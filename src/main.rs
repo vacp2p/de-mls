@@ -3,14 +3,9 @@ mod identity;
 mod openmls_provider;
 mod user;
 
-use std::{any::Any, fmt::Debug, str::FromStr};
+use std::str::FromStr;
 
 use ds::keystore::PublicKeyStorage;
-use identity::Identity;
-use openmls::prelude::{config::CryptoConfig, *};
-use openmls_basic_credential::SignatureKeyPair;
-use openmls_provider::CryptoProvider;
-use openmls_rust_crypto::OpenMlsRustCrypto;
 use user::User;
 
 fn main() {
@@ -36,6 +31,9 @@ fn main() {
     );
 
     let res = a_user.invite(b_user.username(), group_name.clone(), &pks);
+    println!("RES: {:?}", res);
+
+    let res = b_user.send_msg("Hi!", group_name.clone(), &pks);
     println!("RES: {:?}", res);
 
     let msg = a_user.recieve_msg(group_name.clone(), &pks);

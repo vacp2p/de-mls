@@ -1,4 +1,4 @@
-use std::{borrow::Borrow, collections::HashMap};
+use std::collections::HashMap;
 
 use bus::{Bus, BusReader};
 // use chrono::Utc;
@@ -20,7 +20,7 @@ impl DSClient {
             pub_node: Bus::new(10),
             sub_node: HashMap::new(),
         };
-        ds.add_subscriber(id);
+        let _ = ds.add_subscriber(id);
         ds
     }
 
@@ -73,7 +73,7 @@ impl DSClient {
         mut self,
         id: Vec<u8>,
         auth_token: AuthToken,
-        pks: PublicKeyStorage,
+        pks: &PublicKeyStorage,
     ) -> Result<MlsMessageIn, String> {
         let auth_t = match pks.get_user_auth_token(id.clone()) {
             Ok(c) => c,

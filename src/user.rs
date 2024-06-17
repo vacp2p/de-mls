@@ -29,7 +29,7 @@ pub struct Group {
     group_name: String,
     conversation: Conversation,
     mls_group: RefCell<MlsGroup>,
-    ds_node: DSClient,
+    ds_node: RefCell<DSClient>,
     // pubsub_topic: WakuPubSubTopic,
     // content_topics: Vec<WakuContentTopic>,
 }
@@ -96,7 +96,9 @@ impl User {
             group_name: name.clone(),
             conversation: Conversation::default(),
             mls_group: RefCell::new(mls_group),
-            ds_node: DSClient::new_with_subscriber(self.identity.borrow().identity().to_vec()),
+            ds_node: RefCell::new(DSClient::new_with_subscriber(
+                self.identity.borrow().identity().to_vec(),
+            )),
             // pubsub_topic: WakuPubSubTopic::new(),
             // content_topics: Vec::new(),
         };
@@ -192,7 +194,7 @@ impl User {
         let group_recipients = self.recipients(group, pks).unwrap();
 
         let msg = GroupMessage::new(out_messages.into(), &group_recipients);
-        group.borrow_mut().ds_node.msg_send(msg)?;
+        group.ds_node.borrow_mut().msg_send(msg)?;
         // Second, process the invitation on our end.
         group
             .mls_group
@@ -201,7 +203,7 @@ impl User {
             .expect("error merging pending commit");
 
         let msg = GroupMessage::new(welcome.into(), &group_recipients);
-        group.ds_node.msg_send(msg)?;
+        group.ds_node.borrow_mut().msg_send(msg)?;
 
         drop(groups);
 
@@ -218,9 +220,24 @@ impl User {
             Some(g) => g,
             None => return Err("Unknown group".to_string()),
         };
+        // let id = self.identity.borrow().identity().to_vec();
+        // let msg = group
+        //     .ds_node
+        //     .borrow()
+        //     .msg_recv(id, self.auth_token.unwrap(), pks)
+        //     .unwrap();
+
+        // match msg.extract() {
+        //     MlsMessageInBody::Welcome(welcome) => {}
+        //     MlsMessageInBody::PrivateMessage(message) => {}
+        //     MlsMessageInBody::PublicMessage(message) => {}
+        //     _ => panic!("Unsupported message type"),
+        // }
 
         Ok(vec![])
     }
+
+    // fn process_protocol_msg() {}
 
     pub fn send_msg(
         &mut self,
@@ -245,12 +262,12 @@ impl User {
             .map_err(|e| format!("{e}"))?;
 
         let msg = GroupMessage::new(message_out.into(), &self.recipients(group, pks).unwrap());
-        group.ds_node.msg_send(msg)?;
+        group.ds_node.borrow_mut().msg_send(msg)?;
 
         Ok(())
     }
 
-    fn join_group(&self, welcome: Welcome, ds: &DSClient) -> Result<(), String> {
+    fn join_group(&self, welcome: Welcome, ds: DSClient) -> Result<(), String> {
         debug!("{} joining group ...", self.username());
 
         let mut ident = self.identity.borrow_mut();
@@ -275,7 +292,7 @@ impl User {
             group_name: group_name.clone(),
             conversation: Conversation::default(),
             mls_group: RefCell::new(mls_group),
-            ds_node: ds.clone(),
+            ds_node: RefCell::new(ds),
         };
 
         trace!("   {}", group_name);
@@ -339,7 +356,7 @@ impl User {
         let group_recipients = self.recipients(group, pks).unwrap();
 
         let msg = GroupMessage::new(remove_message.into(), &group_recipients);
-        group.ds_node.msg_send(msg)?;
+        group.ds_node.borrow_mut().msg_send(msg)?;
 
         // Second, process the removal on our end.
         group
