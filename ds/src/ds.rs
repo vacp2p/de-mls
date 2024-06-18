@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-
 use bus::{Bus, BusReader};
 // use chrono::Utc;
+use std::collections::HashMap;
+
 use openmls::framing::MlsMessageIn;
 // use waku_bindings::*;
 
@@ -32,19 +32,13 @@ impl DSClient {
 
     pub fn msg_send(
         &mut self,
-        msg: GroupMessage,
+        msg: MlsMessageIn,
         // pubsub_topic: WakuPubSubTopic,
         // content_topic: WakuContentTopic,
     ) -> Result<(), String> {
         // let buff = self.msg.tls_serialize_detached().unwrap();
         // Message::encode(&self.msg, &mut buff).expect("Could not encode :(");
-
-        // TODO: manage hanshake message
-        // let protocol_msg: ProtocolMessage = group_msg.msg.clone().into();
-
-        // Reject any handshake message that has an earlier epoch than the one we know
-        // about.
-        self.pub_node.broadcast(msg.msg);
+        self.pub_node.broadcast(msg);
 
         // let waku_message = WakuMessage::new(
         //     buff,
@@ -70,7 +64,7 @@ impl DSClient {
     }
 
     pub fn msg_recv(
-        mut self,
+        &mut self,
         id: Vec<u8>,
         auth_token: AuthToken,
         pks: &PublicKeyStorage,
@@ -85,72 +79,8 @@ impl DSClient {
         }
 
         let node: &mut BusReader<MlsMessageIn> = self.sub_node.get_mut(&id).unwrap();
-        Ok(node.recv().unwrap())
+        let msg = node.recv().unwrap();
+
+        Ok(msg)
     }
 }
-
-/// An core group message.
-/// This is an `MLSMessage` plus the list of recipients as a vector of client
-/// names
-#[derive(Clone, PartialEq)]
-pub struct GroupMessage {
-    // #[prost(message, repeated, tag = "1")]
-    pub recipients: Vec<Vec<u8>>,
-    // #[prost(message,  tag = "2")]
-    pub msg: MlsMessageIn,
-}
-
-impl GroupMessage {
-    /// Create a new `GroupMessage` taking an `MlsMessageIn` and slice of
-    /// recipient names.
-    pub fn new(msg: MlsMessageIn, recipients: &[Vec<u8>]) -> Self {
-        Self {
-            msg,
-            recipients: recipients.to_vec(),
-        }
-    }
-}
-
-// #[derive(Debug, thiserror::Error)]
-// pub enum WakuHandlingError {
-//     // #[error(transparent)]
-//     // ParseUrlError(#[from] Pars),
-//     #[error("Subscription error to the content topic. {}", .0)]
-//     ContentTopicsError(String),
-//     #[error("Unable to retrieve peers list. {}", .0)]
-//     RetrievePeersError(String),
-//     #[error("Unable to publish message to peer: {}", .0)]
-//     PublishMessage(String),
-//     #[error("Unable to validate a message from peer: {}", .0)]
-//     InvalidMessage(String),
-//     // #[error(transparent)]
-//     // ParsePortError(#[from] ParseIntError),
-//     #[error("Unable to create waku node: {}", .0)]
-//     CreateNodeError(String),
-//     #[error("Unable to stop waku node: {}", .0)]
-//     StopNodeError(String),
-//     #[error("Unable to get peer information: {}", .0)]
-//     PeerInfoError(String),
-//     // #[error(transparent)]
-//     // QueryResponseError(#[from] QueryError),
-//     // #[error("Unknown error: {0}")]
-//     // Other(anyhow::Error),
-// }
-
-// impl WakuHandlingError {
-//     pub fn type_string(&self) -> &str {
-//         match self {
-//             // WakuHandlingError::ParseUrlError(_) => "ParseUrlError",
-//             WakuHandlingError::ContentTopicsError(_) => "ContentTopicsError",
-//             WakuHandlingError::RetrievePeersError(_) => "RetrievePeersError",
-//             WakuHandlingError::PublishMessage(_) => "PublishMessage",
-//             WakuHandlingError::InvalidMessage(_) => "InvalidMessage",
-//             // WakuHandlingError::ParsePortError(_) => "ParsePortError",
-//             WakuHandlingError::CreateNodeError(_) => "CreateNodeError",
-//             WakuHandlingError::StopNodeError(_) => "StopNodeError",
-//             WakuHandlingError::PeerInfoError(_) => "PeerInfoError",
-//             // WakuHandlingError::QueryResponseError(_) => "QueryResponseError",
-//             // WakuHandlingError::Other(_) => "Other",
-//         }
-//     }
-// }

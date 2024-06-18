@@ -1,8 +1,7 @@
 use openmls::prelude_test::KeyPackage;
-// use std::sync::Arc;
+
 use std::collections::HashMap;
 use std::sync::Mutex;
-// use tokio::sync::Mutex;
 
 use crate::{AuthToken, UserInfo, UserKeyPackages};
 

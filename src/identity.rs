@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::ops::BitOrAssign;
 
 use openmls::credentials::CredentialWithKey;
 use openmls::key_packages::*;
@@ -84,8 +83,8 @@ impl Identity {
     }
 
     /// Get the plain identity as byte vector.
-    pub fn identity(&self) -> &[u8] {
-        self.credential_with_key.credential.identity()
+    pub fn identity(&self) -> Vec<u8> {
+        self.credential_with_key.credential.identity().to_vec()
     }
 
     /// Get the plain identity as byte vector.
