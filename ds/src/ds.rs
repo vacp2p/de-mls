@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use openmls::framing::MlsMessageIn;
 // use waku_bindings::*;
 
-use crate::{keystore::PublicKeyStorage, AuthToken};
+use crate::{
+    keystore::{KeyStoreError, PublicKeyStorage},
+    AuthToken,
+};
 
 #[derive(Debug)]
 pub struct DSClient {
@@ -15,16 +18,16 @@ pub struct DSClient {
 }
 
 impl DSClient {
-    pub fn new_with_subscriber(id: Vec<u8>) -> Self {
+    pub fn new_with_subscriber(id: Vec<u8>) -> Result<DSClient, DeliveryServiceError> {
         let mut ds = DSClient {
             pub_node: Bus::new(10),
             sub_node: HashMap::new(),
         };
-        let _ = ds.add_subscriber(id);
-        ds
+        ds.add_subscriber(id)?;
+        Ok(ds)
     }
 
-    pub fn add_subscriber(&mut self, id: Vec<u8>) -> Result<(), String> {
+    pub fn add_subscriber(&mut self, id: Vec<u8>) -> Result<(), DeliveryServiceError> {
         let rx = self.pub_node.add_rx();
         self.sub_node.insert(id, rx);
         Ok(())
@@ -35,7 +38,7 @@ impl DSClient {
         msg: MlsMessageIn,
         // pubsub_topic: WakuPubSubTopic,
         // content_topic: WakuContentTopic,
-    ) -> Result<(), String> {
+    ) -> Result<(), DeliveryServiceError> {
         // let buff = self.msg.tls_serialize_detached().unwrap();
         // Message::encode(&self.msg, &mut buff).expect("Could not encode :(");
         self.pub_node.broadcast(msg);
@@ -65,22 +68,34 @@ impl DSClient {
 
     pub fn msg_recv(
         &mut self,
-        id: Vec<u8>,
-        auth_token: AuthToken,
+        id: &[u8],
+        auth_token: &AuthToken,
         pks: &PublicKeyStorage,
-    ) -> Result<MlsMessageIn, String> {
-        let auth_t = match pks.get_user_auth_token(id.clone()) {
-            Ok(c) => c,
-            Err(c) => return Err(c),
-        };
+    ) -> Result<MlsMessageIn, DeliveryServiceError> {
+        let auth_t = pks
+            .get_user_auth_token(id)
+            .map_err(DeliveryServiceError::KeyStoreError)?;
 
-        if auth_token != auth_t {
-            return Err("Unauthorized client".to_string());
+        if auth_t.ne(auth_token) {
+            return Err(DeliveryServiceError::UnauthorizedUserError);
         }
 
-        let node: &mut BusReader<MlsMessageIn> = self.sub_node.get_mut(&id).unwrap();
-        let msg = node.recv().unwrap();
-
-        Ok(msg)
+        let node: &mut BusReader<MlsMessageIn> = match self.sub_node.get_mut(id) {
+            Some(node) => node,
+            None => return Err(DeliveryServiceError::EmptySubNodeError),
+        };
+        node.recv().map_err(DeliveryServiceError::RecieveError)
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DeliveryServiceError {
+    #[error("Could not get data from Key Store: {0}")]
+    KeyStoreError(KeyStoreError),
+    #[error("Unauthorized User")]
+    UnauthorizedUserError,
+    #[error("Subscriber doesn't exist")]
+    EmptySubNodeError,
+    #[error("Reciever error: {0}")]
+    RecieveError(#[from] std::sync::mpsc::RecvError),
 }

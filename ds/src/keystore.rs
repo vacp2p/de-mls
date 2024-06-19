@@ -1,7 +1,6 @@
-use openmls::prelude_test::KeyPackage;
-
 use std::collections::HashMap;
-use std::sync::Mutex;
+
+use openmls::prelude_test::KeyPackage;
 
 use crate::{AuthToken, UserInfo, UserKeyPackages};
 
@@ -11,7 +10,7 @@ use crate::{AuthToken, UserInfo, UserKeyPackages};
 /// and the second value is the corresponding user information.
 #[derive(Debug, Default)]
 pub struct PublicKeyStorage {
-    storage: Mutex<HashMap<Vec<u8>, UserInfo>>,
+    storage: HashMap<Vec<u8>, UserInfo>,
 }
 
 impl PublicKeyStorage {
@@ -19,65 +18,58 @@ impl PublicKeyStorage {
         PublicKeyStorage::default()
     }
 
-    pub fn is_client_exist(&self, id: Vec<u8>) -> Result<(), String> {
-        let storage = self.storage.lock().unwrap();
-        if storage.contains_key(&id) {
-            Ok(())
-        } else {
-            Err("Client doesn't exist".to_string())
-        }
+    pub fn does_user_exist(&self, id: &[u8]) -> bool {
+        self.storage.contains_key(id)
     }
 
-    pub fn add_user(&self, key_packages: UserKeyPackages) -> Result<AuthToken, String> {
+    pub fn add_user(&mut self, key_packages: UserKeyPackages) -> Result<AuthToken, KeyStoreError> {
         if key_packages.0.is_empty() {
-            return Err("Invalid data for client: no key packages".to_string());
+            return Err(KeyStoreError::InvalidUserDataError(
+                "no key packages".to_string(),
+            ));
         }
-        let new_client_info = UserInfo::new(key_packages.0);
-        println!("Registering client: {:?}", new_client_info.id);
+        let new_user_info: UserInfo = key_packages.into();
 
-        let mut clients = self.storage.lock().unwrap();
-        if clients.contains_key(&new_client_info.id) {
-            return Err("Invalid data for client: already register".to_string());
+        if self.storage.contains_key(&new_user_info.id) {
+            return Err(KeyStoreError::InvalidUserDataError(
+                "already register".to_string(),
+            ));
         }
 
-        let res = clients.insert(new_client_info.id.clone(), new_client_info.clone());
+        let res = self
+            .storage
+            .insert(new_user_info.id.clone(), new_user_info.clone());
         assert!(res.is_none());
 
-        Ok(new_client_info.auth_token)
+        Ok(new_user_info.auth_token)
     }
 
-    pub fn get_user_kp(&self, id: Vec<u8>) -> Result<KeyPackage, String> {
-        let mut storage = self.storage.lock().unwrap();
-        if !storage.contains_key(&id) {
-            return Err("Client doesn't exist".to_string());
+    pub fn get_avaliable_user_kp(&mut self, id: &[u8]) -> Result<KeyPackage, KeyStoreError> {
+        if !self.storage.contains_key(id) {
+            return Err(KeyStoreError::UnknownUserError);
         }
-
-        let user = match storage.get_mut(&id) {
-            Some(c) => c,
-            None => return Err("No client found".to_string()),
-        };
-
-        let kp = user.get_kp().unwrap().clone();
-        Ok(kp)
+        let user = self.storage.get_mut(id).unwrap();
+        match user.key_packages.0.pop() {
+            Some(c) => Ok(c.1),
+            None => Err(KeyStoreError::InvalidUserDataError(
+                "No more keypackage available".to_string(),
+            )),
+        }
     }
 
     pub fn add_user_kp(
-        &self,
-        id: Vec<u8>,
+        &mut self,
+        id: &[u8],
         auth_token: AuthToken,
         ukp: UserKeyPackages,
-    ) -> Result<(), String> {
-        let mut storage = self.storage.lock().unwrap();
-        if !storage.contains_key(&id) {
-            return Err("Client doesn't exist".to_string());
+    ) -> Result<(), KeyStoreError> {
+        if !self.storage.contains_key(id) {
+            return Err(KeyStoreError::UnknownUserError);
         }
-        let user = match storage.get_mut(&id) {
-            Some(c) => c,
-            None => return Err("No client found".to_string()),
-        };
+        let user = self.storage.get_mut(id).unwrap();
 
         if auth_token != user.auth_token {
-            return Err("Unauthorized client".to_string());
+            return Err(KeyStoreError::UnauthorizedUserError);
         }
 
         ukp.0
@@ -87,16 +79,23 @@ impl PublicKeyStorage {
         Ok(())
     }
 
-    pub fn get_user_auth_token(&self, id: Vec<u8>) -> Result<AuthToken, String> {
-        let user = self.storage.lock().unwrap();
-        if !user.contains_key(&id) {
-            return Err("Client doesn't exist".to_string());
+    pub fn get_user_auth_token(&self, id: &[u8]) -> Result<&AuthToken, KeyStoreError> {
+        if !self.storage.contains_key(id) {
+            return Err(KeyStoreError::UnknownUserError);
         }
-        let user = match user.get(&id) {
-            Some(c) => c,
-            None => return Err("No client found".to_string()),
-        };
-        let at = user.auth_token.clone();
-        Ok(at)
+        let user = self.storage.get(id).unwrap();
+        Ok(&user.auth_token)
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum KeyStoreError {
+    #[error("User doesn't exist")]
+    UnknownUserError,
+    #[error("Invalid data for User: {0}")]
+    InvalidUserDataError(String),
+    #[error("Unauthorized User")]
+    UnauthorizedUserError,
+    #[error("Unknown error: {0}")]
+    Other(anyhow::Error),
 }

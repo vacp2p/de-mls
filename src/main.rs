@@ -11,7 +11,7 @@ use openmls::framing::{MlsMessageIn, MlsMessageInBody};
 use user::User;
 
 fn main() {
-    let pks = PublicKeyStorage::new();
+    let mut pks = PublicKeyStorage::new();
     // This channel for message before adding to group.
     // Message are still encrypted, but this channel not attached to any group
     let mut m: Bus<MlsMessageIn> = Bus::new(10);
@@ -21,7 +21,7 @@ fn main() {
     //// Create user Alice
     println!("Start Register Alice");
     let mut a_user = User::new("Alice".as_bytes()).unwrap();
-    let res = a_user.register(&pks);
+    let res = a_user.register(&mut pks);
     assert!(res.is_ok());
     println!("Register Alice successfully");
     //////
@@ -29,7 +29,7 @@ fn main() {
     //// Create user Bob
     println!("Start Register Bob");
     let mut b_user = User::new("Bob".as_bytes()).unwrap();
-    let res = b_user.register(&pks);
+    let res = b_user.register(&mut pks);
     assert!(res.is_ok());
     println!("Register Bob successfully");
     //////
@@ -45,7 +45,7 @@ fn main() {
 
     //// Alice invite Bob
     println!("Alice inviting Bob");
-    let welcome = a_user.invite(b_user.username(), group_name.clone(), &pks);
+    let welcome = a_user.invite(b_user.username(), group_name.clone(), &mut pks);
     assert!(welcome.is_ok());
     // Alice should skip message with invite update because she already update her instance
     // It is failed because of wrong epoch
@@ -106,14 +106,14 @@ fn main() {
     //// Create user Alice
     println!("Start Register Carla");
     let mut c_user = User::new("Carla".as_bytes()).unwrap();
-    let res = c_user.register(&pks);
+    let res = c_user.register(&mut pks);
     assert!(res.is_ok());
     println!("Register Carla successfully");
     //////
 
     //// Alice invite Carla
     println!("Alice inviting Carla");
-    let welcome = a_user.invite(c_user.username(), group_name.clone(), &pks);
+    let welcome = a_user.invite(c_user.username(), group_name.clone(), &mut pks);
     assert!(welcome.is_ok());
     // Alice should skip message with invite update because she already update her instance
     // It is failed because of wrong epoch

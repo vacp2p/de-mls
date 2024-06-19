@@ -1,11 +1,14 @@
+use std::string::FromUtf8Error;
 use std::{cell::RefCell, collections::HashMap, rc::Rc, str};
 
+use ds::keystore::KeyStoreError;
 use ds::{ds::*, keystore::PublicKeyStorage, AuthToken, UserKeyPackages};
 use openmls::{group::*, prelude::*};
+use openmls_rust_crypto::MemoryKeyStoreError;
 // use waku_bindings::*;
 
 use crate::conversation::*;
-use crate::identity::Identity;
+use crate::identity::{Identity, IdentityError};
 use crate::openmls_provider::{CryptoProvider, CIPHERSUITE};
 
 #[derive(Debug)]
@@ -28,11 +31,12 @@ pub struct User {
 
 impl User {
     /// Create a new user with the given name and a fresh set of credentials.
-    pub fn new(username: &[u8]) -> Result<User, String> {
+    pub fn new(username: &[u8]) -> Result<User, UserError> {
         let crypto = CryptoProvider::default();
+        let id = Identity::new(CIPHERSUITE, &crypto, username)?;
         Ok(User {
             groups: RefCell::new(HashMap::new()),
-            identity: RefCell::new(Identity::new(CIPHERSUITE, &crypto, username)),
+            identity: RefCell::new(id),
             provider: crypto,
             auth_token: None,
             // contacts: HashMap::new(),
@@ -40,11 +44,20 @@ impl User {
     }
 
     pub(crate) fn username(&self) -> String {
-        self.identity.borrow().identity_as_string()
+        self.identity.borrow().to_string()
     }
 
     pub(crate) fn id(&self) -> Vec<u8> {
         self.identity.borrow().identity()
+    }
+
+    fn is_signature_eq(&self, sign: &Vec<u8>) -> bool {
+        self.identity
+            .borrow()
+            .credential_with_key
+            .signature_key
+            .as_slice()
+            == sign
     }
 
     pub(super) fn set_auth_token(&mut self, token: AuthToken) {
@@ -55,11 +68,11 @@ impl User {
         self.auth_token.as_ref()
     }
 
-    pub fn create_group(&mut self, group_name: String) -> Result<(), String> {
+    pub fn create_group(&mut self, group_name: String) -> Result<(), UserError> {
         let group_id = group_name.as_bytes();
 
         if self.groups.borrow().contains_key(&group_name) {
-            return Err(format!("Error creating user: {:?}", group_name));
+            return Err(UserError::UnknownGroupError(group_name));
         }
 
         let group_config = MlsGroupConfig::builder()
@@ -72,10 +85,9 @@ impl User {
             &group_config,
             GroupId::from_slice(group_id),
             self.identity.borrow().credential_with_key.clone(),
-        )
-        .expect("Failed to create MlsGroup");
+        )?;
 
-        let ds = DSClient::new_with_subscriber(self.id());
+        let ds = DSClient::new_with_subscriber(self.id())?;
         let group = Group {
             group_name: group_name.clone(),
             conversation: Conversation::default(),
@@ -89,19 +101,14 @@ impl User {
         Ok(())
     }
 
-    pub fn register(&mut self, pks: &PublicKeyStorage) -> Result<(), String> {
-        match pks.add_user(self.key_packages()) {
-            Ok(token) => {
-                self.set_auth_token(token);
-                Ok(())
-            }
-            Err(e) => Err(format!("Error creating user: {:?}", e)),
-        }
+    pub fn register(&mut self, pks: &mut PublicKeyStorage) -> Result<(), UserError> {
+        let token = pks.add_user(self.key_packages())?;
+        self.set_auth_token(token);
+        Ok(())
     }
 
     /// Get the key packages fo this user.
     pub fn key_packages(&self) -> UserKeyPackages {
-        // clone first !
         let mut kpgs = self.identity.borrow().kp.clone();
         UserKeyPackages(kpgs.drain().collect::<Vec<(Vec<u8>, KeyPackage)>>())
     }
@@ -110,30 +117,28 @@ impl User {
         &self,
         username: String,
         group_name: String,
-        pks: &PublicKeyStorage,
-    ) -> Result<MlsMessageIn, String> {
+        pks: &mut PublicKeyStorage,
+    ) -> Result<MlsMessageIn, UserError> {
         // First we need to get the key package for {id} from the DS.
-        pks.is_client_exist(username.clone().into_bytes())?;
+        if !pks.does_user_exist(username.as_bytes()) {
+            return Err(UserError::UnknownUserError);
+        }
 
         // Reclaim a key package from the server
-        let joiner_key_package = pks.get_user_kp(username.into_bytes());
+        let joiner_key_package = pks.get_avaliable_user_kp(username.as_bytes())?;
 
         // Build a proposal with this key package and do the MLS bits.
         let mut groups = self.groups.borrow_mut();
         let group = match groups.get_mut(&group_name) {
             Some(g) => g,
-            None => return Err(format!("No group with name {group_name} known.")),
+            None => return Err(UserError::UnknownGroupError(group_name)),
         };
 
-        let (out_messages, welcome, _group_info) = group
-            .mls_group
-            .borrow_mut()
-            .add_members(
-                &self.provider,
-                &self.identity.borrow().signer,
-                &[joiner_key_package.unwrap()],
-            )
-            .map_err(|e| format!("Failed to add member to group - {e}"))?;
+        let (out_messages, welcome, _group_info) = group.mls_group.borrow_mut().add_members(
+            &self.provider,
+            &self.identity.borrow().signer,
+            &[joiner_key_package],
+        )?;
 
         let msg = out_messages.into();
         group.ds_node.as_ref().borrow_mut().msg_send(msg)?;
@@ -141,8 +146,7 @@ impl User {
         group
             .mls_group
             .borrow_mut()
-            .merge_pending_commit(&self.provider)
-            .expect("error merging pending commit");
+            .merge_pending_commit(&self.provider)?;
 
         // Put sending welcome by p2p here
         // group.ds_node.as_ref().borrow_mut().msg_send(welcome.into())?;
@@ -152,21 +156,21 @@ impl User {
         Ok(welcome.into())
     }
 
-    pub fn recieve_msg(&self, group_name: String, pks: &PublicKeyStorage) -> Result<(), String> {
+    pub fn recieve_msg(&self, group_name: String, pks: &PublicKeyStorage) -> Result<(), UserError> {
         let msg = {
             let groups = self.groups.borrow();
             let group = match groups.get(&group_name) {
                 Some(g) => g,
-                None => return Err("Unknown group".to_string()),
+                None => return Err(UserError::UnknownGroupError(group_name)),
             };
             let msg = group.ds_node.as_ref().borrow_mut().msg_recv(
-                self.id(),
-                self.auth_token().unwrap().clone(),
+                self.id().as_ref(),
+                self.auth_token().unwrap(),
                 pks,
-            );
-
-            msg.unwrap()
+            )?;
+            msg
         };
+
         match msg.extract() {
             MlsMessageInBody::Welcome(_welcome) => {
                 // Now irrelevant because message are attached to group
@@ -178,30 +182,21 @@ impl User {
             MlsMessageInBody::PublicMessage(message) => {
                 self.process_protocol_msg(message.into())?;
             }
-            _ => return Err("Unsupported message type".to_string()),
+            _ => return Err(UserError::MessageTypeError),
         }
         Ok(())
     }
 
-    fn process_protocol_msg(&self, message: ProtocolMessage) -> Result<(), String> {
+    fn process_protocol_msg(&self, message: ProtocolMessage) -> Result<(), UserError> {
         let mut groups = self.groups.borrow_mut();
-        let group = match groups.get_mut(str::from_utf8(message.group_id().as_slice()).unwrap()) {
+        let group_name = str::from_utf8(message.group_id().as_slice()).unwrap();
+        let group = match groups.get_mut(group_name) {
             Some(g) => g,
-            None => {
-                return Err(format!(
-                    "Error getting group {:?} for a message",
-                    message.group_id()
-                ))
-            }
+            None => return Err(UserError::UnknownGroupError(group_name.to_string())),
         };
         let mut mls_group = group.mls_group.borrow_mut();
 
-        let processed_message = match mls_group.process_message(&self.provider, message) {
-            Ok(msg) => msg,
-            Err(e) => {
-                return Err(format!("Error processing unverified message: {:?}", e));
-            }
-        };
+        let processed_message = mls_group.process_message(&self.provider, message)?;
 
         let processed_message_credential: Credential = processed_message.credential().clone();
 
@@ -222,7 +217,7 @@ impl User {
                                 .as_slice()
                                 != m.signature_key.as_slice())
                         {
-                            println!("update::Processing ApplicationMessage read sender name from credential identity for group {} ", group.group_name);
+                            println!("process ApplicationMessage: read sender name from credential identity for group {} ", group.group_name);
                             Some(
                                 str::from_utf8(m_credential.identity()).unwrap().to_owned(),
                             )
@@ -234,10 +229,8 @@ impl User {
                 };
 
                 let conversation_message = ConversationMessage::new(
-                    String::from_utf8(application_message.into_bytes())
-                        .unwrap()
-                        .clone(),
-                    String::from_utf8(sender_name).unwrap(),
+                    String::from_utf8(application_message.into_bytes())?.clone(),
+                    String::from_utf8(sender_name)?,
                 );
                 group.conversation.add(conversation_message.clone());
             }
@@ -248,40 +241,32 @@ impl User {
                 if commit_ptr.self_removed() {
                     remove_proposal = true;
                 }
-                match mls_group.merge_staged_commit(&self.provider, *commit_ptr) {
-                    Ok(()) => {
-                        if remove_proposal {
-                            println!(
-                                "update::Processing StagedCommitMessage removing {} from group {} ",
-                                self.username(),
-                                group.group_name
-                            );
-                            return Ok(());
-                        }
-                    }
-                    Err(e) => return Err(e.to_string()),
+                mls_group.merge_staged_commit(&self.provider, *commit_ptr)?;
+                if remove_proposal {
+                    println!(
+                        "update::Processing StagedCommitMessage removing {} from group {} ",
+                        self.username(),
+                        group.group_name
+                    );
+                    return Ok(());
                 }
             }
         };
         Ok(())
     }
 
-    pub fn send_msg(&mut self, msg: &str, group_name: String) -> Result<(), String> {
+    pub fn send_msg(&mut self, msg: &str, group_name: String) -> Result<(), UserError> {
         let groups = self.groups.borrow();
         let group = match groups.get(&group_name) {
             Some(g) => g,
-            None => return Err("Unknown group".to_string()),
+            None => return Err(UserError::UnknownGroupError(group_name)),
         };
 
-        let message_out = group
-            .mls_group
-            .borrow_mut()
-            .create_message(
-                &self.provider,
-                &self.identity.borrow().signer,
-                msg.as_bytes(),
-            )
-            .map_err(|e| format!("{e}"))?;
+        let message_out = group.mls_group.borrow_mut().create_message(
+            &self.provider,
+            &self.identity.borrow().signer,
+            msg.as_bytes(),
+        )?;
 
         group
             .ds_node
@@ -292,18 +277,15 @@ impl User {
         Ok(())
     }
 
-    pub fn join_group(&self, welcome: Welcome, ds: Rc<RefCell<DSClient>>) -> Result<(), String> {
-        println!("{} joining group ...", self.username());
-
+    pub fn join_group(&self, welcome: Welcome, ds: Rc<RefCell<DSClient>>) -> Result<(), UserError> {
         let group_config = MlsGroupConfig::builder()
             .use_ratchet_tree_extension(true)
             .build();
 
-        let mls_group = MlsGroup::new_from_welcome(&self.provider, &group_config, welcome, None)
-            .expect("Failed to create staged join");
+        let mls_group = MlsGroup::new_from_welcome(&self.provider, &group_config, welcome, None)?;
 
         let group_id = mls_group.group_id().to_vec();
-        let group_name = String::from_utf8(group_id.clone()).unwrap();
+        let group_name = String::from_utf8(group_id.clone())?;
 
         ds.clone()
             .borrow_mut()
@@ -317,83 +299,53 @@ impl User {
         };
 
         match self.groups.borrow_mut().insert(group_name, group) {
-            Some(old) => Err(format!("Overrode the group {:?}", old.group_name)),
+            Some(old) => Err(UserError::AlreadyExistedGroupError(old.group_name)),
             None => Ok(()),
         }
     }
 
     /// Get a member
-    fn find_member_index(&self, name: String, group: &Group) -> Result<LeafNodeIndex, String> {
-        let mls_group = group.mls_group.borrow();
-        for Member {
-            index,
-            encryption_key: _,
-            signature_key: _,
-            credential,
-        } in mls_group.members()
-        {
-            if credential.identity() == name.as_bytes() {
-                return Ok(index);
-            }
-        }
-        Err("Unknown member".to_string())
-    }
-
-    fn recipients(&self, group: &Group, pks: &PublicKeyStorage) -> Result<Vec<Vec<u8>>, String> {
-        let mut recipients = Vec::new();
-
+    fn find_member_index(&self, name: String, group: &Group) -> Result<LeafNodeIndex, UserError> {
         let mls_group = group.mls_group.borrow();
 
-        for Member {
-            index: _,
-            encryption_key: _,
-            signature_key,
-            credential,
-        } in mls_group.members()
-        {
-            if self
-                .identity
-                .borrow()
-                .credential_with_key
-                .signature_key
-                .as_slice()
-                != signature_key.as_slice()
-            {
-                match pks.is_client_exist(credential.identity().to_vec()) {
-                    Ok(()) => recipients.push(credential.identity().to_vec()),
-                    Err(e) => {
-                        return Err(format!("There's a member in the group we don't know: {e}"))
-                    }
-                };
-            }
+        let member = mls_group
+            .members()
+            .find(|m| m.credential.identity().eq(name.as_bytes()));
+
+        match member {
+            Some(m) => Ok(m.index),
+            None => Err(UserError::UnknownGroupMemberError(name)),
         }
-        Ok(recipients)
     }
 
-    pub fn remove(&mut self, name: String, group_name: String) -> Result<(), String> {
+    fn group_members(&self, group: &Group) -> Result<Vec<Vec<u8>>, UserError> {
+        let mls_group = group.mls_group.borrow();
+
+        let members: Vec<Vec<u8>> = mls_group
+            .members()
+            .filter(|m| self.is_signature_eq(&m.signature_key))
+            .map(|m| m.credential.identity().to_vec())
+            .collect();
+        Ok(members)
+    }
+
+    pub fn remove(&mut self, name: String, group_name: String) -> Result<(), UserError> {
         // Get the group ID
         let mut groups = self.groups.borrow_mut();
         let group = match groups.get_mut(&group_name) {
             Some(g) => g,
-            None => return Err(format!("No group with name {group_name} known.")),
+            None => return Err(UserError::UnknownGroupError(group_name)),
         };
 
-        // Get the client leaf index
-        let leaf_index = match self.find_member_index(name, group) {
-            Ok(l) => l,
-            Err(e) => return Err(e),
-        };
+        // Get the user leaf index
+        let leaf_index = self.find_member_index(name, group)?;
 
         // Remove operation on the mls group
-        let (remove_message, _welcome, _group_info) = group
-            .mls_group
-            .borrow_mut()
-            .remove_members(
-                &self.provider,
-                &self.identity.borrow().signer,
-                &[leaf_index],
-            )
-            .map_err(|e| format!("Failed to remove member from group - {e}"))?;
+        let (remove_message, _welcome, _group_info) = group.mls_group.borrow_mut().remove_members(
+            &self.provider,
+            &self.identity.borrow().signer,
+            &[leaf_index],
+        )?;
 
         let msg = remove_message.into();
         group.ds_node.as_ref().borrow_mut().msg_send(msg)?;
@@ -402,8 +354,7 @@ impl User {
         group
             .mls_group
             .borrow_mut()
-            .merge_pending_commit(&self.provider)
-            .expect("error merging pending commit");
+            .merge_pending_commit(&self.provider)?;
 
         drop(groups);
 
@@ -414,10 +365,10 @@ impl User {
     pub fn read_msgs(
         &self,
         group_name: String,
-    ) -> Result<Option<Vec<ConversationMessage>>, String> {
+    ) -> Result<Option<Vec<ConversationMessage>>, UserError> {
         let groups = self.groups.borrow();
         groups.get(&group_name).map_or_else(
-            || Err("Unknown group".to_string()),
+            || Err(UserError::UnknownGroupError(group_name)),
             |g| {
                 Ok(g.conversation
                     .get(100)
@@ -425,4 +376,44 @@ impl User {
             },
         )
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum UserError {
+    #[error("Unknown group: {0}")]
+    UnknownGroupError(String),
+    #[error("Group already exist: {0}")]
+    AlreadyExistedGroupError(String),
+    #[error("Unknown group member : {0}")]
+    UnknownGroupMemberError(String),
+    #[error("Unsupported message type")]
+    MessageTypeError,
+    #[error("Unknown user")]
+    UnknownUserError,
+    #[error("Delivery Service error: {0}")]
+    DeliveryServiceError(#[from] DeliveryServiceError),
+    #[error("Key Store error: {0}")]
+    KeyStoreError(#[from] KeyStoreError),
+    #[error("Identity error: {0}")]
+    IdentityError(#[from] IdentityError),
+    #[error("Something wrong while creating Mls group: {0}")]
+    MlsGroupCreationError(#[from] NewGroupError<MemoryKeyStoreError>),
+    #[error("Something wrong while adding member to Mls group: {0}")]
+    MlsAddMemberError(#[from] AddMembersError<MemoryKeyStoreError>),
+    #[error("Something wrong while merging pending commit: {0}")]
+    MlsMergePendingCommitError(#[from] MergePendingCommitError<MemoryKeyStoreError>),
+    #[error("Something wrong while merging commit: {0}")]
+    MlsMergeCommitError(#[from] MergeCommitError<MemoryKeyStoreError>),
+    #[error("Error processing unverified message: {0}")]
+    MlsProcessMessageError(#[from] ProcessMessageError),
+    #[error("Something wrong while creating message: {0}")]
+    MlsCreateMessageError(#[from] CreateMessageError),
+    #[error("Failed to create staged join: {0}")]
+    MlsWelcomeError(#[from] WelcomeError<MemoryKeyStoreError>),
+    #[error("Failed to remove member from group: {0}")]
+    MlsRemoveMembersError(#[from] RemoveMembersError<MemoryKeyStoreError>),
+    #[error("Parse UTF8 error: {0}")]
+    ParseUTF8Error(#[from] FromUtf8Error),
+    #[error("Unknown error: {0}")]
+    Other(anyhow::Error),
 }

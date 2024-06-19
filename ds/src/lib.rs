@@ -31,7 +31,7 @@ impl AuthToken {
     }
 }
 
-/// Information about a client.
+/// Information about a user.
 #[derive(Debug, Default, Clone)]
 pub struct UserInfo {
     pub id: Vec<u8>,
@@ -43,13 +43,11 @@ pub struct UserInfo {
     pub auth_token: AuthToken,
 }
 
-impl UserInfo {
-    /// Create a new `ClientInfo` struct for a given client name and vector of
-    /// key packages with corresponding hashes.
-    pub fn new(mut key_packages: Vec<(Vec<u8>, KeyPackage)>) -> Self {
-        let key_package: KeyPackage = key_packages[0].1.clone();
+impl From<UserKeyPackages> for UserInfo {
+    fn from(mut key_packages: UserKeyPackages) -> Self {
+        let key_package: KeyPackage = key_packages.0[0].1.clone();
         let id = key_package.leaf_node().credential().identity();
-        let drain = key_packages.drain(..);
+        let drain = key_packages.0.drain(..);
         Self {
             id: id.into(),
             key_packages: UserKeyPackages(drain.collect::<Vec<(Vec<u8>, KeyPackage)>>()),
@@ -57,19 +55,6 @@ impl UserInfo {
             msgs: Vec::new(),
             welcome_queue: Vec::new(),
             auth_token: AuthToken::random(),
-        }
-    }
-
-    /// The identity of a client is defined as the identity of the first key
-    /// package right now.
-    pub fn id(&self) -> &[u8] {
-        self.id.as_slice()
-    }
-
-    pub fn get_kp(&mut self) -> Result<KeyPackage, String> {
-        match self.key_packages.0.pop() {
-            Some(c) => Ok(c.1),
-            None => Err("No more keypackage available".to_string()),
         }
     }
 }
