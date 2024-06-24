@@ -1,10 +1,11 @@
 use std::string::FromUtf8Error;
 use std::{cell::RefCell, collections::HashMap, rc::Rc, str};
 
-use ds::keystore::KeyStoreError;
-use ds::{ds::*, keystore::PublicKeyStorage, AuthToken, UserKeyPackages};
+use ds::ds::*;
 use openmls::{group::*, prelude::*};
 use openmls_rust_crypto::MemoryKeyStoreError;
+use sc_key_store::*;
+use sc_key_store::{local_ks::LocalCache, pks::PublicKeyStorage};
 // use waku_bindings::*;
 
 use crate::conversation::*;
@@ -25,7 +26,7 @@ pub struct User {
     pub(crate) identity: RefCell<Identity>,
     pub(crate) groups: RefCell<HashMap<String, Group>>,
     provider: CryptoProvider,
-    auth_token: Option<AuthToken>,
+    local_ks: LocalCache,
     // pub(crate) contacts: HashMap<Vec<u8>, WakuPeers>,
 }
 
@@ -38,7 +39,7 @@ impl User {
             groups: RefCell::new(HashMap::new()),
             identity: RefCell::new(id),
             provider: crypto,
-            auth_token: None,
+            local_ks: LocalCache::empty_key_store(username),
             // contacts: HashMap::new(),
         })
     }
@@ -58,14 +59,6 @@ impl User {
             .signature_key
             .as_slice()
             == sign
-    }
-
-    pub(super) fn set_auth_token(&mut self, token: AuthToken) {
-        self.auth_token = Some(token);
-    }
-
-    pub(super) fn auth_token(&self) -> Option<&AuthToken> {
-        self.auth_token.as_ref()
     }
 
     pub fn create_group(&mut self, group_name: String) -> Result<(), UserError> {
@@ -101,9 +94,9 @@ impl User {
         Ok(())
     }
 
-    pub fn register(&mut self, pks: &mut PublicKeyStorage) -> Result<(), UserError> {
-        let token = pks.add_user(self.key_packages())?;
-        self.set_auth_token(token);
+    pub fn register(&mut self, mut pks: &mut PublicKeyStorage) -> Result<(), UserError> {
+        pks.add_user(self.key_packages(), self.identity.borrow().signer.public())?;
+        self.local_ks.get_update_from_smart_contract(pks)?;
         Ok(())
     }
 
@@ -114,10 +107,10 @@ impl User {
     }
 
     pub fn invite(
-        &self,
+        &mut self,
         username: String,
         group_name: String,
-        pks: &mut PublicKeyStorage,
+        mut pks: &mut PublicKeyStorage,
     ) -> Result<MlsMessageIn, UserError> {
         // First we need to get the key package for {id} from the DS.
         if !pks.does_user_exist(username.as_bytes()) {
@@ -163,11 +156,11 @@ impl User {
                 Some(g) => g,
                 None => return Err(UserError::UnknownGroupError(group_name)),
             };
-            let msg = group.ds_node.as_ref().borrow_mut().msg_recv(
-                self.id().as_ref(),
-                self.auth_token().unwrap(),
-                pks,
-            )?;
+            let msg = group
+                .ds_node
+                .as_ref()
+                .borrow_mut()
+                .msg_recv(self.id().as_ref(), pks)?;
             msg
         };
 

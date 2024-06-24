@@ -6,12 +6,12 @@ mod user;
 use std::{rc::Rc, str::FromStr};
 
 use bus::Bus;
-use ds::keystore::PublicKeyStorage;
 use openmls::framing::{MlsMessageIn, MlsMessageInBody};
+use sc_key_store::pks::PublicKeyStorage;
 use user::User;
 
 fn main() {
-    let mut pks = PublicKeyStorage::new();
+    let mut pks = PublicKeyStorage::default();
     // This channel for message before adding to group.
     // Message are still encrypted, but this channel not attached to any group
     let mut m: Bus<MlsMessageIn> = Bus::new(10);
@@ -98,9 +98,9 @@ fn main() {
     /////
 
     let msg = a_user.read_msgs(group_name.clone());
-    println!("Alice recieve_msgs: {:?}", msg);
+    println!("Alice recieve_msgs: {:#?}", msg);
     let msg = b_user.read_msgs(group_name.clone());
-    println!("Bob recieve_msgs: {:?}", msg);
+    println!("Bob recieve_msgs: {:#?}", msg);
 
     let mut c_r = m.add_rx();
     //// Create user Alice
@@ -159,9 +159,9 @@ fn main() {
     ////
 
     let msg = a_user.read_msgs(group_name.clone());
-    println!("Alice recieve_msgs: {:?}", msg);
+    println!("Alice recieve_msgs: {:#?}", msg);
     let msg = b_user.read_msgs(group_name.clone());
-    println!("Bob recieve_msgs: {:?}", msg);
+    println!("Bob recieve_msgs: {:#?}", msg);
     let msg = c_user.read_msgs(group_name.clone());
-    println!("Carla recieve_msgs: {:?}", msg);
+    println!("Carla recieve_msgs: {:#?}", msg);
 }

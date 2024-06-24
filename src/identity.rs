@@ -15,13 +15,6 @@ pub struct Identity {
     pub(crate) signer: SignatureKeyPair,
 }
 
-// pub trait IdentityService {
-//     type CSuite;
-//     type CProvider: OpenMlsCryptoProvider;
-
-//     fn get_signature_key_pair() -> Result<SignatureKeyPair, IdentityError>;
-// }
-
 impl Identity {
     pub(crate) fn new(
         ciphersuite: Ciphersuite,

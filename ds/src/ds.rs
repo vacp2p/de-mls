@@ -5,10 +5,7 @@ use std::collections::HashMap;
 use openmls::framing::MlsMessageIn;
 // use waku_bindings::*;
 
-use crate::{
-    keystore::{KeyStoreError, PublicKeyStorage},
-    AuthToken,
-};
+use sc_key_store::{pks::PublicKeyStorage, KeyStoreError};
 
 #[derive(Debug)]
 pub struct DSClient {
@@ -69,17 +66,8 @@ impl DSClient {
     pub fn msg_recv(
         &mut self,
         id: &[u8],
-        auth_token: &AuthToken,
         pks: &PublicKeyStorage,
     ) -> Result<MlsMessageIn, DeliveryServiceError> {
-        let auth_t = pks
-            .get_user_auth_token(id)
-            .map_err(DeliveryServiceError::KeyStoreError)?;
-
-        if auth_t.ne(auth_token) {
-            return Err(DeliveryServiceError::UnauthorizedUserError);
-        }
-
         let node: &mut BusReader<MlsMessageIn> = match self.sub_node.get_mut(id) {
             Some(node) => node,
             None => return Err(DeliveryServiceError::EmptySubNodeError),
