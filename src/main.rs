@@ -20,7 +20,9 @@ fn main() {
 
     //// Create user Alice
     println!("Start Register Alice");
-    let mut a_user = User::new("Alice".as_bytes()).unwrap();
+    let res = User::new("Alice".as_bytes());
+    assert!(res.is_ok());
+    let mut a_user = res.unwrap();
     let res = a_user.register(&mut pks);
     assert!(res.is_ok());
     println!("Register Alice successfully");
@@ -28,7 +30,9 @@ fn main() {
 
     //// Create user Bob
     println!("Start Register Bob");
-    let mut b_user = User::new("Bob".as_bytes()).unwrap();
+    let res = User::new("Bob".as_bytes());
+    assert!(res.is_ok());
+    let mut b_user = res.unwrap();
     let res = b_user.register(&mut pks);
     assert!(res.is_ok());
     println!("Register Bob successfully");
@@ -105,7 +109,9 @@ fn main() {
     let mut c_r = m.add_rx();
     //// Create user Alice
     println!("Start Register Carla");
-    let mut c_user = User::new("Carla".as_bytes()).unwrap();
+    let res = User::new("Carla".as_bytes());
+    assert!(res.is_ok());
+    let mut c_user = res.unwrap();
     let res = c_user.register(&mut pks);
     assert!(res.is_ok());
     println!("Register Carla successfully");

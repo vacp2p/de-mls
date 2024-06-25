@@ -21,7 +21,7 @@ impl Identity {
         crypto: &CryptoProvider,
         username: &[u8],
     ) -> Result<Identity, IdentityError> {
-        let credential = Credential::new(username.to_vec(), CredentialType::Basic).unwrap();
+        let credential = Credential::new(username.to_vec(), CredentialType::Basic)?;
         let signature_keys = SignatureKeyPair::new(ciphersuite.signature_algorithm())?;
         let credential_with_key = CredentialWithKey {
             credential,
@@ -41,7 +41,7 @@ impl Identity {
 
         let kp = key_package.hash_ref(crypto.crypto())?;
         Ok(Identity {
-            kp: HashMap::from([(kp.as_slice().to_vec(), key_package.clone())]),
+            kp: HashMap::from([(kp.as_slice().to_vec(), key_package)]),
             credential_with_key,
             signer: signature_keys,
         })
@@ -62,7 +62,7 @@ impl Identity {
 
         let kp = key_package.hash_ref(crypto.crypto())?;
         self.kp.insert(kp.as_slice().to_vec(), key_package.clone());
-        Ok(key_package.clone())
+        Ok(key_package)
     }
 
     /// Get the plain identity as byte vector.
@@ -89,6 +89,8 @@ pub enum IdentityError {
     MlsCryptoError(#[from] CryptoError),
     #[error("Can't save signature key")]
     MlsKeyStoreError(#[from] MemoryKeyStoreError),
+    #[error("Something wrong with credential: {0}")]
+    MlsCredentialError(#[from] CredentialError),
     #[error("Unknown error: {0}")]
     Other(anyhow::Error),
 }

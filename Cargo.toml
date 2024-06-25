@@ -7,17 +7,18 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-openmls = { version = "0.5.0", features = ["test-utils"] }
-openmls_basic_credential = "0.2.0"
-openmls_rust_crypto = "0.2.0"
-openmls_traits = "0.2.0"
-url = "2.5.0"
-waku-bindings = "0.6.0"
-bus = "2.4.1"
-rand = "0.8.5"
-tracing = "0.1.40"
-tokio = "1.38.0"
-anyhow = "1.0.71"
-thiserror = "1.0.61"
+openmls = { version = "=0.5.0", features = ["test-utils"] }
+openmls_basic_credential = "=0.2.0"
+openmls_rust_crypto = "=0.2.0"
+openmls_traits = "=0.2.0"
+
+# waku-bindings = "0.6.0"
+bus = "=2.4.1"
+
+rand = "=0.8.5"
+
+anyhow = "=1.0.71"
+thiserror = "=1.0.61"
+
 ds = { path = "ds" }
 sc_key_store = {path = "sc_key_store" }

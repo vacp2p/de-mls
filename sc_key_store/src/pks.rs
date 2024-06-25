@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use openmls::prelude_test::KeyPackage;
+use openmls::prelude::KeyPackage;
 
 use crate::{KeyStoreError, SCKeyStoreService, UserInfo, UserKeyPackages};
 
@@ -50,19 +50,17 @@ impl SCKeyStoreService for &mut PublicKeyStorage {
             ));
         }
 
-        let res = self
-            .storage
-            .insert(new_user_info.id.clone(), new_user_info.clone());
+        let res = self.storage.insert(new_user_info.id.clone(), new_user_info);
         assert!(res.is_none());
 
         Ok(())
     }
 
     fn add_user_kp(&mut self, id: &[u8], ukp: UserKeyPackages) -> Result<(), KeyStoreError> {
-        if !self.storage.contains_key(id) {
-            return Err(KeyStoreError::UnknownUserError);
-        }
-        let user = self.storage.get_mut(id).unwrap();
+        let user = match self.storage.get_mut(id) {
+            Some(u) => u,
+            None => return Err(KeyStoreError::UnknownUserError),
+        };
         ukp.0
             .into_iter()
             .for_each(|value| user.key_packages.0.push(value));
@@ -71,18 +69,17 @@ impl SCKeyStoreService for &mut PublicKeyStorage {
     }
 
     fn get_user(&self, id: &[u8]) -> Result<UserInfo, KeyStoreError> {
-        if !self.storage.contains_key(id) {
-            return Err(KeyStoreError::UnknownUserError);
+        match self.storage.get(id) {
+            Some(u) => Ok(u.to_owned()),
+            None => Err(KeyStoreError::UnknownUserError),
         }
-        let user = self.storage.get(id).unwrap();
-        Ok(user.clone())
     }
 
     fn get_avaliable_user_kp(&mut self, id: &[u8]) -> Result<KeyPackage, KeyStoreError> {
-        if !self.storage.contains_key(id) {
-            return Err(KeyStoreError::UnknownUserError);
-        }
-        let user = self.storage.get_mut(id).unwrap();
+        let user = match self.storage.get_mut(id) {
+            Some(u) => u,
+            None => return Err(KeyStoreError::UnknownUserError),
+        };
         match user.key_packages.0.pop() {
             Some(c) => Ok(c.1),
             None => Err(KeyStoreError::InvalidUserDataError(

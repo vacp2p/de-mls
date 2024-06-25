@@ -1,3 +1,4 @@
+use std::str::Utf8Error;
 use std::string::FromUtf8Error;
 use std::{cell::RefCell, collections::HashMap, rc::Rc, str};
 
@@ -182,7 +183,7 @@ impl User {
 
     fn process_protocol_msg(&self, message: ProtocolMessage) -> Result<(), UserError> {
         let mut groups = self.groups.borrow_mut();
-        let group_name = str::from_utf8(message.group_id().as_slice()).unwrap();
+        let group_name = str::from_utf8(message.group_id().as_slice())?;
         let group = match groups.get_mut(group_name) {
             Some(g) => g,
             None => return Err(UserError::UnknownGroupError(group_name.to_string())),
@@ -195,12 +196,9 @@ impl User {
 
         match processed_message.into_content() {
             ProcessedMessageContent::ApplicationMessage(application_message) => {
-                let processed_message_credential = processed_message_credential.clone();
-
                 let sender_name = {
                     let user_id = mls_group.members().find_map(|m| {
-                        let m_credential = m.credential.clone();
-                        if m_credential.identity()
+                        if m.credential.identity()
                             == processed_message_credential.identity()
                             && (self
                                 .identity
@@ -212,7 +210,7 @@ impl User {
                         {
                             println!("process ApplicationMessage: read sender name from credential identity for group {} ", group.group_name);
                             Some(
-                                str::from_utf8(m_credential.identity()).unwrap().to_owned(),
+                                str::from_utf8(m.credential.identity()).unwrap().to_owned(),
                             )
                         } else {
                             None
@@ -222,10 +220,10 @@ impl User {
                 };
 
                 let conversation_message = ConversationMessage::new(
-                    String::from_utf8(application_message.into_bytes())?.clone(),
+                    String::from_utf8(application_message.into_bytes())?,
                     String::from_utf8(sender_name)?,
                 );
-                group.conversation.add(conversation_message.clone());
+                group.conversation.add(conversation_message);
             }
             ProcessedMessageContent::ProposalMessage(_proposal_ptr) => (),
             ProcessedMessageContent::ExternalJoinProposalMessage(_external_proposal_ptr) => (),
@@ -278,10 +276,9 @@ impl User {
         let mls_group = MlsGroup::new_from_welcome(&self.provider, &group_config, welcome, None)?;
 
         let group_id = mls_group.group_id().to_vec();
-        let group_name = String::from_utf8(group_id.clone())?;
+        let group_name = String::from_utf8(group_id)?;
 
-        ds.clone()
-            .borrow_mut()
+        ds.borrow_mut()
             .add_subscriber(self.identity.borrow().identity())?;
 
         let group = Group {
@@ -405,8 +402,10 @@ pub enum UserError {
     MlsWelcomeError(#[from] WelcomeError<MemoryKeyStoreError>),
     #[error("Failed to remove member from group: {0}")]
     MlsRemoveMembersError(#[from] RemoveMembersError<MemoryKeyStoreError>),
-    #[error("Parse UTF8 error: {0}")]
+    #[error("Parse String UTF8 error: {0}")]
     ParseUTF8Error(#[from] FromUtf8Error),
+    #[error("Parse str UTF8 error: {0}")]
+    ParseStrUTF8Error(#[from] Utf8Error),
     #[error("Unknown error: {0}")]
     Other(anyhow::Error),
 }
