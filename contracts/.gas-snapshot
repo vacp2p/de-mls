@@ -1,1 +1,5 @@
-FooTest:test_Example() (gas: 8662)
+ScKeystoreTest:test__addUser__addsUser__whenUserInfoIsValid() (gas: 56777)
+ScKeystoreTest:test__addUser__reverts__whenUserAlreadyExists() (gas: 61532)
+ScKeystoreTest:test__addUser__reverts__whenUserInfoIsMalformed() (gas: 9384)
+ScKeystoreTest:test__getUser__returnsUserInfo__whenUserExists() (gas: 60956)
+ScKeystoreTest:test__userExists__returnsFalse__whenUserDoesNotExist() (gas: 7976)

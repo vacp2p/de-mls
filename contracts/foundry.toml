@@ -16,6 +16,7 @@
   solc = "0.8.24"
   src = "src"
   test = "test"
+  via_ir = true
 
 [profile.ci]
   fuzz = { runs = 10_000 }

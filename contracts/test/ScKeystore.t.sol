@@ -18,11 +18,8 @@ contract ScKeystoreTest is Test {
 
     function addUser() internal {
         KeyPackage[] memory keyPackages = new KeyPackage[](1);
-        keyPackages[0] = KeyPackage({data: new bytes[](0)});
-        UserInfo memory userInfo = UserInfo({
-            signaturePubKey: "0x",
-            keyPackages: keyPackages
-        });
+        keyPackages[0] = KeyPackage({ data: new bytes[](0) });
+        UserInfo memory userInfo = UserInfo({ signaturePubKey: "0x", keyPackages: keyPackages });
         s.addUser(userInfo);
     }
 

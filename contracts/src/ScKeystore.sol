@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.24;
 
-import {IScKeystore, UserInfo, KeyPackage} from "./IScKeystore.sol";
+import { IScKeystore, UserInfo, KeyPackage } from "./IScKeystore.sol";
 
 error UserAlreadyExists();
 error MalformedKeyPackage();
@@ -16,9 +16,9 @@ contract ScKeystore is IScKeystore {
     }
 
     function addUser(UserInfo calldata userInfo) external {
-        if(userInfo.signaturePubKey.length == 0) revert MalformedUserInfo();
-        if(userInfo.keyPackages.length != 1) revert MalformedUserInfo();
-        if(userExists(msg.sender)) revert UserAlreadyExists();
+        if (userInfo.signaturePubKey.length == 0) revert MalformedUserInfo();
+        if (userInfo.keyPackages.length != 1) revert MalformedUserInfo();
+        if (userExists(msg.sender)) revert UserAlreadyExists();
 
         users[msg.sender] = userInfo;
     }
@@ -28,8 +28,8 @@ contract ScKeystore is IScKeystore {
     }
 
     function addKeyPackage(KeyPackage calldata keyPackage) external {
-        if(keyPackage.data.length == 0) revert MalformedKeyPackage();
-        if(!userExists(msg.sender)) revert UserDoesNotExist();
+        if (keyPackage.data.length == 0) revert MalformedKeyPackage();
+        if (!userExists(msg.sender)) revert UserDoesNotExist();
 
         users[msg.sender].keyPackages.push(keyPackage);
     }
