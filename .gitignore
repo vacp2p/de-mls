@@ -18,9 +18,9 @@ src/.DS_Store
 
 ## contracts
 # directories
-cache
-node_modules
-out
+contracts/cache/**
+contracts/node_modules/**
+contracts/out/**
 
 # files
 *.env
