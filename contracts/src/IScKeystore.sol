@@ -16,4 +16,5 @@ interface IScKeystore {
     function addUser(UserInfo calldata userInfo) external;
     function getUser(address user) external view returns (UserInfo memory);
     function addKeyPackage(KeyPackage calldata) external;
+    function getAvailableKeyPackage(address user) external view returns (KeyPackage memory);
 }
