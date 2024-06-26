@@ -15,3 +15,24 @@ Cargo.lock
 
 .DS_Store
 src/.DS_Store
+
+## contracts
+# directories
+contracts/cache/**
+contracts/node_modules/**
+contracts/out/**
+
+# files
+*.env
+*.log
+.DS_Store
+.pnp.*
+lcov.info
+yarn.lock
+
+# broadcasts
+!broadcast
+broadcast/*
+broadcast/*/31337/
+
+.certora_internal
