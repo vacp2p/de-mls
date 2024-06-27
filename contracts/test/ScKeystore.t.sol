@@ -17,10 +17,8 @@ contract ScKeystoreTest is Test {
     }
 
     function addUser() internal {
-        KeyPackage[] memory keyPackages = new KeyPackage[](1);
-        keyPackages[0] = KeyPackage({ data: new bytes[](0) });
-        UserInfo memory userInfo = UserInfo({ signaturePubKey: "0x", keyPackages: keyPackages });
-        s.addUser(userInfo);
+        KeyPackage memory keyPackage = KeyPackage({ data: new bytes[](1) });
+        s.addUser("0x", keyPackage);
     }
 
     function test__userExists__returnsFalse__whenUserDoesNotExist() public view {
@@ -28,9 +26,8 @@ contract ScKeystoreTest is Test {
     }
 
     function test__addUser__reverts__whenUserInfoIsMalformed() public {
-        UserInfo memory userInfo;
         vm.expectRevert(MalformedUserInfo.selector);
-        s.addUser(userInfo);
+        s.addUser("", KeyPackage({ data: new bytes[](0) }));
     }
 
     function test__addUser__reverts__whenUserAlreadyExists() public {
@@ -48,6 +45,12 @@ contract ScKeystoreTest is Test {
         addUser();
         UserInfo memory userInfo = s.getUser(address(this));
         assert(userInfo.signaturePubKey.length == 2);
-        assert(userInfo.keyPackages.length == 1);
+        assert(userInfo.keyPackageIndices.length == 1);
+    }
+
+    function test__getAllKeyPackagesForUser__returnsKeyPackages__whenUserExists() public {
+        addUser();
+        KeyPackage[] memory keyPackages = s.getAllKeyPackagesForUser(address(this));
+        assert(keyPackages.length == 1);
     }
 }

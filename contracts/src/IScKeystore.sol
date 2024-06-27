@@ -7,13 +7,13 @@ struct KeyPackage {
 }
 
 struct UserInfo {
-    KeyPackage[] keyPackages;
+    uint256[] keyPackageIndices;
     bytes signaturePubKey;
 }
 
 interface IScKeystore {
     function userExists(address user) external view returns (bool);
-    function addUser(UserInfo calldata userInfo) external;
+    function addUser(bytes calldata signaturePubKey, KeyPackage calldata keyPackage) external;
     function getUser(address user) external view returns (UserInfo memory);
     function addKeyPackage(KeyPackage calldata) external;
     function getAvailableKeyPackage(address user) external view returns (KeyPackage memory);
