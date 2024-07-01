@@ -9,11 +9,15 @@ edition = "2021"
 # chrono = "=0.4.38"
 # waku-bindings = "=0.6.0"
 bus = "=2.4.1"
+fred = { version = "=9.0.3", features = ["subscriber-client"] }
+tokio = "=1.38.0"
 
-openmls = "=0.5.0"
+openmls = { version = "=0.5.0", features = ["test-utils"] }
 rand = { version = "^0.8" }
 
 anyhow = "=1.0.71"
 thiserror = "=1.0.61"
+
+tls_codec = "=0.4.1"
 
 sc_key_store = { path = "../sc_key_store" }
