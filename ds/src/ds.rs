@@ -44,7 +44,7 @@ impl RClient {
     }
 
     pub async fn msg_send(&mut self, msg: MlsMessageOut) -> Result<(), DeliveryServiceError> {
-        let buf = msg.tls_serialize_detached().unwrap();
+        let buf = msg.tls_serialize_detached()?;
         self.client
             .publish(self.group_id.clone(), buf.as_slice())
             .await?;
@@ -56,7 +56,7 @@ impl RClient {
         // check only one message
         let msg = self.broadcaster.recv().await?;
         let bytes: Vec<u8> = msg.value.convert()?;
-        let res = MlsMessageIn::tls_deserialize_bytes(bytes).unwrap();
+        let res = MlsMessageIn::tls_deserialize_bytes(bytes)?;
         Ok(res)
     }
 }
@@ -65,8 +65,10 @@ impl RClient {
 pub enum DeliveryServiceError {
     #[error("Redis error: {0}")]
     RedisError(#[from] RedisError),
-    #[error("Tokyo error: {0}")]
-    TokyoRecieveError(#[from] RecvError),
+    #[error("Tokio error: {0}")]
+    TokioRecieveError(#[from] RecvError),
     #[error("Serialization problem: {0}")]
     TlsError(#[from] tls_codec::Error),
+    #[error("Unknown error: {0}")]
+    Other(anyhow::Error),
 }

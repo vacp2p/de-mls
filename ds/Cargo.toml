@@ -18,6 +18,6 @@ rand = { version = "^0.8" }
 anyhow = "=1.0.71"
 thiserror = "=1.0.61"
 
-tls_codec = "=0.4.1"
+tls_codec = "=0.3.0"
 
 sc_key_store = { path = "../sc_key_store" }
