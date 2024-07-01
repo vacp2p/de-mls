@@ -1,4 +1,4 @@
-workspace = { members = [ "sc_key_store","ds"] }
+workspace = { members = ["sc_key_store", "ds"] }
 [package]
 name = "de-mls"
 version = "0.1.0"
@@ -14,6 +14,7 @@ openmls_traits = "=0.2.0"
 
 # waku-bindings = "0.6.0"
 bus = "=2.4.1"
+tokio = "=1.38.0"
 
 rand = "=0.8.5"
 
@@ -21,4 +22,4 @@ anyhow = "=1.0.71"
 thiserror = "=1.0.61"
 
 ds = { path = "ds" }
-sc_key_store = {path = "sc_key_store" }
+sc_key_store = { path = "sc_key_store" }
