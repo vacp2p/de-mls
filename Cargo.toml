@@ -1,4 +1,8 @@
-workspace = { members = ["sc_key_store", "ds"] }
+[workspace]
+members = ["sc_key_store", "ds", "crates/bindings"]
+[workspace.dependencies]
+foundry-contracts = { path = "crates/bindings" }
+
 [package]
 name = "de-mls"
 version = "0.1.0"
@@ -7,6 +11,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+foundry-contracts.workspace = true
 openmls = { version = "=0.5.0", features = ["test-utils"] }
 openmls_basic_credential = "=0.2.0"
 openmls_rust_crypto = "=0.2.0"
@@ -14,9 +19,17 @@ openmls_traits = "=0.2.0"
 
 # waku-bindings = "0.6.0"
 bus = "=2.4.1"
-tokio = "=1.38.0"
+tokio = { version = "=1.38.0", features = ["macros", "rt-multi-thread"] }
+alloy = { git = "https://github.com/alloy-rs/alloy", features = [
+    "providers",
+    "node-bindings",
+    "network",
+    "transports",
+    "k256"
+] }
 
 rand = "=0.8.5"
+serde_json = "1.0"
 
 anyhow = "=1.0.71"
 thiserror = "=1.0.61"

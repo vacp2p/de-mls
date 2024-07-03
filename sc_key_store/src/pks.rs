@@ -27,15 +27,15 @@ impl From<UserKeyPackages> for UserInfo {
 }
 
 impl SCKeyStoreService for &mut PublicKeyStorage {
-    fn connect() -> Self {
-        todo!()
+    async fn does_user_exist(&self, id: &[u8]) -> Result<bool, KeyStoreError> {
+        Ok(self.storage.contains_key(id))
     }
 
-    fn does_user_exist(&self, id: &[u8]) -> bool {
-        self.storage.contains_key(id)
-    }
-
-    fn add_user(&mut self, ukp: UserKeyPackages, sign_pk: &[u8]) -> Result<(), KeyStoreError> {
+    async fn add_user(
+        &mut self,
+        ukp: UserKeyPackages,
+        sign_pk: &[u8],
+    ) -> Result<(), KeyStoreError> {
         if ukp.0.is_empty() {
             return Err(KeyStoreError::InvalidUserDataError(
                 "no key packages".to_string(),
@@ -56,7 +56,7 @@ impl SCKeyStoreService for &mut PublicKeyStorage {
         Ok(())
     }
 
-    fn add_user_kp(&mut self, id: &[u8], ukp: UserKeyPackages) -> Result<(), KeyStoreError> {
+    async fn add_user_kp(&mut self, id: &[u8], ukp: UserKeyPackages) -> Result<(), KeyStoreError> {
         let user = match self.storage.get_mut(id) {
             Some(u) => u,
             None => return Err(KeyStoreError::UnknownUserError),
@@ -68,14 +68,14 @@ impl SCKeyStoreService for &mut PublicKeyStorage {
         Ok(())
     }
 
-    fn get_user(&self, id: &[u8]) -> Result<UserInfo, KeyStoreError> {
+    async fn get_user(&self, id: &[u8]) -> Result<UserInfo, KeyStoreError> {
         match self.storage.get(id) {
             Some(u) => Ok(u.to_owned()),
             None => Err(KeyStoreError::UnknownUserError),
         }
     }
 
-    fn get_avaliable_user_kp(&mut self, id: &[u8]) -> Result<KeyPackage, KeyStoreError> {
+    async fn get_avaliable_user_kp(&mut self, id: &[u8]) -> Result<KeyPackage, KeyStoreError> {
         let user = match self.storage.get_mut(id) {
             Some(u) => u,
             None => return Err(KeyStoreError::UnknownUserError),
