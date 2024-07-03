@@ -1,9 +1,10 @@
 use std::{borrow::BorrowMut, collections::HashMap, str::FromStr};
 
 use alloy::{
-    network::Network,
+    network::{EthereumWallet, Network, TxSigner},
     primitives::{bytes::Buf, Address, Bytes},
     providers::{Provider, ProviderBuilder},
+    signers::local::PrivateKeySigner,
     transports::Transport,
 };
 use p256::ecdsa::SigningKey;
@@ -13,6 +14,7 @@ use foundry_contracts::sckeystore::ScKeystore::{self, KeyPackage, ScKeystoreInst
 use openmls::prelude::{KeyPackage as mlsKeyPackage, TlsSerializeTrait};
 use openmls::{prelude::*, test_utils::OpenMlsRustCrypto};
 use openmls_basic_credential::SignatureKeyPair;
+use url::Url;
 
 use crate::UserInfo;
 use crate::UserKeyPackages;
@@ -126,9 +128,17 @@ fn test_identity() -> (UserKeyPackages, SignatureKeyPair, Address) {
 #[tokio::test]
 async fn test_sc_storage() {
     let res = Address::from_str("0x5FC8d32690cc91D4c39d9d3abcBD16989F875707");
+    let alice_address = Address::from_str("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266").unwrap(); // anvil default key 0
     let address = res.unwrap();
     assert!(res.is_ok());
-    let provider = ProviderBuilder::new().on_anvil_with_wallet();
+    let signer = PrivateKeySigner::from_str(
+        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+    )
+    .unwrap();
+    let wallet = EthereumWallet::from(signer);
+    let provider = ProviderBuilder::new()
+        .wallet(wallet)
+        .on_http(Url::from_str("http://localhost:8545").unwrap());
     let alice = test_identity();
     let mut binding = ScKeyStorage::new(provider, address);
     let mut storage = binding.borrow_mut();
@@ -136,6 +146,9 @@ async fn test_sc_storage() {
     let res = storage.add_user(alice.0, alice.1.public()).await;
     println!("res: {:#?}", res);
 
-    let res = storage.get_user(alice.2.as_slice()).await;
+    let res = storage.get_user(alice_address.as_slice()).await;
+    println!("res: {:#?}", res);
+
+    let res = storage.does_user_exist(alice_address.as_slice()).await;
     println!("res: {:#?}", res);
 }
