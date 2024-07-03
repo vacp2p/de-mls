@@ -127,7 +127,7 @@ fn test_identity() -> (UserKeyPackages, SignatureKeyPair, Address) {
 
 #[tokio::test]
 async fn test_sc_storage() {
-    let res = Address::from_str("0x5FC8d32690cc91D4c39d9d3abcBD16989F875707");
+    let res = Address::from_str("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512");
     let alice_address = Address::from_str("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266").unwrap(); // anvil default key 0
     let address = res.unwrap();
     assert!(res.is_ok());
@@ -149,6 +149,7 @@ async fn test_sc_storage() {
     let res = storage.get_user(alice_address.as_slice()).await;
     println!("res: {:#?}", res);
 
-    let res = storage.does_user_exist(alice_address.as_slice()).await;
-    println!("res: {:#?}", res);
+    let res = storage.instance.userExists(alice_address).call().await;
+
+    println!("res: {:#?}", res.is_err());
 }
