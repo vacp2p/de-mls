@@ -1,4 +1,8 @@
-use std::{borrow::BorrowMut, collections::HashMap, str::FromStr};
+use std::{
+    borrow::{Borrow, BorrowMut},
+    collections::HashMap,
+    str::FromStr,
+};
 
 use alloy::{
     network::{EthereumWallet, Network, TxSigner},
@@ -58,11 +62,8 @@ impl<T: Transport + Clone, P: Provider<T, N>, N: Network> SCKeyStoreService
             .collect();
 
         let kp: KeyPackage = KeyPackage::from((kp_bytes,));
-        let res = self
-            .instance
-            .addUser(Bytes::copy_from_slice(sign_pk), kp)
-            .call()
-            .await;
+        let add_user_binding = self.instance.addUser(Bytes::copy_from_slice(sign_pk), kp);
+        let res = add_user_binding.send().await;
 
         match res {
             Ok(_) => Ok(()),
@@ -137,8 +138,10 @@ async fn test_sc_storage() {
     .unwrap();
     let wallet = EthereumWallet::from(signer);
     let provider = ProviderBuilder::new()
+        .with_recommended_fillers()
         .wallet(wallet)
         .on_http(Url::from_str("http://localhost:8545").unwrap());
+
     let alice = test_identity();
     let mut binding = ScKeyStorage::new(provider, address);
     let mut storage = binding.borrow_mut();
@@ -150,6 +153,5 @@ async fn test_sc_storage() {
     println!("res: {:#?}", res);
 
     let res = storage.instance.userExists(alice_address).call().await;
-
-    println!("res: {:#?}", res.is_err());
+    println!("res: {:#?}", res.unwrap()._0);
 }
