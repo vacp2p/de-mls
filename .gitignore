@@ -31,8 +31,8 @@ lcov.info
 yarn.lock
 
 # broadcasts
-!broadcast
-broadcast/*
-broadcast/*/31337/
+contracts/!broadcast
+contracts/broadcast/*
+contracts/broadcast/*/31337/
 
 .certora_internal

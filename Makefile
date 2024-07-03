@@ -19,7 +19,7 @@ ANVIL_PORT=8545
 start:
 	docker compose up -d
 	until cast chain-id --rpc-url "http://localhost:${ANVIL_PORT}" 2> /dev/null; do sleep 1; done
-	cd contracts && forge script --rpc-url "http://localhost:${ANVIL_PORT}" script/Deploy.s.sol:Deploy --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+	cd contracts && forge script --broadcast --rpc-url "http://localhost:${ANVIL_PORT}" script/Deploy.s.sol:Deploy --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 
 stop:
 	docker compose down
