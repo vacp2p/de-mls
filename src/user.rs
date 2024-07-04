@@ -11,7 +11,7 @@ use ds::ds::*;
 use mls_crypto::openmls_provider::*;
 use sc_key_store::{local_ks::LocalCache, sc_ks::ScKeyStorage, *};
 // use waku_bindings::*;
-//
+
 use crate::conversation::*;
 use crate::identity::{Identity, IdentityError};
 
@@ -40,24 +40,24 @@ where
     N: Network,
 {
     /// Create a new user with the given name and a fresh set of credentials.
-    pub async fn new(username: &[u8], provider: P, address: Address) -> Result<Self, UserError> {
+    pub async fn new(
+        user_wallet_address: &[u8],
+        provider: P,
+        sc_storage_address: Address,
+    ) -> Result<Self, UserError> {
         let crypto = MlsCryptoProvider::default();
-        let id = Identity::new(CIPHERSUITE, &crypto, username)?;
+        let id = Identity::new(CIPHERSUITE, &crypto, user_wallet_address)?;
         Ok(User {
             groups: HashMap::new(),
             identity: id,
             provider: crypto,
-            local_ks: LocalCache::empty_key_store(username),
-            sc_ks: ScKeyStorage::new(provider, address),
+            local_ks: LocalCache::empty_key_store(user_wallet_address),
+            sc_ks: ScKeyStorage::new(provider, sc_storage_address),
             // contacts: HashMap::new(),
         })
     }
 
-    pub fn username(&self) -> String {
-        self.identity.to_string()
-    }
-
-    pub fn id(&self) -> Vec<u8> {
+    pub fn user_wallet_address(&self) -> Vec<u8> {
         self.identity.identity()
     }
 
@@ -101,7 +101,7 @@ where
             .add_user(kp, self.identity.signer.public())
             .await?;
         self.local_ks
-            .get_update_from_smart_contract(self.sc_ks.borrow_mut())
+            .get_update_from_smart_contract(self.sc_ks.borrow_mut(), &self.provider)
             .await?;
         Ok(())
     }
@@ -114,14 +114,14 @@ where
 
     pub async fn invite(
         &mut self,
-        username: String,
+        user_wallet_address: &[u8],
         group_name: String,
     ) -> Result<MlsMessageIn, UserError> {
         // First we need to get the key package for {id} from the DS.
         if !self
             .sc_ks
             .borrow_mut()
-            .does_user_exist(username.as_bytes())
+            .does_user_exist(user_wallet_address)
             .await?
         {
             return Err(UserError::UnknownUserError);
@@ -131,7 +131,7 @@ where
         let joiner_key_package = self
             .sc_ks
             .borrow_mut()
-            .get_avaliable_user_kp(username.as_bytes(), &self.provider)
+            .get_avaliable_user_kp(user_wallet_address, &self.provider)
             .await?;
 
         // Build a proposal with this key package and do the MLS bits.
@@ -209,18 +209,18 @@ where
                         {
                             println!("process ApplicationMessage: read sender name from credential identity for group {} ", group.group_name);
                             Some(
-                                str::from_utf8(m.credential.identity()).unwrap().to_owned(),
+                                format!("{:?}", m.credential.identity())
                             )
                         } else {
                             None
                         }
                     });
-                    user_id.unwrap_or("".to_owned()).as_bytes().to_vec()
+                    user_id.unwrap_or("".to_owned())
                 };
 
                 let conversation_message = ConversationMessage::new(
                     String::from_utf8(application_message.into_bytes())?,
-                    String::from_utf8(sender_name)?,
+                    sender_name,
                 );
                 group.conversation.add(conversation_message);
             }

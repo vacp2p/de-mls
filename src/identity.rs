@@ -19,9 +19,9 @@ impl Identity {
     pub(crate) fn new(
         ciphersuite: Ciphersuite,
         crypto: &MlsCryptoProvider,
-        username: &[u8],
+        user_wallet_address: &[u8],
     ) -> Result<Identity, IdentityError> {
-        let credential = Credential::new(username.to_vec(), CredentialType::Basic)?;
+        let credential = Credential::new(user_wallet_address.to_vec(), CredentialType::Basic)?;
         let signature_keys = SignatureKeyPair::new(ciphersuite.signature_algorithm())?;
         let credential_with_key = CredentialWithKey {
             credential,

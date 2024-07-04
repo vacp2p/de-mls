@@ -1,30 +1,42 @@
-use alloy::{
-    network::NetworkWallet,
-    primitives::Address,
-    providers::{ProviderBuilder, WalletProvider},
-};
+use alloy::{primitives::Address, providers::ProviderBuilder};
 use bus::Bus;
-use de_mls::{get_contract_address, user::User};
-use openmls::framing::{MlsMessageIn, MlsMessageInBody};
 use std::str::FromStr;
+use url::Url;
+
+use openmls::framing::{MlsMessageIn, MlsMessageInBody};
+
+use de_mls::{get_contract_address, user::User};
+use sc_key_store::sc_ks::*;
 
 #[tokio::main]
 async fn main() {
+    let storage_address = Address::from_str("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512").unwrap();
+    let (alice_address, alice_wallet) = alice_addr_test();
+    let alice_provider = ProviderBuilder::new()
+        .with_recommended_fillers()
+        .wallet(alice_wallet)
+        .on_http(Url::from_str("http://localhost:8545").unwrap());
+
+    let (bob_address, bob_wallet) = bob_addr_test();
+    let bob_provider = ProviderBuilder::new()
+        .with_recommended_fillers()
+        .wallet(bob_wallet)
+        .on_http(Url::from_str("http://localhost:8545").unwrap());
+
     // This channel for message before adding to group.
     // Message are still encrypted, but this channel not attached to any group
-    let res = get_contract_address();
-    assert!(res.is_ok());
-    let res = Address::from_str(&res.unwrap());
-    let address = res.unwrap();
-    assert!(res.is_ok());
-    let provider = ProviderBuilder::new().on_anvil_with_wallet();
     let mut m: Bus<MlsMessageIn> = Bus::new(10);
     let mut a_r = m.add_rx();
     let mut b_r = m.add_rx();
 
     //// Create user Alice
     println!("Start Register Alice");
-    let res = User::new("Alice".as_bytes(), provider.clone(), address).await;
+    let res = User::new(
+        alice_address.as_slice(),
+        alice_provider.clone(),
+        storage_address,
+    )
+    .await;
     assert!(res.is_ok());
     let mut a_user = res.unwrap();
     let res = a_user.register().await;
@@ -34,7 +46,12 @@ async fn main() {
 
     //// Create user Bob
     println!("Start Register Bob");
-    let res = User::new("Bob".as_bytes(), provider.clone(), address).await;
+    let res = User::new(
+        bob_address.as_slice(),
+        bob_provider.clone(),
+        storage_address,
+    )
+    .await;
     assert!(res.is_ok());
     let mut b_user = res.unwrap();
     let res = b_user.register().await;
@@ -52,7 +69,9 @@ async fn main() {
 
     //// Alice invite Bob
     println!("Alice inviting Bob");
-    let welcome = a_user.invite(b_user.username(), group_name.clone()).await;
+    let welcome = a_user
+        .invite(b_user.user_wallet_address().as_slice(), group_name.clone())
+        .await;
     assert!(welcome.is_ok());
     // Alice should skip message with invite update because she already update her instance
     // It is failed because of wrong epoch
@@ -104,10 +123,21 @@ async fn main() {
     let msg = b_user.read_msgs(group_name.clone());
     println!("Bob recieve_msgs: {:#?}", msg);
 
+    let (carla_address, carla_wallet) = carla_addr_test();
+    let carla_provider = ProviderBuilder::new()
+        .with_recommended_fillers()
+        .wallet(carla_wallet)
+        .on_http(Url::from_str("http://localhost:8545").unwrap());
+
     let mut c_r = m.add_rx();
     //// Create user Alice
     println!("Start Register Carla");
-    let res = User::new("Carla".as_bytes(), provider.clone(), address).await;
+    let res = User::new(
+        carla_address.as_slice(),
+        carla_provider.clone(),
+        storage_address,
+    )
+    .await;
     assert!(res.is_ok());
     let mut c_user = res.unwrap();
     let res = c_user.register().await;
@@ -117,7 +147,9 @@ async fn main() {
 
     //// Alice invite Carla
     println!("Alice inviting Carla");
-    let welcome = a_user.invite(c_user.username(), group_name.clone()).await;
+    let welcome = a_user
+        .invite(c_user.user_wallet_address().as_slice(), group_name.clone())
+        .await;
     assert!(welcome.is_ok());
     // Alice should skip message with invite update because she already update her instance
     // It is failed because of wrong epoch

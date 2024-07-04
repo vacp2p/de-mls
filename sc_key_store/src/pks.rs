@@ -69,7 +69,11 @@ impl SCKeyStoreService for &mut PublicKeyStorage {
         Ok(())
     }
 
-    async fn get_user(&self, id: &[u8]) -> Result<UserInfo, KeyStoreError> {
+    async fn get_user(
+        &self,
+        id: &[u8],
+        _crypto: &MlsCryptoProvider,
+    ) -> Result<UserInfo, KeyStoreError> {
         match self.storage.get(id) {
             Some(u) => Ok(u.to_owned()),
             None => Err(KeyStoreError::UnknownUserError),
