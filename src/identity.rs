@@ -7,7 +7,7 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::MemoryKeyStoreError;
 use openmls_traits::types::Ciphersuite;
 
-use crate::openmls_provider::CryptoProvider;
+use mls_crypto::openmls_provider::MlsCryptoProvider;
 
 pub struct Identity {
     pub(crate) kp: HashMap<Vec<u8>, KeyPackage>,
@@ -18,7 +18,7 @@ pub struct Identity {
 impl Identity {
     pub(crate) fn new(
         ciphersuite: Ciphersuite,
-        crypto: &CryptoProvider,
+        crypto: &MlsCryptoProvider,
         username: &[u8],
     ) -> Result<Identity, IdentityError> {
         let credential = Credential::new(username.to_vec(), CredentialType::Basic)?;
@@ -51,7 +51,7 @@ impl Identity {
     pub fn add_key_package(
         &mut self,
         ciphersuite: Ciphersuite,
-        crypto: &CryptoProvider,
+        crypto: &MlsCryptoProvider,
     ) -> Result<KeyPackage, IdentityError> {
         let key_package = KeyPackage::builder().build(
             CryptoConfig::with_default_version(ciphersuite),

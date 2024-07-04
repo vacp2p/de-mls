@@ -11,11 +11,10 @@ use alloy::{
     signers::local::PrivateKeySigner,
     transports::Transport,
 };
-use p256::ecdsa::SigningKey;
-
 // use alloy_contract;
 use foundry_contracts::sckeystore::ScKeystore::{self, KeyPackage, ScKeystoreInstance};
-use openmls::prelude::{KeyPackage as mlsKeyPackage, TlsSerializeTrait};
+use mls_crypto::openmls_provider::MlsCryptoProvider;
+use openmls::prelude::{KeyPackage as mlsKeyPackage, TlsDeserializeTrait, TlsSerializeTrait};
 use openmls::{prelude::*, test_utils::OpenMlsRustCrypto};
 use openmls_basic_credential::SignatureKeyPair;
 use url::Url;
@@ -82,14 +81,62 @@ impl<T: Transport + Clone, P: Provider<T, N>, N: Network> SCKeyStoreService
 
         let u = user._0;
         println!("{:#?}", u.signaturePubKey);
+
+        let res = self.instance.getAllKeyPackagesForUser(address).call().await;
+
+        let kps = match res {
+            Ok(kp) => kp,
+            Err(err) => return Err(KeyStoreError::AlloyError(err)),
+        };
+        for kp in kps._0 {
+            println!("{:#?}", kp.data);
+        }
+
         Ok(UserInfo::default())
     }
 
     async fn add_user_kp(&mut self, id: &[u8], ukp: UserKeyPackages) -> Result<(), KeyStoreError> {
-        todo!()
+        if !self.does_user_exist(id).await? {
+            return Err(KeyStoreError::UnknownUserError);
+        }
+
+        let kp_bytes: Vec<Bytes> = ukp
+            .0
+            .iter()
+            .map(|kp| Bytes::copy_from_slice(kp.tls_serialize_detached().unwrap().as_slice()))
+            .collect();
+
+        let kp: KeyPackage = KeyPackage::from((kp_bytes,));
+
+        let add_kp_binding = self.instance.addKeyPackage(kp);
+        let res = add_kp_binding.send().await;
+
+        match res {
+            Ok(_) => Ok(()),
+            Err(err) => Err(KeyStoreError::AlloyError(err)),
+        }
     }
 
-    async fn get_avaliable_user_kp(&mut self, id: &[u8]) -> Result<mlsKeyPackage, KeyStoreError> {
+    async fn get_avaliable_user_kp(
+        &mut self,
+        id: &[u8],
+        crypto: &MlsCryptoProvider,
+    ) -> Result<mlsKeyPackage, KeyStoreError> {
+        if !self.does_user_exist(id).await? {
+            return Err(KeyStoreError::UnknownUserError);
+        }
+
+        let address = Address::from_slice(id);
+        let add_kp_binding = self.instance.getAvailableKeyPackage(address);
+        let res = add_kp_binding.call().await?;
+        // let mut data = Vec::new();
+        let bytes = res._0.data;
+        println!("{:#?}", bytes);
+
+        // let key_package_in = KeyPackageIn::tls_deserialize_bytes(&mut bytes)?;
+
+        // let key_package = key_package_in.validate(crypto.crypto(), ProtocolVersion::Mls10)?;
+        // Ok(key_package)
         todo!()
     }
 }
@@ -147,11 +194,13 @@ async fn test_sc_storage() {
     let mut storage = binding.borrow_mut();
 
     let res = storage.add_user(alice.0, alice.1.public()).await;
-    println!("res: {:#?}", res);
+    println!("Add user res: {:#?}", res);
+    assert!(res.is_ok());
 
     let res = storage.get_user(alice_address.as_slice()).await;
-    println!("res: {:#?}", res);
+    println!("Get user res: {:#?}", res);
+    assert!(res.is_ok());
 
     let res = storage.instance.userExists(alice_address).call().await;
-    println!("res: {:#?}", res.unwrap()._0);
+    println!("User exist res: {:#?}", res.unwrap()._0);
 }

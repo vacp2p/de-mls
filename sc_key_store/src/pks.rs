@@ -1,6 +1,7 @@
+use openmls::prelude::KeyPackage;
 use std::collections::HashMap;
 
-use openmls::prelude::KeyPackage;
+use mls_crypto::openmls_provider::MlsCryptoProvider;
 
 use crate::{KeyStoreError, SCKeyStoreService, UserInfo, UserKeyPackages};
 
@@ -75,7 +76,11 @@ impl SCKeyStoreService for &mut PublicKeyStorage {
         }
     }
 
-    async fn get_avaliable_user_kp(&mut self, id: &[u8]) -> Result<KeyPackage, KeyStoreError> {
+    async fn get_avaliable_user_kp(
+        &mut self,
+        id: &[u8],
+        _crypto: &MlsCryptoProvider,
+    ) -> Result<KeyPackage, KeyStoreError> {
         let user = match self.storage.get_mut(id) {
             Some(u) => u,
             None => return Err(KeyStoreError::UnknownUserError),

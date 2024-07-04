@@ -1,6 +1,5 @@
 pub mod conversation;
 pub mod identity;
-mod openmls_provider;
 pub mod user;
 
 use std::{fs::File, io};

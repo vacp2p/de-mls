@@ -2,6 +2,7 @@ pub mod local_ks;
 pub mod pks;
 pub mod sc_ks;
 
+use mls_crypto::openmls_provider::MlsCryptoProvider;
 use openmls::prelude::*;
 
 /// The DS returns a list of key packages for a user as `UserKeyPackages`.
@@ -26,7 +27,11 @@ pub trait SCKeyStoreService {
     async fn get_user(&self, id: &[u8]) -> Result<UserInfo, KeyStoreError>;
     async fn add_user_kp(&mut self, id: &[u8], ukp: UserKeyPackages) -> Result<(), KeyStoreError>;
     // we need get key package of other user for inviting them to group
-    async fn get_avaliable_user_kp(&mut self, id: &[u8]) -> Result<KeyPackage, KeyStoreError>;
+    async fn get_avaliable_user_kp(
+        &mut self,
+        id: &[u8],
+        crypto: &MlsCryptoProvider,
+    ) -> Result<KeyPackage, KeyStoreError>;
 }
 
 pub trait LocalKeyStoreService {
@@ -56,6 +61,8 @@ pub enum KeyStoreError {
     AlloyError(#[from] alloy::contract::Error),
     #[error("Serialization problem: {0}")]
     TlsError(#[from] tls_codec::Error),
+    #[error("Key package doesn't valid: {0}")]
+    MlsKeyPackageVerifyError(#[from] openmls::prelude::KeyPackageVerifyError),
     #[error("Unknown error: {0}")]
     Other(anyhow::Error),
 }

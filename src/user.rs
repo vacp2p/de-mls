@@ -1,21 +1,19 @@
-use std::borrow::BorrowMut;
-use std::str::Utf8Error;
-use std::string::FromUtf8Error;
-use std::{cell::RefCell, collections::HashMap, str};
+use std::{
+    borrow::BorrowMut, cell::RefCell, collections::HashMap, str, str::Utf8Error,
+    string::FromUtf8Error,
+};
 
-use ds::ds::*;
+use alloy::{network::Network, primitives::Address, providers::Provider, transports::Transport};
 use openmls::{group::*, prelude::*};
 use openmls_rust_crypto::MemoryKeyStoreError;
-use sc_key_store::local_ks::LocalCache;
-use sc_key_store::*;
-use sc_ks::ScKeyStorage;
+
+use ds::ds::*;
+use mls_crypto::openmls_provider::*;
+use sc_key_store::{local_ks::LocalCache, sc_ks::ScKeyStorage, *};
 // use waku_bindings::*;
 //
-use alloy::{network::Network, primitives::Address, providers::Provider, transports::Transport};
-
 use crate::conversation::*;
 use crate::identity::{Identity, IdentityError};
-use crate::openmls_provider::{CryptoProvider, CIPHERSUITE};
 
 pub struct Group {
     group_name: String,
@@ -29,7 +27,7 @@ pub struct Group {
 pub struct User<T, P, N> {
     pub(crate) identity: Identity,
     pub(crate) groups: HashMap<String, Group>,
-    provider: CryptoProvider,
+    provider: MlsCryptoProvider,
     sc_ks: ScKeyStorage<T, P, N>,
     local_ks: LocalCache,
     // pub(crate) contacts: HashMap<Vec<u8>, WakuPeers>,
@@ -43,7 +41,7 @@ where
 {
     /// Create a new user with the given name and a fresh set of credentials.
     pub async fn new(username: &[u8], provider: P, address: Address) -> Result<Self, UserError> {
-        let crypto = CryptoProvider::default();
+        let crypto = MlsCryptoProvider::default();
         let id = Identity::new(CIPHERSUITE, &crypto, username)?;
         Ok(User {
             groups: HashMap::new(),
@@ -133,7 +131,7 @@ where
         let joiner_key_package = self
             .sc_ks
             .borrow_mut()
-            .get_avaliable_user_kp(username.as_bytes())
+            .get_avaliable_user_kp(username.as_bytes(), &self.provider)
             .await?;
 
         // Build a proposal with this key package and do the MLS bits.

@@ -29,3 +29,5 @@ alloy = { git = "https://github.com/alloy-rs/alloy", features = [
 ] }
 async-trait = "0.1.80"
 p256 = "0.13.2"
+
+mls_crypto = { path = "../mls_crypto" }
