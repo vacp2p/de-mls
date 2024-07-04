@@ -23,3 +23,6 @@ start:
 
 stop:
 	docker compose down
+
+example: stop start
+	cargo run --release
