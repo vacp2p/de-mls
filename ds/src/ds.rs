@@ -66,7 +66,7 @@ pub enum DeliveryServiceError {
     #[error("Redis error: {0}")]
     RedisError(#[from] RedisError),
     #[error("Tokio error: {0}")]
-    TokioRecieveError(#[from] RecvError),
+    TokioReceiveError(#[from] RecvError),
     #[error("Serialization problem: {0}")]
     TlsError(#[from] tls_codec::Error),
     #[error("Unknown error: {0}")]

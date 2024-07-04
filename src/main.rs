@@ -75,7 +75,7 @@ async fn main() {
     assert!(welcome.is_ok());
     // Alice should skip message with invite update because she already update her instance
     // It is failed because of wrong epoch
-    let res = a_user.recieve_msg(group_name.clone()).await;
+    let res = a_user.receive_msg(group_name.clone()).await;
     assert!(res.is_err());
 
     //// Send welcome message to system broadcast. Only Bob can use it
@@ -94,34 +94,34 @@ async fn main() {
     println!("Bob successfully join to the group");
     /////
 
-    //// Bob send message and Alice recieve it
+    //// Bob send message and Alice receive it
     let res = b_user.send_msg("Hi!", group_name.clone()).await;
     assert!(res.is_ok());
 
     // Bob also get the message but he cant decrypt it (regarding the mls rfc)
-    let res = b_user.recieve_msg(group_name.clone()).await;
+    let res = b_user.receive_msg(group_name.clone()).await;
     // Expected error with invalid decryption
     assert!(res.is_err());
 
-    let res = a_user.recieve_msg(group_name.clone()).await;
+    let res = a_user.receive_msg(group_name.clone()).await;
     assert!(res.is_ok());
     /////
 
-    //// Alice send message and Bob recieve it
+    //// Alice send message and Bob receive it
     let res = a_user.send_msg("Hi Bob!", group_name.clone()).await;
     assert!(res.is_ok());
 
-    let res = a_user.recieve_msg(group_name.clone()).await;
+    let res = a_user.receive_msg(group_name.clone()).await;
     assert!(res.is_err());
 
-    let res = b_user.recieve_msg(group_name.clone()).await;
+    let res = b_user.receive_msg(group_name.clone()).await;
     assert!(res.is_ok());
     /////
 
     let msg = a_user.read_msgs(group_name.clone());
-    println!("Alice recieve_msgs: {:#?}", msg);
+    println!("Alice receive_msgs: {:#?}", msg);
     let msg = b_user.read_msgs(group_name.clone());
-    println!("Bob recieve_msgs: {:#?}", msg);
+    println!("Bob receive_msgs: {:#?}", msg);
 
     let (carla_address, carla_wallet) = carla_addr_test();
     let carla_provider = ProviderBuilder::new()
@@ -153,9 +153,9 @@ async fn main() {
     assert!(welcome.is_ok());
     // Alice should skip message with invite update because she already update her instance
     // It is failed because of wrong epoch
-    let res = a_user.recieve_msg(group_name.clone()).await;
+    let res = a_user.receive_msg(group_name.clone()).await;
     assert!(res.is_err());
-    let res = b_user.recieve_msg(group_name.clone()).await;
+    let res = b_user.receive_msg(group_name.clone()).await;
     assert!(res.is_ok());
 
     //// Send welcome message to system broadcast. Only Bob can use it
@@ -175,24 +175,24 @@ async fn main() {
     println!("Carla successfully join to the group");
     /////
 
-    //// Carla send message and Alice and Bob recieve it
+    //// Carla send message and Alice and Bob receive it
     let res = c_user.send_msg("Hi all!", group_name.clone()).await;
     assert!(res.is_ok());
 
-    let res = c_user.recieve_msg(group_name.clone()).await;
+    let res = c_user.receive_msg(group_name.clone()).await;
     assert!(res.is_err());
 
-    let res = a_user.recieve_msg(group_name.clone()).await;
+    let res = a_user.receive_msg(group_name.clone()).await;
     assert!(res.is_ok());
 
-    let res = b_user.recieve_msg(group_name.clone()).await;
+    let res = b_user.receive_msg(group_name.clone()).await;
     assert!(res.is_ok());
     ////
 
     let msg = a_user.read_msgs(group_name.clone());
-    println!("Alice recieve_msgs: {:#?}", msg);
+    println!("Alice receive_msgs: {:#?}", msg);
     let msg = b_user.read_msgs(group_name.clone());
-    println!("Bob recieve_msgs: {:#?}", msg);
+    println!("Bob receive_msgs: {:#?}", msg);
     let msg = c_user.read_msgs(group_name.clone());
-    println!("Carla recieve_msgs: {:#?}", msg);
+    println!("Carla receive_msgs: {:#?}", msg);
 }

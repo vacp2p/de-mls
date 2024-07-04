@@ -158,7 +158,7 @@ where
         Ok(welcome.into())
     }
 
-    pub async fn recieve_msg(&mut self, group_name: String) -> Result<(), UserError> {
+    pub async fn receive_msg(&mut self, group_name: String) -> Result<(), UserError> {
         let group = match self.groups.get_mut(&group_name) {
             Some(g) => g,
             None => return Err(UserError::UnknownGroupError(group_name)),
