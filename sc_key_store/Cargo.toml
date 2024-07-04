@@ -6,6 +6,29 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-openmls = "=0.5.0"
+foundry-contracts.workspace = true
+openmls = { version = "=0.5.0", features = ["test-utils"] }
+openmls_basic_credential = "=0.2.0"
+tls_codec = "=0.3.0"
+
 thiserror = "=1.0.61"
 anyhow = "=1.0.71"
+
+url = "2.5.2"
+
+eyre = "=0.6"
+tokio = { version = "=1.38.0", features = ["macros", "rt-multi-thread"] }
+alloy = { git = "https://github.com/alloy-rs/alloy", features = [
+    "providers",
+    "node-bindings",
+    "network",
+    "signer-local",
+    "transports",
+    "transport-http",
+    "k256",
+] }
+async-trait = "0.1.80"
+p256 = "0.13.2"
+
+mls_crypto = { path = "../mls_crypto" }
+hex = "0.4.3"

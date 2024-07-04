@@ -1,17 +1,19 @@
-use std::str::Utf8Error;
-use std::string::FromUtf8Error;
-use std::{cell::RefCell, collections::HashMap, str};
+use std::{
+    borrow::BorrowMut, cell::RefCell, collections::HashMap, str, str::Utf8Error,
+    string::FromUtf8Error,
+};
 
-use ds::ds::*;
+use alloy::{network::Network, primitives::Address, providers::Provider, transports::Transport};
 use openmls::{group::*, prelude::*};
 use openmls_rust_crypto::MemoryKeyStoreError;
-use sc_key_store::*;
-use sc_key_store::{local_ks::LocalCache, pks::PublicKeyStorage};
+
+use ds::ds::*;
+use mls_crypto::openmls_provider::*;
+use sc_key_store::{local_ks::LocalCache, sc_ks::ScKeyStorage, *};
 // use waku_bindings::*;
 
 use crate::conversation::*;
 use crate::identity::{Identity, IdentityError};
-use crate::openmls_provider::{CryptoProvider, CIPHERSUITE};
 
 pub struct Group {
     group_name: String,
@@ -22,33 +24,40 @@ pub struct Group {
     // content_topics: Vec<WakuContentTopic>,
 }
 
-pub struct User {
+pub struct User<T, P, N> {
     pub(crate) identity: Identity,
     pub(crate) groups: HashMap<String, Group>,
-    provider: CryptoProvider,
+    provider: MlsCryptoProvider,
+    sc_ks: ScKeyStorage<T, P, N>,
     local_ks: LocalCache,
     // pub(crate) contacts: HashMap<Vec<u8>, WakuPeers>,
 }
 
-impl User {
+impl<T, P, N> User<T, P, N>
+where
+    T: Transport + Clone,
+    P: Provider<T, N>,
+    N: Network,
+{
     /// Create a new user with the given name and a fresh set of credentials.
-    pub fn new(username: &[u8]) -> Result<User, UserError> {
-        let crypto = CryptoProvider::default();
-        let id = Identity::new(CIPHERSUITE, &crypto, username)?;
+    pub async fn new(
+        user_wallet_address: &[u8],
+        provider: P,
+        sc_storage_address: Address,
+    ) -> Result<Self, UserError> {
+        let crypto = MlsCryptoProvider::default();
+        let id = Identity::new(CIPHERSUITE, &crypto, user_wallet_address)?;
         Ok(User {
             groups: HashMap::new(),
             identity: id,
             provider: crypto,
-            local_ks: LocalCache::empty_key_store(username),
+            local_ks: LocalCache::empty_key_store(user_wallet_address),
+            sc_ks: ScKeyStorage::new(provider, sc_storage_address),
             // contacts: HashMap::new(),
         })
     }
 
-    pub(crate) fn username(&self) -> String {
-        self.identity.to_string()
-    }
-
-    pub(crate) fn id(&self) -> Vec<u8> {
+    pub fn user_wallet_address(&self) -> Vec<u8> {
         self.identity.identity()
     }
 
@@ -85,9 +94,15 @@ impl User {
         Ok(())
     }
 
-    pub fn register(&mut self, mut pks: &mut PublicKeyStorage) -> Result<(), UserError> {
-        pks.add_user(self.key_packages(), self.identity.signer.public())?;
-        self.local_ks.get_update_from_smart_contract(pks)?;
+    pub async fn register(&mut self) -> Result<(), UserError> {
+        let kp = self.key_packages();
+        self.sc_ks
+            .borrow_mut()
+            .add_user(kp, self.identity.signer.public())
+            .await?;
+        self.local_ks
+            .get_update_from_smart_contract(self.sc_ks.borrow_mut(), &self.provider)
+            .await?;
         Ok(())
     }
 
@@ -99,17 +114,25 @@ impl User {
 
     pub async fn invite(
         &mut self,
-        username: String,
+        user_wallet_address: &[u8],
         group_name: String,
-        mut pks: &mut PublicKeyStorage,
     ) -> Result<MlsMessageIn, UserError> {
         // First we need to get the key package for {id} from the DS.
-        if !pks.does_user_exist(username.as_bytes()) {
+        if !self
+            .sc_ks
+            .borrow_mut()
+            .does_user_exist(user_wallet_address)
+            .await?
+        {
             return Err(UserError::UnknownUserError);
         }
 
         // Reclaim a key package from the server
-        let joiner_key_package = pks.get_avaliable_user_kp(username.as_bytes())?;
+        let joiner_key_package = self
+            .sc_ks
+            .borrow_mut()
+            .get_avaliable_user_kp(user_wallet_address, &self.provider)
+            .await?;
 
         // Build a proposal with this key package and do the MLS bits.
         let group = match self.groups.get_mut(&group_name) {
@@ -186,18 +209,18 @@ impl User {
                         {
                             println!("process ApplicationMessage: read sender name from credential identity for group {} ", group.group_name);
                             Some(
-                                str::from_utf8(m.credential.identity()).unwrap().to_owned(),
+                                format!("{:?}", m.credential.identity())
                             )
                         } else {
                             None
                         }
                     });
-                    user_id.unwrap_or("".to_owned()).as_bytes().to_vec()
+                    user_id.unwrap_or("".to_owned())
                 };
 
                 let conversation_message = ConversationMessage::new(
                     String::from_utf8(application_message.into_bytes())?,
-                    String::from_utf8(sender_name)?,
+                    sender_name,
                 );
                 group.conversation.add(conversation_message);
             }

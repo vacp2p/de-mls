@@ -1,18 +1,28 @@
-mod conversation;
-mod identity;
-mod openmls_provider;
-mod user;
-
-use std::str::FromStr;
-
+use alloy::{primitives::Address, providers::ProviderBuilder};
 use bus::Bus;
+use std::str::FromStr;
+use url::Url;
+
 use openmls::framing::{MlsMessageIn, MlsMessageInBody};
-use sc_key_store::pks::PublicKeyStorage;
-use user::User;
+
+use de_mls::{get_contract_address, user::User};
+use sc_key_store::sc_ks::*;
 
 #[tokio::main]
 async fn main() {
-    let mut pks = PublicKeyStorage::default();
+    let storage_address = Address::from_str("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512").unwrap();
+    let (alice_address, alice_wallet) = alice_addr_test();
+    let alice_provider = ProviderBuilder::new()
+        .with_recommended_fillers()
+        .wallet(alice_wallet)
+        .on_http(Url::from_str("http://localhost:8545").unwrap());
+
+    let (bob_address, bob_wallet) = bob_addr_test();
+    let bob_provider = ProviderBuilder::new()
+        .with_recommended_fillers()
+        .wallet(bob_wallet)
+        .on_http(Url::from_str("http://localhost:8545").unwrap());
+
     // This channel for message before adding to group.
     // Message are still encrypted, but this channel not attached to any group
     let mut m: Bus<MlsMessageIn> = Bus::new(10);
@@ -21,20 +31,30 @@ async fn main() {
 
     //// Create user Alice
     println!("Start Register Alice");
-    let res = User::new("Alice".as_bytes());
+    let res = User::new(
+        alice_address.as_slice(),
+        alice_provider.clone(),
+        storage_address,
+    )
+    .await;
     assert!(res.is_ok());
     let mut a_user = res.unwrap();
-    let res = a_user.register(&mut pks);
+    let res = a_user.register().await;
     assert!(res.is_ok());
     println!("Register Alice successfully");
     //////
 
     //// Create user Bob
     println!("Start Register Bob");
-    let res = User::new("Bob".as_bytes());
+    let res = User::new(
+        bob_address.as_slice(),
+        bob_provider.clone(),
+        storage_address,
+    )
+    .await;
     assert!(res.is_ok());
     let mut b_user = res.unwrap();
-    let res = b_user.register(&mut pks);
+    let res = b_user.register().await;
     assert!(res.is_ok());
     println!("Register Bob successfully");
     //////
@@ -44,14 +64,13 @@ async fn main() {
     let group_name = String::from_str("Alice_Group").unwrap();
     let res = a_user.create_group(group_name.clone()).await;
     assert!(res.is_ok());
-    assert!(a_user.groups.contains_key("Alice_Group"));
     println!("Create group successfully");
     //////
 
     //// Alice invite Bob
     println!("Alice inviting Bob");
     let welcome = a_user
-        .invite(b_user.username(), group_name.clone(), &mut pks)
+        .invite(b_user.user_wallet_address().as_slice(), group_name.clone())
         .await;
     assert!(welcome.is_ok());
     // Alice should skip message with invite update because she already update her instance
@@ -68,7 +87,6 @@ async fn main() {
         MlsMessageInBody::Welcome(welcome) => {
             let res = b_user.join_group(welcome).await;
             assert!(res.is_ok());
-            assert!(b_user.groups.contains_key("Alice_Group"));
             Ok(())
         }
         _ => Err("do nothing".to_string()),
@@ -105,13 +123,24 @@ async fn main() {
     let msg = b_user.read_msgs(group_name.clone());
     println!("Bob recieve_msgs: {:#?}", msg);
 
+    let (carla_address, carla_wallet) = carla_addr_test();
+    let carla_provider = ProviderBuilder::new()
+        .with_recommended_fillers()
+        .wallet(carla_wallet)
+        .on_http(Url::from_str("http://localhost:8545").unwrap());
+
     let mut c_r = m.add_rx();
     //// Create user Alice
     println!("Start Register Carla");
-    let res = User::new("Carla".as_bytes());
+    let res = User::new(
+        carla_address.as_slice(),
+        carla_provider.clone(),
+        storage_address,
+    )
+    .await;
     assert!(res.is_ok());
     let mut c_user = res.unwrap();
-    let res = c_user.register(&mut pks);
+    let res = c_user.register().await;
     assert!(res.is_ok());
     println!("Register Carla successfully");
     //////
@@ -119,7 +148,7 @@ async fn main() {
     //// Alice invite Carla
     println!("Alice inviting Carla");
     let welcome = a_user
-        .invite(c_user.username(), group_name.clone(), &mut pks)
+        .invite(c_user.user_wallet_address().as_slice(), group_name.clone())
         .await;
     assert!(welcome.is_ok());
     // Alice should skip message with invite update because she already update her instance
@@ -139,7 +168,6 @@ async fn main() {
         MlsMessageInBody::Welcome(welcome) => {
             let res = c_user.join_group(welcome).await;
             assert!(res.is_ok());
-            assert!(c_user.groups.contains_key("Alice_Group"));
             Ok(())
         }
         _ => Err("do nothing".to_string()),

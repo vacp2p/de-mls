@@ -6,12 +6,12 @@ use openmls_traits::OpenMlsCryptoProvider;
 pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
 #[derive(Default)]
-pub struct CryptoProvider {
+pub struct MlsCryptoProvider {
     crypto: RustCrypto,
     key_storage: MemoryKeyStore,
 }
 
-impl OpenMlsCryptoProvider for CryptoProvider {
+impl OpenMlsCryptoProvider for MlsCryptoProvider {
     type CryptoProvider = RustCrypto;
     type RandProvider = RustCrypto;
     type KeyStoreProvider = MemoryKeyStore;

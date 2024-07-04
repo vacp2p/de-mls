@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use mls_crypto::openmls_provider::MlsCryptoProvider;
 use openmls::prelude::KeyPackage;
 
 use crate::{KeyStoreError, LocalKeyStoreService, SCKeyStoreService, UserInfo, UserKeyPackages};
@@ -22,18 +23,20 @@ impl LocalKeyStoreService for LocalCache {
         }
     }
 
-    fn load_to_smart_contract<T: SCKeyStoreService>(
+    async fn load_to_smart_contract<T: SCKeyStoreService>(
         &self,
         sc: &mut T,
     ) -> Result<(), KeyStoreError> {
         sc.add_user_kp(&self.user_info.id, self.user_info.key_packages.clone())
+            .await
     }
 
-    fn get_update_from_smart_contract<T: SCKeyStoreService>(
+    async fn get_update_from_smart_contract<T: SCKeyStoreService>(
         &mut self,
         sc: T,
+        crypto: &MlsCryptoProvider,
     ) -> Result<(), KeyStoreError> {
-        let info = sc.get_user(&self.user_info.id)?;
+        let info = sc.get_user(&self.user_info.id, crypto).await?;
         self.user_info.key_packages.clone_from(&info.key_packages);
         Ok(())
     }

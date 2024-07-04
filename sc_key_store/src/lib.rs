@@ -1,6 +1,7 @@
 pub mod local_ks;
-pub mod pks;
+pub mod sc_ks;
 
+use mls_crypto::openmls_provider::MlsCryptoProvider;
 use openmls::prelude::*;
 
 /// The DS returns a list of key packages for a user as `UserKeyPackages`.
@@ -9,6 +10,13 @@ use openmls::prelude::*;
 /// and the second value is the corresponding key package.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct UserKeyPackages(pub Vec<(Vec<u8>, KeyPackage)>);
+
+impl UserKeyPackages {
+    fn get_id_from_kp(&self) -> Vec<u8> {
+        let key_package: KeyPackage = self.0[0].1.clone();
+        key_package.leaf_node().credential().identity().to_vec()
+    }
+}
 
 /// Information about a user.
 #[derive(Debug, Default, Clone)]
@@ -19,25 +27,45 @@ pub struct UserInfo {
 }
 
 pub trait SCKeyStoreService {
-    fn connect() -> Self;
-
-    fn does_user_exist(&self, id: &[u8]) -> bool;
-    fn add_user(&mut self, ukp: UserKeyPackages, sign_pk: &[u8]) -> Result<(), KeyStoreError>;
-    fn get_user(&self, id: &[u8]) -> Result<UserInfo, KeyStoreError>;
-    fn add_user_kp(&mut self, id: &[u8], ukp: UserKeyPackages) -> Result<(), KeyStoreError>;
+    fn does_user_exist(
+        &self,
+        id: &[u8],
+    ) -> impl std::future::Future<Output = Result<bool, KeyStoreError>>;
+    fn add_user(
+        &mut self,
+        ukp: UserKeyPackages,
+        sign_pk: &[u8],
+    ) -> impl std::future::Future<Output = Result<(), KeyStoreError>>;
+    fn get_user(
+        &self,
+        id: &[u8],
+        crypto: &MlsCryptoProvider,
+    ) -> impl std::future::Future<Output = Result<UserInfo, KeyStoreError>>;
+    fn add_user_kp(
+        &mut self,
+        id: &[u8],
+        ukp: UserKeyPackages,
+    ) -> impl std::future::Future<Output = Result<(), KeyStoreError>>;
     // we need get key package of other user for inviting them to group
-    fn get_avaliable_user_kp(&mut self, id: &[u8]) -> Result<KeyPackage, KeyStoreError>;
+    fn get_avaliable_user_kp(
+        &mut self,
+        id: &[u8],
+        crypto: &MlsCryptoProvider,
+    ) -> impl std::future::Future<Output = Result<KeyPackage, KeyStoreError>>;
 }
 
 pub trait LocalKeyStoreService {
     fn empty_key_store(id: &[u8]) -> Self;
 
-    fn load_to_smart_contract<T: SCKeyStoreService>(&self, sc: &mut T)
-        -> Result<(), KeyStoreError>;
+    fn load_to_smart_contract<T: SCKeyStoreService>(
+        &self,
+        sc: &mut T,
+    ) -> impl std::future::Future<Output = Result<(), KeyStoreError>>;
     fn get_update_from_smart_contract<T: SCKeyStoreService>(
         &mut self,
         sc: T,
-    ) -> Result<(), KeyStoreError>;
+        crypto: &MlsCryptoProvider,
+    ) -> impl std::future::Future<Output = Result<(), KeyStoreError>>;
 
     fn get_avaliable_kp(&mut self) -> Result<KeyPackage, KeyStoreError>;
 }
@@ -50,6 +78,16 @@ pub enum KeyStoreError {
     InvalidUserDataError(String),
     #[error("Unauthorized User")]
     UnauthorizedUserError,
+    #[error("User already exist")]
+    AlreadyExistedUserError,
+    #[error("Alloy contract error: {0}")]
+    AlloyError(#[from] alloy::contract::Error),
+    #[error("Serialization problem: {0}")]
+    TlsError(#[from] tls_codec::Error),
+    #[error("Key package doesn't valid: {0}")]
+    MlsKeyPackageVerifyError(#[from] openmls::prelude::KeyPackageVerifyError),
+    #[error(transparent)]
+    MlsLibraryError(#[from] LibraryError),
     #[error("Unknown error: {0}")]
     Other(anyhow::Error),
 }
