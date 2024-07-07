@@ -17,23 +17,28 @@ pub struct RClient {
     group_id: String,
     client: RedisClient,
     sub_client: SubscriberClient,
-    broadcaster: Receiver<Message>,
+    // broadcaster: Receiver<Message>,
 }
 
 impl RClient {
-    pub async fn new_for_group(group_id: String) -> Result<Self, DeliveryServiceError> {
+    pub async fn new_for_group(
+        group_id: String,
+    ) -> Result<(Self, Receiver<Message>), DeliveryServiceError> {
         let redis_client = RedisClient::default();
         let subscriber: SubscriberClient =
             Builder::default_centralized().build_subscriber_client()?;
         redis_client.init().await?;
         subscriber.init().await?;
         subscriber.subscribe(group_id.clone()).await?;
-        Ok(RClient {
-            group_id,
-            client: redis_client,
-            sub_client: subscriber.clone(),
-            broadcaster: subscriber.message_rx(),
-        })
+        Ok((
+            RClient {
+                group_id,
+                client: redis_client,
+                sub_client: subscriber.clone(),
+                // broadcaster: subscriber.message_rx(),
+            },
+            subscriber.message_rx(),
+        ))
     }
 
     pub async fn remove_from_group(&mut self) -> Result<(), DeliveryServiceError> {
@@ -52,13 +57,13 @@ impl RClient {
         Ok(())
     }
 
-    pub async fn msg_recv(&mut self) -> Result<MlsMessageIn, DeliveryServiceError> {
-        // check only one message
-        let msg = self.broadcaster.recv().await?;
-        let bytes: Vec<u8> = msg.value.convert()?;
-        let res = MlsMessageIn::tls_deserialize_bytes(bytes)?;
-        Ok(res)
-    }
+    // pub async fn msg_recv(&mut self) -> Result<MlsMessageIn, DeliveryServiceError> {
+    //     // check only one message
+    //     let msg = self.broadcaster.recv().await?;
+    //     let bytes: Vec<u8> = msg.value.convert()?;
+    //     let res = MlsMessageIn::tls_deserialize_bytes(bytes)?;
+    //     Ok(res)
+    // }
 }
 
 #[derive(Debug, thiserror::Error)]

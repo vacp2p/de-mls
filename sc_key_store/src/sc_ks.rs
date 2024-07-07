@@ -234,7 +234,7 @@ mod test {
         let storage_address =
             Address::from_str("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512").unwrap();
         let (alice_address, wallet) = alice_addr_test();
-        let provider = ProviderBuilder::new()
+        let provider = providers::ProviderBuilder::new()
             .with_recommended_fillers()
             .wallet(wallet)
             .on_http(url::Url::from_str("http://localhost:8545").unwrap());

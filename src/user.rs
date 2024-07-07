@@ -1,7 +1,9 @@
+use fred::types::Message;
 use std::{
     borrow::BorrowMut, cell::RefCell, collections::HashMap, str, str::Utf8Error,
     string::FromUtf8Error,
 };
+use tokio::sync::broadcast::Receiver;
 
 use alloy::{network::Network, primitives::Address, providers::Provider, transports::Transport};
 use openmls::{group::*, prelude::*};
@@ -11,6 +13,7 @@ use ds::ds::*;
 use mls_crypto::openmls_provider::*;
 use sc_key_store::{local_ks::LocalCache, sc_ks::ScKeyStorage, *};
 // use waku_bindings::*;
+//
 
 use crate::conversation::*;
 use crate::identity::{Identity, IdentityError};
@@ -19,14 +22,15 @@ pub struct Group {
     group_name: String,
     conversation: Conversation,
     mls_group: RefCell<MlsGroup>,
+    epoch: GroupEpoch,
     rc_client: RClient,
     // pubsub_topic: WakuPubSubTopic,
     // content_topics: Vec<WakuContentTopic>,
 }
 
 pub struct User<T, P, N> {
-    pub(crate) identity: Identity,
-    pub(crate) groups: HashMap<String, Group>,
+    identity: Identity,
+    groups: HashMap<String, Group>,
     provider: MlsCryptoProvider,
     sc_ks: ScKeyStorage<T, P, N>,
     local_ks: LocalCache,
@@ -61,7 +65,10 @@ where
         self.identity.identity()
     }
 
-    pub async fn create_group(&mut self, group_name: String) -> Result<(), UserError> {
+    pub async fn create_group(
+        &mut self,
+        group_name: String,
+    ) -> Result<Receiver<Message>, UserError> {
         let group_id = group_name.as_bytes();
 
         if self.groups.contains_key(&group_name) {
@@ -80,18 +87,20 @@ where
             self.identity.credential_with_key.clone(),
         )?;
 
-        let rc = RClient::new_for_group(group_name.clone()).await?;
+        let (rc, broadcater) = RClient::new_for_group(group_name.clone()).await?;
+        let epoch = mls_group.epoch();
         let group = Group {
             group_name: group_name.clone(),
             conversation: Conversation::default(),
             mls_group: RefCell::new(mls_group),
+            epoch,
             rc_client: rc,
             // pubsub_topic: WakuPubSubTopic::new(),
             // content_topics: Vec::new(),
         };
 
         self.groups.insert(group_name, group);
-        Ok(())
+        Ok(broadcater)
     }
 
     pub async fn register(&mut self) -> Result<(), UserError> {
@@ -152,43 +161,69 @@ where
             .mls_group
             .borrow_mut()
             .merge_pending_commit(&self.provider)?;
-
+        group.epoch = group.mls_group.borrow_mut().epoch();
         // Put sending welcome by p2p here
 
         Ok(welcome.into())
     }
 
-    pub async fn receive_msg(&mut self, group_name: String) -> Result<(), UserError> {
-        let group = match self.groups.get_mut(&group_name) {
-            Some(g) => g,
-            None => return Err(UserError::UnknownGroupError(group_name)),
-        };
+    // pub async fn receive_msg(&mut self, group_name: String) -> Result<(), UserError> {
+    //     let group = match self.groups.get_mut(&group_name) {
+    //         Some(g) => g,
+    //         None => return Err(UserError::UnknownGroupError(group_name)),
+    //     };
 
-        let msg = group.rc_client.msg_recv().await?;
+    //     let msg = group.rc_client.msg_recv().await?;
 
-        match msg.extract() {
-            MlsMessageInBody::Welcome(_welcome) => {
-                // Now irrelevant because message are attached to group
-                // self.join_group(welcome, Rc::clone(&group.ds_node))?;
-            }
+    //     match msg.extract() {
+    //         MlsMessageInBody::Welcome(_welcome) => {
+    //             // Now irrelevant because message are attached to group
+    //             // self.join_group(welcome, Rc::clone(&group.ds_node))?;
+    //             // None
+    //         }
+    //         MlsMessageInBody::PrivateMessage(message) => {
+    //             self.process_protocol_msg(message.into())?;
+    //         }
+    //         MlsMessageInBody::PublicMessage(message) => {
+    //             self.process_protocol_msg(message.into())?;
+    //         }
+    //         _ => return Err(UserError::MessageTypeError),
+    //     };
+    //     Ok(())
+    // }
+
+    pub async fn receive_msg(
+        &mut self,
+        msg: MlsMessageIn,
+    ) -> Result<Option<ConversationMessage>, UserError> {
+        let msg = match msg.extract() {
             MlsMessageInBody::PrivateMessage(message) => {
-                self.process_protocol_msg(message.into())?;
+                self.process_protocol_msg(message.into())?
             }
             MlsMessageInBody::PublicMessage(message) => {
-                self.process_protocol_msg(message.into())?;
+                self.process_protocol_msg(message.into())?
             }
             _ => return Err(UserError::MessageTypeError),
-        }
-        Ok(())
+        };
+        Ok(msg)
     }
 
-    fn process_protocol_msg(&mut self, message: ProtocolMessage) -> Result<(), UserError> {
+    pub fn process_protocol_msg(
+        &mut self,
+        message: ProtocolMessage,
+    ) -> Result<Option<ConversationMessage>, UserError> {
         let group_name = str::from_utf8(message.group_id().as_slice())?;
         let group = match self.groups.get_mut(group_name) {
             Some(g) => g,
             None => return Err(UserError::UnknownGroupError(group_name.to_string())),
         };
         let mut mls_group = group.mls_group.borrow_mut();
+
+        // This check is now necessary to avoid processing control messages from itself.
+        // Be sure to change it to not send a message to yourself.
+        if group.epoch.as_u64() - message.epoch().as_u64() == 1 {
+            return Ok(None);
+        }
 
         let processed_message = mls_group.process_message(&self.provider, message)?;
 
@@ -222,7 +257,8 @@ where
                     String::from_utf8(application_message.into_bytes())?,
                     sender_name,
                 );
-                group.conversation.add(conversation_message);
+                // group.conversation.add(conversation_message.clone());
+                return Ok(Some(conversation_message));
             }
             ProcessedMessageContent::ProposalMessage(_proposal_ptr) => (),
             ProcessedMessageContent::ExternalJoinProposalMessage(_external_proposal_ptr) => (),
@@ -232,17 +268,18 @@ where
                     remove_proposal = true;
                 }
                 mls_group.merge_staged_commit(&self.provider, *commit_ptr)?;
+                group.epoch = group.mls_group.borrow_mut().epoch();
                 if remove_proposal {
                     println!(
                         "update::Processing StagedCommitMessage removing {} from group {} ",
                         self.identity.to_string(),
                         group.group_name
                     );
-                    return Ok(());
+                    return Ok(None);
                 }
             }
         };
-        Ok(())
+        Ok(None)
     }
 
     pub async fn send_msg(&mut self, msg: &str, group_name: String) -> Result<(), UserError> {
@@ -261,7 +298,7 @@ where
         Ok(())
     }
 
-    pub async fn join_group(&mut self, welcome: Welcome) -> Result<(), UserError> {
+    pub async fn join_group(&mut self, welcome: Welcome) -> Result<Receiver<Message>, UserError> {
         let group_config = MlsGroupConfig::builder()
             .use_ratchet_tree_extension(true)
             .build();
@@ -271,17 +308,19 @@ where
         let group_id = mls_group.group_id().to_vec();
         let group_name = String::from_utf8(group_id)?;
 
-        let rc = RClient::new_for_group(group_name.clone()).await?;
+        let (rc, br) = RClient::new_for_group(group_name.clone()).await?;
+        let epoch = mls_group.epoch();
         let group = Group {
             group_name: group_name.clone(),
             conversation: Conversation::default(),
             mls_group: RefCell::new(mls_group),
+            epoch,
             rc_client: rc,
         };
 
         match self.groups.insert(group_name, group) {
             Some(old) => Err(UserError::AlreadyExistedGroupError(old.group_name)),
-            None => Ok(()),
+            None => Ok(br),
         }
     }
 

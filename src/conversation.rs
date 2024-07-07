@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 #[derive(Default, Debug)]
 pub struct Conversation {
     messages: Vec<ConversationMessage>,
@@ -7,6 +9,16 @@ pub struct Conversation {
 pub struct ConversationMessage {
     pub author: String,
     pub message: String,
+}
+
+impl Display for ConversationMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "Author: {:#?}\nMessage: {:#?}",
+            self.author, self.message
+        )
+    }
 }
 
 impl Conversation {

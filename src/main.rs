@@ -1,198 +1,148 @@
-use alloy::{primitives::Address, providers::ProviderBuilder};
-use bus::Bus;
+use alloy::{
+    hex::{self, ToHexExt},
+    primitives::Address,
+    providers::ProviderBuilder,
+};
+use clap::Parser;
+
 use std::str::FromStr;
-use url::Url;
+use tls_codec::Deserialize;
+use tokio::sync::mpsc;
 
-use openmls::framing::{MlsMessageIn, MlsMessageInBody};
+use openmls::{framing::MlsMessageIn, prelude::TlsSerializeTrait};
 
-use de_mls::{get_contract_address, user::User};
-use sc_key_store::sc_ks::*;
+use de_mls::{cli::*, user::User};
+use promkit::preset::readline::Readline;
 
 #[tokio::main]
-async fn main() {
-    let storage_address = Address::from_str("0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512").unwrap();
-    let (alice_address, alice_wallet) = alice_addr_test();
-    let alice_provider = ProviderBuilder::new()
+async fn main() -> Result<(), CliError> {
+    let (cli_tx, mut cli_gr_rx) = mpsc::channel::<Commands>(100);
+    let (res_msg_tx, mut res_msg_rx) = mpsc::channel::<String>(100);
+
+    let args = Args::parse();
+    let (user_address, wallet, storage_address) = get_user_data(&args)?;
+
+    let client_provider = ProviderBuilder::new()
         .with_recommended_fillers()
-        .wallet(alice_wallet)
-        .on_http(Url::from_str("http://localhost:8545").unwrap());
+        .wallet(wallet)
+        .on_http(args.storage_url);
 
-    let (bob_address, bob_wallet) = bob_addr_test();
-    let bob_provider = ProviderBuilder::new()
-        .with_recommended_fillers()
-        .wallet(bob_wallet)
-        .on_http(Url::from_str("http://localhost:8545").unwrap());
-
-    // This channel for message before adding to group.
-    // Message are still encrypted, but this channel not attached to any group
-    let mut m: Bus<MlsMessageIn> = Bus::new(10);
-    let mut a_r = m.add_rx();
-    let mut b_r = m.add_rx();
-
-    //// Create user Alice
-    println!("Start Register Alice");
-    let res = User::new(
-        alice_address.as_slice(),
-        alice_provider.clone(),
+    //// Create user
+    println!("Start register user");
+    let mut user = User::new(
+        user_address.as_slice(),
+        client_provider.clone(),
         storage_address,
     )
-    .await;
-    assert!(res.is_ok());
-    let mut a_user = res.unwrap();
-    let res = a_user.register().await;
-    assert!(res.is_ok());
-    println!("Register Alice successfully");
-    //////
+    .await?;
+    user.register().await?;
 
-    //// Create user Bob
-    println!("Start Register Bob");
-    let res = User::new(
-        bob_address.as_slice(),
-        bob_provider.clone(),
-        storage_address,
-    )
-    .await;
-    assert!(res.is_ok());
-    let mut b_user = res.unwrap();
-    let res = b_user.register().await;
-    assert!(res.is_ok());
-    println!("Register Bob successfully");
-    //////
+    tokio::spawn(async move {
+        loop {
+            // let line = readline().unwrap();
+            // let line = line.trim();
+            // if line.is_empty() {
+            //     continue;
+            // }
+            let line: String = Readline::default()
+                .title("> ")
+                .prompt()
+                .unwrap()
+                .run()
+                .unwrap();
 
-    //// Alice create group: Alice_Group
-    println!("Start create group");
-    let group_name = String::from_str("Alice_Group").unwrap();
-    let res = a_user.create_group(group_name.clone()).await;
-    assert!(res.is_ok());
-    println!("Create group successfully");
-    //////
-
-    //// Alice invite Bob
-    println!("Alice inviting Bob");
-    let welcome = a_user
-        .invite(b_user.user_wallet_address().as_slice(), group_name.clone())
-        .await;
-    assert!(welcome.is_ok());
-    // Alice should skip message with invite update because she already update her instance
-    // It is failed because of wrong epoch
-    let res = a_user.receive_msg(group_name.clone()).await;
-    assert!(res.is_err());
-
-    //// Send welcome message to system broadcast. Only Bob can use it
-    m.broadcast(welcome.unwrap());
-    let _ = a_r.recv();
-    let welc = b_r.recv();
-    assert!(welc.is_ok());
-    let _ = match welc.unwrap().extract() {
-        MlsMessageInBody::Welcome(welcome) => {
-            let res = b_user.join_group(welcome).await;
-            assert!(res.is_ok());
-            Ok(())
+            let args = shlex::split(&line).ok_or(CliError::SplitLineError).unwrap();
+            let cli = Cli::try_parse_from(args).unwrap();
+            cli_tx.send(cli.command).await.unwrap();
         }
-        _ => Err("do nothing".to_string()),
-    };
-    println!("Bob successfully join to the group");
-    /////
+    });
 
-    //// Bob send message and Alice receive it
-    let res = b_user.send_msg("Hi!", group_name.clone()).await;
-    assert!(res.is_ok());
-
-    // Bob also get the message but he cant decrypt it (regarding the mls rfc)
-    let res = b_user.receive_msg(group_name.clone()).await;
-    // Expected error with invalid decryption
-    assert!(res.is_err());
-
-    let res = a_user.receive_msg(group_name.clone()).await;
-    assert!(res.is_ok());
-    /////
-
-    //// Alice send message and Bob receive it
-    let res = a_user.send_msg("Hi Bob!", group_name.clone()).await;
-    assert!(res.is_ok());
-
-    let res = a_user.receive_msg(group_name.clone()).await;
-    assert!(res.is_err());
-
-    let res = b_user.receive_msg(group_name.clone()).await;
-    assert!(res.is_ok());
-    /////
-
-    let msg = a_user.read_msgs(group_name.clone());
-    println!("Alice receive_msgs: {:#?}", msg);
-    let msg = b_user.read_msgs(group_name.clone());
-    println!("Bob receive_msgs: {:#?}", msg);
-
-    let (carla_address, carla_wallet) = carla_addr_test();
-    let carla_provider = ProviderBuilder::new()
-        .with_recommended_fillers()
-        .wallet(carla_wallet)
-        .on_http(Url::from_str("http://localhost:8545").unwrap());
-
-    let mut c_r = m.add_rx();
-    //// Create user Alice
-    println!("Start Register Carla");
-    let res = User::new(
-        carla_address.as_slice(),
-        carla_provider.clone(),
-        storage_address,
-    )
-    .await;
-    assert!(res.is_ok());
-    let mut c_user = res.unwrap();
-    let res = c_user.register().await;
-    assert!(res.is_ok());
-    println!("Register Carla successfully");
-    //////
-
-    //// Alice invite Carla
-    println!("Alice inviting Carla");
-    let welcome = a_user
-        .invite(c_user.user_wallet_address().as_slice(), group_name.clone())
-        .await;
-    assert!(welcome.is_ok());
-    // Alice should skip message with invite update because she already update her instance
-    // It is failed because of wrong epoch
-    let res = a_user.receive_msg(group_name.clone()).await;
-    assert!(res.is_err());
-    let res = b_user.receive_msg(group_name.clone()).await;
-    assert!(res.is_ok());
-
-    //// Send welcome message to system broadcast. Only Bob can use it
-    m.broadcast(welcome.unwrap());
-    let _ = a_r.recv();
-    let _ = b_r.recv();
-    let welc = c_r.recv();
-    assert!(welc.is_ok());
-    let _ = match welc.unwrap().extract() {
-        MlsMessageInBody::Welcome(welcome) => {
-            let res = c_user.join_group(welcome).await;
-            assert!(res.is_ok());
-            Ok(())
+    tokio::spawn(async move {
+        let (redis_tx, mut redis_rx) = mpsc::channel::<Vec<u8>>(100);
+        println!("Start loop");
+        loop {
+            tokio::select! {
+                Some(val) = redis_rx.recv() =>{
+                    let res = MlsMessageIn::tls_deserialize_bytes(val).unwrap();
+                    println!("Get Message from Redis: {:#?}", res);
+                    let msg = user.receive_msg(res).await.unwrap();
+                    match msg {
+                        Some(m) =>  res_msg_tx.send(m.to_string()).await.unwrap(),
+                        None => break
+                    }
+                }
+                Some(command) = cli_gr_rx.recv() => {
+                    // res_msg_tx.send(format!("Get command: {:?}", command)).await.unwrap();
+                    println!("Get command: {:?}", command);
+                    match command {
+                        Commands::CreateGroup { group_name } => {
+                            let mut br = user.create_group(group_name.clone()).await.unwrap();
+                            let redis_tx = redis_tx.clone();
+                            tokio::spawn(async move {
+                                while let Ok(msg) = br.recv().await {
+                                    let bytes: Vec<u8> = msg.value.convert().unwrap();
+                                    redis_tx.send(bytes).await.unwrap();
+                                }
+                            });
+                        },
+                        Commands::Invite { group_name, user_wallet } => {
+                            let user_address = Address::from_str(&user_wallet).unwrap();
+                            let welcome: MlsMessageIn =
+                                user.invite(user_address.as_slice(), group_name).await.unwrap();
+                            let bytes = welcome.tls_serialize_detached().unwrap();
+                            let string = bytes.encode_hex();
+                            res_msg_tx.send(string).await.unwrap();
+                        },
+                        Commands::JoinGroup { welcome } => {
+                            let wbytes = hex::decode(welcome).unwrap();
+                            let welc = MlsMessageIn::tls_deserialize_bytes(wbytes).unwrap();
+                            let welcome = welc.into_welcome();
+                            if welcome.is_some() {
+                                let mut br = user.join_group(welcome.unwrap()).await.unwrap();
+                                let redis_tx = redis_tx.clone();
+                                tokio::spawn(async move {
+                                    while let Ok(msg) = br.recv().await {
+                                        let bytes: Vec<u8> = msg.value.convert().unwrap();
+                                        redis_tx.send(bytes).await.unwrap();
+                                    }
+                                });
+                            }
+                        },
+                        Commands::SendMessage { group_name, msg } => {
+                            user.send_msg(&msg, group_name).await.unwrap();
+                        },
+                        Commands::Exit => {
+                            println!("Exiting");
+                            break
+                        },
+                    }
+                }
+                else => {
+                    println!("Both channels closed");
+                    break
+                }
+            }
         }
-        _ => Err("do nothing".to_string()),
-    };
-    println!("Carla successfully join to the group");
-    /////
+    });
 
-    //// Carla send message and Alice and Bob receive it
-    let res = c_user.send_msg("Hi all!", group_name.clone()).await;
-    assert!(res.is_ok());
+    println!("Start ui loop");
+    loop {
+        tokio::select! {
+            // Some(val) = cli_rx.recv() => {
+            //     if val == "exit" {
+            //         break;
+            //     }
+            //     println!("Me: {:?}", val);
+            // }
+            Some(val) = res_msg_rx.recv() => {
+                println!("Them: {:#?}", val);
+            }
+            else => {
+                println!("Break UI");
+                break
+            }
+        }
+    }
 
-    let res = c_user.receive_msg(group_name.clone()).await;
-    assert!(res.is_err());
-
-    let res = a_user.receive_msg(group_name.clone()).await;
-    assert!(res.is_ok());
-
-    let res = b_user.receive_msg(group_name.clone()).await;
-    assert!(res.is_ok());
-    ////
-
-    let msg = a_user.read_msgs(group_name.clone());
-    println!("Alice receive_msgs: {:#?}", msg);
-    let msg = b_user.read_msgs(group_name.clone());
-    println!("Bob receive_msgs: {:#?}", msg);
-    let msg = c_user.read_msgs(group_name.clone());
-    println!("Carla receive_msgs: {:#?}", msg);
+    Ok(())
 }
