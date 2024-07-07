@@ -19,7 +19,7 @@ openmls_traits = "=0.2.0"
 
 # waku-bindings = "0.6.0"
 bus = "=2.4.1"
-tokio = { version = "=1.38.0", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "=1.38.0", features = ["macros", "rt-multi-thread", "full"] }
 alloy = { git = "https://github.com/alloy-rs/alloy", features = [
     "providers",
     "node-bindings",
@@ -36,10 +36,13 @@ tls_codec = "=0.3.0"
 
 shlex = "=1.3.0"
 clap = { version = "=4.5.8", features = ["derive"] }
-promkit = "=0.4.4"
 
 anyhow = "=1.0.81"
 thiserror = "=1.0.61"
+
+crossterm = "=0.27.0"
+ratatui = "=0.27.0"
+textwrap = "=0.16.1"
 
 ds = { path = "ds" }
 sc_key_store = { path = "sc_key_store" }
