@@ -18,7 +18,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
     Frame, Terminal,
 };
-use std::{io, str::FromStr, sync::Arc};
+use std::{fs::File, io, io::Read, io::Write, str::FromStr, sync::Arc};
 use tls_codec::Deserialize;
 use tokio::sync::{mpsc, Mutex};
 
@@ -52,7 +52,10 @@ async fn main() -> Result<(), CliError> {
         Exit,
     }
     let (messages_tx, mut messages_rx) = mpsc::channel::<Msg>(100);
-    messages_tx.send(Msg::Refresh("".to_string())).await;
+    messages_tx
+        .send(Msg::Refresh("".to_string()))
+        .await
+        .unwrap();
 
     let messages_tx2 = messages_tx.clone();
     let h1 = tokio::spawn(async move {
@@ -73,9 +76,16 @@ async fn main() -> Result<(), CliError> {
                     KeyCode::Enter => {
                         let line: String = input.drain(..).collect();
                         let args = shlex::split(&line).ok_or(CliError::SplitLineError).unwrap();
-                        let cli = Cli::try_parse_from(args).unwrap();
+                        let cli = Cli::try_parse_from(args);
+                        if cli.is_err() {
+                            messages_tx2
+                                .send(Msg::Input("unknown command".to_string()))
+                                .await
+                                .unwrap();
+                            continue;
+                        }
 
-                        cli_tx.send(cli.command).await.unwrap();
+                        cli_tx.send(cli.unwrap().command).await.unwrap();
                         messages_tx2.send(Msg::Input(line)).await.unwrap();
                     }
                     KeyCode::Esc => {
@@ -124,9 +134,16 @@ async fn main() -> Result<(), CliError> {
                                 user.invite(user_address.as_slice(), group_name).await.unwrap();
                             let bytes = welcome.tls_serialize_detached().unwrap();
                             let string = bytes.encode_hex();
-                            res_msg_tx.send(Msg::Input(string)).await.unwrap();
+
+                            let mut file = File::create("invite.txt").unwrap();
+                            file.write_all(string.as_bytes()).unwrap();
+                            // res_msg_tx.send(Msg::Input(string)).await.unwrap();
                         },
                         Commands::JoinGroup { welcome } => {
+                            let mut file = File::open(welcome).unwrap();
+                            let mut welcome = String::new();
+                            file.read_to_string(&mut welcome).unwrap();
+
                             let wbytes = hex::decode(welcome).unwrap();
                             let welc = MlsMessageIn::tls_deserialize_bytes(wbytes).unwrap();
                             let welcome = welc.into_welcome();
@@ -163,7 +180,7 @@ async fn main() -> Result<(), CliError> {
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen).unwrap();
         let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Arc::new(Mutex::new(Terminal::new(backend).unwrap()));
+        let terminal = Arc::new(Mutex::new(Terminal::new(backend).unwrap()));
 
         let messages = Arc::new(Mutex::new(vec![]));
         let input = Arc::new(Mutex::new(String::new()));
