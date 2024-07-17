@@ -18,12 +18,12 @@ openmls_rust_crypto = "=0.2.0"
 openmls_traits = "=0.2.0"
 
 # waku-bindings = "0.6.0"
-bus = "=2.4.1"
 tokio = { version = "=1.38.0", features = [
     "macros",
     "rt-multi-thread",
     "full",
 ] }
+tokio-util = "=0.7.11"
 alloy = { git = "https://github.com/alloy-rs/alloy", features = [
     "providers",
     "node-bindings",

@@ -2,10 +2,7 @@ use alloy::{
     hex::FromHexError,
     network::EthereumWallet,
     primitives::Address,
-    signers::{
-        local::{LocalSignerError, PrivateKeySigner},
-        Signer,
-    },
+    signers::local::{LocalSignerError, PrivateKeySigner},
 };
 use clap::{arg, command, Parser, Subcommand};
 use crossterm::{
@@ -36,6 +33,7 @@ use tokio::{
     sync::Mutex,
     task::JoinError,
 };
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::user::UserError;
@@ -118,6 +116,7 @@ pub fn readline() -> Result<String, CliError> {
 pub async fn event_handler(
     messages_tx: Sender<Msg>,
     cli_tx: Sender<Commands>,
+    token: CancellationToken,
 ) -> Result<(), CliError> {
     let mut input = String::new();
     loop {
@@ -143,6 +142,7 @@ pub async fn event_handler(
                 }
                 KeyCode::Esc => {
                     messages_tx.send(Msg::Exit).await?;
+                    token.cancel();
                     break;
                 }
                 _ => {}
@@ -199,7 +199,10 @@ pub fn ui(f: &mut Frame, messages: &[Message], input: &str) {
     f.render_widget(input_line, chunks[1]);
 }
 
-pub async fn terminal_handler(mut messages_rx: Receiver<Msg>) -> Result<(), CliError> {
+pub async fn terminal_handler(
+    mut messages_rx: Receiver<Msg>,
+    token: CancellationToken,
+) -> Result<(), CliError> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -225,6 +228,7 @@ pub async fn terminal_handler(mut messages_rx: Receiver<Msg>) -> Result<(), CliE
                 *input = i;
             }
             Msg::Exit => {
+                token.cancel();
                 break;
             }
         };

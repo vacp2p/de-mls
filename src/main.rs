@@ -4,6 +4,7 @@ use openmls::framing::MlsMessageIn;
 use std::{error::Error, fs::File, io::Read};
 use tls_codec::Deserialize;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use de_mls::{
     cli::*,
@@ -12,6 +13,8 @@ use de_mls::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let token = CancellationToken::new();
+
     let (cli_tx, mut cli_gr_rx) = mpsc::channel::<Commands>(100);
 
     let args = Args::parse();
@@ -39,9 +42,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await?;
 
     let messages_tx2 = messages_tx.clone();
-    let h1 = tokio::spawn(async move { event_handler(messages_tx2, cli_tx).await });
+    let event_token = token.clone();
+    let h1 = tokio::spawn(async move { event_handler(messages_tx2, cli_tx, event_token).await });
 
     let res_msg_tx = messages_tx.clone();
+    let main_token = token.clone();
     let h2 = tokio::spawn(async move {
         let (redis_tx, mut redis_rx) = mpsc::channel::<Vec<u8>>(100);
         loop {
@@ -161,6 +166,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         },
                     }
                 }
+                _ = main_token.cancelled() => {
+                    break;
+                }
                 else => {
                     res_msg_tx.send(Msg::Input(Message::System("Something went wrong".to_string()))).await?;
                     break
@@ -170,7 +178,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok::<_, CliError>(())
     });
 
-    let h3 = tokio::spawn(async move { terminal_handler(messages_rx).await });
+    let h3 = tokio::spawn(async move { terminal_handler(messages_rx, token).await });
 
     let handler_res = tokio::join!(h1, h2, h3);
     handler_res.0??;
