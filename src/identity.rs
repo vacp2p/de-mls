@@ -1,8 +1,7 @@
+use hex;
 use std::collections::HashMap;
 
-use openmls::credentials::CredentialWithKey;
-use openmls::key_packages::*;
-use openmls::prelude::*;
+use openmls::{credentials::CredentialWithKey, key_packages::*, prelude::*};
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::MemoryKeyStoreError;
 use openmls_traits::types::Ciphersuite;
@@ -69,13 +68,15 @@ impl Identity {
     pub fn identity(&self) -> Vec<u8> {
         self.credential_with_key.credential.identity().to_vec()
     }
+
+    pub fn signature_pub_key(&self) -> Vec<u8> {
+        self.signer.public().to_vec()
+    }
 }
 
 impl ToString for Identity {
     fn to_string(&self) -> String {
-        std::str::from_utf8(self.credential_with_key.credential.identity())
-            .unwrap()
-            .to_string()
+        hex::encode(self.credential_with_key.credential.identity())
     }
 }
 

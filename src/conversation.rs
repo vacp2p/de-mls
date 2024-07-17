@@ -7,6 +7,7 @@ pub struct Conversation {
 
 #[derive(Clone, Debug)]
 pub struct ConversationMessage {
+    pub group: String,
     pub author: String,
     pub message: String,
 }
@@ -15,8 +16,8 @@ impl Display for ConversationMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(
             f,
-            "Author: {:#?}\nMessage: {:#?}",
-            self.author, self.message
+            "Group: {:#?}\nAuthor: {:#?}\nMessage: {:#?}",
+            self.group, self.author, self.message
         )
     }
 }
@@ -41,7 +42,11 @@ impl Conversation {
 }
 
 impl ConversationMessage {
-    pub fn new(message: String, author: String) -> Self {
-        Self { author, message }
+    pub fn new(group: String, author: String, message: String) -> Self {
+        Self {
+            group,
+            author,
+            message,
+        }
     }
 }
