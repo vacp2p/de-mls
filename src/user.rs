@@ -33,7 +33,6 @@ pub struct Group {
     group_name: String,
     conversation: Conversation,
     mls_group: RefCell<MlsGroup>,
-    epoch: GroupEpoch,
     rc_client: RClient,
     // pubsub_topic: WakuPubSubTopic,
     // content_topics: Vec<WakuContentTopic>,
@@ -102,12 +101,10 @@ where
         )?;
 
         let (rc, broadcaster) = RClient::new_for_group(group_name.clone()).await?;
-        let epoch = mls_group.epoch();
         let group = Group {
             group_name: group_name.clone(),
             conversation: Conversation::default(),
             mls_group: RefCell::new(mls_group),
-            epoch,
             rc_client: rc,
             // pubsub_topic: WakuPubSubTopic::new(),
             // content_topics: Vec::new(),
@@ -180,7 +177,6 @@ where
             .mls_group
             .borrow_mut()
             .merge_pending_commit(&self.provider)?;
-        group.epoch = group.mls_group.borrow_mut().epoch();
         // Put sending welcome by p2p here
         let bytes = welcome.tls_serialize_detached()?;
         let string = bytes.encode_hex();
@@ -258,7 +254,6 @@ where
                     remove_proposal = true;
                 }
                 mls_group.merge_staged_commit(&self.provider, *commit_ptr)?;
-                group.epoch = group.mls_group.borrow_mut().epoch();
                 if remove_proposal {
                     // here we need to remove group instance locally and
                     // also remove correspond key package from local storage ans sc storage
@@ -304,12 +299,10 @@ where
         let group_name = String::from_utf8(group_id)?;
 
         let (rc, br) = RClient::new_for_group(group_name.clone()).await?;
-        let epoch = mls_group.epoch();
         let group = Group {
             group_name: group_name.clone(),
             conversation: Conversation::default(),
             mls_group: RefCell::new(mls_group),
-            epoch,
             rc_client: rc,
         };
 
