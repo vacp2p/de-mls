@@ -4,36 +4,44 @@ use fred::{
     prelude::*,
     types::Message,
 };
-
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{error::RecvError, Receiver};
 
-use openmls::{
-    framing::{MlsMessageIn, MlsMessageOut},
-    prelude::{TlsDeserializeTrait, TlsSerializeTrait},
-};
+use openmls::{framing::MlsMessageOut, prelude::TlsSerializeTrait};
 // use waku_bindings::*;
 
 pub struct RClient {
     group_id: String,
     client: RedisClient,
     sub_client: SubscriberClient,
-    broadcaster: Receiver<Message>,
+    // broadcaster: Receiver<Message>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SenderStruct {
+    pub sender: String,
+    pub msg: Vec<u8>,
 }
 
 impl RClient {
-    pub async fn new_for_group(group_id: String) -> Result<Self, DeliveryServiceError> {
+    pub async fn new_for_group(
+        group_id: String,
+    ) -> Result<(Self, Receiver<Message>), DeliveryServiceError> {
         let redis_client = RedisClient::default();
         let subscriber: SubscriberClient =
             Builder::default_centralized().build_subscriber_client()?;
         redis_client.init().await?;
         subscriber.init().await?;
         subscriber.subscribe(group_id.clone()).await?;
-        Ok(RClient {
-            group_id,
-            client: redis_client,
-            sub_client: subscriber.clone(),
-            broadcaster: subscriber.message_rx(),
-        })
+        Ok((
+            RClient {
+                group_id,
+                client: redis_client,
+                sub_client: subscriber.clone(),
+                // broadcaster: subscriber.message_rx(),
+            },
+            subscriber.message_rx(),
+        ))
     }
 
     pub async fn remove_from_group(&mut self) -> Result<(), DeliveryServiceError> {
@@ -43,30 +51,31 @@ impl RClient {
         Ok(())
     }
 
-    pub async fn msg_send(&mut self, msg: MlsMessageOut) -> Result<(), DeliveryServiceError> {
+    pub async fn msg_send(
+        &mut self,
+        msg: MlsMessageOut,
+        sender: String,
+    ) -> Result<(), DeliveryServiceError> {
         let buf = msg.tls_serialize_detached()?;
+
+        let json_value = SenderStruct { sender, msg: buf };
+        let bytes = serde_json::to_vec(&json_value)?;
         self.client
-            .publish(self.group_id.clone(), buf.as_slice())
+            .publish(self.group_id.clone(), bytes.as_slice())
             .await?;
 
         Ok(())
-    }
-
-    pub async fn msg_recv(&mut self) -> Result<MlsMessageIn, DeliveryServiceError> {
-        // check only one message
-        let msg = self.broadcaster.recv().await?;
-        let bytes: Vec<u8> = msg.value.convert()?;
-        let res = MlsMessageIn::tls_deserialize_bytes(bytes)?;
-        Ok(res)
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeliveryServiceError {
+    #[error("Json error: {0}")]
+    JsonError(#[from] serde_json::Error),
     #[error("Redis error: {0}")]
     RedisError(#[from] RedisError),
     #[error("Tokio error: {0}")]
-    TokioRecieveError(#[from] RecvError),
+    TokioReceiveError(#[from] RecvError),
     #[error("Serialization problem: {0}")]
     TlsError(#[from] tls_codec::Error),
     #[error("Unknown error: {0}")]

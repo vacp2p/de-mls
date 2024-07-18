@@ -191,7 +191,7 @@ mod test {
     use openmls::prelude::*;
     use openmls_basic_credential::SignatureKeyPair;
 
-    use mls_crypto::openmls_provider::MlsCryptoProvider;
+    use mls_crypto::openmls_provider::{MlsCryptoProvider, CIPHERSUITE};
 
     use crate::{sc_ks::*, UserKeyPackages};
 
@@ -199,7 +199,7 @@ mod test {
         address: Address,
         crypto: &MlsCryptoProvider,
     ) -> (UserKeyPackages, SignatureKeyPair) {
-        let ciphersuite = Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256;
+        let ciphersuite = CIPHERSUITE;
         let signature_keys = SignatureKeyPair::new(ciphersuite.signature_algorithm()).unwrap();
         let credential = Credential::new(address.to_vec(), CredentialType::Basic).unwrap();
 

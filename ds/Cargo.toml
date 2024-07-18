@@ -15,9 +15,11 @@ tokio = "=1.38.0"
 openmls = { version = "=0.5.0", features = ["test-utils"] }
 rand = { version = "^0.8" }
 
-anyhow = "=1.0.71"
+anyhow = "=1.0.81"
 thiserror = "=1.0.61"
 
 tls_codec = "=0.3.0"
+serde_json = "=1.0"
+serde = "=1.0.204"
 
 sc_key_store = { path = "../sc_key_store" }

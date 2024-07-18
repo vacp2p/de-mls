@@ -1,3 +1,4 @@
+pub mod cli;
 pub mod conversation;
 pub mod identity;
 pub mod user;
