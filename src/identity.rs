@@ -19,6 +19,7 @@ impl Identity {
         ciphersuite: Ciphersuite,
         crypto: &MlsCryptoProvider,
         user_wallet_address: &[u8],
+        number_of_kp: usize,
     ) -> Result<Identity, IdentityError> {
         let credential = Credential::new(user_wallet_address.to_vec(), CredentialType::Basic)?;
         let signature_keys = SignatureKeyPair::new(ciphersuite.signature_algorithm())?;
@@ -28,19 +29,23 @@ impl Identity {
         };
         signature_keys.store(crypto.key_store())?;
 
-        let key_package = KeyPackage::builder().build(
-            CryptoConfig {
-                ciphersuite,
-                version: ProtocolVersion::default(),
-            },
-            crypto,
-            &signature_keys,
-            credential_with_key.clone(),
-        )?;
+        let mut kps = HashMap::new();
+        for _ in 0..number_of_kp {
+            let key_package = KeyPackage::builder().build(
+                CryptoConfig {
+                    ciphersuite,
+                    version: ProtocolVersion::default(),
+                },
+                crypto,
+                &signature_keys,
+                credential_with_key.clone(),
+            )?;
+            let kp = key_package.hash_ref(crypto.crypto())?;
+            kps.insert(kp.as_slice().to_vec(), key_package);
+        }
 
-        let kp = key_package.hash_ref(crypto.crypto())?;
         Ok(Identity {
-            kp: HashMap::from([(kp.as_slice().to_vec(), key_package)]),
+            kp: kps,
             credential_with_key,
             signer: signature_keys,
         })

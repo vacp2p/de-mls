@@ -13,7 +13,7 @@ use openmls::{
     prelude::{KeyPackage as mlsKeyPackage, TlsDeserializeTrait, TlsSerializeTrait},
     versions::ProtocolVersion,
 };
-use std::str::FromStr;
+use std::{collections::HashSet, str::FromStr};
 
 use crate::UserInfo;
 use crate::UserKeyPackages;
@@ -33,6 +33,19 @@ where
         Self {
             instance: ScKeystore::new(address, provider),
         }
+    }
+}
+
+impl From<UserKeyPackages> for Vec<KeyPackage> {
+    fn from(ukp: UserKeyPackages) -> Self {
+        let mut res: Vec<KeyPackage> = Vec::with_capacity(ukp.0.len());
+        for kp in ukp.0 {
+            let bytes = kp.1.tls_serialize_detached().unwrap();
+            let kp_bytes = Bytes::copy_from_slice(bytes.as_slice());
+            let kp_sc: KeyPackage = KeyPackage::from((vec![kp_bytes],));
+            res.push(kp_sc)
+        }
+        res
     }
 }
 
@@ -62,20 +75,26 @@ impl<T: Transport + Clone, P: Provider<T, N>, N: Network> SCKeyStoreService
             return Err(KeyStoreError::AlreadyExistedUserError);
         }
 
-        let mut kp_bytes: Vec<Bytes> = Vec::with_capacity(ukp.0.len());
-        for kp in ukp.0 {
-            let bytes = kp.1.tls_serialize_detached()?;
-            kp_bytes.push(Bytes::copy_from_slice(bytes.as_slice()))
+        let ukp_sc: Vec<KeyPackage> = ukp.into();
+        for (i, kp_sc) in ukp_sc.iter().enumerate() {
+            if i == 0 {
+                let add_user_binding = self
+                    .instance
+                    .addUser(Bytes::copy_from_slice(sign_pk), kp_sc.to_owned());
+                let res = add_user_binding.send().await;
+                match res {
+                    Ok(_) => continue,
+                    Err(err) => return Err(KeyStoreError::AlloyError(err)),
+                }
+            }
+            let add_kp_binding = self.instance.addKeyPackage(kp_sc.to_owned());
+            let res = add_kp_binding.send().await;
+            match res {
+                Ok(_) => continue,
+                Err(err) => return Err(KeyStoreError::AlloyError(err)),
+            }
         }
-
-        let kp: KeyPackage = KeyPackage::from((kp_bytes,));
-        let add_user_binding = self.instance.addUser(Bytes::copy_from_slice(sign_pk), kp);
-        let res = add_user_binding.send().await;
-
-        match res {
-            Ok(_) => Ok(()),
-            Err(err) => Err(KeyStoreError::AlloyError(err)),
-        }
+        Ok(())
     }
 
     async fn get_user(
@@ -94,6 +113,7 @@ impl<T: Transport + Clone, P: Provider<T, N>, N: Network> SCKeyStoreService
         let mut user = UserInfo {
             id: id.to_vec(),
             key_packages: UserKeyPackages::default(),
+            key_packages_hash: HashSet::default(),
             sign_pk: user._0.signaturePubKey.to_vec(),
         };
 
@@ -209,22 +229,24 @@ mod test {
         };
         signature_keys.store(crypto.key_store()).unwrap();
 
-        let key_package = mlsKeyPackage::builder()
-            .build(
-                CryptoConfig {
-                    ciphersuite,
-                    version: ProtocolVersion::default(),
-                },
-                crypto,
-                &signature_keys,
-                credential_with_key.clone(),
-            )
-            .unwrap();
+        let mut kps = HashMap::new();
+        for _ in 0..3 {
+            let key_package = mlsKeyPackage::builder()
+                .build(
+                    CryptoConfig {
+                        ciphersuite,
+                        version: ProtocolVersion::default(),
+                    },
+                    crypto,
+                    &signature_keys,
+                    credential_with_key.clone(),
+                )
+                .unwrap();
+            let kp = key_package.hash_ref(crypto.crypto()).unwrap();
+            kps.insert(kp.as_slice().to_vec(), key_package);
+        }
+        let ukp = UserKeyPackages(kps.drain().collect::<Vec<(Vec<u8>, mlsKeyPackage)>>());
 
-        let kp = key_package.hash_ref(crypto.crypto()).unwrap();
-
-        let mut kpgs = HashMap::from([(kp.as_slice().to_vec(), key_package)]);
-        let ukp = UserKeyPackages(kpgs.drain().collect::<Vec<(Vec<u8>, mlsKeyPackage)>>());
         (ukp, signature_keys)
     }
 
@@ -257,7 +279,16 @@ mod test {
         let res = storage
             .get_avaliable_user_kp(alice_address.as_slice(), &crypto)
             .await;
-        println!("Get user kp: {:#?}", res);
+        // println!("Get user kp: {:#?}", res);
         assert!(res.is_ok());
+
+        let res2 = storage
+            .get_avaliable_user_kp(alice_address.as_slice(), &crypto)
+            .await;
+        // println!("Get user kp: {:#?}", res);
+        assert!(res.is_ok());
+
+        // HERE SHOULD BE NOT EQUAL
+        assert_ne!(res.unwrap(), res2.unwrap());
     }
 }

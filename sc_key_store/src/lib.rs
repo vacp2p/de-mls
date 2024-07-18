@@ -1,8 +1,9 @@
-pub mod local_ks;
+// pub mod local_ks;
 pub mod sc_ks;
 
 use mls_crypto::openmls_provider::MlsCryptoProvider;
 use openmls::prelude::*;
+use std::collections::HashSet;
 
 /// The DS returns a list of key packages for a user as `UserKeyPackages`.
 /// This is a tuple struct holding a vector of `(Vec<u8>, KeyPackage)` tuples,
@@ -23,6 +24,7 @@ impl UserKeyPackages {
 pub struct UserInfo {
     pub id: Vec<u8>,
     pub key_packages: UserKeyPackages,
+    pub key_packages_hash: HashSet<Vec<u8>>,
     pub sign_pk: Vec<u8>,
 }
 
@@ -52,22 +54,6 @@ pub trait SCKeyStoreService {
         id: &[u8],
         crypto: &MlsCryptoProvider,
     ) -> impl std::future::Future<Output = Result<KeyPackage, KeyStoreError>>;
-}
-
-pub trait LocalKeyStoreService {
-    fn empty_key_store(id: &[u8]) -> Self;
-
-    fn load_to_smart_contract<T: SCKeyStoreService>(
-        &self,
-        sc: &mut T,
-    ) -> impl std::future::Future<Output = Result<(), KeyStoreError>>;
-    fn get_update_from_smart_contract<T: SCKeyStoreService>(
-        &mut self,
-        sc: T,
-        crypto: &MlsCryptoProvider,
-    ) -> impl std::future::Future<Output = Result<(), KeyStoreError>>;
-
-    fn get_avaliable_kp(&mut self) -> Result<KeyPackage, KeyStoreError>;
 }
 
 #[derive(Debug, thiserror::Error)]
