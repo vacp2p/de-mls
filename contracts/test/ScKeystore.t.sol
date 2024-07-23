@@ -19,7 +19,7 @@ contract ScKeystoreTest is Test {
 
     function addUser() internal {
         KeyPackage memory keyPackage = KeyPackage({ data: new bytes[](1) });
-        s.addUser("0x", keyPackage);
+        s.addUser(address(this), "0x", keyPackage);
     }
 
     function test__owner() public view {
@@ -32,7 +32,7 @@ contract ScKeystoreTest is Test {
 
     function test__addUser__reverts__whenUserInfoIsMalformed() public {
         vm.expectRevert(MalformedUserInfo.selector);
-        s.addUser("", KeyPackage({ data: new bytes[](0) }));
+        s.addUser(address(this), "", KeyPackage({ data: new bytes[](0) }));
     }
 
     function test__addUser__reverts__whenUserAlreadyExists() public {

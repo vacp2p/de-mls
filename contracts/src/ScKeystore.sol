@@ -22,19 +22,19 @@ contract ScKeystore is Ownable, IScKeystore {
         return users[user].signaturePubKey.length > 0;
     }
 
-    function addUser(bytes calldata signaturePubKey, KeyPackage calldata keyPackage) external onlyOwner {
+    function addUser(address user, bytes calldata signaturePubKey, KeyPackage calldata keyPackage) external onlyOwner {
         if (signaturePubKey.length == 0) revert MalformedUserInfo();
         if (keyPackage.data.length == 0) revert MalformedKeyPackage();
-        if (userExists(msg.sender)) revert UserAlreadyExists();
+        if (userExists(user)) revert UserAlreadyExists();
 
         keyPackages.push(keyPackage);
         uint256 keyPackageIndex = keyPackages.length - 1;
 
-        users[msg.sender] = UserInfo(new uint256[](0), signaturePubKey);
-        users[msg.sender].signaturePubKey = signaturePubKey;
-        users[msg.sender].keyPackageIndices.push(keyPackageIndex);
+        users[user] = UserInfo(new uint256[](0), signaturePubKey);
+        users[user].signaturePubKey = signaturePubKey;
+        users[user].keyPackageIndices.push(keyPackageIndex);
 
-        emit UserAdded(msg.sender, signaturePubKey);
+        emit UserAdded(user, signaturePubKey);
     }
 
     function getUser(address user) external view returns (UserInfo memory) {
