@@ -16,7 +16,7 @@ contract ScKeystore is Ownable, IScKeystore {
   mapping(address user => UserInfo userInfo) private users;
   KeyPackage[] private keyPackages;
 
-  constructor() Ownable(msg.sender) {}
+  constructor(address initialOwner) Ownable(initialOwner) {}
 
   function userExists(address user) public view returns (bool) {
     return users[user].signaturePubKey.length > 0;
