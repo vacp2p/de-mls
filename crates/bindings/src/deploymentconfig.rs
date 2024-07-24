@@ -111,24 +111,26 @@ pub mod DeploymentConfig {
     /// The creation / init bytecode of the contract.
     ///
     /// ```text
-    ///0x608060405260048054600160ff199182168117909255600c8054909116909117905534801561002d57600080fd5b5060405161022938038061022983398101604081905261004c916100fc565b6001600160a01b0381166100735760405163201616d160e21b815260040160405180910390fd5b600e80546001600160a01b0319166001600160a01b03831617905546617a69036100d757604080516020808201835260009091528151908101909152600e546001600160a01b031690819052600d80546001600160a01b03191690911790556100f6565b604051630b13dbff60e01b815246600482015260240160405180910390fd5b5061012c565b60006020828403121561010e57600080fd5b81516001600160a01b038116811461012557600080fd5b9392505050565b60ef8061013a6000396000f3fe6080604052348015600f57600080fd5b506004361060465760003560e01c806312900da814604b578063d7b6574514608f578063f8a8fd6d1460d2578063f8ccbf471460d4575b600080fd5b6040805160208082018352600090915281518082018352600e5473ffffffffffffffffffffffffffffffffffffffff16908190529151918252015b60405180910390f35b600d5460ae9073ffffffffffffffffffffffffffffffffffffffff1681565b60405173ffffffffffffffffffffffffffffffffffffffff90911681526020016086565b005b600c5460e09060ff1681565b6040519015158152602001608656
+    ///0x6080604052600c805462ff00ff19166201000117905534801561002157600080fd5b50604051610223380380610223833981016040819052610040916100f0565b6001600160a01b0381166100675760405163201616d160e21b815260040160405180910390fd5b600e80546001600160a01b0319166001600160a01b03831617905546617a69036100cb57604080516020808201835260009091528151908101909152600e546001600160a01b031690819052600d80546001600160a01b03191690911790556100ea565b604051630b13dbff60e01b815246600482015260240160405180910390fd5b50610120565b60006020828403121561010257600080fd5b81516001600160a01b038116811461011957600080fd5b9392505050565b60f58061012e6000396000f3fe6080604052348015600f57600080fd5b506004361060465760003560e01c806312900da814604b578063d7b6574514608f578063f8a8fd6d1460d2578063f8ccbf471460d4575b600080fd5b6040805160208082018352600090915281518082018352600e5473ffffffffffffffffffffffffffffffffffffffff16908190529151918252015b60405180910390f35b600d5460ae9073ffffffffffffffffffffffffffffffffffffffff1681565b60405173ffffffffffffffffffffffffffffffffffffffff90911681526020016086565b005b600c5460e69062010000900460ff1681565b6040519015158152602001608656
     /// ```
     #[rustfmt::skip]
+    #[allow(clippy::all)]
     pub static BYTECODE: alloy_sol_types::private::Bytes = alloy_sol_types::private::Bytes::from_static(
-        b"`\x80`@R`\x04\x80T`\x01`\xFF\x19\x91\x82\x16\x81\x17\x90\x92U`\x0C\x80T\x90\x91\x16\x90\x91\x17\x90U4\x80\x15a\0-W`\0\x80\xFD[P`@Qa\x02)8\x03\x80a\x02)\x839\x81\x01`@\x81\x90Ra\0L\x91a\0\xFCV[`\x01`\x01`\xA0\x1B\x03\x81\x16a\0sW`@Qc \x16\x16\xD1`\xE2\x1B\x81R`\x04\x01`@Q\x80\x91\x03\x90\xFD[`\x0E\x80T`\x01`\x01`\xA0\x1B\x03\x19\x16`\x01`\x01`\xA0\x1B\x03\x83\x16\x17\x90UFazi\x03a\0\xD7W`@\x80Q` \x80\x82\x01\x83R`\0\x90\x91R\x81Q\x90\x81\x01\x90\x91R`\x0ET`\x01`\x01`\xA0\x1B\x03\x16\x90\x81\x90R`\r\x80T`\x01`\x01`\xA0\x1B\x03\x19\x16\x90\x91\x17\x90Ua\0\xF6V[`@Qc\x0B\x13\xDB\xFF`\xE0\x1B\x81RF`\x04\x82\x01R`$\x01`@Q\x80\x91\x03\x90\xFD[Pa\x01,V[`\0` \x82\x84\x03\x12\x15a\x01\x0EW`\0\x80\xFD[\x81Q`\x01`\x01`\xA0\x1B\x03\x81\x16\x81\x14a\x01%W`\0\x80\xFD[\x93\x92PPPV[`\xEF\x80a\x01:`\09`\0\xF3\xFE`\x80`@R4\x80\x15`\x0FW`\0\x80\xFD[P`\x046\x10`FW`\x005`\xE0\x1C\x80c\x12\x90\r\xA8\x14`KW\x80c\xD7\xB6WE\x14`\x8FW\x80c\xF8\xA8\xFDm\x14`\xD2W\x80c\xF8\xCC\xBFG\x14`\xD4W[`\0\x80\xFD[`@\x80Q` \x80\x82\x01\x83R`\0\x90\x91R\x81Q\x80\x82\x01\x83R`\x0ETs\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x16\x90\x81\x90R\x91Q\x91\x82R\x01[`@Q\x80\x91\x03\x90\xF3[`\rT`\xAE\x90s\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x16\x81V[`@Qs\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x90\x91\x16\x81R` \x01`\x86V[\0[`\x0CT`\xE0\x90`\xFF\x16\x81V[`@Q\x90\x15\x15\x81R` \x01`\x86V",
+        b"`\x80`@R`\x0C\x80Tb\xFF\0\xFF\x19\x16b\x01\0\x01\x17\x90U4\x80\x15a\0!W`\0\x80\xFD[P`@Qa\x02#8\x03\x80a\x02#\x839\x81\x01`@\x81\x90Ra\0@\x91a\0\xF0V[`\x01`\x01`\xA0\x1B\x03\x81\x16a\0gW`@Qc \x16\x16\xD1`\xE2\x1B\x81R`\x04\x01`@Q\x80\x91\x03\x90\xFD[`\x0E\x80T`\x01`\x01`\xA0\x1B\x03\x19\x16`\x01`\x01`\xA0\x1B\x03\x83\x16\x17\x90UFazi\x03a\0\xCBW`@\x80Q` \x80\x82\x01\x83R`\0\x90\x91R\x81Q\x90\x81\x01\x90\x91R`\x0ET`\x01`\x01`\xA0\x1B\x03\x16\x90\x81\x90R`\r\x80T`\x01`\x01`\xA0\x1B\x03\x19\x16\x90\x91\x17\x90Ua\0\xEAV[`@Qc\x0B\x13\xDB\xFF`\xE0\x1B\x81RF`\x04\x82\x01R`$\x01`@Q\x80\x91\x03\x90\xFD[Pa\x01 V[`\0` \x82\x84\x03\x12\x15a\x01\x02W`\0\x80\xFD[\x81Q`\x01`\x01`\xA0\x1B\x03\x81\x16\x81\x14a\x01\x19W`\0\x80\xFD[\x93\x92PPPV[`\xF5\x80a\x01.`\09`\0\xF3\xFE`\x80`@R4\x80\x15`\x0FW`\0\x80\xFD[P`\x046\x10`FW`\x005`\xE0\x1C\x80c\x12\x90\r\xA8\x14`KW\x80c\xD7\xB6WE\x14`\x8FW\x80c\xF8\xA8\xFDm\x14`\xD2W\x80c\xF8\xCC\xBFG\x14`\xD4W[`\0\x80\xFD[`@\x80Q` \x80\x82\x01\x83R`\0\x90\x91R\x81Q\x80\x82\x01\x83R`\x0ETs\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x16\x90\x81\x90R\x91Q\x91\x82R\x01[`@Q\x80\x91\x03\x90\xF3[`\rT`\xAE\x90s\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x16\x81V[`@Qs\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x90\x91\x16\x81R` \x01`\x86V[\0[`\x0CT`\xE6\x90b\x01\0\0\x90\x04`\xFF\x16\x81V[`@Q\x90\x15\x15\x81R` \x01`\x86V",
     );
     /// The runtime bytecode of the contract, as deployed on the network.
     ///
     /// ```text
-    ///0x6080604052348015600f57600080fd5b506004361060465760003560e01c806312900da814604b578063d7b6574514608f578063f8a8fd6d1460d2578063f8ccbf471460d4575b600080fd5b6040805160208082018352600090915281518082018352600e5473ffffffffffffffffffffffffffffffffffffffff16908190529151918252015b60405180910390f35b600d5460ae9073ffffffffffffffffffffffffffffffffffffffff1681565b60405173ffffffffffffffffffffffffffffffffffffffff90911681526020016086565b005b600c5460e09060ff1681565b6040519015158152602001608656
+    ///0x6080604052348015600f57600080fd5b506004361060465760003560e01c806312900da814604b578063d7b6574514608f578063f8a8fd6d1460d2578063f8ccbf471460d4575b600080fd5b6040805160208082018352600090915281518082018352600e5473ffffffffffffffffffffffffffffffffffffffff16908190529151918252015b60405180910390f35b600d5460ae9073ffffffffffffffffffffffffffffffffffffffff1681565b60405173ffffffffffffffffffffffffffffffffffffffff90911681526020016086565b005b600c5460e69062010000900460ff1681565b6040519015158152602001608656
     /// ```
     #[rustfmt::skip]
+    #[allow(clippy::all)]
     pub static DEPLOYED_BYTECODE: alloy_sol_types::private::Bytes = alloy_sol_types::private::Bytes::from_static(
-        b"`\x80`@R4\x80\x15`\x0FW`\0\x80\xFD[P`\x046\x10`FW`\x005`\xE0\x1C\x80c\x12\x90\r\xA8\x14`KW\x80c\xD7\xB6WE\x14`\x8FW\x80c\xF8\xA8\xFDm\x14`\xD2W\x80c\xF8\xCC\xBFG\x14`\xD4W[`\0\x80\xFD[`@\x80Q` \x80\x82\x01\x83R`\0\x90\x91R\x81Q\x80\x82\x01\x83R`\x0ETs\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x16\x90\x81\x90R\x91Q\x91\x82R\x01[`@Q\x80\x91\x03\x90\xF3[`\rT`\xAE\x90s\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x16\x81V[`@Qs\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x90\x91\x16\x81R` \x01`\x86V[\0[`\x0CT`\xE0\x90`\xFF\x16\x81V[`@Q\x90\x15\x15\x81R` \x01`\x86V",
+        b"`\x80`@R4\x80\x15`\x0FW`\0\x80\xFD[P`\x046\x10`FW`\x005`\xE0\x1C\x80c\x12\x90\r\xA8\x14`KW\x80c\xD7\xB6WE\x14`\x8FW\x80c\xF8\xA8\xFDm\x14`\xD2W\x80c\xF8\xCC\xBFG\x14`\xD4W[`\0\x80\xFD[`@\x80Q` \x80\x82\x01\x83R`\0\x90\x91R\x81Q\x80\x82\x01\x83R`\x0ETs\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x16\x90\x81\x90R\x91Q\x91\x82R\x01[`@Q\x80\x91\x03\x90\xF3[`\rT`\xAE\x90s\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x16\x81V[`@Qs\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x90\x91\x16\x81R` \x01`\x86V[\0[`\x0CT`\xE6\x90b\x01\0\0\x90\x04`\xFF\x16\x81V[`@Q\x90\x15\x15\x81R` \x01`\x86V",
     );
     /**```solidity
-    struct NetworkConfig { address deployer; }
-    ```*/
+struct NetworkConfig { address deployer; }
+```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct NetworkConfig {
@@ -143,7 +145,9 @@ pub mod DeploymentConfig {
         type UnderlyingRustTuple<'a> = (alloy::sol_types::private::Address,);
         #[cfg(test)]
         #[allow(dead_code, unreachable_patterns)]
-        fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+        fn _type_assertion(
+            _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+        ) {
             match _t {
                 alloy_sol_types::private::AssertTypeEq::<
                     <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -180,37 +184,67 @@ pub mod DeploymentConfig {
             }
             #[inline]
             fn stv_abi_encoded_size(&self) -> usize {
-                let tuple =
-                    <UnderlyingRustTuple<'_> as ::core::convert::From<Self>>::from(self.clone());
-                <UnderlyingSolTuple<'_> as alloy_sol_types::SolType>::abi_encoded_size(&tuple)
+                if let Some(size) = <Self as alloy_sol_types::SolType>::ENCODED_SIZE {
+                    return size;
+                }
+                let tuple = <UnderlyingRustTuple<
+                    '_,
+                > as ::core::convert::From<Self>>::from(self.clone());
+                <UnderlyingSolTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::abi_encoded_size(&tuple)
             }
             #[inline]
             fn stv_eip712_data_word(&self) -> alloy_sol_types::Word {
                 <Self as alloy_sol_types::SolStruct>::eip712_hash_struct(self)
             }
             #[inline]
-            fn stv_abi_encode_packed_to(&self, out: &mut alloy_sol_types::private::Vec<u8>) {
-                let tuple =
-                    <UnderlyingRustTuple<'_> as ::core::convert::From<Self>>::from(self.clone());
-                <UnderlyingSolTuple<'_> as alloy_sol_types::SolType>::abi_encode_packed_to(
-                    &tuple, out,
-                )
+            fn stv_abi_encode_packed_to(
+                &self,
+                out: &mut alloy_sol_types::private::Vec<u8>,
+            ) {
+                let tuple = <UnderlyingRustTuple<
+                    '_,
+                > as ::core::convert::From<Self>>::from(self.clone());
+                <UnderlyingSolTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::abi_encode_packed_to(&tuple, out)
+            }
+            #[inline]
+            fn stv_abi_packed_encoded_size(&self) -> usize {
+                if let Some(size) = <Self as alloy_sol_types::SolType>::PACKED_ENCODED_SIZE {
+                    return size;
+                }
+                let tuple = <UnderlyingRustTuple<
+                    '_,
+                > as ::core::convert::From<Self>>::from(self.clone());
+                <UnderlyingSolTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::abi_packed_encoded_size(&tuple)
             }
         }
         #[automatically_derived]
         impl alloy_sol_types::SolType for NetworkConfig {
             type RustType = Self;
-            type Token<'a> = <UnderlyingSolTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <UnderlyingSolTuple<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             const SOL_NAME: &'static str = <Self as alloy_sol_types::SolStruct>::NAME;
-            const ENCODED_SIZE: Option<usize> =
-                <UnderlyingSolTuple<'_> as alloy_sol_types::SolType>::ENCODED_SIZE;
+            const ENCODED_SIZE: Option<usize> = <UnderlyingSolTuple<
+                '_,
+            > as alloy_sol_types::SolType>::ENCODED_SIZE;
+            const PACKED_ENCODED_SIZE: Option<usize> = <UnderlyingSolTuple<
+                '_,
+            > as alloy_sol_types::SolType>::PACKED_ENCODED_SIZE;
             #[inline]
             fn valid_token(token: &Self::Token<'_>) -> bool {
                 <UnderlyingSolTuple<'_> as alloy_sol_types::SolType>::valid_token(token)
             }
             #[inline]
             fn detokenize(token: Self::Token<'_>) -> Self::RustType {
-                let tuple = <UnderlyingSolTuple<'_> as alloy_sol_types::SolType>::detokenize(token);
+                let tuple = <UnderlyingSolTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::detokenize(token);
                 <Self as ::core::convert::From<UnderlyingRustTuple<'_>>>::from(tuple)
             }
         }
@@ -219,12 +253,14 @@ pub mod DeploymentConfig {
             const NAME: &'static str = "NetworkConfig";
             #[inline]
             fn eip712_root_type() -> alloy_sol_types::private::Cow<'static, str> {
-                alloy_sol_types::private::Cow::Borrowed("NetworkConfig(address deployer)")
+                alloy_sol_types::private::Cow::Borrowed(
+                    "NetworkConfig(address deployer)",
+                )
             }
             #[inline]
-            fn eip712_components(
-            ) -> alloy_sol_types::private::Vec<alloy_sol_types::private::Cow<'static, str>>
-            {
+            fn eip712_components() -> alloy_sol_types::private::Vec<
+                alloy_sol_types::private::Cow<'static, str>,
+            > {
                 alloy_sol_types::private::Vec::new()
             }
             #[inline]
@@ -234,10 +270,10 @@ pub mod DeploymentConfig {
             #[inline]
             fn eip712_encode_data(&self) -> alloy_sol_types::private::Vec<u8> {
                 <alloy::sol_types::sol_data::Address as alloy_sol_types::SolType>::eip712_data_word(
-                    &self.deployer,
-                )
-                .0
-                .to_vec()
+                        &self.deployer,
+                    )
+                    .0
+                    .to_vec()
             }
         }
         #[automatically_derived]
@@ -254,24 +290,33 @@ pub mod DeploymentConfig {
                 rust: &Self::RustType,
                 out: &mut alloy_sol_types::private::Vec<u8>,
             ) {
-                out.reserve(<Self as alloy_sol_types::EventTopic>::topic_preimage_length(rust));
+                out.reserve(
+                    <Self as alloy_sol_types::EventTopic>::topic_preimage_length(rust),
+                );
                 <alloy::sol_types::sol_data::Address as alloy_sol_types::EventTopic>::encode_topic_preimage(
                     &rust.deployer,
                     out,
                 );
             }
             #[inline]
-            fn encode_topic(rust: &Self::RustType) -> alloy_sol_types::abi::token::WordToken {
+            fn encode_topic(
+                rust: &Self::RustType,
+            ) -> alloy_sol_types::abi::token::WordToken {
                 let mut out = alloy_sol_types::private::Vec::new();
-                <Self as alloy_sol_types::EventTopic>::encode_topic_preimage(rust, &mut out);
-                alloy_sol_types::abi::token::WordToken(alloy_sol_types::private::keccak256(out))
+                <Self as alloy_sol_types::EventTopic>::encode_topic_preimage(
+                    rust,
+                    &mut out,
+                );
+                alloy_sol_types::abi::token::WordToken(
+                    alloy_sol_types::private::keccak256(out),
+                )
             }
         }
     };
     /**Custom error with signature `DeploymentConfig_InvalidDeployerAddress()` and selector `0x80585b44`.
-    ```solidity
-    error DeploymentConfig_InvalidDeployerAddress();
-    ```*/
+```solidity
+error DeploymentConfig_InvalidDeployerAddress();
+```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct DeploymentConfig_InvalidDeployerAddress {}
@@ -284,7 +329,9 @@ pub mod DeploymentConfig {
         type UnderlyingRustTuple<'a> = ();
         #[cfg(test)]
         #[allow(dead_code, unreachable_patterns)]
-        fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+        fn _type_assertion(
+            _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+        ) {
             match _t {
                 alloy_sol_types::private::AssertTypeEq::<
                     <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -293,14 +340,16 @@ pub mod DeploymentConfig {
         }
         #[automatically_derived]
         #[doc(hidden)]
-        impl ::core::convert::From<DeploymentConfig_InvalidDeployerAddress> for UnderlyingRustTuple<'_> {
+        impl ::core::convert::From<DeploymentConfig_InvalidDeployerAddress>
+        for UnderlyingRustTuple<'_> {
             fn from(value: DeploymentConfig_InvalidDeployerAddress) -> Self {
                 ()
             }
         }
         #[automatically_derived]
         #[doc(hidden)]
-        impl ::core::convert::From<UnderlyingRustTuple<'_>> for DeploymentConfig_InvalidDeployerAddress {
+        impl ::core::convert::From<UnderlyingRustTuple<'_>>
+        for DeploymentConfig_InvalidDeployerAddress {
             fn from(tuple: UnderlyingRustTuple<'_>) -> Self {
                 Self {}
             }
@@ -308,7 +357,9 @@ pub mod DeploymentConfig {
         #[automatically_derived]
         impl alloy_sol_types::SolError for DeploymentConfig_InvalidDeployerAddress {
             type Parameters<'a> = UnderlyingSolTuple<'a>;
-            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             const SIGNATURE: &'static str = "DeploymentConfig_InvalidDeployerAddress()";
             const SELECTOR: [u8; 4] = [128u8, 88u8, 91u8, 68u8];
             #[inline]
@@ -324,9 +375,9 @@ pub mod DeploymentConfig {
         }
     };
     /**Custom error with signature `DeploymentConfig_NoConfigForChain(uint256)` and selector `0x0b13dbff`.
-    ```solidity
-    error DeploymentConfig_NoConfigForChain(uint256);
-    ```*/
+```solidity
+error DeploymentConfig_NoConfigForChain(uint256);
+```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct DeploymentConfig_NoConfigForChain {
@@ -341,7 +392,9 @@ pub mod DeploymentConfig {
         type UnderlyingRustTuple<'a> = (alloy::sol_types::private::U256,);
         #[cfg(test)]
         #[allow(dead_code, unreachable_patterns)]
-        fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+        fn _type_assertion(
+            _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+        ) {
             match _t {
                 alloy_sol_types::private::AssertTypeEq::<
                     <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -350,14 +403,16 @@ pub mod DeploymentConfig {
         }
         #[automatically_derived]
         #[doc(hidden)]
-        impl ::core::convert::From<DeploymentConfig_NoConfigForChain> for UnderlyingRustTuple<'_> {
+        impl ::core::convert::From<DeploymentConfig_NoConfigForChain>
+        for UnderlyingRustTuple<'_> {
             fn from(value: DeploymentConfig_NoConfigForChain) -> Self {
                 (value._0,)
             }
         }
         #[automatically_derived]
         #[doc(hidden)]
-        impl ::core::convert::From<UnderlyingRustTuple<'_>> for DeploymentConfig_NoConfigForChain {
+        impl ::core::convert::From<UnderlyingRustTuple<'_>>
+        for DeploymentConfig_NoConfigForChain {
             fn from(tuple: UnderlyingRustTuple<'_>) -> Self {
                 Self { _0: tuple.0 }
             }
@@ -365,7 +420,9 @@ pub mod DeploymentConfig {
         #[automatically_derived]
         impl alloy_sol_types::SolError for DeploymentConfig_NoConfigForChain {
             type Parameters<'a> = UnderlyingSolTuple<'a>;
-            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             const SIGNATURE: &'static str = "DeploymentConfig_NoConfigForChain(uint256)";
             const SELECTOR: [u8; 4] = [11u8, 19u8, 219u8, 255u8];
             #[inline]
@@ -377,17 +434,17 @@ pub mod DeploymentConfig {
             #[inline]
             fn tokenize(&self) -> Self::Token<'_> {
                 (
-                    <alloy::sol_types::sol_data::Uint<256> as alloy_sol_types::SolType>::tokenize(
-                        &self._0,
-                    ),
+                    <alloy::sol_types::sol_data::Uint<
+                        256,
+                    > as alloy_sol_types::SolType>::tokenize(&self._0),
                 )
             }
         }
     };
     /**Constructor`.
-    ```solidity
-    constructor(address _broadcaster);
-    ```*/
+```solidity
+constructor(address _broadcaster);
+```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct constructorCall {
@@ -402,7 +459,9 @@ pub mod DeploymentConfig {
             type UnderlyingRustTuple<'a> = (alloy::sol_types::private::Address,);
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+            fn _type_assertion(
+                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+            ) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -420,16 +479,16 @@ pub mod DeploymentConfig {
             #[doc(hidden)]
             impl ::core::convert::From<UnderlyingRustTuple<'_>> for constructorCall {
                 fn from(tuple: UnderlyingRustTuple<'_>) -> Self {
-                    Self {
-                        _broadcaster: tuple.0,
-                    }
+                    Self { _broadcaster: tuple.0 }
                 }
             }
         }
         #[automatically_derived]
         impl alloy_sol_types::SolConstructor for constructorCall {
             type Parameters<'a> = (alloy::sol_types::sol_data::Address,);
-            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             #[inline]
             fn new<'a>(
                 tuple: <Self::Parameters<'a> as alloy_sol_types::SolType>::RustType,
@@ -447,9 +506,9 @@ pub mod DeploymentConfig {
         }
     };
     /**Function with signature `IS_SCRIPT()` and selector `0xf8ccbf47`.
-    ```solidity
-    function IS_SCRIPT() external view returns (bool);
-    ```*/
+```solidity
+function IS_SCRIPT() external view returns (bool);
+```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct IS_SCRIPTCall {}
@@ -469,7 +528,9 @@ pub mod DeploymentConfig {
             type UnderlyingRustTuple<'a> = ();
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+            fn _type_assertion(
+                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+            ) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -498,7 +559,9 @@ pub mod DeploymentConfig {
             type UnderlyingRustTuple<'a> = (bool,);
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+            fn _type_assertion(
+                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+            ) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -523,10 +586,14 @@ pub mod DeploymentConfig {
         #[automatically_derived]
         impl alloy_sol_types::SolCall for IS_SCRIPTCall {
             type Parameters<'a> = ();
-            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             type Return = IS_SCRIPTReturn;
             type ReturnTuple<'a> = (alloy::sol_types::sol_data::Bool,);
-            type ReturnToken<'a> = <Self::ReturnTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type ReturnToken<'a> = <Self::ReturnTuple<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             const SIGNATURE: &'static str = "IS_SCRIPT()";
             const SELECTOR: [u8; 4] = [248u8, 204u8, 191u8, 71u8];
             #[inline]
@@ -544,17 +611,17 @@ pub mod DeploymentConfig {
                 data: &[u8],
                 validate: bool,
             ) -> alloy_sol_types::Result<Self::Return> {
-                <Self::ReturnTuple<'_> as alloy_sol_types::SolType>::abi_decode_sequence(
-                    data, validate,
-                )
-                .map(Into::into)
+                <Self::ReturnTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::abi_decode_sequence(data, validate)
+                    .map(Into::into)
             }
         }
     };
     /**Function with signature `activeNetworkConfig()` and selector `0xd7b65745`.
-    ```solidity
-    function activeNetworkConfig() external view returns (address deployer);
-    ```*/
+```solidity
+function activeNetworkConfig() external view returns (address deployer);
+```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct activeNetworkConfigCall {}
@@ -574,7 +641,9 @@ pub mod DeploymentConfig {
             type UnderlyingRustTuple<'a> = ();
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+            fn _type_assertion(
+                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+            ) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -583,14 +652,16 @@ pub mod DeploymentConfig {
             }
             #[automatically_derived]
             #[doc(hidden)]
-            impl ::core::convert::From<activeNetworkConfigCall> for UnderlyingRustTuple<'_> {
+            impl ::core::convert::From<activeNetworkConfigCall>
+            for UnderlyingRustTuple<'_> {
                 fn from(value: activeNetworkConfigCall) -> Self {
                     ()
                 }
             }
             #[automatically_derived]
             #[doc(hidden)]
-            impl ::core::convert::From<UnderlyingRustTuple<'_>> for activeNetworkConfigCall {
+            impl ::core::convert::From<UnderlyingRustTuple<'_>>
+            for activeNetworkConfigCall {
                 fn from(tuple: UnderlyingRustTuple<'_>) -> Self {
                     Self {}
                 }
@@ -603,7 +674,9 @@ pub mod DeploymentConfig {
             type UnderlyingRustTuple<'a> = (alloy::sol_types::private::Address,);
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+            fn _type_assertion(
+                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+            ) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -612,14 +685,16 @@ pub mod DeploymentConfig {
             }
             #[automatically_derived]
             #[doc(hidden)]
-            impl ::core::convert::From<activeNetworkConfigReturn> for UnderlyingRustTuple<'_> {
+            impl ::core::convert::From<activeNetworkConfigReturn>
+            for UnderlyingRustTuple<'_> {
                 fn from(value: activeNetworkConfigReturn) -> Self {
                     (value.deployer,)
                 }
             }
             #[automatically_derived]
             #[doc(hidden)]
-            impl ::core::convert::From<UnderlyingRustTuple<'_>> for activeNetworkConfigReturn {
+            impl ::core::convert::From<UnderlyingRustTuple<'_>>
+            for activeNetworkConfigReturn {
                 fn from(tuple: UnderlyingRustTuple<'_>) -> Self {
                     Self { deployer: tuple.0 }
                 }
@@ -628,10 +703,14 @@ pub mod DeploymentConfig {
         #[automatically_derived]
         impl alloy_sol_types::SolCall for activeNetworkConfigCall {
             type Parameters<'a> = ();
-            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             type Return = activeNetworkConfigReturn;
             type ReturnTuple<'a> = (alloy::sol_types::sol_data::Address,);
-            type ReturnToken<'a> = <Self::ReturnTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type ReturnToken<'a> = <Self::ReturnTuple<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             const SIGNATURE: &'static str = "activeNetworkConfig()";
             const SELECTOR: [u8; 4] = [215u8, 182u8, 87u8, 69u8];
             #[inline]
@@ -649,17 +728,17 @@ pub mod DeploymentConfig {
                 data: &[u8],
                 validate: bool,
             ) -> alloy_sol_types::Result<Self::Return> {
-                <Self::ReturnTuple<'_> as alloy_sol_types::SolType>::abi_decode_sequence(
-                    data, validate,
-                )
-                .map(Into::into)
+                <Self::ReturnTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::abi_decode_sequence(data, validate)
+                    .map(Into::into)
             }
         }
     };
     /**Function with signature `getOrCreateAnvilEthConfig()` and selector `0x12900da8`.
-    ```solidity
-    function getOrCreateAnvilEthConfig() external view returns (NetworkConfig memory);
-    ```*/
+```solidity
+function getOrCreateAnvilEthConfig() external view returns (NetworkConfig memory);
+```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct getOrCreateAnvilEthConfigCall {}
@@ -679,7 +758,9 @@ pub mod DeploymentConfig {
             type UnderlyingRustTuple<'a> = ();
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+            fn _type_assertion(
+                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+            ) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -688,14 +769,16 @@ pub mod DeploymentConfig {
             }
             #[automatically_derived]
             #[doc(hidden)]
-            impl ::core::convert::From<getOrCreateAnvilEthConfigCall> for UnderlyingRustTuple<'_> {
+            impl ::core::convert::From<getOrCreateAnvilEthConfigCall>
+            for UnderlyingRustTuple<'_> {
                 fn from(value: getOrCreateAnvilEthConfigCall) -> Self {
                     ()
                 }
             }
             #[automatically_derived]
             #[doc(hidden)]
-            impl ::core::convert::From<UnderlyingRustTuple<'_>> for getOrCreateAnvilEthConfigCall {
+            impl ::core::convert::From<UnderlyingRustTuple<'_>>
+            for getOrCreateAnvilEthConfigCall {
                 fn from(tuple: UnderlyingRustTuple<'_>) -> Self {
                     Self {}
                 }
@@ -705,11 +788,14 @@ pub mod DeploymentConfig {
             #[doc(hidden)]
             type UnderlyingSolTuple<'a> = (NetworkConfig,);
             #[doc(hidden)]
-            type UnderlyingRustTuple<'a> =
-                (<NetworkConfig as alloy::sol_types::SolType>::RustType,);
+            type UnderlyingRustTuple<'a> = (
+                <NetworkConfig as alloy::sol_types::SolType>::RustType,
+            );
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+            fn _type_assertion(
+                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+            ) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -718,14 +804,16 @@ pub mod DeploymentConfig {
             }
             #[automatically_derived]
             #[doc(hidden)]
-            impl ::core::convert::From<getOrCreateAnvilEthConfigReturn> for UnderlyingRustTuple<'_> {
+            impl ::core::convert::From<getOrCreateAnvilEthConfigReturn>
+            for UnderlyingRustTuple<'_> {
                 fn from(value: getOrCreateAnvilEthConfigReturn) -> Self {
                     (value._0,)
                 }
             }
             #[automatically_derived]
             #[doc(hidden)]
-            impl ::core::convert::From<UnderlyingRustTuple<'_>> for getOrCreateAnvilEthConfigReturn {
+            impl ::core::convert::From<UnderlyingRustTuple<'_>>
+            for getOrCreateAnvilEthConfigReturn {
                 fn from(tuple: UnderlyingRustTuple<'_>) -> Self {
                     Self { _0: tuple.0 }
                 }
@@ -734,10 +822,14 @@ pub mod DeploymentConfig {
         #[automatically_derived]
         impl alloy_sol_types::SolCall for getOrCreateAnvilEthConfigCall {
             type Parameters<'a> = ();
-            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             type Return = getOrCreateAnvilEthConfigReturn;
             type ReturnTuple<'a> = (NetworkConfig,);
-            type ReturnToken<'a> = <Self::ReturnTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type ReturnToken<'a> = <Self::ReturnTuple<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             const SIGNATURE: &'static str = "getOrCreateAnvilEthConfig()";
             const SELECTOR: [u8; 4] = [18u8, 144u8, 13u8, 168u8];
             #[inline]
@@ -755,17 +847,17 @@ pub mod DeploymentConfig {
                 data: &[u8],
                 validate: bool,
             ) -> alloy_sol_types::Result<Self::Return> {
-                <Self::ReturnTuple<'_> as alloy_sol_types::SolType>::abi_decode_sequence(
-                    data, validate,
-                )
-                .map(Into::into)
+                <Self::ReturnTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::abi_decode_sequence(data, validate)
+                    .map(Into::into)
             }
         }
     };
     /**Function with signature `test()` and selector `0xf8a8fd6d`.
-    ```solidity
-    function test() external;
-    ```*/
+```solidity
+function test() external;
+```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct testCall {}
@@ -783,7 +875,9 @@ pub mod DeploymentConfig {
             type UnderlyingRustTuple<'a> = ();
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+            fn _type_assertion(
+                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+            ) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -812,7 +906,9 @@ pub mod DeploymentConfig {
             type UnderlyingRustTuple<'a> = ();
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+            fn _type_assertion(
+                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+            ) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -837,10 +933,14 @@ pub mod DeploymentConfig {
         #[automatically_derived]
         impl alloy_sol_types::SolCall for testCall {
             type Parameters<'a> = ();
-            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             type Return = testReturn;
             type ReturnTuple<'a> = ();
-            type ReturnToken<'a> = <Self::ReturnTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type ReturnToken<'a> = <Self::ReturnTuple<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             const SIGNATURE: &'static str = "test()";
             const SELECTOR: [u8; 4] = [248u8, 168u8, 253u8, 109u8];
             #[inline]
@@ -858,10 +958,10 @@ pub mod DeploymentConfig {
                 data: &[u8],
                 validate: bool,
             ) -> alloy_sol_types::Result<Self::Return> {
-                <Self::ReturnTuple<'_> as alloy_sol_types::SolType>::abi_decode_sequence(
-                    data, validate,
-                )
-                .map(Into::into)
+                <Self::ReturnTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::abi_decode_sequence(data, validate)
+                    .map(Into::into)
             }
         }
     };
@@ -895,7 +995,9 @@ pub mod DeploymentConfig {
         #[inline]
         fn selector(&self) -> [u8; 4] {
             match self {
-                Self::IS_SCRIPT(_) => <IS_SCRIPTCall as alloy_sol_types::SolCall>::SELECTOR,
+                Self::IS_SCRIPT(_) => {
+                    <IS_SCRIPTCall as alloy_sol_types::SolCall>::SELECTOR
+                }
                 Self::activeNetworkConfig(_) => {
                     <activeNetworkConfigCall as alloy_sol_types::SolCall>::SELECTOR
                 }
@@ -923,17 +1025,17 @@ pub mod DeploymentConfig {
             static DECODE_SHIMS: &[fn(
                 &[u8],
                 bool,
-            )
-                -> alloy_sol_types::Result<DeploymentConfigCalls>] = &[
+            ) -> alloy_sol_types::Result<DeploymentConfigCalls>] = &[
                 {
                     fn getOrCreateAnvilEthConfig(
                         data: &[u8],
                         validate: bool,
                     ) -> alloy_sol_types::Result<DeploymentConfigCalls> {
                         <getOrCreateAnvilEthConfigCall as alloy_sol_types::SolCall>::abi_decode_raw(
-                            data, validate,
-                        )
-                        .map(DeploymentConfigCalls::getOrCreateAnvilEthConfig)
+                                data,
+                                validate,
+                            )
+                            .map(DeploymentConfigCalls::getOrCreateAnvilEthConfig)
                     }
                     getOrCreateAnvilEthConfig
                 },
@@ -943,9 +1045,10 @@ pub mod DeploymentConfig {
                         validate: bool,
                     ) -> alloy_sol_types::Result<DeploymentConfigCalls> {
                         <activeNetworkConfigCall as alloy_sol_types::SolCall>::abi_decode_raw(
-                            data, validate,
-                        )
-                        .map(DeploymentConfigCalls::activeNetworkConfig)
+                                data,
+                                validate,
+                            )
+                            .map(DeploymentConfigCalls::activeNetworkConfig)
                     }
                     activeNetworkConfig
                 },
@@ -954,7 +1057,10 @@ pub mod DeploymentConfig {
                         data: &[u8],
                         validate: bool,
                     ) -> alloy_sol_types::Result<DeploymentConfigCalls> {
-                        <testCall as alloy_sol_types::SolCall>::abi_decode_raw(data, validate)
+                        <testCall as alloy_sol_types::SolCall>::abi_decode_raw(
+                                data,
+                                validate,
+                            )
                             .map(DeploymentConfigCalls::test)
                     }
                     test
@@ -964,17 +1070,22 @@ pub mod DeploymentConfig {
                         data: &[u8],
                         validate: bool,
                     ) -> alloy_sol_types::Result<DeploymentConfigCalls> {
-                        <IS_SCRIPTCall as alloy_sol_types::SolCall>::abi_decode_raw(data, validate)
+                        <IS_SCRIPTCall as alloy_sol_types::SolCall>::abi_decode_raw(
+                                data,
+                                validate,
+                            )
                             .map(DeploymentConfigCalls::IS_SCRIPT)
                     }
                     IS_SCRIPT
                 },
             ];
             let Ok(idx) = Self::SELECTORS.binary_search(&selector) else {
-                return Err(alloy_sol_types::Error::unknown_selector(
-                    <Self as alloy_sol_types::SolInterface>::NAME,
-                    selector,
-                ));
+                return Err(
+                    alloy_sol_types::Error::unknown_selector(
+                        <Self as alloy_sol_types::SolInterface>::NAME,
+                        selector,
+                    ),
+                );
             };
             (unsafe { DECODE_SHIMS.get_unchecked(idx) })(data, validate)
         }
@@ -985,7 +1096,9 @@ pub mod DeploymentConfig {
                     <IS_SCRIPTCall as alloy_sol_types::SolCall>::abi_encoded_size(inner)
                 }
                 Self::activeNetworkConfig(inner) => {
-                    <activeNetworkConfigCall as alloy_sol_types::SolCall>::abi_encoded_size(inner)
+                    <activeNetworkConfigCall as alloy_sol_types::SolCall>::abi_encoded_size(
+                        inner,
+                    )
                 }
                 Self::getOrCreateAnvilEthConfig(inner) => {
                     <getOrCreateAnvilEthConfigCall as alloy_sol_types::SolCall>::abi_encoded_size(
@@ -1001,16 +1114,21 @@ pub mod DeploymentConfig {
         fn abi_encode_raw(&self, out: &mut alloy_sol_types::private::Vec<u8>) {
             match self {
                 Self::IS_SCRIPT(inner) => {
-                    <IS_SCRIPTCall as alloy_sol_types::SolCall>::abi_encode_raw(inner, out)
+                    <IS_SCRIPTCall as alloy_sol_types::SolCall>::abi_encode_raw(
+                        inner,
+                        out,
+                    )
                 }
                 Self::activeNetworkConfig(inner) => {
                     <activeNetworkConfigCall as alloy_sol_types::SolCall>::abi_encode_raw(
-                        inner, out,
+                        inner,
+                        out,
                     )
                 }
                 Self::getOrCreateAnvilEthConfig(inner) => {
                     <getOrCreateAnvilEthConfigCall as alloy_sol_types::SolCall>::abi_encode_raw(
-                        inner, out,
+                        inner,
+                        out,
                     )
                 }
                 Self::test(inner) => {
@@ -1032,8 +1150,10 @@ pub mod DeploymentConfig {
         /// No guarantees are made about the order of the selectors.
         ///
         /// Prefer using `SolInterface` methods instead.
-        pub const SELECTORS: &'static [[u8; 4usize]] =
-            &[[11u8, 19u8, 219u8, 255u8], [128u8, 88u8, 91u8, 68u8]];
+        pub const SELECTORS: &'static [[u8; 4usize]] = &[
+            [11u8, 19u8, 219u8, 255u8],
+            [128u8, 88u8, 91u8, 68u8],
+        ];
     }
     #[automatically_derived]
     impl alloy_sol_types::SolInterface for DeploymentConfigErrors {
@@ -1069,8 +1189,7 @@ pub mod DeploymentConfig {
             static DECODE_SHIMS: &[fn(
                 &[u8],
                 bool,
-            )
-                -> alloy_sol_types::Result<DeploymentConfigErrors>] = &[
+            ) -> alloy_sol_types::Result<DeploymentConfigErrors>] = &[
                 {
                     fn DeploymentConfig_NoConfigForChain(
                         data: &[u8],
@@ -1103,10 +1222,12 @@ pub mod DeploymentConfig {
                 },
             ];
             let Ok(idx) = Self::SELECTORS.binary_search(&selector) else {
-                return Err(alloy_sol_types::Error::unknown_selector(
-                    <Self as alloy_sol_types::SolInterface>::NAME,
-                    selector,
-                ));
+                return Err(
+                    alloy_sol_types::Error::unknown_selector(
+                        <Self as alloy_sol_types::SolInterface>::NAME,
+                        selector,
+                    ),
+                );
             };
             (unsafe { DECODE_SHIMS.get_unchecked(idx) })(data, validate)
         }
@@ -1146,7 +1267,7 @@ pub mod DeploymentConfig {
     use alloy::contract as alloy_contract;
     /**Creates a new wrapper around an on-chain [`DeploymentConfig`](self) contract instance.
 
-    See the [wrapper's documentation](`DeploymentConfigInstance`) for more details.*/
+See the [wrapper's documentation](`DeploymentConfigInstance`) for more details.*/
     #[inline]
     pub const fn new<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
@@ -1160,9 +1281,9 @@ pub mod DeploymentConfig {
     }
     /**Deploys this contract using the given `provider` and constructor arguments, if any.
 
-    Returns a new instance of the contract, if the deployment was successful.
+Returns a new instance of the contract, if the deployment was successful.
 
-    For more fine-grained control over the deployment process, use [`deploy_builder`] instead.*/
+For more fine-grained control over the deployment process, use [`deploy_builder`] instead.*/
     #[inline]
     pub fn deploy<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
@@ -1171,15 +1292,16 @@ pub mod DeploymentConfig {
     >(
         provider: P,
         _broadcaster: alloy::sol_types::private::Address,
-    ) -> impl ::core::future::Future<Output = alloy_contract::Result<DeploymentConfigInstance<T, P, N>>>
-    {
+    ) -> impl ::core::future::Future<
+        Output = alloy_contract::Result<DeploymentConfigInstance<T, P, N>>,
+    > {
         DeploymentConfigInstance::<T, P, N>::deploy(provider, _broadcaster)
     }
     /**Creates a `RawCallBuilder` for deploying this contract using the given `provider`
-    and constructor arguments, if any.
+and constructor arguments, if any.
 
-    This is a simple wrapper around creating a `RawCallBuilder` with the data set to
-    the bytecode concatenated with the constructor's ABI-encoded arguments.*/
+This is a simple wrapper around creating a `RawCallBuilder` with the data set to
+the bytecode concatenated with the constructor's ABI-encoded arguments.*/
     #[inline]
     pub fn deploy_builder<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
@@ -1193,15 +1315,15 @@ pub mod DeploymentConfig {
     }
     /**A [`DeploymentConfig`](self) instance.
 
-    Contains type-safe methods for interacting with an on-chain instance of the
-    [`DeploymentConfig`](self) contract located at a given `address`, using a given
-    provider `P`.
+Contains type-safe methods for interacting with an on-chain instance of the
+[`DeploymentConfig`](self) contract located at a given `address`, using a given
+provider `P`.
 
-    If the contract bytecode is available (see the [`sol!`](alloy_sol_types::sol!)
-    documentation on how to provide it), the `deploy` and `deploy_builder` methods can
-    be used to deploy a new instance of the contract.
+If the contract bytecode is available (see the [`sol!`](alloy_sol_types::sol!)
+documentation on how to provide it), the `deploy` and `deploy_builder` methods can
+be used to deploy a new instance of the contract.
 
-    See the [module-level documentation](self) for all the available methods.*/
+See the [module-level documentation](self) for all the available methods.*/
     #[derive(Clone)]
     pub struct DeploymentConfigInstance<T, P, N = alloy_contract::private::Ethereum> {
         address: alloy_sol_types::private::Address,
@@ -1212,24 +1334,24 @@ pub mod DeploymentConfig {
     impl<T, P, N> ::core::fmt::Debug for DeploymentConfigInstance<T, P, N> {
         #[inline]
         fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-            f.debug_tuple("DeploymentConfigInstance")
-                .field(&self.address)
-                .finish()
+            f.debug_tuple("DeploymentConfigInstance").field(&self.address).finish()
         }
     }
     /// Instantiation and getters/setters.
     #[automatically_derived]
     impl<
-            T: alloy_contract::private::Transport + ::core::clone::Clone,
-            P: alloy_contract::private::Provider<T, N>,
-            N: alloy_contract::private::Network,
-        > DeploymentConfigInstance<T, P, N>
-    {
+        T: alloy_contract::private::Transport + ::core::clone::Clone,
+        P: alloy_contract::private::Provider<T, N>,
+        N: alloy_contract::private::Network,
+    > DeploymentConfigInstance<T, P, N> {
         /**Creates a new wrapper around an on-chain [`DeploymentConfig`](self) contract instance.
 
-        See the [wrapper's documentation](`DeploymentConfigInstance`) for more details.*/
+See the [wrapper's documentation](`DeploymentConfigInstance`) for more details.*/
         #[inline]
-        pub const fn new(address: alloy_sol_types::private::Address, provider: P) -> Self {
+        pub const fn new(
+            address: alloy_sol_types::private::Address,
+            provider: P,
+        ) -> Self {
             Self {
                 address,
                 provider,
@@ -1238,9 +1360,9 @@ pub mod DeploymentConfig {
         }
         /**Deploys this contract using the given `provider` and constructor arguments, if any.
 
-        Returns a new instance of the contract, if the deployment was successful.
+Returns a new instance of the contract, if the deployment was successful.
 
-        For more fine-grained control over the deployment process, use [`deploy_builder`] instead.*/
+For more fine-grained control over the deployment process, use [`deploy_builder`] instead.*/
         #[inline]
         pub async fn deploy(
             provider: P,
@@ -1251,10 +1373,10 @@ pub mod DeploymentConfig {
             Ok(Self::new(contract_address, call_builder.provider))
         }
         /**Creates a `RawCallBuilder` for deploying this contract using the given `provider`
-        and constructor arguments, if any.
+and constructor arguments, if any.
 
-        This is a simple wrapper around creating a `RawCallBuilder` with the data set to
-        the bytecode concatenated with the constructor's ABI-encoded arguments.*/
+This is a simple wrapper around creating a `RawCallBuilder` with the data set to
+the bytecode concatenated with the constructor's ABI-encoded arguments.*/
         #[inline]
         pub fn deploy_builder(
             provider: P,
@@ -1264,11 +1386,12 @@ pub mod DeploymentConfig {
                 provider,
                 [
                     &BYTECODE[..],
-                    &alloy_sol_types::SolConstructor::abi_encode(&constructorCall { _broadcaster })
-                        [..],
+                    &alloy_sol_types::SolConstructor::abi_encode(
+                        &constructorCall { _broadcaster },
+                    )[..],
                 ]
-                .concat()
-                .into(),
+                    .concat()
+                    .into(),
             )
         }
         /// Returns a reference to the address.
@@ -1306,11 +1429,10 @@ pub mod DeploymentConfig {
     /// Function calls.
     #[automatically_derived]
     impl<
-            T: alloy_contract::private::Transport + ::core::clone::Clone,
-            P: alloy_contract::private::Provider<T, N>,
-            N: alloy_contract::private::Network,
-        > DeploymentConfigInstance<T, P, N>
-    {
+        T: alloy_contract::private::Transport + ::core::clone::Clone,
+        P: alloy_contract::private::Provider<T, N>,
+        N: alloy_contract::private::Network,
+    > DeploymentConfigInstance<T, P, N> {
         /// Creates a new call builder using this contract instance's provider and address.
         ///
         /// Note that the call can be any function call, not just those defined in this
@@ -1322,7 +1444,9 @@ pub mod DeploymentConfig {
             alloy_contract::SolCallBuilder::new_sol(&self.provider, &self.address, call)
         }
         ///Creates a new call builder for the [`IS_SCRIPT`] function.
-        pub fn IS_SCRIPT(&self) -> alloy_contract::SolCallBuilder<T, &P, IS_SCRIPTCall, N> {
+        pub fn IS_SCRIPT(
+            &self,
+        ) -> alloy_contract::SolCallBuilder<T, &P, IS_SCRIPTCall, N> {
             self.call_builder(&IS_SCRIPTCall {})
         }
         ///Creates a new call builder for the [`activeNetworkConfig`] function.
@@ -1345,11 +1469,10 @@ pub mod DeploymentConfig {
     /// Event filters.
     #[automatically_derived]
     impl<
-            T: alloy_contract::private::Transport + ::core::clone::Clone,
-            P: alloy_contract::private::Provider<T, N>,
-            N: alloy_contract::private::Network,
-        > DeploymentConfigInstance<T, P, N>
-    {
+        T: alloy_contract::private::Transport + ::core::clone::Clone,
+        P: alloy_contract::private::Provider<T, N>,
+        N: alloy_contract::private::Network,
+    > DeploymentConfigInstance<T, P, N> {
         /// Creates a new event filter using this contract instance's provider and address.
         ///
         /// Note that the type can be any event, not just those defined in this contract.
