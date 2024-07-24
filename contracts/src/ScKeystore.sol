@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.24;
 
+import { Ownable } from "Openzeppelin/access/Ownable.sol";
 import { IScKeystore, UserInfo, KeyPackage } from "./IScKeystore.sol";
 
 error UserAlreadyExists();
@@ -8,30 +9,32 @@ error MalformedKeyPackage();
 error MalformedUserInfo();
 error UserDoesNotExist();
 
-contract ScKeystore is IScKeystore {
+contract ScKeystore is Ownable, IScKeystore {
     event UserAdded(address user, bytes signaturePubKey);
     event UserKeyPackageAdded(address indexed user, uint256 index);
 
     mapping(address user => UserInfo userInfo) private users;
     KeyPackage[] private keyPackages;
 
+    constructor(address initialOwner) Ownable(initialOwner) { }
+
     function userExists(address user) public view returns (bool) {
         return users[user].signaturePubKey.length > 0;
     }
 
-    function addUser(bytes calldata signaturePubKey, KeyPackage calldata keyPackage) external {
+    function addUser(address user, bytes calldata signaturePubKey, KeyPackage calldata keyPackage) external onlyOwner {
         if (signaturePubKey.length == 0) revert MalformedUserInfo();
         if (keyPackage.data.length == 0) revert MalformedKeyPackage();
-        if (userExists(msg.sender)) revert UserAlreadyExists();
+        if (userExists(user)) revert UserAlreadyExists();
 
         keyPackages.push(keyPackage);
         uint256 keyPackageIndex = keyPackages.length - 1;
 
-        users[msg.sender] = UserInfo(new uint256[](0), signaturePubKey);
-        users[msg.sender].signaturePubKey = signaturePubKey;
-        users[msg.sender].keyPackageIndices.push(keyPackageIndex);
+        users[user] = UserInfo(new uint256[](0), signaturePubKey);
+        users[user].signaturePubKey = signaturePubKey;
+        users[user].keyPackageIndices.push(keyPackageIndex);
 
-        emit UserAdded(msg.sender, signaturePubKey);
+        emit UserAdded(user, signaturePubKey);
     }
 
     function getUser(address user) external view returns (UserInfo memory) {
