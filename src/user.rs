@@ -23,7 +23,6 @@ use tokio::sync::broadcast::Receiver;
 use ds::ds::*;
 use mls_crypto::openmls_provider::*;
 use sc_key_store::{sc_ks::ScKeyStorage, *};
-// use sc_key_store::local_ks::LocalCache;
 // use waku_bindings::*;
 //
 
@@ -51,8 +50,6 @@ pub struct User<T, P, N> {
     pub groups: HashMap<String, Group>,
     provider: MlsCryptoProvider,
     sc_ks: ScKeyStorage<T, P, N>,
-    // we don't need local storage as long as we are working with openmls
-    // local_ks: LocalCache,
     // pub(crate) contacts: HashMap<Vec<u8>, WakuPeers>,
 }
 
@@ -70,12 +67,10 @@ where
     ) -> Result<Self, UserError> {
         let crypto = MlsCryptoProvider::default();
         let id = Identity::new(CIPHERSUITE, &crypto, user_wallet_address, NUMBER_OF_KP)?;
-        // let sign_pk = id.signature_pub_key();
         let mut user = User {
             groups: HashMap::new(),
             identity: id,
             provider: crypto,
-            // local_ks: LocalCache::empty_key_store(user_wallet_address, sign_pk.as_slice()),
             sc_ks: ScKeyStorage::new(provider, sc_storage_address),
             // contacts: HashMap::new(),
         };
@@ -125,7 +120,6 @@ where
             .borrow_mut()
             .add_user(ukp.clone(), self.identity.signature_pub_key().as_slice())
             .await?;
-        // self.local_ks.fill_empty_key_store(ukp)?;
         Ok(())
     }
 

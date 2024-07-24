@@ -1,4 +1,3 @@
-// pub mod local_ks;
 pub mod sc_ks;
 
 use mls_crypto::openmls_provider::MlsCryptoProvider;
