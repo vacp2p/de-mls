@@ -12,7 +12,7 @@ interface IScKeystore {
     }
 
     function addKeyPackage(KeyPackage memory) external;
-    function addUser(bytes memory signaturePubKey, KeyPackage memory keyPackage) external;
+    function addUser(address user, bytes memory signaturePubKey, KeyPackage memory keyPackage) external;
     function getAvailableKeyPackage(address user) external view returns (KeyPackage memory);
     function getUser(address user) external view returns (UserInfo memory);
     function userExists(address user) external view returns (bool);
@@ -46,6 +46,11 @@ interface IScKeystore {
     "type": "function",
     "name": "addUser",
     "inputs": [
+      {
+        "name": "user",
+        "type": "address",
+        "internalType": "address"
+      },
       {
         "name": "signaturePubKey",
         "type": "bytes",
@@ -155,6 +160,7 @@ pub mod IScKeystore {
     ///0x
     /// ```
     #[rustfmt::skip]
+    #[allow(clippy::all)]
     pub static BYTECODE: alloy_sol_types::private::Bytes = alloy_sol_types::private::Bytes::from_static(
         b"",
     );
@@ -164,12 +170,13 @@ pub mod IScKeystore {
     ///0x
     /// ```
     #[rustfmt::skip]
+    #[allow(clippy::all)]
     pub static DEPLOYED_BYTECODE: alloy_sol_types::private::Bytes = alloy_sol_types::private::Bytes::from_static(
         b"",
     );
     /**```solidity
-    struct KeyPackage { bytes[] data; }
-    ```*/
+struct KeyPackage { bytes[] data; }
+```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct KeyPackage {
@@ -179,14 +186,18 @@ pub mod IScKeystore {
     const _: () = {
         use alloy::sol_types as alloy_sol_types;
         #[doc(hidden)]
-        type UnderlyingSolTuple<'a> =
-            (alloy::sol_types::sol_data::Array<alloy::sol_types::sol_data::Bytes>,);
+        type UnderlyingSolTuple<'a> = (
+            alloy::sol_types::sol_data::Array<alloy::sol_types::sol_data::Bytes>,
+        );
         #[doc(hidden)]
-        type UnderlyingRustTuple<'a> =
-            (alloy::sol_types::private::Vec<alloy::sol_types::private::Bytes>,);
+        type UnderlyingRustTuple<'a> = (
+            alloy::sol_types::private::Vec<alloy::sol_types::private::Bytes>,
+        );
         #[cfg(test)]
         #[allow(dead_code, unreachable_patterns)]
-        fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+        fn _type_assertion(
+            _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+        ) {
             match _t {
                 alloy_sol_types::private::AssertTypeEq::<
                     <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -215,45 +226,75 @@ pub mod IScKeystore {
         impl alloy_sol_types::private::SolTypeValue<Self> for KeyPackage {
             #[inline]
             fn stv_to_tokens(&self) -> <Self as alloy_sol_types::SolType>::Token<'_> {
-                (<alloy::sol_types::sol_data::Array<
-                    alloy::sol_types::sol_data::Bytes,
-                > as alloy_sol_types::SolType>::tokenize(
-                    &self.data
-                ),)
+                (
+                    <alloy::sol_types::sol_data::Array<
+                        alloy::sol_types::sol_data::Bytes,
+                    > as alloy_sol_types::SolType>::tokenize(&self.data),
+                )
             }
             #[inline]
             fn stv_abi_encoded_size(&self) -> usize {
-                let tuple =
-                    <UnderlyingRustTuple<'_> as ::core::convert::From<Self>>::from(self.clone());
-                <UnderlyingSolTuple<'_> as alloy_sol_types::SolType>::abi_encoded_size(&tuple)
+                if let Some(size) = <Self as alloy_sol_types::SolType>::ENCODED_SIZE {
+                    return size;
+                }
+                let tuple = <UnderlyingRustTuple<
+                    '_,
+                > as ::core::convert::From<Self>>::from(self.clone());
+                <UnderlyingSolTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::abi_encoded_size(&tuple)
             }
             #[inline]
             fn stv_eip712_data_word(&self) -> alloy_sol_types::Word {
                 <Self as alloy_sol_types::SolStruct>::eip712_hash_struct(self)
             }
             #[inline]
-            fn stv_abi_encode_packed_to(&self, out: &mut alloy_sol_types::private::Vec<u8>) {
-                let tuple =
-                    <UnderlyingRustTuple<'_> as ::core::convert::From<Self>>::from(self.clone());
-                <UnderlyingSolTuple<'_> as alloy_sol_types::SolType>::abi_encode_packed_to(
-                    &tuple, out,
-                )
+            fn stv_abi_encode_packed_to(
+                &self,
+                out: &mut alloy_sol_types::private::Vec<u8>,
+            ) {
+                let tuple = <UnderlyingRustTuple<
+                    '_,
+                > as ::core::convert::From<Self>>::from(self.clone());
+                <UnderlyingSolTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::abi_encode_packed_to(&tuple, out)
+            }
+            #[inline]
+            fn stv_abi_packed_encoded_size(&self) -> usize {
+                if let Some(size) = <Self as alloy_sol_types::SolType>::PACKED_ENCODED_SIZE {
+                    return size;
+                }
+                let tuple = <UnderlyingRustTuple<
+                    '_,
+                > as ::core::convert::From<Self>>::from(self.clone());
+                <UnderlyingSolTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::abi_packed_encoded_size(&tuple)
             }
         }
         #[automatically_derived]
         impl alloy_sol_types::SolType for KeyPackage {
             type RustType = Self;
-            type Token<'a> = <UnderlyingSolTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <UnderlyingSolTuple<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             const SOL_NAME: &'static str = <Self as alloy_sol_types::SolStruct>::NAME;
-            const ENCODED_SIZE: Option<usize> =
-                <UnderlyingSolTuple<'_> as alloy_sol_types::SolType>::ENCODED_SIZE;
+            const ENCODED_SIZE: Option<usize> = <UnderlyingSolTuple<
+                '_,
+            > as alloy_sol_types::SolType>::ENCODED_SIZE;
+            const PACKED_ENCODED_SIZE: Option<usize> = <UnderlyingSolTuple<
+                '_,
+            > as alloy_sol_types::SolType>::PACKED_ENCODED_SIZE;
             #[inline]
             fn valid_token(token: &Self::Token<'_>) -> bool {
                 <UnderlyingSolTuple<'_> as alloy_sol_types::SolType>::valid_token(token)
             }
             #[inline]
             fn detokenize(token: Self::Token<'_>) -> Self::RustType {
-                let tuple = <UnderlyingSolTuple<'_> as alloy_sol_types::SolType>::detokenize(token);
+                let tuple = <UnderlyingSolTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::detokenize(token);
                 <Self as ::core::convert::From<UnderlyingRustTuple<'_>>>::from(tuple)
             }
         }
@@ -265,9 +306,9 @@ pub mod IScKeystore {
                 alloy_sol_types::private::Cow::Borrowed("KeyPackage(bytes[] data)")
             }
             #[inline]
-            fn eip712_components(
-            ) -> alloy_sol_types::private::Vec<alloy_sol_types::private::Cow<'static, str>>
-            {
+            fn eip712_components() -> alloy_sol_types::private::Vec<
+                alloy_sol_types::private::Cow<'static, str>,
+            > {
                 alloy_sol_types::private::Vec::new()
             }
             #[inline]
@@ -297,7 +338,9 @@ pub mod IScKeystore {
                 rust: &Self::RustType,
                 out: &mut alloy_sol_types::private::Vec<u8>,
             ) {
-                out.reserve(<Self as alloy_sol_types::EventTopic>::topic_preimage_length(rust));
+                out.reserve(
+                    <Self as alloy_sol_types::EventTopic>::topic_preimage_length(rust),
+                );
                 <alloy::sol_types::sol_data::Array<
                     alloy::sol_types::sol_data::Bytes,
                 > as alloy_sol_types::EventTopic>::encode_topic_preimage(
@@ -306,20 +349,29 @@ pub mod IScKeystore {
                 );
             }
             #[inline]
-            fn encode_topic(rust: &Self::RustType) -> alloy_sol_types::abi::token::WordToken {
+            fn encode_topic(
+                rust: &Self::RustType,
+            ) -> alloy_sol_types::abi::token::WordToken {
                 let mut out = alloy_sol_types::private::Vec::new();
-                <Self as alloy_sol_types::EventTopic>::encode_topic_preimage(rust, &mut out);
-                alloy_sol_types::abi::token::WordToken(alloy_sol_types::private::keccak256(out))
+                <Self as alloy_sol_types::EventTopic>::encode_topic_preimage(
+                    rust,
+                    &mut out,
+                );
+                alloy_sol_types::abi::token::WordToken(
+                    alloy_sol_types::private::keccak256(out),
+                )
             }
         }
     };
     /**```solidity
-    struct UserInfo { uint256[] keyPackageIndices; bytes signaturePubKey; }
-    ```*/
+struct UserInfo { uint256[] keyPackageIndices; bytes signaturePubKey; }
+```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct UserInfo {
-        pub keyPackageIndices: alloy::sol_types::private::Vec<alloy::sol_types::private::U256>,
+        pub keyPackageIndices: alloy::sol_types::private::Vec<
+            alloy::sol_types::private::U256,
+        >,
         pub signaturePubKey: alloy::sol_types::private::Bytes,
     }
     #[allow(non_camel_case_types, non_snake_case, clippy::style)]
@@ -337,7 +389,9 @@ pub mod IScKeystore {
         );
         #[cfg(test)]
         #[allow(dead_code, unreachable_patterns)]
-        fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+        fn _type_assertion(
+            _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+        ) {
             match _t {
                 alloy_sol_types::private::AssertTypeEq::<
                     <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -380,37 +434,67 @@ pub mod IScKeystore {
             }
             #[inline]
             fn stv_abi_encoded_size(&self) -> usize {
-                let tuple =
-                    <UnderlyingRustTuple<'_> as ::core::convert::From<Self>>::from(self.clone());
-                <UnderlyingSolTuple<'_> as alloy_sol_types::SolType>::abi_encoded_size(&tuple)
+                if let Some(size) = <Self as alloy_sol_types::SolType>::ENCODED_SIZE {
+                    return size;
+                }
+                let tuple = <UnderlyingRustTuple<
+                    '_,
+                > as ::core::convert::From<Self>>::from(self.clone());
+                <UnderlyingSolTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::abi_encoded_size(&tuple)
             }
             #[inline]
             fn stv_eip712_data_word(&self) -> alloy_sol_types::Word {
                 <Self as alloy_sol_types::SolStruct>::eip712_hash_struct(self)
             }
             #[inline]
-            fn stv_abi_encode_packed_to(&self, out: &mut alloy_sol_types::private::Vec<u8>) {
-                let tuple =
-                    <UnderlyingRustTuple<'_> as ::core::convert::From<Self>>::from(self.clone());
-                <UnderlyingSolTuple<'_> as alloy_sol_types::SolType>::abi_encode_packed_to(
-                    &tuple, out,
-                )
+            fn stv_abi_encode_packed_to(
+                &self,
+                out: &mut alloy_sol_types::private::Vec<u8>,
+            ) {
+                let tuple = <UnderlyingRustTuple<
+                    '_,
+                > as ::core::convert::From<Self>>::from(self.clone());
+                <UnderlyingSolTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::abi_encode_packed_to(&tuple, out)
+            }
+            #[inline]
+            fn stv_abi_packed_encoded_size(&self) -> usize {
+                if let Some(size) = <Self as alloy_sol_types::SolType>::PACKED_ENCODED_SIZE {
+                    return size;
+                }
+                let tuple = <UnderlyingRustTuple<
+                    '_,
+                > as ::core::convert::From<Self>>::from(self.clone());
+                <UnderlyingSolTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::abi_packed_encoded_size(&tuple)
             }
         }
         #[automatically_derived]
         impl alloy_sol_types::SolType for UserInfo {
             type RustType = Self;
-            type Token<'a> = <UnderlyingSolTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <UnderlyingSolTuple<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             const SOL_NAME: &'static str = <Self as alloy_sol_types::SolStruct>::NAME;
-            const ENCODED_SIZE: Option<usize> =
-                <UnderlyingSolTuple<'_> as alloy_sol_types::SolType>::ENCODED_SIZE;
+            const ENCODED_SIZE: Option<usize> = <UnderlyingSolTuple<
+                '_,
+            > as alloy_sol_types::SolType>::ENCODED_SIZE;
+            const PACKED_ENCODED_SIZE: Option<usize> = <UnderlyingSolTuple<
+                '_,
+            > as alloy_sol_types::SolType>::PACKED_ENCODED_SIZE;
             #[inline]
             fn valid_token(token: &Self::Token<'_>) -> bool {
                 <UnderlyingSolTuple<'_> as alloy_sol_types::SolType>::valid_token(token)
             }
             #[inline]
             fn detokenize(token: Self::Token<'_>) -> Self::RustType {
-                let tuple = <UnderlyingSolTuple<'_> as alloy_sol_types::SolType>::detokenize(token);
+                let tuple = <UnderlyingSolTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::detokenize(token);
                 <Self as ::core::convert::From<UnderlyingRustTuple<'_>>>::from(tuple)
             }
         }
@@ -424,9 +508,9 @@ pub mod IScKeystore {
                 )
             }
             #[inline]
-            fn eip712_components(
-            ) -> alloy_sol_types::private::Vec<alloy_sol_types::private::Cow<'static, str>>
-            {
+            fn eip712_components() -> alloy_sol_types::private::Vec<
+                alloy_sol_types::private::Cow<'static, str>,
+            > {
                 alloy_sol_types::private::Vec::new()
             }
             #[inline]
@@ -469,7 +553,9 @@ pub mod IScKeystore {
                 rust: &Self::RustType,
                 out: &mut alloy_sol_types::private::Vec<u8>,
             ) {
-                out.reserve(<Self as alloy_sol_types::EventTopic>::topic_preimage_length(rust));
+                out.reserve(
+                    <Self as alloy_sol_types::EventTopic>::topic_preimage_length(rust),
+                );
                 <alloy::sol_types::sol_data::Array<
                     alloy::sol_types::sol_data::Uint<256>,
                 > as alloy_sol_types::EventTopic>::encode_topic_preimage(
@@ -482,17 +568,24 @@ pub mod IScKeystore {
                 );
             }
             #[inline]
-            fn encode_topic(rust: &Self::RustType) -> alloy_sol_types::abi::token::WordToken {
+            fn encode_topic(
+                rust: &Self::RustType,
+            ) -> alloy_sol_types::abi::token::WordToken {
                 let mut out = alloy_sol_types::private::Vec::new();
-                <Self as alloy_sol_types::EventTopic>::encode_topic_preimage(rust, &mut out);
-                alloy_sol_types::abi::token::WordToken(alloy_sol_types::private::keccak256(out))
+                <Self as alloy_sol_types::EventTopic>::encode_topic_preimage(
+                    rust,
+                    &mut out,
+                );
+                alloy_sol_types::abi::token::WordToken(
+                    alloy_sol_types::private::keccak256(out),
+                )
             }
         }
     };
     /**Function with signature `addKeyPackage((bytes[]))` and selector `0xfe52f796`.
-    ```solidity
-    function addKeyPackage(KeyPackage memory) external;
-    ```*/
+```solidity
+function addKeyPackage(KeyPackage memory) external;
+```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct addKeyPackageCall {
@@ -509,10 +602,14 @@ pub mod IScKeystore {
             #[doc(hidden)]
             type UnderlyingSolTuple<'a> = (KeyPackage,);
             #[doc(hidden)]
-            type UnderlyingRustTuple<'a> = (<KeyPackage as alloy::sol_types::SolType>::RustType,);
+            type UnderlyingRustTuple<'a> = (
+                <KeyPackage as alloy::sol_types::SolType>::RustType,
+            );
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+            fn _type_assertion(
+                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+            ) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -541,7 +638,9 @@ pub mod IScKeystore {
             type UnderlyingRustTuple<'a> = ();
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+            fn _type_assertion(
+                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+            ) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -566,10 +665,14 @@ pub mod IScKeystore {
         #[automatically_derived]
         impl alloy_sol_types::SolCall for addKeyPackageCall {
             type Parameters<'a> = (KeyPackage,);
-            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             type Return = addKeyPackageReturn;
             type ReturnTuple<'a> = ();
-            type ReturnToken<'a> = <Self::ReturnTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type ReturnToken<'a> = <Self::ReturnTuple<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             const SIGNATURE: &'static str = "addKeyPackage((bytes[]))";
             const SELECTOR: [u8; 4] = [254u8, 82u8, 247u8, 150u8];
             #[inline]
@@ -587,24 +690,25 @@ pub mod IScKeystore {
                 data: &[u8],
                 validate: bool,
             ) -> alloy_sol_types::Result<Self::Return> {
-                <Self::ReturnTuple<'_> as alloy_sol_types::SolType>::abi_decode_sequence(
-                    data, validate,
-                )
-                .map(Into::into)
+                <Self::ReturnTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::abi_decode_sequence(data, validate)
+                    .map(Into::into)
             }
         }
     };
-    /**Function with signature `addUser(bytes,(bytes[]))` and selector `0x3ecf37d9`.
-    ```solidity
-    function addUser(bytes memory signaturePubKey, KeyPackage memory keyPackage) external;
-    ```*/
+    /**Function with signature `addUser(address,bytes,(bytes[]))` and selector `0xc8d178b2`.
+```solidity
+function addUser(address user, bytes memory signaturePubKey, KeyPackage memory keyPackage) external;
+```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct addUserCall {
+        pub user: alloy::sol_types::private::Address,
         pub signaturePubKey: alloy::sol_types::private::Bytes,
         pub keyPackage: <KeyPackage as alloy::sol_types::SolType>::RustType,
     }
-    ///Container type for the return parameters of the [`addUser(bytes,(bytes[]))`](addUserCall) function.
+    ///Container type for the return parameters of the [`addUser(address,bytes,(bytes[]))`](addUserCall) function.
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct addUserReturn {}
@@ -613,15 +717,22 @@ pub mod IScKeystore {
         use alloy::sol_types as alloy_sol_types;
         {
             #[doc(hidden)]
-            type UnderlyingSolTuple<'a> = (alloy::sol_types::sol_data::Bytes, KeyPackage);
+            type UnderlyingSolTuple<'a> = (
+                alloy::sol_types::sol_data::Address,
+                alloy::sol_types::sol_data::Bytes,
+                KeyPackage,
+            );
             #[doc(hidden)]
             type UnderlyingRustTuple<'a> = (
+                alloy::sol_types::private::Address,
                 alloy::sol_types::private::Bytes,
                 <KeyPackage as alloy::sol_types::SolType>::RustType,
             );
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+            fn _type_assertion(
+                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+            ) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -632,7 +743,7 @@ pub mod IScKeystore {
             #[doc(hidden)]
             impl ::core::convert::From<addUserCall> for UnderlyingRustTuple<'_> {
                 fn from(value: addUserCall) -> Self {
-                    (value.signaturePubKey, value.keyPackage)
+                    (value.user, value.signaturePubKey, value.keyPackage)
                 }
             }
             #[automatically_derived]
@@ -640,8 +751,9 @@ pub mod IScKeystore {
             impl ::core::convert::From<UnderlyingRustTuple<'_>> for addUserCall {
                 fn from(tuple: UnderlyingRustTuple<'_>) -> Self {
                     Self {
-                        signaturePubKey: tuple.0,
-                        keyPackage: tuple.1,
+                        user: tuple.0,
+                        signaturePubKey: tuple.1,
+                        keyPackage: tuple.2,
                     }
                 }
             }
@@ -653,7 +765,9 @@ pub mod IScKeystore {
             type UnderlyingRustTuple<'a> = ();
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+            fn _type_assertion(
+                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+            ) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -677,13 +791,21 @@ pub mod IScKeystore {
         }
         #[automatically_derived]
         impl alloy_sol_types::SolCall for addUserCall {
-            type Parameters<'a> = (alloy::sol_types::sol_data::Bytes, KeyPackage);
-            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type Parameters<'a> = (
+                alloy::sol_types::sol_data::Address,
+                alloy::sol_types::sol_data::Bytes,
+                KeyPackage,
+            );
+            type Token<'a> = <Self::Parameters<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             type Return = addUserReturn;
             type ReturnTuple<'a> = ();
-            type ReturnToken<'a> = <Self::ReturnTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
-            const SIGNATURE: &'static str = "addUser(bytes,(bytes[]))";
-            const SELECTOR: [u8; 4] = [62u8, 207u8, 55u8, 217u8];
+            type ReturnToken<'a> = <Self::ReturnTuple<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
+            const SIGNATURE: &'static str = "addUser(address,bytes,(bytes[]))";
+            const SELECTOR: [u8; 4] = [200u8, 209u8, 120u8, 178u8];
             #[inline]
             fn new<'a>(
                 tuple: <Self::Parameters<'a> as alloy_sol_types::SolType>::RustType,
@@ -693,6 +815,9 @@ pub mod IScKeystore {
             #[inline]
             fn tokenize(&self) -> Self::Token<'_> {
                 (
+                    <alloy::sol_types::sol_data::Address as alloy_sol_types::SolType>::tokenize(
+                        &self.user,
+                    ),
                     <alloy::sol_types::sol_data::Bytes as alloy_sol_types::SolType>::tokenize(
                         &self.signaturePubKey,
                     ),
@@ -704,17 +829,17 @@ pub mod IScKeystore {
                 data: &[u8],
                 validate: bool,
             ) -> alloy_sol_types::Result<Self::Return> {
-                <Self::ReturnTuple<'_> as alloy_sol_types::SolType>::abi_decode_sequence(
-                    data, validate,
-                )
-                .map(Into::into)
+                <Self::ReturnTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::abi_decode_sequence(data, validate)
+                    .map(Into::into)
             }
         }
     };
     /**Function with signature `getAvailableKeyPackage(address)` and selector `0x33cf520c`.
-    ```solidity
-    function getAvailableKeyPackage(address user) external view returns (KeyPackage memory);
-    ```*/
+```solidity
+function getAvailableKeyPackage(address user) external view returns (KeyPackage memory);
+```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct getAvailableKeyPackageCall {
@@ -736,7 +861,9 @@ pub mod IScKeystore {
             type UnderlyingRustTuple<'a> = (alloy::sol_types::private::Address,);
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+            fn _type_assertion(
+                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+            ) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -745,14 +872,16 @@ pub mod IScKeystore {
             }
             #[automatically_derived]
             #[doc(hidden)]
-            impl ::core::convert::From<getAvailableKeyPackageCall> for UnderlyingRustTuple<'_> {
+            impl ::core::convert::From<getAvailableKeyPackageCall>
+            for UnderlyingRustTuple<'_> {
                 fn from(value: getAvailableKeyPackageCall) -> Self {
                     (value.user,)
                 }
             }
             #[automatically_derived]
             #[doc(hidden)]
-            impl ::core::convert::From<UnderlyingRustTuple<'_>> for getAvailableKeyPackageCall {
+            impl ::core::convert::From<UnderlyingRustTuple<'_>>
+            for getAvailableKeyPackageCall {
                 fn from(tuple: UnderlyingRustTuple<'_>) -> Self {
                     Self { user: tuple.0 }
                 }
@@ -762,10 +891,14 @@ pub mod IScKeystore {
             #[doc(hidden)]
             type UnderlyingSolTuple<'a> = (KeyPackage,);
             #[doc(hidden)]
-            type UnderlyingRustTuple<'a> = (<KeyPackage as alloy::sol_types::SolType>::RustType,);
+            type UnderlyingRustTuple<'a> = (
+                <KeyPackage as alloy::sol_types::SolType>::RustType,
+            );
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+            fn _type_assertion(
+                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+            ) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -774,14 +907,16 @@ pub mod IScKeystore {
             }
             #[automatically_derived]
             #[doc(hidden)]
-            impl ::core::convert::From<getAvailableKeyPackageReturn> for UnderlyingRustTuple<'_> {
+            impl ::core::convert::From<getAvailableKeyPackageReturn>
+            for UnderlyingRustTuple<'_> {
                 fn from(value: getAvailableKeyPackageReturn) -> Self {
                     (value._0,)
                 }
             }
             #[automatically_derived]
             #[doc(hidden)]
-            impl ::core::convert::From<UnderlyingRustTuple<'_>> for getAvailableKeyPackageReturn {
+            impl ::core::convert::From<UnderlyingRustTuple<'_>>
+            for getAvailableKeyPackageReturn {
                 fn from(tuple: UnderlyingRustTuple<'_>) -> Self {
                     Self { _0: tuple.0 }
                 }
@@ -790,10 +925,14 @@ pub mod IScKeystore {
         #[automatically_derived]
         impl alloy_sol_types::SolCall for getAvailableKeyPackageCall {
             type Parameters<'a> = (alloy::sol_types::sol_data::Address,);
-            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             type Return = getAvailableKeyPackageReturn;
             type ReturnTuple<'a> = (KeyPackage,);
-            type ReturnToken<'a> = <Self::ReturnTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type ReturnToken<'a> = <Self::ReturnTuple<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             const SIGNATURE: &'static str = "getAvailableKeyPackage(address)";
             const SELECTOR: [u8; 4] = [51u8, 207u8, 82u8, 12u8];
             #[inline]
@@ -815,17 +954,17 @@ pub mod IScKeystore {
                 data: &[u8],
                 validate: bool,
             ) -> alloy_sol_types::Result<Self::Return> {
-                <Self::ReturnTuple<'_> as alloy_sol_types::SolType>::abi_decode_sequence(
-                    data, validate,
-                )
-                .map(Into::into)
+                <Self::ReturnTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::abi_decode_sequence(data, validate)
+                    .map(Into::into)
             }
         }
     };
     /**Function with signature `getUser(address)` and selector `0x6f77926b`.
-    ```solidity
-    function getUser(address user) external view returns (UserInfo memory);
-    ```*/
+```solidity
+function getUser(address user) external view returns (UserInfo memory);
+```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct getUserCall {
@@ -847,7 +986,9 @@ pub mod IScKeystore {
             type UnderlyingRustTuple<'a> = (alloy::sol_types::private::Address,);
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+            fn _type_assertion(
+                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+            ) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -873,10 +1014,14 @@ pub mod IScKeystore {
             #[doc(hidden)]
             type UnderlyingSolTuple<'a> = (UserInfo,);
             #[doc(hidden)]
-            type UnderlyingRustTuple<'a> = (<UserInfo as alloy::sol_types::SolType>::RustType,);
+            type UnderlyingRustTuple<'a> = (
+                <UserInfo as alloy::sol_types::SolType>::RustType,
+            );
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+            fn _type_assertion(
+                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+            ) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -901,10 +1046,14 @@ pub mod IScKeystore {
         #[automatically_derived]
         impl alloy_sol_types::SolCall for getUserCall {
             type Parameters<'a> = (alloy::sol_types::sol_data::Address,);
-            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             type Return = getUserReturn;
             type ReturnTuple<'a> = (UserInfo,);
-            type ReturnToken<'a> = <Self::ReturnTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type ReturnToken<'a> = <Self::ReturnTuple<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             const SIGNATURE: &'static str = "getUser(address)";
             const SELECTOR: [u8; 4] = [111u8, 119u8, 146u8, 107u8];
             #[inline]
@@ -926,17 +1075,17 @@ pub mod IScKeystore {
                 data: &[u8],
                 validate: bool,
             ) -> alloy_sol_types::Result<Self::Return> {
-                <Self::ReturnTuple<'_> as alloy_sol_types::SolType>::abi_decode_sequence(
-                    data, validate,
-                )
-                .map(Into::into)
+                <Self::ReturnTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::abi_decode_sequence(data, validate)
+                    .map(Into::into)
             }
         }
     };
     /**Function with signature `userExists(address)` and selector `0x0e666e49`.
-    ```solidity
-    function userExists(address user) external view returns (bool);
-    ```*/
+```solidity
+function userExists(address user) external view returns (bool);
+```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct userExistsCall {
@@ -958,7 +1107,9 @@ pub mod IScKeystore {
             type UnderlyingRustTuple<'a> = (alloy::sol_types::private::Address,);
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+            fn _type_assertion(
+                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+            ) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -987,7 +1138,9 @@ pub mod IScKeystore {
             type UnderlyingRustTuple<'a> = (bool,);
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
+            fn _type_assertion(
+                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
+            ) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -1012,10 +1165,14 @@ pub mod IScKeystore {
         #[automatically_derived]
         impl alloy_sol_types::SolCall for userExistsCall {
             type Parameters<'a> = (alloy::sol_types::sol_data::Address,);
-            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             type Return = userExistsReturn;
             type ReturnTuple<'a> = (alloy::sol_types::sol_data::Bool,);
-            type ReturnToken<'a> = <Self::ReturnTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
+            type ReturnToken<'a> = <Self::ReturnTuple<
+                'a,
+            > as alloy_sol_types::SolType>::Token<'a>;
             const SIGNATURE: &'static str = "userExists(address)";
             const SELECTOR: [u8; 4] = [14u8, 102u8, 110u8, 73u8];
             #[inline]
@@ -1037,10 +1194,10 @@ pub mod IScKeystore {
                 data: &[u8],
                 validate: bool,
             ) -> alloy_sol_types::Result<Self::Return> {
-                <Self::ReturnTuple<'_> as alloy_sol_types::SolType>::abi_decode_sequence(
-                    data, validate,
-                )
-                .map(Into::into)
+                <Self::ReturnTuple<
+                    '_,
+                > as alloy_sol_types::SolType>::abi_decode_sequence(data, validate)
+                    .map(Into::into)
             }
         }
     };
@@ -1063,8 +1220,8 @@ pub mod IScKeystore {
         pub const SELECTORS: &'static [[u8; 4usize]] = &[
             [14u8, 102u8, 110u8, 73u8],
             [51u8, 207u8, 82u8, 12u8],
-            [62u8, 207u8, 55u8, 217u8],
             [111u8, 119u8, 146u8, 107u8],
+            [200u8, 209u8, 120u8, 178u8],
             [254u8, 82u8, 247u8, 150u8],
         ];
     }
@@ -1076,13 +1233,17 @@ pub mod IScKeystore {
         #[inline]
         fn selector(&self) -> [u8; 4] {
             match self {
-                Self::addKeyPackage(_) => <addKeyPackageCall as alloy_sol_types::SolCall>::SELECTOR,
+                Self::addKeyPackage(_) => {
+                    <addKeyPackageCall as alloy_sol_types::SolCall>::SELECTOR
+                }
                 Self::addUser(_) => <addUserCall as alloy_sol_types::SolCall>::SELECTOR,
                 Self::getAvailableKeyPackage(_) => {
                     <getAvailableKeyPackageCall as alloy_sol_types::SolCall>::SELECTOR
                 }
                 Self::getUser(_) => <getUserCall as alloy_sol_types::SolCall>::SELECTOR,
-                Self::userExists(_) => <userExistsCall as alloy_sol_types::SolCall>::SELECTOR,
+                Self::userExists(_) => {
+                    <userExistsCall as alloy_sol_types::SolCall>::SELECTOR
+                }
             }
         }
         #[inline]
@@ -1100,75 +1261,83 @@ pub mod IScKeystore {
             data: &[u8],
             validate: bool,
         ) -> alloy_sol_types::Result<Self> {
-            static DECODE_SHIMS: &[fn(&[u8], bool) -> alloy_sol_types::Result<IScKeystoreCalls>] =
-                &[
-                    {
-                        fn userExists(
-                            data: &[u8],
-                            validate: bool,
-                        ) -> alloy_sol_types::Result<IScKeystoreCalls> {
-                            <userExistsCall as alloy_sol_types::SolCall>::abi_decode_raw(
-                                data, validate,
+            static DECODE_SHIMS: &[fn(
+                &[u8],
+                bool,
+            ) -> alloy_sol_types::Result<IScKeystoreCalls>] = &[
+                {
+                    fn userExists(
+                        data: &[u8],
+                        validate: bool,
+                    ) -> alloy_sol_types::Result<IScKeystoreCalls> {
+                        <userExistsCall as alloy_sol_types::SolCall>::abi_decode_raw(
+                                data,
+                                validate,
                             )
                             .map(IScKeystoreCalls::userExists)
-                        }
-                        userExists
-                    },
-                    {
-                        fn getAvailableKeyPackage(
-                            data: &[u8],
-                            validate: bool,
-                        ) -> alloy_sol_types::Result<IScKeystoreCalls> {
-                            <getAvailableKeyPackageCall as alloy_sol_types::SolCall>::abi_decode_raw(
+                    }
+                    userExists
+                },
+                {
+                    fn getAvailableKeyPackage(
+                        data: &[u8],
+                        validate: bool,
+                    ) -> alloy_sol_types::Result<IScKeystoreCalls> {
+                        <getAvailableKeyPackageCall as alloy_sol_types::SolCall>::abi_decode_raw(
                                 data,
                                 validate,
                             )
                             .map(IScKeystoreCalls::getAvailableKeyPackage)
-                        }
-                        getAvailableKeyPackage
-                    },
-                    {
-                        fn addUser(
-                            data: &[u8],
-                            validate: bool,
-                        ) -> alloy_sol_types::Result<IScKeystoreCalls> {
-                            <addUserCall as alloy_sol_types::SolCall>::abi_decode_raw(
-                                data, validate,
-                            )
-                            .map(IScKeystoreCalls::addUser)
-                        }
-                        addUser
-                    },
-                    {
-                        fn getUser(
-                            data: &[u8],
-                            validate: bool,
-                        ) -> alloy_sol_types::Result<IScKeystoreCalls> {
-                            <getUserCall as alloy_sol_types::SolCall>::abi_decode_raw(
-                                data, validate,
+                    }
+                    getAvailableKeyPackage
+                },
+                {
+                    fn getUser(
+                        data: &[u8],
+                        validate: bool,
+                    ) -> alloy_sol_types::Result<IScKeystoreCalls> {
+                        <getUserCall as alloy_sol_types::SolCall>::abi_decode_raw(
+                                data,
+                                validate,
                             )
                             .map(IScKeystoreCalls::getUser)
-                        }
-                        getUser
-                    },
-                    {
-                        fn addKeyPackage(
-                            data: &[u8],
-                            validate: bool,
-                        ) -> alloy_sol_types::Result<IScKeystoreCalls> {
-                            <addKeyPackageCall as alloy_sol_types::SolCall>::abi_decode_raw(
-                                data, validate,
+                    }
+                    getUser
+                },
+                {
+                    fn addUser(
+                        data: &[u8],
+                        validate: bool,
+                    ) -> alloy_sol_types::Result<IScKeystoreCalls> {
+                        <addUserCall as alloy_sol_types::SolCall>::abi_decode_raw(
+                                data,
+                                validate,
+                            )
+                            .map(IScKeystoreCalls::addUser)
+                    }
+                    addUser
+                },
+                {
+                    fn addKeyPackage(
+                        data: &[u8],
+                        validate: bool,
+                    ) -> alloy_sol_types::Result<IScKeystoreCalls> {
+                        <addKeyPackageCall as alloy_sol_types::SolCall>::abi_decode_raw(
+                                data,
+                                validate,
                             )
                             .map(IScKeystoreCalls::addKeyPackage)
-                        }
-                        addKeyPackage
-                    },
-                ];
+                    }
+                    addKeyPackage
+                },
+            ];
             let Ok(idx) = Self::SELECTORS.binary_search(&selector) else {
-                return Err(alloy_sol_types::Error::unknown_selector(
-                    <Self as alloy_sol_types::SolInterface>::NAME,
-                    selector,
-                ));
+                return Err(
+                    alloy_sol_types::Error::unknown_selector(
+                        <Self as alloy_sol_types::SolInterface>::NAME,
+                        selector,
+                    ),
+                );
             };
             (unsafe { DECODE_SHIMS.get_unchecked(idx) })(data, validate)
         }
@@ -1176,7 +1345,9 @@ pub mod IScKeystore {
         fn abi_encoded_size(&self) -> usize {
             match self {
                 Self::addKeyPackage(inner) => {
-                    <addKeyPackageCall as alloy_sol_types::SolCall>::abi_encoded_size(inner)
+                    <addKeyPackageCall as alloy_sol_types::SolCall>::abi_encoded_size(
+                        inner,
+                    )
                 }
                 Self::addUser(inner) => {
                     <addUserCall as alloy_sol_types::SolCall>::abi_encoded_size(inner)
@@ -1198,21 +1369,28 @@ pub mod IScKeystore {
         fn abi_encode_raw(&self, out: &mut alloy_sol_types::private::Vec<u8>) {
             match self {
                 Self::addKeyPackage(inner) => {
-                    <addKeyPackageCall as alloy_sol_types::SolCall>::abi_encode_raw(inner, out)
+                    <addKeyPackageCall as alloy_sol_types::SolCall>::abi_encode_raw(
+                        inner,
+                        out,
+                    )
                 }
                 Self::addUser(inner) => {
                     <addUserCall as alloy_sol_types::SolCall>::abi_encode_raw(inner, out)
                 }
                 Self::getAvailableKeyPackage(inner) => {
                     <getAvailableKeyPackageCall as alloy_sol_types::SolCall>::abi_encode_raw(
-                        inner, out,
+                        inner,
+                        out,
                     )
                 }
                 Self::getUser(inner) => {
                     <getUserCall as alloy_sol_types::SolCall>::abi_encode_raw(inner, out)
                 }
                 Self::userExists(inner) => {
-                    <userExistsCall as alloy_sol_types::SolCall>::abi_encode_raw(inner, out)
+                    <userExistsCall as alloy_sol_types::SolCall>::abi_encode_raw(
+                        inner,
+                        out,
+                    )
                 }
             }
         }
@@ -1220,7 +1398,7 @@ pub mod IScKeystore {
     use alloy::contract as alloy_contract;
     /**Creates a new wrapper around an on-chain [`IScKeystore`](self) contract instance.
 
-    See the [wrapper's documentation](`IScKeystoreInstance`) for more details.*/
+See the [wrapper's documentation](`IScKeystoreInstance`) for more details.*/
     #[inline]
     pub const fn new<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
@@ -1234,9 +1412,9 @@ pub mod IScKeystore {
     }
     /**Deploys this contract using the given `provider` and constructor arguments, if any.
 
-    Returns a new instance of the contract, if the deployment was successful.
+Returns a new instance of the contract, if the deployment was successful.
 
-    For more fine-grained control over the deployment process, use [`deploy_builder`] instead.*/
+For more fine-grained control over the deployment process, use [`deploy_builder`] instead.*/
     #[inline]
     pub fn deploy<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
@@ -1244,36 +1422,35 @@ pub mod IScKeystore {
         N: alloy_contract::private::Network,
     >(
         provider: P,
-    ) -> impl ::core::future::Future<Output = alloy_contract::Result<IScKeystoreInstance<T, P, N>>>
-    {
+    ) -> impl ::core::future::Future<
+        Output = alloy_contract::Result<IScKeystoreInstance<T, P, N>>,
+    > {
         IScKeystoreInstance::<T, P, N>::deploy(provider)
     }
     /**Creates a `RawCallBuilder` for deploying this contract using the given `provider`
-    and constructor arguments, if any.
+and constructor arguments, if any.
 
-    This is a simple wrapper around creating a `RawCallBuilder` with the data set to
-    the bytecode concatenated with the constructor's ABI-encoded arguments.*/
+This is a simple wrapper around creating a `RawCallBuilder` with the data set to
+the bytecode concatenated with the constructor's ABI-encoded arguments.*/
     #[inline]
     pub fn deploy_builder<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
         N: alloy_contract::private::Network,
-    >(
-        provider: P,
-    ) -> alloy_contract::RawCallBuilder<T, P, N> {
+    >(provider: P) -> alloy_contract::RawCallBuilder<T, P, N> {
         IScKeystoreInstance::<T, P, N>::deploy_builder(provider)
     }
     /**A [`IScKeystore`](self) instance.
 
-    Contains type-safe methods for interacting with an on-chain instance of the
-    [`IScKeystore`](self) contract located at a given `address`, using a given
-    provider `P`.
+Contains type-safe methods for interacting with an on-chain instance of the
+[`IScKeystore`](self) contract located at a given `address`, using a given
+provider `P`.
 
-    If the contract bytecode is available (see the [`sol!`](alloy_sol_types::sol!)
-    documentation on how to provide it), the `deploy` and `deploy_builder` methods can
-    be used to deploy a new instance of the contract.
+If the contract bytecode is available (see the [`sol!`](alloy_sol_types::sol!)
+documentation on how to provide it), the `deploy` and `deploy_builder` methods can
+be used to deploy a new instance of the contract.
 
-    See the [module-level documentation](self) for all the available methods.*/
+See the [module-level documentation](self) for all the available methods.*/
     #[derive(Clone)]
     pub struct IScKeystoreInstance<T, P, N = alloy_contract::private::Ethereum> {
         address: alloy_sol_types::private::Address,
@@ -1284,24 +1461,24 @@ pub mod IScKeystore {
     impl<T, P, N> ::core::fmt::Debug for IScKeystoreInstance<T, P, N> {
         #[inline]
         fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-            f.debug_tuple("IScKeystoreInstance")
-                .field(&self.address)
-                .finish()
+            f.debug_tuple("IScKeystoreInstance").field(&self.address).finish()
         }
     }
     /// Instantiation and getters/setters.
     #[automatically_derived]
     impl<
-            T: alloy_contract::private::Transport + ::core::clone::Clone,
-            P: alloy_contract::private::Provider<T, N>,
-            N: alloy_contract::private::Network,
-        > IScKeystoreInstance<T, P, N>
-    {
+        T: alloy_contract::private::Transport + ::core::clone::Clone,
+        P: alloy_contract::private::Provider<T, N>,
+        N: alloy_contract::private::Network,
+    > IScKeystoreInstance<T, P, N> {
         /**Creates a new wrapper around an on-chain [`IScKeystore`](self) contract instance.
 
-        See the [wrapper's documentation](`IScKeystoreInstance`) for more details.*/
+See the [wrapper's documentation](`IScKeystoreInstance`) for more details.*/
         #[inline]
-        pub const fn new(address: alloy_sol_types::private::Address, provider: P) -> Self {
+        pub const fn new(
+            address: alloy_sol_types::private::Address,
+            provider: P,
+        ) -> Self {
             Self {
                 address,
                 provider,
@@ -1310,20 +1487,22 @@ pub mod IScKeystore {
         }
         /**Deploys this contract using the given `provider` and constructor arguments, if any.
 
-        Returns a new instance of the contract, if the deployment was successful.
+Returns a new instance of the contract, if the deployment was successful.
 
-        For more fine-grained control over the deployment process, use [`deploy_builder`] instead.*/
+For more fine-grained control over the deployment process, use [`deploy_builder`] instead.*/
         #[inline]
-        pub async fn deploy(provider: P) -> alloy_contract::Result<IScKeystoreInstance<T, P, N>> {
+        pub async fn deploy(
+            provider: P,
+        ) -> alloy_contract::Result<IScKeystoreInstance<T, P, N>> {
             let call_builder = Self::deploy_builder(provider);
             let contract_address = call_builder.deploy().await?;
             Ok(Self::new(contract_address, call_builder.provider))
         }
         /**Creates a `RawCallBuilder` for deploying this contract using the given `provider`
-        and constructor arguments, if any.
+and constructor arguments, if any.
 
-        This is a simple wrapper around creating a `RawCallBuilder` with the data set to
-        the bytecode concatenated with the constructor's ABI-encoded arguments.*/
+This is a simple wrapper around creating a `RawCallBuilder` with the data set to
+the bytecode concatenated with the constructor's ABI-encoded arguments.*/
         #[inline]
         pub fn deploy_builder(provider: P) -> alloy_contract::RawCallBuilder<T, P, N> {
             alloy_contract::RawCallBuilder::new_raw_deploy(
@@ -1366,11 +1545,10 @@ pub mod IScKeystore {
     /// Function calls.
     #[automatically_derived]
     impl<
-            T: alloy_contract::private::Transport + ::core::clone::Clone,
-            P: alloy_contract::private::Provider<T, N>,
-            N: alloy_contract::private::Network,
-        > IScKeystoreInstance<T, P, N>
-    {
+        T: alloy_contract::private::Transport + ::core::clone::Clone,
+        P: alloy_contract::private::Provider<T, N>,
+        N: alloy_contract::private::Network,
+    > IScKeystoreInstance<T, P, N> {
         /// Creates a new call builder using this contract instance's provider and address.
         ///
         /// Note that the call can be any function call, not just those defined in this
@@ -1391,13 +1569,17 @@ pub mod IScKeystore {
         ///Creates a new call builder for the [`addUser`] function.
         pub fn addUser(
             &self,
+            user: alloy::sol_types::private::Address,
             signaturePubKey: alloy::sol_types::private::Bytes,
             keyPackage: <KeyPackage as alloy::sol_types::SolType>::RustType,
         ) -> alloy_contract::SolCallBuilder<T, &P, addUserCall, N> {
-            self.call_builder(&addUserCall {
-                signaturePubKey,
-                keyPackage,
-            })
+            self.call_builder(
+                &addUserCall {
+                    user,
+                    signaturePubKey,
+                    keyPackage,
+                },
+            )
         }
         ///Creates a new call builder for the [`getAvailableKeyPackage`] function.
         pub fn getAvailableKeyPackage(
@@ -1424,11 +1606,10 @@ pub mod IScKeystore {
     /// Event filters.
     #[automatically_derived]
     impl<
-            T: alloy_contract::private::Transport + ::core::clone::Clone,
-            P: alloy_contract::private::Provider<T, N>,
-            N: alloy_contract::private::Network,
-        > IScKeystoreInstance<T, P, N>
-    {
+        T: alloy_contract::private::Transport + ::core::clone::Clone,
+        P: alloy_contract::private::Provider<T, N>,
+        N: alloy_contract::private::Network,
+    > IScKeystoreInstance<T, P, N> {
         /// Creates a new event filter using this contract instance's provider and address.
         ///
         /// Note that the type can be any event, not just those defined in this contract.
