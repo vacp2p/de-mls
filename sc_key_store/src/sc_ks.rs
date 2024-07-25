@@ -68,19 +68,19 @@ impl<T: Transport + Clone, P: Provider<T, N>, N: Network> SCKeyStoreService
                 "no key packages".to_string(),
             ));
         }
-        if self
-            .does_user_exist(ukp.get_id_from_kp().as_slice())
-            .await?
-        {
+        let user_id = ukp.get_id_from_kp();
+        if self.does_user_exist(user_id.as_slice()).await? {
             return Err(KeyStoreError::AlreadyExistedUserError);
         }
 
         let ukp_sc: Vec<KeyPackage> = ukp.into();
         for (i, kp_sc) in ukp_sc.iter().enumerate() {
             if i == 0 {
-                let add_user_binding = self
-                    .instance
-                    .addUser(Bytes::copy_from_slice(sign_pk), kp_sc.to_owned());
+                let add_user_binding = self.instance.addUser(
+                    Address::from_slice(user_id.as_slice()),
+                    Bytes::copy_from_slice(sign_pk),
+                    kp_sc.to_owned(),
+                );
                 let res = add_user_binding.send().await;
                 match res {
                     Ok(_) => continue,
