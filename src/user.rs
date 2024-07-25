@@ -22,12 +22,14 @@ use tokio::sync::broadcast::Receiver;
 
 use ds::ds::*;
 use mls_crypto::openmls_provider::*;
-use sc_key_store::{local_ks::LocalCache, sc_ks::ScKeyStorage, *};
+use sc_key_store::{sc_ks::ScKeyStorage, *};
 // use waku_bindings::*;
 //
 
 use crate::conversation::*;
 use crate::identity::{Identity, IdentityError};
+
+const NUMBER_OF_KP: usize = 2;
 
 pub struct Group {
     group_name: String,
@@ -48,7 +50,6 @@ pub struct User<T, P, N> {
     pub groups: HashMap<String, Group>,
     provider: MlsCryptoProvider,
     sc_ks: ScKeyStorage<T, P, N>,
-    local_ks: LocalCache,
     // pub(crate) contacts: HashMap<Vec<u8>, WakuPeers>,
 }
 
@@ -65,12 +66,11 @@ where
         sc_storage_address: Address,
     ) -> Result<Self, UserError> {
         let crypto = MlsCryptoProvider::default();
-        let id = Identity::new(CIPHERSUITE, &crypto, user_wallet_address)?;
+        let id = Identity::new(CIPHERSUITE, &crypto, user_wallet_address, NUMBER_OF_KP)?;
         let mut user = User {
             groups: HashMap::new(),
             identity: id,
             provider: crypto,
-            local_ks: LocalCache::empty_key_store(user_wallet_address),
             sc_ks: ScKeyStorage::new(provider, sc_storage_address),
             // contacts: HashMap::new(),
         };
@@ -115,13 +115,10 @@ where
     }
 
     async fn register(&mut self) -> Result<(), UserError> {
-        let kp = self.key_packages();
+        let ukp = self.key_packages();
         self.sc_ks
             .borrow_mut()
-            .add_user(kp, self.identity.signer.public())
-            .await?;
-        self.local_ks
-            .get_update_from_smart_contract(self.sc_ks.borrow_mut(), &self.provider)
+            .add_user(ukp.clone(), self.identity.signature_pub_key().as_slice())
             .await?;
         Ok(())
     }
@@ -293,6 +290,7 @@ where
             .use_ratchet_tree_extension(true)
             .build();
 
+        // TODO: After we move from openmls, we will have to delete the used key package here ourselves.
         let mls_group = MlsGroup::new_from_welcome(&self.provider, &group_config, welcome, None)?;
 
         let group_id = mls_group.group_id().to_vec();
