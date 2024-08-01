@@ -2,33 +2,34 @@
 pragma solidity 0.8.24;
 
 import { Ownable } from "Openzeppelin/access/Ownable.sol";
-import { IScKeystore, UserInfo } from "./IScKeystore.sol";
+import { IScKeystore } from "./IScKeystore.sol";
 
 error UserAlreadyExists();
-error MalformedUserInfo();
 error UserDoesNotExist();
 
 contract ScKeystore is Ownable, IScKeystore {
-    event UserAdded(address user, bytes signaturePubKey);
+    event UserAdded(address user);
+    event UserRemoved(address user);
 
-    mapping(address user => UserInfo userInfo) private users;
+    mapping(address user => bool exists) private users;
 
     constructor(address initialOwner) Ownable(initialOwner) { }
 
     function userExists(address user) public view returns (bool) {
-        return users[user].signaturePubKey.length > 0;
+        return users[user];
     }
 
-    function addUser(address user, bytes calldata signaturePubKey) external onlyOwner {
-        if (signaturePubKey.length == 0) revert MalformedUserInfo();
+    function addUser(address user) external onlyOwner {
         if (userExists(user)) revert UserAlreadyExists();
 
-        users[user] = UserInfo(signaturePubKey);
+        users[user] = true;
 
-        emit UserAdded(user, signaturePubKey);
+        emit UserAdded(user);
     }
 
-    function getUser(address user) external view returns (UserInfo memory) {
-        return users[user];
+    function removeUser(address user) external onlyOwner {
+        if (!userExists(user)) revert UserDoesNotExist();
+        users[user] == false;
+        emit UserRemoved(user);
     }
 }
