@@ -19,7 +19,6 @@ pub mod Context {
     ///0x
     /// ```
     #[rustfmt::skip]
-    #[allow(clippy::all)]
     pub static BYTECODE: alloy_sol_types::private::Bytes = alloy_sol_types::private::Bytes::from_static(
         b"",
     );
@@ -29,7 +28,6 @@ pub mod Context {
     ///0x
     /// ```
     #[rustfmt::skip]
-    #[allow(clippy::all)]
     pub static DEPLOYED_BYTECODE: alloy_sol_types::private::Bytes = alloy_sol_types::private::Bytes::from_static(
         b"",
     );

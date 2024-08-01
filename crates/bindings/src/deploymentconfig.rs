@@ -114,7 +114,6 @@ pub mod DeploymentConfig {
     ///0x6080604052600c805462ff00ff19166201000117905534801561002157600080fd5b50604051610223380380610223833981016040819052610040916100f0565b6001600160a01b0381166100675760405163201616d160e21b815260040160405180910390fd5b600e80546001600160a01b0319166001600160a01b03831617905546617a69036100cb57604080516020808201835260009091528151908101909152600e546001600160a01b031690819052600d80546001600160a01b03191690911790556100ea565b604051630b13dbff60e01b815246600482015260240160405180910390fd5b50610120565b60006020828403121561010257600080fd5b81516001600160a01b038116811461011957600080fd5b9392505050565b60f58061012e6000396000f3fe6080604052348015600f57600080fd5b506004361060465760003560e01c806312900da814604b578063d7b6574514608f578063f8a8fd6d1460d2578063f8ccbf471460d4575b600080fd5b6040805160208082018352600090915281518082018352600e5473ffffffffffffffffffffffffffffffffffffffff16908190529151918252015b60405180910390f35b600d5460ae9073ffffffffffffffffffffffffffffffffffffffff1681565b60405173ffffffffffffffffffffffffffffffffffffffff90911681526020016086565b005b600c5460e69062010000900460ff1681565b6040519015158152602001608656
     /// ```
     #[rustfmt::skip]
-    #[allow(clippy::all)]
     pub static BYTECODE: alloy_sol_types::private::Bytes = alloy_sol_types::private::Bytes::from_static(
         b"`\x80`@R`\x0C\x80Tb\xFF\0\xFF\x19\x16b\x01\0\x01\x17\x90U4\x80\x15a\0!W`\0\x80\xFD[P`@Qa\x02#8\x03\x80a\x02#\x839\x81\x01`@\x81\x90Ra\0@\x91a\0\xF0V[`\x01`\x01`\xA0\x1B\x03\x81\x16a\0gW`@Qc \x16\x16\xD1`\xE2\x1B\x81R`\x04\x01`@Q\x80\x91\x03\x90\xFD[`\x0E\x80T`\x01`\x01`\xA0\x1B\x03\x19\x16`\x01`\x01`\xA0\x1B\x03\x83\x16\x17\x90UFazi\x03a\0\xCBW`@\x80Q` \x80\x82\x01\x83R`\0\x90\x91R\x81Q\x90\x81\x01\x90\x91R`\x0ET`\x01`\x01`\xA0\x1B\x03\x16\x90\x81\x90R`\r\x80T`\x01`\x01`\xA0\x1B\x03\x19\x16\x90\x91\x17\x90Ua\0\xEAV[`@Qc\x0B\x13\xDB\xFF`\xE0\x1B\x81RF`\x04\x82\x01R`$\x01`@Q\x80\x91\x03\x90\xFD[Pa\x01 V[`\0` \x82\x84\x03\x12\x15a\x01\x02W`\0\x80\xFD[\x81Q`\x01`\x01`\xA0\x1B\x03\x81\x16\x81\x14a\x01\x19W`\0\x80\xFD[\x93\x92PPPV[`\xF5\x80a\x01.`\09`\0\xF3\xFE`\x80`@R4\x80\x15`\x0FW`\0\x80\xFD[P`\x046\x10`FW`\x005`\xE0\x1C\x80c\x12\x90\r\xA8\x14`KW\x80c\xD7\xB6WE\x14`\x8FW\x80c\xF8\xA8\xFDm\x14`\xD2W\x80c\xF8\xCC\xBFG\x14`\xD4W[`\0\x80\xFD[`@\x80Q` \x80\x82\x01\x83R`\0\x90\x91R\x81Q\x80\x82\x01\x83R`\x0ETs\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x16\x90\x81\x90R\x91Q\x91\x82R\x01[`@Q\x80\x91\x03\x90\xF3[`\rT`\xAE\x90s\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x16\x81V[`@Qs\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x90\x91\x16\x81R` \x01`\x86V[\0[`\x0CT`\xE6\x90b\x01\0\0\x90\x04`\xFF\x16\x81V[`@Q\x90\x15\x15\x81R` \x01`\x86V",
     );
@@ -124,7 +123,6 @@ pub mod DeploymentConfig {
     ///0x6080604052348015600f57600080fd5b506004361060465760003560e01c806312900da814604b578063d7b6574514608f578063f8a8fd6d1460d2578063f8ccbf471460d4575b600080fd5b6040805160208082018352600090915281518082018352600e5473ffffffffffffffffffffffffffffffffffffffff16908190529151918252015b60405180910390f35b600d5460ae9073ffffffffffffffffffffffffffffffffffffffff1681565b60405173ffffffffffffffffffffffffffffffffffffffff90911681526020016086565b005b600c5460e69062010000900460ff1681565b6040519015158152602001608656
     /// ```
     #[rustfmt::skip]
-    #[allow(clippy::all)]
     pub static DEPLOYED_BYTECODE: alloy_sol_types::private::Bytes = alloy_sol_types::private::Bytes::from_static(
         b"`\x80`@R4\x80\x15`\x0FW`\0\x80\xFD[P`\x046\x10`FW`\x005`\xE0\x1C\x80c\x12\x90\r\xA8\x14`KW\x80c\xD7\xB6WE\x14`\x8FW\x80c\xF8\xA8\xFDm\x14`\xD2W\x80c\xF8\xCC\xBFG\x14`\xD4W[`\0\x80\xFD[`@\x80Q` \x80\x82\x01\x83R`\0\x90\x91R\x81Q\x80\x82\x01\x83R`\x0ETs\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x16\x90\x81\x90R\x91Q\x91\x82R\x01[`@Q\x80\x91\x03\x90\xF3[`\rT`\xAE\x90s\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x16\x81V[`@Qs\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x90\x91\x16\x81R` \x01`\x86V[\0[`\x0CT`\xE6\x90b\x01\0\0\x90\x04`\xFF\x16\x81V[`@Q\x90\x15\x15\x81R` \x01`\x86V",
     );
@@ -184,9 +182,6 @@ struct NetworkConfig { address deployer; }
             }
             #[inline]
             fn stv_abi_encoded_size(&self) -> usize {
-                if let Some(size) = <Self as alloy_sol_types::SolType>::ENCODED_SIZE {
-                    return size;
-                }
                 let tuple = <UnderlyingRustTuple<
                     '_,
                 > as ::core::convert::From<Self>>::from(self.clone());
@@ -210,18 +205,6 @@ struct NetworkConfig { address deployer; }
                     '_,
                 > as alloy_sol_types::SolType>::abi_encode_packed_to(&tuple, out)
             }
-            #[inline]
-            fn stv_abi_packed_encoded_size(&self) -> usize {
-                if let Some(size) = <Self as alloy_sol_types::SolType>::PACKED_ENCODED_SIZE {
-                    return size;
-                }
-                let tuple = <UnderlyingRustTuple<
-                    '_,
-                > as ::core::convert::From<Self>>::from(self.clone());
-                <UnderlyingSolTuple<
-                    '_,
-                > as alloy_sol_types::SolType>::abi_packed_encoded_size(&tuple)
-            }
         }
         #[automatically_derived]
         impl alloy_sol_types::SolType for NetworkConfig {
@@ -233,9 +216,6 @@ struct NetworkConfig { address deployer; }
             const ENCODED_SIZE: Option<usize> = <UnderlyingSolTuple<
                 '_,
             > as alloy_sol_types::SolType>::ENCODED_SIZE;
-            const PACKED_ENCODED_SIZE: Option<usize> = <UnderlyingSolTuple<
-                '_,
-            > as alloy_sol_types::SolType>::PACKED_ENCODED_SIZE;
             #[inline]
             fn valid_token(token: &Self::Token<'_>) -> bool {
                 <UnderlyingSolTuple<'_> as alloy_sol_types::SolType>::valid_token(token)
