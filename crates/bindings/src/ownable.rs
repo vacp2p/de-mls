@@ -103,7 +103,6 @@ pub mod Ownable {
     ///0x
     /// ```
     #[rustfmt::skip]
-    #[allow(clippy::all)]
     pub static BYTECODE: alloy_sol_types::private::Bytes = alloy_sol_types::private::Bytes::from_static(
         b"",
     );
@@ -113,7 +112,6 @@ pub mod Ownable {
     ///0x
     /// ```
     #[rustfmt::skip]
-    #[allow(clippy::all)]
     pub static DEPLOYED_BYTECODE: alloy_sol_types::private::Bytes = alloy_sol_types::private::Bytes::from_static(
         b"",
     );
@@ -354,20 +352,15 @@ event OwnershipTransferred(address indexed previousOwner, address indexed newOwn
                 Ok(())
             }
         }
-        #[automatically_derived]
-        impl alloy_sol_types::private::IntoLogData for OwnershipTransferred {
-            fn to_log_data(&self) -> alloy_sol_types::private::LogData {
-                From::from(self)
-            }
-            fn into_log_data(self) -> alloy_sol_types::private::LogData {
-                From::from(&self)
-            }
-        }
-        #[automatically_derived]
         impl From<&OwnershipTransferred> for alloy_sol_types::private::LogData {
             #[inline]
             fn from(this: &OwnershipTransferred) -> alloy_sol_types::private::LogData {
-                alloy_sol_types::SolEvent::encode_log_data(this)
+                let topics = alloy_sol_types::SolEvent::encode_topics(this)
+                    .into_iter()
+                    .map(|t| t.into())
+                    .collect();
+                let data = alloy_sol_types::SolEvent::encode_data(this).into();
+                alloy_sol_types::private::LogData::new_unchecked(topics, data)
             }
         }
     };
@@ -1067,23 +1060,6 @@ function transferOwnership(address newOwner) external;
                             ),
                         ),
                     })
-                }
-            }
-        }
-    }
-    #[automatically_derived]
-    impl alloy_sol_types::private::IntoLogData for OwnableEvents {
-        fn to_log_data(&self) -> alloy_sol_types::private::LogData {
-            match self {
-                Self::OwnershipTransferred(inner) => {
-                    alloy_sol_types::private::IntoLogData::to_log_data(inner)
-                }
-            }
-        }
-        fn into_log_data(self) -> alloy_sol_types::private::LogData {
-            match self {
-                Self::OwnershipTransferred(inner) => {
-                    alloy_sol_types::private::IntoLogData::into_log_data(inner)
                 }
             }
         }

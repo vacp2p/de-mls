@@ -41,7 +41,6 @@ pub mod Foo {
     ///0x6080604052348015600f57600080fd5b5060658061001e6000396000f3fe6080604052348015600f57600080fd5b506004361060285760003560e01c80637d3c40c814602d575b600080fd5b603b6038366004604d565b90565b60405190815260200160405180910390f35b600060208284031215605e57600080fd5b503591905056
     /// ```
     #[rustfmt::skip]
-    #[allow(clippy::all)]
     pub static BYTECODE: alloy_sol_types::private::Bytes = alloy_sol_types::private::Bytes::from_static(
         b"`\x80`@R4\x80\x15`\x0FW`\0\x80\xFD[P`e\x80a\0\x1E`\09`\0\xF3\xFE`\x80`@R4\x80\x15`\x0FW`\0\x80\xFD[P`\x046\x10`(W`\x005`\xE0\x1C\x80c}<@\xC8\x14`-W[`\0\x80\xFD[`;`86`\x04`MV[\x90V[`@Q\x90\x81R` \x01`@Q\x80\x91\x03\x90\xF3[`\0` \x82\x84\x03\x12\x15`^W`\0\x80\xFD[P5\x91\x90PV",
     );
@@ -51,7 +50,6 @@ pub mod Foo {
     ///0x6080604052348015600f57600080fd5b506004361060285760003560e01c80637d3c40c814602d575b600080fd5b603b6038366004604d565b90565b60405190815260200160405180910390f35b600060208284031215605e57600080fd5b503591905056
     /// ```
     #[rustfmt::skip]
-    #[allow(clippy::all)]
     pub static DEPLOYED_BYTECODE: alloy_sol_types::private::Bytes = alloy_sol_types::private::Bytes::from_static(
         b"`\x80`@R4\x80\x15`\x0FW`\0\x80\xFD[P`\x046\x10`(W`\x005`\xE0\x1C\x80c}<@\xC8\x14`-W[`\0\x80\xFD[`;`86`\x04`MV[\x90V[`@Q\x90\x81R` \x01`@Q\x80\x91\x03\x90\xF3[`\0` \x82\x84\x03\x12\x15`^W`\0\x80\xFD[P5\x91\x90PV",
     );

@@ -320,7 +320,6 @@ pub mod IERC721 {
     ///0x
     /// ```
     #[rustfmt::skip]
-    #[allow(clippy::all)]
     pub static BYTECODE: alloy_sol_types::private::Bytes = alloy_sol_types::private::Bytes::from_static(
         b"",
     );
@@ -330,7 +329,6 @@ pub mod IERC721 {
     ///0x
     /// ```
     #[rustfmt::skip]
-    #[allow(clippy::all)]
     pub static DEPLOYED_BYTECODE: alloy_sol_types::private::Bytes = alloy_sol_types::private::Bytes::from_static(
         b"",
     );
@@ -447,20 +445,15 @@ event Approval(address indexed _owner, address indexed _approved, uint256 indexe
                 Ok(())
             }
         }
-        #[automatically_derived]
-        impl alloy_sol_types::private::IntoLogData for Approval {
-            fn to_log_data(&self) -> alloy_sol_types::private::LogData {
-                From::from(self)
-            }
-            fn into_log_data(self) -> alloy_sol_types::private::LogData {
-                From::from(&self)
-            }
-        }
-        #[automatically_derived]
         impl From<&Approval> for alloy_sol_types::private::LogData {
             #[inline]
             fn from(this: &Approval) -> alloy_sol_types::private::LogData {
-                alloy_sol_types::SolEvent::encode_log_data(this)
+                let topics = alloy_sol_types::SolEvent::encode_topics(this)
+                    .into_iter()
+                    .map(|t| t.into())
+                    .collect();
+                let data = alloy_sol_types::SolEvent::encode_data(this).into();
+                alloy_sol_types::private::LogData::new_unchecked(topics, data)
             }
         }
     };
@@ -576,20 +569,15 @@ event ApprovalForAll(address indexed _owner, address indexed _operator, bool _ap
                 Ok(())
             }
         }
-        #[automatically_derived]
-        impl alloy_sol_types::private::IntoLogData for ApprovalForAll {
-            fn to_log_data(&self) -> alloy_sol_types::private::LogData {
-                From::from(self)
-            }
-            fn into_log_data(self) -> alloy_sol_types::private::LogData {
-                From::from(&self)
-            }
-        }
-        #[automatically_derived]
         impl From<&ApprovalForAll> for alloy_sol_types::private::LogData {
             #[inline]
             fn from(this: &ApprovalForAll) -> alloy_sol_types::private::LogData {
-                alloy_sol_types::SolEvent::encode_log_data(this)
+                let topics = alloy_sol_types::SolEvent::encode_topics(this)
+                    .into_iter()
+                    .map(|t| t.into())
+                    .collect();
+                let data = alloy_sol_types::SolEvent::encode_data(this).into();
+                alloy_sol_types::private::LogData::new_unchecked(topics, data)
             }
         }
     };
@@ -706,20 +694,15 @@ event Transfer(address indexed _from, address indexed _to, uint256 indexed _toke
                 Ok(())
             }
         }
-        #[automatically_derived]
-        impl alloy_sol_types::private::IntoLogData for Transfer {
-            fn to_log_data(&self) -> alloy_sol_types::private::LogData {
-                From::from(self)
-            }
-            fn into_log_data(self) -> alloy_sol_types::private::LogData {
-                From::from(&self)
-            }
-        }
-        #[automatically_derived]
         impl From<&Transfer> for alloy_sol_types::private::LogData {
             #[inline]
             fn from(this: &Transfer) -> alloy_sol_types::private::LogData {
-                alloy_sol_types::SolEvent::encode_log_data(this)
+                let topics = alloy_sol_types::SolEvent::encode_topics(this)
+                    .into_iter()
+                    .map(|t| t.into())
+                    .collect();
+                let data = alloy_sol_types::SolEvent::encode_data(this).into();
+                alloy_sol_types::private::LogData::new_unchecked(topics, data)
             }
         }
     };
@@ -2550,35 +2533,6 @@ function transferFrom(address _from, address _to, uint256 _tokenId) external pay
                             ),
                         ),
                     })
-                }
-            }
-        }
-    }
-    #[automatically_derived]
-    impl alloy_sol_types::private::IntoLogData for IERC721Events {
-        fn to_log_data(&self) -> alloy_sol_types::private::LogData {
-            match self {
-                Self::Approval(inner) => {
-                    alloy_sol_types::private::IntoLogData::to_log_data(inner)
-                }
-                Self::ApprovalForAll(inner) => {
-                    alloy_sol_types::private::IntoLogData::to_log_data(inner)
-                }
-                Self::Transfer(inner) => {
-                    alloy_sol_types::private::IntoLogData::to_log_data(inner)
-                }
-            }
-        }
-        fn into_log_data(self) -> alloy_sol_types::private::LogData {
-            match self {
-                Self::Approval(inner) => {
-                    alloy_sol_types::private::IntoLogData::into_log_data(inner)
-                }
-                Self::ApprovalForAll(inner) => {
-                    alloy_sol_types::private::IntoLogData::into_log_data(inner)
-                }
-                Self::Transfer(inner) => {
-                    alloy_sol_types::private::IntoLogData::into_log_data(inner)
                 }
             }
         }

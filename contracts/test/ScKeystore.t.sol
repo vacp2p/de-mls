@@ -18,7 +18,7 @@ contract ScKeystoreTest is Test {
     }
 
     function addUser() internal {
-        s.addUser(address(this), "0x");
+        s.addUser(address(this));
     }
 
     function test__owner() public view {
@@ -27,11 +27,6 @@ contract ScKeystoreTest is Test {
 
     function test__userExists__returnsFalse__whenUserDoesNotExist() public view {
         assert(!s.userExists(address(this)));
-    }
-
-    function test__addUser__reverts__whenUserInfoIsMalformed() public {
-        vm.expectRevert(MalformedUserInfo.selector);
-        s.addUser(address(this), "");
     }
 
     function test__addUser__reverts__whenUserAlreadyExists() public {
@@ -52,9 +47,13 @@ contract ScKeystoreTest is Test {
         vm.stopPrank();
     }
 
-    function test__getUser__returnsUserInfo__whenUserExists() public {
+    function test__removeUser__reverts__whenUserDoesNotExist() public {
+        vm.expectRevert();
+        s.removeUser(address(0));
+    }
+
+    function test__removeUser() public {
         addUser();
-        UserInfo memory userInfo = s.getUser(address(this));
-        assert(userInfo.signaturePubKey.length == 2);
+        s.removeUser(address(this));
     }
 }
