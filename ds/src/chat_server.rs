@@ -3,14 +3,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::{
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     sync::{mpsc, Mutex},
-    task,
 };
-use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
 
-use crate::chat_client::ChatMessages;
 use crate::ChatServiceError;
 
 type Tx = mpsc::UnboundedSender<Message>;

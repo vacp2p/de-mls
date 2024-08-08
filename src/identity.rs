@@ -1,5 +1,4 @@
 use alloy::primitives::Address;
-use hex;
 use std::collections::HashMap;
 
 use openmls::{credentials::CredentialWithKey, key_packages::*, prelude::*};

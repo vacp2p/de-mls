@@ -1,8 +1,5 @@
 use alloy::primitives::Address;
-use alloy::providers::ProviderBuilder;
-use alloy::rlp::Encodable;
 use alloy::signers::Signature;
-use alloy::signers::{local::PrivateKeySigner, SignerSync};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -74,7 +71,6 @@ impl ResponseMLSPayload {
 
 pub struct ChatClient {
     sender: mpsc::UnboundedSender<Message>,
-    pub request_in_progress: Arc<Mutex<()>>,
 }
 
 impl ChatClient {
@@ -92,7 +88,7 @@ impl ChatClient {
         // Spawn a task to handle outgoing messages
         tokio::spawn(async move {
             while let Some(message) = receiver.lock().await.recv().await {
-                println!("Message from reciever: {}", message);
+                // println!("Message from reciever: {}", message);
                 if let Err(e) = write.send(message).await {
                     eprintln!("Error sending message: {}", e);
                 }
@@ -104,7 +100,6 @@ impl ChatClient {
             let mut read = read;
             while let Some(message) = read.next().await {
                 if let Ok(msg) = message {
-                    println!("Message from read: {}", msg);
                     if let Err(e) = msg_sender.send(msg) {
                         eprintln!("Failed to send message to channel: {}", e);
                     }
@@ -121,29 +116,21 @@ impl ChatClient {
             .send(Message::Text(join_json))
             .map_err(|_| ChatServiceError::SendError)?;
 
-        Ok((
-            ChatClient {
-                sender,
-                request_in_progress: Arc::new(Mutex::new(())),
-            },
-            msg_receiver,
-        ))
+        Ok((ChatClient { sender }, msg_receiver))
     }
 
     pub async fn send_request(&self, msg: ServerMessage) -> Result<(), ChatServiceError> {
-        let _guard = self.request_in_progress.lock().await;
         self.send_message_to_server(msg)?;
         Ok(())
     }
 
     pub async fn handle_response(&self) -> Result<(), ChatServiceError> {
-        drop(self.request_in_progress.lock().await);
         Ok(())
     }
 
     pub fn send_message_to_server(&self, msg: ServerMessage) -> Result<(), ChatServiceError> {
         let msg_json = serde_json::to_string(&msg).unwrap();
-        println!("Message to sender: {}", msg_json);
+        // println!("Message to sender: {}", msg_json);
         self.sender
             .send(Message::Text(msg_json))
             .map_err(|_| ChatServiceError::SendError)?;
@@ -153,7 +140,8 @@ impl ChatClient {
 
 #[test]
 fn test_sign() {
-    let signer = PrivateKeySigner::from_str(
+    use alloy::signers::SignerSync;
+    let signer = alloy::signers::local::PrivateKeySigner::from_str(
         "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
     )
     .unwrap();

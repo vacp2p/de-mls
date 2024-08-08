@@ -139,8 +139,6 @@ where
             return Err(UserError::EmptyScConnection);
         }
         self.sc_ks.as_mut().unwrap().add_user(user_address).await?;
-
-        self.contacts.add_new_contact(user_address).await?;
         Ok(())
     }
 
@@ -167,6 +165,29 @@ where
         if self.sc_ks.is_none() {
             return Err(UserError::EmptyScConnection);
         }
+
+        // for user_wallet in users.iter() {
+        //     if !self.contacts.does_user_in_contacts(user_wallet).await {
+        //         self.contacts.add_new_contact(user_wallet).await?;
+        //     }
+        //     self.contacts
+        //         .send_req_msg_to_user(
+        //             self.identity.to_string(),
+        //             user_wallet,
+        //             self.sc_ks.as_mut().unwrap().get_sc_adsress(),
+        //             ReqMessageType::InviteToGroup,
+        //         )
+        //         .await?;
+        //     println!("waiting token");
+        //     match self.contacts.future_req.get(user_wallet) {
+        //         Some(token) => token.cancelled().await,
+        //         None => return Err(UserError::UnknownUserError),
+        //     };
+        //     println!("cancelled token");
+        //     self.contacts.future_req.remove(user_wallet);
+
+        //     self.add_user_to_acl(user_wallet).await?;
+        // }
 
         let users_for_invite = self
             .contacts
@@ -308,14 +329,22 @@ where
 
     pub async fn join_group(
         &mut self,
-        welcome: Welcome,
+        welcome: String,
     ) -> Result<(Receiver<Message>, String), UserError> {
+        let wbytes = hex::decode(welcome).unwrap();
+        let welc = MlsMessageIn::tls_deserialize_bytes(wbytes).unwrap();
+        let welcome = welc.into_welcome();
+        if welcome.is_none() {
+            return Err(UserError::EmptyWelcomeMessageError);
+        }
+
         let group_config = MlsGroupConfig::builder()
             .use_ratchet_tree_extension(true)
             .build();
 
         // TODO: After we move from openmls, we will have to delete the used key package here ourselves.
-        let mls_group = MlsGroup::new_from_welcome(&self.provider, &group_config, welcome, None)?;
+        let mls_group =
+            MlsGroup::new_from_welcome(&self.provider, &group_config, welcome.unwrap(), None)?;
 
         let group_id = mls_group.group_id().to_vec();
         let group_name = String::from_utf8(group_id)?;
@@ -405,6 +434,7 @@ where
     pub fn send_responce_on_request(
         &mut self,
         req: RequestMLSPayload,
+        self_address: String,
         user_address: &str,
     ) -> Result<(), UserError> {
         match req.msg_type {
@@ -415,14 +445,11 @@ where
                     .generate_key_package(CIPHERSUITE, &self.provider)?;
                 let resp = ResponseMLSPayload::new(
                     signature,
-                    self.identity.to_string(),
+                    self_address.clone(),
                     key_package.tls_serialize_detached()?,
                 );
-                self.contacts.send_resp_msg_to_user(
-                    self.identity.to_string(),
-                    user_address,
-                    resp,
-                )?;
+                self.contacts
+                    .send_resp_msg_to_user(self_address, user_address, resp)?;
 
                 Ok(())
             }
@@ -439,11 +466,20 @@ where
             return Err(UserError::EmptyScConnection);
         }
         let (user_wallet, kp) = resp.validate(self.sc_ks.as_ref().unwrap().get_sc_adsress())?;
+
         self.contacts
-            .add_key_package_to_contact(&user_wallet, kp, group_name)
+            .add_key_package_to_contact(&user_wallet, kp, group_name.clone())
             .await?;
 
+        self.contacts.handle_response(&user_wallet)?;
         Ok(())
+    }
+
+    pub fn get_sc_address(&self) -> Result<String, UserError> {
+        if self.sc_ks.is_none() {
+            return Err(UserError::EmptyScConnection);
+        }
+        Ok(self.sc_ks.as_ref().unwrap().get_sc_adsress())
     }
 }
 
@@ -496,6 +532,8 @@ pub enum UserError {
     InvalidChatMessageError,
     #[error("Message from server is invalid")]
     InvalidServerMessageError,
+    #[error("Unknown user")]
+    UnknownUserError,
 
     #[error(transparent)]
     DeliveryServiceError(#[from] DeliveryServiceError),

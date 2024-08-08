@@ -1,4 +1,4 @@
-use alloy::{hex::ToHexExt, primitives::SignatureError, signers::Signature};
+use alloy::{hex::ToHexExt, primitives::SignatureError};
 use ds::{
     chat_client::{
         ChatClient, ChatMessages, ReqMessageType, RequestMLSPayload, ResponseMLSPayload,
@@ -12,11 +12,13 @@ use openmls::prelude::MlsMessageOut;
 use std::{collections::HashMap, sync::Arc};
 use tls_codec::Serialize;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 pub const CHAT_SERVER_ADDR: &str = "ws://127.0.0.1:8080";
 
 pub struct ContactsList {
     contacts: Arc<Mutex<HashMap<String, Contact>>>,
+    pub future_req: HashMap<String, CancellationToken>,
     pub chat_client: ChatClient,
 }
 
@@ -51,6 +53,7 @@ impl ContactsList {
     pub async fn new(chat_client: ChatClient) -> Result<Self, ContactError> {
         Ok(ContactsList {
             contacts: Arc::new(Mutex::new(HashMap::new())),
+            future_req: HashMap::new(),
             chat_client,
         })
     }
@@ -82,6 +85,9 @@ impl ContactsList {
         sc_address: String,
         msg_type: ReqMessageType,
     ) -> Result<(), ContactError> {
+        self.future_req
+            .insert(user_address.to_string(), CancellationToken::new());
+
         let req = ChatMessages::Request(RequestMLSPayload::new(sc_address, msg_type));
         self.chat_client
             .send_request(ServerMessage::InMessage {
@@ -90,6 +96,7 @@ impl ContactsList {
                 msg: serde_json::to_string(&req)?,
             })
             .await?;
+
         Ok(())
     }
 
@@ -194,6 +201,16 @@ impl ContactsList {
         }
 
         Ok(joiners_kp)
+    }
+
+    pub fn handle_response(&mut self, user_address: &str) -> Result<(), ContactError> {
+        match self.future_req.get(user_address) {
+            Some(token) => {
+                token.cancel();
+                Ok(())
+            }
+            None => Err(ContactError::UnknownUserError),
+        }
     }
 }
 

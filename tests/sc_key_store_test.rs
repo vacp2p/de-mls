@@ -117,7 +117,11 @@ async fn test_input_request() {
                             if let Ok(chat_msg) = serde_json::from_str::<ChatMessages>(&msg) {
                                 match chat_msg {
                                     ChatMessages::Request(req) => {
-                                        let res = alice.send_responce_on_request(req, &from);
+                                        let res = alice.send_responce_on_request(
+                                            req,
+                                            to[0].clone(),
+                                            &from,
+                                        );
                                         match res {
                                             Ok(_) => {
                                                 println!("Succesfully create responce");
@@ -140,26 +144,18 @@ async fn test_input_request() {
                                         }
                                     }
                                     ChatMessages::Welcome(welcome) => {
-                                        let wbytes = hex::decode(welcome).unwrap();
-                                        let welc =
-                                            MlsMessageIn::tls_deserialize_bytes(wbytes).unwrap();
-                                        let welcome = welc.into_welcome();
-                                        if welcome.is_some() {
-                                            let res = alice.join_group(welcome.unwrap()).await;
-                                            match res {
-                                                Ok(mut buf) => {
-                                                    let msg = format!(
-                                                        "Succesfully join to the group: {:#?}",
-                                                        buf.1
-                                                    );
-                                                }
-                                                Err(err) => {
-                                                    eprintln!("Error: {}", err);
-                                                }
-                                            };
-                                        } else {
-                                            eprintln!("Error: empty welcome");
-                                        }
+                                        let res = alice.join_group(welcome).await;
+                                        match res {
+                                            Ok(mut buf) => {
+                                                let msg = format!(
+                                                    "Succesfully join to the group: {:#?}",
+                                                    buf.1
+                                                );
+                                            }
+                                            Err(err) => {
+                                                eprintln!("Error: {}", err);
+                                            }
+                                        };
                                     }
                                 }
                             }

@@ -41,9 +41,7 @@ impl<T: Transport + Clone, P: Provider<T, N>, N: Network> SCKeyStoreService
 
     async fn add_user(&mut self, address: &str) -> Result<(), KeyStoreError> {
         if self.does_user_exist(address).await? {
-            println!("User already exist");
-            // return Err(KeyStoreError::AlreadyExistedUserError);
-            return Ok(());
+            return Err(KeyStoreError::AlreadyExistedUserError);
         }
 
         let add_to_acl_binding = self.instance.addUser(Address::from_str(address)?);
