@@ -1,3 +1,4 @@
+use alloy::primitives::Address;
 use hex;
 use std::collections::HashMap;
 
@@ -19,7 +20,6 @@ impl Identity {
         ciphersuite: Ciphersuite,
         crypto: &MlsCryptoProvider,
         user_wallet_address: &[u8],
-        number_of_kp: usize,
     ) -> Result<Identity, IdentityError> {
         let credential = Credential::new(user_wallet_address.to_vec(), CredentialType::Basic)?;
         let signature_keys = SignatureKeyPair::new(ciphersuite.signature_algorithm())?;
@@ -30,19 +30,17 @@ impl Identity {
         signature_keys.store(crypto.key_store())?;
 
         let mut kps = HashMap::new();
-        for _ in 0..number_of_kp {
-            let key_package = KeyPackage::builder().build(
-                CryptoConfig {
-                    ciphersuite,
-                    version: ProtocolVersion::default(),
-                },
-                crypto,
-                &signature_keys,
-                credential_with_key.clone(),
-            )?;
-            let kp = key_package.hash_ref(crypto.crypto())?;
-            kps.insert(kp.as_slice().to_vec(), key_package);
-        }
+        let key_package = KeyPackage::builder().build(
+            CryptoConfig {
+                ciphersuite,
+                version: ProtocolVersion::default(),
+            },
+            crypto,
+            &signature_keys,
+            credential_with_key.clone(),
+        )?;
+        let kp = key_package.hash_ref(crypto.crypto())?;
+        kps.insert(kp.as_slice().to_vec(), key_package);
 
         Ok(Identity {
             kp: kps,
@@ -52,7 +50,7 @@ impl Identity {
     }
 
     /// Create an additional key package using the credential_with_key/signer bound to this identity
-    pub fn add_key_package(
+    pub fn generate_key_package(
         &mut self,
         ciphersuite: Ciphersuite,
         crypto: &MlsCryptoProvider,
@@ -81,7 +79,7 @@ impl Identity {
 
 impl ToString for Identity {
     fn to_string(&self) -> String {
-        hex::encode(self.credential_with_key.credential.identity())
+        Address::from_slice(self.credential_with_key.credential.identity()).to_string()
     }
 }
 

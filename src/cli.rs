@@ -1,9 +1,3 @@
-use alloy::{
-    hex::FromHexError,
-    network::EthereumWallet,
-    primitives::Address,
-    signers::local::{LocalSignerError, PrivateKeySigner},
-};
 use clap::{arg, command, Parser, Subcommand};
 use crossterm::{
     event::{self, Event, KeyCode},
@@ -21,10 +15,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::{
-    io,
-    io::{Read, Write},
-    str::FromStr,
-    string::FromUtf8Error,
+    io::{stdout, Read, Write},
     sync::Arc,
 };
 use tokio::{
@@ -36,24 +27,20 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::user::UserError;
-use ds::ds::DeliveryServiceError;
-
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 pub struct Args {
     /// User private key that correspond to Ethereum wallet
     #[arg(short = 'K', long)]
-    user_priv_key: String,
+    pub user_priv_key: String,
+    // /// Rpc url
+    // #[arg(short = 'U', long,
+    //     default_value_t = Url::from_str("http://localhost:8545").unwrap())]
+    // pub storage_url: Url,
 
-    /// Rpc url
-    #[arg(short = 'U', long,
-        default_value_t = Url::from_str("http://localhost:8545").unwrap())]
-    pub storage_url: Url,
-
-    /// Storage contract address
-    #[arg(short = 'S', long)]
-    pub storage_addr: String,
+    // /// Storage contract address
+    // #[arg(short = 'S', long)]
+    // pub storage_addr: String,
 }
 
 pub enum Msg {
@@ -70,14 +57,6 @@ pub enum Message {
     Error(String),
 }
 
-pub fn get_user_data(args: &Args) -> Result<(Address, EthereumWallet, Address), CliError> {
-    let signer = PrivateKeySigner::from_str(&args.user_priv_key)?;
-    let user_address = signer.address();
-    let wallet = EthereumWallet::from(signer);
-    let storage_address = Address::from_str(&args.storage_addr)?;
-    Ok((user_address, wallet, storage_address))
-}
-
 #[derive(Debug, Parser)]
 #[command(multicall = true)]
 pub struct Cli {
@@ -89,13 +68,12 @@ pub struct Cli {
 pub enum Commands {
     CreateGroup {
         group_name: String,
+        storage_address: String,
+        storage_url: Url,
     },
     Invite {
         group_name: String,
-        user_wallet: String,
-    },
-    JoinGroup {
-        group_name: String,
+        users_wallet_addrs: Vec<String>,
     },
     SendMessage {
         group_name: String,
@@ -204,7 +182,7 @@ pub async fn terminal_handler(
     token: CancellationToken,
 ) -> Result<(), CliError> {
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
+    let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Arc::new(Mutex::new(Terminal::new(backend)?));
@@ -259,24 +237,9 @@ pub async fn terminal_handler(
 pub enum CliError {
     #[error("Can't split the line")]
     SplitLineError,
-    #[error("Unknown message type")]
-    UnknownMsgError,
 
-    #[error(transparent)]
-    UserError(#[from] UserError),
-    #[error(transparent)]
-    DeliveryServiceError(#[from] DeliveryServiceError),
-
-    #[error("Unable to parce the address: {0}")]
-    AlloyFromHexError(#[from] FromHexError),
-    #[error("Unable to parce the signer: {0}")]
-    AlloyParceSignerError(#[from] LocalSignerError),
     #[error("Problem from std::io library: {0}")]
     IoError(#[from] std::io::Error),
-    #[error("Parse String UTF8 error: {0}")]
-    ParseUTF8Error(#[from] FromUtf8Error),
-    #[error("Parse String error: {0}")]
-    StringError(#[from] core::convert::Infallible),
 
     #[error("Can't send control message into channel: {0}")]
     SendMsgError(#[from] SendError<Msg>),
@@ -285,8 +248,6 @@ pub enum CliError {
     #[error("Can't send command into channel: {0}")]
     SendCommandError(#[from] SendError<Commands>),
 
-    #[error(transparent)]
-    ClapError(#[from] clap::error::Error),
     #[error("Redis error: {0}")]
     RedisError(#[from] RedisError),
     #[error("Failed from tokio join: {0}")]

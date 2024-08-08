@@ -1,35 +1,39 @@
 use alloy::{
-    hex::{self, FromHexError, ToHexExt},
-    network::Network,
+    hex::{self, FromHexError},
+    network::{EthereumWallet, Network},
     primitives::Address,
     providers::Provider,
+    signers::{
+        local::{LocalSignerError, PrivateKeySigner},
+        SignerSync,
+    },
     transports::Transport,
 };
 use fred::types::Message;
 use openmls::{group::*, prelude::*};
 use openmls_rust_crypto::MemoryKeyStoreError;
 use std::{
-    borrow::BorrowMut,
     cell::RefCell,
     collections::HashMap,
     fmt::Display,
-    fs::File,
-    io::Write,
     str::{from_utf8, FromStr, Utf8Error},
     string::FromUtf8Error,
 };
 use tokio::sync::broadcast::Receiver;
 
-use ds::ds::*;
+use ds::{
+    chat_client::{ChatClient, ReqMessageType, RequestMLSPayload, ResponseMLSPayload},
+    ds::*,
+    ChatServiceError,
+};
 use mls_crypto::openmls_provider::*;
 use sc_key_store::{sc_ks::ScKeyStorage, *};
-// use waku_bindings::*;
-//
 
-use crate::conversation::*;
-use crate::identity::{Identity, IdentityError};
-
-const NUMBER_OF_KP: usize = 2;
+use crate::{
+    contact::ContactError,
+    identity::{Identity, IdentityError},
+};
+use crate::{contact::ContactsList, conversation::*};
 
 pub struct Group {
     group_name: String,
@@ -49,8 +53,10 @@ pub struct User<T, P, N> {
     pub identity: Identity,
     pub groups: HashMap<String, Group>,
     provider: MlsCryptoProvider,
-    sc_ks: ScKeyStorage<T, P, N>,
-    // pub(crate) contacts: HashMap<Vec<u8>, WakuPeers>,
+    eth_signer: PrivateKeySigner,
+    // we don't need on-chain connection if we don't create a group
+    sc_ks: Option<ScKeyStorage<T, P, N>>,
+    pub contacts: ContactsList,
 }
 
 impl<T, P, N> User<T, P, N>
@@ -60,22 +66,36 @@ where
     N: Network,
 {
     /// Create a new user with the given name and a fresh set of credentials.
-    pub async fn new(
-        user_wallet_address: &[u8],
-        provider: P,
-        sc_storage_address: Address,
-    ) -> Result<Self, UserError> {
+    pub async fn new(user_eth_priv_key: &str, chat_client: ChatClient) -> Result<Self, UserError> {
+        let signer = PrivateKeySigner::from_str(user_eth_priv_key)?;
+        let user_address = signer.address();
+
         let crypto = MlsCryptoProvider::default();
-        let id = Identity::new(CIPHERSUITE, &crypto, user_wallet_address, NUMBER_OF_KP)?;
-        let mut user = User {
+        let id = Identity::new(CIPHERSUITE, &crypto, user_address.as_slice())?;
+        let user = User {
             groups: HashMap::new(),
             identity: id,
+            eth_signer: signer,
             provider: crypto,
-            sc_ks: ScKeyStorage::new(provider, sc_storage_address),
-            // contacts: HashMap::new(),
+            sc_ks: None,
+            contacts: ContactsList::new(chat_client).await?,
         };
-        user.register().await?;
         Ok(user)
+    }
+
+    pub async fn connect_to_smart_contract(
+        &mut self,
+        sc_storage_address: &str,
+        provider: P,
+    ) -> Result<(), UserError> {
+        let storage_address = Address::from_str(sc_storage_address)?;
+        self.sc_ks = Some(ScKeyStorage::new(provider, storage_address));
+        self.sc_ks
+            .as_mut()
+            .unwrap()
+            .add_user(&self.identity.to_string())
+            .await?;
+        Ok(())
     }
 
     pub async fn create_group(
@@ -114,44 +134,51 @@ where
         Ok(broadcaster)
     }
 
-    async fn register(&mut self) -> Result<(), UserError> {
-        let ukp = self.key_packages();
-        self.sc_ks
-            .borrow_mut()
-            .add_user(ukp.clone(), self.identity.signature_pub_key().as_slice())
-            .await?;
+    pub async fn add_user_to_acl(&mut self, user_address: &str) -> Result<(), UserError> {
+        if self.sc_ks.is_none() {
+            return Err(UserError::EmptyScConnection);
+        }
+        self.sc_ks.as_mut().unwrap().add_user(user_address).await?;
+
+        self.contacts.add_new_contact(user_address).await?;
         Ok(())
     }
 
-    /// Get the key packages fo this user.
-    pub fn key_packages(&self) -> UserKeyPackages {
-        let mut kpgs = self.identity.kp.clone();
-        UserKeyPackages(kpgs.drain().collect::<Vec<(Vec<u8>, KeyPackage)>>())
+    pub async fn restore_key_package(
+        &mut self,
+        mut signed_kp: &[u8],
+    ) -> Result<KeyPackage, UserError> {
+        if self.sc_ks.is_none() {
+            return Err(UserError::EmptyScConnection);
+        }
+
+        let key_package_in = KeyPackageIn::tls_deserialize(&mut signed_kp)?;
+        let key_package =
+            key_package_in.validate(self.provider.crypto(), ProtocolVersion::Mls10)?;
+
+        Ok(key_package)
     }
 
     pub async fn invite(
         &mut self,
-        user_wallet: String,
+        users: Vec<String>,
         group_name: String,
     ) -> Result<(), UserError> {
-        let user_address = Address::from_str(&user_wallet)?;
-        let user_wallet_address = user_address.as_slice();
-        // First we need to get the key package for {id} from the DS.
-        if !self
-            .sc_ks
-            .borrow_mut()
-            .does_user_exist(user_wallet_address)
-            .await?
-        {
-            return Err(UserError::UnknownUserError);
+        if self.sc_ks.is_none() {
+            return Err(UserError::EmptyScConnection);
         }
 
-        // Reclaim a key package from the server
-        let joiner_key_package = self
-            .sc_ks
-            .borrow_mut()
-            .get_avaliable_user_kp(user_wallet_address, &self.provider)
+        let users_for_invite = self
+            .contacts
+            .prepare_joiners(users.clone(), group_name.clone())
             .await?;
+
+        let mut joiners_key_package: Vec<KeyPackage> = Vec::with_capacity(users_for_invite.len());
+        let mut user_addrs = Vec::with_capacity(users_for_invite.len());
+        for (user_addr, user_kp) in users_for_invite {
+            joiners_key_package.push(self.restore_key_package(&user_kp).await?);
+            user_addrs.push(user_addr);
+        }
 
         // Build a proposal with this key package and do the MLS bits.
         let group = match self.groups.get_mut(&group_name) {
@@ -162,7 +189,7 @@ where
         let (out_messages, welcome, _group_info) = group.mls_group.borrow_mut().add_members(
             &self.provider,
             &self.identity.signer,
-            &[joiner_key_package],
+            &joiners_key_package,
         )?;
 
         group
@@ -174,12 +201,9 @@ where
             .mls_group
             .borrow_mut()
             .merge_pending_commit(&self.provider)?;
-        // Put sending welcome by p2p here
-        let bytes = welcome.tls_serialize_detached()?;
-        let string = bytes.encode_hex();
-
-        let mut file = File::create(format!("invite_{group_name}.txt"))?;
-        file.write_all(string.as_bytes())?;
+        // Send welcome by p2p
+        self.contacts
+            .send_welcome_msg_to_users(self.identity.to_string(), user_addrs, welcome)?;
 
         Ok(())
     }
@@ -367,6 +391,60 @@ where
         }
         Ok(self.groups.keys().map(|k| k.to_owned()).collect())
     }
+
+    pub fn get_wallet(&self) -> EthereumWallet {
+        EthereumWallet::from(self.eth_signer.clone())
+    }
+
+    fn generate_signature(&self, msg: String) -> Result<String, UserError> {
+        let signature = self.eth_signer.sign_message_sync(msg.as_bytes())?;
+        let res = serde_json::to_string(&signature)?;
+        Ok(res)
+    }
+
+    pub fn send_responce_on_request(
+        &mut self,
+        req: RequestMLSPayload,
+        user_address: &str,
+    ) -> Result<(), UserError> {
+        match req.msg_type {
+            ReqMessageType::InviteToGroup => {
+                let signature = self.generate_signature(req.msg)?;
+                let key_package = self
+                    .identity
+                    .generate_key_package(CIPHERSUITE, &self.provider)?;
+                let resp = ResponseMLSPayload::new(
+                    signature,
+                    self.identity.to_string(),
+                    key_package.tls_serialize_detached()?,
+                );
+                self.contacts.send_resp_msg_to_user(
+                    self.identity.to_string(),
+                    user_address,
+                    resp,
+                )?;
+
+                Ok(())
+            }
+            ReqMessageType::RemoveFromGroup => Ok(()),
+        }
+    }
+
+    pub async fn parce_responce(
+        &mut self,
+        resp: ResponseMLSPayload,
+        group_name: String,
+    ) -> Result<(), UserError> {
+        if self.sc_ks.is_none() {
+            return Err(UserError::EmptyScConnection);
+        }
+        let (user_wallet, kp) = resp.validate(self.sc_ks.as_ref().unwrap().get_sc_adsress())?;
+        self.contacts
+            .add_key_package_to_contact(&user_wallet, kp, group_name)
+            .await?;
+
+        Ok(())
+    }
 }
 
 impl Group {
@@ -402,25 +480,33 @@ pub enum GroupError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum UserError {
+    #[error("User doesn't have connection to smart contract")]
+    EmptyScConnection,
     #[error("Unknown group: {0}")]
     UnknownGroupError(String),
     #[error("Group already exist: {0}")]
     AlreadyExistedGroupError(String),
     #[error("Unsupported message type")]
     MessageTypeError,
-    #[error("Unknown user")]
-    UnknownUserError,
+    #[error("User already exist: {0}")]
+    AlreadyExistedUserError(String),
     #[error("Empty welcome message")]
     EmptyWelcomeMessageError,
+    #[error("Inner Message from server is invalid")]
+    InvalidChatMessageError,
+    #[error("Message from server is invalid")]
+    InvalidServerMessageError,
 
-    #[error("Delivery Service error: {0}")]
+    #[error(transparent)]
     DeliveryServiceError(#[from] DeliveryServiceError),
     #[error(transparent)]
-    GroupError(#[from] GroupError),
-    #[error("Key Store error: {0}")]
     KeyStoreError(#[from] KeyStoreError),
-    #[error("Identity error: {0}")]
+    #[error(transparent)]
     IdentityError(#[from] IdentityError),
+    #[error(transparent)]
+    ContactError(#[from] ContactError),
+    #[error(transparent)]
+    ChatServiceError(#[from] ChatServiceError),
 
     #[error("Something wrong while creating Mls group: {0}")]
     MlsGroupCreationError(#[from] NewGroupError<MemoryKeyStoreError>),
@@ -438,6 +524,8 @@ pub enum UserError {
     MlsWelcomeError(#[from] WelcomeError<MemoryKeyStoreError>),
     #[error("Failed to remove member from group: {0}")]
     MlsRemoveMembersError(#[from] RemoveMembersError<MemoryKeyStoreError>),
+    #[error("Failed to validate user key_pacakge: {0}")]
+    MlsKeyPackageVerifyError(#[from] KeyPackageVerifyError),
 
     #[error("Parse String UTF8 error: {0}")]
     ParseUTF8Error(#[from] FromUtf8Error),
@@ -449,6 +537,10 @@ pub enum UserError {
     TlsError(#[from] tls_codec::Error),
     #[error("Unable to parce the address: {0}")]
     AlloyFromHexError(#[from] FromHexError),
+    #[error("Unable to parce the signer: {0}")]
+    AlloyParceSignerError(#[from] LocalSignerError),
+    #[error("Unable to sign the message: {0}")]
+    AlloySignersError(#[from] alloy::signers::Error),
     #[error("Write to stdout error")]
     IoError(#[from] std::io::Error),
 

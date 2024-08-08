@@ -5,7 +5,7 @@ use fred::{
     types::Message,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast::{error::RecvError, Receiver};
+use tokio::sync::broadcast::Receiver;
 
 use openmls::{framing::MlsMessageOut, prelude::TlsSerializeTrait};
 // use waku_bindings::*;
@@ -74,8 +74,6 @@ pub enum DeliveryServiceError {
     JsonError(#[from] serde_json::Error),
     #[error("Redis error: {0}")]
     RedisError(#[from] RedisError),
-    #[error("Tokio error: {0}")]
-    TokioReceiveError(#[from] RecvError),
     #[error("Serialization problem: {0}")]
     TlsError(#[from] tls_codec::Error),
     #[error("Unknown error: {0}")]

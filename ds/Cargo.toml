@@ -10,7 +10,19 @@ edition = "2021"
 # waku-bindings = "=0.6.0"
 bus = "=2.4.1"
 fred = { version = "=9.0.3", features = ["subscriber-client"] }
-tokio = "=1.38.0"
+tokio = { version = "=1.38.0", features = ["full"] }
+tokio-tungstenite = "0.15"
+tungstenite = "0.14"
+futures-util = "0.3"
+tokio-stream = "0.1"
+alloy = { git = "https://github.com/alloy-rs/alloy", features = [
+    "providers",
+    "node-bindings",
+    "network",
+    "transports",
+    "k256",
+    "rlp",
+] }
 
 openmls = { version = "=0.5.0", features = ["test-utils"] }
 rand = { version = "^0.8" }
@@ -23,3 +35,4 @@ serde_json = "=1.0"
 serde = "=1.0.204"
 
 sc_key_store = { path = "../sc_key_store" }
+url = "2.5.2"
