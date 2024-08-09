@@ -19,14 +19,18 @@ pub trait SCKeyStoreService {
 
 #[derive(Debug, thiserror::Error)]
 pub enum KeyStoreError {
-    #[error("User already exist")]
-    AlreadyExistedUserError,
-    #[error("Unknown user")]
-    UnknownUserError,
-    #[error("Alloy contract error: {0}")]
-    AlloyError(#[from] alloy::contract::Error),
-    #[error("Unable to parce the address: {0}")]
-    AlloyFromHexError(#[from] FromHexError),
-    #[error("Unknown error: {0}")]
-    Other(anyhow::Error),
+    #[error("User already exists.")]
+    UserAlreadyExistsError,
+
+    #[error("User not found.")]
+    UserNotFoundError,
+
+    #[error("Alloy contract operation failed: {0}")]
+    AlloyContractError(#[from] alloy::contract::Error),
+
+    #[error("Failed to parse address: {0}")]
+    AddressParseError(#[from] FromHexError),
+
+    #[error("An unexpected error occurred: {0}")]
+    UnexpectedError(anyhow::Error),
 }

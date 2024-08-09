@@ -1,10 +1,9 @@
-use alloy::{hex::ToHexExt, primitives::SignatureError};
+use alloy::hex::ToHexExt;
 use ds::{
     chat_client::{
         ChatClient, ChatMessages, ReqMessageType, RequestMLSPayload, ResponseMLSPayload,
     },
     chat_server::ServerMessage,
-    ChatServiceError,
 };
 // use waku_bindings::*;
 
@@ -14,26 +13,28 @@ use tls_codec::Serialize;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+use crate::ContactError;
+
 pub const CHAT_SERVER_ADDR: &str = "ws://127.0.0.1:8080";
 
 pub struct ContactsList {
     contacts: Arc<Mutex<HashMap<String, Contact>>>,
+    group_id2sc: HashMap<String, String>,
     pub future_req: HashMap<String, CancellationToken>,
     pub chat_client: ChatClient,
 }
 
 pub struct Contact {
-    user_address: String,
     // map group_name to key_package bytes
-    user_kp2group: HashMap<String, Vec<u8>>,
+    group_id2user_kp: HashMap<String, Vec<u8>>,
     // user_p2p_addr: WakuPeers,
 }
 
 impl Contact {
     pub fn get_relevant_kp(&mut self, group_name: String) -> Result<Vec<u8>, ContactError> {
-        match self.user_kp2group.remove(&group_name) {
+        match self.group_id2user_kp.remove(&group_name) {
             Some(kp) => Ok(kp.clone()),
-            None => Err(ContactError::UnknownKeyPackageForGroupError),
+            None => Err(ContactError::MissingKeyPackageForGroup),
         }
     }
 
@@ -42,8 +43,8 @@ impl Contact {
         key_package: Vec<u8>,
         group_name: String,
     ) -> Result<(), ContactError> {
-        match self.user_kp2group.insert(group_name, key_package) {
-            Some(_) => Err(ContactError::DoubleUserError),
+        match self.group_id2user_kp.insert(group_name, key_package) {
+            Some(_) => Err(ContactError::DuplicateUserError),
             None => Ok(()),
         }
     }
@@ -53,6 +54,7 @@ impl ContactsList {
     pub async fn new(chat_client: ChatClient) -> Result<Self, ContactError> {
         Ok(ContactsList {
             contacts: Arc::new(Mutex::new(HashMap::new())),
+            group_id2sc: HashMap::new(),
             future_req: HashMap::new(),
             chat_client,
         })
@@ -68,34 +70,36 @@ impl ContactsList {
         let welcome_str: String = bytes.encode_hex();
 
         let msg = ChatMessages::Welcome(welcome_str);
-        self.chat_client
-            .send_message_to_server(ServerMessage::InMessage {
-                from: self_address,
-                to: users_address,
-                msg: serde_json::to_string(&msg)?,
-            })?;
+        self.chat_client.send_message(ServerMessage::InMessage {
+            from: self_address,
+            to: users_address,
+            msg: serde_json::to_string(&msg)?,
+        })?;
 
         Ok(())
     }
 
-    pub async fn send_req_msg_to_user(
+    pub fn send_msg_req(
         &mut self,
         self_address: String,
-        user_address: &str,
-        sc_address: String,
+        user_address: String,
+        group_name: String,
         msg_type: ReqMessageType,
     ) -> Result<(), ContactError> {
         self.future_req
-            .insert(user_address.to_string(), CancellationToken::new());
+            .insert(user_address.clone(), CancellationToken::new());
 
-        let req = ChatMessages::Request(RequestMLSPayload::new(sc_address, msg_type));
-        self.chat_client
-            .send_request(ServerMessage::InMessage {
-                from: self_address,
-                to: vec![user_address.to_string()],
-                msg: serde_json::to_string(&req)?,
-            })
-            .await?;
+        let sc_address = match self.group_id2sc.get(&group_name).cloned() {
+            Some(sc) => sc,
+            None => return Err(ContactError::MissingSmartContractForGroup),
+        };
+
+        let req = ChatMessages::Request(RequestMLSPayload::new(sc_address, group_name, msg_type));
+        self.chat_client.send_message(ServerMessage::InMessage {
+            from: self_address,
+            to: vec![user_address],
+            msg: serde_json::to_string(&req)?,
+        })?;
 
         Ok(())
     }
@@ -107,51 +111,27 @@ impl ContactsList {
         resp: ResponseMLSPayload,
     ) -> Result<(), ContactError> {
         let resp_j = ChatMessages::Response(resp);
-        self.chat_client
-            .send_message_to_server(ServerMessage::InMessage {
-                from: self_address,
-                to: vec![user_address.to_string()],
-                msg: serde_json::to_string(&resp_j)?,
-            })?;
+        self.chat_client.send_message(ServerMessage::InMessage {
+            from: self_address,
+            to: vec![user_address.to_string()],
+            msg: serde_json::to_string(&resp_j)?,
+        })?;
         Ok(())
     }
-
-    // pub fn recive_resp_msg(
-    //     &mut self,
-    //     msg_bytes: &str,
-    //     sc_address: &str,
-    // ) -> Result<(), ContactError> {
-    //     let resp: ResponseMLSPayload = serde_json::from_str(msg_bytes)?;
-    //     let check_msg = REQUEST.to_owned() + sc_address;
-
-    //     if !self.contacts.contains_key(&resp.user_address) {
-    //         return Err(ContactError::UnknownUserError);
-    //     }
-
-    //     // Verify msg: https://alloy.rs/examples/wallets/verify_message.html
-    //     let signature = Signature::from_str(&resp.signature)?;
-    //     let addr = signature.recover_address_from_msg(&check_msg)?;
-    //     if addr.to_string() != resp.user_address {
-    //         return Err(ContactError::InvalidSignature);
-    //     }
-
-    //     Ok(())
-    // }
 
     pub async fn add_new_contact(&mut self, user_address: &str) -> Result<(), ContactError> {
         let mut contacts = self.contacts.lock().await;
         if contacts.contains_key(user_address) {
-            return Err(ContactError::DoubleUserError);
+            return Err(ContactError::DuplicateUserError);
         }
 
         match contacts.insert(
             user_address.to_string(),
             Contact {
-                user_address: user_address.to_string(),
-                user_kp2group: HashMap::new(),
+                group_id2user_kp: HashMap::new(),
             },
         ) {
-            Some(_) => Err(ContactError::DoubleUserError),
+            Some(_) => Err(ContactError::DuplicateUserError),
             None => Ok(()),
         }
     }
@@ -165,7 +145,7 @@ impl ContactsList {
         let mut contacts = self.contacts.lock().await;
         match contacts.get_mut(user_wallet) {
             Some(user) => user.add_key_package(key_package, group_name)?,
-            None => return Err(ContactError::UnknownUserError),
+            None => return Err(ContactError::UserNotFoundError),
         }
         Ok(())
     }
@@ -184,19 +164,19 @@ impl ContactsList {
 
         for user_wallet in user_wallets {
             if joiners_kp.contains_key(&user_wallet) {
-                return Err(ContactError::DoubleUserError);
+                return Err(ContactError::DuplicateUserError);
             }
 
             let mut contacts = self.contacts.lock().await;
             match contacts.get_mut(&user_wallet) {
                 Some(contact) => match contact.get_relevant_kp(group_name.clone()) {
                     Ok(kp) => match joiners_kp.insert(user_wallet, kp) {
-                        Some(_) => return Err(ContactError::DoubleUserError),
+                        Some(_) => return Err(ContactError::DuplicateUserError),
                         None => continue,
                     },
                     Err(err) => return Err(err),
                 },
-                None => return Err(ContactError::UnknownUserError),
+                None => return Err(ContactError::UserNotFoundError),
             }
         }
 
@@ -209,29 +189,25 @@ impl ContactsList {
                 token.cancel();
                 Ok(())
             }
-            None => Err(ContactError::UnknownUserError),
+            None => Err(ContactError::UserNotFoundError),
         }
     }
-}
 
-#[derive(Debug, thiserror::Error)]
-pub enum ContactError {
-    #[error("Key package for given group doesnt exist")]
-    UnknownKeyPackageForGroupError,
-    #[error("Unknown user")]
-    UnknownUserError,
-    #[error("Double user in joiners users list")]
-    DoubleUserError,
-    #[error("Invalid user address inside signature")]
-    InvalidSignature,
+    pub fn insert_group2sc(
+        &mut self,
+        group_name: String,
+        sc_address: String,
+    ) -> Result<(), ContactError> {
+        match self.group_id2sc.insert(group_name, sc_address) {
+            Some(_) => Err(ContactError::GroupAlreadyExistsError),
+            None => Ok(()),
+        }
+    }
 
-    #[error(transparent)]
-    ChatServiceError(#[from] ChatServiceError),
-
-    #[error("Can't parce signature: {0}")]
-    AlloySignatureError(#[from] SignatureError),
-    #[error("Json error: {0}")]
-    JsonError(#[from] serde_json::Error),
-    #[error("Serialization problem: {0}")]
-    TlsError(#[from] tls_codec::Error),
+    pub fn group2sc(&self, group_name: String) -> Result<String, ContactError> {
+        match self.group_id2sc.get(&group_name).cloned() {
+            Some(addr) => Ok(addr),
+            None => Err(ContactError::GroupNotFoundError(group_name)),
+        }
+    }
 }

@@ -8,12 +8,12 @@ use tokio::{
 };
 use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
 
-use crate::ChatServiceError;
+use crate::DeliveryServiceError;
 
 type Tx = mpsc::UnboundedSender<Message>;
 type PeerMap = Arc<Mutex<HashMap<String, Tx>>>;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 #[serde(tag = "type")]
 pub enum ServerMessage {
     InMessage {
@@ -26,7 +26,7 @@ pub enum ServerMessage {
     },
 }
 
-pub async fn start_server(addr: &str) -> Result<(), ChatServiceError> {
+pub async fn start_server(addr: &str) -> Result<(), DeliveryServiceError> {
     let listener = TcpListener::bind(addr).await?;
     let peers = PeerMap::new(Mutex::new(HashMap::new()));
 
@@ -46,7 +46,7 @@ pub async fn start_server(addr: &str) -> Result<(), ChatServiceError> {
 async fn handle_connection(
     peers: PeerMap,
     stream: tokio::net::TcpStream,
-) -> Result<(), ChatServiceError> {
+) -> Result<(), DeliveryServiceError> {
     let ws_stream = accept_async(stream).await?;
     let (mut write, mut read) = ws_stream.split();
     let (sender, receiver) = mpsc::unbounded_channel();
@@ -57,16 +57,15 @@ async fn handle_connection(
     // Spawn a task to handle outgoing messages
     tokio::spawn(async move {
         while let Some(message) = receiver.lock().await.recv().await {
-            println!("raw message out: {}", message);
-            if let Err(e) = write.send(message).await {
-                eprintln!("Error sending message: {}", e);
+            if let Err(err) = write.send(message).await {
+                return Err(DeliveryServiceError::SenderError(err.to_string()));
             }
         }
+        Ok(())
     });
 
     // Handle incoming messages
     while let Some(Ok(Message::Text(text))) = read.next().await {
-        println!("raw message in {}", text);
         if let Ok(chat_message) = serde_json::from_str::<ServerMessage>(&text) {
             match chat_message {
                 ServerMessage::SystemJoin {
@@ -81,12 +80,7 @@ async fn handle_connection(
                 }
                 ServerMessage::InMessage { from, to, msg } => {
                     println!("Received message from {} to {:?}: {}", from, to, msg);
-                    println!(
-                        "\t got contact list {:?}",
-                        peers.lock().await.keys().collect::<Vec<&String>>()
-                    );
                     for recipient in to {
-                        println!("\t rcpt {}", recipient);
                         if let Some(recipient_sender) = peers.lock().await.get(&recipient) {
                             let message = ServerMessage::InMessage {
                                 from: from.clone(),
@@ -96,7 +90,9 @@ async fn handle_connection(
                             let message_json = serde_json::to_string(&message).unwrap();
                             recipient_sender
                                 .send(Message::Text(message_json))
-                                .map_err(|_| ChatServiceError::SendError)?;
+                                .map_err(|err| {
+                                    DeliveryServiceError::SenderError(err.to_string())
+                                })?;
                         }
                     }
                 }

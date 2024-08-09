@@ -3,10 +3,11 @@ use std::collections::HashMap;
 
 use openmls::{credentials::CredentialWithKey, key_packages::*, prelude::*};
 use openmls_basic_credential::SignatureKeyPair;
-use openmls_rust_crypto::MemoryKeyStoreError;
 use openmls_traits::types::Ciphersuite;
 
 use mls_crypto::openmls_provider::MlsCryptoProvider;
+
+use crate::IdentityError;
 
 pub struct Identity {
     pub(crate) kp: HashMap<Vec<u8>, KeyPackage>,
@@ -80,20 +81,4 @@ impl ToString for Identity {
     fn to_string(&self) -> String {
         Address::from_slice(self.credential_with_key.credential.identity()).to_string()
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum IdentityError {
-    #[error("Something wrong while creating new key package: {0}")]
-    MlsKeyPackageNewError(#[from] KeyPackageNewError<MemoryKeyStoreError>),
-    #[error(transparent)]
-    MlsLibraryError(#[from] LibraryError),
-    #[error("Something wrong with signature: {0}")]
-    MlsCryptoError(#[from] CryptoError),
-    #[error("Can't save signature key")]
-    MlsKeyStoreError(#[from] MemoryKeyStoreError),
-    #[error("Something wrong with credential: {0}")]
-    MlsCredentialError(#[from] CredentialError),
-    #[error("Unknown error: {0}")]
-    Other(anyhow::Error),
 }

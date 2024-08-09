@@ -8,62 +8,82 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::protocol::Message;
 
 use crate::chat_server::ServerMessage;
-use crate::ChatServiceError;
+use crate::DeliveryServiceError;
 
-// pub const REQUEST: &str = "You are joining the group with smart contract: ";
-
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum ChatMessages {
     Request(RequestMLSPayload),
     Response(ResponseMLSPayload),
     Welcome(String),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum ReqMessageType {
     InviteToGroup,
     RemoveFromGroup,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct RequestMLSPayload {
-    pub msg: String,
+    sc_address: String,
+    group_name: String,
     pub msg_type: ReqMessageType,
 }
 
 impl RequestMLSPayload {
-    pub fn new(sc_address: String, msg_type: ReqMessageType) -> Self {
+    pub fn new(sc_address: String, group_name: String, msg_type: ReqMessageType) -> Self {
         RequestMLSPayload {
-            msg: sc_address,
+            sc_address,
+            group_name,
             msg_type,
         }
     }
+
+    pub fn msg_to_sign(&self) -> String {
+        self.sc_address.to_owned() + &self.group_name
+    }
+
+    pub fn group_name(&self) -> String {
+        self.group_name.clone()
+    }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct ResponseMLSPayload {
     signature: String,
     user_address: String,
+    pub group_name: String,
     key_package: Vec<u8>,
 }
 
 impl ResponseMLSPayload {
-    pub fn new(signature: String, user_address: String, key_package: Vec<u8>) -> Self {
+    pub fn new(
+        signature: String,
+        user_address: String,
+        group_name: String,
+        key_package: Vec<u8>,
+    ) -> Self {
         Self {
             signature,
             user_address,
+            group_name,
             key_package,
         }
     }
 
-    pub fn validate(&self, sc_address: String) -> Result<(String, Vec<u8>), ChatServiceError> {
+    pub fn validate(
+        &self,
+        sc_address: String,
+        group_name: String,
+    ) -> Result<(String, Vec<u8>), DeliveryServiceError> {
         let recover_sig: Signature = serde_json::from_str(&self.signature)?;
         let addr = Address::from_str(&self.user_address)?;
         // Recover the signer from the message.
-        let recovered = recover_sig.recover_address_from_msg(sc_address)?;
+        let recovered =
+            recover_sig.recover_address_from_msg(sc_address.to_owned() + &group_name)?;
 
         if recovered.ne(&addr) {
-            return Err(ChatServiceError::ValidationError);
+            return Err(DeliveryServiceError::ValidationError(recovered.to_string()));
         }
         Ok((self.user_address.clone(), self.key_package.clone()))
     }
@@ -75,10 +95,10 @@ pub struct ChatClient {
 
 impl ChatClient {
     pub async fn connect(
-        addr: &str,
-        username: &str,
-    ) -> Result<(Self, mpsc::UnboundedReceiver<Message>), ChatServiceError> {
-        let (ws_stream, _) = tokio_tungstenite::connect_async(addr).await?;
+        server_addr: &str,
+        username: String,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<Message>), DeliveryServiceError> {
+        let (ws_stream, _) = tokio_tungstenite::connect_async(server_addr).await?;
         let (mut write, read) = ws_stream.split();
         let (sender, receiver) = mpsc::unbounded_channel();
         let (msg_sender, msg_receiver) = mpsc::unbounded_channel();
@@ -88,23 +108,22 @@ impl ChatClient {
         // Spawn a task to handle outgoing messages
         tokio::spawn(async move {
             while let Some(message) = receiver.lock().await.recv().await {
-                // println!("Message from reciever: {}", message);
-                if let Err(e) = write.send(message).await {
-                    eprintln!("Error sending message: {}", e);
+                if let Err(err) = write.send(message).await {
+                    return Err(DeliveryServiceError::SenderError(err.to_string()));
                 }
             }
+            Ok(())
         });
 
         // Spawn a task to handle incoming messages
         tokio::spawn(async move {
             let mut read = read;
-            while let Some(message) = read.next().await {
-                if let Ok(msg) = message {
-                    if let Err(e) = msg_sender.send(msg) {
-                        eprintln!("Failed to send message to channel: {}", e);
-                    }
+            while let Some(Ok(message)) = read.next().await {
+                if let Err(err) = msg_sender.send(message) {
+                    return Err(DeliveryServiceError::SenderError(err.to_string()));
                 }
             }
+            Ok(())
         });
 
         // Send a SystemJoin message when registering
@@ -114,26 +133,16 @@ impl ChatClient {
         let join_json = serde_json::to_string(&join_msg).unwrap();
         sender
             .send(Message::Text(join_json))
-            .map_err(|_| ChatServiceError::SendError)?;
+            .map_err(|err| DeliveryServiceError::SenderError(err.to_string()))?;
 
         Ok((ChatClient { sender }, msg_receiver))
     }
 
-    pub async fn send_request(&self, msg: ServerMessage) -> Result<(), ChatServiceError> {
-        self.send_message_to_server(msg)?;
-        Ok(())
-    }
-
-    pub async fn handle_response(&self) -> Result<(), ChatServiceError> {
-        Ok(())
-    }
-
-    pub fn send_message_to_server(&self, msg: ServerMessage) -> Result<(), ChatServiceError> {
+    pub fn send_message(&self, msg: ServerMessage) -> Result<(), DeliveryServiceError> {
         let msg_json = serde_json::to_string(&msg).unwrap();
-        // println!("Message to sender: {}", msg_json);
         self.sender
             .send(Message::Text(msg_json))
-            .map_err(|_| ChatServiceError::SendError)?;
+            .map_err(|err| DeliveryServiceError::SenderError(err.to_string()))?;
         Ok(())
     }
 }
@@ -163,6 +172,7 @@ fn test_sign() {
 fn json_test() {
     let inner_msg = ChatMessages::Request(RequestMLSPayload::new(
         "sc_address".to_string(),
+        "group_name".to_string(),
         ReqMessageType::InviteToGroup,
     ));
 
@@ -183,19 +193,14 @@ fn json_test() {
     ////
 
     if let Ok(chat_message) = serde_json::from_str::<ServerMessage>(&json_server_msg) {
-        println!("Server: {:?}", chat_message);
+        assert_eq!(chat_message, server_msg);
         match chat_message {
             ServerMessage::InMessage { from, to, msg } => {
-                println!("Chat: {:?}", msg);
                 if let Ok(chat_msg) = serde_json::from_str::<ChatMessages>(&msg) {
-                    match chat_msg {
-                        ChatMessages::Request(req) => println!("Request: {:?}", req),
-                        ChatMessages::Response(_) => println!("Response"),
-                        ChatMessages::Welcome(_) => println!("Welcome"),
-                    }
+                    assert_eq!(chat_msg, inner_msg);
                 }
             }
-            ServerMessage::SystemJoin { username } => println!("SystemJoin"),
+            ServerMessage::SystemJoin { username } => {}
         }
     }
 }

@@ -1,39 +1,31 @@
 use alloy::{
-    hex::{self, FromHexError},
+    hex::{self},
     network::{EthereumWallet, Network},
     primitives::Address,
     providers::Provider,
-    signers::{
-        local::{LocalSignerError, PrivateKeySigner},
-        SignerSync,
-    },
+    signers::{local::PrivateKeySigner, SignerSync},
     transports::Transport,
 };
 use fred::types::Message;
 use openmls::{group::*, prelude::*};
-use openmls_rust_crypto::MemoryKeyStoreError;
 use std::{
     cell::RefCell,
     collections::HashMap,
     fmt::Display,
-    str::{from_utf8, FromStr, Utf8Error},
-    string::FromUtf8Error,
+    str::{from_utf8, FromStr},
 };
 use tokio::sync::broadcast::Receiver;
+use tokio_util::sync::CancellationToken;
 
 use ds::{
     chat_client::{ChatClient, ReqMessageType, RequestMLSPayload, ResponseMLSPayload},
     ds::*,
-    ChatServiceError,
 };
 use mls_crypto::openmls_provider::*;
 use sc_key_store::{sc_ks::ScKeyStorage, *};
 
-use crate::{
-    contact::ContactError,
-    identity::{Identity, IdentityError},
-};
 use crate::{contact::ContactsList, conversation::*};
+use crate::{identity::Identity, UserError};
 
 pub struct Group {
     group_name: String,
@@ -105,7 +97,7 @@ where
         let group_id = group_name.as_bytes();
 
         if self.groups.contains_key(&group_name) {
-            return Err(UserError::AlreadyExistedGroupError(group_name));
+            return Err(UserError::GroupAlreadyExistsError(group_name));
         }
 
         let group_config = MlsGroupConfig::builder()
@@ -120,7 +112,7 @@ where
             self.identity.credential_with_key.clone(),
         )?;
 
-        let (rc, broadcaster) = RClient::new_for_group(group_name.clone()).await?;
+        let (rc, broadcaster) = RClient::new_with_group(group_name.clone()).await?;
         let group = Group {
             group_name: group_name.clone(),
             conversation: Conversation::default(),
@@ -130,13 +122,15 @@ where
             // content_topics: Vec::new(),
         };
 
-        self.groups.insert(group_name, group);
+        self.groups.insert(group_name.clone(), group);
+        self.contacts
+            .insert_group2sc(group_name, self.sc_address()?)?;
         Ok(broadcaster)
     }
 
     pub async fn add_user_to_acl(&mut self, user_address: &str) -> Result<(), UserError> {
         if self.sc_ks.is_none() {
-            return Err(UserError::EmptyScConnection);
+            return Err(UserError::MissingSmartContractConnection);
         }
         self.sc_ks.as_mut().unwrap().add_user(user_address).await?;
         Ok(())
@@ -147,7 +141,7 @@ where
         mut signed_kp: &[u8],
     ) -> Result<KeyPackage, UserError> {
         if self.sc_ks.is_none() {
-            return Err(UserError::EmptyScConnection);
+            return Err(UserError::MissingSmartContractConnection);
         }
 
         let key_package_in = KeyPackageIn::tls_deserialize(&mut signed_kp)?;
@@ -163,31 +157,8 @@ where
         group_name: String,
     ) -> Result<(), UserError> {
         if self.sc_ks.is_none() {
-            return Err(UserError::EmptyScConnection);
+            return Err(UserError::MissingSmartContractConnection);
         }
-
-        // for user_wallet in users.iter() {
-        //     if !self.contacts.does_user_in_contacts(user_wallet).await {
-        //         self.contacts.add_new_contact(user_wallet).await?;
-        //     }
-        //     self.contacts
-        //         .send_req_msg_to_user(
-        //             self.identity.to_string(),
-        //             user_wallet,
-        //             self.sc_ks.as_mut().unwrap().get_sc_adsress(),
-        //             ReqMessageType::InviteToGroup,
-        //         )
-        //         .await?;
-        //     println!("waiting token");
-        //     match self.contacts.future_req.get(user_wallet) {
-        //         Some(token) => token.cancelled().await,
-        //         None => return Err(UserError::UnknownUserError),
-        //     };
-        //     println!("cancelled token");
-        //     self.contacts.future_req.remove(user_wallet);
-
-        //     self.add_user_to_acl(user_wallet).await?;
-        // }
 
         let users_for_invite = self
             .contacts
@@ -204,7 +175,7 @@ where
         // Build a proposal with this key package and do the MLS bits.
         let group = match self.groups.get_mut(&group_name) {
             Some(g) => g,
-            None => return Err(UserError::UnknownGroupError(group_name)),
+            None => return Err(UserError::GroupNotFoundError(group_name)),
         };
 
         let (out_messages, welcome, _group_info) = group.mls_group.borrow_mut().add_members(
@@ -215,7 +186,11 @@ where
 
         group
             .rc_client
-            .msg_send(out_messages, self.identity.to_string())
+            .msg_send(
+                out_messages.tls_serialize_detached()?,
+                self.identity.to_string(),
+                group_name,
+            )
             .await?;
         // Second, process the invitation on our end.
         group
@@ -245,7 +220,7 @@ where
             MlsMessageInBody::PublicMessage(message) => {
                 self.process_protocol_msg(message.into())?
             }
-            _ => return Err(UserError::MessageTypeError),
+            _ => return Err(UserError::UnsupportedMessageType),
         };
         Ok(msg)
     }
@@ -257,7 +232,7 @@ where
         let group_name = from_utf8(message.group_id().as_slice())?.to_string();
         let group = match self.groups.get_mut(&group_name) {
             Some(g) => g,
-            None => return Err(UserError::UnknownGroupError(group_name)),
+            None => return Err(UserError::GroupNotFoundError(group_name)),
         };
         let mut mls_group = group.mls_group.borrow_mut();
 
@@ -314,7 +289,7 @@ where
     ) -> Result<(), UserError> {
         let group = match self.groups.get_mut(&group_name) {
             Some(g) => g,
-            None => return Err(UserError::UnknownGroupError(group_name)),
+            None => return Err(UserError::GroupNotFoundError(group_name)),
         };
 
         let message_out = group.mls_group.borrow_mut().create_message(
@@ -323,7 +298,10 @@ where
             msg.as_bytes(),
         )?;
 
-        group.rc_client.msg_send(message_out, sender).await?;
+        group
+            .rc_client
+            .msg_send(message_out.tls_serialize_detached()?, sender, group_name)
+            .await?;
         Ok(())
     }
 
@@ -349,7 +327,7 @@ where
         let group_id = mls_group.group_id().to_vec();
         let group_name = String::from_utf8(group_id)?;
 
-        let (rc, br) = RClient::new_for_group(group_name.clone()).await?;
+        let (rc, br) = RClient::new_with_group(group_name.clone()).await?;
         let group = Group {
             group_name: group_name.clone(),
             conversation: Conversation::default(),
@@ -358,7 +336,7 @@ where
         };
 
         match self.groups.insert(group_name.clone(), group) {
-            Some(old) => Err(UserError::AlreadyExistedGroupError(old.group_name)),
+            Some(old) => Err(UserError::GroupAlreadyExistsError(old.group_name)),
             None => Ok((br, group_name)),
         }
     }
@@ -397,7 +375,7 @@ where
         group_name: String,
     ) -> Result<Option<Vec<ConversationMessage>>, UserError> {
         self.groups.get(&group_name).map_or_else(
-            || Err(UserError::UnknownGroupError(group_name)),
+            || Err(UserError::GroupNotFoundError(group_name)),
             |g| {
                 Ok(g.conversation
                     .get(100)
@@ -409,7 +387,7 @@ where
     pub fn group_members(&self, group_name: String) -> Result<Vec<String>, UserError> {
         let group = match self.groups.get(&group_name) {
             Some(g) => g,
-            None => return Err(UserError::UnknownGroupError(group_name)),
+            None => return Err(UserError::GroupNotFoundError(group_name)),
         };
         Ok(group.group_members(self.identity.signature_pub_key().as_slice()))
     }
@@ -421,11 +399,11 @@ where
         Ok(self.groups.keys().map(|k| k.to_owned()).collect())
     }
 
-    pub fn get_wallet(&self) -> EthereumWallet {
+    pub fn wallet(&self) -> EthereumWallet {
         EthereumWallet::from(self.eth_signer.clone())
     }
 
-    fn generate_signature(&self, msg: String) -> Result<String, UserError> {
+    fn sign(&self, msg: String) -> Result<String, UserError> {
         let signature = self.eth_signer.sign_message_sync(msg.as_bytes())?;
         let res = serde_json::to_string(&signature)?;
         Ok(res)
@@ -434,18 +412,19 @@ where
     pub fn send_responce_on_request(
         &mut self,
         req: RequestMLSPayload,
-        self_address: String,
         user_address: &str,
     ) -> Result<(), UserError> {
+        let self_address = self.identity.to_string();
         match req.msg_type {
             ReqMessageType::InviteToGroup => {
-                let signature = self.generate_signature(req.msg)?;
+                let signature = self.sign(req.msg_to_sign())?;
                 let key_package = self
                     .identity
                     .generate_key_package(CIPHERSUITE, &self.provider)?;
                 let resp = ResponseMLSPayload::new(
                     signature,
                     self_address.clone(),
+                    req.group_name(),
                     key_package.tls_serialize_detached()?,
                 );
                 self.contacts
@@ -457,15 +436,13 @@ where
         }
     }
 
-    pub async fn parce_responce(
-        &mut self,
-        resp: ResponseMLSPayload,
-        group_name: String,
-    ) -> Result<(), UserError> {
+    pub async fn parce_responce(&mut self, resp: ResponseMLSPayload) -> Result<(), UserError> {
         if self.sc_ks.is_none() {
-            return Err(UserError::EmptyScConnection);
+            return Err(UserError::MissingSmartContractConnection);
         }
-        let (user_wallet, kp) = resp.validate(self.sc_ks.as_ref().unwrap().get_sc_adsress())?;
+        let group_name = resp.group_name.clone();
+        let sc_address = self.contacts.group2sc(group_name.clone())?;
+        let (user_wallet, kp) = resp.validate(sc_address, group_name.clone())?;
 
         self.contacts
             .add_key_package_to_contact(&user_wallet, kp, group_name.clone())
@@ -475,11 +452,31 @@ where
         Ok(())
     }
 
-    pub fn get_sc_address(&self) -> Result<String, UserError> {
+    pub fn sc_address(&self) -> Result<String, UserError> {
         if self.sc_ks.is_none() {
-            return Err(UserError::EmptyScConnection);
+            return Err(UserError::MissingSmartContractConnection);
         }
-        Ok(self.sc_ks.as_ref().unwrap().get_sc_adsress())
+        Ok(self.sc_ks.as_ref().unwrap().sc_adsress())
+    }
+
+    pub async fn handle_send_req(
+        &mut self,
+        user_wallet: &str,
+        group_name: String,
+    ) -> Result<Option<CancellationToken>, UserError> {
+        if !self.contacts.does_user_in_contacts(user_wallet).await {
+            self.contacts.add_new_contact(user_wallet).await?;
+        }
+        self.contacts
+            .send_msg_req(
+                self.identity.to_string(),
+                user_wallet.to_owned(),
+                group_name,
+                ReqMessageType::InviteToGroup,
+            )
+            .unwrap();
+
+        Ok(self.contacts.future_req.get(user_wallet).cloned())
     }
 }
 
@@ -512,76 +509,4 @@ impl Group {
 pub enum GroupError {
     #[error("Unknown group member : {0}")]
     UnknownGroupMemberError(String),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum UserError {
-    #[error("User doesn't have connection to smart contract")]
-    EmptyScConnection,
-    #[error("Unknown group: {0}")]
-    UnknownGroupError(String),
-    #[error("Group already exist: {0}")]
-    AlreadyExistedGroupError(String),
-    #[error("Unsupported message type")]
-    MessageTypeError,
-    #[error("User already exist: {0}")]
-    AlreadyExistedUserError(String),
-    #[error("Empty welcome message")]
-    EmptyWelcomeMessageError,
-    #[error("Inner Message from server is invalid")]
-    InvalidChatMessageError,
-    #[error("Message from server is invalid")]
-    InvalidServerMessageError,
-    #[error("Unknown user")]
-    UnknownUserError,
-
-    #[error(transparent)]
-    DeliveryServiceError(#[from] DeliveryServiceError),
-    #[error(transparent)]
-    KeyStoreError(#[from] KeyStoreError),
-    #[error(transparent)]
-    IdentityError(#[from] IdentityError),
-    #[error(transparent)]
-    ContactError(#[from] ContactError),
-    #[error(transparent)]
-    ChatServiceError(#[from] ChatServiceError),
-
-    #[error("Something wrong while creating Mls group: {0}")]
-    MlsGroupCreationError(#[from] NewGroupError<MemoryKeyStoreError>),
-    #[error("Something wrong while adding member to Mls group: {0}")]
-    MlsAddMemberError(#[from] AddMembersError<MemoryKeyStoreError>),
-    #[error("Something wrong while merging pending commit: {0}")]
-    MlsMergePendingCommitError(#[from] MergePendingCommitError<MemoryKeyStoreError>),
-    #[error("Something wrong while merging commit: {0}")]
-    MlsMergeCommitError(#[from] MergeCommitError<MemoryKeyStoreError>),
-    #[error("Error processing unverified message: {0}")]
-    MlsProcessMessageError(#[from] ProcessMessageError),
-    #[error("Something wrong while creating message: {0}")]
-    MlsCreateMessageError(#[from] CreateMessageError),
-    #[error("Failed to create staged join: {0}")]
-    MlsWelcomeError(#[from] WelcomeError<MemoryKeyStoreError>),
-    #[error("Failed to remove member from group: {0}")]
-    MlsRemoveMembersError(#[from] RemoveMembersError<MemoryKeyStoreError>),
-    #[error("Failed to validate user key_pacakge: {0}")]
-    MlsKeyPackageVerifyError(#[from] KeyPackageVerifyError),
-
-    #[error("Parse String UTF8 error: {0}")]
-    ParseUTF8Error(#[from] FromUtf8Error),
-    #[error("Parse str UTF8 error: {0}")]
-    ParseStrUTF8Error(#[from] Utf8Error),
-    #[error("Json error: {0}")]
-    JsonError(#[from] serde_json::Error),
-    #[error("Serialization problem: {0}")]
-    TlsError(#[from] tls_codec::Error),
-    #[error("Unable to parce the address: {0}")]
-    AlloyFromHexError(#[from] FromHexError),
-    #[error("Unable to parce the signer: {0}")]
-    AlloyParceSignerError(#[from] LocalSignerError),
-    #[error("Unable to sign the message: {0}")]
-    AlloySignersError(#[from] alloy::signers::Error),
-    #[error("Write to stdout error")]
-    IoError(#[from] std::io::Error),
-
-    #[error("Unknown error: {0}")]
-    Other(anyhow::Error),
 }

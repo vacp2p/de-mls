@@ -4,8 +4,6 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-
-use fred::error::RedisError;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -19,13 +17,13 @@ use std::{
     sync::Arc,
 };
 use tokio::{
-    sync::mpsc::error::SendError,
     sync::mpsc::{Receiver, Sender},
     sync::Mutex,
-    task::JoinError,
 };
 use tokio_util::sync::CancellationToken;
 use url::Url;
+
+use crate::CliError;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -113,19 +111,29 @@ pub async fn event_handler(
                     if cli.is_err() {
                         messages_tx
                             .send(Msg::Input(Message::System("Unknown command".to_string())))
-                            .await?;
+                            .await
+                            .map_err(|err| CliError::SenderError(err.to_string()))?;
                         continue;
                     }
-                    cli_tx.send(cli.unwrap().command).await?;
+                    cli_tx
+                        .send(cli.unwrap().command)
+                        .await
+                        .map_err(|err| CliError::SenderError(err.to_string()))?;
                 }
                 KeyCode::Esc => {
-                    messages_tx.send(Msg::Exit).await?;
+                    messages_tx
+                        .send(Msg::Exit)
+                        .await
+                        .map_err(|err| CliError::SenderError(err.to_string()))?;
                     token.cancel();
                     break;
                 }
                 _ => {}
             }
-            messages_tx.send(Msg::Refresh(input.clone())).await?;
+            messages_tx
+                .send(Msg::Refresh(input.clone()))
+                .await
+                .map_err(|err| CliError::SenderError(err.to_string()))?;
         }
     }
     Ok::<_, CliError>(())
@@ -231,28 +239,4 @@ pub async fn terminal_handler(
     execute!(terminal_lock.backend_mut(), LeaveAlternateScreen)?;
     terminal_lock.show_cursor()?;
     Ok(())
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum CliError {
-    #[error("Can't split the line")]
-    SplitLineError,
-
-    #[error("Problem from std::io library: {0}")]
-    IoError(#[from] std::io::Error),
-
-    #[error("Can't send control message into channel: {0}")]
-    SendMsgError(#[from] SendError<Msg>),
-    #[error("Can't send bytes into channel: {0}")]
-    SendVecError(#[from] SendError<Vec<u8>>),
-    #[error("Can't send command into channel: {0}")]
-    SendCommandError(#[from] SendError<Commands>),
-
-    #[error("Redis error: {0}")]
-    RedisError(#[from] RedisError),
-    #[error("Failed from tokio join: {0}")]
-    TokioJoinError(#[from] JoinError),
-
-    #[error("Unknown error: {0}")]
-    AnyHowError(anyhow::Error),
 }
