@@ -204,6 +204,7 @@ pub mod ScKeystore {
     ///0x608060405234801561001057600080fd5b5060405161055638038061055683398101604081905261002f916100be565b806001600160a01b03811661005e57604051631e4fbdf760e01b81526000600482015260240160405180910390fd5b6100678161006e565b50506100ee565b600080546001600160a01b038381166001600160a01b0319831681178455604051919092169283917f8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e09190a35050565b6000602082840312156100d057600080fd5b81516001600160a01b03811681146100e757600080fd5b9392505050565b610459806100fd6000396000f3fe608060405234801561001057600080fd5b50600436106100725760003560e01c80638da5cb5b116100505780638da5cb5b146100e2578063985751881461010a578063f2fde38b1461011d57600080fd5b80630e666e4914610077578063421b2d8b146100c5578063715018a6146100da575b600080fd5b6100b061008536600461041c565b73ffffffffffffffffffffffffffffffffffffffff1660009081526001602052604090205460ff1690565b60405190151581526020015b60405180910390f35b6100d86100d336600461041c565b610130565b005b6100d861021f565b60005460405173ffffffffffffffffffffffffffffffffffffffff90911681526020016100bc565b6100d861011836600461041c565b610233565b6100d861012b36600461041c565b6102eb565b610138610354565b73ffffffffffffffffffffffffffffffffffffffff811660009081526001602052604090205460ff1615610198576040517fc344397e00000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b73ffffffffffffffffffffffffffffffffffffffff811660008181526001602081815260409283902080547fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff001690921790915590519182527f19ef9a4877199f89440a26acb26895ec02ed86f2df1aeaa90dc18041b892f71f91015b60405180910390a150565b610227610354565b61023160006103a7565b565b61023b610354565b73ffffffffffffffffffffffffffffffffffffffff811660009081526001602052604090205460ff1661029a576040517f907b361f00000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b73ffffffffffffffffffffffffffffffffffffffff81166000819052600160209081526040519182527fe9dce8c992623ce791725b21e857e33248d1f190a25b5168313420eebdaae99d9101610214565b6102f3610354565b73ffffffffffffffffffffffffffffffffffffffff8116610348576040517f1e4fbdf7000000000000000000000000000000000000000000000000000000008152600060048201526024015b60405180910390fd5b610351816103a7565b50565b60005473ffffffffffffffffffffffffffffffffffffffff163314610231576040517f118cdaa700000000000000000000000000000000000000000000000000000000815233600482015260240161033f565b6000805473ffffffffffffffffffffffffffffffffffffffff8381167fffffffffffffffffffffffff0000000000000000000000000000000000000000831681178455604051919092169283917f8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e09190a35050565b60006020828403121561042e57600080fd5b813573ffffffffffffffffffffffffffffffffffffffff8116811461045257600080fd5b939250505056
     /// ```
     #[rustfmt::skip]
+    #[allow(clippy::all)]
     pub static BYTECODE: alloy_sol_types::private::Bytes = alloy_sol_types::private::Bytes::from_static(
         b"`\x80`@R4\x80\x15a\0\x10W`\0\x80\xFD[P`@Qa\x05V8\x03\x80a\x05V\x839\x81\x01`@\x81\x90Ra\0/\x91a\0\xBEV[\x80`\x01`\x01`\xA0\x1B\x03\x81\x16a\0^W`@Qc\x1EO\xBD\xF7`\xE0\x1B\x81R`\0`\x04\x82\x01R`$\x01`@Q\x80\x91\x03\x90\xFD[a\0g\x81a\0nV[PPa\0\xEEV[`\0\x80T`\x01`\x01`\xA0\x1B\x03\x83\x81\x16`\x01`\x01`\xA0\x1B\x03\x19\x83\x16\x81\x17\x84U`@Q\x91\x90\x92\x16\x92\x83\x91\x7F\x8B\xE0\x07\x9CS\x16Y\x14\x13D\xCD\x1F\xD0\xA4\xF2\x84\x19I\x7F\x97\"\xA3\xDA\xAF\xE3\xB4\x18okdW\xE0\x91\x90\xA3PPV[`\0` \x82\x84\x03\x12\x15a\0\xD0W`\0\x80\xFD[\x81Q`\x01`\x01`\xA0\x1B\x03\x81\x16\x81\x14a\0\xE7W`\0\x80\xFD[\x93\x92PPPV[a\x04Y\x80a\0\xFD`\09`\0\xF3\xFE`\x80`@R4\x80\x15a\0\x10W`\0\x80\xFD[P`\x046\x10a\0rW`\x005`\xE0\x1C\x80c\x8D\xA5\xCB[\x11a\0PW\x80c\x8D\xA5\xCB[\x14a\0\xE2W\x80c\x98WQ\x88\x14a\x01\nW\x80c\xF2\xFD\xE3\x8B\x14a\x01\x1DW`\0\x80\xFD[\x80c\x0EfnI\x14a\0wW\x80cB\x1B-\x8B\x14a\0\xC5W\x80cqP\x18\xA6\x14a\0\xDAW[`\0\x80\xFD[a\0\xB0a\0\x856`\x04a\x04\x1CV[s\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x16`\0\x90\x81R`\x01` R`@\x90 T`\xFF\x16\x90V[`@Q\x90\x15\x15\x81R` \x01[`@Q\x80\x91\x03\x90\xF3[a\0\xD8a\0\xD36`\x04a\x04\x1CV[a\x010V[\0[a\0\xD8a\x02\x1FV[`\0T`@Qs\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x90\x91\x16\x81R` \x01a\0\xBCV[a\0\xD8a\x01\x186`\x04a\x04\x1CV[a\x023V[a\0\xD8a\x01+6`\x04a\x04\x1CV[a\x02\xEBV[a\x018a\x03TV[s\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x81\x16`\0\x90\x81R`\x01` R`@\x90 T`\xFF\x16\x15a\x01\x98W`@Q\x7F\xC3D9~\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x81R`\x04\x01`@Q\x80\x91\x03\x90\xFD[s\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x81\x16`\0\x81\x81R`\x01` \x81\x81R`@\x92\x83\x90 \x80T\x7F\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\0\x16\x90\x92\x17\x90\x91U\x90Q\x91\x82R\x7F\x19\xEF\x9AHw\x19\x9F\x89D\n&\xAC\xB2h\x95\xEC\x02\xED\x86\xF2\xDF\x1A\xEA\xA9\r\xC1\x80A\xB8\x92\xF7\x1F\x91\x01[`@Q\x80\x91\x03\x90\xA1PV[a\x02'a\x03TV[a\x021`\0a\x03\xA7V[V[a\x02;a\x03TV[s\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x81\x16`\0\x90\x81R`\x01` R`@\x90 T`\xFF\x16a\x02\x9AW`@Q\x7F\x90{6\x1F\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x81R`\x04\x01`@Q\x80\x91\x03\x90\xFD[s\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x81\x16`\0\x81\x90R`\x01` \x90\x81R`@Q\x91\x82R\x7F\xE9\xDC\xE8\xC9\x92b<\xE7\x91r[!\xE8W\xE32H\xD1\xF1\x90\xA2[Qh14 \xEE\xBD\xAA\xE9\x9D\x91\x01a\x02\x14V[a\x02\xF3a\x03TV[s\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x81\x16a\x03HW`@Q\x7F\x1EO\xBD\xF7\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x81R`\0`\x04\x82\x01R`$\x01[`@Q\x80\x91\x03\x90\xFD[a\x03Q\x81a\x03\xA7V[PV[`\0Ts\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x163\x14a\x021W`@Q\x7F\x11\x8C\xDA\xA7\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x81R3`\x04\x82\x01R`$\x01a\x03?V[`\0\x80Ts\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x83\x81\x16\x7F\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x83\x16\x81\x17\x84U`@Q\x91\x90\x92\x16\x92\x83\x91\x7F\x8B\xE0\x07\x9CS\x16Y\x14\x13D\xCD\x1F\xD0\xA4\xF2\x84\x19I\x7F\x97\"\xA3\xDA\xAF\xE3\xB4\x18okdW\xE0\x91\x90\xA3PPV[`\0` \x82\x84\x03\x12\x15a\x04.W`\0\x80\xFD[\x815s\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x81\x16\x81\x14a\x04RW`\0\x80\xFD[\x93\x92PPPV",
     );
@@ -213,13 +214,14 @@ pub mod ScKeystore {
     ///0x608060405234801561001057600080fd5b50600436106100725760003560e01c80638da5cb5b116100505780638da5cb5b146100e2578063985751881461010a578063f2fde38b1461011d57600080fd5b80630e666e4914610077578063421b2d8b146100c5578063715018a6146100da575b600080fd5b6100b061008536600461041c565b73ffffffffffffffffffffffffffffffffffffffff1660009081526001602052604090205460ff1690565b60405190151581526020015b60405180910390f35b6100d86100d336600461041c565b610130565b005b6100d861021f565b60005460405173ffffffffffffffffffffffffffffffffffffffff90911681526020016100bc565b6100d861011836600461041c565b610233565b6100d861012b36600461041c565b6102eb565b610138610354565b73ffffffffffffffffffffffffffffffffffffffff811660009081526001602052604090205460ff1615610198576040517fc344397e00000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b73ffffffffffffffffffffffffffffffffffffffff811660008181526001602081815260409283902080547fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff001690921790915590519182527f19ef9a4877199f89440a26acb26895ec02ed86f2df1aeaa90dc18041b892f71f91015b60405180910390a150565b610227610354565b61023160006103a7565b565b61023b610354565b73ffffffffffffffffffffffffffffffffffffffff811660009081526001602052604090205460ff1661029a576040517f907b361f00000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b73ffffffffffffffffffffffffffffffffffffffff81166000819052600160209081526040519182527fe9dce8c992623ce791725b21e857e33248d1f190a25b5168313420eebdaae99d9101610214565b6102f3610354565b73ffffffffffffffffffffffffffffffffffffffff8116610348576040517f1e4fbdf7000000000000000000000000000000000000000000000000000000008152600060048201526024015b60405180910390fd5b610351816103a7565b50565b60005473ffffffffffffffffffffffffffffffffffffffff163314610231576040517f118cdaa700000000000000000000000000000000000000000000000000000000815233600482015260240161033f565b6000805473ffffffffffffffffffffffffffffffffffffffff8381167fffffffffffffffffffffffff0000000000000000000000000000000000000000831681178455604051919092169283917f8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e09190a35050565b60006020828403121561042e57600080fd5b813573ffffffffffffffffffffffffffffffffffffffff8116811461045257600080fd5b939250505056
     /// ```
     #[rustfmt::skip]
+    #[allow(clippy::all)]
     pub static DEPLOYED_BYTECODE: alloy_sol_types::private::Bytes = alloy_sol_types::private::Bytes::from_static(
         b"`\x80`@R4\x80\x15a\0\x10W`\0\x80\xFD[P`\x046\x10a\0rW`\x005`\xE0\x1C\x80c\x8D\xA5\xCB[\x11a\0PW\x80c\x8D\xA5\xCB[\x14a\0\xE2W\x80c\x98WQ\x88\x14a\x01\nW\x80c\xF2\xFD\xE3\x8B\x14a\x01\x1DW`\0\x80\xFD[\x80c\x0EfnI\x14a\0wW\x80cB\x1B-\x8B\x14a\0\xC5W\x80cqP\x18\xA6\x14a\0\xDAW[`\0\x80\xFD[a\0\xB0a\0\x856`\x04a\x04\x1CV[s\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x16`\0\x90\x81R`\x01` R`@\x90 T`\xFF\x16\x90V[`@Q\x90\x15\x15\x81R` \x01[`@Q\x80\x91\x03\x90\xF3[a\0\xD8a\0\xD36`\x04a\x04\x1CV[a\x010V[\0[a\0\xD8a\x02\x1FV[`\0T`@Qs\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x90\x91\x16\x81R` \x01a\0\xBCV[a\0\xD8a\x01\x186`\x04a\x04\x1CV[a\x023V[a\0\xD8a\x01+6`\x04a\x04\x1CV[a\x02\xEBV[a\x018a\x03TV[s\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x81\x16`\0\x90\x81R`\x01` R`@\x90 T`\xFF\x16\x15a\x01\x98W`@Q\x7F\xC3D9~\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x81R`\x04\x01`@Q\x80\x91\x03\x90\xFD[s\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x81\x16`\0\x81\x81R`\x01` \x81\x81R`@\x92\x83\x90 \x80T\x7F\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\0\x16\x90\x92\x17\x90\x91U\x90Q\x91\x82R\x7F\x19\xEF\x9AHw\x19\x9F\x89D\n&\xAC\xB2h\x95\xEC\x02\xED\x86\xF2\xDF\x1A\xEA\xA9\r\xC1\x80A\xB8\x92\xF7\x1F\x91\x01[`@Q\x80\x91\x03\x90\xA1PV[a\x02'a\x03TV[a\x021`\0a\x03\xA7V[V[a\x02;a\x03TV[s\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x81\x16`\0\x90\x81R`\x01` R`@\x90 T`\xFF\x16a\x02\x9AW`@Q\x7F\x90{6\x1F\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x81R`\x04\x01`@Q\x80\x91\x03\x90\xFD[s\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x81\x16`\0\x81\x90R`\x01` \x90\x81R`@Q\x91\x82R\x7F\xE9\xDC\xE8\xC9\x92b<\xE7\x91r[!\xE8W\xE32H\xD1\xF1\x90\xA2[Qh14 \xEE\xBD\xAA\xE9\x9D\x91\x01a\x02\x14V[a\x02\xF3a\x03TV[s\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x81\x16a\x03HW`@Q\x7F\x1EO\xBD\xF7\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x81R`\0`\x04\x82\x01R`$\x01[`@Q\x80\x91\x03\x90\xFD[a\x03Q\x81a\x03\xA7V[PV[`\0Ts\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x163\x14a\x021W`@Q\x7F\x11\x8C\xDA\xA7\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x81R3`\x04\x82\x01R`$\x01a\x03?V[`\0\x80Ts\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x83\x81\x16\x7F\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x83\x16\x81\x17\x84U`@Q\x91\x90\x92\x16\x92\x83\x91\x7F\x8B\xE0\x07\x9CS\x16Y\x14\x13D\xCD\x1F\xD0\xA4\xF2\x84\x19I\x7F\x97\"\xA3\xDA\xAF\xE3\xB4\x18okdW\xE0\x91\x90\xA3PPV[`\0` \x82\x84\x03\x12\x15a\x04.W`\0\x80\xFD[\x815s\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x81\x16\x81\x14a\x04RW`\0\x80\xFD[\x93\x92PPPV",
     );
     /**Custom error with signature `OwnableInvalidOwner(address)` and selector `0x1e4fbdf7`.
-```solidity
-error OwnableInvalidOwner(address owner);
-```*/
+    ```solidity
+    error OwnableInvalidOwner(address owner);
+    ```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct OwnableInvalidOwner {
@@ -234,9 +236,7 @@ error OwnableInvalidOwner(address owner);
         type UnderlyingRustTuple<'a> = (alloy::sol_types::private::Address,);
         #[cfg(test)]
         #[allow(dead_code, unreachable_patterns)]
-        fn _type_assertion(
-            _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
-        ) {
+        fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
             match _t {
                 alloy_sol_types::private::AssertTypeEq::<
                     <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -260,9 +260,7 @@ error OwnableInvalidOwner(address owner);
         #[automatically_derived]
         impl alloy_sol_types::SolError for OwnableInvalidOwner {
             type Parameters<'a> = UnderlyingSolTuple<'a>;
-            type Token<'a> = <Self::Parameters<
-                'a,
-            > as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
             const SIGNATURE: &'static str = "OwnableInvalidOwner(address)";
             const SELECTOR: [u8; 4] = [30u8, 79u8, 189u8, 247u8];
             #[inline]
@@ -282,9 +280,9 @@ error OwnableInvalidOwner(address owner);
         }
     };
     /**Custom error with signature `OwnableUnauthorizedAccount(address)` and selector `0x118cdaa7`.
-```solidity
-error OwnableUnauthorizedAccount(address account);
-```*/
+    ```solidity
+    error OwnableUnauthorizedAccount(address account);
+    ```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct OwnableUnauthorizedAccount {
@@ -299,9 +297,7 @@ error OwnableUnauthorizedAccount(address account);
         type UnderlyingRustTuple<'a> = (alloy::sol_types::private::Address,);
         #[cfg(test)]
         #[allow(dead_code, unreachable_patterns)]
-        fn _type_assertion(
-            _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
-        ) {
+        fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
             match _t {
                 alloy_sol_types::private::AssertTypeEq::<
                     <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -310,16 +306,14 @@ error OwnableUnauthorizedAccount(address account);
         }
         #[automatically_derived]
         #[doc(hidden)]
-        impl ::core::convert::From<OwnableUnauthorizedAccount>
-        for UnderlyingRustTuple<'_> {
+        impl ::core::convert::From<OwnableUnauthorizedAccount> for UnderlyingRustTuple<'_> {
             fn from(value: OwnableUnauthorizedAccount) -> Self {
                 (value.account,)
             }
         }
         #[automatically_derived]
         #[doc(hidden)]
-        impl ::core::convert::From<UnderlyingRustTuple<'_>>
-        for OwnableUnauthorizedAccount {
+        impl ::core::convert::From<UnderlyingRustTuple<'_>> for OwnableUnauthorizedAccount {
             fn from(tuple: UnderlyingRustTuple<'_>) -> Self {
                 Self { account: tuple.0 }
             }
@@ -327,9 +321,7 @@ error OwnableUnauthorizedAccount(address account);
         #[automatically_derived]
         impl alloy_sol_types::SolError for OwnableUnauthorizedAccount {
             type Parameters<'a> = UnderlyingSolTuple<'a>;
-            type Token<'a> = <Self::Parameters<
-                'a,
-            > as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
             const SIGNATURE: &'static str = "OwnableUnauthorizedAccount(address)";
             const SELECTOR: [u8; 4] = [17u8, 140u8, 218u8, 167u8];
             #[inline]
@@ -349,9 +341,9 @@ error OwnableUnauthorizedAccount(address account);
         }
     };
     /**Custom error with signature `UserAlreadyExists()` and selector `0xc344397e`.
-```solidity
-error UserAlreadyExists();
-```*/
+    ```solidity
+    error UserAlreadyExists();
+    ```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct UserAlreadyExists {}
@@ -364,9 +356,7 @@ error UserAlreadyExists();
         type UnderlyingRustTuple<'a> = ();
         #[cfg(test)]
         #[allow(dead_code, unreachable_patterns)]
-        fn _type_assertion(
-            _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
-        ) {
+        fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
             match _t {
                 alloy_sol_types::private::AssertTypeEq::<
                     <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -390,9 +380,7 @@ error UserAlreadyExists();
         #[automatically_derived]
         impl alloy_sol_types::SolError for UserAlreadyExists {
             type Parameters<'a> = UnderlyingSolTuple<'a>;
-            type Token<'a> = <Self::Parameters<
-                'a,
-            > as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
             const SIGNATURE: &'static str = "UserAlreadyExists()";
             const SELECTOR: [u8; 4] = [195u8, 68u8, 57u8, 126u8];
             #[inline]
@@ -408,9 +396,9 @@ error UserAlreadyExists();
         }
     };
     /**Custom error with signature `UserDoesNotExist()` and selector `0x907b361f`.
-```solidity
-error UserDoesNotExist();
-```*/
+    ```solidity
+    error UserDoesNotExist();
+    ```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct UserDoesNotExist {}
@@ -423,9 +411,7 @@ error UserDoesNotExist();
         type UnderlyingRustTuple<'a> = ();
         #[cfg(test)]
         #[allow(dead_code, unreachable_patterns)]
-        fn _type_assertion(
-            _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
-        ) {
+        fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
             match _t {
                 alloy_sol_types::private::AssertTypeEq::<
                     <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -449,9 +435,7 @@ error UserDoesNotExist();
         #[automatically_derived]
         impl alloy_sol_types::SolError for UserDoesNotExist {
             type Parameters<'a> = UnderlyingSolTuple<'a>;
-            type Token<'a> = <Self::Parameters<
-                'a,
-            > as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
             const SIGNATURE: &'static str = "UserDoesNotExist()";
             const SELECTOR: [u8; 4] = [144u8, 123u8, 54u8, 31u8];
             #[inline]
@@ -467,9 +451,9 @@ error UserDoesNotExist();
         }
     };
     /**Event with signature `OwnershipTransferred(address,address)` and selector `0x8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e0`.
-```solidity
-event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
-```*/
+    ```solidity
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    ```*/
     #[allow(non_camel_case_types, non_snake_case, clippy::style)]
     #[derive(Clone)]
     pub struct OwnershipTransferred {
@@ -484,49 +468,19 @@ event OwnershipTransferred(address indexed previousOwner, address indexed newOwn
         #[automatically_derived]
         impl alloy_sol_types::SolEvent for OwnershipTransferred {
             type DataTuple<'a> = ();
-            type DataToken<'a> = <Self::DataTuple<
-                'a,
-            > as alloy_sol_types::SolType>::Token<'a>;
+            type DataToken<'a> = <Self::DataTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
             type TopicList = (
                 alloy_sol_types::sol_data::FixedBytes<32>,
                 alloy::sol_types::sol_data::Address,
                 alloy::sol_types::sol_data::Address,
             );
             const SIGNATURE: &'static str = "OwnershipTransferred(address,address)";
-            const SIGNATURE_HASH: alloy_sol_types::private::B256 = alloy_sol_types::private::B256::new([
-                139u8,
-                224u8,
-                7u8,
-                156u8,
-                83u8,
-                22u8,
-                89u8,
-                20u8,
-                19u8,
-                68u8,
-                205u8,
-                31u8,
-                208u8,
-                164u8,
-                242u8,
-                132u8,
-                25u8,
-                73u8,
-                127u8,
-                151u8,
-                34u8,
-                163u8,
-                218u8,
-                175u8,
-                227u8,
-                180u8,
-                24u8,
-                111u8,
-                107u8,
-                100u8,
-                87u8,
-                224u8,
-            ]);
+            const SIGNATURE_HASH: alloy_sol_types::private::B256 =
+                alloy_sol_types::private::B256::new([
+                    139u8, 224u8, 7u8, 156u8, 83u8, 22u8, 89u8, 20u8, 19u8, 68u8, 205u8, 31u8,
+                    208u8, 164u8, 242u8, 132u8, 25u8, 73u8, 127u8, 151u8, 34u8, 163u8, 218u8,
+                    175u8, 227u8, 180u8, 24u8, 111u8, 107u8, 100u8, 87u8, 224u8,
+                ]);
             const ANONYMOUS: bool = false;
             #[allow(unused_variables)]
             #[inline]
@@ -559,9 +513,7 @@ event OwnershipTransferred(address indexed previousOwner, address indexed newOwn
                 if out.len() < <Self::TopicList as alloy_sol_types::TopicList>::COUNT {
                     return Err(alloy_sol_types::Error::Overrun);
                 }
-                out[0usize] = alloy_sol_types::abi::token::WordToken(
-                    Self::SIGNATURE_HASH,
-                );
+                out[0usize] = alloy_sol_types::abi::token::WordToken(Self::SIGNATURE_HASH);
                 out[1usize] = <alloy::sol_types::sol_data::Address as alloy_sol_types::EventTopic>::encode_topic(
                     &self.previousOwner,
                 );
@@ -571,22 +523,27 @@ event OwnershipTransferred(address indexed previousOwner, address indexed newOwn
                 Ok(())
             }
         }
+        #[automatically_derived]
+        impl alloy_sol_types::private::IntoLogData for OwnershipTransferred {
+            fn to_log_data(&self) -> alloy_sol_types::private::LogData {
+                From::from(self)
+            }
+            fn into_log_data(self) -> alloy_sol_types::private::LogData {
+                From::from(&self)
+            }
+        }
+        #[automatically_derived]
         impl From<&OwnershipTransferred> for alloy_sol_types::private::LogData {
             #[inline]
             fn from(this: &OwnershipTransferred) -> alloy_sol_types::private::LogData {
-                let topics = alloy_sol_types::SolEvent::encode_topics(this)
-                    .into_iter()
-                    .map(|t| t.into())
-                    .collect();
-                let data = alloy_sol_types::SolEvent::encode_data(this).into();
-                alloy_sol_types::private::LogData::new_unchecked(topics, data)
+                alloy_sol_types::SolEvent::encode_log_data(this)
             }
         }
     };
     /**Event with signature `UserAdded(address)` and selector `0x19ef9a4877199f89440a26acb26895ec02ed86f2df1aeaa90dc18041b892f71f`.
-```solidity
-event UserAdded(address user);
-```*/
+    ```solidity
+    event UserAdded(address user);
+    ```*/
     #[allow(non_camel_case_types, non_snake_case, clippy::style)]
     #[derive(Clone)]
     pub struct UserAdded {
@@ -599,45 +556,15 @@ event UserAdded(address user);
         #[automatically_derived]
         impl alloy_sol_types::SolEvent for UserAdded {
             type DataTuple<'a> = (alloy::sol_types::sol_data::Address,);
-            type DataToken<'a> = <Self::DataTuple<
-                'a,
-            > as alloy_sol_types::SolType>::Token<'a>;
+            type DataToken<'a> = <Self::DataTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
             type TopicList = (alloy_sol_types::sol_data::FixedBytes<32>,);
             const SIGNATURE: &'static str = "UserAdded(address)";
-            const SIGNATURE_HASH: alloy_sol_types::private::B256 = alloy_sol_types::private::B256::new([
-                25u8,
-                239u8,
-                154u8,
-                72u8,
-                119u8,
-                25u8,
-                159u8,
-                137u8,
-                68u8,
-                10u8,
-                38u8,
-                172u8,
-                178u8,
-                104u8,
-                149u8,
-                236u8,
-                2u8,
-                237u8,
-                134u8,
-                242u8,
-                223u8,
-                26u8,
-                234u8,
-                169u8,
-                13u8,
-                193u8,
-                128u8,
-                65u8,
-                184u8,
-                146u8,
-                247u8,
-                31u8,
-            ]);
+            const SIGNATURE_HASH: alloy_sol_types::private::B256 =
+                alloy_sol_types::private::B256::new([
+                    25u8, 239u8, 154u8, 72u8, 119u8, 25u8, 159u8, 137u8, 68u8, 10u8, 38u8, 172u8,
+                    178u8, 104u8, 149u8, 236u8, 2u8, 237u8, 134u8, 242u8, 223u8, 26u8, 234u8,
+                    169u8, 13u8, 193u8, 128u8, 65u8, 184u8, 146u8, 247u8, 31u8,
+                ]);
             const ANONYMOUS: bool = false;
             #[allow(unused_variables)]
             #[inline]
@@ -667,28 +594,31 @@ event UserAdded(address user);
                 if out.len() < <Self::TopicList as alloy_sol_types::TopicList>::COUNT {
                     return Err(alloy_sol_types::Error::Overrun);
                 }
-                out[0usize] = alloy_sol_types::abi::token::WordToken(
-                    Self::SIGNATURE_HASH,
-                );
+                out[0usize] = alloy_sol_types::abi::token::WordToken(Self::SIGNATURE_HASH);
                 Ok(())
             }
         }
+        #[automatically_derived]
+        impl alloy_sol_types::private::IntoLogData for UserAdded {
+            fn to_log_data(&self) -> alloy_sol_types::private::LogData {
+                From::from(self)
+            }
+            fn into_log_data(self) -> alloy_sol_types::private::LogData {
+                From::from(&self)
+            }
+        }
+        #[automatically_derived]
         impl From<&UserAdded> for alloy_sol_types::private::LogData {
             #[inline]
             fn from(this: &UserAdded) -> alloy_sol_types::private::LogData {
-                let topics = alloy_sol_types::SolEvent::encode_topics(this)
-                    .into_iter()
-                    .map(|t| t.into())
-                    .collect();
-                let data = alloy_sol_types::SolEvent::encode_data(this).into();
-                alloy_sol_types::private::LogData::new_unchecked(topics, data)
+                alloy_sol_types::SolEvent::encode_log_data(this)
             }
         }
     };
     /**Event with signature `UserRemoved(address)` and selector `0xe9dce8c992623ce791725b21e857e33248d1f190a25b5168313420eebdaae99d`.
-```solidity
-event UserRemoved(address user);
-```*/
+    ```solidity
+    event UserRemoved(address user);
+    ```*/
     #[allow(non_camel_case_types, non_snake_case, clippy::style)]
     #[derive(Clone)]
     pub struct UserRemoved {
@@ -701,45 +631,15 @@ event UserRemoved(address user);
         #[automatically_derived]
         impl alloy_sol_types::SolEvent for UserRemoved {
             type DataTuple<'a> = (alloy::sol_types::sol_data::Address,);
-            type DataToken<'a> = <Self::DataTuple<
-                'a,
-            > as alloy_sol_types::SolType>::Token<'a>;
+            type DataToken<'a> = <Self::DataTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
             type TopicList = (alloy_sol_types::sol_data::FixedBytes<32>,);
             const SIGNATURE: &'static str = "UserRemoved(address)";
-            const SIGNATURE_HASH: alloy_sol_types::private::B256 = alloy_sol_types::private::B256::new([
-                233u8,
-                220u8,
-                232u8,
-                201u8,
-                146u8,
-                98u8,
-                60u8,
-                231u8,
-                145u8,
-                114u8,
-                91u8,
-                33u8,
-                232u8,
-                87u8,
-                227u8,
-                50u8,
-                72u8,
-                209u8,
-                241u8,
-                144u8,
-                162u8,
-                91u8,
-                81u8,
-                104u8,
-                49u8,
-                52u8,
-                32u8,
-                238u8,
-                189u8,
-                170u8,
-                233u8,
-                157u8,
-            ]);
+            const SIGNATURE_HASH: alloy_sol_types::private::B256 =
+                alloy_sol_types::private::B256::new([
+                    233u8, 220u8, 232u8, 201u8, 146u8, 98u8, 60u8, 231u8, 145u8, 114u8, 91u8, 33u8,
+                    232u8, 87u8, 227u8, 50u8, 72u8, 209u8, 241u8, 144u8, 162u8, 91u8, 81u8, 104u8,
+                    49u8, 52u8, 32u8, 238u8, 189u8, 170u8, 233u8, 157u8,
+                ]);
             const ANONYMOUS: bool = false;
             #[allow(unused_variables)]
             #[inline]
@@ -769,28 +669,31 @@ event UserRemoved(address user);
                 if out.len() < <Self::TopicList as alloy_sol_types::TopicList>::COUNT {
                     return Err(alloy_sol_types::Error::Overrun);
                 }
-                out[0usize] = alloy_sol_types::abi::token::WordToken(
-                    Self::SIGNATURE_HASH,
-                );
+                out[0usize] = alloy_sol_types::abi::token::WordToken(Self::SIGNATURE_HASH);
                 Ok(())
             }
         }
+        #[automatically_derived]
+        impl alloy_sol_types::private::IntoLogData for UserRemoved {
+            fn to_log_data(&self) -> alloy_sol_types::private::LogData {
+                From::from(self)
+            }
+            fn into_log_data(self) -> alloy_sol_types::private::LogData {
+                From::from(&self)
+            }
+        }
+        #[automatically_derived]
         impl From<&UserRemoved> for alloy_sol_types::private::LogData {
             #[inline]
             fn from(this: &UserRemoved) -> alloy_sol_types::private::LogData {
-                let topics = alloy_sol_types::SolEvent::encode_topics(this)
-                    .into_iter()
-                    .map(|t| t.into())
-                    .collect();
-                let data = alloy_sol_types::SolEvent::encode_data(this).into();
-                alloy_sol_types::private::LogData::new_unchecked(topics, data)
+                alloy_sol_types::SolEvent::encode_log_data(this)
             }
         }
     };
     /**Constructor`.
-```solidity
-constructor(address initialOwner);
-```*/
+    ```solidity
+    constructor(address initialOwner);
+    ```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct constructorCall {
@@ -805,9 +708,7 @@ constructor(address initialOwner);
             type UnderlyingRustTuple<'a> = (alloy::sol_types::private::Address,);
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(
-                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
-            ) {
+            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -825,16 +726,16 @@ constructor(address initialOwner);
             #[doc(hidden)]
             impl ::core::convert::From<UnderlyingRustTuple<'_>> for constructorCall {
                 fn from(tuple: UnderlyingRustTuple<'_>) -> Self {
-                    Self { initialOwner: tuple.0 }
+                    Self {
+                        initialOwner: tuple.0,
+                    }
                 }
             }
         }
         #[automatically_derived]
         impl alloy_sol_types::SolConstructor for constructorCall {
             type Parameters<'a> = (alloy::sol_types::sol_data::Address,);
-            type Token<'a> = <Self::Parameters<
-                'a,
-            > as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
             #[inline]
             fn new<'a>(
                 tuple: <Self::Parameters<'a> as alloy_sol_types::SolType>::RustType,
@@ -852,9 +753,9 @@ constructor(address initialOwner);
         }
     };
     /**Function with signature `addUser(address)` and selector `0x421b2d8b`.
-```solidity
-function addUser(address user) external;
-```*/
+    ```solidity
+    function addUser(address user) external;
+    ```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct addUserCall {
@@ -874,9 +775,7 @@ function addUser(address user) external;
             type UnderlyingRustTuple<'a> = (alloy::sol_types::private::Address,);
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(
-                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
-            ) {
+            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -905,9 +804,7 @@ function addUser(address user) external;
             type UnderlyingRustTuple<'a> = ();
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(
-                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
-            ) {
+            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -932,14 +829,10 @@ function addUser(address user) external;
         #[automatically_derived]
         impl alloy_sol_types::SolCall for addUserCall {
             type Parameters<'a> = (alloy::sol_types::sol_data::Address,);
-            type Token<'a> = <Self::Parameters<
-                'a,
-            > as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
             type Return = addUserReturn;
             type ReturnTuple<'a> = ();
-            type ReturnToken<'a> = <Self::ReturnTuple<
-                'a,
-            > as alloy_sol_types::SolType>::Token<'a>;
+            type ReturnToken<'a> = <Self::ReturnTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
             const SIGNATURE: &'static str = "addUser(address)";
             const SELECTOR: [u8; 4] = [66u8, 27u8, 45u8, 139u8];
             #[inline]
@@ -961,17 +854,17 @@ function addUser(address user) external;
                 data: &[u8],
                 validate: bool,
             ) -> alloy_sol_types::Result<Self::Return> {
-                <Self::ReturnTuple<
-                    '_,
-                > as alloy_sol_types::SolType>::abi_decode_sequence(data, validate)
-                    .map(Into::into)
+                <Self::ReturnTuple<'_> as alloy_sol_types::SolType>::abi_decode_sequence(
+                    data, validate,
+                )
+                .map(Into::into)
             }
         }
     };
     /**Function with signature `owner()` and selector `0x8da5cb5b`.
-```solidity
-function owner() external view returns (address);
-```*/
+    ```solidity
+    function owner() external view returns (address);
+    ```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct ownerCall {}
@@ -991,9 +884,7 @@ function owner() external view returns (address);
             type UnderlyingRustTuple<'a> = ();
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(
-                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
-            ) {
+            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -1022,9 +913,7 @@ function owner() external view returns (address);
             type UnderlyingRustTuple<'a> = (alloy::sol_types::private::Address,);
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(
-                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
-            ) {
+            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -1049,14 +938,10 @@ function owner() external view returns (address);
         #[automatically_derived]
         impl alloy_sol_types::SolCall for ownerCall {
             type Parameters<'a> = ();
-            type Token<'a> = <Self::Parameters<
-                'a,
-            > as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
             type Return = ownerReturn;
             type ReturnTuple<'a> = (alloy::sol_types::sol_data::Address,);
-            type ReturnToken<'a> = <Self::ReturnTuple<
-                'a,
-            > as alloy_sol_types::SolType>::Token<'a>;
+            type ReturnToken<'a> = <Self::ReturnTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
             const SIGNATURE: &'static str = "owner()";
             const SELECTOR: [u8; 4] = [141u8, 165u8, 203u8, 91u8];
             #[inline]
@@ -1074,17 +959,17 @@ function owner() external view returns (address);
                 data: &[u8],
                 validate: bool,
             ) -> alloy_sol_types::Result<Self::Return> {
-                <Self::ReturnTuple<
-                    '_,
-                > as alloy_sol_types::SolType>::abi_decode_sequence(data, validate)
-                    .map(Into::into)
+                <Self::ReturnTuple<'_> as alloy_sol_types::SolType>::abi_decode_sequence(
+                    data, validate,
+                )
+                .map(Into::into)
             }
         }
     };
     /**Function with signature `removeUser(address)` and selector `0x98575188`.
-```solidity
-function removeUser(address user) external;
-```*/
+    ```solidity
+    function removeUser(address user) external;
+    ```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct removeUserCall {
@@ -1104,9 +989,7 @@ function removeUser(address user) external;
             type UnderlyingRustTuple<'a> = (alloy::sol_types::private::Address,);
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(
-                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
-            ) {
+            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -1135,9 +1018,7 @@ function removeUser(address user) external;
             type UnderlyingRustTuple<'a> = ();
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(
-                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
-            ) {
+            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -1162,14 +1043,10 @@ function removeUser(address user) external;
         #[automatically_derived]
         impl alloy_sol_types::SolCall for removeUserCall {
             type Parameters<'a> = (alloy::sol_types::sol_data::Address,);
-            type Token<'a> = <Self::Parameters<
-                'a,
-            > as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
             type Return = removeUserReturn;
             type ReturnTuple<'a> = ();
-            type ReturnToken<'a> = <Self::ReturnTuple<
-                'a,
-            > as alloy_sol_types::SolType>::Token<'a>;
+            type ReturnToken<'a> = <Self::ReturnTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
             const SIGNATURE: &'static str = "removeUser(address)";
             const SELECTOR: [u8; 4] = [152u8, 87u8, 81u8, 136u8];
             #[inline]
@@ -1191,17 +1068,17 @@ function removeUser(address user) external;
                 data: &[u8],
                 validate: bool,
             ) -> alloy_sol_types::Result<Self::Return> {
-                <Self::ReturnTuple<
-                    '_,
-                > as alloy_sol_types::SolType>::abi_decode_sequence(data, validate)
-                    .map(Into::into)
+                <Self::ReturnTuple<'_> as alloy_sol_types::SolType>::abi_decode_sequence(
+                    data, validate,
+                )
+                .map(Into::into)
             }
         }
     };
     /**Function with signature `renounceOwnership()` and selector `0x715018a6`.
-```solidity
-function renounceOwnership() external;
-```*/
+    ```solidity
+    function renounceOwnership() external;
+    ```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct renounceOwnershipCall {}
@@ -1219,9 +1096,7 @@ function renounceOwnership() external;
             type UnderlyingRustTuple<'a> = ();
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(
-                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
-            ) {
+            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -1230,16 +1105,14 @@ function renounceOwnership() external;
             }
             #[automatically_derived]
             #[doc(hidden)]
-            impl ::core::convert::From<renounceOwnershipCall>
-            for UnderlyingRustTuple<'_> {
+            impl ::core::convert::From<renounceOwnershipCall> for UnderlyingRustTuple<'_> {
                 fn from(value: renounceOwnershipCall) -> Self {
                     ()
                 }
             }
             #[automatically_derived]
             #[doc(hidden)]
-            impl ::core::convert::From<UnderlyingRustTuple<'_>>
-            for renounceOwnershipCall {
+            impl ::core::convert::From<UnderlyingRustTuple<'_>> for renounceOwnershipCall {
                 fn from(tuple: UnderlyingRustTuple<'_>) -> Self {
                     Self {}
                 }
@@ -1252,9 +1125,7 @@ function renounceOwnership() external;
             type UnderlyingRustTuple<'a> = ();
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(
-                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
-            ) {
+            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -1263,16 +1134,14 @@ function renounceOwnership() external;
             }
             #[automatically_derived]
             #[doc(hidden)]
-            impl ::core::convert::From<renounceOwnershipReturn>
-            for UnderlyingRustTuple<'_> {
+            impl ::core::convert::From<renounceOwnershipReturn> for UnderlyingRustTuple<'_> {
                 fn from(value: renounceOwnershipReturn) -> Self {
                     ()
                 }
             }
             #[automatically_derived]
             #[doc(hidden)]
-            impl ::core::convert::From<UnderlyingRustTuple<'_>>
-            for renounceOwnershipReturn {
+            impl ::core::convert::From<UnderlyingRustTuple<'_>> for renounceOwnershipReturn {
                 fn from(tuple: UnderlyingRustTuple<'_>) -> Self {
                     Self {}
                 }
@@ -1281,14 +1150,10 @@ function renounceOwnership() external;
         #[automatically_derived]
         impl alloy_sol_types::SolCall for renounceOwnershipCall {
             type Parameters<'a> = ();
-            type Token<'a> = <Self::Parameters<
-                'a,
-            > as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
             type Return = renounceOwnershipReturn;
             type ReturnTuple<'a> = ();
-            type ReturnToken<'a> = <Self::ReturnTuple<
-                'a,
-            > as alloy_sol_types::SolType>::Token<'a>;
+            type ReturnToken<'a> = <Self::ReturnTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
             const SIGNATURE: &'static str = "renounceOwnership()";
             const SELECTOR: [u8; 4] = [113u8, 80u8, 24u8, 166u8];
             #[inline]
@@ -1306,17 +1171,17 @@ function renounceOwnership() external;
                 data: &[u8],
                 validate: bool,
             ) -> alloy_sol_types::Result<Self::Return> {
-                <Self::ReturnTuple<
-                    '_,
-                > as alloy_sol_types::SolType>::abi_decode_sequence(data, validate)
-                    .map(Into::into)
+                <Self::ReturnTuple<'_> as alloy_sol_types::SolType>::abi_decode_sequence(
+                    data, validate,
+                )
+                .map(Into::into)
             }
         }
     };
     /**Function with signature `transferOwnership(address)` and selector `0xf2fde38b`.
-```solidity
-function transferOwnership(address newOwner) external;
-```*/
+    ```solidity
+    function transferOwnership(address newOwner) external;
+    ```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct transferOwnershipCall {
@@ -1336,9 +1201,7 @@ function transferOwnership(address newOwner) external;
             type UnderlyingRustTuple<'a> = (alloy::sol_types::private::Address,);
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(
-                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
-            ) {
+            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -1347,16 +1210,14 @@ function transferOwnership(address newOwner) external;
             }
             #[automatically_derived]
             #[doc(hidden)]
-            impl ::core::convert::From<transferOwnershipCall>
-            for UnderlyingRustTuple<'_> {
+            impl ::core::convert::From<transferOwnershipCall> for UnderlyingRustTuple<'_> {
                 fn from(value: transferOwnershipCall) -> Self {
                     (value.newOwner,)
                 }
             }
             #[automatically_derived]
             #[doc(hidden)]
-            impl ::core::convert::From<UnderlyingRustTuple<'_>>
-            for transferOwnershipCall {
+            impl ::core::convert::From<UnderlyingRustTuple<'_>> for transferOwnershipCall {
                 fn from(tuple: UnderlyingRustTuple<'_>) -> Self {
                     Self { newOwner: tuple.0 }
                 }
@@ -1369,9 +1230,7 @@ function transferOwnership(address newOwner) external;
             type UnderlyingRustTuple<'a> = ();
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(
-                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
-            ) {
+            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -1380,16 +1239,14 @@ function transferOwnership(address newOwner) external;
             }
             #[automatically_derived]
             #[doc(hidden)]
-            impl ::core::convert::From<transferOwnershipReturn>
-            for UnderlyingRustTuple<'_> {
+            impl ::core::convert::From<transferOwnershipReturn> for UnderlyingRustTuple<'_> {
                 fn from(value: transferOwnershipReturn) -> Self {
                     ()
                 }
             }
             #[automatically_derived]
             #[doc(hidden)]
-            impl ::core::convert::From<UnderlyingRustTuple<'_>>
-            for transferOwnershipReturn {
+            impl ::core::convert::From<UnderlyingRustTuple<'_>> for transferOwnershipReturn {
                 fn from(tuple: UnderlyingRustTuple<'_>) -> Self {
                     Self {}
                 }
@@ -1398,14 +1255,10 @@ function transferOwnership(address newOwner) external;
         #[automatically_derived]
         impl alloy_sol_types::SolCall for transferOwnershipCall {
             type Parameters<'a> = (alloy::sol_types::sol_data::Address,);
-            type Token<'a> = <Self::Parameters<
-                'a,
-            > as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
             type Return = transferOwnershipReturn;
             type ReturnTuple<'a> = ();
-            type ReturnToken<'a> = <Self::ReturnTuple<
-                'a,
-            > as alloy_sol_types::SolType>::Token<'a>;
+            type ReturnToken<'a> = <Self::ReturnTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
             const SIGNATURE: &'static str = "transferOwnership(address)";
             const SELECTOR: [u8; 4] = [242u8, 253u8, 227u8, 139u8];
             #[inline]
@@ -1427,17 +1280,17 @@ function transferOwnership(address newOwner) external;
                 data: &[u8],
                 validate: bool,
             ) -> alloy_sol_types::Result<Self::Return> {
-                <Self::ReturnTuple<
-                    '_,
-                > as alloy_sol_types::SolType>::abi_decode_sequence(data, validate)
-                    .map(Into::into)
+                <Self::ReturnTuple<'_> as alloy_sol_types::SolType>::abi_decode_sequence(
+                    data, validate,
+                )
+                .map(Into::into)
             }
         }
     };
     /**Function with signature `userExists(address)` and selector `0x0e666e49`.
-```solidity
-function userExists(address user) external view returns (bool);
-```*/
+    ```solidity
+    function userExists(address user) external view returns (bool);
+    ```*/
     #[allow(non_camel_case_types, non_snake_case)]
     #[derive(Clone)]
     pub struct userExistsCall {
@@ -1459,9 +1312,7 @@ function userExists(address user) external view returns (bool);
             type UnderlyingRustTuple<'a> = (alloy::sol_types::private::Address,);
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(
-                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
-            ) {
+            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -1490,9 +1341,7 @@ function userExists(address user) external view returns (bool);
             type UnderlyingRustTuple<'a> = (bool,);
             #[cfg(test)]
             #[allow(dead_code, unreachable_patterns)]
-            fn _type_assertion(
-                _t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>,
-            ) {
+            fn _type_assertion(_t: alloy_sol_types::private::AssertTypeEq<UnderlyingRustTuple>) {
                 match _t {
                     alloy_sol_types::private::AssertTypeEq::<
                         <UnderlyingSolTuple as alloy_sol_types::SolType>::RustType,
@@ -1517,14 +1366,10 @@ function userExists(address user) external view returns (bool);
         #[automatically_derived]
         impl alloy_sol_types::SolCall for userExistsCall {
             type Parameters<'a> = (alloy::sol_types::sol_data::Address,);
-            type Token<'a> = <Self::Parameters<
-                'a,
-            > as alloy_sol_types::SolType>::Token<'a>;
+            type Token<'a> = <Self::Parameters<'a> as alloy_sol_types::SolType>::Token<'a>;
             type Return = userExistsReturn;
             type ReturnTuple<'a> = (alloy::sol_types::sol_data::Bool,);
-            type ReturnToken<'a> = <Self::ReturnTuple<
-                'a,
-            > as alloy_sol_types::SolType>::Token<'a>;
+            type ReturnToken<'a> = <Self::ReturnTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
             const SIGNATURE: &'static str = "userExists(address)";
             const SELECTOR: [u8; 4] = [14u8, 102u8, 110u8, 73u8];
             #[inline]
@@ -1546,10 +1391,10 @@ function userExists(address user) external view returns (bool);
                 data: &[u8],
                 validate: bool,
             ) -> alloy_sol_types::Result<Self::Return> {
-                <Self::ReturnTuple<
-                    '_,
-                > as alloy_sol_types::SolType>::abi_decode_sequence(data, validate)
-                    .map(Into::into)
+                <Self::ReturnTuple<'_> as alloy_sol_types::SolType>::abi_decode_sequence(
+                    data, validate,
+                )
+                .map(Into::into)
             }
         }
     };
@@ -1589,18 +1434,14 @@ function userExists(address user) external view returns (bool);
             match self {
                 Self::addUser(_) => <addUserCall as alloy_sol_types::SolCall>::SELECTOR,
                 Self::owner(_) => <ownerCall as alloy_sol_types::SolCall>::SELECTOR,
-                Self::removeUser(_) => {
-                    <removeUserCall as alloy_sol_types::SolCall>::SELECTOR
-                }
+                Self::removeUser(_) => <removeUserCall as alloy_sol_types::SolCall>::SELECTOR,
                 Self::renounceOwnership(_) => {
                     <renounceOwnershipCall as alloy_sol_types::SolCall>::SELECTOR
                 }
                 Self::transferOwnership(_) => {
                     <transferOwnershipCall as alloy_sol_types::SolCall>::SELECTOR
                 }
-                Self::userExists(_) => {
-                    <userExistsCall as alloy_sol_types::SolCall>::SELECTOR
-                }
+                Self::userExists(_) => <userExistsCall as alloy_sol_types::SolCall>::SELECTOR,
             }
         }
         #[inline]
@@ -1618,19 +1459,13 @@ function userExists(address user) external view returns (bool);
             data: &[u8],
             validate: bool,
         ) -> alloy_sol_types::Result<Self> {
-            static DECODE_SHIMS: &[fn(
-                &[u8],
-                bool,
-            ) -> alloy_sol_types::Result<ScKeystoreCalls>] = &[
+            static DECODE_SHIMS: &[fn(&[u8], bool) -> alloy_sol_types::Result<ScKeystoreCalls>] = &[
                 {
                     fn userExists(
                         data: &[u8],
                         validate: bool,
                     ) -> alloy_sol_types::Result<ScKeystoreCalls> {
-                        <userExistsCall as alloy_sol_types::SolCall>::abi_decode_raw(
-                                data,
-                                validate,
-                            )
+                        <userExistsCall as alloy_sol_types::SolCall>::abi_decode_raw(data, validate)
                             .map(ScKeystoreCalls::userExists)
                     }
                     userExists
@@ -1640,10 +1475,7 @@ function userExists(address user) external view returns (bool);
                         data: &[u8],
                         validate: bool,
                     ) -> alloy_sol_types::Result<ScKeystoreCalls> {
-                        <addUserCall as alloy_sol_types::SolCall>::abi_decode_raw(
-                                data,
-                                validate,
-                            )
+                        <addUserCall as alloy_sol_types::SolCall>::abi_decode_raw(data, validate)
                             .map(ScKeystoreCalls::addUser)
                     }
                     addUser
@@ -1654,10 +1486,9 @@ function userExists(address user) external view returns (bool);
                         validate: bool,
                     ) -> alloy_sol_types::Result<ScKeystoreCalls> {
                         <renounceOwnershipCall as alloy_sol_types::SolCall>::abi_decode_raw(
-                                data,
-                                validate,
-                            )
-                            .map(ScKeystoreCalls::renounceOwnership)
+                            data, validate,
+                        )
+                        .map(ScKeystoreCalls::renounceOwnership)
                     }
                     renounceOwnership
                 },
@@ -1666,10 +1497,7 @@ function userExists(address user) external view returns (bool);
                         data: &[u8],
                         validate: bool,
                     ) -> alloy_sol_types::Result<ScKeystoreCalls> {
-                        <ownerCall as alloy_sol_types::SolCall>::abi_decode_raw(
-                                data,
-                                validate,
-                            )
+                        <ownerCall as alloy_sol_types::SolCall>::abi_decode_raw(data, validate)
                             .map(ScKeystoreCalls::owner)
                     }
                     owner
@@ -1679,10 +1507,7 @@ function userExists(address user) external view returns (bool);
                         data: &[u8],
                         validate: bool,
                     ) -> alloy_sol_types::Result<ScKeystoreCalls> {
-                        <removeUserCall as alloy_sol_types::SolCall>::abi_decode_raw(
-                                data,
-                                validate,
-                            )
+                        <removeUserCall as alloy_sol_types::SolCall>::abi_decode_raw(data, validate)
                             .map(ScKeystoreCalls::removeUser)
                     }
                     removeUser
@@ -1693,21 +1518,18 @@ function userExists(address user) external view returns (bool);
                         validate: bool,
                     ) -> alloy_sol_types::Result<ScKeystoreCalls> {
                         <transferOwnershipCall as alloy_sol_types::SolCall>::abi_decode_raw(
-                                data,
-                                validate,
-                            )
-                            .map(ScKeystoreCalls::transferOwnership)
+                            data, validate,
+                        )
+                        .map(ScKeystoreCalls::transferOwnership)
                     }
                     transferOwnership
                 },
             ];
             let Ok(idx) = Self::SELECTORS.binary_search(&selector) else {
-                return Err(
-                    alloy_sol_types::Error::unknown_selector(
-                        <Self as alloy_sol_types::SolInterface>::NAME,
-                        selector,
-                    ),
-                );
+                return Err(alloy_sol_types::Error::unknown_selector(
+                    <Self as alloy_sol_types::SolInterface>::NAME,
+                    selector,
+                ));
             };
             (unsafe { DECODE_SHIMS.get_unchecked(idx) })(data, validate)
         }
@@ -1724,14 +1546,10 @@ function userExists(address user) external view returns (bool);
                     <removeUserCall as alloy_sol_types::SolCall>::abi_encoded_size(inner)
                 }
                 Self::renounceOwnership(inner) => {
-                    <renounceOwnershipCall as alloy_sol_types::SolCall>::abi_encoded_size(
-                        inner,
-                    )
+                    <renounceOwnershipCall as alloy_sol_types::SolCall>::abi_encoded_size(inner)
                 }
                 Self::transferOwnership(inner) => {
-                    <transferOwnershipCall as alloy_sol_types::SolCall>::abi_encoded_size(
-                        inner,
-                    )
+                    <transferOwnershipCall as alloy_sol_types::SolCall>::abi_encoded_size(inner)
                 }
                 Self::userExists(inner) => {
                     <userExistsCall as alloy_sol_types::SolCall>::abi_encoded_size(inner)
@@ -1748,28 +1566,16 @@ function userExists(address user) external view returns (bool);
                     <ownerCall as alloy_sol_types::SolCall>::abi_encode_raw(inner, out)
                 }
                 Self::removeUser(inner) => {
-                    <removeUserCall as alloy_sol_types::SolCall>::abi_encode_raw(
-                        inner,
-                        out,
-                    )
+                    <removeUserCall as alloy_sol_types::SolCall>::abi_encode_raw(inner, out)
                 }
                 Self::renounceOwnership(inner) => {
-                    <renounceOwnershipCall as alloy_sol_types::SolCall>::abi_encode_raw(
-                        inner,
-                        out,
-                    )
+                    <renounceOwnershipCall as alloy_sol_types::SolCall>::abi_encode_raw(inner, out)
                 }
                 Self::transferOwnership(inner) => {
-                    <transferOwnershipCall as alloy_sol_types::SolCall>::abi_encode_raw(
-                        inner,
-                        out,
-                    )
+                    <transferOwnershipCall as alloy_sol_types::SolCall>::abi_encode_raw(inner, out)
                 }
                 Self::userExists(inner) => {
-                    <userExistsCall as alloy_sol_types::SolCall>::abi_encode_raw(
-                        inner,
-                        out,
-                    )
+                    <userExistsCall as alloy_sol_types::SolCall>::abi_encode_raw(inner, out)
                 }
             }
         }
@@ -1833,70 +1639,63 @@ function userExists(address user) external view returns (bool);
             data: &[u8],
             validate: bool,
         ) -> alloy_sol_types::Result<Self> {
-            static DECODE_SHIMS: &[fn(
-                &[u8],
-                bool,
-            ) -> alloy_sol_types::Result<ScKeystoreErrors>] = &[
-                {
-                    fn OwnableUnauthorizedAccount(
-                        data: &[u8],
-                        validate: bool,
-                    ) -> alloy_sol_types::Result<ScKeystoreErrors> {
-                        <OwnableUnauthorizedAccount as alloy_sol_types::SolError>::abi_decode_raw(
+            static DECODE_SHIMS: &[fn(&[u8], bool) -> alloy_sol_types::Result<ScKeystoreErrors>] =
+                &[
+                    {
+                        fn OwnableUnauthorizedAccount(
+                            data: &[u8],
+                            validate: bool,
+                        ) -> alloy_sol_types::Result<ScKeystoreErrors> {
+                            <OwnableUnauthorizedAccount as alloy_sol_types::SolError>::abi_decode_raw(
                                 data,
                                 validate,
                             )
                             .map(ScKeystoreErrors::OwnableUnauthorizedAccount)
-                    }
-                    OwnableUnauthorizedAccount
-                },
-                {
-                    fn OwnableInvalidOwner(
-                        data: &[u8],
-                        validate: bool,
-                    ) -> alloy_sol_types::Result<ScKeystoreErrors> {
-                        <OwnableInvalidOwner as alloy_sol_types::SolError>::abi_decode_raw(
-                                data,
-                                validate,
+                        }
+                        OwnableUnauthorizedAccount
+                    },
+                    {
+                        fn OwnableInvalidOwner(
+                            data: &[u8],
+                            validate: bool,
+                        ) -> alloy_sol_types::Result<ScKeystoreErrors> {
+                            <OwnableInvalidOwner as alloy_sol_types::SolError>::abi_decode_raw(
+                                data, validate,
                             )
                             .map(ScKeystoreErrors::OwnableInvalidOwner)
-                    }
-                    OwnableInvalidOwner
-                },
-                {
-                    fn UserDoesNotExist(
-                        data: &[u8],
-                        validate: bool,
-                    ) -> alloy_sol_types::Result<ScKeystoreErrors> {
-                        <UserDoesNotExist as alloy_sol_types::SolError>::abi_decode_raw(
-                                data,
-                                validate,
+                        }
+                        OwnableInvalidOwner
+                    },
+                    {
+                        fn UserDoesNotExist(
+                            data: &[u8],
+                            validate: bool,
+                        ) -> alloy_sol_types::Result<ScKeystoreErrors> {
+                            <UserDoesNotExist as alloy_sol_types::SolError>::abi_decode_raw(
+                                data, validate,
                             )
                             .map(ScKeystoreErrors::UserDoesNotExist)
-                    }
-                    UserDoesNotExist
-                },
-                {
-                    fn UserAlreadyExists(
-                        data: &[u8],
-                        validate: bool,
-                    ) -> alloy_sol_types::Result<ScKeystoreErrors> {
-                        <UserAlreadyExists as alloy_sol_types::SolError>::abi_decode_raw(
-                                data,
-                                validate,
+                        }
+                        UserDoesNotExist
+                    },
+                    {
+                        fn UserAlreadyExists(
+                            data: &[u8],
+                            validate: bool,
+                        ) -> alloy_sol_types::Result<ScKeystoreErrors> {
+                            <UserAlreadyExists as alloy_sol_types::SolError>::abi_decode_raw(
+                                data, validate,
                             )
                             .map(ScKeystoreErrors::UserAlreadyExists)
-                    }
-                    UserAlreadyExists
-                },
-            ];
+                        }
+                        UserAlreadyExists
+                    },
+                ];
             let Ok(idx) = Self::SELECTORS.binary_search(&selector) else {
-                return Err(
-                    alloy_sol_types::Error::unknown_selector(
-                        <Self as alloy_sol_types::SolInterface>::NAME,
-                        selector,
-                    ),
-                );
+                return Err(alloy_sol_types::Error::unknown_selector(
+                    <Self as alloy_sol_types::SolInterface>::NAME,
+                    selector,
+                ));
             };
             (unsafe { DECODE_SHIMS.get_unchecked(idx) })(data, validate)
         }
@@ -1904,9 +1703,7 @@ function userExists(address user) external view returns (bool);
         fn abi_encoded_size(&self) -> usize {
             match self {
                 Self::OwnableInvalidOwner(inner) => {
-                    <OwnableInvalidOwner as alloy_sol_types::SolError>::abi_encoded_size(
-                        inner,
-                    )
+                    <OwnableInvalidOwner as alloy_sol_types::SolError>::abi_encoded_size(inner)
                 }
                 Self::OwnableUnauthorizedAccount(inner) => {
                     <OwnableUnauthorizedAccount as alloy_sol_types::SolError>::abi_encoded_size(
@@ -1914,14 +1711,10 @@ function userExists(address user) external view returns (bool);
                     )
                 }
                 Self::UserAlreadyExists(inner) => {
-                    <UserAlreadyExists as alloy_sol_types::SolError>::abi_encoded_size(
-                        inner,
-                    )
+                    <UserAlreadyExists as alloy_sol_types::SolError>::abi_encoded_size(inner)
                 }
                 Self::UserDoesNotExist(inner) => {
-                    <UserDoesNotExist as alloy_sol_types::SolError>::abi_encoded_size(
-                        inner,
-                    )
+                    <UserDoesNotExist as alloy_sol_types::SolError>::abi_encoded_size(inner)
                 }
             }
         }
@@ -1929,28 +1722,18 @@ function userExists(address user) external view returns (bool);
         fn abi_encode_raw(&self, out: &mut alloy_sol_types::private::Vec<u8>) {
             match self {
                 Self::OwnableInvalidOwner(inner) => {
-                    <OwnableInvalidOwner as alloy_sol_types::SolError>::abi_encode_raw(
-                        inner,
-                        out,
-                    )
+                    <OwnableInvalidOwner as alloy_sol_types::SolError>::abi_encode_raw(inner, out)
                 }
                 Self::OwnableUnauthorizedAccount(inner) => {
                     <OwnableUnauthorizedAccount as alloy_sol_types::SolError>::abi_encode_raw(
-                        inner,
-                        out,
+                        inner, out,
                     )
                 }
                 Self::UserAlreadyExists(inner) => {
-                    <UserAlreadyExists as alloy_sol_types::SolError>::abi_encode_raw(
-                        inner,
-                        out,
-                    )
+                    <UserAlreadyExists as alloy_sol_types::SolError>::abi_encode_raw(inner, out)
                 }
                 Self::UserDoesNotExist(inner) => {
-                    <UserDoesNotExist as alloy_sol_types::SolError>::abi_encode_raw(
-                        inner,
-                        out,
-                    )
+                    <UserDoesNotExist as alloy_sol_types::SolError>::abi_encode_raw(inner, out)
                 }
             }
         }
@@ -1971,106 +1754,19 @@ function userExists(address user) external view returns (bool);
         /// Prefer using `SolInterface` methods instead.
         pub const SELECTORS: &'static [[u8; 32usize]] = &[
             [
-                25u8,
-                239u8,
-                154u8,
-                72u8,
-                119u8,
-                25u8,
-                159u8,
-                137u8,
-                68u8,
-                10u8,
-                38u8,
-                172u8,
-                178u8,
-                104u8,
-                149u8,
-                236u8,
-                2u8,
-                237u8,
-                134u8,
-                242u8,
-                223u8,
-                26u8,
-                234u8,
-                169u8,
-                13u8,
-                193u8,
-                128u8,
-                65u8,
-                184u8,
-                146u8,
-                247u8,
-                31u8,
+                25u8, 239u8, 154u8, 72u8, 119u8, 25u8, 159u8, 137u8, 68u8, 10u8, 38u8, 172u8,
+                178u8, 104u8, 149u8, 236u8, 2u8, 237u8, 134u8, 242u8, 223u8, 26u8, 234u8, 169u8,
+                13u8, 193u8, 128u8, 65u8, 184u8, 146u8, 247u8, 31u8,
             ],
             [
-                139u8,
-                224u8,
-                7u8,
-                156u8,
-                83u8,
-                22u8,
-                89u8,
-                20u8,
-                19u8,
-                68u8,
-                205u8,
-                31u8,
-                208u8,
-                164u8,
-                242u8,
-                132u8,
-                25u8,
-                73u8,
-                127u8,
-                151u8,
-                34u8,
-                163u8,
-                218u8,
-                175u8,
-                227u8,
-                180u8,
-                24u8,
-                111u8,
-                107u8,
-                100u8,
-                87u8,
-                224u8,
+                139u8, 224u8, 7u8, 156u8, 83u8, 22u8, 89u8, 20u8, 19u8, 68u8, 205u8, 31u8, 208u8,
+                164u8, 242u8, 132u8, 25u8, 73u8, 127u8, 151u8, 34u8, 163u8, 218u8, 175u8, 227u8,
+                180u8, 24u8, 111u8, 107u8, 100u8, 87u8, 224u8,
             ],
             [
-                233u8,
-                220u8,
-                232u8,
-                201u8,
-                146u8,
-                98u8,
-                60u8,
-                231u8,
-                145u8,
-                114u8,
-                91u8,
-                33u8,
-                232u8,
-                87u8,
-                227u8,
-                50u8,
-                72u8,
-                209u8,
-                241u8,
-                144u8,
-                162u8,
-                91u8,
-                81u8,
-                104u8,
-                49u8,
-                52u8,
-                32u8,
-                238u8,
-                189u8,
-                170u8,
-                233u8,
-                157u8,
+                233u8, 220u8, 232u8, 201u8, 146u8, 98u8, 60u8, 231u8, 145u8, 114u8, 91u8, 33u8,
+                232u8, 87u8, 227u8, 50u8, 72u8, 209u8, 241u8, 144u8, 162u8, 91u8, 81u8, 104u8,
+                49u8, 52u8, 32u8, 238u8, 189u8, 170u8, 233u8, 157u8,
             ],
         ];
     }
@@ -2084,42 +1780,57 @@ function userExists(address user) external view returns (bool);
             validate: bool,
         ) -> alloy_sol_types::Result<Self> {
             match topics.first().copied() {
-                Some(
-                    <OwnershipTransferred as alloy_sol_types::SolEvent>::SIGNATURE_HASH,
-                ) => {
+                Some(<OwnershipTransferred as alloy_sol_types::SolEvent>::SIGNATURE_HASH) => {
                     <OwnershipTransferred as alloy_sol_types::SolEvent>::decode_raw_log(
-                            topics,
-                            data,
-                            validate,
-                        )
-                        .map(Self::OwnershipTransferred)
+                        topics, data, validate,
+                    )
+                    .map(Self::OwnershipTransferred)
                 }
                 Some(<UserAdded as alloy_sol_types::SolEvent>::SIGNATURE_HASH) => {
-                    <UserAdded as alloy_sol_types::SolEvent>::decode_raw_log(
-                            topics,
-                            data,
-                            validate,
-                        )
+                    <UserAdded as alloy_sol_types::SolEvent>::decode_raw_log(topics, data, validate)
                         .map(Self::UserAdded)
                 }
                 Some(<UserRemoved as alloy_sol_types::SolEvent>::SIGNATURE_HASH) => {
                     <UserRemoved as alloy_sol_types::SolEvent>::decode_raw_log(
-                            topics,
-                            data,
-                            validate,
-                        )
-                        .map(Self::UserRemoved)
+                        topics, data, validate,
+                    )
+                    .map(Self::UserRemoved)
                 }
-                _ => {
-                    alloy_sol_types::private::Err(alloy_sol_types::Error::InvalidLog {
-                        name: <Self as alloy_sol_types::SolEventInterface>::NAME,
-                        log: alloy_sol_types::private::Box::new(
-                            alloy_sol_types::private::LogData::new_unchecked(
-                                topics.to_vec(),
-                                data.to_vec().into(),
-                            ),
+                _ => alloy_sol_types::private::Err(alloy_sol_types::Error::InvalidLog {
+                    name: <Self as alloy_sol_types::SolEventInterface>::NAME,
+                    log: alloy_sol_types::private::Box::new(
+                        alloy_sol_types::private::LogData::new_unchecked(
+                            topics.to_vec(),
+                            data.to_vec().into(),
                         ),
-                    })
+                    ),
+                }),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl alloy_sol_types::private::IntoLogData for ScKeystoreEvents {
+        fn to_log_data(&self) -> alloy_sol_types::private::LogData {
+            match self {
+                Self::OwnershipTransferred(inner) => {
+                    alloy_sol_types::private::IntoLogData::to_log_data(inner)
+                }
+                Self::UserAdded(inner) => alloy_sol_types::private::IntoLogData::to_log_data(inner),
+                Self::UserRemoved(inner) => {
+                    alloy_sol_types::private::IntoLogData::to_log_data(inner)
+                }
+            }
+        }
+        fn into_log_data(self) -> alloy_sol_types::private::LogData {
+            match self {
+                Self::OwnershipTransferred(inner) => {
+                    alloy_sol_types::private::IntoLogData::into_log_data(inner)
+                }
+                Self::UserAdded(inner) => {
+                    alloy_sol_types::private::IntoLogData::into_log_data(inner)
+                }
+                Self::UserRemoved(inner) => {
+                    alloy_sol_types::private::IntoLogData::into_log_data(inner)
                 }
             }
         }
@@ -2127,7 +1838,7 @@ function userExists(address user) external view returns (bool);
     use alloy::contract as alloy_contract;
     /**Creates a new wrapper around an on-chain [`ScKeystore`](self) contract instance.
 
-See the [wrapper's documentation](`ScKeystoreInstance`) for more details.*/
+    See the [wrapper's documentation](`ScKeystoreInstance`) for more details.*/
     #[inline]
     pub const fn new<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
@@ -2141,9 +1852,9 @@ See the [wrapper's documentation](`ScKeystoreInstance`) for more details.*/
     }
     /**Deploys this contract using the given `provider` and constructor arguments, if any.
 
-Returns a new instance of the contract, if the deployment was successful.
+    Returns a new instance of the contract, if the deployment was successful.
 
-For more fine-grained control over the deployment process, use [`deploy_builder`] instead.*/
+    For more fine-grained control over the deployment process, use [`deploy_builder`] instead.*/
     #[inline]
     pub fn deploy<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
@@ -2152,16 +1863,15 @@ For more fine-grained control over the deployment process, use [`deploy_builder`
     >(
         provider: P,
         initialOwner: alloy::sol_types::private::Address,
-    ) -> impl ::core::future::Future<
-        Output = alloy_contract::Result<ScKeystoreInstance<T, P, N>>,
-    > {
+    ) -> impl ::core::future::Future<Output = alloy_contract::Result<ScKeystoreInstance<T, P, N>>>
+    {
         ScKeystoreInstance::<T, P, N>::deploy(provider, initialOwner)
     }
     /**Creates a `RawCallBuilder` for deploying this contract using the given `provider`
-and constructor arguments, if any.
+    and constructor arguments, if any.
 
-This is a simple wrapper around creating a `RawCallBuilder` with the data set to
-the bytecode concatenated with the constructor's ABI-encoded arguments.*/
+    This is a simple wrapper around creating a `RawCallBuilder` with the data set to
+    the bytecode concatenated with the constructor's ABI-encoded arguments.*/
     #[inline]
     pub fn deploy_builder<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
@@ -2175,15 +1885,15 @@ the bytecode concatenated with the constructor's ABI-encoded arguments.*/
     }
     /**A [`ScKeystore`](self) instance.
 
-Contains type-safe methods for interacting with an on-chain instance of the
-[`ScKeystore`](self) contract located at a given `address`, using a given
-provider `P`.
+    Contains type-safe methods for interacting with an on-chain instance of the
+    [`ScKeystore`](self) contract located at a given `address`, using a given
+    provider `P`.
 
-If the contract bytecode is available (see the [`sol!`](alloy_sol_types::sol!)
-documentation on how to provide it), the `deploy` and `deploy_builder` methods can
-be used to deploy a new instance of the contract.
+    If the contract bytecode is available (see the [`sol!`](alloy_sol_types::sol!)
+    documentation on how to provide it), the `deploy` and `deploy_builder` methods can
+    be used to deploy a new instance of the contract.
 
-See the [module-level documentation](self) for all the available methods.*/
+    See the [module-level documentation](self) for all the available methods.*/
     #[derive(Clone)]
     pub struct ScKeystoreInstance<T, P, N = alloy_contract::private::Ethereum> {
         address: alloy_sol_types::private::Address,
@@ -2194,24 +1904,24 @@ See the [module-level documentation](self) for all the available methods.*/
     impl<T, P, N> ::core::fmt::Debug for ScKeystoreInstance<T, P, N> {
         #[inline]
         fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-            f.debug_tuple("ScKeystoreInstance").field(&self.address).finish()
+            f.debug_tuple("ScKeystoreInstance")
+                .field(&self.address)
+                .finish()
         }
     }
     /// Instantiation and getters/setters.
     #[automatically_derived]
     impl<
-        T: alloy_contract::private::Transport + ::core::clone::Clone,
-        P: alloy_contract::private::Provider<T, N>,
-        N: alloy_contract::private::Network,
-    > ScKeystoreInstance<T, P, N> {
+            T: alloy_contract::private::Transport + ::core::clone::Clone,
+            P: alloy_contract::private::Provider<T, N>,
+            N: alloy_contract::private::Network,
+        > ScKeystoreInstance<T, P, N>
+    {
         /**Creates a new wrapper around an on-chain [`ScKeystore`](self) contract instance.
 
-See the [wrapper's documentation](`ScKeystoreInstance`) for more details.*/
+        See the [wrapper's documentation](`ScKeystoreInstance`) for more details.*/
         #[inline]
-        pub const fn new(
-            address: alloy_sol_types::private::Address,
-            provider: P,
-        ) -> Self {
+        pub const fn new(address: alloy_sol_types::private::Address, provider: P) -> Self {
             Self {
                 address,
                 provider,
@@ -2220,9 +1930,9 @@ See the [wrapper's documentation](`ScKeystoreInstance`) for more details.*/
         }
         /**Deploys this contract using the given `provider` and constructor arguments, if any.
 
-Returns a new instance of the contract, if the deployment was successful.
+        Returns a new instance of the contract, if the deployment was successful.
 
-For more fine-grained control over the deployment process, use [`deploy_builder`] instead.*/
+        For more fine-grained control over the deployment process, use [`deploy_builder`] instead.*/
         #[inline]
         pub async fn deploy(
             provider: P,
@@ -2233,10 +1943,10 @@ For more fine-grained control over the deployment process, use [`deploy_builder`
             Ok(Self::new(contract_address, call_builder.provider))
         }
         /**Creates a `RawCallBuilder` for deploying this contract using the given `provider`
-and constructor arguments, if any.
+        and constructor arguments, if any.
 
-This is a simple wrapper around creating a `RawCallBuilder` with the data set to
-the bytecode concatenated with the constructor's ABI-encoded arguments.*/
+        This is a simple wrapper around creating a `RawCallBuilder` with the data set to
+        the bytecode concatenated with the constructor's ABI-encoded arguments.*/
         #[inline]
         pub fn deploy_builder(
             provider: P,
@@ -2246,12 +1956,11 @@ the bytecode concatenated with the constructor's ABI-encoded arguments.*/
                 provider,
                 [
                     &BYTECODE[..],
-                    &alloy_sol_types::SolConstructor::abi_encode(
-                        &constructorCall { initialOwner },
-                    )[..],
+                    &alloy_sol_types::SolConstructor::abi_encode(&constructorCall { initialOwner })
+                        [..],
                 ]
-                    .concat()
-                    .into(),
+                .concat()
+                .into(),
             )
         }
         /// Returns a reference to the address.
@@ -2289,10 +1998,11 @@ the bytecode concatenated with the constructor's ABI-encoded arguments.*/
     /// Function calls.
     #[automatically_derived]
     impl<
-        T: alloy_contract::private::Transport + ::core::clone::Clone,
-        P: alloy_contract::private::Provider<T, N>,
-        N: alloy_contract::private::Network,
-    > ScKeystoreInstance<T, P, N> {
+            T: alloy_contract::private::Transport + ::core::clone::Clone,
+            P: alloy_contract::private::Provider<T, N>,
+            N: alloy_contract::private::Network,
+        > ScKeystoreInstance<T, P, N>
+    {
         /// Creates a new call builder using this contract instance's provider and address.
         ///
         /// Note that the call can be any function call, not just those defined in this
@@ -2345,10 +2055,11 @@ the bytecode concatenated with the constructor's ABI-encoded arguments.*/
     /// Event filters.
     #[automatically_derived]
     impl<
-        T: alloy_contract::private::Transport + ::core::clone::Clone,
-        P: alloy_contract::private::Provider<T, N>,
-        N: alloy_contract::private::Network,
-    > ScKeystoreInstance<T, P, N> {
+            T: alloy_contract::private::Transport + ::core::clone::Clone,
+            P: alloy_contract::private::Provider<T, N>,
+            N: alloy_contract::private::Network,
+        > ScKeystoreInstance<T, P, N>
+    {
         /// Creates a new event filter using this contract instance's provider and address.
         ///
         /// Note that the type can be any event, not just those defined in this contract.
@@ -2369,9 +2080,7 @@ the bytecode concatenated with the constructor's ABI-encoded arguments.*/
             self.event_filter::<UserAdded>()
         }
         ///Creates a new event filter for the [`UserRemoved`] event.
-        pub fn UserRemoved_filter(
-            &self,
-        ) -> alloy_contract::Event<T, &P, UserRemoved, N> {
+        pub fn UserRemoved_filter(&self) -> alloy_contract::Event<T, &P, UserRemoved, N> {
             self.event_filter::<UserRemoved>()
         }
     }

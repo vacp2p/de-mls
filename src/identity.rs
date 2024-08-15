@@ -1,12 +1,13 @@
-use hex;
+use alloy::primitives::Address;
 use std::collections::HashMap;
 
 use openmls::{credentials::CredentialWithKey, key_packages::*, prelude::*};
 use openmls_basic_credential::SignatureKeyPair;
-use openmls_rust_crypto::MemoryKeyStoreError;
 use openmls_traits::types::Ciphersuite;
 
 use mls_crypto::openmls_provider::MlsCryptoProvider;
+
+use crate::IdentityError;
 
 pub struct Identity {
     pub(crate) kp: HashMap<Vec<u8>, KeyPackage>,
@@ -19,7 +20,6 @@ impl Identity {
         ciphersuite: Ciphersuite,
         crypto: &MlsCryptoProvider,
         user_wallet_address: &[u8],
-        number_of_kp: usize,
     ) -> Result<Identity, IdentityError> {
         let credential = Credential::new(user_wallet_address.to_vec(), CredentialType::Basic)?;
         let signature_keys = SignatureKeyPair::new(ciphersuite.signature_algorithm())?;
@@ -30,19 +30,17 @@ impl Identity {
         signature_keys.store(crypto.key_store())?;
 
         let mut kps = HashMap::new();
-        for _ in 0..number_of_kp {
-            let key_package = KeyPackage::builder().build(
-                CryptoConfig {
-                    ciphersuite,
-                    version: ProtocolVersion::default(),
-                },
-                crypto,
-                &signature_keys,
-                credential_with_key.clone(),
-            )?;
-            let kp = key_package.hash_ref(crypto.crypto())?;
-            kps.insert(kp.as_slice().to_vec(), key_package);
-        }
+        let key_package = KeyPackage::builder().build(
+            CryptoConfig {
+                ciphersuite,
+                version: ProtocolVersion::default(),
+            },
+            crypto,
+            &signature_keys,
+            credential_with_key.clone(),
+        )?;
+        let kp = key_package.hash_ref(crypto.crypto())?;
+        kps.insert(kp.as_slice().to_vec(), key_package);
 
         Ok(Identity {
             kp: kps,
@@ -52,7 +50,7 @@ impl Identity {
     }
 
     /// Create an additional key package using the credential_with_key/signer bound to this identity
-    pub fn add_key_package(
+    pub fn generate_key_package(
         &mut self,
         ciphersuite: Ciphersuite,
         crypto: &MlsCryptoProvider,
@@ -81,22 +79,6 @@ impl Identity {
 
 impl ToString for Identity {
     fn to_string(&self) -> String {
-        hex::encode(self.credential_with_key.credential.identity())
+        Address::from_slice(self.credential_with_key.credential.identity()).to_string()
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum IdentityError {
-    #[error("Something wrong while creating new key package: {0}")]
-    MlsKeyPackageNewError(#[from] KeyPackageNewError<MemoryKeyStoreError>),
-    #[error(transparent)]
-    MlsLibraryError(#[from] LibraryError),
-    #[error("Something wrong with signature: {0}")]
-    MlsCryptoError(#[from] CryptoError),
-    #[error("Can't save signature key")]
-    MlsKeyStoreError(#[from] MemoryKeyStoreError),
-    #[error("Something wrong with credential: {0}")]
-    MlsCredentialError(#[from] CredentialError),
-    #[error("Unknown error: {0}")]
-    Other(anyhow::Error),
 }

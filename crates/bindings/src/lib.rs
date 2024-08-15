@@ -6,7 +6,6 @@
 pub mod context;
 pub mod deploy;
 pub mod deploymentconfig;
-pub mod foo;
 pub mod ierc165;
 pub mod ierc20;
 pub mod ierc721;
