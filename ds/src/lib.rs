@@ -4,6 +4,7 @@ use fred::error::RedisError;
 pub mod chat_client;
 pub mod chat_server;
 pub mod ds;
+pub mod ds_waku;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeliveryServiceError {
@@ -28,6 +29,17 @@ pub enum DeliveryServiceError {
     AlloyFromHexError(#[from] FromHexError),
     #[error("Failed to recover signature: {0}")]
     AlloySignatureError(#[from] SignatureError),
+
+    #[error("Unable to create waku node: {0}")]
+    WakuCreateNodeError(String),
+    #[error("Invalid waku message: {0}")]
+    WakuInvalidMessage(String),
+    #[error("Waku relay error: {0}")]
+    WakuRelayError(String),
+    #[error("Waku stop node error: {0}")]
+    WakuStopNodeError(String),
+    #[error("Waku publish message error: {0}")]
+    WakuPublishMessageError(String),
 
     #[error("An unknown error occurred: {0}")]
     Other(anyhow::Error),

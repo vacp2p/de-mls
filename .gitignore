@@ -15,6 +15,7 @@ Cargo.lock
 
 .DS_Store
 src/.DS_Store
+.idea
 
 ## contracts
 # directories

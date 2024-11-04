@@ -6,8 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-# chrono = "=0.4.38"
-# waku-bindings = "=0.6.0"
+chrono = "=0.4.38"
+waku-bindings = "=0.6.0"
 bus = "=2.4.1"
 fred = { version = "=9.0.3", features = ["subscriber-client"] }
 tokio = { version = "=1.38.0", features = ["full"] }
@@ -34,6 +34,7 @@ thiserror = "=1.0.61"
 tls_codec = "=0.3.0"
 serde_json = "=1.0"
 serde = "=1.0.204"
+tracing = "=0.1"
 
 sc_key_store = { path = "../sc_key_store" }
 url = "2.5.2"

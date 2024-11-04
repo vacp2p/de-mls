@@ -7,12 +7,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::Receiver;
 
 use crate::DeliveryServiceError;
-// use waku_bindings::*;
 
 pub struct RClient {
     client: RedisClient,
     sub_client: SubscriberClient,
-    // broadcaster: Receiver<Message>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
