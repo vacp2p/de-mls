@@ -14,7 +14,7 @@ use crate::DeliveryServiceError;
 pub enum ChatMessages {
     Request(RequestMLSPayload),
     Response(ResponseMLSPayload),
-    Welcome(String),
+    // Welcome(String),
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]

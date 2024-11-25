@@ -1,11 +1,9 @@
 use chrono::Utc;
-use std::sync::Mutex as SyncMutex;
-use std::{borrow::Cow, collections::HashSet, str::FromStr, sync::Arc};
-
 use core::result::Result;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
-use tokio::sync::broadcast::{Receiver, Sender};
+use std::sync::{mpsc::Sender, Arc, Mutex as SyncMutex};
+use std::{borrow::Cow, collections::HashSet, str::FromStr};
 use tracing::{debug, error, trace};
 use waku_bindings::*;
 
@@ -17,19 +15,27 @@ pub fn pubsub_topic(group_name: &str) -> WakuPubSubTopic {
 
 pub fn build_content_topics(
     group_name: &str,
-    group_version: String,
-    subtopics: &[String],
+    group_version: &str,
+    subtopics: &[&str],
 ) -> Vec<WakuContentTopic> {
     (*subtopics
         .iter()
         .map(|subtopic| WakuContentTopic {
             application_name: Cow::from(group_name.to_string()),
-            version: Cow::from(group_version.clone()),
+            version: Cow::from(group_version.to_string()),
             content_topic_name: Cow::from(subtopic.to_string()),
             encoding: Encoding::Proto,
         })
         .collect::<Vec<WakuContentTopic>>())
     .to_vec()
+}
+
+pub fn build_content_topic(
+    group_name: &str,
+    group_version: &str,
+    subtopic: &str,
+) -> WakuContentTopic {
+    build_content_topics(group_name, group_version, &[subtopic])[0].clone()
 }
 
 pub fn content_filter(
@@ -49,8 +55,10 @@ pub fn relay_subscribe(
         .map_err(|e| DeliveryServiceError::WakuCreateNodeError(e.to_string()))
 }
 
-fn setup_node_handle(nodes: Vec<String>) -> Result<WakuNodeHandle<Running>, Box<dyn Error>> {
-    let node_handle = waku_new(None)?;
+pub fn setup_node_handle(nodes: Vec<String>) -> Result<WakuNodeHandle<Running>, Box<dyn Error>> {
+    let mut config = WakuNodeConfig::default();
+    config.log_level = Some(WakuLogLevel::Debug);
+    let node_handle = waku_new(Some(config))?;
     let node_handle = node_handle.start()?;
     for address in nodes
         .iter()
@@ -122,8 +130,8 @@ pub fn register_handler(
 
         if let Ok(m) = msg {
             match sender.send(m) {
-                Ok(_) => trace!("Sent received message to radio operator"),
-                Err(e) => error!("Could not send message to channel: {:#?}", e),
+                Ok(_) => trace!("Sent received message"),
+                Err(e) => error!("Could not send message: {:#?}", e),
             }
         }
     };
@@ -132,30 +140,60 @@ pub fn register_handler(
     Ok(())
 }
 
-pub struct WakuClient {
-    node: WakuNodeHandle<Running>,
+pub struct WakuGroupClient {
+    pub group_id: String,
     pub pubsub_topic: WakuPubSubTopic,
     pub content_topics: Arc<SyncMutex<Vec<WakuContentTopic>>>,
     /// A set of message ids sent from the group
     pub seen_msg_ids: Arc<SyncMutex<HashSet<String>>>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct DeMlsMesage {
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DeMlsMessage {
     pub sender: String,
     pub msg: Vec<u8>,
+    pub msg_type: MsgType,
 }
 
-impl WakuClient {
-    pub fn new_with_group(
-        nodes: Vec<String>,
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+pub enum MsgType {
+    Text,
+    UpdateGroup,
+    InviteToGroup,
+    RemoveFromGroup,
+}
+
+pub const GROUP_VERSION: &str = "1";
+pub const APP_MSG_SUBTOPIC: &str = "app_msg";
+pub const COMMIT_MSG_SUBTOPIC: &str = "commit_msg";
+pub const WELCOME_SUBTOPIC: &str = "welcome";
+pub const SUBTOPICS: [&str; 3] = [APP_MSG_SUBTOPIC, COMMIT_MSG_SUBTOPIC, WELCOME_SUBTOPIC];
+
+impl WakuGroupClient {
+    pub fn waku_relay_topics(&self, node: &WakuNodeHandle<Running>) -> Vec<String> {
+        let topics = node.relay_topics().unwrap();
+        debug!("topics: {:?}", topics);
+        topics
+    }
+
+    pub fn new(
+        node: &WakuNodeHandle<Running>,
         group_id: String,
         sender: Sender<WakuMessage>,
     ) -> Result<Self, DeliveryServiceError> {
-        let node = setup_node_handle(nodes).unwrap();
-
+        // check if already subscribed to the pubsub topic
         let pubsub_topic = pubsub_topic(&group_id);
-        let content_topics = build_content_topics(&group_id, "1".to_string(), &["msg".to_string()]);
+        let topics = node.relay_topics();
+        if let Ok(topics) = topics {
+            if topics.contains(&pubsub_topic) {
+                return Err(DeliveryServiceError::WakuAlreadySubscribed(format!(
+                    "Already subscribed to the pubsub topic: {:#?}",
+                    pubsub_topic
+                )));
+            }
+        }
+
+        let content_topics = build_content_topics(&group_id, GROUP_VERSION, &SUBTOPICS.clone());
         let content_filter = content_filter(&pubsub_topic, &content_topics);
         node.relay_subscribe(&content_filter)
             .map_err(|e| DeliveryServiceError::WakuRelayError(e.to_string()))?;
@@ -165,24 +203,41 @@ impl WakuClient {
         register_handler(sender, seen_msg_ids.clone(), content_topics.clone())
             .expect("Could not register handler");
 
-        Ok(WakuClient {
-            node,
+        Ok(WakuGroupClient {
+            group_id,
             pubsub_topic,
             content_topics,
             seen_msg_ids,
         })
     }
 
-    pub async fn remove_group(&mut self, group_id: String) -> Result<(), DeliveryServiceError> {
+    pub async fn remove_group(
+        &mut self,
+        node: &WakuNodeHandle<Running>,
+        group_id: String,
+    ) -> Result<(), DeliveryServiceError> {
         Ok(())
     }
 
     pub fn send_to_waku(
         &self,
+        node: &WakuNodeHandle<Running>,
         msg: Vec<u8>,
-        pubsub_topic: WakuPubSubTopic,
-        content_topic: WakuContentTopic,
+        msg_type: MsgType,
     ) -> Result<String, DeliveryServiceError> {
+        let content_topic = match msg_type {
+            MsgType::Text => build_content_topic(&self.group_id, GROUP_VERSION, APP_MSG_SUBTOPIC),
+            MsgType::InviteToGroup => {
+                build_content_topic(&self.group_id, GROUP_VERSION, WELCOME_SUBTOPIC)
+            }
+            MsgType::RemoveFromGroup => {
+                build_content_topic(&self.group_id, GROUP_VERSION, COMMIT_MSG_SUBTOPIC)
+            }
+            MsgType::UpdateGroup => {
+                build_content_topic(&self.group_id, GROUP_VERSION, COMMIT_MSG_SUBTOPIC)
+            }
+        };
+
         let waku_message = WakuMessage::new(
             msg,
             content_topic,
@@ -192,8 +247,7 @@ impl WakuClient {
             true,
         );
 
-        self.node
-            .relay_publish_message(&waku_message, Some(pubsub_topic.clone()), None)
+        node.relay_publish_message(&waku_message, Some(self.pubsub_topic.clone()), None)
             .map_err(|e| {
                 debug!(
                     error = tracing::field::debug(&e),
@@ -203,16 +257,16 @@ impl WakuClient {
             })
     }
 
-    pub fn stop(self) -> Result<(), DeliveryServiceError> {
-        trace!("Set an empty event callback");
-        waku_set_event_callback(|_| {});
-        debug!("Stop Waku node");
-        self.node
-            .stop()
-            .map_err(|e| DeliveryServiceError::WakuStopNodeError(e))?;
-        trace!("Drop Arc std sync mutexes");
-        drop(self.content_topics);
-        drop(self.seen_msg_ids);
-        Ok(())
-    }
+    // pub fn stop(self, node: &WakuNodeHandle<Running>) -> Result<(), DeliveryServiceError> {
+    //     trace!("Set an empty event callback");
+    //     waku_set_event_callback(|_| {});
+    //     debug!("Stop Waku node");
+    //     node
+    //         .stop()
+    //         .map_err(|e| DeliveryServiceError::WakuStopNodeError(e))?;
+    //     trace!("Drop Arc std sync mutexes");
+    //     drop(self.content_topics);
+    //     drop(self.seen_msg_ids);
+    //     Ok(())
+    // }
 }

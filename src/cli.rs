@@ -31,6 +31,9 @@ pub struct Args {
     /// User private key that correspond to Ethereum wallet
     #[arg(short = 'K', long)]
     pub user_priv_key: String,
+    /// Nodes
+    #[arg(short = 'N', long)]
+    pub nodes: String,
     // /// Rpc url
     // #[arg(short = 'U', long,
     //     default_value_t = Url::from_str("http://localhost:8545").unwrap())]

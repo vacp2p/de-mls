@@ -20,12 +20,12 @@ services:
           "cast",
           "chain-id",
           "--rpc-url",
-          "http://localhost:${ANVIL_PORT}",
+          "http://localhost:8545",
         ]
       interval: 5s
       timeout: 3s
       retries: 5
     ports:
-      - "${ANVIL_PORT}:${ANVIL_PORT}"
+      - "8545:8545"
     entrypoint: ["anvil", "--host", "0.0.0.0"]
     platform: linux/amd64

@@ -21,7 +21,7 @@ pub struct ContactsList {
     contacts: Arc<Mutex<HashMap<String, Contact>>>,
     group_id2sc: HashMap<String, String>,
     pub future_req: HashMap<String, CancellationToken>,
-    pub chat_client: ChatClient,
+    // pub chat_client: ChatClient,
 }
 
 pub struct Contact {
@@ -51,33 +51,33 @@ impl Contact {
 }
 
 impl ContactsList {
-    pub async fn new(chat_client: ChatClient) -> Result<Self, ContactError> {
+    pub async fn new() -> Result<Self, ContactError> {
         Ok(ContactsList {
             contacts: Arc::new(Mutex::new(HashMap::new())),
             group_id2sc: HashMap::new(),
             future_req: HashMap::new(),
-            chat_client,
+            // chat_client,
         })
     }
 
-    pub fn send_welcome_msg_to_users(
-        &mut self,
-        self_address: String,
-        users_address: Vec<String>,
-        welcome: MlsMessageOut,
-    ) -> Result<(), ContactError> {
-        let bytes = welcome.tls_serialize_detached()?;
-        let welcome_str: String = bytes.encode_hex();
+    // pub fn send_welcome_msg_to_users(
+    //     &mut self,
+    //     self_address: String,
+    //     users_address: Vec<String>,
+    //     welcome: MlsMessageOut,
+    // ) -> Result<(), ContactError> {
+    //     let bytes = welcome.tls_serialize_detached()?;
+    //     let welcome_str: String = bytes.encode_hex();
 
-        let msg = ChatMessages::Welcome(welcome_str);
-        self.chat_client.send_message(ServerMessage::InMessage {
-            from: self_address,
-            to: users_address,
-            msg: serde_json::to_string(&msg)?,
-        })?;
+    //     let msg = ChatMessages::Welcome(welcome_str);
+    //     self.chat_client.send_message(ServerMessage::InMessage {
+    //         from: self_address,
+    //         to: users_address,
+    //         msg: serde_json::to_string(&msg)?,
+    //     })?;
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     pub fn send_msg_req(
         &mut self,
@@ -95,11 +95,11 @@ impl ContactsList {
         };
 
         let req = ChatMessages::Request(RequestMLSPayload::new(sc_address, group_name, msg_type));
-        self.chat_client.send_message(ServerMessage::InMessage {
-            from: self_address,
-            to: vec![user_address],
-            msg: serde_json::to_string(&req)?,
-        })?;
+        // self.chat_client.send_message(ServerMessage::InMessage {
+        //     from: self_address,
+        //     to: vec![user_address],
+        //     msg: serde_json::to_string(&req)?,
+        // })?;
 
         Ok(())
     }
@@ -111,11 +111,11 @@ impl ContactsList {
         resp: ResponseMLSPayload,
     ) -> Result<(), ContactError> {
         let resp_j = ChatMessages::Response(resp);
-        self.chat_client.send_message(ServerMessage::InMessage {
-            from: self_address,
-            to: vec![user_address.to_string()],
-            msg: serde_json::to_string(&resp_j)?,
-        })?;
+        // self.chat_client.send_message(ServerMessage::InMessage {
+        //     from: self_address,
+        //     to: vec![user_address.to_string()],
+        //     msg: serde_json::to_string(&resp_j)?,
+        // })?;
         Ok(())
     }
 

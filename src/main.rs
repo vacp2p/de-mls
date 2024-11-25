@@ -1,15 +1,101 @@
-use alloy::{providers::ProviderBuilder, signers::local::PrivateKeySigner};
+use alloy::{primitives::Address, providers::ProviderBuilder, signers::local::PrivateKeySigner};
 use clap::Parser;
+use sc_key_store::{sc_ks::ScKeyStorage, SCKeyStoreService};
 use std::{error::Error, str::FromStr, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::protocol::Message as TokioMessage;
 use tokio_util::sync::CancellationToken;
+use waku_bindings::WakuMessage;
 
 use de_mls::{cli::*, user::User, CliError, UserError};
 use ds::{
     chat_client::{ChatClient, ChatMessages},
     chat_server::ServerMessage,
+    ds_waku::{pubsub_topic, setup_node_handle},
 };
+
+// async fn main() -> Result<(), Box<dyn Error>> {
+//     let token = CancellationToken::new();
+
+//     let args = Args::parse();
+//     let signer = PrivateKeySigner::from_str(&args.user_priv_key)?;
+//     let user_address = signer.address().to_string();
+
+//     let nodes_name: Vec<String> = args.nodes.split(',').map(|s| s.to_string()).collect();
+//     let node = setup_node_handle(nodes_name).unwrap();
+//     let group_name = "group_test".to_string();
+
+//     // Create user
+//     let mut user = User::new(&args.user_priv_key, node).await?;
+//     // let user_arc = Arc::new(Mutex::new(user_n));
+
+//     let storage_url = "http://localhost:8545".to_string();
+//     let storage_address = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512".to_string();
+
+//     let client_provider = ProviderBuilder::new()
+//         .with_recommended_fillers()
+//         .wallet(user.wallet())
+//         .on_http(storage_url.parse().unwrap());
+
+//     let sc_storage_address = Address::from_str(&storage_address)?;
+//     let mut sc_ks = ScKeyStorage::new(client_provider, sc_storage_address);
+//     sc_ks.add_user(&user.identity.to_string()).await?;
+
+//     let msg = format!(
+//         "\n>>>>>>> Successfully connect to Smart Contract on address {:}\n",
+//         storage_address
+//     );
+//     println!("{}", msg);
+
+//     let res = user.create_group(group_name.clone(), storage_address);
+//     match res {
+//         Ok(br) => {
+//             let msg = format!("Successfully create group: {:?}", group_name.clone());
+//             println!("{}", msg);
+
+//             tokio::spawn(async move {
+//                 while let Ok(msg) = br.recv() {
+//                     if msg.payload() == "end".as_bytes() {
+//                         break;
+//                     }
+//                     println!("Received message for user1: {:?}", msg);
+//                 }
+//             });
+//         }
+//         Err(err) => {
+//             println!("Error: {:?}", err);
+//         }
+//     };
+
+//     // let user_priv_key2 = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+//     // let signer2 = PrivateKeySigner::from_str(user_priv_key2)?;
+//     // let user_address2 = signer2.address().to_string();
+//     // let mut user2 = User::new(user_priv_key2, node).await?;
+
+//     // let (receiver, w_c) = user2.subscribe_to_group(group_name.clone()).await?;
+//     // let msg = format!("Successfully subscribe to group: {:?}", group_name.clone());
+//     // println!("{}", msg);
+
+//     // tokio::spawn(async move {
+//     //     while let Ok(msg) = receiver.recv() {
+//     //         println!("Received message for user2: {:?}", msg);
+//     //     }
+//     // });
+
+//     let res = user
+//         .send_msg("test", group_name.clone(), user_address.clone())
+//         .await;
+//     match res {
+//         Ok(_) => {
+//             println!("Successfully send message");
+//         }
+//         Err(err) => {
+//             println!("Error: {:?}", err);
+//         }
+//     };
+
+//     Ok(())
+// }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -19,11 +105,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let args = Args::parse();
     let signer = PrivateKeySigner::from_str(&args.user_priv_key)?;
+    let nodes_name: Vec<String> = args.nodes.split(',').map(|s| s.to_string()).collect();
     let user_address = signer.address().to_string();
-    let (client, mut client_recv) =
-        ChatClient::connect("ws://127.0.0.1:8080", user_address.clone()).await?;
-    //// Create user
-    let user_n = User::new(&args.user_priv_key, client).await?;
+
+    let node = setup_node_handle(nodes_name).unwrap();
+
+    // Create user
+    let user_n = User::new(&args.user_priv_key, node).await?;
     let user_arc = Arc::new(Mutex::new(user_n));
 
     let (messages_tx, messages_rx) = mpsc::channel::<Msg>(100);
@@ -43,212 +131,156 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let user = user_arc.clone();
     let h2 = tokio::spawn(async move {
         let (redis_tx, mut redis_rx) = mpsc::channel::<Vec<u8>>(100);
+
         loop {
             tokio::select! {
-                Some(msg) = client_recv.recv() => {
-                    if let TokioMessage::Text(text) = msg {
-                        if let Ok(chat_message) = serde_json::from_str::<ServerMessage>(&text) {
-                            if let ServerMessage::InMessage { from, to, msg } = chat_message {
-                                if let Ok(chat_msg) = serde_json::from_str::<ChatMessages>(&msg) {
-                                    match chat_msg {
-                                        ChatMessages::Request(req) => {
-                                            let res = user.as_ref().lock().await.send_responce_on_request(req, &from);
-                                            if let Err(err) = res {
-                                                res_msg_tx
-                                                    .send(Msg::Input(Message::Error(err.to_string())))
-                                                    .await.map_err(|err| CliError::SenderError(err.to_string()))?;
-                                            }
-                                        },
-                                        ChatMessages::Response(resp) => {
-                                            let res = user.as_ref().lock().await.parce_responce(resp).await;
-                                            if let Err(err) = res {
-                                                res_msg_tx
-                                                    .send(Msg::Input(Message::Error(err.to_string())))
-                                                    .await.map_err(|err| CliError::SenderError(err.to_string()))?;
-                                            }
-                                        },
-                                        ChatMessages::Welcome(welcome) => {
-                                            let res = user.as_ref().lock().await.join_group(welcome).await;
-                                            match res {
-                                                Ok(mut buf) => {
-                                                    let msg = format!("Succesfully join to the group: {:#?}", buf.1);
-                                                    res_msg_tx.send(Msg::Input(Message::System(msg))).await.map_err(|err| CliError::SenderError(err.to_string()))?;
-
-                                                    let redis_tx = redis_tx.clone();
-                                                    tokio::spawn(async move {
-                                                        while let Ok(msg) = buf.0.recv().await {
-                                                            let bytes: Vec<u8> = msg.value.convert()?;
-                                                            redis_tx.send(bytes).await.map_err(|err| CliError::SenderError(err.to_string()))?;
-                                                        }
-                                                        Ok::<_, CliError>(())
-                                                    });
-                                                },
-                                                Err(err) => {
-                                                    res_msg_tx
-                                                        .send(Msg::Input(Message::Error(err.to_string())))
-                                                        .await.map_err(|err| CliError::SenderError(err.to_string()))?;
-                                                },
-                                            };
-                                        },
-                                    }
-                                } else {
-                                    res_msg_tx
-                                        .send(Msg::Input(Message::Error(UserError::InvalidChatMessageError.to_string())))
-                                        .await.map_err(|err| CliError::SenderError(err.to_string()))?;
+                    Some(val) = redis_rx.recv() =>{
+                        let res = user.as_ref().lock().await.receive_msg(val).await;
+                        match res {
+                            Ok(msg) => {
+                                match msg {
+                                    Some(m) => res_msg_tx.send(Msg::Input(Message::Incoming(m.group, m.author, m.message))).await.map_err(|err| CliError::SenderError(err.to_string()))?,
+                                    None => continue
                                 }
-                            };
-                        } else {
-                            res_msg_tx
-                                .send(Msg::Input(Message::Error(UserError::InvalidServerMessageError.to_string())))
-                                .await.map_err(|err| CliError::SenderError(err.to_string()))?;
-                        }
+                            },
+                            Err(err) => {
+                                res_msg_tx
+                                    .send(Msg::Input(Message::Error(err.to_string())))
+                                    .await.map_err(|err| CliError::SenderError(err.to_string()))?;
+                            },
+                        };
                     }
-                }
-                Some(val) = redis_rx.recv() =>{
-                    let res = user.as_ref().lock().await.receive_msg(val).await;
-                    match res {
-                        Ok(msg) => {
-                            match msg {
-                                Some(m) => res_msg_tx.send(Msg::Input(Message::Incoming(m.group, m.author, m.message))).await.map_err(|err| CliError::SenderError(err.to_string()))?,
-                                None => continue
-                            }
-                        },
-                        Err(err) => {
-                            res_msg_tx
-                                .send(Msg::Input(Message::Error(err.to_string())))
-                                .await.map_err(|err| CliError::SenderError(err.to_string()))?;
-                        },
-                    };
-                }
-                Some(command) = cli_gr_rx.recv() => {
-                    // res_msg_tx.send(Msg::Input(Message::System(format!("Get command: {:?}", command)))).await?;
-                    match command {
-                        Commands::CreateGroup { group_name, storage_address, storage_url } => {
-                            let client_provider = ProviderBuilder::new()
-                                .with_recommended_fillers()
-                                .wallet(user.as_ref().lock().await.wallet())
-                                .on_http(storage_url);
-                            let res = user.as_ref().lock().await.connect_to_smart_contract(&storage_address, client_provider).await;
-                            match res {
-                                Ok(_) => {
-                                    let msg = format!("Successfully connect to Smart Contract on address {:}\n", storage_address);
-                                    res_msg_tx.send(Msg::Input(Message::System(msg))).await.map_err(|err| CliError::SenderError(err.to_string()))?;
-                                },
-                                Err(err) => {
-                                    res_msg_tx
-                                        .send(Msg::Input(Message::Error(err.to_string())))
-                                        .await.map_err(|err| CliError::SenderError(err.to_string()))?;
-                                },
-                            };
-
-                            let res = user.as_ref().lock().await.create_group(group_name.clone()).await;
-                            match res {
-                                Ok(mut br) => {
-                                    let msg = format!("Successfully create group: {:?}", group_name.clone());
-                                    res_msg_tx.send(Msg::Input(Message::System(msg))).await.map_err(|err| CliError::SenderError(err.to_string()))?;
-
-                                    let redis_tx = redis_tx.clone();
-                                    tokio::spawn(async move {
-                                        while let Ok(msg) = br.recv().await {
-                                            let bytes: Vec<u8> = msg.value.convert()?;
-                                            redis_tx.send(bytes).await.map_err(|err| CliError::SenderError(err.to_string()))?;
-                                        }
-                                        Ok::<_, CliError>(())
-                                    });
-                                },
-                                Err(err) => {
-                                    res_msg_tx
-                                        .send(Msg::Input(Message::Error(err.to_string())))
-                                        .await.map_err(|err| CliError::SenderError(err.to_string()))?;
-                                },
-                            };
-                        },
-                        Commands::Invite { group_name, users_wallet_addrs } => {
-                            let user_clone = user.clone();
-                            let res_msg_tx_c = messages_tx.clone();
-                            tokio::spawn(async move {
-                                for user_wallet in users_wallet_addrs.iter() {
-                                    let user_clone_ref = user_clone.as_ref();
-                                    let opt_token =
-                                    {
-                                        let mut user_clone_ref_lock = user_clone_ref.lock().await;
-                                        let res = user_clone_ref_lock.handle_send_req(user_wallet, group_name.clone()).await;
-                                        match res {
-                                            Ok(token) => {
-                                                token
-                                            },
-                                            Err(err) => {
-                                                res_msg_tx_c
-                                                    .send(Msg::Input(Message::Error(err.to_string())))
-                                                    .await.map_err(|err| CliError::SenderError(err.to_string()))?;
-                                                None
-                                            },
-                                        }
-                                    };
-
-                                    match opt_token {
-                                        Some(token) => token.cancelled().await,
-                                        None => return Err(CliError::TokenCancellingError),
-                                    };
-
-                                    {
-                                        let mut user_clone_ref_lock = user_clone.as_ref().lock().await;
-                                        user_clone_ref_lock.contacts.future_req.remove(user_wallet);
-                                        let res = user_clone_ref_lock.add_user_to_acl(user_wallet).await;
-                                        if let Err(err) = res {
-                                            res_msg_tx_c
-                                                .send(Msg::Input(Message::Error(err.to_string())))
-                                                .await.map_err(|err| CliError::SenderError(err.to_string()))?;
-                                        };
-                                    }
-
-                                }
-
-                                let res = user_clone.as_ref().lock().await.invite(users_wallet_addrs.clone(), group_name.clone()).await;
+                    Some(command) = cli_gr_rx.recv() => {
+                        // res_msg_tx.send(Msg::Input(Message::System(format!("Get command: {:?}", command)))).await?;
+                        match command {
+                            Commands::CreateGroup { group_name, storage_address, storage_url } => {
+                                let client_provider = ProviderBuilder::new()
+                                    .with_recommended_fillers()
+                                    .wallet(user.as_ref().lock().await.wallet())
+                                    .on_http(storage_url);
+                            let sc_storage_address = Address::from_str(&storage_address).unwrap();
+                            let mut sc_ks = ScKeyStorage::new(client_provider, sc_storage_address);
+                            let res = sc_ks.add_user(&user.as_ref().lock().await.identity.to_string()).await;
                                 match res {
                                     Ok(_) => {
-                                        let msg = format!("Invite {:?} to the group {:}\n",
-                                            users_wallet_addrs, group_name
-                                        );
-                                        res_msg_tx_c.send(Msg::Input(Message::System(msg))).await.map_err(|err| CliError::SenderError(err.to_string()))?;
+                                        let msg = format!("Successfully connect to Smart Contract on address {:}\n", storage_address);
+                                        res_msg_tx.send(Msg::Input(Message::System(msg))).await.map_err(|err| CliError::SenderError(err.to_string()))?;
                                     },
                                     Err(err) => {
-                                        res_msg_tx_c
+                                        res_msg_tx
                                             .send(Msg::Input(Message::Error(err.to_string())))
                                             .await.map_err(|err| CliError::SenderError(err.to_string()))?;
                                     },
                                 };
-                                Ok::<_, CliError>(())
-                            });
-                        },
-                        Commands::SendMessage { group_name, msg } => {
-                            let message = msg.join(" ");
-                            let res = user.as_ref().lock().await.send_msg(&message, group_name.clone(), user_address.clone()).await;
-                            match res {
-                                Ok(_) => {
-                                    res_msg_tx.send(Msg::Input(Message::Mine(group_name, user_address.clone(), message ))).await.map_err(|err| CliError::SenderError(err.to_string()))?;
-                                },
-                                Err(err) => {
-                                    res_msg_tx
-                                        .send(Msg::Input(Message::Error(err.to_string())))
-                                        .await.map_err(|err| CliError::SenderError(err.to_string()))?;
-                                },
-                            };
-                        },
-                        Commands::Exit => {
-                            res_msg_tx.send(Msg::Input(Message::System("Bye!".to_string()))).await.map_err(|err| CliError::SenderError(err.to_string()))?;
-                            break
-                        },
+
+                                let res = user.as_ref().lock().await.create_group(group_name.clone(), storage_address.clone());
+                                match res {
+                                    Ok(br) => {
+                                        let msg = format!("Successfully create group: {:?}", group_name.clone());
+                                        res_msg_tx.send(Msg::Input(Message::System(msg))).await.map_err(|err| CliError::SenderError(err.to_string()))?;
+
+                                        let redis_tx = redis_tx.clone();
+                                        tokio::spawn(async move {
+                                            while let Ok(msg) = br.recv() {
+                                                let bytes: Vec<u8> = msg.payload().to_vec();
+                                                redis_tx.send(bytes).await.map_err(|err| CliError::SenderError(err.to_string()))?;
+                                            }
+                                            Ok::<_, CliError>(())
+                                        });
+                                    },
+                                    Err(err) => {
+                                        res_msg_tx
+                                            .send(Msg::Input(Message::Error(err.to_string())))
+                                            .await.map_err(|err| CliError::SenderError(err.to_string()))?;
+                                    },
+                                };
+                            },
+                            Commands::Invite { group_name, users_wallet_addrs } => {
+                                let user_clone = user.clone();
+                                let res_msg_tx_c = messages_tx.clone();
+                                tokio::spawn(async move {
+                                    for user_wallet in users_wallet_addrs.iter() {
+                                        let user_clone_ref = user_clone.as_ref();
+                                        let opt_token =
+                                        {
+                                            let mut user_clone_ref_lock = user_clone_ref.lock().await;
+                                            let res = user_clone_ref_lock.handle_send_req(user_wallet, group_name.clone()).await;
+                                            match res {
+                                                Ok(token) => {
+                                                    token
+                                                },
+                                                Err(err) => {
+                                                    res_msg_tx_c
+                                                        .send(Msg::Input(Message::Error(err.to_string())))
+                                                        .await.map_err(|err| CliError::SenderError(err.to_string()))?;
+                                                    None
+                                                },
+                                            }
+                                        };
+
+                                        match opt_token {
+                                            Some(token) => token.cancelled().await,
+                                            None => return Err(CliError::TokenCancellingError),
+                                        };
+
+                                        // {
+                                        //     let mut user_clone_ref_lock = user_clone.as_ref().lock().await;
+                                        //     user_clone_ref_lock.contacts.future_req.remove(user_wallet);
+                                        //     let res = user_clone_ref_lock.add_user_to_acl(user_wallet).await;
+                                        //     if let Err(err) = res {
+                                        //         res_msg_tx_c
+                                        //             .send(Msg::Input(Message::Error(err.to_string())))
+                                        //             .await.map_err(|err| CliError::SenderError(err.to_string()))?;
+                                        //     };
+                                        // }
+
+                                    }
+
+                                    let res = user_clone.as_ref().lock().await.invite(users_wallet_addrs.clone(), group_name.clone()).await;
+                                    match res {
+                                        Ok(_) => {
+                                            let msg = format!("Invite {:?} to the group {:}\n",
+                                                users_wallet_addrs, group_name
+                                            );
+                                            res_msg_tx_c.send(Msg::Input(Message::System(msg))).await.map_err(|err| CliError::SenderError(err.to_string()))?;
+                                        },
+                                        Err(err) => {
+                                            res_msg_tx_c
+                                                .send(Msg::Input(Message::Error(err.to_string())))
+                                                .await.map_err(|err| CliError::SenderError(err.to_string()))?;
+                                        },
+                                    };
+                                    Ok::<_, CliError>(())
+                                });
+                            },
+                            Commands::SendMessage { group_name, msg } => {
+                                let message = msg.join(" ");
+                                let res = user.as_ref().lock().await.send_msg(&message, group_name.clone(), user_address.clone()).await;
+                                match res {
+                                    Ok(_) => {
+                                        res_msg_tx.send(Msg::Input(Message::Mine(group_name, user_address.clone(), message ))).await.map_err(|err| CliError::SenderError(err.to_string()))?;
+                                    },
+                                    Err(err) => {
+                                        res_msg_tx
+                                            .send(Msg::Input(Message::Error(err.to_string())))
+                                            .await.map_err(|err| CliError::SenderError(err.to_string()))?;
+                                    },
+                                };
+                            },
+                            Commands::Exit => {
+                                res_msg_tx.send(Msg::Input(Message::System("Bye!".to_string()))).await.map_err(|err| CliError::SenderError(err.to_string()))?;
+                                break
+                            },
+                        }
                     }
-                }
-                _ = main_token.cancelled() => {
-                    break;
-                }
-                else => {
-                    res_msg_tx.send(Msg::Input(Message::System("Something went wrong".to_string()))).await.map_err(|err| CliError::SenderError(err.to_string()))?;
-                    break
-                }
-            };
+                    _ = main_token.cancelled() => {
+                        break;
+                    }
+                    else => {
+                        res_msg_tx.send(Msg::Input(Message::System("Something went wrong".to_string()))).await.map_err(|err| CliError::SenderError(err.to_string()))?;
+                        break
+                    }
+                };
         }
         Ok::<_, CliError>(())
     });

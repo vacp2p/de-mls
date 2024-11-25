@@ -13,13 +13,15 @@ use std::{
     collections::HashMap,
     fmt::Display,
     str::{from_utf8, FromStr},
+    sync::mpsc::{channel, Receiver},
 };
-use tokio::sync::broadcast::Receiver;
 use tokio_util::sync::CancellationToken;
+use waku_bindings::{Running, WakuMessage, WakuNodeHandle};
 
 use ds::{
     chat_client::{ChatClient, ReqMessageType, RequestMLSPayload, ResponseMLSPayload},
     ds::*,
+    ds_waku::{setup_node_handle, WakuGroupClient},
 };
 use mls_crypto::openmls_provider::*;
 use sc_key_store::{sc_ks::ScKeyStorage, *};
@@ -31,9 +33,8 @@ pub struct Group {
     group_name: String,
     conversation: Conversation,
     mls_group: RefCell<MlsGroup>,
-    rc_client: RClient,
-    // pubsub_topic: WakuPubSubTopic,
-    // content_topics: Vec<WakuContentTopic>,
+    // rc_client: RClient,
+    waku_client: WakuGroupClient,
 }
 impl Display for Group {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -41,59 +42,68 @@ impl Display for Group {
     }
 }
 
-pub struct User<T, P, N> {
+pub struct User {
     pub identity: Identity,
     pub groups: HashMap<String, Group>,
     provider: MlsCryptoProvider,
     eth_signer: PrivateKeySigner,
     // we don't need on-chain connection if we don't create a group
-    sc_ks: Option<ScKeyStorage<T, P, N>>,
+    // sc_ks: Option<ScKeyStorage<T, P, N>>,
+    pub waku_node: WakuNodeHandle<Running>,
     pub contacts: ContactsList,
 }
 
-impl<T, P, N> User<T, P, N>
-where
-    T: Transport + Clone,
-    P: Provider<T, N>,
-    N: Network,
+impl User
+// where
+//     T: Transport + Clone,
+//     P: Provider<T, N>,
+//     N: Network,
 {
     /// Create a new user with the given name and a fresh set of credentials.
-    pub async fn new(user_eth_priv_key: &str, chat_client: ChatClient) -> Result<Self, UserError> {
+    pub async fn new(
+        user_eth_priv_key: &str,
+        node: WakuNodeHandle<Running>,
+        // nodes: Vec<String>,
+        // chat_client: ChatClient,
+    ) -> Result<Self, UserError> {
         let signer = PrivateKeySigner::from_str(user_eth_priv_key)?;
         let user_address = signer.address();
 
         let crypto = MlsCryptoProvider::default();
         let id = Identity::new(CIPHERSUITE, &crypto, user_address.as_slice())?;
+
         let user = User {
             groups: HashMap::new(),
             identity: id,
             eth_signer: signer,
             provider: crypto,
-            sc_ks: None,
-            contacts: ContactsList::new(chat_client).await?,
+            // sc_ks: None,
+            waku_node: node,
+            contacts: ContactsList::new().await?,
         };
         Ok(user)
     }
 
-    pub async fn connect_to_smart_contract(
-        &mut self,
-        sc_storage_address: &str,
-        provider: P,
-    ) -> Result<(), UserError> {
-        let storage_address = Address::from_str(sc_storage_address)?;
-        self.sc_ks = Some(ScKeyStorage::new(provider, storage_address));
-        self.sc_ks
-            .as_mut()
-            .unwrap()
-            .add_user(&self.identity.to_string())
-            .await?;
-        Ok(())
-    }
+    // pub async fn connect_to_smart_contract(
+    //     &mut self,
+    //     sc_storage_address: &str,
+    //     provider: P,
+    // ) -> Result<(), UserError> {
+    //     let storage_address = Address::from_str(sc_storage_address)?;
+    //     self.sc_ks = Some(ScKeyStorage::new(provider, storage_address));
+    //     self.sc_ks
+    //         .as_mut()
+    //         .unwrap()
+    //         .add_user(&self.identity.to_string())
+    //         .await?;
+    //     Ok(())
+    // }
 
-    pub async fn create_group(
+    pub fn create_group(
         &mut self,
         group_name: String,
-    ) -> Result<Receiver<Message>, UserError> {
+        sc_address: String,
+    ) -> Result<Receiver<WakuMessage>, UserError> {
         let group_id = group_name.as_bytes();
 
         if self.groups.contains_key(&group_name) {
@@ -112,37 +122,36 @@ where
             self.identity.credential_with_key.clone(),
         )?;
 
-        let (rc, broadcaster) = RClient::new_with_group(group_name.clone()).await?;
+        let (sender, receiver) = channel::<WakuMessage>();
+        let waku_client =
+            WakuGroupClient::new(&self.waku_node, group_name.clone(), sender).unwrap();
         let group = Group {
             group_name: group_name.clone(),
             conversation: Conversation::default(),
             mls_group: RefCell::new(mls_group),
-            rc_client: rc,
-            // pubsub_topic: WakuPubSubTopic::new(),
-            // content_topics: Vec::new(),
+            waku_client,
         };
 
         self.groups.insert(group_name.clone(), group);
-        self.contacts
-            .insert_group2sc(group_name, self.sc_address()?)?;
-        Ok(broadcaster)
+        self.contacts.insert_group2sc(group_name, sc_address)?;
+        Ok(receiver)
     }
 
-    pub async fn add_user_to_acl(&mut self, user_address: &str) -> Result<(), UserError> {
-        if self.sc_ks.is_none() {
-            return Err(UserError::MissingSmartContractConnection);
-        }
-        self.sc_ks.as_mut().unwrap().add_user(user_address).await?;
-        Ok(())
-    }
+    // pub async fn add_user_to_acl(&mut self, user_address: &str) -> Result<(), UserError> {
+    //     if self.sc_ks.is_none() {
+    //         return Err(UserError::MissingSmartContractConnection);
+    //     }
+    //     self.sc_ks.as_mut().unwrap().add_user(user_address).await?;
+    //     Ok(())
+    // }
 
     pub async fn restore_key_package(
         &mut self,
         mut signed_kp: &[u8],
     ) -> Result<KeyPackage, UserError> {
-        if self.sc_ks.is_none() {
-            return Err(UserError::MissingSmartContractConnection);
-        }
+        // if self.sc_ks.is_none() {
+        //     return Err(UserError::MissingSmartContractConnection);
+        // }
 
         let key_package_in = KeyPackageIn::tls_deserialize(&mut signed_kp)?;
         let key_package =
@@ -156,9 +165,9 @@ where
         users: Vec<String>,
         group_name: String,
     ) -> Result<(), UserError> {
-        if self.sc_ks.is_none() {
-            return Err(UserError::MissingSmartContractConnection);
-        }
+        // if self.sc_ks.is_none() {
+        //     return Err(UserError::MissingSmartContractConnection);
+        // }
 
         let users_for_invite = self
             .contacts
@@ -184,22 +193,33 @@ where
             &joiners_key_package,
         )?;
 
-        group
-            .rc_client
-            .msg_send(
-                out_messages.tls_serialize_detached()?,
-                self.identity.to_string(),
-                group_name,
-            )
-            .await?;
+        group.waku_client.send_to_waku(
+            &self.waku_node,
+            out_messages.tls_serialize_detached()?,
+            ds::ds_waku::MsgType::UpdateGroup,
+        )?;
+        // group
+        //     .rc_client
+        //     .msg_send(
+        //         out_messages.tls_serialize_detached()?,
+        //         self.identity.to_string(),
+        //         group_name,
+        //     )
+        //     .await?;
         // Second, process the invitation on our end.
         group
             .mls_group
             .borrow_mut()
             .merge_pending_commit(&self.provider)?;
         // Send welcome by p2p
-        self.contacts
-            .send_welcome_msg_to_users(self.identity.to_string(), user_addrs, welcome)?;
+        group.waku_client.send_to_waku(
+            &self.waku_node,
+            welcome.tls_serialize_detached()?,
+            ds::ds_waku::MsgType::InviteToGroup,
+        )?;
+
+        // self.contacts
+        //     .send_welcome_msg_to_users(self.identity.to_string(), user_addrs, welcome)?;
 
         Ok(())
     }
@@ -298,17 +318,32 @@ where
             msg.as_bytes(),
         )?;
 
-        group
-            .rc_client
-            .msg_send(message_out.tls_serialize_detached()?, sender, group_name)
-            .await?;
+        group.waku_client.send_to_waku(
+            &self.waku_node,
+            message_out.tls_serialize_detached()?,
+            ds::ds_waku::MsgType::Text,
+        )?;
+
+        // group
+        //     .rc_client
+        //     .msg_send(message_out.tls_serialize_detached()?, sender, group_name)
+        //     .await?;
         Ok(())
+    }
+
+    pub async fn subscribe_to_group(
+        &mut self,
+        group_name: String,
+    ) -> Result<(Receiver<WakuMessage>, WakuGroupClient), UserError> {
+        let (sender, receiver) = channel::<WakuMessage>();
+        let w_c = WakuGroupClient::new(&self.waku_node, group_name.clone(), sender).unwrap();
+        Ok((receiver, w_c))
     }
 
     pub async fn join_group(
         &mut self,
         welcome: String,
-    ) -> Result<(Receiver<Message>, String), UserError> {
+    ) -> Result<(Receiver<WakuMessage>, String), UserError> {
         let wbytes = hex::decode(welcome).unwrap();
         let welc = MlsMessageIn::tls_deserialize_bytes(wbytes).unwrap();
         let welcome = welc.into_welcome();
@@ -327,17 +362,18 @@ where
         let group_id = mls_group.group_id().to_vec();
         let group_name = String::from_utf8(group_id)?;
 
-        let (rc, br) = RClient::new_with_group(group_name.clone()).await?;
+        // let (rc, br) = RClient::new_with_group(group_name.clone()).await?;
+        let (sender, receiver) = channel::<WakuMessage>();
         let group = Group {
             group_name: group_name.clone(),
             conversation: Conversation::default(),
             mls_group: RefCell::new(mls_group),
-            rc_client: rc,
+            waku_client: WakuGroupClient::new(&self.waku_node, group_name.clone(), sender).unwrap(),
         };
 
         match self.groups.insert(group_name.clone(), group) {
             Some(old) => Err(UserError::GroupAlreadyExistsError(old.group_name)),
-            None => Ok((br, group_name)),
+            None => Ok((receiver, group_name)),
         }
     }
 
@@ -437,9 +473,9 @@ where
     }
 
     pub async fn parce_responce(&mut self, resp: ResponseMLSPayload) -> Result<(), UserError> {
-        if self.sc_ks.is_none() {
-            return Err(UserError::MissingSmartContractConnection);
-        }
+        // if self.sc_ks.is_none() {
+        //     return Err(UserError::MissingSmartContractConnection);
+        // }
         let group_name = resp.group_name.clone();
         let sc_address = self.contacts.group2sc(group_name.clone())?;
         let (user_wallet, kp) = resp.validate(sc_address, group_name.clone())?;
@@ -452,12 +488,12 @@ where
         Ok(())
     }
 
-    pub fn sc_address(&self) -> Result<String, UserError> {
-        if self.sc_ks.is_none() {
-            return Err(UserError::MissingSmartContractConnection);
-        }
-        Ok(self.sc_ks.as_ref().unwrap().sc_adsress())
-    }
+    // pub fn sc_address(&self) -> Result<String, UserError> {
+    //     if self.sc_ks.is_none() {
+    //         return Err(UserError::MissingSmartContractConnection);
+    //     }
+    //     Ok(self.sc_ks.as_ref().unwrap().sc_adsress())
+    // }
 
     pub async fn handle_send_req(
         &mut self,
