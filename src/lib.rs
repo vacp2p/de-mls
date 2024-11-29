@@ -127,6 +127,8 @@ pub enum UserError {
     MlsRemoveMemberError(#[from] RemoveMembersError<MemoryKeyStoreError>),
     #[error("Failed to validate user key package: {0}")]
     MlsKeyPackageVerificationError(#[from] KeyPackageVerifyError),
+    #[error("Failed to create signature key pair: {0}")]
+    MlsSignatureKeyPairError(#[from] CryptoError),
 
     #[error("UTF-8 parsing error: {0}")]
     Utf8ParsingError(#[from] FromUtf8Error),
@@ -147,6 +149,13 @@ pub enum UserError {
     SigningError(#[from] alloy::signers::Error),
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
+
+    #[error("Waku error: {0}")]
+    WakuError(String),
+    #[error("Message verification failed: {0}")]
+    MessageVerificationFailed(#[from] secp256k1::Error),
+    #[error("Unknown message type: {0}")]
+    UnknownMessageType(String),
 
     #[error("An unknown error occurred: {0}")]
     UnknownError(anyhow::Error),

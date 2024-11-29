@@ -1,5 +1,6 @@
 use chrono::Utc;
 use core::result::Result;
+use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::sync::{mpsc::Sender, Arc, Mutex as SyncMutex};
@@ -57,7 +58,7 @@ pub fn relay_subscribe(
 
 pub fn setup_node_handle(nodes: Vec<String>) -> Result<WakuNodeHandle<Running>, Box<dyn Error>> {
     let mut config = WakuNodeConfig::default();
-    config.log_level = Some(WakuLogLevel::Debug);
+    config.log_level = Some(WakuLogLevel::Panic);
     let node_handle = waku_new(Some(config))?;
     let node_handle = node_handle.start()?;
     for address in nodes
@@ -81,14 +82,17 @@ pub fn handle_signal(
     match signal.event() {
         waku_bindings::Event::WakuMessage(event) => {
             let msg_id = event.message_id();
+            
             let mut ids = seen_msg_ids.lock().unwrap();
             // Check if message has been received before or sent from local node
             if ids.contains(msg_id) {
+                println!("Message already received or sent from local node: {:?}", msg_id);
                 return Err(DeliveryServiceError::WakuInvalidMessage(format!(
                     "Skip repeated message: {:#?}",
                     msg_id
                 )));
             };
+            println!("Received new message: {:?}", msg_id);
             ids.insert(msg_id.to_string());
             let content_topic = event.waku_message().content_topic();
             // Check if message belongs to a relevant topic
@@ -155,19 +159,42 @@ pub struct DeMlsMessage {
     pub msg_type: MsgType,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MsgType {
     Text,
+    MlsText,
     UpdateGroup,
     InviteToGroup,
     RemoveFromGroup,
 }
 
+impl MsgType {
+    pub fn to_string(&self) -> String {
+        match self {
+            MsgType::Text => "text".to_string(),
+            MsgType::MlsText => "mls_text".to_string(),
+            MsgType::UpdateGroup => "update_group".to_string(),
+            MsgType::InviteToGroup => "invite_to_group".to_string(),
+            MsgType::RemoveFromGroup => "remove_from_group".to_string(),
+        }
+    }
+}
+
+pub const TEST_GROUP_NAME: &str = "new_group";
 pub const GROUP_VERSION: &str = "1";
 pub const APP_MSG_SUBTOPIC: &str = "app_msg";
 pub const COMMIT_MSG_SUBTOPIC: &str = "commit_msg";
 pub const WELCOME_SUBTOPIC: &str = "welcome";
 pub const SUBTOPICS: [&str; 3] = [APP_MSG_SUBTOPIC, COMMIT_MSG_SUBTOPIC, WELCOME_SUBTOPIC];
+
+lazy_static! {
+    pub static ref TEST_WELCOME_CONTENT_TOPIC: WakuContentTopic =
+        build_content_topic(TEST_GROUP_NAME, GROUP_VERSION, WELCOME_SUBTOPIC);
+    pub static ref TEST_APP_MSG_CONTENT_TOPIC: WakuContentTopic =
+        build_content_topic(TEST_GROUP_NAME, GROUP_VERSION, APP_MSG_SUBTOPIC);
+    pub static ref TEST_COMMIT_MSG_CONTENT_TOPIC: WakuContentTopic =
+        build_content_topic(TEST_GROUP_NAME, GROUP_VERSION, COMMIT_MSG_SUBTOPIC);
+}
 
 impl WakuGroupClient {
     pub fn waku_relay_topics(&self, node: &WakuNodeHandle<Running>) -> Vec<String> {
@@ -194,7 +221,7 @@ impl WakuGroupClient {
         }
 
         let content_topics = build_content_topics(&group_id, GROUP_VERSION, &SUBTOPICS.clone());
-        let content_filter = content_filter(&pubsub_topic, &content_topics);
+        let content_filter = content_filter(&pubsub_topic, content_topics.as_ref());
         node.relay_subscribe(&content_filter)
             .map_err(|e| DeliveryServiceError::WakuRelayError(e.to_string()))?;
 
@@ -226,7 +253,10 @@ impl WakuGroupClient {
         msg_type: MsgType,
     ) -> Result<String, DeliveryServiceError> {
         let content_topic = match msg_type {
-            MsgType::Text => build_content_topic(&self.group_id, GROUP_VERSION, APP_MSG_SUBTOPIC),
+            MsgType::Text => build_content_topic(&self.group_id, GROUP_VERSION, WELCOME_SUBTOPIC),
+            MsgType::MlsText => {
+                build_content_topic(&self.group_id, GROUP_VERSION, APP_MSG_SUBTOPIC)
+            }
             MsgType::InviteToGroup => {
                 build_content_topic(&self.group_id, GROUP_VERSION, WELCOME_SUBTOPIC)
             }
@@ -254,6 +284,11 @@ impl WakuGroupClient {
                     "Failed to relay publish the message"
                 );
                 DeliveryServiceError::WakuPublishMessageError(e)
+            })
+            .map(|id| {
+                self.seen_msg_ids.lock().unwrap().insert(id.clone());
+                trace!(id = id, "Sent message");
+                id
             })
     }
 

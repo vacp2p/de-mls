@@ -12,6 +12,16 @@ pub struct ConversationMessage {
     pub message: String,
 }
 
+impl ConversationMessage {
+    fn to_string(&self) -> String {
+        format!(
+            "Group: {:#?}\nAuthor: {:#?}\nMessage: {:#?}",
+            self.group, self.author, self.message
+        )
+    }
+}
+
+
 impl Display for ConversationMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(

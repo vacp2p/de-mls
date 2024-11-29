@@ -80,6 +80,13 @@ pub enum Commands {
         group_name: String,
         msg: Vec<String>,
     },
+    Subscribe {
+        group_name: String,
+    },
+    SendToGroup {
+        group_name: String,
+        msg: Vec<String>,
+    },
     // RemoveUser { user_wallet: String },
     Exit,
 }
