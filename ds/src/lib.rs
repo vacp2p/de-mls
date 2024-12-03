@@ -1,8 +1,6 @@
 use alloy::{hex::FromHexError, primitives::SignatureError};
 use fred::error::RedisError;
 
-pub mod chat_client;
-pub mod chat_server;
 pub mod ds;
 pub mod ds_waku;
 
@@ -42,6 +40,8 @@ pub enum DeliveryServiceError {
     WakuPublishMessageError(String),
     #[error("Waku already subscribed to the pubsub topic: {0}")]
     WakuAlreadySubscribed(String),
+    #[error("Waku relay topics error: {0}")]
+    WakuRelayTopicsError(String),
 
     #[error("An unknown error occurred: {0}")]
     Other(anyhow::Error),

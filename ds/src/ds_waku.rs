@@ -58,7 +58,8 @@ pub fn relay_subscribe(
 
 pub fn setup_node_handle(nodes: Vec<String>) -> Result<WakuNodeHandle<Running>, Box<dyn Error>> {
     let mut config = WakuNodeConfig::default();
-    config.log_level = Some(WakuLogLevel::Panic);
+    config.port = Some(0);
+    config.log_level = Some(WakuLogLevel::Info);
     let node_handle = waku_new(Some(config))?;
     let node_handle = node_handle.start()?;
     for address in nodes
@@ -82,16 +83,19 @@ pub fn handle_signal(
     match signal.event() {
         waku_bindings::Event::WakuMessage(event) => {
             let msg_id = event.message_id();
-            
+
             let mut ids = seen_msg_ids.lock().unwrap();
             // Check if message has been received before or sent from local node
-            if ids.contains(msg_id) {
-                println!("Message already received or sent from local node: {:?}", msg_id);
-                return Err(DeliveryServiceError::WakuInvalidMessage(format!(
-                    "Skip repeated message: {:#?}",
-                    msg_id
-                )));
-            };
+            // if ids.contains(msg_id) {
+            //     println!(
+            //         "Message already received or sent from local node: {:?}",
+            //         msg_id
+            //     );
+            //     return Err(DeliveryServiceError::WakuInvalidMessage(format!(
+            //         "Skip repeated message: {:#?}",
+            //         msg_id
+            //     )));
+            // };
             println!("Received new message: {:?}", msg_id);
             ids.insert(msg_id.to_string());
             let content_topic = event.waku_message().content_topic();
@@ -197,10 +201,12 @@ lazy_static! {
 }
 
 impl WakuGroupClient {
-    pub fn waku_relay_topics(&self, node: &WakuNodeHandle<Running>) -> Vec<String> {
-        let topics = node.relay_topics().unwrap();
-        debug!("topics: {:?}", topics);
-        topics
+    pub fn waku_relay_topics(
+        &self,
+        node: &WakuNodeHandle<Running>,
+    ) -> Result<Vec<String>, DeliveryServiceError> {
+        node.relay_topics()
+            .map_err(|e| DeliveryServiceError::WakuRelayTopicsError(e.to_string()))
     }
 
     pub fn new(
@@ -210,6 +216,7 @@ impl WakuGroupClient {
     ) -> Result<Self, DeliveryServiceError> {
         // check if already subscribed to the pubsub topic
         let pubsub_topic = pubsub_topic(&group_id);
+        let content_topics = build_content_topics(&group_id, GROUP_VERSION, &SUBTOPICS.clone());
         let topics = node.relay_topics();
         if let Ok(topics) = topics {
             if topics.contains(&pubsub_topic) {
@@ -277,6 +284,9 @@ impl WakuGroupClient {
             true,
         );
 
+        let topics = node.relay_topics().unwrap();
+        println!("Topics: {:?}", topics);
+
         node.relay_publish_message(&waku_message, Some(self.pubsub_topic.clone()), None)
             .map_err(|e| {
                 debug!(
@@ -285,11 +295,11 @@ impl WakuGroupClient {
                 );
                 DeliveryServiceError::WakuPublishMessageError(e)
             })
-            .map(|id| {
-                self.seen_msg_ids.lock().unwrap().insert(id.clone());
-                trace!(id = id, "Sent message");
-                id
-            })
+            // .map(|id| {
+            //     self.seen_msg_ids.lock().unwrap().insert(id.clone());
+            //     trace!(id = id, "Sent message");
+            //     id
+            // })
     }
 
     // pub fn stop(self, node: &WakuNodeHandle<Running>) -> Result<(), DeliveryServiceError> {

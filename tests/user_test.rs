@@ -11,8 +11,8 @@ use ds::ds_waku::{setup_node_handle, MsgType, WakuGroupClient};
 #[tokio::test]
 async fn test_waku_client_end() {
     let node_name = env::var("NODE").unwrap();
-    let group_name = "group_test".to_string();
-    let msg = "end".as_bytes().to_vec();
+    let group_name = "new_group".to_string();
+    let msg = "test message".to_string();
 
     let user_priv_key2 = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
     let signer2 = PrivateKeySigner::from_str(user_priv_key2).unwrap();
@@ -21,6 +21,8 @@ async fn test_waku_client_end() {
     let mut user2 = User::new(user_priv_key2, node).await.unwrap();
     let user2_arc = Arc::new(Mutex::new(user2));
 
+    println!("Subscribing to group: {:?}", group_name.clone());
+
     let (receiver, topics) = user2_arc
         .as_ref()
         .lock()
@@ -28,7 +30,16 @@ async fn test_waku_client_end() {
         .subscribe_to_group(group_name.clone())
         .await
         .unwrap();
-    let msg = format!("Successfully subscribe to group: {:?}", group_name.clone());
+    println!("Successfully subscribe to group: {:?}", group_name.clone());
+
+    let topics = user2_arc
+        .as_ref()
+        .lock()
+        .await
+        .waku_node
+        .relay_topics()
+        .unwrap();
+    println!("Topics: {:?}", topics);
 
     let group_name_clone = group_name.clone();
     let user_recv_clone = user2_arc.clone();
@@ -43,5 +54,14 @@ async fn test_waku_client_end() {
             // }
         }
     });
+
+    user2_arc
+        .as_ref()
+        .lock()
+        .await
+        .send_msg(&msg, group_name.clone(), user_address2.clone())
+        .await
+        .unwrap();
+
     h1.await.unwrap();
 }

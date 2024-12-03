@@ -18,9 +18,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let nodes_name: Vec<String> = args.nodes.split(',').map(|s| s.to_string()).collect();
     let user_address = signer.address().to_string();
     let group_name: String = "new_group".to_string();
+    let group_name_2: String = "new_group_2".to_string();
+
 
     let node = setup_node_handle(nodes_name).unwrap();
-    // let node_arc = Arc::new(node);
 
     // Create user
     let user_n = User::new(&args.user_priv_key, node).await?;
@@ -31,6 +32,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .lock()
         .await
         .create_group(group_name.clone())?;
+    let topics = user_arc
+        .as_ref()
+        .lock()
+        .await
+        .waku_node
+        .relay_topics()
+        .unwrap();
+    println!("Topics: {:?}", topics);
+
+    let receiver_2 = user_arc
+        .as_ref()
+        .lock()
+        .await
+        .create_group(group_name_2.clone())?;
+    let topics = user_arc
+        .as_ref()
+        .lock()
+        .await
+        .waku_node
+        .relay_topics()
+        .unwrap();
+    println!("Topics: {:?}", topics);
 
     let user_recv_clone = user_arc.clone();
     let group_name_clone = group_name.clone();
@@ -92,6 +115,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+
+
 
 // #[tokio::main]
 // async fn main_old() -> Result<(), Box<dyn Error>> {

@@ -1,10 +1,5 @@
 use alloy::hex::ToHexExt;
-use ds::{
-    chat_client::{
-        ChatClient, ChatMessages, ReqMessageType, RequestMLSPayload, ResponseMLSPayload,
-    },
-    chat_server::ServerMessage,
-};
+
 // use waku_bindings::*;
 
 use openmls::prelude::MlsMessageOut;
@@ -79,45 +74,45 @@ impl ContactsList {
     //     Ok(())
     // }
 
-    pub fn send_msg_req(
-        &mut self,
-        self_address: String,
-        user_address: String,
-        group_name: String,
-        msg_type: ReqMessageType,
-    ) -> Result<(), ContactError> {
-        self.future_req
-            .insert(user_address.clone(), CancellationToken::new());
+    // pub fn send_msg_req(
+    //     &mut self,
+    //     self_address: String,
+    //     user_address: String,
+    //     group_name: String,
+    //     msg_type: ReqMessageType,
+    // ) -> Result<(), ContactError> {
+    //     self.future_req
+    //         .insert(user_address.clone(), CancellationToken::new());
 
-        let sc_address = match self.group_id2sc.get(&group_name).cloned() {
-            Some(sc) => sc,
-            None => return Err(ContactError::MissingSmartContractForGroup),
-        };
+    //     let sc_address = match self.group_id2sc.get(&group_name).cloned() {
+    //         Some(sc) => sc,
+    //         None => return Err(ContactError::MissingSmartContractForGroup),
+    //     };
 
-        let req = ChatMessages::Request(RequestMLSPayload::new(sc_address, group_name, msg_type));
-        // self.chat_client.send_message(ServerMessage::InMessage {
-        //     from: self_address,
-        //     to: vec![user_address],
-        //     msg: serde_json::to_string(&req)?,
-        // })?;
+    //     let req = ChatMessages::Request(RequestMLSPayload::new(sc_address, group_name, msg_type));
+    //     // self.chat_client.send_message(ServerMessage::InMessage {
+    //     //     from: self_address,
+    //     //     to: vec![user_address],
+    //     //     msg: serde_json::to_string(&req)?,
+    //     // })?;
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
-    pub fn send_resp_msg_to_user(
-        &mut self,
-        self_address: String,
-        user_address: &str,
-        resp: ResponseMLSPayload,
-    ) -> Result<(), ContactError> {
-        let resp_j = ChatMessages::Response(resp);
-        // self.chat_client.send_message(ServerMessage::InMessage {
-        //     from: self_address,
-        //     to: vec![user_address.to_string()],
-        //     msg: serde_json::to_string(&resp_j)?,
-        // })?;
-        Ok(())
-    }
+    // pub fn send_resp_msg_to_user(
+    //     &mut self,
+    //     self_address: String,
+    //     user_address: &str,
+    //     resp: ResponseMLSPayload,
+    // ) -> Result<(), ContactError> {
+    //     let resp_j = ChatMessages::Response(resp);
+    //     // self.chat_client.send_message(ServerMessage::InMessage {
+    //     //     from: self_address,
+    //     //     to: vec![user_address.to_string()],
+    //     //     msg: serde_json::to_string(&resp_j)?,
+    //     // })?;
+    //     Ok(())
+    // }
 
     pub async fn add_new_contact(&mut self, user_address: &str) -> Result<(), ContactError> {
         let mut contacts = self.contacts.lock().await;

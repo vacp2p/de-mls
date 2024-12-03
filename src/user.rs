@@ -30,13 +30,8 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use waku_bindings::{Running, WakuContentTopic, WakuMessage, WakuNodeHandle};
 
-use ds::{
-    chat_client::{ChatClient, ReqMessageType, RequestMLSPayload, ResponseMLSPayload},
-    ds::*,
-    ds_waku::{
-        setup_node_handle, DeMlsMessage, WakuGroupClient, APP_MSG_SUBTOPIC, COMMIT_MSG_SUBTOPIC,
-        WELCOME_SUBTOPIC,
-    },
+use ds::ds_waku::{
+    DeMlsMessage, WakuGroupClient, APP_MSG_SUBTOPIC, COMMIT_MSG_SUBTOPIC, WELCOME_SUBTOPIC,
 };
 use mls_crypto::openmls_provider::*;
 use sc_key_store::{sc_ks::ScKeyStorage, *};
@@ -238,7 +233,12 @@ impl User
         let ct = msg.content_topic().content_topic_name.to_string();
         match ct.as_str() {
             WELCOME_SUBTOPIC => {
-                group.admin.as_mut().unwrap().push_message(msg.payload().to_vec()).await;
+                group
+                    .admin
+                    .as_mut()
+                    .unwrap()
+                    .push_message(msg.payload().to_vec())
+                    .await;
                 return Ok(Some(format!("WELCOME msg: {:?}", msg.payload())));
             }
             COMMIT_MSG_SUBTOPIC => {
@@ -552,10 +552,15 @@ impl User
         };
 
         self.groups.insert(group_name.clone(), group);
-        let topics = self.waku_node.relay_topics().unwrap();
-        // println!("topics: {:?}", topics);
-
-        Ok((receiver, topics))
+        // let group_after = self.groups.get_mut(&group_name).unwrap();
+        // let res = group_after.waku_client.waku_relay_topics(&self.waku_node);
+        // let res = self.waku_node.relay_topics();
+        // if let Ok(topics) = res {
+        // Ok((receiver, topics))
+        // } else {
+        // Err(UserError::DeliveryServiceError(res.err().unwrap()))
+        // }
+        Ok((receiver, Vec::new()))
     }
 
     pub async fn join_group(
@@ -664,48 +669,48 @@ impl User
         Ok(res)
     }
 
-    pub fn send_responce_on_request(
-        &mut self,
-        req: RequestMLSPayload,
-        user_address: &str,
-    ) -> Result<(), UserError> {
-        let self_address = self.identity.to_string();
-        match req.msg_type {
-            ReqMessageType::InviteToGroup => {
-                let signature = self.sign(req.msg_to_sign())?;
-                let key_package = self
-                    .identity
-                    .generate_key_package(CIPHERSUITE, &self.provider)?;
-                let resp = ResponseMLSPayload::new(
-                    signature,
-                    self_address.clone(),
-                    req.group_name(),
-                    key_package.tls_serialize_detached()?,
-                );
-                self.contacts
-                    .send_resp_msg_to_user(self_address, user_address, resp)?;
+    // pub fn send_responce_on_request(
+    //     &mut self,
+    //     req: RequestMLSPayload,
+    //     user_address: &str,
+    // ) -> Result<(), UserError> {
+    //     let self_address = self.identity.to_string();
+    //     match req.msg_type {
+    //         ReqMessageType::InviteToGroup => {
+    //             let signature = self.sign(req.msg_to_sign())?;
+    //             let key_package = self
+    //                 .identity
+    //                 .generate_key_package(CIPHERSUITE, &self.provider)?;
+    //             let resp = ResponseMLSPayload::new(
+    //                 signature,
+    //                 self_address.clone(),
+    //                 req.group_name(),
+    //                 key_package.tls_serialize_detached()?,
+    //             );
+    //             self.contacts
+    //                 .send_resp_msg_to_user(self_address, user_address, resp)?;
 
-                Ok(())
-            }
-            ReqMessageType::RemoveFromGroup => Ok(()),
-        }
-    }
+    //             Ok(())
+    //         }
+    //         ReqMessageType::RemoveFromGroup => Ok(()),
+    //     }
+    // }
 
-    pub async fn parce_responce(&mut self, resp: ResponseMLSPayload) -> Result<(), UserError> {
-        // if self.sc_ks.is_none() {
-        //     return Err(UserError::MissingSmartContractConnection);
-        // }
-        let group_name = resp.group_name.clone();
-        let sc_address = self.contacts.group2sc(group_name.clone())?;
-        let (user_wallet, kp) = resp.validate(sc_address, group_name.clone())?;
+    // pub async fn parce_responce(&mut self, resp: ResponseMLSPayload) -> Result<(), UserError> {
+    //     // if self.sc_ks.is_none() {
+    //     //     return Err(UserError::MissingSmartContractConnection);
+    //     // }
+    //     let group_name = resp.group_name.clone();
+    //     let sc_address = self.contacts.group2sc(group_name.clone())?;
+    //     let (user_wallet, kp) = resp.validate(sc_address, group_name.clone())?;
 
-        self.contacts
-            .add_key_package_to_contact(&user_wallet, kp, group_name.clone())
-            .await?;
+    //     self.contacts
+    //         .add_key_package_to_contact(&user_wallet, kp, group_name.clone())
+    //         .await?;
 
-        self.contacts.handle_response(&user_wallet)?;
-        Ok(())
-    }
+    //     self.contacts.handle_response(&user_wallet)?;
+    //     Ok(())
+    // }
 
     // pub fn sc_address(&self) -> Result<String, UserError> {
     //     if self.sc_ks.is_none() {
@@ -714,25 +719,25 @@ impl User
     //     Ok(self.sc_ks.as_ref().unwrap().sc_adsress())
     // }
 
-    pub async fn handle_send_req(
-        &mut self,
-        user_wallet: &str,
-        group_name: String,
-    ) -> Result<Option<CancellationToken>, UserError> {
-        if !self.contacts.does_user_in_contacts(user_wallet).await {
-            self.contacts.add_new_contact(user_wallet).await?;
-        }
-        self.contacts
-            .send_msg_req(
-                self.identity.to_string(),
-                user_wallet.to_owned(),
-                group_name,
-                ReqMessageType::InviteToGroup,
-            )
-            .unwrap();
+    // pub async fn handle_send_req(
+    //     &mut self,
+    //     user_wallet: &str,
+    //     group_name: String,
+    // ) -> Result<Option<CancellationToken>, UserError> {
+    //     if !self.contacts.does_user_in_contacts(user_wallet).await {
+    //         self.contacts.add_new_contact(user_wallet).await?;
+    //     }
+    //     self.contacts
+    //         .send_msg_req(
+    //             self.identity.to_string(),
+    //             user_wallet.to_owned(),
+    //             group_name,
+    //             ReqMessageType::InviteToGroup,
+    //         )
+    //         .unwrap();
 
-        Ok(self.contacts.future_req.get(user_wallet).cloned())
-    }
+    //     Ok(self.contacts.future_req.get(user_wallet).cloned())
+    // }
 }
 
 impl Group {
