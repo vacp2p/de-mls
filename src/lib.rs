@@ -157,6 +157,11 @@ pub enum UserError {
     #[error("Unknown message type: {0}")]
     UnknownMessageType(String),
 
+    #[error("Failed to decrypt message: {0}")]
+    DecryptionError(String),
+    #[error("Failed to encrypt message: {0}")]
+    EncryptionError(String),
+
     #[error("An unknown error occurred: {0}")]
     UnknownError(anyhow::Error),
 }

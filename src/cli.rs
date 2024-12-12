@@ -31,13 +31,6 @@ pub struct Args {
     /// User private key that correspond to Ethereum wallet
     #[arg(short = 'K', long)]
     pub user_priv_key: String,
-    /// Nodes
-    #[arg(short = 'N', long)]
-    pub nodes: String,
-    // /// Rpc url
-    // #[arg(short = 'U', long,
-    //     default_value_t = Url::from_str("http://localhost:8545").unwrap())]
-    // pub storage_url: Url,
 
     // /// Storage contract address
     // #[arg(short = 'S', long)]
@@ -69,12 +62,6 @@ pub struct Cli {
 pub enum Commands {
     CreateGroup {
         group_name: String,
-        storage_address: String,
-        storage_url: Url,
-    },
-    Invite {
-        group_name: String,
-        users_wallet_addrs: Vec<String>,
     },
     SendMessage {
         group_name: String,
@@ -82,10 +69,6 @@ pub enum Commands {
     },
     Subscribe {
         group_name: String,
-    },
-    SendToGroup {
-        group_name: String,
-        msg: Vec<String>,
     },
     // RemoveUser { user_wallet: String },
     Exit,

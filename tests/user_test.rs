@@ -6,11 +6,12 @@ use std::{env, str::FromStr};
 use tokio::sync::Mutex;
 use waku_bindings::WakuMessage;
 
-use ds::ds_waku::{setup_node_handle, MsgType, WakuGroupClient};
+use ds::ds_waku::{setup_node_handle, MsgType, WakuGroupClient, WakuConfig};
 
 #[tokio::test]
 async fn test_waku_client_end() {
-    let node_name = env::var("NODE").unwrap();
+    let cfg = WakuConfig::new_from_toml("../resources/cfg_test.toml").unwrap();
+    let node_name = cfg.nodes[0].clone();
     let group_name = "new_group".to_string();
     let msg = "test message".to_string();
 
@@ -23,7 +24,7 @@ async fn test_waku_client_end() {
 
     println!("Subscribing to group: {:?}", group_name.clone());
 
-    let (receiver, topics) = user2_arc
+    let (receiver) = user2_arc
         .as_ref()
         .lock()
         .await
@@ -59,7 +60,7 @@ async fn test_waku_client_end() {
         .as_ref()
         .lock()
         .await
-        .send_msg(&msg, group_name.clone(), user_address2.clone())
+        .send_msg(&msg, group_name.clone())
         .await
         .unwrap();
 

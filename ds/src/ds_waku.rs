@@ -4,14 +4,38 @@ use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::sync::{mpsc::Sender, Arc, Mutex as SyncMutex};
+use std::thread;
+use std::time::Duration;
 use std::{borrow::Cow, collections::HashSet, str::FromStr};
+use toml;
 use tracing::{debug, error, trace};
 use waku_bindings::*;
 
 use crate::DeliveryServiceError;
 
-pub fn pubsub_topic(group_name: &str) -> WakuPubSubTopic {
-    "/waku/2/".to_string() + group_name + "/proto"
+#[derive(Deserialize, Debug)]
+pub struct WakuConfig {
+    pub nodes: Vec<String>,
+}
+
+impl Default for WakuConfig {
+    fn default() -> Self {
+        Self { nodes: vec![] }
+    }
+}
+
+impl WakuConfig {
+    pub fn new_from_toml(path: &str) -> Result<Self, DeliveryServiceError> {
+        let cfg = std::fs::read_to_string(path)
+            .map_err(|e| DeliveryServiceError::WakuNodeConfigError(e.to_string()))?;
+        let cfg: WakuConfig = toml::from_str(&cfg)
+            .map_err(|e| DeliveryServiceError::WakuNodeConfigError(e.to_string()))?;
+        Ok(cfg)
+    }
+}
+
+pub fn pubsub_topic() -> WakuPubSubTopic {
+    "/waku/2/rs/15/0".to_string()
 }
 
 pub fn build_content_topics(
@@ -46,28 +70,21 @@ pub fn content_filter(
     ContentFilter::new(Some(pubsub_topic.to_string()), content_topics.to_vec())
 }
 
-/// Subscribe to pubsub topic on the relay protocol
-pub fn relay_subscribe(
-    node_handle: &WakuNodeHandle<Running>,
-    content_filter: &ContentFilter,
-) -> Result<(), DeliveryServiceError> {
-    node_handle
-        .relay_subscribe(content_filter)
-        .map_err(|e| DeliveryServiceError::WakuCreateNodeError(e.to_string()))
-}
-
 pub fn setup_node_handle(nodes: Vec<String>) -> Result<WakuNodeHandle<Running>, Box<dyn Error>> {
     let mut config = WakuNodeConfig::default();
     config.port = Some(0);
-    config.log_level = Some(WakuLogLevel::Info);
+    config.log_level = Some(WakuLogLevel::Panic);
     let node_handle = waku_new(Some(config))?;
     let node_handle = node_handle.start()?;
+    let content_filter = ContentFilter::new(Some(pubsub_topic()), vec![]);
+    node_handle.relay_subscribe(&content_filter)?;
     for address in nodes
         .iter()
         .map(|a| Multiaddr::from_str(a.as_str()).unwrap())
     {
         let peerid = node_handle.add_peer(&address, ProtocolId::Relay)?;
         node_handle.connect_peer_with_id(&peerid, None)?;
+        thread::sleep(Duration::from_secs(2));
     }
 
     Ok(node_handle)
@@ -85,23 +102,19 @@ pub fn handle_signal(
             let msg_id = event.message_id();
 
             let mut ids = seen_msg_ids.lock().unwrap();
-            // Check if message has been received before or sent from local node
-            // if ids.contains(msg_id) {
-            //     println!(
-            //         "Message already received or sent from local node: {:?}",
-            //         msg_id
-            //     );
-            //     return Err(DeliveryServiceError::WakuInvalidMessage(format!(
-            //         "Skip repeated message: {:#?}",
-            //         msg_id
-            //     )));
-            // };
-            println!("Received new message: {:?}", msg_id);
+            // Check if message has been received before or sent from this user
+            if ids.contains(msg_id) {
+                return Err(DeliveryServiceError::WakuAlreadyReceived(format!(
+                    "Skip repeated message: {:#?}",
+                    msg_id
+                )));
+            };
             ids.insert(msg_id.to_string());
             let content_topic = event.waku_message().content_topic();
             // Check if message belongs to a relevant topic
             if !match_content_topic(content_topics, content_topic) {
-                return Err(DeliveryServiceError::WakuInvalidMessage(format!(
+                println!("Content topic not match: {:?}", content_topic);
+                return Err(DeliveryServiceError::WakuInvalidContentTopic(format!(
                     "Skip irrelevant content topic: {:#?}",
                     content_topic
                 )));
@@ -135,11 +148,17 @@ pub fn register_handler(
 ) -> Result<(), DeliveryServiceError> {
     let handle_async = move |signal: Signal| {
         let msg = handle_signal(signal, &seen_msg_ids, &content_topics);
-
-        if let Ok(m) = msg {
+        // if err is Waku is already received, skip
+        if let Err(e) = msg {
+            if e.to_string().contains("WakuAlreadyReceived") {
+                return;
+            }
+        } else {
+            if let Ok(m) = msg {
             match sender.send(m) {
                 Ok(_) => trace!("Sent received message"),
                 Err(e) => error!("Could not send message: {:#?}", e),
+            }
             }
         }
     };
@@ -150,7 +169,7 @@ pub fn register_handler(
 
 pub struct WakuGroupClient {
     pub group_id: String,
-    pub pubsub_topic: WakuPubSubTopic,
+    // pub pubsub_topic: WakuPubSubTopic,
     pub content_topics: Arc<SyncMutex<Vec<WakuContentTopic>>>,
     /// A set of message ids sent from the group
     pub seen_msg_ids: Arc<SyncMutex<HashSet<String>>>,
@@ -214,23 +233,10 @@ impl WakuGroupClient {
         group_id: String,
         sender: Sender<WakuMessage>,
     ) -> Result<Self, DeliveryServiceError> {
-        // check if already subscribed to the pubsub topic
-        let pubsub_topic = pubsub_topic(&group_id);
         let content_topics = build_content_topics(&group_id, GROUP_VERSION, &SUBTOPICS.clone());
-        let topics = node.relay_topics();
-        if let Ok(topics) = topics {
-            if topics.contains(&pubsub_topic) {
-                return Err(DeliveryServiceError::WakuAlreadySubscribed(format!(
-                    "Already subscribed to the pubsub topic: {:#?}",
-                    pubsub_topic
-                )));
-            }
-        }
-
-        let content_topics = build_content_topics(&group_id, GROUP_VERSION, &SUBTOPICS.clone());
-        let content_filter = content_filter(&pubsub_topic, content_topics.as_ref());
-        node.relay_subscribe(&content_filter)
-            .map_err(|e| DeliveryServiceError::WakuRelayError(e.to_string()))?;
+        // let content_filter = content_filter(&pubsub_topic(), content_topics.as_ref());
+        // node.relay_subscribe(&content_filter)
+        //     .map_err(|e| DeliveryServiceError::WakuRelayError(e.to_string()))?;
 
         let seen_msg_ids = Arc::new(SyncMutex::new(HashSet::new()));
         let content_topics = Arc::new(SyncMutex::new(content_topics));
@@ -239,7 +245,6 @@ impl WakuGroupClient {
 
         Ok(WakuGroupClient {
             group_id,
-            pubsub_topic,
             content_topics,
             seen_msg_ids,
         })
@@ -257,24 +262,9 @@ impl WakuGroupClient {
         &self,
         node: &WakuNodeHandle<Running>,
         msg: Vec<u8>,
-        msg_type: MsgType,
+        subtopic: &str,
     ) -> Result<String, DeliveryServiceError> {
-        let content_topic = match msg_type {
-            MsgType::Text => build_content_topic(&self.group_id, GROUP_VERSION, WELCOME_SUBTOPIC),
-            MsgType::MlsText => {
-                build_content_topic(&self.group_id, GROUP_VERSION, APP_MSG_SUBTOPIC)
-            }
-            MsgType::InviteToGroup => {
-                build_content_topic(&self.group_id, GROUP_VERSION, WELCOME_SUBTOPIC)
-            }
-            MsgType::RemoveFromGroup => {
-                build_content_topic(&self.group_id, GROUP_VERSION, COMMIT_MSG_SUBTOPIC)
-            }
-            MsgType::UpdateGroup => {
-                build_content_topic(&self.group_id, GROUP_VERSION, COMMIT_MSG_SUBTOPIC)
-            }
-        };
-
+        let content_topic = build_content_topic(&self.group_id, GROUP_VERSION, subtopic);
         let waku_message = WakuMessage::new(
             msg,
             content_topic,
@@ -284,10 +274,16 @@ impl WakuGroupClient {
             true,
         );
 
-        let topics = node.relay_topics().unwrap();
-        println!("Topics: {:?}", topics);
+        // let topics = node.relay_topics().map_err(|e| {
+        //     debug!(
+        //         error = tracing::field::debug(&e),
+        //         "Failed to get relay topics"
+        //     );
+        //     DeliveryServiceError::WakuRelayTopicsError(e.to_string())
+        // })? ;
+        // println!("Topics: {:?}", topics);
 
-        node.relay_publish_message(&waku_message, Some(self.pubsub_topic.clone()), None)
+        node.relay_publish_message(&waku_message, Some(pubsub_topic()), None)
             .map_err(|e| {
                 debug!(
                     error = tracing::field::debug(&e),
@@ -295,11 +291,11 @@ impl WakuGroupClient {
                 );
                 DeliveryServiceError::WakuPublishMessageError(e)
             })
-            // .map(|id| {
-            //     self.seen_msg_ids.lock().unwrap().insert(id.clone());
-            //     trace!(id = id, "Sent message");
-            //     id
-            // })
+            .map(|id| {
+                self.seen_msg_ids.lock().unwrap().insert(id.clone());
+                trace!(id = id, "Sent message");
+                id
+            })
     }
 
     // pub fn stop(self, node: &WakuNodeHandle<Running>) -> Result<(), DeliveryServiceError> {

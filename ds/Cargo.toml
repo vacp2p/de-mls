@@ -7,7 +7,8 @@ edition = "2021"
 
 [dependencies]
 chrono = "=0.4.38"
-waku-bindings = "=0.6.0"
+waku-bindings = { git = "https://github.com/waku-org/waku-rust-bindings.git",  branch = "force-cluster-15",  subdir = "waku-bindings" }
+waku-sys = { git = "https://github.com/waku-org/waku-rust-bindings.git",  branch = "force-cluster-15",  subdir = "waku-sys" }
 bus = "=2.4.1"
 fred = { version = "=9.0.3", features = ["subscriber-client"] }
 tokio = { version = "=1.38.0", features = ["full"] }
@@ -39,3 +40,4 @@ lazy_static = "=1.4.0"
 
 sc_key_store = { path = "../sc_key_store" }
 url = "2.5.2"
+toml = "0.8.19"
