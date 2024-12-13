@@ -219,6 +219,12 @@ lazy_static! {
         build_content_topic(TEST_GROUP_NAME, GROUP_VERSION, COMMIT_MSG_SUBTOPIC);
 }
 
+#[derive(Debug, Clone)]
+pub struct MessageToSend {
+    pub msg: Vec<u8>,
+    pub subtopic: String,
+}
+
 impl WakuGroupClient {
     pub fn waku_relay_topics(
         &self,
@@ -229,14 +235,10 @@ impl WakuGroupClient {
     }
 
     pub fn new(
-        node: &WakuNodeHandle<Running>,
         group_id: String,
         sender: Sender<WakuMessage>,
     ) -> Result<Self, DeliveryServiceError> {
         let content_topics = build_content_topics(&group_id, GROUP_VERSION, &SUBTOPICS.clone());
-        // let content_filter = content_filter(&pubsub_topic(), content_topics.as_ref());
-        // node.relay_subscribe(&content_filter)
-        //     .map_err(|e| DeliveryServiceError::WakuRelayError(e.to_string()))?;
 
         let seen_msg_ids = Arc::new(SyncMutex::new(HashSet::new()));
         let content_topics = Arc::new(SyncMutex::new(content_topics));
@@ -261,12 +263,11 @@ impl WakuGroupClient {
     pub fn send_to_waku(
         &self,
         node: &WakuNodeHandle<Running>,
-        msg: Vec<u8>,
-        subtopic: &str,
+        msg: MessageToSend,
     ) -> Result<String, DeliveryServiceError> {
-        let content_topic = build_content_topic(&self.group_id, GROUP_VERSION, subtopic);
+        let content_topic = build_content_topic(&self.group_id, GROUP_VERSION, &msg.subtopic);
         let waku_message = WakuMessage::new(
-            msg,
+            msg.msg,
             content_topic,
             2,
             Utc::now().timestamp() as usize,

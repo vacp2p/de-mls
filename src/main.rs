@@ -25,7 +25,7 @@ use tokio::sync::broadcast;
 use log::{error, info};
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
-use waku_bindings::WakuMessage;
+use waku_bindings::{Running, WakuMessage, WakuNodeHandle};
 
 use de_mls::main_loop::{main_loop, Connection};
 use de_mls::{
@@ -36,6 +36,7 @@ use de_mls::{
 use ds::ds_waku::setup_node_handle;
 
 struct AppState {
+    node: Arc<WakuNodeHandle<Running>>,
     rooms: Mutex<Vec<String>>,
     // users: Mutex<HashMap<String, User>>,
 }
@@ -69,7 +70,10 @@ async fn main() {
         .unwrap();
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
+    let node_name = std::env::var("NODE_NAME").unwrap();
+
     let app_state = Arc::new(AppState {
+        node: Arc::new(setup_node_handle(vec![node_name]).unwrap()),
         rooms: Mutex::new(Vec::new()),
     });
 
@@ -109,7 +113,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             struct Connect {
                 eth_private_key: String,
                 group_id: String,
-                node: String,
+                should_create: bool,
             }
             info!("Got data: {:?}", &data);
             let connect: Connect = match serde_json::from_str(&data) {
@@ -128,15 +132,15 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             main_loop_connection = Some(Connection {
                 eth_private_key: connect.eth_private_key.clone(),
                 group_id: connect.group_id.clone(),
-                node: connect.node.clone(),
-                is_created: false,
+                should_create_group: connect.should_create,
             });
 
             {
-                let rooms = state.rooms.lock().unwrap();
-                if rooms.contains(&connect.group_id.clone()) {
-                    main_loop_connection.as_mut().unwrap().is_created = true;
+                let mut rooms = state.rooms.lock().unwrap();
+                if !rooms.contains(&connect.group_id.clone()) {
+                    rooms.push(connect.group_id.clone());
                 }
+                
             }
             info!("Prepare info for main loop: {:?}", main_loop_connection);
             break;
@@ -148,6 +152,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         info!("Running main loop");
         let res = main_loop(
             main_loop_connection.unwrap().clone(),
+            state.node.clone(),
             tx_ws.clone(),
             rx_waku,
         )

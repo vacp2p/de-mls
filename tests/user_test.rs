@@ -19,7 +19,7 @@ async fn test_waku_client_end() {
     let signer2 = PrivateKeySigner::from_str(user_priv_key2).unwrap();
     let user_address2 = signer2.address().to_string();
     let node = setup_node_handle(vec![node_name]).unwrap();
-    let mut user2 = User::new(user_priv_key2, node).await.unwrap();
+    let mut user2 = User::new(user_priv_key2).unwrap();
     let user2_arc = Arc::new(Mutex::new(user2));
 
     println!("Subscribing to group: {:?}", group_name.clone());
@@ -29,18 +29,8 @@ async fn test_waku_client_end() {
         .lock()
         .await
         .subscribe_to_group(group_name.clone())
-        .await
         .unwrap();
     println!("Successfully subscribe to group: {:?}", group_name.clone());
-
-    let topics = user2_arc
-        .as_ref()
-        .lock()
-        .await
-        .waku_node
-        .relay_topics()
-        .unwrap();
-    println!("Topics: {:?}", topics);
 
     let group_name_clone = group_name.clone();
     let user_recv_clone = user2_arc.clone();

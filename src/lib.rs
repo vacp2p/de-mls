@@ -154,7 +154,7 @@ pub enum UserError {
     #[error("Waku error: {0}")]
     WakuError(String),
     #[error("Message verification failed: {0}")]
-    MessageVerificationFailed(#[from] secp256k1::Error),
+    MessageVerificationFailed(String),
     #[error("Unknown message type: {0}")]
     UnknownMessageType(String),
 
@@ -162,6 +162,8 @@ pub enum UserError {
     DecryptionError(String),
     #[error("Failed to encrypt message: {0}")]
     EncryptionError(String),
+    #[error("Failed to verify signature: {0}")]
+    SignatureVerificationError(#[from] libsecp256k1::Error),
 
     #[error("An unknown error occurred: {0}")]
     UnknownError(anyhow::Error),

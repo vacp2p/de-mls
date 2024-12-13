@@ -7,6 +7,9 @@ foundry-contracts = { path = "crates/bindings" }
 name = "de-mls"
 version = "0.1.0"
 edition = "2021"
+[[bin]]
+name = "de-mls"
+path = "src/main.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -69,4 +72,5 @@ futures = "0.3.26"
 tower-http = {version = "0.4.0", features = ["cors"]}
 env_logger = "0.11.5"
 log = "0.4.22"
+libsecp256k1 = "0.7.1"
 
