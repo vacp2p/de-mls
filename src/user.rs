@@ -67,7 +67,7 @@ pub trait AdminTrait {
 
     fn decrypt_msg(&mut self, message: Vec<u8>) -> Result<KeyPackage, UserError>;
     // Process accumulated messages
-    async fn process_messages(&self) -> Result<(), UserError>;
+    // async fn process_messages(&self) -> impl std::future::Future<Output = Result<(), UserError>> + Send;
 
     async fn push_message(&self, message: Vec<u8>);
 }
@@ -116,29 +116,29 @@ impl AdminTrait for Admin {
         self.message_queue.as_ref().lock().await.push(message);
     }
 
-    async fn process_messages(&self) -> Result<(), UserError> {
-        if self.message_queue.as_ref().lock().await.is_empty() {
-            println!("No messages to process");
-            return Ok(());
-        }
-        let messages = self.message_queue.as_ref().lock().await.clone();
-        for message in messages {
-            let admin_msg: GroupAnnouncement = serde_json::from_slice(&message).unwrap();
+    // async fn process_messages(&self) -> Result<(), UserError> {
+    //     if self.message_queue.as_ref().lock().await.is_empty() {
+    //         println!("No messages to process");
+    //         return Ok(());
+    //     }
+    //     let messages = self.message_queue.as_ref().lock().await.clone();
+    //     for message in messages {
+    //         let admin_msg: GroupAnnouncement = serde_json::from_slice(&message).unwrap();
 
-            let digest = sha256::Hash::hash(&admin_msg.pub_key);
-            let original_msg = secpMessage::from_digest(digest.to_byte_array());
+    //         let digest = sha256::Hash::hash(&admin_msg.pub_key);
+    //         let original_msg = secpMessage::from_digest(digest.to_byte_array());
 
-            let sig = secpSignature::from_compact(admin_msg.signature.as_slice()).unwrap();
+    //         let sig = secpSignature::from_compact(admin_msg.signature.as_slice()).unwrap();
 
-            let pub_key = PublicKey::from_slice(&admin_msg.pub_key).unwrap();
-            let verified = sig.verify(&original_msg, &pub_key);
-            match verified {
-                Ok(_) => println!("Message verified"),
-                Err(e) => return Err(UserError::MessageVerificationFailed(e)),
-            }
-        }
-        Ok(())
-    }
+    //         let pub_key = PublicKey::from_slice(&admin_msg.pub_key).unwrap();
+    //         let verified = sig.verify(&original_msg, &pub_key);
+    //         match verified {
+    //             Ok(_) => println!("Message verified"),
+    //             Err(e) => return Err(UserError::MessageVerificationFailed(e)),
+    //         }
+    //     }
+    //     Ok(())
+    // }
 
     fn decrypt_msg(&mut self, message: Vec<u8>) -> Result<KeyPackage, UserError> {
         let msg: Vec<u8> = decrypt(&self.current_key_pair_private.secret_bytes(), &message)

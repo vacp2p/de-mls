@@ -12,6 +12,7 @@ pub mod contact;
 pub mod conversation;
 pub mod identity;
 pub mod user;
+pub mod main_loop;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {

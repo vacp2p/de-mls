@@ -40,7 +40,7 @@ waku-sys = { git = "https://github.com/waku-org/waku-rust-bindings.git",  branch
 
 rand = "=0.8.5"
 serde_json = "=1.0"
-serde = "=1.0.204"
+serde = { version = "=1.0.204", features = ["derive"] }
 url = "=2.5.2"
 tls_codec = "=0.3.0"
 hex = "=0.4.3"
@@ -64,4 +64,9 @@ p256 = "0.13.2"
 secp256k1 = {version = "0.30.0", features = ["rand", "std", "hashes", "global-context"]}
 sha256 = "1.5.0"
 ecies = "0.2.7"
+axum = { version = "0.6.10", features = ["ws"] }
+futures = "0.3.26"
+tower-http = {version = "0.4.0", features = ["cors"]}
+env_logger = "0.11.5"
+log = "0.4.22"
 
