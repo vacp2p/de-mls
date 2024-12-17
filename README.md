@@ -1,17 +1,22 @@
 # de-mls
+
 Decentralized MLS PoC using a smart contract for group coordination
 
-## Run Redis Server
+## Run User Instance 
 
-`docker-compose up`
+Create a `.env` file in the `.env` folder for each client containing the following variables:
 
-## Install deps
+```
+NAME=client1
+BACKEND_PORT=3000
+FRONTEND_PORT=4000
+NODE_NAME=<waku-node-ip>
+```
 
-1. `Foundry`
-2. `make deps`
+Run docker compose up for the user instance
 
-## Scaffold Environment
+```
+docker-compose --env-file ./.env/client1.env up --build
+```
 
-1. `make start`: This command will start the docker compose instance, and deploy the smart contract to the local network.
-
-2. `make stop`: This command will stop the docker compose instance.
+For each client, run the following command to start the frontend on the local host with the port specified in the `.env` file.

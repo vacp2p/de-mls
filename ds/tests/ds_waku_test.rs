@@ -8,7 +8,7 @@ async fn test_waku_client() {
     let group_name = "new_group".to_string();
     let msg = "test_message".as_bytes().to_vec();
 
-    let (sender_alice, receiver_alice) = channel::<WakuMessage>();
+    let (sender_alice, _) = channel::<WakuMessage>();
     let (sender_bob, receiver_bob) = channel::<WakuMessage>();
     let node = setup_node_handle(vec![
         "/ip4/143.110.189.47/tcp/60000/p2p/16Uiu2HAmGqxbqiaur7qqXqWyfDrhmKcnR2ZjCj6Whs17jsgZ66xJ"
@@ -16,7 +16,7 @@ async fn test_waku_client() {
     ])
     .unwrap();
     let waku_client_alice = WakuGroupClient::new(group_name.clone(), sender_alice).unwrap();
-    let waku_client_bob = WakuGroupClient::new(group_name.clone(), sender_bob).unwrap();
+    let _ = WakuGroupClient::new(group_name.clone(), sender_bob).unwrap();
 
     let topics = waku_client_alice.waku_relay_topics(&node);
     println!("topics: {:?}", topics);

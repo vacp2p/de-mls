@@ -17,7 +17,7 @@
         createNewRoom.set(create_new_room);
         goto("/chat");
     }
-    const select_room = (selected_room: String) => {
+    const select_room = (selected_room: string) => {
         room = selected_room;
     };
     const filled_in = () => {

@@ -9,7 +9,7 @@
     let status = "🔴";
     let statusTip = "Disconnected";
     let message = "";
-    let messages = [];
+    let messages: any[] = [];
     let socket: WebSocket;
     let interval: number;
     let delay = 2000;
@@ -81,7 +81,10 @@
     })
 
     const sendMessage = () => {
-        socket.send(message)
+        socket.send(JSON.stringify({
+            message: message,
+            group_id: $group,
+        }));
         message = "";
     };
     const clear_messages = () => {

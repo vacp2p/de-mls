@@ -7,18 +7,10 @@ edition = "2021"
 
 [dependencies]
 foundry-contracts.workspace = true
-openmls = { version = "=0.5.0", features = ["test-utils"] }
-openmls_basic_credential = "=0.2.0"
 
 thiserror = "=1.0.61"
 anyhow = "=1.0.81"
 
-tls_codec = "=0.3.0"
-hex = "0.4.3"
-url = "2.5.2"
-
-eyre = "=0.6"
-tokio = { version = "=1.38.0", features = ["macros", "rt-multi-thread"] }
 alloy = { git = "https://github.com/alloy-rs/alloy", features = [
     "providers",
     "node-bindings",
@@ -28,5 +20,3 @@ alloy = { git = "https://github.com/alloy-rs/alloy", features = [
     "transport-http",
     "k256",
 ] }
-
-mls_crypto = { path = "../mls_crypto" }

@@ -12,19 +12,9 @@ pub struct ConversationMessage {
     pub message: String,
 }
 
-impl ConversationMessage {
-    fn to_string(&self) -> String {
-        format!(
-            "Group: {:#?}\nAuthor: {:#?}\nMessage: {:#?}",
-            self.group, self.author, self.message
-        )
-    }
-}
-
-
 impl Display for ConversationMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(
+        write!(
             f,
             "Group: {:#?}\nAuthor: {:#?}\nMessage: {:#?}",
             self.group, self.author, self.message
@@ -45,7 +35,7 @@ impl Conversation {
         let start = if last_n > num_messages {
             0
         } else {
-            num_messages - last_n
+            num_messages.saturating_sub(last_n)
         };
         self.messages.get(start..num_messages)
     }

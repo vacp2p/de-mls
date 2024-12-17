@@ -2,26 +2,25 @@ use chrono::Utc;
 use core::result::Result;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use std::error::Error;
-use std::sync::{mpsc::Sender, Arc, Mutex as SyncMutex};
-use std::thread;
-use std::time::Duration;
-use std::{borrow::Cow, collections::HashSet, str::FromStr};
+use std::{
+    borrow::Cow,
+    collections::HashSet,
+    error::Error,
+    fmt::Display,
+    str::FromStr,
+    sync::{mpsc::Sender, Arc, Mutex as SyncMutex},
+    thread,
+    time::Duration,
+};
 use toml;
-use tracing::{debug, error, trace};
+use log::{debug, error, trace};
 use waku_bindings::*;
 
 use crate::DeliveryServiceError;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Default)]
 pub struct WakuConfig {
     pub nodes: Vec<String>,
-}
-
-impl Default for WakuConfig {
-    fn default() -> Self {
-        Self { nodes: vec![] }
-    }
 }
 
 impl WakuConfig {
@@ -95,7 +94,7 @@ pub fn handle_signal(
     signal: Signal,
     seen_msg_ids: &Arc<SyncMutex<HashSet<String>>>,
     content_topics: &Arc<SyncMutex<Vec<WakuContentTopic>>>,
-) -> Result<WakuMessage, DeliveryServiceError> {
+) -> Result<Option<WakuMessage>, DeliveryServiceError> {
     // Do not accept messages that were already received or sent by self
     match signal.event() {
         waku_bindings::Event::WakuMessage(event) => {
@@ -104,10 +103,7 @@ pub fn handle_signal(
             let mut ids = seen_msg_ids.lock().unwrap();
             // Check if message has been received before or sent from this user
             if ids.contains(msg_id) {
-                return Err(DeliveryServiceError::WakuAlreadyReceived(format!(
-                    "Skip repeated message: {:#?}",
-                    msg_id
-                )));
+                return Ok(None);
             };
             ids.insert(msg_id.to_string());
             let content_topic = event.waku_message().content_topic();
@@ -119,7 +115,7 @@ pub fn handle_signal(
                     content_topic
                 )));
             };
-            Ok(event.waku_message().clone())
+            Ok(Some(event.waku_message().clone()))
         }
 
         waku_bindings::Event::Unrecognized(data) => Err(DeliveryServiceError::WakuInvalidMessage(
@@ -149,20 +145,19 @@ pub fn register_handler(
     let handle_async = move |signal: Signal| {
         let msg = handle_signal(signal, &seen_msg_ids, &content_topics);
         // if err is Waku is already received, skip
-        if let Err(e) = msg {
-            if e.to_string().contains("WakuAlreadyReceived") {
-                return;
-            }
-        } else {
-            if let Ok(m) = msg {
-            match sender.send(m) {
+        match msg {
+            Ok(Some(m)) => match sender.send(m) {
                 Ok(_) => trace!("Sent received message"),
-                Err(e) => error!("Could not send message: {:#?}", e),
-            }
+                Err(e) => {
+                    error!("Could not send message: {:#?}", e);
+                }
+            },
+            Ok(None) => (),
+            Err(e) => {
+                error!("Could not handle message: {:#?}", e);
             }
         }
     };
-
     waku_set_event_callback(handle_async);
     Ok(())
 }
@@ -191,14 +186,14 @@ pub enum MsgType {
     RemoveFromGroup,
 }
 
-impl MsgType {
-    pub fn to_string(&self) -> String {
+impl Display for MsgType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MsgType::Text => "text".to_string(),
-            MsgType::MlsText => "mls_text".to_string(),
-            MsgType::UpdateGroup => "update_group".to_string(),
-            MsgType::InviteToGroup => "invite_to_group".to_string(),
-            MsgType::RemoveFromGroup => "remove_from_group".to_string(),
+            MsgType::Text => write!(f, "text"),
+            MsgType::MlsText => write!(f, "mls_text"),
+            MsgType::UpdateGroup => write!(f, "update_group"),
+            MsgType::InviteToGroup => write!(f, "invite_to_group"),
+            MsgType::RemoveFromGroup => write!(f, "remove_from_group"),
         }
     }
 }
@@ -219,7 +214,7 @@ lazy_static! {
         build_content_topic(TEST_GROUP_NAME, GROUP_VERSION, COMMIT_MSG_SUBTOPIC);
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MessageToSend {
     pub msg: Vec<u8>,
     pub subtopic: String,
@@ -252,51 +247,45 @@ impl WakuGroupClient {
         })
     }
 
-    pub async fn remove_group(
-        &mut self,
-        node: &WakuNodeHandle<Running>,
-        group_id: String,
-    ) -> Result<(), DeliveryServiceError> {
-        Ok(())
-    }
+    // pub async fn remove_group(
+    //     &mut self,
+    //     node: &WakuNodeHandle<Running>,
+    //     group_id: String,
+    // ) -> Result<(), DeliveryServiceError> {
+    //     Ok(())
+    // }
 
     pub fn send_to_waku(
         &self,
         node: &WakuNodeHandle<Running>,
         msg: MessageToSend,
     ) -> Result<String, DeliveryServiceError> {
+        let waku_message = self.build_waku_message(msg)?;
+        node.relay_publish_message(&waku_message, Some(pubsub_topic()), None)
+            .map_err(|e| {
+                debug!("Failed to relay publish the message: {:?}", e);
+                DeliveryServiceError::WakuPublishMessageError(e)
+            })
+            .map(|id| {
+                self.seen_msg_ids.lock().unwrap().insert(id.clone());
+                trace!("Sent message: {:?}", id);
+                id
+            })
+    }
+
+    pub fn build_waku_message(
+        &self,
+        msg: MessageToSend,
+    ) -> Result<WakuMessage, DeliveryServiceError> {
         let content_topic = build_content_topic(&self.group_id, GROUP_VERSION, &msg.subtopic);
-        let waku_message = WakuMessage::new(
+        Ok(WakuMessage::new(
             msg.msg,
             content_topic,
             2,
             Utc::now().timestamp() as usize,
             vec![],
             true,
-        );
-
-        // let topics = node.relay_topics().map_err(|e| {
-        //     debug!(
-        //         error = tracing::field::debug(&e),
-        //         "Failed to get relay topics"
-        //     );
-        //     DeliveryServiceError::WakuRelayTopicsError(e.to_string())
-        // })? ;
-        // println!("Topics: {:?}", topics);
-
-        node.relay_publish_message(&waku_message, Some(pubsub_topic()), None)
-            .map_err(|e| {
-                debug!(
-                    error = tracing::field::debug(&e),
-                    "Failed to relay publish the message"
-                );
-                DeliveryServiceError::WakuPublishMessageError(e)
-            })
-            .map(|id| {
-                self.seen_msg_ids.lock().unwrap().insert(id.clone());
-                trace!(id = id, "Sent message");
-                id
-            })
+        ))
     }
 
     // pub fn stop(self, node: &WakuNodeHandle<Running>) -> Result<(), DeliveryServiceError> {

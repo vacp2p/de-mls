@@ -6,38 +6,25 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-chrono = "=0.4.38"
 waku-bindings = { git = "https://github.com/waku-org/waku-rust-bindings.git",  branch = "force-cluster-15",  subdir = "waku-bindings" }
 waku-sys = { git = "https://github.com/waku-org/waku-rust-bindings.git",  branch = "force-cluster-15",  subdir = "waku-sys" }
-bus = "=2.4.1"
-fred = { version = "=9.0.3", features = ["subscriber-client"] }
+
 tokio = { version = "=1.38.0", features = ["full"] }
-tokio-tungstenite = "0.15"
-tungstenite = "0.14"
-futures-util = "0.3"
-tokio-stream = "0.1"
-alloy = { git = "https://github.com/alloy-rs/alloy", features = [
-    "providers",
-    "node-bindings",
-    "network",
-    "transports",
-    "k256",
-    "rlp",
-] }
-tokio-util = "=0.7.11"
 
 openmls = { version = "=0.5.0", features = ["test-utils"] }
-rand = { version = "^0.8" }
+
+chrono = "=0.4.38"
+lazy_static = "=1.4.0"
 
 anyhow = "=1.0.81"
 thiserror = "=1.0.61"
 
-tls_codec = "=0.3.0"
 serde_json = "=1.0"
 serde = "=1.0.204"
-tracing = "=0.1"
-lazy_static = "=1.4.0"
+toml = "0.8.19"
+
+env_logger = "0.11.5"
+log = "0.4.22"
 
 sc_key_store = { path = "../sc_key_store" }
-url = "2.5.2"
-toml = "0.8.19"
+
