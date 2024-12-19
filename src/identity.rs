@@ -73,7 +73,7 @@ impl Identity {
     }
 
     pub fn identity_string(&self) -> String {
-        Address::from_slice(self.credential_with_key.credential.identity()).to_string()
+        address_string(self.credential_with_key.credential.identity())
     }
 
     pub fn signature_pub_key(&self) -> Vec<u8> {
@@ -89,4 +89,8 @@ impl Display for Identity {
             Address::from_slice(self.credential_with_key.credential.identity())
         )
     }
+}
+
+pub fn address_string(identity: &[u8]) -> String {
+    Address::from_slice(identity).to_string()
 }

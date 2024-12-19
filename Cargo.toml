@@ -36,6 +36,7 @@ alloy = { git = "https://github.com/alloy-rs/alloy", features = [
     "transports",
     "k256",
 ] }
+kameo = "0.13.0"
 
 waku-bindings = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "force-cluster-15", subdir = "waku-bindings" }
 waku-sys = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "force-cluster-15", subdir = "waku-sys" }
@@ -64,3 +65,4 @@ log = "0.4.22"
 ds = { path = "ds" }
 sc_key_store = { path = "sc_key_store" }
 mls_crypto = { path = "mls_crypto" }
+uuid = "1.11.0"

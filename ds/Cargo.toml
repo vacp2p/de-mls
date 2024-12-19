@@ -6,10 +6,11 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-waku-bindings = { git = "https://github.com/waku-org/waku-rust-bindings.git",  branch = "force-cluster-15",  subdir = "waku-bindings" }
-waku-sys = { git = "https://github.com/waku-org/waku-rust-bindings.git",  branch = "force-cluster-15",  subdir = "waku-sys" }
+waku-bindings = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "force-cluster-15", subdir = "waku-bindings" }
+waku-sys = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "force-cluster-15", subdir = "waku-sys" }
 
 tokio = { version = "=1.38.0", features = ["full"] }
+kameo = "0.13.0"
 
 openmls = { version = "=0.5.0", features = ["test-utils"] }
 
@@ -27,4 +28,4 @@ env_logger = "0.11.5"
 log = "0.4.22"
 
 sc_key_store = { path = "../sc_key_store" }
-
+uuid = { version = "1.11.0", features = ["v4", "fast-rng", "macro-diagnostics"] }
