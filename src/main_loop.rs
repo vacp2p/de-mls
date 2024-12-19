@@ -1,28 +1,11 @@
 use alloy::signers::local::PrivateKeySigner;
-use kameo::actor::{pubsub::PubSub, ActorRef};
+use kameo::actor::ActorRef;
 use log::{error, info};
-use openmls::prelude::AppAckProposal;
-use std::{
-    str::FromStr,
-    sync::{
-        mpsc::{channel, Receiver, Sender},
-        Arc,
-    },
-    time::Duration,
-};
-use tokio::sync::Mutex;
-use waku_bindings::{Running, WakuMessage, WakuNodeHandle};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
-use crate::user::{ProcessLeaveGroup, ProcessSendMessage, User, UserAction};
-use crate::{
-    group_actor::*,
-    user::{ProcessAdminMessage, ProcessCreateGroup},
-    AppState,
-};
-use ds::{
-    ds_waku::register_handler,
-    waku_actor::{self, *},
-};
+use crate::user::{ProcessAdminMessage, ProcessCreateGroup, User};
+use crate::AppState;
+use ds::waku_actor::ProcessSubscribeToGroup;
 
 #[derive(Debug, Clone)]
 pub struct Connection {
@@ -54,11 +37,17 @@ pub async fn main_loop(
             is_creation: connection.should_create_group,
         })
         .await?;
-    let mut content_topics = app_state.waku_actor.ask(ProcessSubscribeToGroup {
-        group_name: group_name.clone(),
-    })
-    .await?;
-    app_state.content_topics.lock().unwrap().append(&mut content_topics);
+    let mut content_topics = app_state
+        .waku_actor
+        .ask(ProcessSubscribeToGroup {
+            group_name: group_name.clone(),
+        })
+        .await?;
+    app_state
+        .content_topics
+        .lock()
+        .unwrap()
+        .append(&mut content_topics);
 
     if connection.should_create_group {
         info!(
@@ -72,26 +61,19 @@ pub async fn main_loop(
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             loop {
                 interval.tick().await;
-                let res = user_clone
-                    .ask(ProcessAdminMessage {
-                        group_name: group_name_clone.clone(),
-                    })
-                    .await;
-                match res {
-                    Ok(msg) => {
-                        let res = node_clone.ask(msg).await;
-                        match res {
-                            Ok(id) => {
-                                info!("Successfully publish admin message with id: {:?}", id);
-                            }
-                            Err(e) => {
-                                error!("Error sending admin message to waku: {}", e);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("Error preparing admin message to waku: {}", e);
-                    }
+                let res = async {
+                    let msg = user_clone
+                        .ask(ProcessAdminMessage {
+                            group_name: group_name_clone.clone(),
+                        })
+                        .await?;
+                    let id = node_clone.ask(msg).await?;
+                    info!("Successfully publish admin message with id: {:?}", id);
+                    Ok::<(), Box<dyn std::error::Error>>(())
+                }
+                .await;
+                if let Err(e) = res {
+                    error!("Error sending admin message to waku: {}", e);
                 }
             }
         });

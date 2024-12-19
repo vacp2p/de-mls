@@ -1,6 +1,5 @@
 use alloy::{network::EthereumWallet, signers::local::PrivateKeySigner};
 use kameo::{
-    actor::ActorRef,
     message::{Context, Message},
     Actor,
 };
@@ -15,14 +14,13 @@ use waku_bindings::WakuMessage;
 
 use ds::{
     ds_waku::{APP_MSG_SUBTOPIC, COMMIT_MSG_SUBTOPIC, WELCOME_SUBTOPIC},
-    waku_actor::{
-        ProcessMessageToSend, ProcessSubscribeToGroup, ProcessUnsubscribeFromGroup, WakuActor,
-    },
+    waku_actor::ProcessMessageToSend,
 };
 use mls_crypto::openmls_provider::*;
 
 use crate::{
-    group_actor::{Group, GroupAction}, AppMessage, GroupAnnouncement, MessageToPrint, WelcomeMessage, WelcomeMessageType
+    group_actor::{Group, GroupAction},
+    AppMessage, GroupAnnouncement, MessageToPrint, WelcomeMessage, WelcomeMessageType,
 };
 use crate::{identity::Identity, UserError};
 
@@ -48,7 +46,7 @@ impl Message<WakuMessage> for User {
     async fn handle(
         &mut self,
         msg: WakuMessage,
-        ctx: Context<'_, Self, Self::Reply>,
+        _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
         let actions = self.process_waku_msg(msg).await?;
         Ok(actions)
@@ -66,7 +64,7 @@ impl Message<ProcessCreateGroup> for User {
     async fn handle(
         &mut self,
         msg: ProcessCreateGroup,
-        ctx: Context<'_, Self, Self::Reply>,
+        _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
         self.create_group(msg.group_name.clone(), msg.is_creation)
             .await?;
@@ -84,7 +82,7 @@ impl Message<ProcessAdminMessage> for User {
     async fn handle(
         &mut self,
         msg: ProcessAdminMessage,
-        ctx: Context<'_, Self, Self::Reply>,
+        _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
         self.prepare_admin_msg(msg.group_name.clone()).await
     }
@@ -100,7 +98,7 @@ impl Message<ProcessLeaveGroup> for User {
     async fn handle(
         &mut self,
         msg: ProcessLeaveGroup,
-        ctx: Context<'_, Self, Self::Reply>,
+        _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
         self.leave_group(msg.group_name.clone()).await
     }
@@ -117,7 +115,7 @@ impl Message<ProcessSendMessage> for User {
     async fn handle(
         &mut self,
         msg: ProcessSendMessage,
-        ctx: Context<'_, Self, Self::Reply>,
+        _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
         self.prepare_msg_to_send(&msg.msg, msg.group_name.clone())
             .await
@@ -161,11 +159,6 @@ impl User {
         } else {
             Group::new(group_name.clone(), false, None, None, None)?
         };
-
-        // Create a channel to send and receive messages to the group
-        // let (sender, receiver) = channel::<WakuMessage>();
-        // let waku_client = WakuGroupClient::new(group_name.clone(), sender)?;
-        // self.waku_clients.insert(group_name.clone(), waku_client);
 
         self.groups.insert(group_name.clone(), group);
         Ok(())

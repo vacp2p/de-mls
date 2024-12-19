@@ -1,17 +1,25 @@
 use alloy::signers::local::LocalSignerError;
 use ecies::{decrypt, encrypt};
-use kameo::{actor::{pubsub::PubSub, ActorRef}, error::SendError};
+use kameo::{actor::ActorRef, error::SendError};
 use libsecp256k1::{sign, verify, Message, PublicKey, SecretKey, Signature as libSignature};
 use openmls::{error::LibraryError, prelude::*};
 use openmls_rust_crypto::MemoryKeyStoreError;
 use rand::thread_rng;
 use secp256k1::hashes::{sha256, Hash};
 use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashSet,
+    fmt::Display,
+    str::Utf8Error,
+    string::FromUtf8Error,
+    sync::{Arc, Mutex},
+};
 use waku_bindings::{WakuContentTopic, WakuMessage};
-use std::{collections::HashSet, fmt::Display, str::Utf8Error, string::FromUtf8Error, sync::{Arc, Mutex}};
 
 use ds::{
-    waku_actor::{ProcessMessageToSend, ProcessSubscribeToGroup, ProcessUnsubscribeFromGroup, WakuActor},
+    waku_actor::{
+        ProcessMessageToSend, ProcessSubscribeToGroup, ProcessUnsubscribeFromGroup, WakuActor,
+    },
     DeliveryServiceError,
 };
 use sc_key_store::KeyStoreError;

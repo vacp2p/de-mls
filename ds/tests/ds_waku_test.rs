@@ -5,15 +5,16 @@ use kameo::{
 };
 use log::error;
 use std::{
-    collections::HashSet, sync::{Arc, Mutex}, time::Duration
+    sync::{Arc, Mutex},
+    time::Duration,
 };
 use tokio::sync::mpsc::channel;
 use waku_bindings::WakuMessage;
 
 use ds::{
     ds_waku::{
-        build_content_topics, match_content_topic, register_handler, setup_node_handle,
-        APP_MSG_SUBTOPIC, GROUP_VERSION, SUBTOPICS,
+        build_content_topics, match_content_topic, setup_node_handle, APP_MSG_SUBTOPIC,
+        GROUP_VERSION, SUBTOPICS,
     },
     waku_actor::{ProcessMessageToSend, ProcessSubscribeToGroup, WakuActor},
     DeliveryServiceError,
@@ -58,7 +59,6 @@ async fn test_waku_client() {
     .unwrap();
     let uuid = uuid::Uuid::new_v4().as_bytes().to_vec();
     let waku_actor = WakuActor::new(Arc::new(node), uuid);
-    let app_id = waku_actor.app_id();
     let actor_ref = kameo::spawn(waku_actor);
 
     let actor_a = ActorA::new();
@@ -82,10 +82,6 @@ async fn test_waku_client() {
     waku_set_event_callback(move |signal| {
         match signal.event() {
             waku_bindings::Event::WakuMessage(event) => {
-                let msg_app_id = event.waku_message().meta();
-                // if msg_app_id == app_id {
-                //     return Ok(None);
-                // };
                 let content_topic = event.waku_message().content_topic();
                 // Check if message belongs to a relevant topic
                 if !match_content_topic(&content_topics, content_topic) {
@@ -109,7 +105,7 @@ async fn test_waku_client() {
     });
 
     let handle2 = tokio::spawn(async move {
-        for i in 0..10 {
+        for _ in 0..10 {
             let res = actor_ref
                 .ask(ProcessMessageToSend {
                     msg: format!("test_message").as_bytes().to_vec(),
@@ -139,6 +135,4 @@ async fn test_waku_client() {
             println!("3msg received: {:?}", w);
         }
     }
-
-    tokio::time::sleep(Duration::from_secs(10)).await;
 }

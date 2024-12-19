@@ -1,6 +1,5 @@
 use core::result::Result;
 use lazy_static::lazy_static;
-use log::{error, trace};
 use std::{
     borrow::Cow,
     error::Error,
@@ -9,10 +8,7 @@ use std::{
     thread,
     time::Duration,
 };
-use tokio::sync::mpsc::Sender;
 use waku_bindings::*;
-
-use crate::DeliveryServiceError;
 
 pub const TEST_GROUP_NAME: &str = "new_group";
 pub const GROUP_VERSION: &str = "1";
@@ -86,41 +82,6 @@ pub fn setup_node_handle(nodes: Vec<String>) -> Result<WakuNodeHandle<Running>, 
     Ok(node_handle)
 }
 
-/// Parse and validate incoming message
-pub fn handle_signal(
-    signal: Signal,
-    content_topics: &Arc<SyncMutex<Vec<WakuContentTopic>>>,
-    app_id: Vec<u8>,
-) -> Result<Option<WakuMessage>, DeliveryServiceError> {
-    // Do not accept messages that were already received or sent by self
-    match signal.event() {
-        waku_bindings::Event::WakuMessage(event) => {
-            let msg_app_id = event.waku_message().meta();
-            // if msg_app_id == app_id {
-            //     return Ok(None);
-            // };
-            let content_topic = event.waku_message().content_topic();
-            // Check if message belongs to a relevant topic
-            if !match_content_topic(content_topics, content_topic) {
-                println!("Content topic not match: {:?}", content_topic);
-                return Err(DeliveryServiceError::WakuInvalidContentTopic(format!(
-                    "Skip irrelevant content topic: {:#?}",
-                    content_topic
-                )));
-            };
-            Ok(Some(event.waku_message().clone()))
-        }
-
-        waku_bindings::Event::Unrecognized(data) => Err(DeliveryServiceError::WakuInvalidMessage(
-            format!("Unrecognized event!\n {data:?}"),
-        )),
-        _ => Err(DeliveryServiceError::WakuInvalidMessage(format!(
-            "Unrecognized signal!\n {:?}",
-            serde_json::to_string(&signal)
-        ))),
-    }
-}
-
 /// Check if a content topic exists in a list of topics or if the list is empty
 pub fn match_content_topic(
     content_topics: &Arc<SyncMutex<Vec<WakuContentTopic>>>,
@@ -128,28 +89,4 @@ pub fn match_content_topic(
 ) -> bool {
     let locked_topics = content_topics.lock().unwrap();
     locked_topics.is_empty() || locked_topics.iter().any(|t| t == topic)
-}
-
-pub fn register_handler(
-    sender: Sender<WakuMessage>,
-    app_id: Vec<u8>,
-    content_topics: Arc<SyncMutex<Vec<WakuContentTopic>>>,
-) -> Result<(), DeliveryServiceError> {
-    let handle_async = move |signal: Signal| {
-        let msg = handle_signal(signal, &content_topics, app_id.clone());
-        match msg {
-            Ok(Some(m)) => match sender.blocking_send(m) {
-                Ok(_) => trace!("Sent received message"),
-                Err(e) => {
-                    error!("Could not send message: {:#?}", e);
-                }
-            },
-            Ok(None) => (),
-            Err(e) => {
-                error!("Could not handle message: {:#?}", e);
-            }
-        };
-    };
-    waku_set_event_callback(handle_async);
-    Ok(())
 }

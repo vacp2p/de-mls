@@ -1,9 +1,6 @@
-use std::fmt::Display;
-
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use futures::{stream::SplitSink, SinkExt};
 use kameo::{
-    actor::ActorRef,
     message::{Context, Message},
     Actor,
 };
@@ -54,7 +51,7 @@ impl Message<RawWsMessage> for WsActor {
     async fn handle(
         &mut self,
         msg: RawWsMessage,
-        ctx: Context<'_, Self, Self::Reply>,
+        _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
         if !self.is_initialized {
             let connect_message = serde_json::from_str(&msg.message)?;
@@ -70,24 +67,13 @@ impl Message<RawWsMessage> for WsActor {
     }
 }
 
-// pub struct WsChatMessage {
-//     pub message: String,
-//     pub sender: String,
-// }
-
-// impl Display for WsChatMessage {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         write!(f, "{}: {}", self.sender, self.message)
-//     }
-// }
-
 impl Message<MessageToPrint> for WsActor {
     type Reply = Result<(), WsError>;
 
     async fn handle(
         &mut self,
         msg: MessageToPrint,
-        ctx: Context<'_, Self, Self::Reply>,
+        _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
         self.ws_sender
             .send(WsMessage::Text(msg.to_string()))
@@ -102,7 +88,6 @@ pub enum WsError {
     InvalidMessage,
     #[error("Malformed json")]
     MalformedJson(#[from] serde_json::Error),
-
     #[error("Failed to send message")]
     SendMessageError(#[from] axum::Error),
 }

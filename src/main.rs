@@ -6,10 +6,9 @@ use axum::{
     routing::get,
     Router,
 };
-use futures::{SinkExt, StreamExt};
-use kameo::{actor::pubsub::PubSub, actor::ActorRef, error::SendError};
+use futures::StreamExt;
+use kameo::actor::ActorRef;
 use log::{error, info};
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     collections::HashSet,
@@ -18,22 +17,17 @@ use std::{
 };
 use tokio::sync::mpsc::{channel, Sender};
 use tower_http::cors::{Any, CorsLayer};
-use waku_bindings::{
-    waku_set_event_callback, Running, WakuContentTopic, WakuMessage, WakuNodeHandle,
-};
+use waku_bindings::{waku_set_event_callback, WakuMessage};
 
 use de_mls::{
     main_loop::{main_loop, Connection},
     user::{ProcessSendMessage, User, UserAction},
-    ws_actor::{ConnectMessage, RawWsMessage, WsAction, WsActor},
+    ws_actor::{RawWsMessage, WsAction, WsActor},
     AppState, MessageToPrint,
 };
 use ds::{
-    ds_waku::{
-        build_content_topics, content_filter, match_content_topic, pubsub_topic, setup_node_handle,
-        GROUP_VERSION, SUBTOPICS,
-    },
-    waku_actor::{ProcessMessageToSend, WakuActor},
+    ds_waku::{match_content_topic, setup_node_handle},
+    waku_actor::WakuActor,
 };
 
 #[tokio::main]
@@ -51,7 +45,7 @@ async fn main() {
     let waku_actor = kameo::actor::spawn(WakuActor::new(Arc::new(node), uuid.clone()));
     let (tx, _) = tokio::sync::broadcast::channel(100);
     let app_state = Arc::new(AppState {
-        waku_actor: waku_actor,
+        waku_actor,
         rooms: Mutex::new(HashSet::new()),
         app_id: uuid.clone(),
         content_topics: Arc::new(Mutex::new(Vec::new())),
@@ -82,13 +76,11 @@ async fn main() {
     println!("Hosted on {:?}", addr);
     let res = axum::Server::bind(&addr).serve(app.into_make_service());
     tokio::select! {
-        x = res => {
-            if let Err(e) = x {
-                error!("Error hosting server: {}", e);
-            }
+        Err(x) = res => {
+            error!("Error hosting server: {}", x);
         }
-        w = recv_messages => {
-            info!("recv_messages finished");
+        Err(w) = recv_messages => {
+            error!("Error receiving messages from waku: {}", w);
         }
     }
 }
@@ -104,7 +96,7 @@ async fn handle_waku(waku_sender: Sender<WakuMessage>, state: Arc<AppState>) {
         match signal.event() {
             waku_bindings::Event::WakuMessage(event) => {
                 let msg_id = event.message_id();
-                if seen_messages.contains(&msg_id) {
+                if seen_messages.contains(msg_id) {
                     return;
                 }
                 seen_messages.push(msg_id.clone());
@@ -213,11 +205,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
 
     info!("Waiting for main loop to finish");
     tokio::select! {
-        x = (&mut recv_messages) => {
-            // info!("recv_messages finished");
+        _ = (&mut recv_messages) => {
+            info!("recv_messages finished");
+            send_messages.abort();
         }
-        w = (&mut send_messages) => {
-            // info!("send_messages finished");
+        _ = (&mut send_messages) => {
+            info!("send_messages finished");
+            recv_messages.abort();
         }
     };
     info!("Main loop finished");

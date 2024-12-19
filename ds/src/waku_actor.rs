@@ -6,8 +6,7 @@ use kameo::{
 };
 use log::debug;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc::Receiver;
+use std::sync::Arc;
 use waku_bindings::{Running, WakuContentTopic, WakuMessage, WakuNodeHandle};
 
 use crate::ds_waku::{pubsub_topic, GROUP_VERSION, SUBTOPICS};
@@ -24,10 +23,7 @@ pub struct WakuActor {
 
 impl WakuActor {
     pub fn new(node: Arc<WakuNodeHandle<Running>>, app_id: Vec<u8>) -> Self {
-        Self {
-            node,
-            app_id,
-        }
+        Self { node, app_id }
     }
 
     pub fn app_id(&self) -> Vec<u8> {
@@ -62,21 +58,6 @@ impl Message<ProcessMessageToSend> for WakuActor {
         Ok(msg_id)
     }
 }
-
-// pub struct ReceiveMessage {
-// }
-
-// impl Message<ReceiveMessage> for WakuActor {
-//     type Reply = Result<WakuMessage, DeliveryServiceError>;
-
-//     async fn handle(
-//         &mut self,
-//         msg: ReceiveMessage,
-//         _ctx: Context<'_, Self, Self::Reply>,
-//     ) -> Self::Reply {
-        
-//     }
-// }
 
 pub struct ProcessSubscribeToGroup {
     pub group_name: String,
