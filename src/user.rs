@@ -22,15 +22,14 @@ use ds::{
 use mls_crypto::openmls_provider::*;
 
 use crate::{
-    group_actor::{Group, GroupAction},
-    AppMessage, GroupAnnouncement, WelcomeMessage, WelcomeMessageType,
+    group_actor::{Group, GroupAction}, AppMessage, GroupAnnouncement, MessageToPrint, WelcomeMessage, WelcomeMessageType
 };
 use crate::{identity::Identity, UserError};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum UserAction {
     SendToWaku(ProcessMessageToSend),
-    SendToGroup(String),
+    SendToGroup(MessageToPrint),
     RemoveGroup(String),
     DoNothing,
 }
@@ -415,7 +414,7 @@ impl User {
             .await?;
 
         match res {
-            GroupAction::MessageToPrint(msg) => Ok(UserAction::SendToGroup(msg.to_string())),
+            GroupAction::MessageToPrint(msg) => Ok(UserAction::SendToGroup(msg)),
             GroupAction::RemoveGroup => Ok(UserAction::RemoveGroup(group_name)),
             GroupAction::DoNothing => Ok(UserAction::DoNothing),
         }

@@ -9,16 +9,26 @@ use kameo::{
 };
 use serde::Deserialize;
 
+use crate::MessageToPrint;
+
 #[derive(Debug, Actor)]
 pub struct WsActor {
     pub ws_sender: SplitSink<WebSocket, WsMessage>,
     pub is_initialized: bool,
 }
 
+impl WsActor {
+    pub fn new(ws_sender: SplitSink<WebSocket, WsMessage>) -> Self {
+        Self {
+            ws_sender,
+            is_initialized: false,
+        }
+    }
+}
+
 pub enum WsAction {
     Connect(ConnectMessage),
     UserMessage(UserMessage),
-    DoNothing,
 }
 
 #[derive(Deserialize, Debug)]
@@ -60,22 +70,28 @@ impl Message<RawWsMessage> for WsActor {
     }
 }
 
-pub struct WsChatMessage {
-    pub message: String,
-    pub sender: String,
-}
+// pub struct WsChatMessage {
+//     pub message: String,
+//     pub sender: String,
+// }
 
-impl Display for WsChatMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.sender, self.message)
-    }
-}
+// impl Display for WsChatMessage {
+//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//         write!(f, "{}: {}", self.sender, self.message)
+//     }
+// }
 
-impl Message<WsChatMessage> for WsActor {
+impl Message<MessageToPrint> for WsActor {
     type Reply = Result<(), WsError>;
 
-    async fn handle(&mut self, msg: WsChatMessage, ctx: Context<'_, Self, Self::Reply>) -> Self::Reply {
-        self.ws_sender.send(WsMessage::Text(msg.to_string())).await?;
+    async fn handle(
+        &mut self,
+        msg: MessageToPrint,
+        ctx: Context<'_, Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.ws_sender
+            .send(WsMessage::Text(msg.to_string()))
+            .await?;
         Ok(())
     }
 }

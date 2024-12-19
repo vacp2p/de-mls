@@ -1,6 +1,7 @@
 use alloy::signers::local::PrivateKeySigner;
 use kameo::actor::{pubsub::PubSub, ActorRef};
 use log::{error, info};
+use openmls::prelude::AppAckProposal;
 use std::{
     str::FromStr,
     sync::{
@@ -16,6 +17,7 @@ use crate::user::{ProcessLeaveGroup, ProcessSendMessage, User, UserAction};
 use crate::{
     group_actor::*,
     user::{ProcessAdminMessage, ProcessCreateGroup},
+    AppState,
 };
 use ds::{
     ds_waku::register_handler,
@@ -31,7 +33,7 @@ pub struct Connection {
 
 pub async fn main_loop(
     connection: Connection,
-    node: ActorRef<WakuActor>,
+    app_state: Arc<AppState>,
     // tx_waku: Sender<String>,
     // rx_ws: Receiver<String>,
 ) -> Result<ActorRef<User>, Box<dyn std::error::Error>> {
@@ -52,10 +54,11 @@ pub async fn main_loop(
             is_creation: connection.should_create_group,
         })
         .await?;
-    node.ask(ProcessSubscribeToGroup {
+    let mut content_topics = app_state.waku_actor.ask(ProcessSubscribeToGroup {
         group_name: group_name.clone(),
     })
     .await?;
+    app_state.content_topics.lock().unwrap().append(&mut content_topics);
 
     if connection.should_create_group {
         info!(
@@ -64,7 +67,7 @@ pub async fn main_loop(
         );
         let user_clone = user_ref.clone();
         let group_name_clone = group_name.clone();
-        let node_clone = node.clone();
+        let node_clone = app_state.waku_actor.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             loop {

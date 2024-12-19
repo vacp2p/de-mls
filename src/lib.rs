@@ -1,15 +1,19 @@
 use alloy::signers::local::LocalSignerError;
 use ecies::{decrypt, encrypt};
+use kameo::{actor::{pubsub::PubSub, ActorRef}, error::SendError};
 use libsecp256k1::{sign, verify, Message, PublicKey, SecretKey, Signature as libSignature};
 use openmls::{error::LibraryError, prelude::*};
 use openmls_rust_crypto::MemoryKeyStoreError;
 use rand::thread_rng;
 use secp256k1::hashes::{sha256, Hash};
 use serde::{Deserialize, Serialize};
-use std::{fmt::Display, str::Utf8Error, string::FromUtf8Error};
-use kameo::error::SendError;
+use waku_bindings::{WakuContentTopic, WakuMessage};
+use std::{collections::HashSet, fmt::Display, str::Utf8Error, string::FromUtf8Error, sync::{Arc, Mutex}};
 
-use ds::{waku_actor::{ProcessMessageToSend, ProcessSubscribeToGroup, ProcessUnsubscribeFromGroup}, DeliveryServiceError};
+use ds::{
+    waku_actor::{ProcessMessageToSend, ProcessSubscribeToGroup, ProcessUnsubscribeFromGroup, WakuActor},
+    DeliveryServiceError,
+};
 use sc_key_store::KeyStoreError;
 
 pub mod group_actor;
@@ -17,6 +21,14 @@ pub mod identity;
 pub mod main_loop;
 pub mod user;
 pub mod ws_actor;
+
+pub struct AppState {
+    pub waku_actor: ActorRef<WakuActor>,
+    pub rooms: Mutex<HashSet<String>>,
+    pub app_id: Vec<u8>,
+    pub content_topics: Arc<Mutex<Vec<WakuContentTopic>>>,
+    pub pubsub: tokio::sync::broadcast::Sender<WakuMessage>,
+}
 
 pub fn group_id_to_name(group_id: Vec<u8>) -> String {
     String::from_utf8(group_id).unwrap()
@@ -69,7 +81,7 @@ impl AppMessage {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MessageToPrint {
     pub sender: String,
     pub message: String,
@@ -194,7 +206,6 @@ pub enum GroupError {
     EmptyWelcomeMessageError,
     #[error("Message verification failed")]
     MessageVerificationFailed,
-
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -282,7 +293,9 @@ pub enum UserError {
     #[error("Failed to publish message: {0}")]
     KameoPublishMessageError(#[from] SendError<ProcessMessageToSend, DeliveryServiceError>),
     #[error("Failed to unsubscribe from group: {0}")]
-    KameoUnsubscribeFromGroupError(#[from] SendError<ProcessUnsubscribeFromGroup, DeliveryServiceError>),
+    KameoUnsubscribeFromGroupError(
+        #[from] SendError<ProcessUnsubscribeFromGroup, DeliveryServiceError>,
+    ),
 }
 
 #[cfg(test)]

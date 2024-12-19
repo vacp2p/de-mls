@@ -8,7 +8,7 @@ use log::debug;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::Receiver;
-use waku_bindings::{Running, WakuMessage, WakuNodeHandle};
+use waku_bindings::{Running, WakuContentTopic, WakuMessage, WakuNodeHandle};
 
 use crate::ds_waku::{pubsub_topic, GROUP_VERSION, SUBTOPICS};
 use crate::{
@@ -83,7 +83,7 @@ pub struct ProcessSubscribeToGroup {
 }
 
 impl Message<ProcessSubscribeToGroup> for WakuActor {
-    type Reply = Result<(), DeliveryServiceError>;
+    type Reply = Result<Vec<WakuContentTopic>, DeliveryServiceError>;
 
     async fn handle(
         &mut self,
@@ -97,7 +97,7 @@ impl Message<ProcessSubscribeToGroup> for WakuActor {
             debug!("Failed to relay subscribe to the group: {:?}", e);
             DeliveryServiceError::WakuSubscribeToGroupError(e)
         })?;
-        Ok(())
+        Ok(content_topics)
     }
 }
 
