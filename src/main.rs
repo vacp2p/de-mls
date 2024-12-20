@@ -6,6 +6,7 @@ use axum::{
     routing::get,
     Router,
 };
+use bounded_vec_deque::BoundedVecDeque;
 use futures::StreamExt;
 use kameo::actor::ActorRef;
 use log::{error, info};
@@ -16,18 +17,19 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::sync::mpsc::{channel, Sender};
+use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
 use waku_bindings::{waku_set_event_callback, WakuMessage};
 
 use de_mls::{
     main_loop::{main_loop, Connection},
-    user::{ProcessSendMessage, User, UserAction},
+    user::{ProcessLeaveGroup, ProcessRemoveUser, ProcessSendMessage, User, UserAction},
     ws_actor::{RawWsMessage, WsAction, WsActor},
     AppState, MessageToPrint,
 };
 use ds::{
     ds_waku::{match_content_topic, setup_node_handle},
-    waku_actor::WakuActor,
+    waku_actor::{ProcessUnsubscribeFromGroup, WakuActor},
 };
 
 #[tokio::main]
@@ -41,13 +43,11 @@ async fn main() {
 
     let node_name = std::env::var("NODE").unwrap();
     let node = setup_node_handle(vec![node_name]).unwrap();
-    let uuid = uuid::Uuid::new_v4().as_bytes().to_vec();
-    let waku_actor = kameo::actor::spawn(WakuActor::new(Arc::new(node), uuid.clone()));
+    let waku_actor = kameo::actor::spawn(WakuActor::new(Arc::new(node)));
     let (tx, _) = tokio::sync::broadcast::channel(100);
     let app_state = Arc::new(AppState {
         waku_actor,
         rooms: Mutex::new(HashSet::new()),
-        app_id: uuid.clone(),
         content_topics: Arc::new(Mutex::new(Vec::new())),
         pubsub: tx.clone(),
     });
@@ -91,7 +91,7 @@ async fn handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> im
 
 async fn handle_waku(waku_sender: Sender<WakuMessage>, state: Arc<AppState>) {
     info!("Setting up waku event callback");
-    let mut seen_messages = Vec::<String>::new();
+    let mut seen_messages = BoundedVecDeque::<String>::new(40);
     waku_set_event_callback(move |signal| {
         match signal.event() {
             waku_bindings::Event::WakuMessage(event) => {
@@ -99,15 +99,12 @@ async fn handle_waku(waku_sender: Sender<WakuMessage>, state: Arc<AppState>) {
                 if seen_messages.contains(msg_id) {
                     return;
                 }
-                seen_messages.push(msg_id.clone());
-                let msg_app_id = event.waku_message().meta();
-                if msg_app_id == state.app_id {
-                    return;
-                };
+                seen_messages.push_back(msg_id.clone());
                 let content_topic = event.waku_message().content_topic();
                 // Check if message belongs to a relevant topic
                 if !match_content_topic(&state.content_topics, content_topic) {
                     error!("Content topic not match: {:?}", content_topic);
+                    return;
                 };
                 let msg = event.waku_message().clone();
                 info!("Received message from waku: {:?}", event.message_id());
@@ -131,7 +128,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (ws_sender, mut ws_receiver) = socket.split();
     let ws_actor = kameo::spawn(WsActor::new(ws_sender));
     let mut main_loop_connection = None::<Connection>;
-
+    let cancel_token = CancellationToken::new();
     while let Some(Ok(Message::Text(data))) = ws_receiver.next().await {
         let res = ws_actor.ask(RawWsMessage { message: data }).await;
         match res {
@@ -145,15 +142,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 let mut rooms = state.rooms.lock().unwrap();
                 if !rooms.contains(&connect.group_id.clone()) {
                     rooms.insert(connect.group_id.clone());
-                    info!("Prepare info for main loop: {:?}", main_loop_connection);
-                    break;
-                } else {
-                    info!("Group already exists");
-                    continue;
                 }
+                info!("Prepare info for main loop: {:?}", main_loop_connection);
+                break;
             }
-            Ok(WsAction::UserMessage(msg)) => {
-                info!("Got chat message for non-existent user: {:?}", &msg)
+            Ok(_) => {
+                info!("Got chat message for non-existent user");
             }
 
             Err(e) => error!("Error handling message: {}", e),
@@ -168,6 +162,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let state_clone = state.clone();
     let ws_actor_clone = ws_actor.clone();
     let mut waku_receiver = state.pubsub.subscribe();
+    let cancel_token_clone = cancel_token.clone();
     let mut recv_messages = tokio::spawn(async move {
         info!("Running recv messages from waku");
         while let Ok(msg) = waku_receiver.recv().await {
@@ -176,6 +171,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 state_clone.waku_actor.clone(),
                 ws_actor_clone.clone(),
                 user_actor_clone.clone(),
+                cancel_token_clone.clone(),
             )
             .await;
             if let Err(e) = res {
@@ -211,9 +207,15 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         }
         _ = (&mut send_messages) => {
             info!("send_messages finished");
+            send_messages.abort();
+        }
+        _ = cancel_token.cancelled() => {
+            info!("Cancel token cancelled");
+            send_messages.abort();
             recv_messages.abort();
         }
     };
+
     info!("Main loop finished");
 }
 
@@ -222,6 +224,7 @@ async fn handle_user_actions(
     waku_actor: ActorRef<WakuActor>,
     ws_actor: ActorRef<WsActor>,
     user_actor: ActorRef<User>,
+    cancel_token: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let actions = user_actor.ask(msg).await?;
     for action in actions {
@@ -231,9 +234,31 @@ async fn handle_user_actions(
                 info!("Successfully publish message with id: {:?}", id);
             }
             UserAction::SendToGroup(msg) => {
+                info!("Send to group: {:?}", msg);
                 ws_actor.ask(msg).await?;
             }
-            _ => {}
+            UserAction::RemoveGroup(group_name) => {
+                waku_actor
+                    .ask(ProcessUnsubscribeFromGroup {
+                        group_name: group_name.clone(),
+                    })
+                    .await?;
+                user_actor
+                    .ask(ProcessLeaveGroup {
+                        group_name: group_name.clone(),
+                    })
+                    .await?;
+                info!("Leave group: {:?}", &group_name);
+                ws_actor
+                    .ask(MessageToPrint {
+                        sender: "system".to_string(),
+                        message: format!("Group {} removed you", group_name),
+                        group_name: group_name.clone(),
+                    })
+                    .await?;
+                cancel_token.cancel();
+            }
+            UserAction::DoNothing => {}
         }
     }
     Ok(())
@@ -268,6 +293,25 @@ async fn handle_ws_message(
             let id = waku_actor.ask(pmt).await?;
             info!("Successfully publish message with id: {:?}", id);
         }
+        WsAction::RemoveUser(user_to_ban, group_name) => {
+            info!("Got remove user: {:?}", &user_to_ban);
+            let pmt = user_actor
+                .ask(ProcessRemoveUser {
+                    user_to_ban: user_to_ban.clone(),
+                    group_name: group_name.clone(),
+                })
+                .await?;
+            let id = waku_actor.ask(pmt).await?;
+            info!("Successfully publish message with id: {:?}", id);
+            ws_actor
+                .ask(MessageToPrint {
+                    sender: "system".to_string(),
+                    message: format!("User {} was removed from group", user_to_ban),
+                    group_name: group_name.clone(),
+                })
+                .await?;
+        }
+        WsAction::DoNothing => {}
     }
 
     Ok(())

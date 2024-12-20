@@ -1,7 +1,7 @@
 [workspace]
-members = ["sc_key_store", "ds", "crates/bindings", "mls_crypto"]
-[workspace.dependencies]
-foundry-contracts = { path = "crates/bindings" }
+members = ["ds", "mls_crypto"]
+# [workspace.dependencies]
+# foundry-contracts = { path = "crates/bindings" }
 
 [package]
 name = "de-mls"
@@ -15,7 +15,7 @@ path = "src/main.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-foundry-contracts.workspace = true
+# foundry-contracts.workspace = true
 openmls = { version = "=0.5.0", features = ["test-utils"] }
 openmls_basic_credential = "=0.2.0"
 openmls_rust_crypto = "=0.2.0"
@@ -29,12 +29,14 @@ tokio = { version = "=1.38.0", features = [
     "rt-multi-thread",
     "full",
 ] }
+tokio-util = "0.7.13"
 alloy = { git = "https://github.com/alloy-rs/alloy", features = [
     "providers",
     "node-bindings",
     "network",
     "transports",
     "k256",
+    "signer-local",
 ] }
 kameo = "0.13.0"
 
@@ -58,11 +60,11 @@ libsecp256k1 = "0.7.1"
 
 anyhow = "=1.0.81"
 thiserror = "=1.0.61"
+uuid = "1.11.0"
+bounded-vec-deque = "0.1.1"
 
 env_logger = "0.11.5"
 log = "0.4.22"
 
 ds = { path = "ds" }
-sc_key_store = { path = "sc_key_store" }
 mls_crypto = { path = "mls_crypto" }
-uuid = "1.11.0"

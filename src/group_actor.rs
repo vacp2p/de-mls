@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 use crate::*;
 use mls_crypto::openmls_provider::*;
 
+#[derive(Clone, Debug)]
 pub enum GroupAction {
     MessageToPrint(MessageToPrint),
     RemoveGroup,
@@ -26,6 +27,7 @@ pub struct Group {
     mls_group: Option<Arc<Mutex<MlsGroup>>>,
     admin: Option<Admin>,
     is_kp_shared: bool,
+    app_id: Vec<u8>,
 }
 
 impl Group {
@@ -36,6 +38,7 @@ impl Group {
         signer: Option<&SignatureKeyPair>,
         credential_with_key: Option<&CredentialWithKey>,
     ) -> Result<Self, GroupError> {
+        let uuid = uuid::Uuid::new_v4().as_bytes().to_vec();
         if is_creation {
             let group_id = group_name.as_bytes();
             // Create a new MLS group instance
@@ -54,6 +57,7 @@ impl Group {
                 mls_group: Some(Arc::new(Mutex::new(mls_group))),
                 admin: Some(Admin::new()),
                 is_kp_shared: true,
+                app_id: uuid.clone(),
             })
         } else {
             Ok(Group {
@@ -61,8 +65,17 @@ impl Group {
                 mls_group: None,
                 admin: None,
                 is_kp_shared: false,
+                app_id: uuid.clone(),
             })
         }
+    }
+
+    pub async fn members_identity(&self) -> Vec<String> {
+        let mls_group = self.mls_group.as_ref().unwrap().lock().await;
+        mls_group
+            .members()
+            .map(|m| hex::encode(m.credential.identity()))
+            .collect()
     }
 
     pub fn set_mls_group(&mut self, mls_group: MlsGroup) -> Result<(), GroupError> {
@@ -85,6 +98,10 @@ impl Group {
 
     pub fn is_admin(&self) -> bool {
         self.admin.is_some()
+    }
+
+    pub fn app_id(&self) -> Vec<u8> {
+        self.app_id.clone()
     }
 
     pub fn admin_decrypt_msg(&self, message: Vec<u8>) -> Result<KeyPackage, GroupError> {
@@ -110,6 +127,7 @@ impl Group {
             msg: out_messages.tls_serialize_detached()?,
             subtopic: COMMIT_MSG_SUBTOPIC.to_string(),
             group_id: self.group_name.clone(),
+            app_id: self.app_id.clone(),
         };
 
         let welcome_serialized = welcome.tls_serialize_detached()?;
@@ -122,6 +140,7 @@ impl Group {
             msg: welcome_msg,
             subtopic: WELCOME_SUBTOPIC.to_string(),
             group_id: self.group_name.clone(),
+            app_id: self.app_id.clone(),
         };
 
         Ok(vec![msg_to_send_commit, msg_to_send_welcome])
@@ -132,16 +151,16 @@ impl Group {
         users: Vec<String>,
         provider: &MlsCryptoProvider,
         signer: &SignatureKeyPair,
-    ) -> Result<Vec<ProcessMessageToSend>, GroupError> {
+    ) -> Result<ProcessMessageToSend, GroupError> {
         let mut mls_group = self.mls_group.as_mut().unwrap().lock().await;
         let mut leaf_indexs = Vec::new();
-
+        let members = mls_group.members().collect::<Vec<_>>();
         for user in users {
-            let _ = mls_group.members().map(|m| {
-                if m.credential.identity() == user.as_bytes() {
+            for m in members.iter() {
+                if hex::encode(m.credential.identity()) == user {
                     leaf_indexs.push(m.index);
                 }
-            });
+            }
         }
         // Remove operation on the mls group
         let (remove_message, _welcome, _group_info) =
@@ -154,9 +173,10 @@ impl Group {
             msg: remove_message.tls_serialize_detached()?,
             subtopic: COMMIT_MSG_SUBTOPIC.to_string(),
             group_id: self.group_name.clone(),
+            app_id: self.app_id.clone(),
         };
 
-        Ok(vec![msg_to_send_commit])
+        Ok(msg_to_send_commit)
     }
 
     pub async fn process_protocol_msg(
@@ -238,6 +258,7 @@ impl Group {
             msg: serde_json::to_vec(&wm)?,
             subtopic: WELCOME_SUBTOPIC.to_string(),
             group_id: self.group_name.clone(),
+            app_id: self.app_id.clone(),
         };
         Ok(msg_to_send)
     }
@@ -265,6 +286,7 @@ impl Group {
             msg: app_msg,
             subtopic: APP_MSG_SUBTOPIC.to_string(),
             group_id: self.group_name.clone(),
+            app_id: self.app_id.clone(),
         })
     }
 }

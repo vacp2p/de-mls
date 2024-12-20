@@ -58,7 +58,7 @@ async fn test_waku_client() {
     ])
     .unwrap();
     let uuid = uuid::Uuid::new_v4().as_bytes().to_vec();
-    let waku_actor = WakuActor::new(Arc::new(node), uuid);
+    let waku_actor = WakuActor::new(Arc::new(node));
     let actor_ref = kameo::spawn(waku_actor);
 
     let actor_a = ActorA::new();
@@ -111,6 +111,7 @@ async fn test_waku_client() {
                     msg: format!("test_message").as_bytes().to_vec(),
                     subtopic: APP_MSG_SUBTOPIC.to_string(),
                     group_id: group_name.clone(),
+                    app_id: uuid.clone(),
                 })
                 .await;
             println!("res: {:?}", res);

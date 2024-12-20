@@ -18,16 +18,11 @@ use crate::{
 #[derive(Actor)]
 pub struct WakuActor {
     node: Arc<WakuNodeHandle<Running>>,
-    app_id: Vec<u8>,
 }
 
 impl WakuActor {
-    pub fn new(node: Arc<WakuNodeHandle<Running>>, app_id: Vec<u8>) -> Self {
-        Self { node, app_id }
-    }
-
-    pub fn app_id(&self) -> Vec<u8> {
-        self.app_id.clone()
+    pub fn new(node: Arc<WakuNodeHandle<Running>>) -> Self {
+        Self { node }
     }
 }
 
@@ -37,6 +32,7 @@ pub struct ProcessMessageToSend {
     pub msg: Vec<u8>,
     pub subtopic: String,
     pub group_id: String,
+    pub app_id: Vec<u8>,
 }
 
 impl Message<ProcessMessageToSend> for WakuActor {
@@ -47,7 +43,7 @@ impl Message<ProcessMessageToSend> for WakuActor {
         msg: ProcessMessageToSend,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        let waku_message = build_waku_message(msg, self.app_id.clone())?;
+        let waku_message = build_waku_message(msg)?;
         let msg_id = self
             .node
             .relay_publish_message(&waku_message, Some(pubsub_topic()), None)
@@ -104,17 +100,14 @@ impl Message<ProcessUnsubscribeFromGroup> for WakuActor {
     }
 }
 
-pub fn build_waku_message(
-    msg: ProcessMessageToSend,
-    app_id: Vec<u8>,
-) -> Result<WakuMessage, DeliveryServiceError> {
+pub fn build_waku_message(msg: ProcessMessageToSend) -> Result<WakuMessage, DeliveryServiceError> {
     let content_topic = build_content_topic(&msg.group_id, GROUP_VERSION, &msg.subtopic);
     Ok(WakuMessage::new(
         msg.msg,
         content_topic,
         2,
         Utc::now().timestamp() as usize,
-        app_id,
+        msg.app_id,
         true,
     ))
 }

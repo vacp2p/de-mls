@@ -1,6 +1,0 @@
-ScKeystoreTest:test__addUser__addsUser__whenUserInfoIsValid() (gas: 106200)
-ScKeystoreTest:test__addUser__reverts__whenUserAlreadyExists() (gas: 110242)
-ScKeystoreTest:test__addUser__reverts__whenUserInfoIsMalformed() (gas: 8989)
-ScKeystoreTest:test__getAllKeyPackagesForUser__returnsKeyPackages__whenUserExists() (gas: 111031)
-ScKeystoreTest:test__getUser__returnsUserInfo__whenUserExists() (gas: 108923)
-ScKeystoreTest:test__userExists__returnsFalse__whenUserDoesNotExist() (gas: 7863)

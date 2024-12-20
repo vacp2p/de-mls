@@ -110,7 +110,7 @@
 
 <div class="message-box flex justify-end">
     <form on:submit|preventDefault={sendMessage}>
-        <input placeholder="Message" class="input input-bordered input-primary w-full sm:w-auto bg-base-200 mb-2"
+        <input placeholder="Message" class="input input-bordered input-primary w-[51rem] bg-base-200 mb-2"
                bind:value={message}>
         <button class="btn btn-primary w-full sm:w-auto btn-wide">Send</button>
     </form>

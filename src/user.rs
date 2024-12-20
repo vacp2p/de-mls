@@ -100,7 +100,8 @@ impl Message<ProcessLeaveGroup> for User {
         msg: ProcessLeaveGroup,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.leave_group(msg.group_name.clone()).await
+        self.leave_group(msg.group_name.clone()).await?;
+        Ok(())
     }
 }
 
@@ -118,6 +119,24 @@ impl Message<ProcessSendMessage> for User {
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
         self.prepare_msg_to_send(&msg.msg, msg.group_name.clone())
+            .await
+    }
+}
+
+pub struct ProcessRemoveUser {
+    pub user_to_ban: String,
+    pub group_name: String,
+}
+
+impl Message<ProcessRemoveUser> for User {
+    type Reply = Result<ProcessMessageToSend, UserError>;
+
+    async fn handle(
+        &mut self,
+        msg: ProcessRemoveUser,
+        _ctx: Context<'_, Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.remove_users_from_group(vec![msg.user_to_ban], msg.group_name.clone())
             .await
     }
 }
@@ -187,6 +206,7 @@ impl User {
         let welcome_msg: WelcomeMessage = serde_json::from_slice(msg.payload())?;
         match welcome_msg.message_type {
             WelcomeMessageType::GroupAnnouncement => {
+                let app_id = group.app_id();
                 if group.is_admin() || group.is_kp_shared() {
                     Ok(vec![UserAction::DoNothing])
                 } else {
@@ -219,6 +239,7 @@ impl User {
                         msg,
                         subtopic: WELCOME_SUBTOPIC.to_string(),
                         group_id: group_name.clone(),
+                        app_id: app_id.clone(),
                     })])
                 }
             }
@@ -265,7 +286,7 @@ impl User {
                     }) {
                         self.join_group(welcome)?;
                         let msg = self
-                            .prepare_msg_to_send("User joined the group", group_name)
+                            .prepare_msg_to_send("User joined to the group", group_name)
                             .await?;
                         Ok(vec![UserAction::SendToWaku(msg)])
                     } else {
@@ -286,6 +307,10 @@ impl User {
             Some(g) => g,
             None => return Err(UserError::GroupNotFoundError(group_name)),
         };
+        let app_id = group.app_id();
+        if msg.meta() == app_id {
+            return Ok(vec![UserAction::DoNothing]);
+        }
         let ct = ct.content_topic_name.to_string();
         match ct.as_str() {
             WELCOME_SUBTOPIC => self.handle_welcome_subtopic(msg, group_name).await,
@@ -394,6 +419,9 @@ impl User {
             Some(g) => g,
             None => return Err(UserError::GroupNotFoundError(group_name)),
         };
+        if !group.is_mls_group_initialized() {
+            return Ok(UserAction::DoNothing);
+        }
         let res = group
             .process_protocol_msg(
                 message,
@@ -457,16 +485,16 @@ impl User {
         &mut self,
         users: Vec<String>,
         group_name: String,
-    ) -> Result<(), UserError> {
+    ) -> Result<ProcessMessageToSend, UserError> {
         if !self.if_group_exists(group_name.clone()) {
             return Err(UserError::GroupNotFoundError(group_name));
         }
         let group = self.groups.get_mut(&group_name).unwrap();
-        group
+        let msg = group
             .remove_members(users, &self.provider, &self.identity.signer)
             .await?;
 
-        Ok(())
+        Ok(msg)
     }
 
     pub async fn leave_group(&mut self, group_name: String) -> Result<(), UserError> {

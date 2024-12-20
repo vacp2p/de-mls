@@ -62,6 +62,7 @@ pub fn content_filter(
     ContentFilter::new(Some(pubsub_topic.to_string()), content_topics.to_vec())
 }
 
+#[allow(clippy::field_reassign_with_default)]
 pub fn setup_node_handle(nodes: Vec<String>) -> Result<WakuNodeHandle<Running>, Box<dyn Error>> {
     let mut config = WakuNodeConfig::default();
     config.port = Some(0);

@@ -22,7 +22,6 @@ use ds::{
     },
     DeliveryServiceError,
 };
-use sc_key_store::KeyStoreError;
 
 pub mod group_actor;
 pub mod identity;
@@ -33,7 +32,6 @@ pub mod ws_actor;
 pub struct AppState {
     pub waku_actor: ActorRef<WakuActor>,
     pub rooms: Mutex<HashSet<String>>,
-    pub app_id: Vec<u8>,
     pub content_topics: Arc<Mutex<Vec<WakuContentTopic>>>,
     pub pubsub: tokio::sync::broadcast::Sender<WakuMessage>,
 }
@@ -242,8 +240,6 @@ pub enum MessageError {
 pub enum UserError {
     #[error(transparent)]
     DeliveryServiceError(#[from] DeliveryServiceError),
-    #[error(transparent)]
-    KeyStoreError(#[from] KeyStoreError),
     #[error(transparent)]
     IdentityError(#[from] IdentityError),
     #[error(transparent)]
