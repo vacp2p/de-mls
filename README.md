@@ -1,17 +1,30 @@
 # de-mls
+
 Decentralized MLS PoC using a smart contract for group coordination
 
-## Run Redis Server
+> Note: The frontend implementation is based on [chatr](https://github.com/0xLaurens/chatr), a real-time chat application built with Rust and SvelteKit
 
-`docker-compose up`
+## Run Test Waku Node
 
-## Install deps
+```bash
+docker run -p 8645:8645 -p 60000:60000 wakuorg/nwaku:v0.33.1 --cluster-id=15 --rest --relay --rln-relay=false --pubsub-topic=/waku/2/rs/15/0
+```
 
-1. `Foundry`
-2. `make deps`
+## Run User Instance
 
-## Scaffold Environment
+Create a `.env` file in the `.env` folder for each client containing the following variables:
 
-1. `make start`: This command will start the docker compose instance, and deploy the smart contract to the local network.
+```text
+NAME=client1
+BACKEND_PORT=3000
+FRONTEND_PORT=4000
+NODE_NAME=<waku-node-ip>
+```
 
-2. `make stop`: This command will stop the docker compose instance.
+Run docker compose up for the user instance
+
+```bash
+docker-compose --env-file ./.env/client1.env up --build
+```
+
+For each client, run the following command to start the frontend on the local host with the port specified in the `.env` file

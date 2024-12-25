@@ -15,12 +15,7 @@ Cargo.lock
 
 .DS_Store
 src/.DS_Store
-
-## contracts
-# directories
-contracts/cache/**
-contracts/node_modules/**
-contracts/out/**
+.idea
 
 # files
 *.env
@@ -29,10 +24,5 @@ contracts/out/**
 .pnp.*
 lcov.info
 yarn.lock
-
-# broadcasts
-contracts/!broadcast
-contracts/broadcast/*
-contracts/broadcast/*/31337/
 
 .certora_internal

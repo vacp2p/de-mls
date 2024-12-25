@@ -1,39 +1,29 @@
 [package]
 name = "ds"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-# chrono = "=0.4.38"
-# waku-bindings = "=0.6.0"
-bus = "=2.4.1"
-fred = { version = "=9.0.3", features = ["subscriber-client"] }
-tokio = { version = "=1.38.0", features = ["full"] }
-tokio-tungstenite = "0.15"
-tungstenite = "0.14"
-futures-util = "0.3"
-tokio-stream = "0.1"
-alloy = { git = "https://github.com/alloy-rs/alloy", features = [
-    "providers",
-    "node-bindings",
-    "network",
-    "transports",
-    "k256",
-    "rlp",
-] }
-tokio-util = "=0.7.11"
+waku-bindings = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "force-cluster-15", subdir = "waku-bindings" }
+waku-sys = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "force-cluster-15", subdir = "waku-sys" }
 
-openmls = { version = "=0.5.0", features = ["test-utils"] }
-rand = { version = "^0.8" }
+tokio = { version = "=1.38.0", features = ["full"] }
+kameo = "=0.13.0"
+
+chrono = "=0.4.38"
+uuid = { version = "=1.11.0", features = [
+    "v4",
+    "fast-rng",
+    "macro-diagnostics",
+] }
 
 anyhow = "=1.0.81"
 thiserror = "=1.0.61"
 
-tls_codec = "=0.3.0"
 serde_json = "=1.0"
 serde = "=1.0.204"
 
-sc_key_store = { path = "../sc_key_store" }
-url = "2.5.2"
+env_logger = "=0.11.5"
+log = "=0.4.22"

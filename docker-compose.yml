@@ -1,31 +1,23 @@
-version: "3.8"
+name: ${NAME}
 services:
-  redis:
-    image: redis@sha256:0c6f34a2d41992ee1e02d52d712c12ac46c4d5a63efdab74915141a52c529586
-    entrypoint: ["redis-server", "--port", "${REDIS_PORT}"]
+  frontend:
+    build:
+      context: frontend
+      dockerfile: Dockerfile
     ports:
-      - "${REDIS_PORT}:${REDIS_PORT}"
-    healthcheck:
-      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
-      interval: 1s
-      timeout: 3s
-      retries: 5
+      - ${FRONTEND_PORT}:5173
+    environment:
+      - PUBLIC_API_URL=http://127.0.0.1:${BACKEND_PORT}
+      - PUBLIC_WEBSOCKET_URL=ws://127.0.0.1:${BACKEND_PORT}
+    depends_on:
+      - backend
 
-  anvil:
-    image: ghcr.io/foundry-rs/foundry:latest
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "cast",
-          "chain-id",
-          "--rpc-url",
-          "http://localhost:${ANVIL_PORT}",
-        ]
-      interval: 5s
-      timeout: 3s
-      retries: 5
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
     ports:
-      - "${ANVIL_PORT}:${ANVIL_PORT}"
-    entrypoint: ["anvil", "--host", "0.0.0.0"]
-    platform: linux/amd64
+      - ${BACKEND_PORT}:3000
+    environment:
+      - RUST_LOG=info
+      - NODE=${NODE}

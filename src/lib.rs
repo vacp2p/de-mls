@@ -1,66 +1,145 @@
-use alloy::{hex::FromHexError, primitives::SignatureError, signers::local::LocalSignerError};
-use ds::DeliveryServiceError;
-use fred::error::RedisError;
+use alloy::signers::local::LocalSignerError;
+use ecies::{decrypt, encrypt};
+use kameo::{actor::ActorRef, error::SendError};
+use libsecp256k1::{sign, verify, Message, PublicKey, SecretKey, Signature as libSignature};
 use openmls::{error::LibraryError, prelude::*};
 use openmls_rust_crypto::MemoryKeyStoreError;
-use sc_key_store::KeyStoreError;
-use std::{str::Utf8Error, string::FromUtf8Error};
-use tokio::task::JoinError;
+use rand::thread_rng;
+use secp256k1::hashes::{sha256, Hash};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashSet,
+    fmt::Display,
+    str::Utf8Error,
+    string::FromUtf8Error,
+    sync::{Arc, Mutex},
+};
+use waku_bindings::{WakuContentTopic, WakuMessage};
 
-pub mod cli;
-pub mod contact;
-pub mod conversation;
+use ds::{
+    waku_actor::{ProcessMessageToSend, ProcessSubscribeToGroup, WakuActor},
+    DeliveryServiceError,
+};
+
+pub mod group_actor;
 pub mod identity;
+pub mod main_loop;
 pub mod user;
+pub mod ws_actor;
 
-#[derive(Debug, thiserror::Error)]
-pub enum CliError {
-    #[error("Can't split the line")]
-    SplitLineError,
-    #[error("Failed to cancel token")]
-    TokenCancellingError,
-
-    #[error("Problem from std::io library: {0}")]
-    IoError(#[from] std::io::Error),
-
-    #[error("Failed to send message to channel: {0}")]
-    SenderError(String),
-
-    #[error("Redis error: {0}")]
-    RedisError(#[from] RedisError),
-    #[error("Failed from tokio join: {0}")]
-    TokioJoinError(#[from] JoinError),
-
-    #[error("Unknown error: {0}")]
-    AnyHowError(anyhow::Error),
+pub struct AppState {
+    pub waku_actor: ActorRef<WakuActor>,
+    pub rooms: Mutex<HashSet<String>>,
+    pub content_topics: Arc<Mutex<Vec<WakuContentTopic>>>,
+    pub pubsub: tokio::sync::broadcast::Sender<WakuMessage>,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum ContactError {
-    #[error("Key package for the specified group does not exist.")]
-    MissingKeyPackageForGroup,
-    #[error("SmartContract address for the specified group does not exist.")]
-    MissingSmartContractForGroup,
-    #[error("User not found.")]
-    UserNotFoundError,
-    #[error("Group not found: {0}")]
-    GroupNotFoundError(String),
-    #[error("Duplicate user found in joiners list.")]
-    DuplicateUserError,
-    #[error("Group already exists")]
-    GroupAlreadyExistsError,
-    #[error("Invalid user address in signature.")]
-    InvalidUserSignatureError,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WelcomeMessageType {
+    GroupAnnouncement,
+    KeyPackageShare,
+    WelcomeShare,
+}
 
-    #[error(transparent)]
-    DeliveryServiceError(#[from] DeliveryServiceError),
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WelcomeMessage {
+    pub message_type: WelcomeMessageType,
+    pub message_payload: Vec<u8>,
+}
 
-    #[error("Failed to parse signature: {0}")]
-    AlloySignatureParsingError(#[from] SignatureError),
-    #[error("JSON processing error: {0}")]
-    JsonProcessingError(#[from] serde_json::Error),
-    #[error("Serialization error: {0}")]
-    SerializationError(#[from] tls_codec::Error),
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupAnnouncement {
+    pub_key: Vec<u8>,
+    signature: Vec<u8>,
+}
+
+impl GroupAnnouncement {
+    pub fn new(pub_key: Vec<u8>, signature: Vec<u8>) -> Self {
+        GroupAnnouncement { pub_key, signature }
+    }
+
+    pub fn verify(&self) -> Result<bool, MessageError> {
+        let verified = verify_message(&self.pub_key, &self.signature, &self.pub_key)?;
+        Ok(verified)
+    }
+
+    pub fn encrypt(&self, data: Vec<u8>) -> Result<Vec<u8>, MessageError> {
+        let encrypted = encrypt_message(&data, &self.pub_key)?;
+        Ok(encrypted)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppMessage {
+    pub sender: Vec<u8>,
+    pub message: Vec<u8>,
+}
+
+impl AppMessage {
+    pub fn new(sender: Vec<u8>, message: Vec<u8>) -> Self {
+        AppMessage { sender, message }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MessageToPrint {
+    pub sender: String,
+    pub message: String,
+    pub group_name: String,
+}
+
+impl MessageToPrint {
+    pub fn new(sender: String, message: String, group_name: String) -> Self {
+        MessageToPrint {
+            sender,
+            message,
+            group_name,
+        }
+    }
+}
+
+impl Display for MessageToPrint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.sender, self.message)
+    }
+}
+
+pub fn generate_keypair() -> (PublicKey, SecretKey) {
+    let secret_key = SecretKey::random(&mut thread_rng());
+    let public_key = PublicKey::from_secret_key(&secret_key);
+    (public_key, secret_key)
+}
+
+pub fn sign_message(message: &[u8], secret_key: &SecretKey) -> Vec<u8> {
+    let digest = sha256::Hash::hash(message);
+    let msg = Message::parse(&digest.to_byte_array());
+    let signature = sign(&msg, secret_key);
+    signature.0.serialize_der().as_ref().to_vec()
+}
+
+pub fn verify_message(
+    message: &[u8],
+    signature: &[u8],
+    public_key: &[u8],
+) -> Result<bool, MessageError> {
+    let digest = sha256::Hash::hash(message);
+    let msg = Message::parse(&digest.to_byte_array());
+    let signature = libSignature::parse_der(signature)?;
+    let mut pub_key_bytes: [u8; 33] = [0; 33];
+    pub_key_bytes[..].copy_from_slice(public_key);
+    let public_key = PublicKey::parse_compressed(&pub_key_bytes)?;
+    Ok(verify(&msg, &signature, &public_key))
+}
+
+pub fn encrypt_message(message: &[u8], public_key: &[u8]) -> Result<Vec<u8>, MessageError> {
+    let encrypted = encrypt(public_key, message)?;
+    Ok(encrypted)
+}
+
+pub fn decrypt_message(message: &[u8], secret_key: SecretKey) -> Result<Vec<u8>, MessageError> {
+    let secret_key_serialized = secret_key.serialize();
+    let decrypted = decrypt(&secret_key_serialized, message)?;
+    Ok(decrypted)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -80,34 +159,13 @@ pub enum IdentityError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum UserError {
-    #[error("User lacks connection to the smart contract.")]
-    MissingSmartContractConnection,
-    #[error("Group not found: {0}")]
-    GroupNotFoundError(String),
-    #[error("Group already exists: {0}")]
-    GroupAlreadyExistsError(String),
-    #[error("Unsupported message type.")]
-    UnsupportedMessageType,
-    #[error("User already exists: {0}")]
-    UserAlreadyExistsError(String),
-    #[error("Welcome message cannot be empty.")]
-    EmptyWelcomeMessageError,
-    #[error("Message from user is invalid")]
-    InvalidChatMessageError,
-    #[error("Message from server is invalid")]
-    InvalidServerMessageError,
-    #[error("User not found.")]
-    UserNotFoundError,
-
+pub enum GroupError {
+    #[error("Admin not set")]
+    AdminNotSetError,
     #[error(transparent)]
-    DeliveryServiceError(#[from] DeliveryServiceError),
-    #[error(transparent)]
-    KeyStoreError(#[from] KeyStoreError),
-    #[error(transparent)]
-    IdentityError(#[from] IdentityError),
-    #[error(transparent)]
-    ContactError(#[from] ContactError),
+    MessageError(#[from] MessageError),
+    #[error("MLS group not initialized")]
+    MlsGroupNotInitializedError,
 
     #[error("Error while creating MLS group: {0}")]
     MlsGroupCreationError(#[from] NewGroupError<MemoryKeyStoreError>),
@@ -121,33 +179,100 @@ pub enum UserError {
     MlsProcessMessageError(#[from] ProcessMessageError),
     #[error("Error while creating message: {0}")]
     MlsCreateMessageError(#[from] CreateMessageError),
-    #[error("Failed to create staged join: {0}")]
-    MlsWelcomeError(#[from] WelcomeError<MemoryKeyStoreError>),
-    #[error("Failed to remove member from MLS group: {0}")]
-    MlsRemoveMemberError(#[from] RemoveMembersError<MemoryKeyStoreError>),
-    #[error("Failed to validate user key package: {0}")]
-    MlsKeyPackageVerificationError(#[from] KeyPackageVerifyError),
+    #[error("Failed to remove members: {0}")]
+    MlsRemoveMembersError(#[from] RemoveMembersError<MemoryKeyStoreError>),
+    #[error("Group still active")]
+    GroupStillActiveError,
 
     #[error("UTF-8 parsing error: {0}")]
     Utf8ParsingError(#[from] FromUtf8Error),
-    #[error("UTF-8 string parsing error: {0}")]
-    Utf8StringParsingError(#[from] Utf8Error),
-
     #[error("JSON processing error: {0}")]
     JsonError(#[from] serde_json::Error),
     #[error("Serialization error: {0}")]
     SerializationError(#[from] tls_codec::Error),
 
-    #[error("Failed to parse address: {0}")]
-    AddressParsingError(#[from] FromHexError),
+    #[error("An unknown error occurred: {0}")]
+    Other(anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MessageError {
+    #[error("Failed to verify signature: {0}")]
+    SignatureVerificationError(#[from] libsecp256k1::Error),
+    #[error("JSON processing error: {0}")]
+    JsonError(#[from] serde_json::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum UserError {
+    #[error(transparent)]
+    DeliveryServiceError(#[from] DeliveryServiceError),
+    #[error(transparent)]
+    IdentityError(#[from] IdentityError),
+    #[error(transparent)]
+    GroupError(#[from] GroupError),
+    #[error(transparent)]
+    MessageError(#[from] MessageError),
+
+    #[error("Group already exists: {0}")]
+    GroupAlreadyExistsError(String),
+    #[error("Group not found: {0}")]
+    GroupNotFoundError(String),
+
+    #[error("Unsupported message type.")]
+    UnsupportedMessageType,
+    #[error("Welcome message cannot be empty.")]
+    EmptyWelcomeMessageError,
+    #[error("Message verification failed")]
+    MessageVerificationFailed,
+
+    #[error("Unknown content topic type: {0}")]
+    UnknownContentTopicType(String),
+
+    #[error("Failed to create staged join: {0}")]
+    MlsWelcomeError(#[from] WelcomeError<MemoryKeyStoreError>),
+
+    #[error("UTF-8 parsing error: {0}")]
+    Utf8ParsingError(#[from] FromUtf8Error),
+    #[error("UTF-8 string parsing error: {0}")]
+    Utf8StringParsingError(#[from] Utf8Error),
+    #[error("JSON processing error: {0}")]
+    JsonError(#[from] serde_json::Error),
+    #[error("Serialization error: {0}")]
+    SerializationError(#[from] tls_codec::Error),
     #[error("Failed to parse signer: {0}")]
     SignerParsingError(#[from] LocalSignerError),
 
-    #[error("Signing error: {0}")]
-    SigningError(#[from] alloy::signers::Error),
-    #[error("I/O error: {0}")]
-    IoError(#[from] std::io::Error),
+    #[error("Failed to subscribe to group: {0}")]
+    KameoSubscribeToGroupError(#[from] SendError<ProcessSubscribeToGroup, DeliveryServiceError>),
+    #[error("Failed to publish message: {0}")]
+    KameoPublishMessageError(#[from] SendError<ProcessMessageToSend, DeliveryServiceError>),
+    #[error("Failed to create group: {0}")]
+    KameoCreateGroupError(String),
+    #[error("Failed to send message to user: {0}")]
+    KameoSendMessageError(String),
+}
 
-    #[error("An unknown error occurred: {0}")]
-    UnknownError(anyhow::Error),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_verify_message() {
+        let message = b"Hello, world!";
+        let (public_key, secret_key) = generate_keypair();
+        let signature = sign_message(message, &secret_key);
+        let verified = verify_message(message, &signature, &public_key.serialize_compressed());
+        assert!(verified.is_ok());
+        assert!(verified.unwrap());
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_message() {
+        let message = b"Hello, world!";
+        let (public_key, secret_key) = generate_keypair();
+        let encrypted = encrypt_message(message, &public_key.serialize_compressed());
+        let decrypted = decrypt_message(&encrypted.unwrap(), secret_key);
+        assert_eq!(message, decrypted.unwrap().as_slice());
+    }
 }

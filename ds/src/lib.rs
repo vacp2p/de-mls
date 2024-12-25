@@ -1,33 +1,27 @@
-use alloy::{hex::FromHexError, primitives::SignatureError};
-use fred::error::RedisError;
-
-pub mod chat_client;
-pub mod chat_server;
-pub mod ds;
+pub mod ds_waku;
+pub mod waku_actor;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeliveryServiceError {
-    #[error("Validation failed: {0}")]
-    ValidationError(String),
+    #[error("Waku publish message error: {0}")]
+    WakuPublishMessageError(String),
+    #[error("Waku relay topics error: {0}")]
+    WakuRelayTopicsError(String),
+    #[error("Waku subscribe to group error: {0}")]
+    WakuSubscribeToGroupError(String),
+    #[error("Waku receive message error: {0}")]
+    WakuReceiveMessageError(String),
+    #[error("Waku node already initialized: {0}")]
+    WakuNodeAlreadyInitialized(String),
+    #[error("Waku subscribe to content filter error: {0}")]
+    WakuSubscribeToContentFilterError(String),
+    #[error("Waku add peer error: {0}")]
+    WakuAddPeerError(String),
+    #[error("Waku connect peer error: {0}")]
+    WakuConnectPeerError(String),
 
-    #[error("Redis operation failed: {0}")]
-    RedisError(#[from] RedisError),
-    #[error("Failed to send message to channel: {0}")]
-    SenderError(String),
-    #[error("WebSocket handshake failed.")]
-    HandshakeError(#[from] tokio_tungstenite::tungstenite::Error),
-
-    #[error("Serialization error: {0}")]
-    TlsError(#[from] tls_codec::Error),
-    #[error("JSON processing error: {0}")]
-    JsonError(#[from] serde_json::Error),
-    #[error("Failed to bind to the address.")]
-    BindError(#[from] std::io::Error),
-
-    #[error("Failed to parse address: {0}")]
-    AlloyFromHexError(#[from] FromHexError),
-    #[error("Failed to recover signature: {0}")]
-    AlloySignatureError(#[from] SignatureError),
+    #[error("Failed to parse multiaddr: {0}")]
+    FailedToParseMultiaddr(String),
 
     #[error("An unknown error occurred: {0}")]
     Other(anyhow::Error),

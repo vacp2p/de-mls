@@ -1,8 +1,3 @@
-name: "CI"
-
-env:
-  FOUNDRY_PROFILE: "ci"
-
 on:
   workflow_dispatch:
   pull_request:
@@ -10,122 +5,61 @@ on:
     branches:
       - "main"
 
-concurrency:
-  cancel-in-progress: true
-  group: ${{github.workflow}}-${{github.ref}}
+name: "CI"
 
 jobs:
+  # ds_test:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v3
+  #     - name: Install stable toolchain
+  #       uses: actions-rs/toolchain@v1
+  #       with:
+  #         profile: minimal
+  #         toolchain: stable
+  #         override: true
+  #     - uses: Swatinem/rust-cache@v2
+  #     - name: cargo test
+  #       run: |
+  #         cargo test --release
+  #       working-directory: ds
+  user_test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.20.x'
+      - name: Checkout code
+        uses: actions/checkout@v3
+      - name: cargo test
+        run: |
+          cargo test --release
+        working-directory: tests
+
   lint:
-    runs-on: "ubuntu-latest"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - name: "Check out the repo"
-        uses: "actions/checkout@v3"
+      - name: Setup Go
+        uses: actions/setup-go@v4
         with:
-          submodules: "recursive"
-
-      - name: "Install Foundry"
-        uses: "foundry-rs/foundry-toolchain@v1"
-
-      - name: "Install Pnpm"
-        uses: "pnpm/action-setup@v4"
+          go-version: '1.20.x'
+      - name: Checkout sources
+        uses: actions/checkout@v3
+      - name: Install stable toolchain
+        uses: actions-rs/toolchain@v1
         with:
-          version: "8"
-
-      - name: "Install Node.js"
-        uses: "actions/setup-node@v3"
-        with:
-          node-version: "lts/*"
-
-      - name: "Install the Node.js dependencies"
-        run: "pnpm install"
-        working-directory: "contracts"
-
-      - name: "Lint the contracts"
-        run: "pnpm lint"
-        working-directory: "contracts"
-
-      - name: "Add lint summary"
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt
+        if: success() || failure()
+        run: cargo fmt -- --check
+      - name: cargo clippy
+        if: success() || failure()
         run: |
-          echo "## Lint result" >> $GITHUB_STEP_SUMMARY
-          echo "✅ Passed" >> $GITHUB_STEP_SUMMARY
-
-  build:
-    runs-on: "ubuntu-latest"
-    steps:
-      - name: "Check out the repo"
-        uses: "actions/checkout@v3"
-        with:
-          submodules: "recursive"
-
-      - name: "Install Foundry"
-        uses: "foundry-rs/foundry-toolchain@v1"
-
-      - name: "Build the contracts and print their size"
-        run: "forge build --sizes"
-        working-directory: "contracts"
-
-      - name: "Add build summary"
-        run: |
-          echo "## Build result" >> $GITHUB_STEP_SUMMARY
-          echo "✅ Passed" >> $GITHUB_STEP_SUMMARY
-
-  test:
-    needs: ["lint", "build"]
-    runs-on: "ubuntu-latest"
-    steps:
-      - name: "Check out the repo"
-        uses: "actions/checkout@v3"
-        with:
-          submodules: "recursive"
-
-      - name: "Install Foundry"
-        uses: "foundry-rs/foundry-toolchain@v1"
-
-      - name: "Show the Foundry config"
-        run: "forge config"
-        working-directory: "contracts"
-
-      - name: "Generate a fuzz seed that changes weekly to avoid burning through RPC allowance"
-        run: >
-          echo "FOUNDRY_FUZZ_SEED=$(
-            echo $(($EPOCHSECONDS - $EPOCHSECONDS % 604800))
-          )" >> $GITHUB_ENV
-
-      - name: "Run the tests"
-        run: "forge test"
-        working-directory: "contracts"
-
-      - name: "Add test summary"
-        run: |
-          echo "## Tests result" >> $GITHUB_STEP_SUMMARY
-          echo "✅ Passed" >> $GITHUB_STEP_SUMMARY
-
-  coverage:
-    needs: ["lint", "build"]
-    runs-on: "ubuntu-latest"
-    steps:
-      - name: "Check out the repo"
-        uses: "actions/checkout@v3"
-        with:
-          submodules: "recursive"
-
-      - name: "Install Foundry"
-        uses: "foundry-rs/foundry-toolchain@v1"
-
-      - name: "Generate the coverage report using the unit and the integration tests"
-        run: 'forge coverage --match-path "test/**/*.sol" --report lcov'
-        working-directory: "contracts"
-
-      - name: "Upload coverage report to Codecov"
-        uses: "codecov/codecov-action@v3"
-        with:
-          files: "./contracts/lcov.info"
-
-      - name: "Add coverage summary"
-        run: |
-          echo "## Coverage result" >> $GITHUB_STEP_SUMMARY
-          echo "✅ Uploaded to Codecov" >> $GITHUB_STEP_SUMMARY
-
-    strategy:
-      fail-fast: false
-      max-parallel: 16
+          cargo clippy --release -- -D warnings
