@@ -2,6 +2,8 @@
 
 Decentralized MLS PoC using a smart contract for group coordination
 
+> Note: The frontend implementation is based on [chatr](https://github.com/0xLaurens/chatr), a real-time chat application built with Rust and SvelteKit
+
 ## Run Test Waku Node
 
 ```bash
