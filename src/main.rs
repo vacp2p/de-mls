@@ -33,16 +33,15 @@ use ds::{
 };
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let port = std::env::var("PORT")
         .map(|val| val.parse::<u16>())
-        .unwrap_or(Ok(3000))
-        .unwrap();
+        .unwrap_or(Ok(3000))?;
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
-    let node_name = std::env::var("NODE").unwrap();
-    let node = setup_node_handle(vec![node_name]).unwrap();
+    let node_name = std::env::var("NODE")?;
+    let node = setup_node_handle(vec![node_name])?;
     let waku_actor = kameo::actor::spawn(WakuActor::new(Arc::new(node)));
     let (tx, _) = tokio::sync::broadcast::channel(100);
     let app_state = Arc::new(AppState {
@@ -83,6 +82,7 @@ async fn main() {
             error!("Error receiving messages from waku: {}", w);
         }
     }
+    Ok(())
 }
 
 async fn handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -108,7 +108,9 @@ async fn handle_waku(waku_sender: Sender<WakuMessage>, state: Arc<AppState>) {
                 };
                 let msg = event.waku_message().clone();
                 info!("Received message from waku: {:?}", event.message_id());
-                waku_sender.blocking_send(msg).unwrap();
+                waku_sender
+                    .blocking_send(msg)
+                    .expect("Failed to send message to waku");
             }
 
             waku_bindings::Event::Unrecognized(data) => {

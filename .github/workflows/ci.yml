@@ -8,22 +8,22 @@ on:
 name: "CI"
 
 jobs:
-  ds_test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-      - uses: Swatinem/rust-cache@v2
-      - name: cargo test
-        run: |
-          cargo test --release
-        working-directory: ds
+  # ds_test:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v3
+  #     - name: Install stable toolchain
+  #       uses: actions-rs/toolchain@v1
+  #       with:
+  #         profile: minimal
+  #         toolchain: stable
+  #         override: true
+  #     - uses: Swatinem/rust-cache@v2
+  #     - name: cargo test
+  #       run: |
+  #         cargo test --release
+  #       working-directory: ds
   user_test:
     runs-on: ubuntu-latest
     steps:

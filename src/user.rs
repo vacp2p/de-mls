@@ -253,7 +253,7 @@ impl User {
                         self.identity.identity_string(),
                         group_name
                     );
-                    let key_package = group.admin_decrypt_msg(welcome_msg.message_payload)?;
+                    let key_package = group.decrypt_admin_msg(welcome_msg.message_payload)?;
                     let msgs = self.invite_users(vec![key_package], group_name).await?;
                     Ok(msgs
                         .iter()

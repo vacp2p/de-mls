@@ -3,7 +3,7 @@ use kameo::{
     message::{Context, Message},
     Actor,
 };
-use log::error;
+use log::{error, info};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -14,7 +14,7 @@ use waku_bindings::WakuMessage;
 use ds::{
     ds_waku::{
         build_content_topics, match_content_topic, setup_node_handle, APP_MSG_SUBTOPIC,
-        GROUP_VERSION, SUBTOPICS,
+        GROUP_VERSION,
     },
     waku_actor::{ProcessMessageToSend, ProcessSubscribeToGroup, WakuActor},
     DeliveryServiceError,
@@ -50,13 +50,11 @@ impl Message<WakuMessage> for ActorA {
 async fn test_waku_client() {
     let group_name = "new_group".to_string();
     let mut pubsub = PubSub::<WakuMessage>::new();
-
     let (sender_alice, mut receiver_alice) = channel(100);
-    let node = setup_node_handle(vec![
-        "/ip4/143.110.189.47/tcp/60000/p2p/16Uiu2HAkv6QDvJcQXKdsJKpJED5Ydh7cb2CZtRkPsjUhkg37ifP5"
-            .to_string(),
-    ])
-    .unwrap();
+    // TODO: get node from env
+    let res = setup_node_handle(vec![]);
+    assert!(res.is_ok());
+    let node = res.unwrap();
     let uuid = uuid::Uuid::new_v4().as_bytes().to_vec();
     let waku_actor = WakuActor::new(Arc::new(node));
     let actor_ref = kameo::spawn(waku_actor);
@@ -66,30 +64,24 @@ async fn test_waku_client() {
 
     pubsub.subscribe(actor_a_ref);
 
-    let content_topics = Arc::new(Mutex::new(build_content_topics(
-        &group_name,
-        GROUP_VERSION,
-        &SUBTOPICS.clone(),
-    )));
+    let content_topics = Arc::new(Mutex::new(build_content_topics(&group_name, GROUP_VERSION)));
 
-    let res = actor_ref
+    assert!(actor_ref
         .ask(ProcessSubscribeToGroup {
             group_name: group_name.clone(),
         })
-        .await;
-    println!("res: {:?}", res);
+        .await
+        .is_ok());
 
     waku_set_event_callback(move |signal| {
         match signal.event() {
             waku_bindings::Event::WakuMessage(event) => {
                 let content_topic = event.waku_message().content_topic();
                 // Check if message belongs to a relevant topic
-                if !match_content_topic(&content_topics, content_topic) {
-                    error!("Content topic not match: {:?}", content_topic);
-                };
+                assert!(match_content_topic(&content_topics, content_topic));
                 let msg = event.waku_message().clone();
-                println!("msg: {:?}", msg.timestamp());
-                sender_alice.blocking_send(msg).unwrap();
+                info!("msg: {:?}", msg.timestamp());
+                assert!(sender_alice.blocking_send(msg).is_ok());
             }
 
             waku_bindings::Event::Unrecognized(data) => {
@@ -104,36 +96,37 @@ async fn test_waku_client() {
         }
     });
 
-    let handle2 = tokio::spawn(async move {
+    let sender = tokio::spawn(async move {
         for _ in 0..10 {
-            let res = actor_ref
+            assert!(actor_ref
                 .ask(ProcessMessageToSend {
                     msg: format!("test_message").as_bytes().to_vec(),
                     subtopic: APP_MSG_SUBTOPIC.to_string(),
                     group_id: group_name.clone(),
                     app_id: uuid.clone(),
                 })
-                .await;
-            println!("res: {:?}", res);
+                .await
+                .is_ok());
+
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        println!("handle2 finished");
+        info!("sender handle is finished");
     });
 
-    let handle = tokio::spawn(async move {
+    let receiver = tokio::spawn(async move {
         while let Some(msg) = receiver_alice.recv().await {
-            println!("msg received: {:?}", msg.timestamp());
+            info!("msg received: {:?}", msg.timestamp());
             pubsub.publish(msg).await;
         }
-        println!("handle finished");
+        info!("receiver handle is finished");
     });
 
     tokio::select! {
-        x = handle2 => {
-            println!("2res: {:?}", x);
+        x = sender => {
+            info!("get from sender: {:?}", x);
         }
-        w = handle => {
-            println!("3msg received: {:?}", w);
+        w = receiver => {
+            info!("get from receiver: {:?}", w);
         }
     }
 }

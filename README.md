@@ -2,6 +2,12 @@
 
 Decentralized MLS PoC using a smart contract for group coordination
 
+## Run Test Waku Node
+
+```bash
+docker run -p 8645:8645 -p 60000:60000 wakuorg/nwaku:v0.33.1 --cluster-id=15 --rest --relay --rln-relay=false --pubsub-topic=/waku/2/rs/15/0
+```
+
 ## Run User Instance
 
 Create a `.env` file in the `.env` folder for each client containing the following variables:

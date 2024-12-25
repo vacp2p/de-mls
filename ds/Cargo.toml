@@ -10,21 +10,20 @@ waku-bindings = { git = "https://github.com/waku-org/waku-rust-bindings.git", br
 waku-sys = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "force-cluster-15", subdir = "waku-sys" }
 
 tokio = { version = "=1.38.0", features = ["full"] }
-kameo = "0.13.0"
-
-openmls = { version = "=0.5.0", features = ["test-utils"] }
+kameo = "=0.13.0"
 
 chrono = "=0.4.38"
-lazy_static = "=1.4.0"
+uuid = { version = "=1.11.0", features = [
+    "v4",
+    "fast-rng",
+    "macro-diagnostics",
+] }
 
 anyhow = "=1.0.81"
 thiserror = "=1.0.61"
 
 serde_json = "=1.0"
 serde = "=1.0.204"
-toml = "0.8.19"
 
-env_logger = "0.11.5"
-log = "0.4.22"
-
-uuid = { version = "1.11.0", features = ["v4", "fast-rng", "macro-diagnostics"] }
+env_logger = "=0.11.5"
+log = "=0.4.22"

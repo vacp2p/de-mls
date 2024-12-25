@@ -104,7 +104,7 @@ impl Group {
         self.app_id.clone()
     }
 
-    pub fn admin_decrypt_msg(&self, message: Vec<u8>) -> Result<KeyPackage, GroupError> {
+    pub fn decrypt_admin_msg(&self, message: Vec<u8>) -> Result<KeyPackage, GroupError> {
         if !self.is_admin() {
             return Err(GroupError::AdminNotSetError);
         }
@@ -118,6 +118,9 @@ impl Group {
         provider: &MlsCryptoProvider,
         signer: &SignatureKeyPair,
     ) -> Result<Vec<ProcessMessageToSend>, GroupError> {
+        if !self.is_mls_group_initialized() {
+            return Err(GroupError::MlsGroupNotInitializedError);
+        }
         let mut mls_group = self.mls_group.as_mut().unwrap().lock().await;
         let (out_messages, welcome, _group_info) =
             mls_group.add_members(provider, signer, &users_kp)?;
@@ -152,6 +155,9 @@ impl Group {
         provider: &MlsCryptoProvider,
         signer: &SignatureKeyPair,
     ) -> Result<ProcessMessageToSend, GroupError> {
+        if !self.is_mls_group_initialized() {
+            return Err(GroupError::MlsGroupNotInitializedError);
+        }
         let mut mls_group = self.mls_group.as_mut().unwrap().lock().await;
         let mut leaf_indexs = Vec::new();
         let members = mls_group.members().collect::<Vec<_>>();
@@ -189,6 +195,9 @@ impl Group {
         if group_id != self.group_name.as_bytes().to_vec() {
             return Ok(GroupAction::DoNothing);
         }
+        if !self.is_mls_group_initialized() {
+            return Err(GroupError::MlsGroupNotInitializedError);
+        }
         let mut mls_group = self.mls_group.as_mut().unwrap().lock().await;
 
         // If the message is from a previous epoch, we don't need to process it and it's a commit for welcome message
@@ -211,7 +220,10 @@ impl Group {
                             None
                         }
                     });
-                    user_id.unwrap_or("".to_owned())
+                    if user_id.is_none() {
+                        return Ok(GroupAction::DoNothing);
+                    }
+                    user_id.unwrap()
                 };
 
                 let conversation_message = MessageToPrint::new(
@@ -247,7 +259,7 @@ impl Group {
             Some(a) => a,
             None => return Err(GroupError::AdminNotSetError),
         };
-        admin.generate_new_key_pair()?;
+        admin.generate_new_key_pair();
         let admin_msg = admin.generate_admin_message();
 
         let wm = WelcomeMessage {
@@ -306,9 +318,9 @@ pub struct Admin {
 
 pub trait AdminTrait {
     fn new() -> Self;
-    fn generate_new_key_pair(&mut self) -> Result<(), AdminError>;
+    fn generate_new_key_pair(&mut self);
     fn generate_admin_message(&self) -> GroupAnnouncement;
-    fn decrypt_msg(&self, message: Vec<u8>) -> Result<KeyPackage, AdminError>;
+    fn decrypt_msg(&self, message: Vec<u8>) -> Result<KeyPackage, MessageError>;
 }
 
 impl AdminTrait for Admin {
@@ -321,12 +333,11 @@ impl AdminTrait for Admin {
         }
     }
 
-    fn generate_new_key_pair(&mut self) -> Result<(), AdminError> {
+    fn generate_new_key_pair(&mut self) {
         let (public_key, secret_key) = generate_keypair();
         self.current_key_pair = public_key;
         self.current_key_pair_private = secret_key;
         self.key_pair_timestamp = Utc::now().timestamp() as u64;
-        Ok(())
     }
 
     fn generate_admin_message(&self) -> GroupAnnouncement {
@@ -340,7 +351,7 @@ impl AdminTrait for Admin {
         )
     }
 
-    fn decrypt_msg(&self, message: Vec<u8>) -> Result<KeyPackage, AdminError> {
+    fn decrypt_msg(&self, message: Vec<u8>) -> Result<KeyPackage, MessageError> {
         let msg: Vec<u8> = decrypt_message(&message, self.current_key_pair_private)?;
         let key_package: KeyPackage = serde_json::from_slice(&msg)?;
         Ok(key_package)

@@ -17,9 +17,7 @@ use std::{
 use waku_bindings::{WakuContentTopic, WakuMessage};
 
 use ds::{
-    waku_actor::{
-        ProcessMessageToSend, ProcessSubscribeToGroup, ProcessUnsubscribeFromGroup, WakuActor,
-    },
+    waku_actor::{ProcessMessageToSend, ProcessSubscribeToGroup, WakuActor},
     DeliveryServiceError,
 };
 
@@ -34,10 +32,6 @@ pub struct AppState {
     pub rooms: Mutex<HashSet<String>>,
     pub content_topics: Arc<Mutex<Vec<WakuContentTopic>>>,
     pub pubsub: tokio::sync::broadcast::Sender<WakuMessage>,
-}
-
-pub fn group_id_to_name(group_id: Vec<u8>) -> String {
-    String::from_utf8(group_id).unwrap()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,7 +163,10 @@ pub enum GroupError {
     #[error("Admin not set")]
     AdminNotSetError,
     #[error(transparent)]
-    AdminError(#[from] AdminError),
+    MessageError(#[from] MessageError),
+    #[error("MLS group not initialized")]
+    MlsGroupNotInitializedError,
+
     #[error("Error while creating MLS group: {0}")]
     MlsGroupCreationError(#[from] NewGroupError<MemoryKeyStoreError>),
     #[error("Error while adding member to MLS group: {0}")]
@@ -182,54 +179,24 @@ pub enum GroupError {
     MlsProcessMessageError(#[from] ProcessMessageError),
     #[error("Error while creating message: {0}")]
     MlsCreateMessageError(#[from] CreateMessageError),
-    #[error("Failed to create staged join: {0}")]
-    MlsWelcomeError(#[from] WelcomeError<MemoryKeyStoreError>),
-    #[error("Failed to validate user key package: {0}")]
-    MlsKeyPackageVerificationError(#[from] KeyPackageVerifyError),
     #[error("Failed to remove members: {0}")]
     MlsRemoveMembersError(#[from] RemoveMembersError<MemoryKeyStoreError>),
-    #[error("Failed to leave group: {0}")]
-    MlsLeaveGroupError(#[from] LeaveGroupError),
+    #[error("Group still active")]
+    GroupStillActiveError,
 
     #[error("UTF-8 parsing error: {0}")]
     Utf8ParsingError(#[from] FromUtf8Error),
-    #[error("UTF-8 string parsing error: {0}")]
-    Utf8StringParsingError(#[from] Utf8Error),
     #[error("JSON processing error: {0}")]
     JsonError(#[from] serde_json::Error),
     #[error("Serialization error: {0}")]
     SerializationError(#[from] tls_codec::Error),
-    #[error("Failed to parse signer: {0}")]
-    SignerParsingError(#[from] LocalSignerError),
-    #[error("Group still active")]
-    GroupStillActiveError,
 
-    #[error("Unsupported message type.")]
-    UnsupportedMessageType,
-    #[error("Unknown content topic type: {0}")]
-    UnknownContentTopicType(String),
-    #[error("Welcome message cannot be empty.")]
-    EmptyWelcomeMessageError,
-    #[error("Message verification failed")]
-    MessageVerificationFailed,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum AdminError {
-    #[error("Admin not found: {0}")]
-    AdminNotFoundError(String),
-    #[error("Admin already exists: {0}")]
-    AdminAlreadyExistsError(String),
-    #[error(transparent)]
-    MessageError(#[from] MessageError),
-    #[error("JSON processing error: {0}")]
-    JsonError(#[from] serde_json::Error),
+    #[error("An unknown error occurred: {0}")]
+    Other(anyhow::Error),
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum MessageError {
-    #[error("Message verification failed")]
-    MessageVerificationFailed,
     #[error("Failed to verify signature: {0}")]
     SignatureVerificationError(#[from] libsecp256k1::Error),
     #[error("JSON processing error: {0}")]
@@ -244,8 +211,6 @@ pub enum UserError {
     IdentityError(#[from] IdentityError),
     #[error(transparent)]
     GroupError(#[from] GroupError),
-    #[error(transparent)]
-    AdminError(#[from] AdminError),
     #[error(transparent)]
     MessageError(#[from] MessageError),
 
@@ -264,22 +229,8 @@ pub enum UserError {
     #[error("Unknown content topic type: {0}")]
     UnknownContentTopicType(String),
 
-    #[error("Error while creating MLS group: {0}")]
-    MlsGroupCreationError(#[from] NewGroupError<MemoryKeyStoreError>),
-    #[error("Error while adding member to MLS group: {0}")]
-    MlsAddMemberError(#[from] AddMembersError<MemoryKeyStoreError>),
-    #[error("Error while merging pending commit in MLS group: {0}")]
-    MlsMergePendingCommitError(#[from] MergePendingCommitError<MemoryKeyStoreError>),
-    #[error("Error while merging commit in MLS group: {0}")]
-    MlsMergeCommitError(#[from] MergeCommitError<MemoryKeyStoreError>),
-    #[error("Error processing unverified message: {0}")]
-    MlsProcessMessageError(#[from] ProcessMessageError),
-    #[error("Error while creating message: {0}")]
-    MlsCreateMessageError(#[from] CreateMessageError),
     #[error("Failed to create staged join: {0}")]
     MlsWelcomeError(#[from] WelcomeError<MemoryKeyStoreError>),
-    #[error("Failed to validate user key package: {0}")]
-    MlsKeyPackageVerificationError(#[from] KeyPackageVerifyError),
 
     #[error("UTF-8 parsing error: {0}")]
     Utf8ParsingError(#[from] FromUtf8Error),
@@ -296,10 +247,10 @@ pub enum UserError {
     KameoSubscribeToGroupError(#[from] SendError<ProcessSubscribeToGroup, DeliveryServiceError>),
     #[error("Failed to publish message: {0}")]
     KameoPublishMessageError(#[from] SendError<ProcessMessageToSend, DeliveryServiceError>),
-    #[error("Failed to unsubscribe from group: {0}")]
-    KameoUnsubscribeFromGroupError(
-        #[from] SendError<ProcessUnsubscribeFromGroup, DeliveryServiceError>,
-    ),
+    #[error("Failed to create group: {0}")]
+    KameoCreateGroupError(String),
+    #[error("Failed to send message to user: {0}")]
+    KameoSendMessageError(String),
 }
 
 #[cfg(test)]

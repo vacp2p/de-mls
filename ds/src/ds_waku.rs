@@ -1,8 +1,6 @@
 use core::result::Result;
-use lazy_static::lazy_static;
 use std::{
     borrow::Cow,
-    error::Error,
     str::FromStr,
     sync::{Arc, Mutex as SyncMutex},
     thread,
@@ -10,51 +8,63 @@ use std::{
 };
 use waku_bindings::*;
 
-pub const TEST_GROUP_NAME: &str = "new_group";
+use crate::DeliveryServiceError;
+
 pub const GROUP_VERSION: &str = "1";
 pub const APP_MSG_SUBTOPIC: &str = "app_msg";
 pub const COMMIT_MSG_SUBTOPIC: &str = "commit_msg";
 pub const WELCOME_SUBTOPIC: &str = "welcome";
 pub const SUBTOPICS: [&str; 3] = [APP_MSG_SUBTOPIC, COMMIT_MSG_SUBTOPIC, WELCOME_SUBTOPIC];
 
-lazy_static! {
-    pub static ref TEST_WELCOME_CONTENT_TOPIC: WakuContentTopic =
-        build_content_topic(TEST_GROUP_NAME, GROUP_VERSION, WELCOME_SUBTOPIC);
-    pub static ref TEST_APP_MSG_CONTENT_TOPIC: WakuContentTopic =
-        build_content_topic(TEST_GROUP_NAME, GROUP_VERSION, APP_MSG_SUBTOPIC);
-    pub static ref TEST_COMMIT_MSG_CONTENT_TOPIC: WakuContentTopic =
-        build_content_topic(TEST_GROUP_NAME, GROUP_VERSION, COMMIT_MSG_SUBTOPIC);
-}
-
+/// The pubsub topic for the Waku Node
+/// Fixed for now because nodes on the network would need to be subscribed to existing pubsub topics
 pub fn pubsub_topic() -> WakuPubSubTopic {
     "/waku/2/rs/15/0".to_string()
 }
 
-pub fn build_content_topics(
-    group_name: &str,
-    group_version: &str,
-    subtopics: &[&str],
-) -> Vec<WakuContentTopic> {
-    (*subtopics
+/// Build the content topics for a group. Subtopics are fixed for de-mls group communication.
+///
+/// Input:
+/// - group_name: The name of the group
+/// - group_version: The version of the group
+///
+/// Returns:
+/// - content_topics: The content topics of the group
+pub fn build_content_topics(group_name: &str, group_version: &str) -> Vec<WakuContentTopic> {
+    SUBTOPICS
         .iter()
-        .map(|subtopic| WakuContentTopic {
-            application_name: Cow::from(group_name.to_string()),
-            version: Cow::from(group_version.to_string()),
-            content_topic_name: Cow::from(subtopic.to_string()),
-            encoding: Encoding::Proto,
-        })
-        .collect::<Vec<WakuContentTopic>>())
-    .to_vec()
+        .map(|subtopic| build_content_topic(group_name, group_version, subtopic))
+        .collect::<Vec<WakuContentTopic>>()
 }
 
+/// Build the content topic for the given group and subtopic
+/// Input:
+/// - group_name: The name of the group
+/// - group_version: The version of the group
+/// - subtopic: The subtopic of the group
+///
+/// Returns:
+/// - content_topic: The content topic of the subtopic
 pub fn build_content_topic(
     group_name: &str,
     group_version: &str,
     subtopic: &str,
 ) -> WakuContentTopic {
-    build_content_topics(group_name, group_version, &[subtopic])[0].clone()
+    WakuContentTopic {
+        application_name: Cow::from(group_name.to_string()),
+        version: Cow::from(group_version.to_string()),
+        content_topic_name: Cow::from(subtopic.to_string()),
+        encoding: Encoding::Proto,
+    }
 }
 
+/// Build the content filter for the given pubsub topic and content topics
+/// Input:
+/// - pubsub_topic: The pubsub topic of the Waku Node
+/// - content_topics: The content topics of the group
+///
+/// Returns:
+/// - content_filter: The content filter of the group
 pub fn content_filter(
     pubsub_topic: &WakuPubSubTopic,
     content_topics: &[WakuContentTopic],
@@ -62,21 +72,41 @@ pub fn content_filter(
     ContentFilter::new(Some(pubsub_topic.to_string()), content_topics.to_vec())
 }
 
+/// Setup the Waku Node Handle
+/// Input:
+/// - nodes_addresses: The addresses of the nodes to connect to
+///
+/// Returns:
+/// - node_handle: The Waku Node Handle
 #[allow(clippy::field_reassign_with_default)]
-pub fn setup_node_handle(nodes: Vec<String>) -> Result<WakuNodeHandle<Running>, Box<dyn Error>> {
+pub fn setup_node_handle(
+    nodes_addresses: Vec<String>,
+) -> Result<WakuNodeHandle<Running>, DeliveryServiceError> {
     let mut config = WakuNodeConfig::default();
+    // Set the port to 0 to let the system choose a random port
     config.port = Some(0);
     config.log_level = Some(WakuLogLevel::Panic);
-    let node_handle = waku_new(Some(config))?;
-    let node_handle = node_handle.start()?;
+    let node_handle = waku_new(Some(config))
+        .map_err(|e| DeliveryServiceError::WakuNodeAlreadyInitialized(e.to_string()))?;
+    let node_handle = node_handle
+        .start()
+        .map_err(|e| DeliveryServiceError::WakuNodeAlreadyInitialized(e.to_string()))?;
     let content_filter = ContentFilter::new(Some(pubsub_topic()), vec![]);
-    node_handle.relay_subscribe(&content_filter)?;
-    for address in nodes
+    node_handle
+        .relay_subscribe(&content_filter)
+        .map_err(|e| DeliveryServiceError::WakuSubscribeToContentFilterError(e.to_string()))?;
+    for address in nodes_addresses
         .iter()
-        .map(|a| Multiaddr::from_str(a.as_str()).unwrap())
+        .map(|a| Multiaddr::from_str(a.as_str()))
     {
-        let peerid = node_handle.add_peer(&address, ProtocolId::Relay)?;
-        node_handle.connect_peer_with_id(&peerid, None)?;
+        let address =
+            address.map_err(|e| DeliveryServiceError::FailedToParseMultiaddr(e.to_string()))?;
+        let peerid = node_handle
+            .add_peer(&address, ProtocolId::Relay)
+            .map_err(|e| DeliveryServiceError::WakuAddPeerError(e.to_string()))?;
+        node_handle
+            .connect_peer_with_id(&peerid, None)
+            .map_err(|e| DeliveryServiceError::WakuConnectPeerError(e.to_string()))?;
         thread::sleep(Duration::from_secs(2));
     }
 

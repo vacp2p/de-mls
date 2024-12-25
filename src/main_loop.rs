@@ -4,7 +4,7 @@ use log::{error, info};
 use std::{str::FromStr, sync::Arc, time::Duration};
 
 use crate::user::{ProcessAdminMessage, ProcessCreateGroup, User};
-use crate::AppState;
+use crate::{AppState, UserError};
 use ds::waku_actor::ProcessSubscribeToGroup;
 
 #[derive(Debug, Clone)]
@@ -17,26 +17,21 @@ pub struct Connection {
 pub async fn main_loop(
     connection: Connection,
     app_state: Arc<AppState>,
-    // tx_waku: Sender<String>,
-    // rx_ws: Receiver<String>,
-) -> Result<ActorRef<User>, Box<dyn std::error::Error>> {
+) -> Result<ActorRef<User>, UserError> {
     let signer = PrivateKeySigner::from_str(&connection.eth_private_key)?;
     let user_address = signer.address().to_string();
     let group_name: String = connection.group_id.clone();
     // Create user
     let user = User::new(&connection.eth_private_key)?;
     let user_ref = kameo::spawn(user);
-
-    info!(
-        "Creating group[{:?}]: {:?}",
-        connection.should_create_group, group_name
-    );
     user_ref
         .ask(ProcessCreateGroup {
             group_name: group_name.clone(),
             is_creation: connection.should_create_group,
         })
-        .await?;
+        .await
+        .map_err(|e| UserError::KameoCreateGroupError(e.to_string()))?;
+
     let mut content_topics = app_state
         .waku_actor
         .ask(ProcessSubscribeToGroup {
@@ -66,10 +61,11 @@ pub async fn main_loop(
                         .ask(ProcessAdminMessage {
                             group_name: group_name_clone.clone(),
                         })
-                        .await?;
+                        .await
+                        .map_err(|e| UserError::KameoSendMessageError(e.to_string()))?;
                     let id = node_clone.ask(msg).await?;
                     info!("Successfully publish admin message with id: {:?}", id);
-                    Ok::<(), Box<dyn std::error::Error>>(())
+                    Ok::<(), UserError>(())
                 }
                 .await;
                 if let Err(e) = res {
