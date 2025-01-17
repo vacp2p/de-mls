@@ -39,13 +39,13 @@ jobs:
         working-directory: tests
 
   benches:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout sources
         uses: actions/checkout@v3
-      - name: cargo bench
-        run: |
-          cargo bench
+      - uses: Swatinem/rust-cache@v2
+      - uses: boa-dev/criterion-compare-action@v3
 
   lint:
     runs-on: ubuntu-latest
