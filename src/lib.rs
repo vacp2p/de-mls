@@ -21,10 +21,11 @@ use ds::{
     DeliveryServiceError,
 };
 
+pub mod action_handlers;
 pub mod group_actor;
 pub mod identity;
-pub mod main_loop;
 pub mod user;
+pub mod user_app_instance;
 pub mod ws_actor;
 
 pub struct AppState {
@@ -32,6 +33,13 @@ pub struct AppState {
     pub rooms: Mutex<HashSet<String>>,
     pub content_topics: Arc<Mutex<Vec<WakuContentTopic>>>,
     pub pubsub: tokio::sync::broadcast::Sender<WakuMessage>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Connection {
+    pub eth_private_key: String,
+    pub group_id: String,
+    pub should_create_group: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

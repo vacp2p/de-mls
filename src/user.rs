@@ -362,7 +362,7 @@ impl User {
         }
     }
 
-    async fn invite_users(
+    pub async fn invite_users(
         &mut self,
         users_kp: Vec<KeyPackage>,
         group_name: String,

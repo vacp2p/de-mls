@@ -38,6 +38,16 @@ jobs:
           cargo test --release
         working-directory: tests
 
+  benches:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      - name: cargo bench
+        run: |
+          cargo bench --release
+        working-directory: benches
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 60

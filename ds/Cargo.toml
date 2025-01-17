@@ -9,8 +9,9 @@ edition = "2021"
 waku-bindings = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "force-cluster-15", subdir = "waku-bindings" }
 waku-sys = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "force-cluster-15", subdir = "waku-sys" }
 
-tokio = { version = "=1.38.0", features = ["full"] }
+tokio = { version = "1.43.0", features = ["full"] }
 kameo = "=0.13.0"
+bounded-vec-deque = "0.1.1"
 
 chrono = "=0.4.38"
 uuid = { version = "=1.11.0", features = [

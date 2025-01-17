@@ -4,17 +4,10 @@ use log::{error, info};
 use std::{str::FromStr, sync::Arc, time::Duration};
 
 use crate::user::{ProcessAdminMessage, ProcessCreateGroup, User};
-use crate::{AppState, UserError};
+use crate::{AppState, Connection, UserError};
 use ds::waku_actor::ProcessSubscribeToGroup;
 
-#[derive(Debug, Clone)]
-pub struct Connection {
-    pub eth_private_key: String,
-    pub group_id: String,
-    pub should_create_group: bool,
-}
-
-pub async fn main_loop(
+pub async fn create_user_instance(
     connection: Connection,
     app_state: Arc<AppState>,
 ) -> Result<ActorRef<User>, UserError> {

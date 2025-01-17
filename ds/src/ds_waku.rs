@@ -1,4 +1,6 @@
+use bounded_vec_deque::BoundedVecDeque;
 use core::result::Result;
+use log::{error, info};
 use std::{
     borrow::Cow,
     str::FromStr,
@@ -6,6 +8,7 @@ use std::{
     thread,
     time::Duration,
 };
+use tokio::sync::mpsc::Sender;
 use waku_bindings::*;
 
 use crate::DeliveryServiceError;
@@ -120,4 +123,44 @@ pub fn match_content_topic(
 ) -> bool {
     let locked_topics = content_topics.lock().unwrap();
     locked_topics.is_empty() || locked_topics.iter().any(|t| t == topic)
+}
+
+pub async fn handle_waku_event(
+    waku_sender: Sender<WakuMessage>,
+    content_topics: Arc<SyncMutex<Vec<WakuContentTopic>>>,
+) {
+    info!("Setting up waku event callback");
+    let mut seen_messages = BoundedVecDeque::<String>::new(40);
+    waku_set_event_callback(move |signal| {
+        match signal.event() {
+            waku_bindings::Event::WakuMessage(event) => {
+                let msg_id = event.message_id();
+                if seen_messages.contains(msg_id) {
+                    return;
+                }
+                seen_messages.push_back(msg_id.clone());
+                let content_topic = event.waku_message().content_topic();
+                // Check if message belongs to a relevant topic
+                if !match_content_topic(&content_topics, content_topic) {
+                    error!("Content topic not match: {:?}", content_topic);
+                    return;
+                };
+                let msg = event.waku_message().clone();
+                info!("Received message from waku: {:?}", event.message_id());
+                waku_sender
+                    .blocking_send(msg)
+                    .expect("Failed to send message to waku");
+            }
+
+            waku_bindings::Event::Unrecognized(data) => {
+                error!("Unrecognized event!\n {data:?}");
+            }
+            _ => {
+                error!(
+                    "Unrecognized signal!\n {:?}",
+                    serde_json::to_string(&signal)
+                );
+            }
+        }
+    });
 }

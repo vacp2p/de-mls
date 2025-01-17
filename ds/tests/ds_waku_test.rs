@@ -50,9 +50,12 @@ impl Message<WakuMessage> for ActorA {
 async fn test_waku_client() {
     let group_name = "new_group".to_string();
     let mut pubsub = PubSub::<WakuMessage>::new();
-    let (sender_alice, mut receiver_alice) = channel(100);
+    let (sender_alice, mut receiver_alice) = channel::<WakuMessage>(100);
     // TODO: get node from env
-    let res = setup_node_handle(vec![]);
+    let res = setup_node_handle(vec![
+        "/ip4/139.59.24.82/tcp/60000/p2p/16Uiu2HAm2CfeeaNiGwv88Loe417HrRbCwTFqhpDiR3wevbCcvYz2"
+            .to_string(),
+    ]);
     assert!(res.is_ok());
     let node = res.unwrap();
     let uuid = uuid::Uuid::new_v4().as_bytes().to_vec();

@@ -47,7 +47,7 @@ pub struct UserMessage {
 }
 
 /// This struct is used to represent the connection data that web socket sends to the user
-#[derive(Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct ConnectMessage {
     /// This is the private key of the user that we will use to authenticate the user
     pub eth_private_key: String,

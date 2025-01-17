@@ -6,9 +6,7 @@ use axum::{
     routing::get,
     Router,
 };
-use bounded_vec_deque::BoundedVecDeque;
 use futures::StreamExt;
-use kameo::actor::ActorRef;
 use log::{error, info};
 use serde_json::json;
 use std::{
@@ -16,20 +14,20 @@ use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
-use tokio::sync::mpsc::{channel, Sender};
+use tokio::sync::mpsc::channel;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
-use waku_bindings::{waku_set_event_callback, WakuMessage};
+use waku_bindings::WakuMessage;
 
 use de_mls::{
-    main_loop::{main_loop, Connection},
-    user::{ProcessLeaveGroup, ProcessRemoveUser, ProcessSendMessage, User, UserAction},
+    action_handlers::{handle_user_actions, handle_ws_action},
+    user_app_instance::create_user_instance,
     ws_actor::{RawWsMessage, WsAction, WsActor},
-    AppState, MessageToPrint,
+    AppState, Connection,
 };
 use ds::{
-    ds_waku::{match_content_topic, setup_node_handle},
-    waku_actor::{ProcessUnsubscribeFromGroup, WakuActor},
+    ds_waku::{handle_waku_event, setup_node_handle},
+    waku_actor::WakuActor,
 };
 
 #[tokio::main]
@@ -52,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let (waku_sender, mut waku_receiver) = channel::<WakuMessage>(100);
-    handle_waku(waku_sender, app_state.clone()).await;
+    handle_waku_event(waku_sender, app_state.content_topics.clone()).await;
 
     let recv_messages = tokio::spawn(async move {
         info!("Running recv messages from waku");
@@ -73,6 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(cors);
 
     println!("Hosted on {:?}", addr);
+
     let res = axum::Server::bind(&addr).serve(app.into_make_service());
     tokio::select! {
         Err(x) = res => {
@@ -87,43 +86,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
     ws.on_upgrade(|socket| handle_socket(socket, state))
-}
-
-async fn handle_waku(waku_sender: Sender<WakuMessage>, state: Arc<AppState>) {
-    info!("Setting up waku event callback");
-    let mut seen_messages = BoundedVecDeque::<String>::new(40);
-    waku_set_event_callback(move |signal| {
-        match signal.event() {
-            waku_bindings::Event::WakuMessage(event) => {
-                let msg_id = event.message_id();
-                if seen_messages.contains(msg_id) {
-                    return;
-                }
-                seen_messages.push_back(msg_id.clone());
-                let content_topic = event.waku_message().content_topic();
-                // Check if message belongs to a relevant topic
-                if !match_content_topic(&state.content_topics, content_topic) {
-                    error!("Content topic not match: {:?}", content_topic);
-                    return;
-                };
-                let msg = event.waku_message().clone();
-                info!("Received message from waku: {:?}", event.message_id());
-                waku_sender
-                    .blocking_send(msg)
-                    .expect("Failed to send message to waku");
-            }
-
-            waku_bindings::Event::Unrecognized(data) => {
-                error!("Unrecognized event!\n {data:?}");
-            }
-            _ => {
-                error!(
-                    "Unrecognized signal!\n {:?}",
-                    serde_json::to_string(&signal)
-                );
-            }
-        }
-    });
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
@@ -156,18 +118,19 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         }
     }
 
-    let user_actor = main_loop(main_loop_connection.unwrap().clone(), state.clone())
+    let user_actor = create_user_instance(main_loop_connection.unwrap().clone(), state.clone())
         .await
         .expect("Failed to start main loop");
 
     let user_actor_clone = user_actor.clone();
     let state_clone = state.clone();
     let ws_actor_clone = ws_actor.clone();
-    let mut waku_receiver = state.pubsub.subscribe();
     let cancel_token_clone = cancel_token.clone();
-    let mut recv_messages = tokio::spawn(async move {
-        info!("Running recv messages from waku");
-        while let Ok(msg) = waku_receiver.recv().await {
+
+    let mut user_waku_receiver = state.pubsub.subscribe();
+    let mut recv_messages_waku = tokio::spawn(async move {
+        info!("Running recv messages from waku for current user");
+        while let Ok(msg) = user_waku_receiver.recv().await {
             let res = handle_user_actions(
                 msg,
                 state_clone.waku_actor.clone(),
@@ -183,11 +146,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     });
 
     let user_ref_clone = user_actor.clone();
-    let mut send_messages = {
+    let mut recv_messages_ws = {
         tokio::spawn(async move {
             info!("Running recieve messages from websocket");
             while let Some(Ok(Message::Text(text))) = ws_receiver.next().await {
-                let res = handle_ws_message(
+                let res = handle_ws_action(
                     RawWsMessage { message: text },
                     ws_actor.clone(),
                     user_ref_clone.clone(),
@@ -201,122 +164,23 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         })
     };
 
-    info!("Waiting for main loop to finish");
     tokio::select! {
-        _ = (&mut recv_messages) => {
-            info!("recv_messages finished");
-            send_messages.abort();
+        _ = (&mut recv_messages_waku) => {
+            info!("recv messages from waku finished");
+            recv_messages_ws.abort();
         }
-        _ = (&mut send_messages) => {
-            info!("send_messages finished");
-            send_messages.abort();
+        _ = (&mut recv_messages_ws) => {
+            info!("recieve messages from websocket finished");
+            recv_messages_ws.abort();
         }
         _ = cancel_token.cancelled() => {
             info!("Cancel token cancelled");
-            send_messages.abort();
-            recv_messages.abort();
+            recv_messages_ws.abort();
+            recv_messages_waku.abort();
         }
     };
 
     info!("Main loop finished");
-}
-
-async fn handle_user_actions(
-    msg: WakuMessage,
-    waku_actor: ActorRef<WakuActor>,
-    ws_actor: ActorRef<WsActor>,
-    user_actor: ActorRef<User>,
-    cancel_token: CancellationToken,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let actions = user_actor.ask(msg).await?;
-    for action in actions {
-        match action {
-            UserAction::SendToWaku(msg) => {
-                let id = waku_actor.ask(msg).await?;
-                info!("Successfully publish message with id: {:?}", id);
-            }
-            UserAction::SendToGroup(msg) => {
-                info!("Send to group: {:?}", msg);
-                ws_actor.ask(msg).await?;
-            }
-            UserAction::RemoveGroup(group_name) => {
-                waku_actor
-                    .ask(ProcessUnsubscribeFromGroup {
-                        group_name: group_name.clone(),
-                    })
-                    .await?;
-                user_actor
-                    .ask(ProcessLeaveGroup {
-                        group_name: group_name.clone(),
-                    })
-                    .await?;
-                info!("Leave group: {:?}", &group_name);
-                ws_actor
-                    .ask(MessageToPrint {
-                        sender: "system".to_string(),
-                        message: format!("Group {} removed you", group_name),
-                        group_name: group_name.clone(),
-                    })
-                    .await?;
-                cancel_token.cancel();
-            }
-            UserAction::DoNothing => {}
-        }
-    }
-    Ok(())
-}
-
-async fn handle_ws_message(
-    msg: RawWsMessage,
-    ws_actor: ActorRef<WsActor>,
-    user_actor: ActorRef<User>,
-    waku_actor: ActorRef<WakuActor>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let action = ws_actor.ask(msg).await?;
-    match action {
-        WsAction::Connect(connect) => {
-            info!("Got unexpected connect: {:?}", &connect);
-        }
-        WsAction::UserMessage(msg) => {
-            info!("Got user message: {:?}", &msg);
-            let mtp = MessageToPrint {
-                message: msg.message.clone(),
-                group_name: msg.group_id.clone(),
-                sender: "me".to_string(),
-            };
-            ws_actor.ask(mtp).await?;
-
-            let pmt = user_actor
-                .ask(ProcessSendMessage {
-                    msg: msg.message,
-                    group_name: msg.group_id,
-                })
-                .await?;
-            let id = waku_actor.ask(pmt).await?;
-            info!("Successfully publish message with id: {:?}", id);
-        }
-        WsAction::RemoveUser(user_to_ban, group_name) => {
-            info!("Got remove user: {:?}", &user_to_ban);
-            let pmt = user_actor
-                .ask(ProcessRemoveUser {
-                    user_to_ban: user_to_ban.clone(),
-                    group_name: group_name.clone(),
-                })
-                .await?;
-            let id = waku_actor.ask(pmt).await?;
-            info!("Successfully publish message with id: {:?}", id);
-            ws_actor
-                .ask(MessageToPrint {
-                    sender: "system".to_string(),
-                    message: format!("User {} was removed from group", user_to_ban),
-                    group_name: group_name.clone(),
-                })
-                .await?;
-        }
-        WsAction::DoNothing => {}
-    }
-
-    Ok(())
 }
 
 async fn get_rooms(State(state): State<Arc<AppState>>) -> String {
