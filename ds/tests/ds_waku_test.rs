@@ -51,11 +51,8 @@ async fn test_waku_client() {
     let group_name = "new_group".to_string();
     let mut pubsub = PubSub::<WakuMessage>::new();
     let (sender_alice, mut receiver_alice) = channel::<WakuMessage>(100);
-    // TODO: get node from env
-    let res = setup_node_handle(vec![
-        "/ip4/139.59.24.82/tcp/60000/p2p/16Uiu2HAm2CfeeaNiGwv88Loe417HrRbCwTFqhpDiR3wevbCcvYz2"
-            .to_string(),
-    ]);
+    let node_name = std::env::var("NODE").expect("NODE is not set");
+    let res = setup_node_handle(vec![node_name]);
     assert!(res.is_ok());
     let node = res.unwrap();
     let uuid = uuid::Uuid::new_v4().as_bytes().to_vec();
@@ -83,7 +80,7 @@ async fn test_waku_client() {
                 // Check if message belongs to a relevant topic
                 assert!(match_content_topic(&content_topics, content_topic));
                 let msg = event.waku_message().clone();
-                info!("msg: {:?}", msg.timestamp());
+                println!("msg: {:?}", msg.timestamp());
                 assert!(sender_alice.blocking_send(msg).is_ok());
             }
 
@@ -100,10 +97,10 @@ async fn test_waku_client() {
     });
 
     let sender = tokio::spawn(async move {
-        for _ in 0..10 {
+        for i in 0..10 {
             assert!(actor_ref
                 .ask(ProcessMessageToSend {
-                    msg: format!("test_message").as_bytes().to_vec(),
+                    msg: format!("test_message_{}", i).as_bytes().to_vec(),
                     subtopic: APP_MSG_SUBTOPIC.to_string(),
                     group_id: group_name.clone(),
                     app_id: uuid.clone(),
@@ -118,7 +115,7 @@ async fn test_waku_client() {
 
     let receiver = tokio::spawn(async move {
         while let Some(msg) = receiver_alice.recv().await {
-            info!("msg received: {:?}", msg.timestamp());
+            println!("msg received: {:?}", msg.timestamp());
             pubsub.publish(msg).await;
         }
         info!("receiver handle is finished");
@@ -126,10 +123,10 @@ async fn test_waku_client() {
 
     tokio::select! {
         x = sender => {
-            info!("get from sender: {:?}", x);
+            println!("get from sender: {:?}", x);
         }
         w = receiver => {
-            info!("get from receiver: {:?}", w);
+            println!("get from receiver: {:?}", w);
         }
     }
 }
