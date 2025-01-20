@@ -11,6 +11,10 @@ edition = "2021"
 [[bin]]
 name = "de-mls"
 path = "src/main.rs"
+bench = false
+
+[lib]
+bench = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -24,11 +28,7 @@ openmls_traits = "=0.2.0"
 axum = { version = "0.6.10", features = ["ws"] }
 futures = "0.3.26"
 tower-http = { version = "0.4.0", features = ["cors"] }
-tokio = { version = "=1.38.0", features = [
-    "macros",
-    "rt-multi-thread",
-    "full",
-] }
+tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread", "full"] }
 tokio-util = "0.7.13"
 alloy = { git = "https://github.com/alloy-rs/alloy", features = [
     "providers",
@@ -39,6 +39,8 @@ alloy = { git = "https://github.com/alloy-rs/alloy", features = [
     "signer-local",
 ] }
 kameo = "0.13.0"
+
+criterion = { version = "=0.4.0", features = ["html_reports"] }
 
 waku-bindings = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "force-cluster-15", subdir = "waku-bindings" }
 waku-sys = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "force-cluster-15", subdir = "waku-sys" }
@@ -68,3 +70,7 @@ log = "0.4.22"
 
 ds = { path = "ds" }
 mls_crypto = { path = "mls_crypto" }
+
+[[bench]]
+name = "group_flow_benchmark"
+harness = false
