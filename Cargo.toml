@@ -41,6 +41,8 @@ alloy = { git = "https://github.com/alloy-rs/alloy", features = [
 kameo = "0.13.0"
 
 criterion = { version = "=0.4.0", features = ["html_reports"] }
+rayon = "1.10.0"
+itertools = "0.14.0"
 
 waku-bindings = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "force-cluster-15", subdir = "waku-bindings" }
 waku-sys = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "force-cluster-15", subdir = "waku-sys" }
@@ -73,4 +75,8 @@ mls_crypto = { path = "mls_crypto" }
 
 [[bench]]
 name = "group_flow_benchmark"
+harness = false
+
+[[bench]]
+name = "add_users_benchmark"
 harness = false

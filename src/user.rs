@@ -508,4 +508,10 @@ impl User {
     pub fn wallet(&self) -> EthereumWallet {
         EthereumWallet::from(self.eth_signer.clone())
     }
+
+    pub fn new_key_package(&mut self) -> Result<KeyPackage, UserError> {
+        Ok(self
+            .identity
+            .generate_key_package(CIPHERSUITE, &self.provider)?)
+    }
 }
