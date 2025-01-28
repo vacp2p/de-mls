@@ -1,43 +1,7 @@
-use alloy::primitives::{Address, U160};
 use criterion::{criterion_group, criterion_main, Criterion};
 use de_mls::user::{ProcessCreateGroup, User, UserAction};
-use mls_crypto::openmls_provider::{MlsCryptoProvider, CIPHERSUITE};
-use openmls::prelude::{
-    Credential, CredentialType, CredentialWithKey, CryptoConfig, KeyPackage, ProtocolVersion,
-};
-use openmls_basic_credential::SignatureKeyPair;
-use openmls_traits::OpenMlsCryptoProvider;
-use rand::{thread_rng, Rng};
-use std::sync::{Arc, Mutex};
+use rand::Rng;
 use tokio::runtime::Runtime;
-
-fn generate_random_key_package() -> KeyPackage {
-    let rand_bytes = thread_rng().gen::<[u8; 20]>();
-    let rand_wallet_address = Address::from(U160::from_be_bytes(rand_bytes));
-    let credential = Credential::new(
-        rand_wallet_address.to_string().as_bytes().to_vec(),
-        CredentialType::Basic,
-    )
-    .unwrap();
-    let signature_keys = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm()).unwrap();
-    let credential_with_key = CredentialWithKey {
-        credential,
-        signature_key: signature_keys.to_public_vec().into(),
-    };
-    let crypto = &MlsCryptoProvider::default();
-    signature_keys.store(crypto.key_store()).unwrap();
-    KeyPackage::builder()
-        .build(
-            CryptoConfig {
-                ciphersuite: CIPHERSUITE,
-                version: ProtocolVersion::default(),
-            },
-            crypto,
-            &signature_keys,
-            credential_with_key.clone(),
-        )
-        .unwrap()
-}
 
 /// Benchmark for creating user with group - that means it creates mls group instance
 fn create_user_with_group_benchmark(c: &mut Criterion) {
@@ -96,35 +60,6 @@ fn create_user_benchmark(c: &mut Criterion) {
             });
         });
     });
-}
-
-fn add_user_to_group_benchmark(c: &mut Criterion) {
-    for i in [10, 100, 500, 1000] {
-        let rt = Runtime::new().unwrap();
-        let user_kps = Arc::new(Mutex::new(
-            (0..i)
-                .map(|_| generate_random_key_package())
-                .collect::<Vec<KeyPackage>>(),
-        ));
-        c.bench_function(format!("add_users_to_group_{}", i).as_str(), |b| {
-            b.iter(|| {
-                rt.block_on(async {
-                    let mut alice = User::new(
-                        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
-                    )
-                    .unwrap();
-                    alice
-                        .create_group("group".to_string(), true)
-                        .await
-                        .expect("Failed to create group");
-                    alice
-                        .invite_users(user_kps.lock().unwrap().clone(), "group".to_string())
-                        .await
-                        .expect("Failed to invite users");
-                });
-            });
-        });
-    }
 }
 
 fn share_kp_benchmark(c: &mut Criterion) {
@@ -196,6 +131,5 @@ criterion_group!(
     create_user_with_group_benchmark,
     share_kp_benchmark,
     create_user_benchmark,
-    add_user_to_group_benchmark,
 );
 criterion_main!(benches);
