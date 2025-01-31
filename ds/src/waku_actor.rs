@@ -1,32 +1,127 @@
-use chrono::Utc;
-use core::result::Result;
-use kameo::{
-    message::{Context, Message},
-    Actor,
-};
-use log::debug;
+use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use waku_bindings::{Running, WakuContentTopic, WakuMessage, WakuNodeHandle};
+use std::{
+    str::FromStr,
+    sync::{Arc, Mutex as SyncMutex},
+    thread::sleep,
+    time::Duration,
+};
+use tokio::sync::mpsc::Sender;
+use waku_bindings::{
+    node::{WakuNodeConfig, WakuNodeHandle},
+    waku_new, Initialized, LibwakuResponse, Multiaddr, Running, WakuContentTopic, WakuEvent,
+    WakuMessage,
+};
 
 use crate::ds_waku::{pubsub_topic, GROUP_VERSION};
-use crate::{
-    ds_waku::{build_content_topic, build_content_topics, content_filter},
-    DeliveryServiceError,
-};
+use crate::{ds_waku::build_content_topic, DeliveryServiceError};
 
-/// WakuActor is the actor that handles the Waku Node
-#[derive(Actor)]
-pub struct WakuActor {
-    node: Arc<WakuNodeHandle<Running>>,
+pub struct WakuNode<State> {
+    node: WakuNodeHandle<State>,
 }
 
-impl WakuActor {
-    /// Create a new WakuActor
+impl WakuNode<Initialized> {
+    /// Create a new WakuNode
     /// Input:
     /// - node: The Waku Node to handle. Waku Node is already running
-    pub fn new(node: Arc<WakuNodeHandle<Running>>) -> Self {
-        Self { node }
+    pub async fn new() -> Result<WakuNode<Initialized>, DeliveryServiceError> {
+        let waku = waku_new(Some(WakuNodeConfig {
+            tcp_port: Some(60000),
+            cluster_id: Some(15),
+            shards: vec![1],
+            log_level: Some("FATAL"), // Supported: TRACE, DEBUG, INFO, NOTICE, WARN, ERROR or FATAL
+            ..Default::default()
+        }))
+        .await
+        .map_err(|e| DeliveryServiceError::WakuNodeAlreadyInitialized(e.to_string()))?;
+
+        Ok(WakuNode { node: waku })
+    }
+
+    pub async fn start(
+        self,
+        nodes_addresses: Vec<String>,
+        waku_sender: Sender<WakuMessage>,
+        content_topics: Arc<SyncMutex<Vec<WakuContentTopic>>>,
+    ) -> Result<WakuNode<Running>, DeliveryServiceError> {
+        let closure = move |response| {
+            if let LibwakuResponse::Success(v) = response {
+                let event: WakuEvent =
+                    serde_json::from_str(v.unwrap().as_str()).expect("Parsing event to succeed");
+
+                match event {
+                    WakuEvent::WakuMessage(evt) => {
+                        info!("WakuMessage event received: {:?}", evt.waku_message);
+                        let content_topic = evt.waku_message.content_topic.clone();
+                        // Check if message belongs to a relevant topic
+                        if !match_content_topic(&content_topics, &content_topic) {
+                            error!("Content topic not match: {:?}", content_topic);
+                            return;
+                        };
+                        info!("Received message from waku: {:?}", evt.message_hash);
+                        waku_sender
+                            .blocking_send(evt.waku_message.clone())
+                            .expect("Failed to send message to waku");
+                    }
+                    WakuEvent::RelayTopicHealthChange(_evt) => {
+                        // dbg!("Relay topic change evt", evt);
+                    }
+                    WakuEvent::ConnectionChange(_evt) => {
+                        // dbg!("Conn change evt", evt);
+                    }
+                    WakuEvent::Unrecognized(err) => panic!("Unrecognized waku event: {:?}", err),
+                    _ => panic!("event case not expected"),
+                };
+            }
+        };
+
+        self.node
+            .set_event_callback(closure)
+            .expect("set event call back working");
+
+        let waku = self.node.start().await.map_err(|e| {
+            debug!("Failed to start the Waku Node: {:?}", e);
+            DeliveryServiceError::WakuNodeAlreadyInitialized(e.to_string())
+        })?;
+
+        sleep(Duration::from_secs(2));
+
+        waku.relay_subscribe(&pubsub_topic()).await.map_err(|e| {
+            debug!("Failed to subscribe to the Waku Node: {:?}", e);
+            DeliveryServiceError::WakuSubscribeToGroupError(e)
+        })?;
+
+        for address in nodes_addresses
+            .iter()
+            .map(|a| Multiaddr::from_str(a.as_str()))
+        {
+            let address =
+                address.map_err(|e| DeliveryServiceError::FailedToParseMultiaddr(e.to_string()))?;
+            waku.connect(&address, None)
+                .await
+                .map_err(|e| DeliveryServiceError::WakuConnectPeerError(e.to_string()))?;
+        }
+
+        Ok(WakuNode { node: waku })
+    }
+}
+
+impl WakuNode<Running> {
+    pub async fn send_message(
+        &self,
+        msg: ProcessMessageToSend,
+    ) -> Result<String, DeliveryServiceError> {
+        let waku_message = msg.build_waku_message()?;
+        let msg_id = self
+            .node
+            .relay_publish_message(&waku_message, &pubsub_topic(), None)
+            .await
+            .map_err(|e| {
+                debug!("Failed to relay publish the message: {:?}", e);
+                DeliveryServiceError::WakuPublishMessageError(e)
+            })?;
+
+        Ok(msg_id.to_string())
     }
 }
 
@@ -58,94 +153,17 @@ impl ProcessMessageToSend {
             self.msg.clone(),
             content_topic,
             2,
-            Utc::now().timestamp() as usize,
             self.app_id.clone(),
             true,
         ))
     }
 }
 
-/// Handle the message to send to the Waku Node
-/// Input:
-/// - msg: The message to send
-///
-/// Returns:
-/// - msg_id: The message id of the message sent to the Waku Node
-impl Message<ProcessMessageToSend> for WakuActor {
-    type Reply = Result<String, DeliveryServiceError>;
-
-    async fn handle(
-        &mut self,
-        msg: ProcessMessageToSend,
-        _ctx: Context<'_, Self, Self::Reply>,
-    ) -> Self::Reply {
-        let waku_message = msg.build_waku_message()?;
-        let msg_id = self
-            .node
-            .relay_publish_message(&waku_message, Some(pubsub_topic()), None)
-            .map_err(|e| {
-                debug!("Failed to relay publish the message: {:?}", e);
-                DeliveryServiceError::WakuPublishMessageError(e)
-            })?;
-        Ok(msg_id)
-    }
-}
-
-/// Message for actor to subscribe to a group
-/// It contains the group name to subscribe to
-pub struct ProcessSubscribeToGroup {
-    pub group_name: String,
-}
-
-/// Handle the message for actor to subscribe to a group
-/// Input:
-/// - group_name: The group to subscribe to
-///
-/// Returns:
-/// - content_topics: The content topics of the group
-impl Message<ProcessSubscribeToGroup> for WakuActor {
-    type Reply = Result<Vec<WakuContentTopic>, DeliveryServiceError>;
-
-    async fn handle(
-        &mut self,
-        msg: ProcessSubscribeToGroup,
-        _ctx: Context<'_, Self, Self::Reply>,
-    ) -> Self::Reply {
-        let content_topics = build_content_topics(&msg.group_name, GROUP_VERSION);
-        let content_filter = content_filter(&pubsub_topic(), &content_topics);
-        self.node.relay_subscribe(&content_filter).map_err(|e| {
-            debug!("Failed to relay subscribe to the group: {:?}", e);
-            DeliveryServiceError::WakuSubscribeToGroupError(e)
-        })?;
-        Ok(content_topics)
-    }
-}
-
-/// Message for actor to unsubscribe from a group
-/// It contains the group name to unsubscribe from
-pub struct ProcessUnsubscribeFromGroup {
-    pub group_name: String,
-}
-
-/// Handle the message for actor to unsubscribe from a group
-/// Input:
-/// - group_name: The group to unsubscribe from
-///
-/// Returns:
-/// - ()
-impl Message<ProcessUnsubscribeFromGroup> for WakuActor {
-    type Reply = Result<(), DeliveryServiceError>;
-
-    async fn handle(
-        &mut self,
-        msg: ProcessUnsubscribeFromGroup,
-        _ctx: Context<'_, Self, Self::Reply>,
-    ) -> Self::Reply {
-        let content_topics = build_content_topics(&msg.group_name, GROUP_VERSION);
-        let content_filter = content_filter(&pubsub_topic(), &content_topics);
-        self.node
-            .relay_unsubscribe(&content_filter)
-            .map_err(|e| DeliveryServiceError::WakuRelayTopicsError(e.to_string()))?;
-        Ok(())
-    }
+/// Check if a content topic exists in a list of topics or if the list is empty
+pub fn match_content_topic(
+    content_topics: &Arc<SyncMutex<Vec<WakuContentTopic>>>,
+    topic: &WakuContentTopic,
+) -> bool {
+    let locked_topics = content_topics.lock().unwrap();
+    locked_topics.is_empty() || locked_topics.iter().any(|t| t == topic)
 }

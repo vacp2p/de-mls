@@ -8,11 +8,11 @@ use crate::{
     ws_actor::{RawWsMessage, WsAction, WsActor},
     MessageToPrint,
 };
-use ds::waku_actor::{ProcessUnsubscribeFromGroup, WakuActor};
+use ds::waku_actor::{WakuNode};
 
 pub async fn handle_user_actions(
     msg: WakuMessage,
-    waku_actor: ActorRef<WakuActor>,
+    // waku_actor: ActorRef<WakuActor>,
     ws_actor: ActorRef<WsActor>,
     user_actor: ActorRef<User>,
     cancel_token: CancellationToken,
@@ -59,7 +59,7 @@ pub async fn handle_ws_action(
     msg: RawWsMessage,
     ws_actor: ActorRef<WsActor>,
     user_actor: ActorRef<User>,
-    waku_actor: ActorRef<WakuActor>,
+    // waku_actor: ActorRef<WakuActor>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let action = ws_actor.ask(msg).await?;
     match action {

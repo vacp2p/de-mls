@@ -14,10 +14,10 @@ use std::{
     string::FromUtf8Error,
     sync::{Arc, Mutex},
 };
-use waku_bindings::{WakuContentTopic, WakuMessage};
+use waku_bindings::{Running, WakuContentTopic, WakuMessage};
 
 use ds::{
-    waku_actor::{ProcessMessageToSend, ProcessSubscribeToGroup, WakuActor},
+    waku_actor::{ProcessMessageToSend, WakuNode},
     DeliveryServiceError,
 };
 
@@ -29,7 +29,7 @@ pub mod user_app_instance;
 pub mod ws_actor;
 
 pub struct AppState {
-    pub waku_actor: ActorRef<WakuActor>,
+    pub waku_actor: WakuNode<Running>,
     pub rooms: Mutex<HashSet<String>>,
     pub content_topics: Arc<Mutex<Vec<WakuContentTopic>>>,
     pub pubsub: tokio::sync::broadcast::Sender<WakuMessage>,
@@ -251,8 +251,6 @@ pub enum UserError {
     #[error("Failed to parse signer: {0}")]
     SignerParsingError(#[from] LocalSignerError),
 
-    #[error("Failed to subscribe to group: {0}")]
-    KameoSubscribeToGroupError(#[from] SendError<ProcessSubscribeToGroup, DeliveryServiceError>),
     #[error("Failed to publish message: {0}")]
     KameoPublishMessageError(#[from] SendError<ProcessMessageToSend, DeliveryServiceError>),
     #[error("Failed to create group: {0}")]

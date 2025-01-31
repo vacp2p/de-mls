@@ -27,7 +27,7 @@ use de_mls::{
 };
 use ds::{
     ds_waku::{handle_waku_event, setup_node_handle},
-    waku_actor::WakuActor,
+    waku_actor::WakuNode,
 };
 
 #[tokio::main]
@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let node_name = std::env::var("NODE")?;
     let node = setup_node_handle(vec![node_name])?;
-    let waku_actor = kameo::actor::spawn(WakuActor::new(Arc::new(node)));
+    let waku_actor = kameo::actor::spawn(WakuNode::new(Arc::new(node)));
     let (tx, _) = tokio::sync::broadcast::channel(100);
     let app_state = Arc::new(AppState {
         waku_actor,

@@ -1,11 +1,11 @@
 use alloy::signers::local::PrivateKeySigner;
+use ds::ds_waku::build_content_topics;
 use kameo::actor::ActorRef;
 use log::{error, info};
 use std::{str::FromStr, sync::Arc, time::Duration};
 
 use crate::user::{ProcessAdminMessage, ProcessCreateGroup, User};
 use crate::{AppState, Connection, UserError};
-use ds::waku_actor::ProcessSubscribeToGroup;
 
 pub async fn create_user_instance(
     connection: Connection,
@@ -25,12 +25,7 @@ pub async fn create_user_instance(
         .await
         .map_err(|e| UserError::KameoCreateGroupError(e.to_string()))?;
 
-    let mut content_topics = app_state
-        .waku_actor
-        .ask(ProcessSubscribeToGroup {
-            group_name: group_name.clone(),
-        })
-        .await?;
+    let mut content_topics = build_content_topics(&group_name);
     app_state
         .content_topics
         .lock()
