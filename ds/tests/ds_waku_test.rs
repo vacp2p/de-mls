@@ -1,3 +1,8 @@
+use ds::{
+    ds_waku::{build_content_topics, APP_MSG_SUBTOPIC},
+    waku_actor::{ProcessMessageToSend, WakuNode},
+    DeliveryServiceError,
+};
 use kameo::{
     actor::pubsub::PubSub,
     message::{Context, Message},
@@ -7,12 +12,6 @@ use log::info;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::channel;
 use waku_bindings::WakuMessage;
-
-use ds::{
-    ds_waku::{build_content_topics, APP_MSG_SUBTOPIC},
-    waku_actor::{ProcessMessageToSend, WakuNode},
-    DeliveryServiceError,
-};
 
 #[derive(Debug, Clone, Actor)]
 pub struct Application {
@@ -44,9 +43,16 @@ async fn test_waku_client() {
     env_logger::init();
     let group_name = "new_group".to_string();
     let mut pubsub = PubSub::<WakuMessage>::new();
+
+    let (sender, _) = channel::<WakuMessage>(100);
+    let waku_node_default = WakuNode::new(60002)
+        .await
+        .expect("Failed to create WakuNode");
+
     let (sender_alice, mut receiver_alice) = channel::<WakuMessage>(100);
-    let node_name = std::env::var("NODE").expect("NODE is not set");
-    let waku_node_init = WakuNode::new().await.expect("Failed to create WakuNode");
+    let waku_node_init = WakuNode::new(60001)
+        .await
+        .expect("Failed to create WakuNode");
 
     let uuid = uuid::Uuid::new_v4().as_bytes().to_vec();
     let actor_a = Application::new();
@@ -55,10 +61,24 @@ async fn test_waku_client() {
 
     let content_topics = Arc::new(Mutex::new(build_content_topics(&group_name)));
 
-    let waku_node = waku_node_init
-        .start(vec![node_name.to_string()], sender_alice, content_topics)
+    let waku_node_default = waku_node_default
+        .start(sender, content_topics.clone())
         .await
         .expect("Failed to start WakuNode");
+
+    let node_name = waku_node_default
+        .listen_addresses()
+        .await
+        .expect("Failed to get listen addresses");
+    let waku_node = waku_node_init
+        .start(sender_alice, content_topics)
+        .await
+        .expect("Failed to start WakuNode");
+
+    waku_node
+        .connect_to_peers(node_name)
+        .await
+        .expect("Failed to connect to peers");
 
     tokio::spawn(async move {
         while let Some(msg) = receiver_alice.recv().await {

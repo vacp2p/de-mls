@@ -1,7 +1,6 @@
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::{
-    str::FromStr,
     sync::{Arc, Mutex as SyncMutex},
     thread::sleep,
     time::Duration,
@@ -24,12 +23,12 @@ impl WakuNode<Initialized> {
     /// Create a new WakuNode
     /// Input:
     /// - node: The Waku Node to handle. Waku Node is already running
-    pub async fn new() -> Result<WakuNode<Initialized>, DeliveryServiceError> {
+    pub async fn new(port: usize) -> Result<WakuNode<Initialized>, DeliveryServiceError> {
         let waku = waku_new(Some(WakuNodeConfig {
-            tcp_port: Some(60000),
+            tcp_port: Some(port),
             cluster_id: Some(15),
             shards: vec![1],
-            log_level: Some("FATAL"), // Supported: TRACE, DEBUG, INFO, NOTICE, WARN, ERROR or FATAL
+            log_level: Some("INFO"), // Supported: TRACE, DEBUG, INFO, NOTICE, WARN, ERROR or FATAL
             ..Default::default()
         }))
         .await
@@ -40,7 +39,6 @@ impl WakuNode<Initialized> {
 
     pub async fn start(
         self,
-        nodes_addresses: Vec<String>,
         waku_sender: Sender<WakuMessage>,
         content_topics: Arc<SyncMutex<Vec<WakuContentTopic>>>,
     ) -> Result<WakuNode<Running>, DeliveryServiceError> {
@@ -91,17 +89,6 @@ impl WakuNode<Initialized> {
             DeliveryServiceError::WakuSubscribeToGroupError(e)
         })?;
 
-        for address in nodes_addresses
-            .iter()
-            .map(|a| Multiaddr::from_str(a.as_str()))
-        {
-            let address =
-                address.map_err(|e| DeliveryServiceError::FailedToParseMultiaddr(e.to_string()))?;
-            waku.connect(&address, None)
-                .await
-                .map_err(|e| DeliveryServiceError::WakuConnectPeerError(e.to_string()))?;
-        }
-
         Ok(WakuNode { node: waku })
     }
 }
@@ -122,6 +109,28 @@ impl WakuNode<Running> {
             })?;
 
         Ok(msg_id.to_string())
+    }
+
+    pub async fn connect_to_peers(
+        &self,
+        peer_addresses: Vec<Multiaddr>,
+    ) -> Result<(), DeliveryServiceError> {
+        for peer_address in peer_addresses {
+            self.node
+                .connect(&peer_address, None)
+                .await
+                .map_err(|e| DeliveryServiceError::WakuConnectPeerError(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    pub async fn listen_addresses(&self) -> Result<Vec<Multiaddr>, DeliveryServiceError> {
+        let addresses = self.node.listen_addresses().await.map_err(|e| {
+            debug!("Failed to get the listen addresses: {:?}", e);
+            DeliveryServiceError::WakuGetListenAddressesError(e)
+        })?;
+
+        Ok(addresses)
     }
 }
 

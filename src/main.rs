@@ -25,10 +25,7 @@ use de_mls::{
     ws_actor::{RawWsMessage, WsAction, WsActor},
     AppState, Connection,
 };
-use ds::{
-    ds_waku::{handle_waku_event, setup_node_handle},
-    waku_actor::WakuNode,
-};
+use ds::waku_actor::{ProcessMessageToSend, WakuNode};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -38,19 +35,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(Ok(3000))?;
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
-    let node_name = std::env::var("NODE")?;
-    let node = setup_node_handle(vec![node_name])?;
-    let waku_actor = kameo::actor::spawn(WakuNode::new(Arc::new(node)));
-    let (tx, _) = tokio::sync::broadcast::channel(100);
-    let app_state = Arc::new(AppState {
-        waku_actor,
-        rooms: Mutex::new(HashSet::new()),
-        content_topics: Arc::new(Mutex::new(Vec::new())),
-        pubsub: tx.clone(),
-    });
+    let node_port = std::env::var("NODE_PORT").expect("NODE_PORT is not set");
+
+    let content_topics = Arc::new(Mutex::new(Vec::new()));
 
     let (waku_sender, mut waku_receiver) = channel::<WakuMessage>(100);
-    handle_waku_event(waku_sender, app_state.content_topics.clone()).await;
+    let waku_node_init = WakuNode::new(node_port.parse::<usize>().unwrap()).await?;
+    let waku_node = waku_node_init
+        .start(waku_sender, content_topics.clone())
+        .await?;
+
+    let peer_addresses =
+        ["/ip4/139.59.24.82/tcp/60000/p2p/16Uiu2HAm34X7nzHh7t4mbDDEt62GFPky8tAvqLUoqrZFSXr2bG7d"];
+    waku_node
+        .connect_to_peers(peer_addresses.iter().map(|s| s.parse().unwrap()).collect())
+        .await?;
+
+    let (sender, mut reciever) = channel::<ProcessMessageToSend>(100);
+    tokio::task::block_in_place(move || {
+        tokio::runtime::Handle::current().block_on(async move {
+            while let Some(msg) = reciever.recv().await {
+                let id = waku_node
+                    .send_message(msg)
+                    .await
+                    .expect("Failed to send message to waku");
+                info!("Successfully publish message with id: {:?}", id);
+            }
+        });
+    });
+
+    let (tx, _) = tokio::sync::broadcast::channel(100);
+    let app_state = Arc::new(AppState {
+        waku_node: sender,
+        rooms: Mutex::new(HashSet::new()),
+        content_topics,
+        pubsub: tx.clone(),
+    });
 
     let recv_messages = tokio::spawn(async move {
         info!("Running recv messages from waku");
@@ -133,7 +153,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         while let Ok(msg) = user_waku_receiver.recv().await {
             let res = handle_user_actions(
                 msg,
-                state_clone.waku_actor.clone(),
+                state_clone.waku_node.clone(),
                 ws_actor_clone.clone(),
                 user_actor_clone.clone(),
                 cancel_token_clone.clone(),
@@ -154,7 +174,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     RawWsMessage { message: text },
                     ws_actor.clone(),
                     user_ref_clone.clone(),
-                    state.waku_actor.clone(),
+                    state.waku_node.clone(),
                 )
                 .await;
                 if let Err(e) = res {

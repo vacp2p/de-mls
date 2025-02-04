@@ -10,7 +10,7 @@ pub const SUBTOPICS: [&str; 3] = [APP_MSG_SUBTOPIC, COMMIT_MSG_SUBTOPIC, WELCOME
 /// The pubsub topic for the Waku Node
 /// Fixed for now because nodes on the network would need to be subscribed to existing pubsub topics
 pub fn pubsub_topic() -> PubsubTopic {
-    PubsubTopic::new("/waku/2/rs/15/0")
+    PubsubTopic::new("/waku/2/rs/15/1")
 }
 
 /// Build the content topics for a group. Subtopics are fixed for de-mls group communication.

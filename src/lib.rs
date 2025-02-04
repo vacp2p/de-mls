@@ -1,6 +1,6 @@
 use alloy::signers::local::LocalSignerError;
 use ecies::{decrypt, encrypt};
-use kameo::{actor::ActorRef, error::SendError};
+use kameo::error::SendError;
 use libsecp256k1::{sign, verify, Message, PublicKey, SecretKey, Signature as libSignature};
 use openmls::{error::LibraryError, prelude::*};
 use openmls_rust_crypto::MemoryKeyStoreError;
@@ -14,12 +14,10 @@ use std::{
     string::FromUtf8Error,
     sync::{Arc, Mutex},
 };
-use waku_bindings::{Running, WakuContentTopic, WakuMessage};
+use tokio::sync::mpsc::Sender;
+use waku_bindings::{WakuContentTopic, WakuMessage};
 
-use ds::{
-    waku_actor::{ProcessMessageToSend, WakuNode},
-    DeliveryServiceError,
-};
+use ds::{waku_actor::ProcessMessageToSend, DeliveryServiceError};
 
 pub mod action_handlers;
 pub mod group_actor;
@@ -29,7 +27,7 @@ pub mod user_app_instance;
 pub mod ws_actor;
 
 pub struct AppState {
-    pub waku_actor: WakuNode<Running>,
+    pub waku_node: Sender<ProcessMessageToSend>,
     pub rooms: Mutex<HashSet<String>>,
     pub content_topics: Arc<Mutex<Vec<WakuContentTopic>>>,
     pub pubsub: tokio::sync::broadcast::Sender<WakuMessage>,
@@ -257,6 +255,9 @@ pub enum UserError {
     KameoCreateGroupError(String),
     #[error("Failed to send message to user: {0}")]
     KameoSendMessageError(String),
+
+    #[error("Failed to send message to waku: {0}")]
+    WakuSendMessageError(#[from] tokio::sync::mpsc::error::SendError<ProcessMessageToSend>),
 }
 
 #[cfg(test)]

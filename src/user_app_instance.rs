@@ -39,7 +39,6 @@ pub async fn create_user_instance(
         );
         let user_clone = user_ref.clone();
         let group_name_clone = group_name.clone();
-        let node_clone = app_state.waku_actor.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             loop {
@@ -51,8 +50,7 @@ pub async fn create_user_instance(
                         })
                         .await
                         .map_err(|e| UserError::KameoSendMessageError(e.to_string()))?;
-                    let id = node_clone.ask(msg).await?;
-                    info!("Successfully publish admin message with id: {:?}", id);
+                    app_state.waku_node.send(msg).await?;
                     Ok::<(), UserError>(())
                 }
                 .await;
