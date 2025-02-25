@@ -14,7 +14,7 @@ use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
-use tokio::sync::mpsc::channel;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
 use waku_bindings::WakuMessage;
@@ -40,29 +40,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let content_topics = Arc::new(Mutex::new(Vec::new()));
 
     let (waku_sender, mut waku_receiver) = channel::<WakuMessage>(100);
-    let waku_node_init = WakuNode::new(node_port.parse::<usize>().unwrap()).await?;
-    let waku_node = waku_node_init
-        .start(waku_sender, content_topics.clone())
-        .await?;
-
-    let peer_addresses =
-        ["/ip4/139.59.24.82/tcp/60000/p2p/16Uiu2HAm34X7nzHh7t4mbDDEt62GFPky8tAvqLUoqrZFSXr2bG7d"];
-    waku_node
-        .connect_to_peers(peer_addresses.iter().map(|s| s.parse().unwrap()).collect())
-        .await?;
-
     let (sender, mut reciever) = channel::<ProcessMessageToSend>(100);
+
+    info!("Starting waku node");
     tokio::task::block_in_place(move || {
-        tokio::runtime::Handle::current().block_on(async move {
-            while let Some(msg) = reciever.recv().await {
-                let id = waku_node
-                    .send_message(msg)
-                    .await
-                    .expect("Failed to send message to waku");
-                info!("Successfully publish message with id: {:?}", id);
-            }
-        });
-    });
+        tokio::runtime::Handle::current()
+            .block_on(async move { run_waku_node(node_port, waku_sender, &mut reciever).await })
+    })?;
 
     let (tx, _) = tokio::sync::broadcast::channel(100);
     let app_state = Arc::new(AppState {
@@ -72,6 +56,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pubsub: tx.clone(),
     });
 
+    info!("App state initialized");
+
     let recv_messages = tokio::spawn(async move {
         info!("Running recv messages from waku");
         while let Some(msg) = waku_receiver.recv().await {
@@ -79,6 +65,78 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    info!("Waku receiver initialized");
+
+    let server_task = tokio::spawn(async move {
+        run_server(app_state, addr)
+            .await
+            .expect("Failed to run server")
+    });
+
+    tokio::select! {
+        result = recv_messages => {
+            if let Err(w) = result {
+                error!("Error receiving messages from waku: {}", w);
+            }
+        }
+        result = server_task => {
+            if let Err(e) = result {
+                error!("Error hosting server: {}", e);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn run_waku_node(
+    node_port: String,
+    waku_sender: Sender<WakuMessage>,
+    reciever: &mut Receiver<ProcessMessageToSend>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    info!("Initializing waku node");
+    let waku_node_init = WakuNode::new(node_port.parse::<usize>().unwrap())
+        .await
+        .expect("Failed to initialize waku node");
+
+    info!("Waku node initialized");
+
+    let waku_node = waku_node_init
+        .start(waku_sender, Arc::new(Mutex::new(Vec::new())))
+        .await
+        .expect("Failed to start waku node");
+
+    info!("Waku node started");
+    let peer_addresses = [
+        "/ip4/139.59.24.82/tcp/60000/p2p/16Uiu2HAmHJN29FBzW4fQfYQHRYMq9ssBfEL73LsVcUSKKPiCFy4e"
+            .parse()
+            .unwrap(),
+    ];
+    info!("Connecting to peers");
+
+    waku_node
+        .connect_to_peers(peer_addresses.to_vec())
+        .await
+        .expect("Failed to connect to peers");
+
+    info!("Waku node connected to peers");
+
+    info!("Waiting for message to send to waku");
+    while let Some(msg) = reciever.recv().await {
+        info!("Received message to send to waku");
+        let id = waku_node
+            .send_message(msg)
+            .await
+            .expect("Failed to send message to waku");
+        info!("Successfully publish message with id: {:?}", id);
+    }
+
+    Ok(())
+}
+
+async fn run_server(
+    app_state: Arc<AppState>,
+    addr: SocketAddr,
+) -> Result<(), Box<dyn std::error::Error>> {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(vec![Method::GET]);
@@ -90,17 +148,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_state(app_state)
         .layer(cors);
 
+    info!("App routes initialized");
+
     println!("Hosted on {:?}", addr);
 
-    let res = axum::Server::bind(&addr).serve(app.into_make_service());
-    tokio::select! {
-        Err(x) = res => {
-            error!("Error hosting server: {}", x);
-        }
-        Err(w) = recv_messages => {
-            error!("Error receiving messages from waku: {}", w);
-        }
-    }
+    axum::Server::bind(&addr)
+        .serve(app.into_make_service())
+        .await?;
     Ok(())
 }
 

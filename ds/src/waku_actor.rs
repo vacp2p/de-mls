@@ -24,6 +24,7 @@ impl WakuNode<Initialized> {
     /// Input:
     /// - node: The Waku Node to handle. Waku Node is already running
     pub async fn new(port: usize) -> Result<WakuNode<Initialized>, DeliveryServiceError> {
+        info!("Initializing waku node inside ");
         let waku = waku_new(Some(WakuNodeConfig {
             tcp_port: Some(port),
             cluster_id: Some(15),
@@ -33,7 +34,7 @@ impl WakuNode<Initialized> {
         }))
         .await
         .map_err(|e| DeliveryServiceError::WakuNodeAlreadyInitialized(e.to_string()))?;
-
+        info!("Waku node initialized");
         Ok(WakuNode { node: waku })
     }
 
@@ -43,29 +44,29 @@ impl WakuNode<Initialized> {
         content_topics: Arc<SyncMutex<Vec<WakuContentTopic>>>,
     ) -> Result<WakuNode<Running>, DeliveryServiceError> {
         let closure = move |response| {
+            info!("Received response from waku: {:?}", response);
             if let LibwakuResponse::Success(v) = response {
                 let event: WakuEvent =
                     serde_json::from_str(v.unwrap().as_str()).expect("Parsing event to succeed");
-
                 match event {
                     WakuEvent::WakuMessage(evt) => {
-                        info!("WakuMessage event received: {:?}", evt.waku_message);
+                        info!("WakuMessage event received: {:?}", evt.message_hash);
                         let content_topic = evt.waku_message.content_topic.clone();
                         // Check if message belongs to a relevant topic
                         if !match_content_topic(&content_topics, &content_topic) {
                             error!("Content topic not match: {:?}", content_topic);
                             return;
                         };
-                        info!("Received message from waku: {:?}", evt.message_hash);
+                        info!("Received message from waku that matches content topic: {:?}", evt.message_hash);
                         waku_sender
                             .blocking_send(evt.waku_message.clone())
                             .expect("Failed to send message to waku");
                     }
-                    WakuEvent::RelayTopicHealthChange(_evt) => {
-                        // dbg!("Relay topic change evt", evt);
+                    WakuEvent::RelayTopicHealthChange(evt) => {
+                        info!("Relay topic change evt: {:?}", evt);
                     }
-                    WakuEvent::ConnectionChange(_evt) => {
-                        // dbg!("Conn change evt", evt);
+                    WakuEvent::ConnectionChange(evt) => {
+                        info!("Conn change evt: {:?}", evt);
                     }
                     WakuEvent::Unrecognized(err) => panic!("Unrecognized waku event: {:?}", err),
                     _ => panic!("event case not expected"),
@@ -116,11 +117,14 @@ impl WakuNode<Running> {
         peer_addresses: Vec<Multiaddr>,
     ) -> Result<(), DeliveryServiceError> {
         for peer_address in peer_addresses {
+            info!("Connecting to peer: {:?}", peer_address);
             self.node
                 .connect(&peer_address, None)
                 .await
                 .map_err(|e| DeliveryServiceError::WakuConnectPeerError(e.to_string()))?;
+            info!("Connected to peer: {:?}", peer_address);
         }
+        info!("Connected to all peers");
         Ok(())
     }
 

@@ -4,17 +4,17 @@ members = ["ds", "mls_crypto"]
 # foundry-contracts = { path = "crates/bindings" }
 
 [package]
-name = "de-mls"
+name = "de_mls"
 version = "1.0.0"
 edition = "2021"
 
 [[bin]]
-name = "de-mls"
+name = "de_mls"
 path = "src/main.rs"
 bench = false
 
-[lib]
-bench = false
+# [lib]
+# bench = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -30,7 +30,7 @@ futures = "0.3.26"
 tower-http = { version = "0.4.0", features = ["cors"] }
 tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread", "full"] }
 tokio-util = "0.7.13"
-alloy = { version = "0.9.2", features = [
+alloy = { version = "0.11.0", features = [
     "providers",
     "node-bindings",
     "network",
@@ -70,7 +70,3 @@ log = "0.4.22"
 
 ds = { path = "ds" }
 mls_crypto = { path = "mls_crypto" }
-
-[[bench]]
-name = "group_flow_benchmark"
-harness = false

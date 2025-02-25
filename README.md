@@ -6,8 +6,10 @@ Decentralized MLS PoC using a smart contract for group coordination
 
 ## Run Test Waku Node
 
+This node is used to easially connect different instances of the app between each other.
+
 ```bash
-docker run -p 8645:8645 -p 60000:60000 wakuorg/nwaku:v0.33.1 --cluster-id=15 --rest --relay --rln-relay=false --pubsub-topic=/waku/2/rs/15/0
+docker run -p 8645:8645 -p 60000:60000 wakuorg/nwaku:v0.33.1 --cluster-id=15 --rest --relay --rln-relay=false --pubsub-topic=/waku/2/rs/15/1
 ```
 
 ## Run User Instance
