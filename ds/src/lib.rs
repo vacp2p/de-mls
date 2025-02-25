@@ -19,6 +19,8 @@ pub enum DeliveryServiceError {
     WakuAddPeerError(String),
     #[error("Waku connect peer error: {0}")]
     WakuConnectPeerError(String),
+    #[error("Waku get listen addresses error: {0}")]
+    WakuGetListenAddressesError(String),
 
     #[error("Failed to parse multiaddr: {0}")]
     FailedToParseMultiaddr(String),

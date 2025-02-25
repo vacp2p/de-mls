@@ -20,4 +20,4 @@ services:
       - ${BACKEND_PORT}:3000
     environment:
       - RUST_LOG=info
-      - NODE=${NODE}
+      - NODE_PORT=${NODE_PORT}
