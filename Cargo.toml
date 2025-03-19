@@ -67,3 +67,7 @@ log = "0.4.22"
 
 ds = { path = "ds" }
 mls_crypto = { path = "mls_crypto" }
+
+[[bench]]
+name = "group_flow_benchmark"
+harness = false

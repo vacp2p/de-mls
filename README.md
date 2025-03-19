@@ -21,6 +21,7 @@ NAME=client1
 BACKEND_PORT=3000
 FRONTEND_PORT=4000
 NODE_PORT=60000
+PEER_ADDRESSES=[/ip4/x.x.x.x/tcp/60000/p2p/xxxx...xxxx]
 ```
 
 Run docker compose up for the user instance
@@ -40,7 +41,7 @@ PUBLIC_API_URL=http://0.0.0.0:3000 PUBLIC_WEBSOCKET_URL=ws://localhost:3000 npm 
 Run from the root directory
 
 ```bash
-RUST_BACKTRACE=full RUST_LOG=info NODE_PORT=60001 cargo run --  --nocapture
+RUST_BACKTRACE=full RUST_LOG=info NODE_PORT=60001 PEER_ADDRESSES=/ip4/x.x.x.x/tcp/60000/p2p/xxxx...xxxx,/ip4/y.y.y.y/tcp/60000/p2p/yyyy...yyyy cargo run --  --nocapture
 ```
 
 ### Example of ban user

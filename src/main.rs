@@ -17,7 +17,7 @@ use std::{
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
-use waku_bindings::WakuMessage;
+use waku_bindings::{Multiaddr, WakuMessage};
 
 use de_mls::{
     action_handlers::{handle_user_actions, handle_ws_action},
@@ -36,6 +36,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(Ok(3000))?;
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let node_port = std::env::var("NODE_PORT").expect("NODE_PORT is not set");
+    let peer_addresses = std::env::var("PEER_ADDRESSES")
+        .map(|val| {
+            val.split(",")
+                .map(|addr| addr.parse::<Multiaddr>().unwrap())
+                .collect()
+        })
+        .unwrap_or(vec![]);
 
     let content_topics = Arc::new(Mutex::new(Vec::new()));
 
@@ -49,7 +56,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         content_topics,
         pubsub: tx.clone(),
     });
-
     info!("App state initialized");
 
     let recv_messages = tokio::spawn(async move {
@@ -58,7 +64,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = tx.send(msg);
         }
     });
-
     info!("Waku receiver initialized");
 
     let server_task = tokio::spawn(async move {
@@ -70,8 +75,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Starting waku node");
     tokio::task::block_in_place(move || {
-        tokio::runtime::Handle::current()
-            .block_on(async move { run_waku_node(node_port, waku_sender, &mut reciever).await })
+        tokio::runtime::Handle::current().block_on(async move {
+            run_waku_node(node_port, peer_addresses, waku_sender, &mut reciever).await
+        })
     })?;
 
     tokio::select! {
@@ -91,6 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run_waku_node(
     node_port: String,
+    peer_addresses: Vec<Multiaddr>,
     waku_sender: Sender<WakuMessage>,
     reciever: &mut Receiver<ProcessMessageToSend>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -99,26 +106,17 @@ async fn run_waku_node(
         .await
         .expect("Failed to initialize waku node");
 
-    info!("Waku node initialized");
-
     let waku_node = waku_node_init
         .start(waku_sender)
         .await
         .expect("Failed to start waku node");
-
     info!("Waku node started");
-    let peer_addresses = [
-        "/ip4/139.59.24.82/tcp/60000/p2p/16Uiu2HAmHJN29FBzW4fQfYQHRYMq9ssBfEL73LsVcUSKKPiCFy4e"
-            .parse()
-            .unwrap(),
-    ];
-    info!("Connecting to peers");
 
+    info!("Connecting to peers");
     waku_node
         .connect_to_peers(peer_addresses.to_vec())
         .await
         .expect("Failed to connect to peers");
-
     info!("Waku node connected to peers");
 
     info!("Waiting for message to send to waku");
@@ -148,8 +146,6 @@ async fn run_server(
         .route("/rooms", get(get_rooms))
         .with_state(app_state)
         .layer(cors);
-
-    info!("App routes initialized");
 
     info!("Hosted on {:?}", addr);
 
