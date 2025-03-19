@@ -20,7 +20,7 @@ Create a `.env` file in the `.env` folder for each client containing the followi
 NAME=client1
 BACKEND_PORT=3000
 FRONTEND_PORT=4000
-NODE_NAME=<waku-node-ip>
+NODE_PORT=60000
 ```
 
 Run docker compose up for the user instance
@@ -30,3 +30,23 @@ docker-compose --env-file ./.env/client1.env up --build
 ```
 
 For each client, run the following command to start the frontend on the local host with the port specified in the `.env` file
+
+Run from the frontend directory
+
+```bash
+PUBLIC_API_URL=http://0.0.0.0:3000 PUBLIC_WEBSOCKET_URL=ws://localhost:3000 npm run dev
+```
+
+Run from the root directory
+
+```bash
+RUST_BACKTRACE=full RUST_LOG=info NODE_PORT=60001 cargo run --  --nocapture
+```
+
+### Example of ban user
+
+In chat message block run ban command, note that user wallet address should be in the format without `0x`
+
+```bash
+/ban f39555ce6ab55579cfffb922665825e726880af6
+```

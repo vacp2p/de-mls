@@ -6,8 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-waku-bindings = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "rln-fix-deps", subdir = "waku-bindings" }
-waku-sys = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "rln-fix-deps", subdir = "waku-sys" }
+waku-bindings = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "rln-fix-deps" }
+waku-sys = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "rln-fix-deps" }
 
 tokio = { version = "1.43.0", features = ["full"] }
 kameo = "0.13.0"

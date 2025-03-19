@@ -21,6 +21,7 @@ use waku_bindings::WakuMessage;
 
 use de_mls::{
     action_handlers::{handle_user_actions, handle_ws_action},
+    match_content_topic,
     user_app_instance::create_user_instance,
     ws_actor::{RawWsMessage, WsAction, WsActor},
     AppState, Connection,
@@ -34,21 +35,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|val| val.parse::<u16>())
         .unwrap_or(Ok(3000))?;
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-
     let node_port = std::env::var("NODE_PORT").expect("NODE_PORT is not set");
 
     let content_topics = Arc::new(Mutex::new(Vec::new()));
 
     let (waku_sender, mut waku_receiver) = channel::<WakuMessage>(100);
     let (sender, mut reciever) = channel::<ProcessMessageToSend>(100);
-
-    info!("Starting waku node");
-    tokio::task::block_in_place(move || {
-        tokio::runtime::Handle::current()
-            .block_on(async move { run_waku_node(node_port, waku_sender, &mut reciever).await })
-    })?;
-
     let (tx, _) = tokio::sync::broadcast::channel(100);
+
     let app_state = Arc::new(AppState {
         waku_node: sender,
         rooms: Mutex::new(HashSet::new()),
@@ -68,10 +62,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Waku receiver initialized");
 
     let server_task = tokio::spawn(async move {
+        info!("Running server");
         run_server(app_state, addr)
             .await
             .expect("Failed to run server")
     });
+
+    info!("Starting waku node");
+    tokio::task::block_in_place(move || {
+        tokio::runtime::Handle::current()
+            .block_on(async move { run_waku_node(node_port, waku_sender, &mut reciever).await })
+    })?;
 
     tokio::select! {
         result = recv_messages => {
@@ -101,7 +102,7 @@ async fn run_waku_node(
     info!("Waku node initialized");
 
     let waku_node = waku_node_init
-        .start(waku_sender, Arc::new(Mutex::new(Vec::new())))
+        .start(waku_sender)
         .await
         .expect("Failed to start waku node");
 
@@ -150,7 +151,7 @@ async fn run_server(
 
     info!("App routes initialized");
 
-    println!("Hosted on {:?}", addr);
+    info!("Hosted on {:?}", addr);
 
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
@@ -163,6 +164,7 @@ async fn handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> im
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
+    info!("Handling socket");
     let (ws_sender, mut ws_receiver) = socket.split();
     let ws_actor = kameo::spawn(WsActor::new(ws_sender));
     let mut main_loop_connection = None::<Connection>;
@@ -205,6 +207,21 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let mut recv_messages_waku = tokio::spawn(async move {
         info!("Running recv messages from waku for current user");
         while let Ok(msg) = user_waku_receiver.recv().await {
+            let content_topic = msg.content_topic.clone();
+            // Check if message belongs to a relevant topic
+            info!("Content topic: {:?}", content_topic);
+            info!(
+                "Content topics: {:?}",
+                state_clone.content_topics.lock().unwrap()
+            );
+            if !match_content_topic(&state_clone.content_topics, &content_topic) {
+                error!("Content topic not match: {:?}", content_topic);
+                return;
+            };
+            info!(
+                "Received message from waku that matches content topic: {:?}",
+                msg.timestamp
+            );
             let res = handle_user_actions(
                 msg,
                 state_clone.waku_node.clone(),

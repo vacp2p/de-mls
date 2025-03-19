@@ -1,5 +1,5 @@
 use ds::{
-    ds_waku::{build_content_topics, APP_MSG_SUBTOPIC},
+    ds_waku::APP_MSG_SUBTOPIC,
     waku_actor::{ProcessMessageToSend, WakuNode},
     DeliveryServiceError,
 };
@@ -9,7 +9,6 @@ use kameo::{
     Actor,
 };
 use log::info;
-use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::channel;
 use waku_bindings::WakuMessage;
 
@@ -59,10 +58,10 @@ async fn test_waku_client() {
     let actor_a_ref = kameo::spawn(actor_a);
     pubsub.subscribe(actor_a_ref);
 
-    let content_topics = Arc::new(Mutex::new(build_content_topics(&group_name)));
+    // let content_topics = Arc::new(Mutex::new(build_content_topics(&group_name)));
 
     let waku_node_default = waku_node_default
-        .start(sender, content_topics.clone())
+        .start(sender)
         .await
         .expect("Failed to start WakuNode");
 
@@ -71,7 +70,7 @@ async fn test_waku_client() {
         .await
         .expect("Failed to get listen addresses");
     let waku_node = waku_node_init
-        .start(sender_alice, content_topics)
+        .start(sender_alice)
         .await
         .expect("Failed to start WakuNode");
 

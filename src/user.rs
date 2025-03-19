@@ -208,6 +208,7 @@ impl User {
             WelcomeMessageType::GroupAnnouncement => {
                 let app_id = group.app_id();
                 if group.is_admin() || group.is_kp_shared() {
+                    info!("Its admin or key package already shared");
                     Ok(vec![UserAction::DoNothing])
                 } else {
                     info!(
@@ -309,6 +310,7 @@ impl User {
         };
         let app_id = group.app_id();
         if msg.meta == app_id {
+            info!("Message is from the same app, skipping");
             return Ok(vec![UserAction::DoNothing]);
         }
         let ct = ct.content_topic_name.to_string();

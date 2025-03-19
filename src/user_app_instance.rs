@@ -26,6 +26,7 @@ pub async fn create_user_instance(
         .map_err(|e| UserError::KameoCreateGroupError(e.to_string()))?;
 
     let mut content_topics = build_content_topics(&group_name);
+    info!("Building content topics: {:?}", content_topics);
     app_state
         .content_topics
         .lock()

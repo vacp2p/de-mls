@@ -260,6 +260,15 @@ pub enum UserError {
     WakuSendMessageError(#[from] tokio::sync::mpsc::error::SendError<ProcessMessageToSend>),
 }
 
+/// Check if a content topic exists in a list of topics or if the list is empty
+pub fn match_content_topic(
+    content_topics: &Arc<Mutex<Vec<WakuContentTopic>>>,
+    topic: &WakuContentTopic,
+) -> bool {
+    let locked_topics = content_topics.lock().unwrap();
+    locked_topics.is_empty() || locked_topics.iter().any(|t| t == topic)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

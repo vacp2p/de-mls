@@ -12,11 +12,11 @@ COPY ["Cargo.toml", "./Cargo.toml"]
 COPY ["ds/", "./ds/"]
 COPY ["mls_crypto/", "./mls_crypto/"]
 RUN sed -i 's#src/main.rs#dummy.rs#' Cargo.toml
-RUN cargo build --release
+RUN cargo build
 RUN sed -i 's#dummy.rs#src/main.rs#' Cargo.toml
 
 # Build the actual app
 COPY ["src/", "./src/"]
-RUN cargo build --release
+RUN cargo build
 
-CMD ["/app/target/release/de_mls"]
+CMD ["/app/target/debug/de-mls"]
