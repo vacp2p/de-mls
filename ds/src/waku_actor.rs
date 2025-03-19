@@ -20,6 +20,7 @@ impl WakuNode<Initialized> {
     /// - node: The Waku Node to handle. Waku Node is already running
     pub async fn new(port: usize) -> Result<WakuNode<Initialized>, DeliveryServiceError> {
         info!("Initializing waku node inside ");
+        // Note: here we are auto-subscribing to the pubsub topic /waku/2/rs/15/1
         let waku = waku_new(Some(WakuNodeConfig {
             tcp_port: Some(port),
             cluster_id: Some(15),
@@ -71,10 +72,13 @@ impl WakuNode<Initialized> {
 
         sleep(Duration::from_secs(2));
 
-        waku.relay_subscribe(&pubsub_topic()).await.map_err(|e| {
-            debug!("Failed to subscribe to the Waku Node: {:?}", e);
-            DeliveryServiceError::WakuSubscribeToGroupError(e)
-        })?;
+        // Note: we are not subscribing to the pubsub topic here because we are already subscribed to it
+        // and from waku side we can't check if we are subscribed to it or not
+        // issue - https://github.com/waku-org/nwaku/issues/3246
+        // waku.relay_subscribe(&pubsub_topic()).await.map_err(|e| {
+        //     debug!("Failed to subscribe to the Waku Node: {:?}", e);
+        //     DeliveryServiceError::WakuSubscribeToGroupError(e)
+        // })?;
 
         Ok(WakuNode { node: waku })
     }
