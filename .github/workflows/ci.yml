@@ -27,10 +27,6 @@ jobs:
   user_test:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.20.x'
       - name: Checkout code
         uses: actions/checkout@v3
       - name: cargo test
@@ -43,10 +39,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Setup Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.20.x'
       - name: Checkout sources
         uses: actions/checkout@v3
       - uses: Swatinem/rust-cache@v2
@@ -58,10 +50,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Setup Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.20.x'
       - name: Checkout sources
         uses: actions/checkout@v3
       - name: Install stable toolchain
