@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|addr| addr.parse::<Multiaddr>().unwrap())
                 .collect()
         })
-        .unwrap_or(vec![]);
+        .expect("PEER_ADDRESSES is not set");
 
     let content_topics = Arc::new(Mutex::new(Vec::new()));
 
