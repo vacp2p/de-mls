@@ -1,5 +1,6 @@
 use kameo::actor::ActorRef;
 use log::info;
+use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 use waku_bindings::WakuMessage;
 
@@ -8,11 +9,11 @@ use crate::{
     ws_actor::{RawWsMessage, WsAction, WsActor},
     MessageToPrint,
 };
-use ds::waku_actor::{ProcessUnsubscribeFromGroup, WakuActor};
+use ds::waku_actor::ProcessMessageToSend;
 
 pub async fn handle_user_actions(
     msg: WakuMessage,
-    waku_actor: ActorRef<WakuActor>,
+    waku_node: Sender<ProcessMessageToSend>,
     ws_actor: ActorRef<WsActor>,
     user_actor: ActorRef<User>,
     cancel_token: CancellationToken,
@@ -21,19 +22,14 @@ pub async fn handle_user_actions(
     for action in actions {
         match action {
             UserAction::SendToWaku(msg) => {
-                let id = waku_actor.ask(msg).await?;
-                info!("Successfully publish message with id: {:?}", id);
+                waku_node.send(msg).await?;
             }
             UserAction::SendToGroup(msg) => {
                 info!("Send to group: {:?}", msg);
                 ws_actor.ask(msg).await?;
             }
             UserAction::RemoveGroup(group_name) => {
-                waku_actor
-                    .ask(ProcessUnsubscribeFromGroup {
-                        group_name: group_name.clone(),
-                    })
-                    .await?;
+                // TODO: remove from content topics
                 user_actor
                     .ask(ProcessLeaveGroup {
                         group_name: group_name.clone(),
@@ -59,7 +55,7 @@ pub async fn handle_ws_action(
     msg: RawWsMessage,
     ws_actor: ActorRef<WsActor>,
     user_actor: ActorRef<User>,
-    waku_actor: ActorRef<WakuActor>,
+    waku_node: Sender<ProcessMessageToSend>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let action = ws_actor.ask(msg).await?;
     match action {
@@ -81,8 +77,7 @@ pub async fn handle_ws_action(
                     group_name: msg.group_id,
                 })
                 .await?;
-            let id = waku_actor.ask(pmt).await?;
-            info!("Successfully publish message with id: {:?}", id);
+            waku_node.send(pmt).await?;
         }
         WsAction::RemoveUser(user_to_ban, group_name) => {
             info!("Got remove user: {:?}", &user_to_ban);
@@ -92,8 +87,7 @@ pub async fn handle_ws_action(
                     group_name: group_name.clone(),
                 })
                 .await?;
-            let id = waku_actor.ask(pmt).await?;
-            info!("Successfully publish message with id: {:?}", id);
+            waku_node.send(pmt).await?;
             ws_actor
                 .ask(MessageToPrint {
                     sender: "system".to_string(),

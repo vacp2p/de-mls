@@ -6,25 +6,25 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-waku-bindings = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "force-cluster-15", subdir = "waku-bindings" }
-waku-sys = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "force-cluster-15", subdir = "waku-sys" }
+waku-bindings = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "rln-fix-deps" }
+waku-sys = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "rln-fix-deps" }
 
 tokio = { version = "1.43.0", features = ["full"] }
-kameo = "=0.13.0"
+kameo = "0.13.0"
 bounded-vec-deque = "0.1.1"
 
-chrono = "=0.4.38"
-uuid = { version = "=1.11.0", features = [
+chrono = "0.4"
+uuid = { version = "1.11.0", features = [
     "v4",
     "fast-rng",
     "macro-diagnostics",
 ] }
 
-anyhow = "=1.0.81"
-thiserror = "=1.0.61"
+anyhow = "1.0.81"
+thiserror = "1.0.39"
 
-serde_json = "=1.0"
-serde = "=1.0.204"
+serde_json = "1.0"
+serde = "1.0.163"
 
-env_logger = "=0.11.5"
-log = "=0.4.22"
+env_logger = "0.11.5"
+log = "0.4.22"

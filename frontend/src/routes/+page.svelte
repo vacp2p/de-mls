@@ -56,14 +56,14 @@
         {/if}
         {#if rooms}
             {#each rooms as room}
-                <div class="card bg-base-300 w-96 shadow-xl my-3" on:click={select_room(room)}>
+                <button class="card bg-base-300 w-96 shadow-xl my-3 w-full" on:click={() => select_room(room)}>
                     <div class="card-body">
                         <div class="flex justify-between">
                             <h2 class="card-title">{room}</h2>
                             <button class="btn btn-primary btn-md">Select Room</button>
-                        </div>
+                        </div>  
                     </div>
-                </div>
+                </button>
             {/each}
         {/if}
     </div>

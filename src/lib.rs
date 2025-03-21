@@ -1,6 +1,6 @@
 use alloy::signers::local::LocalSignerError;
 use ecies::{decrypt, encrypt};
-use kameo::{actor::ActorRef, error::SendError};
+use kameo::error::SendError;
 use libsecp256k1::{sign, verify, Message, PublicKey, SecretKey, Signature as libSignature};
 use openmls::{error::LibraryError, prelude::*};
 use openmls_rust_crypto::MemoryKeyStoreError;
@@ -14,12 +14,10 @@ use std::{
     string::FromUtf8Error,
     sync::{Arc, Mutex},
 };
+use tokio::sync::mpsc::Sender;
 use waku_bindings::{WakuContentTopic, WakuMessage};
 
-use ds::{
-    waku_actor::{ProcessMessageToSend, ProcessSubscribeToGroup, WakuActor},
-    DeliveryServiceError,
-};
+use ds::{waku_actor::ProcessMessageToSend, DeliveryServiceError};
 
 pub mod action_handlers;
 pub mod group_actor;
@@ -29,7 +27,7 @@ pub mod user_app_instance;
 pub mod ws_actor;
 
 pub struct AppState {
-    pub waku_actor: ActorRef<WakuActor>,
+    pub waku_node: Sender<ProcessMessageToSend>,
     pub rooms: Mutex<HashSet<String>>,
     pub content_topics: Arc<Mutex<Vec<WakuContentTopic>>>,
     pub pubsub: tokio::sync::broadcast::Sender<WakuMessage>,
@@ -251,14 +249,24 @@ pub enum UserError {
     #[error("Failed to parse signer: {0}")]
     SignerParsingError(#[from] LocalSignerError),
 
-    #[error("Failed to subscribe to group: {0}")]
-    KameoSubscribeToGroupError(#[from] SendError<ProcessSubscribeToGroup, DeliveryServiceError>),
     #[error("Failed to publish message: {0}")]
     KameoPublishMessageError(#[from] SendError<ProcessMessageToSend, DeliveryServiceError>),
     #[error("Failed to create group: {0}")]
     KameoCreateGroupError(String),
     #[error("Failed to send message to user: {0}")]
     KameoSendMessageError(String),
+
+    #[error("Failed to send message to waku: {0}")]
+    WakuSendMessageError(#[from] tokio::sync::mpsc::error::SendError<ProcessMessageToSend>),
+}
+
+/// Check if a content topic exists in a list of topics or if the list is empty
+pub fn match_content_topic(
+    content_topics: &Arc<Mutex<Vec<WakuContentTopic>>>,
+    topic: &WakuContentTopic,
+) -> bool {
+    let locked_topics = content_topics.lock().unwrap();
+    locked_topics.is_empty() || locked_topics.iter().any(|t| t == topic)
 }
 
 #[cfg(test)]

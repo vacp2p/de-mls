@@ -1,11 +1,11 @@
 use alloy::signers::local::PrivateKeySigner;
+use ds::ds_waku::build_content_topics;
 use kameo::actor::ActorRef;
 use log::{error, info};
 use std::{str::FromStr, sync::Arc, time::Duration};
 
 use crate::user::{ProcessAdminMessage, ProcessCreateGroup, User};
 use crate::{AppState, Connection, UserError};
-use ds::waku_actor::ProcessSubscribeToGroup;
 
 pub async fn create_user_instance(
     connection: Connection,
@@ -25,12 +25,8 @@ pub async fn create_user_instance(
         .await
         .map_err(|e| UserError::KameoCreateGroupError(e.to_string()))?;
 
-    let mut content_topics = app_state
-        .waku_actor
-        .ask(ProcessSubscribeToGroup {
-            group_name: group_name.clone(),
-        })
-        .await?;
+    let mut content_topics = build_content_topics(&group_name);
+    info!("Building content topics: {:?}", content_topics);
     app_state
         .content_topics
         .lock()
@@ -44,7 +40,6 @@ pub async fn create_user_instance(
         );
         let user_clone = user_ref.clone();
         let group_name_clone = group_name.clone();
-        let node_clone = app_state.waku_actor.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             loop {
@@ -56,8 +51,7 @@ pub async fn create_user_instance(
                         })
                         .await
                         .map_err(|e| UserError::KameoSendMessageError(e.to_string()))?;
-                    let id = node_clone.ask(msg).await?;
-                    info!("Successfully publish admin message with id: {:?}", id);
+                    app_state.waku_node.send(msg).await?;
                     Ok::<(), UserError>(())
                 }
                 .await;

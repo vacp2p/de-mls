@@ -208,6 +208,7 @@ impl User {
             WelcomeMessageType::GroupAnnouncement => {
                 let app_id = group.app_id();
                 if group.is_admin() || group.is_kp_shared() {
+                    info!("Its admin or key package already shared");
                     Ok(vec![UserAction::DoNothing])
                 } else {
                     info!(
@@ -301,14 +302,15 @@ impl User {
         &mut self,
         msg: WakuMessage,
     ) -> Result<Vec<UserAction>, UserError> {
-        let ct = msg.content_topic();
+        let ct = msg.content_topic.clone();
         let group_name = ct.application_name.to_string();
         let group = match self.groups.get(&group_name) {
             Some(g) => g,
             None => return Err(UserError::GroupNotFoundError(group_name)),
         };
         let app_id = group.app_id();
-        if msg.meta() == app_id {
+        if msg.meta == app_id {
+            info!("Message is from the same app, skipping");
             return Ok(vec![UserAction::DoNothing]);
         }
         let ct = ct.content_topic_name.to_string();
