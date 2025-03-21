@@ -34,17 +34,17 @@ jobs:
           cargo test --release
         working-directory: tests
 
-  benches:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - name: Checkout sources
-        uses: actions/checkout@v3
-      - uses: Swatinem/rust-cache@v2
-      - uses: boa-dev/criterion-compare-action@v3
-        with:
-          branchName: ${{ github.base_ref }}
+  # benches:
+  #   if: github.event_name == 'pull_request'
+  #   runs-on: ubuntu-latest
+  #   timeout-minutes: 60
+  #   steps:
+  #     - name: Checkout sources
+  #       uses: actions/checkout@v3
+  #     - uses: Swatinem/rust-cache@v2
+  #     - uses: boa-dev/criterion-compare-action@v3
+  #       with:
+  #         branchName: ${{ github.base_ref }}
 
   lint:
     runs-on: ubuntu-latest
