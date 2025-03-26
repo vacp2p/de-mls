@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use kameo::actor::ActorRef;
 use log::info;
 use tokio::sync::mpsc::Sender;
@@ -7,7 +9,7 @@ use waku_bindings::WakuMessage;
 use crate::{
     user::{ProcessLeaveGroup, ProcessRemoveUser, ProcessSendMessage, User, UserAction},
     ws_actor::{RawWsMessage, WsAction, WsActor},
-    MessageToPrint,
+    AppState, MessageToPrint,
 };
 use ds::waku_actor::ProcessMessageToSend;
 
@@ -16,6 +18,7 @@ pub async fn handle_user_actions(
     waku_node: Sender<ProcessMessageToSend>,
     ws_actor: ActorRef<WsActor>,
     user_actor: ActorRef<User>,
+    app_state: Arc<AppState>,
     cancel_token: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let actions = user_actor.ask(msg).await?;
@@ -36,6 +39,12 @@ pub async fn handle_user_actions(
                     })
                     .await?;
                 info!("Leave group: {:?}", &group_name);
+                app_state
+                    .content_topics
+                    .lock()
+                    .unwrap()
+                    .retain(|topic| topic.application_name != group_name);
+
                 ws_actor
                     .ask(MessageToPrint {
                         sender: "system".to_string(),

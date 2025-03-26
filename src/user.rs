@@ -19,7 +19,7 @@ use ds::{
 use mls_crypto::openmls_provider::*;
 
 use crate::{
-    group_actor::{Group, GroupAction},
+    group::{Group, GroupAction},
     AppMessage, GroupAnnouncement, MessageToPrint, WelcomeMessage, WelcomeMessageType,
 };
 use crate::{identity::Identity, UserError};
@@ -141,8 +141,41 @@ impl Message<ProcessRemoveUser> for User {
     }
 }
 
+pub struct ProcessPrepareIncomeKeyPackages {
+    pub group_name: String,
+}
+
+impl Message<ProcessPrepareIncomeKeyPackages> for User {
+    type Reply = Result<(), UserError>;
+
+    async fn handle(
+        &mut self,
+        msg: ProcessPrepareIncomeKeyPackages,
+        _ctx: Context<'_, Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.prepare_income_key_packages(msg.group_name.clone())
+            .await
+    }
+}
+
+pub struct ProcessProcessIncomeKeyPackages {
+    pub group_name: String,
+}
+
+impl Message<ProcessProcessIncomeKeyPackages> for User {
+    type Reply = Result<Vec<ProcessMessageToSend>, UserError>;
+
+    async fn handle(
+        &mut self,
+        msg: ProcessProcessIncomeKeyPackages,
+        _ctx: Context<'_, Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.process_income_key_packages(msg.group_name.clone())
+            .await
+    }
+}
+
 impl User {
-    /// Create a new user with the given name and a fresh set of credentials.
     pub fn new(user_eth_priv_key: &str) -> Result<Self, UserError> {
         let signer = PrivateKeySigner::from_str(user_eth_priv_key)?;
         let user_address = signer.address();
@@ -255,11 +288,8 @@ impl User {
                         group_name
                     );
                     let key_package = group.decrypt_admin_msg(welcome_msg.message_payload)?;
-                    let msgs = self.invite_users(vec![key_package], group_name).await?;
-                    Ok(msgs
-                        .iter()
-                        .map(|msg| UserAction::SendToWaku(msg.clone()))
-                        .collect())
+                    group.push_income_key_package(key_package.clone());
+                    Ok(vec![UserAction::DoNothing])
                 }
             }
             WelcomeMessageType::WelcomeShare => {
@@ -296,6 +326,40 @@ impl User {
                 }
             }
         }
+    }
+
+    pub async fn prepare_income_key_packages(
+        &mut self,
+        group_name: String,
+    ) -> Result<(), UserError> {
+        let group = match self.groups.get_mut(&group_name) {
+            Some(g) => g,
+            None => return Err(UserError::GroupNotFoundError(group_name)),
+        };
+        group.move_income_key_package_to_processed();
+        Ok(())
+    }
+
+    pub async fn process_income_key_packages(
+        &mut self,
+        group_name: String,
+    ) -> Result<Vec<ProcessMessageToSend>, UserError> {
+        let group = match self.groups.get_mut(&group_name) {
+            Some(g) => g,
+            None => return Err(UserError::GroupNotFoundError(group_name)),
+        };
+        let processed_key_packages = group.processed_key_packages();
+        if processed_key_packages.is_empty() {
+            return Ok(vec![]);
+        }
+        let out_messages = group
+            .add_members(
+                processed_key_packages,
+                &self.provider,
+                &self.identity.signer,
+            )
+            .await?;
+        Ok(out_messages)
     }
 
     pub async fn process_waku_msg(

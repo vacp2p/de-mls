@@ -1,17 +1,15 @@
 use alloy::hex;
-use chrono::Utc;
 use ds::{
     ds_waku::{APP_MSG_SUBTOPIC, COMMIT_MSG_SUBTOPIC, WELCOME_SUBTOPIC},
     waku_actor::ProcessMessageToSend,
 };
 use kameo::Actor;
-use libsecp256k1::{PublicKey, SecretKey};
 use openmls::{group::*, prelude::*};
 use openmls_basic_credential::SignatureKeyPair;
 use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 
-use crate::*;
+use crate::{admin::*, *};
 use mls_crypto::openmls_provider::*;
 
 #[derive(Clone, Debug)]
@@ -19,6 +17,12 @@ pub enum GroupAction {
     MessageToPrint(MessageToPrint),
     RemoveGroup,
     DoNothing,
+}
+
+pub enum GroupState {
+    Initialized,
+    
+    KeyPackageShared,
 }
 
 #[derive(Clone, Debug, Actor)]
@@ -110,6 +114,24 @@ impl Group {
         }
         let msg: KeyPackage = self.admin.as_ref().unwrap().decrypt_msg(message)?;
         Ok(msg)
+    }
+
+    pub fn push_income_key_package(&mut self, key_package: KeyPackage) {
+        self.admin
+            .as_mut()
+            .unwrap()
+            .add_income_key_package(key_package);
+    }
+
+    pub fn move_income_key_package_to_processed(&mut self) {
+        self.admin
+            .as_mut()
+            .unwrap()
+            .move_income_key_package_to_processed();
+    }
+
+    pub fn processed_key_packages(&mut self) -> Vec<KeyPackage> {
+        self.admin.as_mut().unwrap().processed_key_packages()
     }
 
     pub async fn add_members(
@@ -306,54 +328,5 @@ impl Group {
 impl Display for Group {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Group: {:#?}", self.group_name)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Admin {
-    current_key_pair: PublicKey,
-    current_key_pair_private: SecretKey,
-    key_pair_timestamp: u64,
-}
-
-pub trait AdminTrait {
-    fn new() -> Self;
-    fn generate_new_key_pair(&mut self);
-    fn generate_admin_message(&self) -> GroupAnnouncement;
-    fn decrypt_msg(&self, message: Vec<u8>) -> Result<KeyPackage, MessageError>;
-}
-
-impl AdminTrait for Admin {
-    fn new() -> Self {
-        let (public_key, secret_key) = generate_keypair();
-        Admin {
-            current_key_pair: public_key,
-            current_key_pair_private: secret_key,
-            key_pair_timestamp: Utc::now().timestamp() as u64,
-        }
-    }
-
-    fn generate_new_key_pair(&mut self) {
-        let (public_key, secret_key) = generate_keypair();
-        self.current_key_pair = public_key;
-        self.current_key_pair_private = secret_key;
-        self.key_pair_timestamp = Utc::now().timestamp() as u64;
-    }
-
-    fn generate_admin_message(&self) -> GroupAnnouncement {
-        let signature = sign_message(
-            &self.current_key_pair.serialize_compressed(),
-            &self.current_key_pair_private,
-        );
-        GroupAnnouncement::new(
-            self.current_key_pair.serialize_compressed().to_vec(),
-            signature,
-        )
-    }
-
-    fn decrypt_msg(&self, message: Vec<u8>) -> Result<KeyPackage, MessageError> {
-        let msg: Vec<u8> = decrypt_message(&message, self.current_key_pair_private)?;
-        let key_package: KeyPackage = serde_json::from_slice(&msg)?;
-        Ok(key_package)
     }
 }
