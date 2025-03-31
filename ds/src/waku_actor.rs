@@ -162,9 +162,6 @@ impl ProcessMessageToSend {
     }
 }
 
-
-
-
 pub async fn run_waku_node(
     node_port: String,
     peer_addresses: Option<Vec<Multiaddr>>,

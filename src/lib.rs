@@ -19,8 +19,8 @@ use waku_bindings::{WakuContentTopic, WakuMessage};
 
 use ds::{waku_actor::ProcessMessageToSend, DeliveryServiceError};
 
-pub mod admin;
 pub mod action_handlers;
+pub mod admin;
 pub mod group;
 pub mod identity;
 pub mod user;

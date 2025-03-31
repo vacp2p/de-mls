@@ -21,7 +21,6 @@ pub enum GroupAction {
 
 pub enum GroupState {
     Initialized,
-    
     KeyPackageShared,
 }
 
