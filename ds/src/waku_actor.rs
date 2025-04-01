@@ -1,7 +1,7 @@
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::{thread::sleep, time::Duration};
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{Receiver, Sender};
 use waku_bindings::{
     node::{WakuNodeConfig, WakuNodeHandle},
     waku_new, Initialized, LibwakuResponse, Multiaddr, Running, WakuEvent, WakuMessage,
@@ -160,4 +160,43 @@ impl ProcessMessageToSend {
             true,
         ))
     }
+}
+
+pub async fn run_waku_node(
+    node_port: String,
+    peer_addresses: Option<Vec<Multiaddr>>,
+    waku_sender: Sender<WakuMessage>,
+    reciever: &mut Receiver<ProcessMessageToSend>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    info!("Initializing waku node");
+    let waku_node_init = WakuNode::new(node_port.parse::<usize>().unwrap())
+        .await
+        .expect("Failed to initialize waku node");
+
+    let waku_node = waku_node_init
+        .start(waku_sender)
+        .await
+        .expect("Failed to start waku node");
+    info!("Waku node started");
+
+    if let Some(peer_addresses) = peer_addresses {
+        info!("Connecting to peers");
+        waku_node
+            .connect_to_peers(peer_addresses)
+            .await
+            .expect("Failed to connect to peers");
+        info!("Waku node connected to peers");
+    }
+
+    info!("Waiting for message to send to waku");
+    while let Some(msg) = reciever.recv().await {
+        info!("Received message to send to waku");
+        let id = waku_node
+            .send_message(msg)
+            .await
+            .expect("Failed to send message to waku");
+        info!("Successfully publish message with id: {:?}", id);
+    }
+
+    Ok(())
 }

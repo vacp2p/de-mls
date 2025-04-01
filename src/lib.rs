@@ -20,7 +20,8 @@ use waku_bindings::{WakuContentTopic, WakuMessage};
 use ds::{waku_actor::ProcessMessageToSend, DeliveryServiceError};
 
 pub mod action_handlers;
-pub mod group_actor;
+pub mod admin;
+pub mod group;
 pub mod identity;
 pub mod user;
 pub mod user_app_instance;
@@ -43,8 +44,8 @@ pub struct Connection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WelcomeMessageType {
     GroupAnnouncement,
-    KeyPackageShare,
-    WelcomeShare,
+    UserKeyPackage,
+    InvitationToJoin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

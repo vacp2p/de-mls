@@ -14,7 +14,7 @@ use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::mpsc::channel;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
 use waku_bindings::{Multiaddr, WakuMessage};
@@ -26,7 +26,7 @@ use de_mls::{
     ws_actor::{RawWsMessage, WsAction, WsActor},
     AppState, Connection,
 };
-use ds::waku_actor::{ProcessMessageToSend, WakuNode};
+use ds::waku_actor::{run_waku_node, ProcessMessageToSend};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting waku node");
     tokio::task::block_in_place(move || {
         tokio::runtime::Handle::current().block_on(async move {
-            run_waku_node(node_port, peer_addresses, waku_sender, &mut reciever).await
+            run_waku_node(node_port, Some(peer_addresses), waku_sender, &mut reciever).await
         })
     })?;
 
@@ -92,43 +92,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    Ok(())
-}
-
-async fn run_waku_node(
-    node_port: String,
-    peer_addresses: Vec<Multiaddr>,
-    waku_sender: Sender<WakuMessage>,
-    reciever: &mut Receiver<ProcessMessageToSend>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    info!("Initializing waku node");
-    let waku_node_init = WakuNode::new(node_port.parse::<usize>().unwrap())
-        .await
-        .expect("Failed to initialize waku node");
-
-    let waku_node = waku_node_init
-        .start(waku_sender)
-        .await
-        .expect("Failed to start waku node");
-    info!("Waku node started");
-
-    info!("Connecting to peers");
-    waku_node
-        .connect_to_peers(peer_addresses.to_vec())
-        .await
-        .expect("Failed to connect to peers");
-    info!("Waku node connected to peers");
-
-    info!("Waiting for message to send to waku");
-    while let Some(msg) = reciever.recv().await {
-        info!("Received message to send to waku");
-        let id = waku_node
-            .send_message(msg)
-            .await
-            .expect("Failed to send message to waku");
-        info!("Successfully publish message with id: {:?}", id);
-    }
-
     Ok(())
 }
 
@@ -205,11 +168,6 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         while let Ok(msg) = user_waku_receiver.recv().await {
             let content_topic = msg.content_topic.clone();
             // Check if message belongs to a relevant topic
-            info!("Content topic: {:?}", content_topic);
-            info!(
-                "Content topics: {:?}",
-                state_clone.content_topics.lock().unwrap()
-            );
             if !match_content_topic(&state_clone.content_topics, &content_topic) {
                 error!("Content topic not match: {:?}", content_topic);
                 return;
@@ -223,6 +181,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 state_clone.waku_node.clone(),
                 ws_actor_clone.clone(),
                 user_actor_clone.clone(),
+                state_clone.clone(),
                 cancel_token_clone.clone(),
             )
             .await;

@@ -4,8 +4,10 @@ use kameo::actor::ActorRef;
 use log::{error, info};
 use std::{str::FromStr, sync::Arc, time::Duration};
 
-use crate::user::{ProcessAdminMessage, ProcessCreateGroup, User};
+use crate::user::*;
 use crate::{AppState, Connection, UserError};
+
+pub const ADMIN_EPOCH: u64 = 30;
 
 pub async fn create_user_instance(
     connection: Connection,
@@ -41,26 +43,68 @@ pub async fn create_user_instance(
         let user_clone = user_ref.clone();
         let group_name_clone = group_name.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            let mut interval = tokio::time::interval(Duration::from_secs(ADMIN_EPOCH));
             loop {
                 interval.tick().await;
-                let res = async {
-                    let msg = user_clone
-                        .ask(ProcessAdminMessage {
-                            group_name: group_name_clone.clone(),
-                        })
-                        .await
-                        .map_err(|e| UserError::KameoSendMessageError(e.to_string()))?;
-                    app_state.waku_node.send(msg).await?;
+                let _ = async {
+                    handle_admin_flow_per_epoch(
+                        user_clone.clone(),
+                        group_name_clone.clone(),
+                        app_state.clone(),
+                    )
+                    .await
+                    .map_err(|e| UserError::KameoSendMessageError(e.to_string()))?;
                     Ok::<(), UserError>(())
                 }
-                .await;
-                if let Err(e) = res {
-                    error!("Error sending admin message to waku: {}", e);
-                }
+                .await
+                .inspect_err(|e| error!("Error sending admin message to waku: {}", e));
             }
         });
     };
 
     Ok(user_ref)
+}
+
+/// Each epoch admin of the group will send the admin key to the waku node, which will be used to share
+/// key packages for current group and for the current epoch admin do next steps:
+/// 1. Get all collected key packages from previous epoch (not processed yet, just drained messaged queue)
+/// 2. Send new admin key to the waku node for new epoch and next message will be saved in the messaged queue
+/// 3. Process the income key packages from previous epoch and send welcome message to the new members and
+///     update message to the other members
+pub async fn handle_admin_flow_per_epoch(
+    user: ActorRef<User>,
+    group_name: String,
+    app_state: Arc<AppState>,
+) -> Result<(), UserError> {
+    // Move all income key packages to processed queue
+    let key_packages = user
+        .ask(ProcessGetIncomeKeyPackages {
+            group_name: group_name.clone(),
+        })
+        .await
+        .map_err(|e| UserError::KameoSendMessageError(e.to_string()))?;
+
+    // Send new admin key to the waku node for new epoch and next message will be saved in the messaged queue
+    let msg = user
+        .ask(ProcessAdminMessage {
+            group_name: group_name.clone(),
+        })
+        .await
+        .map_err(|e| UserError::KameoSendMessageError(e.to_string()))?;
+    app_state.waku_node.send(msg).await?;
+
+    // Process the income key packages from previous epoch and send welcome message to the new members and
+    // update message to the other members
+    let msgs = user
+        .ask(ProcessInviteUsers {
+            group_name: group_name.clone(),
+            users: key_packages,
+        })
+        .await
+        .map_err(|e| UserError::KameoSendMessageError(e.to_string()))?;
+    for msg in msgs {
+        app_state.waku_node.send(msg).await?;
+    }
+
+    Ok(())
 }

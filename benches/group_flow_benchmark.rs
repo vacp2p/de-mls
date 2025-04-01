@@ -117,6 +117,7 @@ fn add_user_to_group_benchmark(c: &mut Criterion) {
                         .create_group("group".to_string(), true)
                         .await
                         .expect("Failed to create group");
+
                     alice
                         .invite_users(user_kps.lock().unwrap().clone(), "group".to_string())
                         .await
@@ -145,44 +146,47 @@ fn share_kp_benchmark(c: &mut Criterion) {
                 bob.create_group(group_name.clone(), false)
                     .await
                     .expect("Failed to create group");
-                let alice_ga_msg = alice
+                let group_announcement = alice
                     .prepare_admin_msg(group_name.clone())
                     .await
                     .expect("Failed to prepare admin message");
-
-                let waku_ga_message = alice_ga_msg
+                let group_announcement_message = group_announcement
                     .build_waku_message()
                     .expect("Failed to build waku message");
 
-                // Bob receives the Group Announcement msg and send Key Package Share msg to Alice
-                let bob_res = bob
-                    .process_waku_msg(waku_ga_message)
+                let bob_action = bob
+                    .process_waku_msg(group_announcement_message.clone())
                     .await
                     .expect("Failed to process waku message");
-                let bob_kp_message = match bob_res[0].clone() {
+                let bob_kp_message = match bob_action[0].clone() {
                     UserAction::SendToWaku(msg) => msg,
                     _ => panic!("User action is not SendToWaku"),
                 };
-                let waku_kp_message = bob_kp_message
+                let bob_kp_waku_message = bob_kp_message
                     .build_waku_message()
                     .expect("Failed to build waku message");
 
-                // Alice receives the Key Package Share msg and send Welcome msg to Bob
-                let user_action_invite = alice
-                    .process_waku_msg(waku_kp_message)
+                let _ = alice
+                    .process_waku_msg(bob_kp_waku_message)
                     .await
                     .expect("Failed to process waku message");
 
-                let alice_welcome_message = match user_action_invite[1].clone() {
-                    UserAction::SendToWaku(msg) => msg,
-                    _ => panic!("User action is not SendToWaku"),
-                };
-                let waku_welcome_message = alice_welcome_message
+                let users_to_invite = alice
+                    .processed_group_income_key_packages(group_name.clone())
+                    .await
+                    .expect("Failed to process income key packages");
+
+                let res = alice
+                    .invite_users(users_to_invite, group_name.clone())
+                    .await
+                    .expect("Failed to invite users");
+
+                let welcome_message = res[1]
                     .build_waku_message()
                     .expect("Failed to build waku message");
 
-                // Bob receives the Welcome msg and join the group
-                bob.process_waku_msg(waku_welcome_message)
+                let _ = bob
+                    .process_waku_msg(welcome_message.clone())
                     .await
                     .expect("Failed to process waku message");
             });
