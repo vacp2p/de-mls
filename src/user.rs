@@ -287,11 +287,11 @@ impl User {
                         group_name
                     );
                     let key_package = group.decrypt_admin_msg(welcome_msg.message_payload)?;
-                    group.push_income_key_package(key_package.clone());
+                    group.push_income_key_package(key_package.clone())?;
                 }
                 Ok(vec![UserAction::DoNothing])
             }
-            WelcomeMessageType::InvintationToJoin => {
+            WelcomeMessageType::InvitationToJoin => {
                 if group.is_admin() {
                     Ok(vec![UserAction::DoNothing])
                 } else {
@@ -335,7 +335,7 @@ impl User {
             Some(g) => g,
             None => return Err(UserError::GroupNotFoundError(group_name)),
         };
-        Ok(group.processed_key_packages())
+        Ok(group.processed_key_packages()?)
     }
 
     pub async fn push_income_key_package(
@@ -347,8 +347,7 @@ impl User {
             Some(g) => g,
             None => return Err(UserError::GroupNotFoundError(group_name)),
         };
-        group.push_income_key_package(kp);
-        Ok(())
+        Ok(group.push_income_key_package(kp)?)
     }
 
     pub async fn process_waku_msg(

@@ -19,11 +19,6 @@ pub enum GroupAction {
     DoNothing,
 }
 
-pub enum GroupState {
-    Initialized,
-    KeyPackageShared,
-}
-
 #[derive(Clone, Debug, Actor)]
 pub struct Group {
     group_name: String,
@@ -115,15 +110,22 @@ impl Group {
         Ok(msg)
     }
 
-    pub fn push_income_key_package(&mut self, key_package: KeyPackage) {
+    pub fn push_income_key_package(&mut self, key_package: KeyPackage) -> Result<(), GroupError> {
+        if !self.is_admin() {
+            return Err(GroupError::AdminNotSetError);
+        }
         self.admin
             .as_mut()
             .unwrap()
-            .add_income_key_package(key_package)
+            .add_income_key_package(key_package);
+        Ok(())
     }
 
-    pub fn processed_key_packages(&mut self) -> Vec<KeyPackage> {
-        self.admin.as_mut().unwrap().processed_key_packages()
+    pub fn processed_key_packages(&mut self) -> Result<Vec<KeyPackage>, GroupError> {
+        if !self.is_admin() {
+            return Err(GroupError::AdminNotSetError);
+        }
+        Ok(self.admin.as_mut().unwrap().processed_key_packages())
     }
 
     pub async fn add_members(
@@ -149,7 +151,7 @@ impl Group {
 
         let welcome_serialized = welcome.tls_serialize_detached()?;
         let welcome_msg: Vec<u8> = serde_json::to_vec(&WelcomeMessage {
-            message_type: WelcomeMessageType::InvintationToJoin,
+            message_type: WelcomeMessageType::InvitationToJoin,
             message_payload: welcome_serialized,
         })?;
 

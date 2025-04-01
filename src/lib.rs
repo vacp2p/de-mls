@@ -45,7 +45,7 @@ pub struct Connection {
 pub enum WelcomeMessageType {
     GroupAnnouncement,
     UserKeyPackage,
-    InvintationToJoin,
+    InvitationToJoin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
