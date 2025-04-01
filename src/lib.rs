@@ -44,8 +44,8 @@ pub struct Connection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WelcomeMessageType {
     GroupAnnouncement,
-    KeyPackageShare,
-    WelcomeShare,
+    UserKeyPackage,
+    InvintationToJoin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

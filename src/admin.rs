@@ -9,8 +9,7 @@ pub struct Admin {
     current_key_pair: PublicKey,
     current_key_pair_private: SecretKey,
     key_pair_timestamp: u64,
-    income_key_package: Vec<KeyPackage>,
-    processed_key_package: Vec<KeyPackage>,
+    income_key_package: Arc<Mutex<Vec<KeyPackage>>>,
 }
 
 impl Default for Admin {
@@ -26,8 +25,7 @@ impl Admin {
             current_key_pair: public_key,
             current_key_pair_private: secret_key,
             key_pair_timestamp: Utc::now().timestamp() as u64,
-            income_key_package: Vec::new(),
-            processed_key_package: Vec::new(),
+            income_key_package: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -56,16 +54,10 @@ impl Admin {
     }
 
     pub fn add_income_key_package(&mut self, key_package: KeyPackage) {
-        self.income_key_package.push(key_package);
-    }
-
-    pub fn move_income_key_package_to_processed(&mut self) {
-        self.processed_key_package
-            .extend(self.income_key_package.clone());
-        self.income_key_package.clear();
+        self.income_key_package.lock().unwrap().push(key_package)
     }
 
     pub fn processed_key_packages(&mut self) -> Vec<KeyPackage> {
-        self.processed_key_package.drain(0..).collect()
+        self.income_key_package.lock().unwrap().drain(0..).collect()
     }
 }

@@ -119,14 +119,7 @@ impl Group {
         self.admin
             .as_mut()
             .unwrap()
-            .add_income_key_package(key_package);
-    }
-
-    pub fn move_income_key_package_to_processed(&mut self) {
-        self.admin
-            .as_mut()
-            .unwrap()
-            .move_income_key_package_to_processed();
+            .add_income_key_package(key_package)
     }
 
     pub fn processed_key_packages(&mut self) -> Vec<KeyPackage> {
@@ -156,7 +149,7 @@ impl Group {
 
         let welcome_serialized = welcome.tls_serialize_detached()?;
         let welcome_msg: Vec<u8> = serde_json::to_vec(&WelcomeMessage {
-            message_type: WelcomeMessageType::WelcomeShare,
+            message_type: WelcomeMessageType::InvintationToJoin,
             message_payload: welcome_serialized,
         })?;
 

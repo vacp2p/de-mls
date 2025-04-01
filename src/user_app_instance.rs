@@ -77,11 +77,12 @@ pub async fn handle_admin_flow_per_epoch(
     app_state: Arc<AppState>,
 ) -> Result<(), UserError> {
     // Move all income key packages to processed queue
-    user.ask(ProcessPrepareIncomeKeyPackages {
-        group_name: group_name.clone(),
-    })
-    .await
-    .map_err(|e| UserError::KameoSendMessageError(e.to_string()))?;
+    let key_packages = user
+        .ask(ProcessGetIncomeKeyPackages {
+            group_name: group_name.clone(),
+        })
+        .await
+        .map_err(|e| UserError::KameoSendMessageError(e.to_string()))?;
 
     // Send new admin key to the waku node for new epoch and next message will be saved in the messaged queue
     let msg = user
@@ -95,8 +96,9 @@ pub async fn handle_admin_flow_per_epoch(
     // Process the income key packages from previous epoch and send welcome message to the new members and
     // update message to the other members
     let msgs = user
-        .ask(ProcessProcessIncomeKeyPackages {
+        .ask(ProcessInviteUsers {
             group_name: group_name.clone(),
+            users: key_packages,
         })
         .await
         .map_err(|e| UserError::KameoSendMessageError(e.to_string()))?;

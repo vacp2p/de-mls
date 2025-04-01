@@ -141,36 +141,37 @@ impl Message<ProcessRemoveUser> for User {
     }
 }
 
-pub struct ProcessPrepareIncomeKeyPackages {
+pub struct ProcessGetIncomeKeyPackages {
     pub group_name: String,
 }
 
-impl Message<ProcessPrepareIncomeKeyPackages> for User {
-    type Reply = Result<(), UserError>;
+impl Message<ProcessGetIncomeKeyPackages> for User {
+    type Reply = Result<Vec<KeyPackage>, UserError>;
 
     async fn handle(
         &mut self,
-        msg: ProcessPrepareIncomeKeyPackages,
+        msg: ProcessGetIncomeKeyPackages,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.prepare_income_key_packages(msg.group_name.clone())
+        self.processed_group_income_key_packages(msg.group_name.clone())
             .await
     }
 }
 
-pub struct ProcessProcessIncomeKeyPackages {
+pub struct ProcessInviteUsers {
     pub group_name: String,
+    pub users: Vec<KeyPackage>,
 }
 
-impl Message<ProcessProcessIncomeKeyPackages> for User {
+impl Message<ProcessInviteUsers> for User {
     type Reply = Result<Vec<ProcessMessageToSend>, UserError>;
 
     async fn handle(
         &mut self,
-        msg: ProcessProcessIncomeKeyPackages,
+        msg: ProcessInviteUsers,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.process_income_key_packages(msg.group_name.clone())
+        self.invite_users(msg.users.clone(), msg.group_name.clone())
             .await
     }
 }
@@ -263,7 +264,7 @@ impl User {
 
                     let encrypted_key_package = group_announcement.encrypt(key_package)?;
                     let msg: Vec<u8> = serde_json::to_vec(&WelcomeMessage {
-                        message_type: WelcomeMessageType::KeyPackageShare,
+                        message_type: WelcomeMessageType::UserKeyPackage,
                         message_payload: encrypted_key_package,
                     })?;
 
@@ -277,27 +278,25 @@ impl User {
                     })])
                 }
             }
-            WelcomeMessageType::KeyPackageShare => {
+            WelcomeMessageType::UserKeyPackage => {
                 // We already shared the key package with the group admin and we don't need to do it again
-                if !group.is_admin() {
-                    Ok(vec![UserAction::DoNothing])
-                } else {
+                if group.is_admin() {
                     info!(
-                        "User {:?} received key package share message for group {:?}",
+                        "Admin {:?} received key package for the group {:?}",
                         self.identity.identity_string(),
                         group_name
                     );
                     let key_package = group.decrypt_admin_msg(welcome_msg.message_payload)?;
                     group.push_income_key_package(key_package.clone());
-                    Ok(vec![UserAction::DoNothing])
                 }
+                Ok(vec![UserAction::DoNothing])
             }
-            WelcomeMessageType::WelcomeShare => {
+            WelcomeMessageType::InvintationToJoin => {
                 if group.is_admin() {
                     Ok(vec![UserAction::DoNothing])
                 } else {
                     info!(
-                        "User {:?} received welcome share message for group {:?}",
+                        "User {:?} received invitation to join group {:?}",
                         self.identity.identity_string(),
                         group_name
                     );
@@ -328,38 +327,28 @@ impl User {
         }
     }
 
-    pub async fn prepare_income_key_packages(
+    pub async fn processed_group_income_key_packages(
         &mut self,
+        group_name: String,
+    ) -> Result<Vec<KeyPackage>, UserError> {
+        let group = match self.groups.get_mut(&group_name) {
+            Some(g) => g,
+            None => return Err(UserError::GroupNotFoundError(group_name)),
+        };
+        Ok(group.processed_key_packages())
+    }
+
+    pub async fn push_income_key_package(
+        &mut self,
+        kp: KeyPackage,
         group_name: String,
     ) -> Result<(), UserError> {
         let group = match self.groups.get_mut(&group_name) {
             Some(g) => g,
             None => return Err(UserError::GroupNotFoundError(group_name)),
         };
-        group.move_income_key_package_to_processed();
+        group.push_income_key_package(kp);
         Ok(())
-    }
-
-    pub async fn process_income_key_packages(
-        &mut self,
-        group_name: String,
-    ) -> Result<Vec<ProcessMessageToSend>, UserError> {
-        let group = match self.groups.get_mut(&group_name) {
-            Some(g) => g,
-            None => return Err(UserError::GroupNotFoundError(group_name)),
-        };
-        let processed_key_packages = group.processed_key_packages();
-        if processed_key_packages.is_empty() {
-            return Ok(vec![]);
-        }
-        let out_messages = group
-            .add_members(
-                processed_key_packages,
-                &self.provider,
-                &self.identity.signer,
-            )
-            .await?;
-        Ok(out_messages)
     }
 
     pub async fn process_waku_msg(
