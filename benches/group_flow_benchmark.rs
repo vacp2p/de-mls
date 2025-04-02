@@ -158,7 +158,7 @@ fn share_kp_benchmark(c: &mut Criterion) {
                     .process_waku_msg(group_announcement_message.clone())
                     .await
                     .expect("Failed to process waku message");
-                let bob_kp_message = match bob_action[0].clone() {
+                let bob_kp_message = match bob_action {
                     UserAction::SendToWaku(msg) => msg,
                     _ => panic!("User action is not SendToWaku"),
                 };

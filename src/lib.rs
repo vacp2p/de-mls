@@ -2,7 +2,7 @@ use alloy::signers::local::LocalSignerError;
 use ecies::{decrypt, encrypt};
 use kameo::error::SendError;
 use libsecp256k1::{sign, verify, Message, PublicKey, SecretKey, Signature as libSignature};
-use openmls::{error::LibraryError, prelude::*};
+use openmls::prelude::*;
 use openmls_rust_crypto::MemoryKeyStoreError;
 use rand::thread_rng;
 use secp256k1::hashes::{sha256, Hash};
@@ -17,18 +17,18 @@ use std::{
 use tokio::sync::mpsc::Sender;
 use waku_bindings::{WakuContentTopic, WakuMessage};
 
-use ds::{waku_actor::ProcessMessageToSend, DeliveryServiceError};
+use ds::{waku_actor::WakuMessageToSend, DeliveryServiceError};
+use mls_crypto::IdentityError;
 
 pub mod action_handlers;
 pub mod admin;
 pub mod group;
-pub mod identity;
 pub mod user;
 pub mod user_app_instance;
 pub mod ws_actor;
 
 pub struct AppState {
-    pub waku_node: Sender<ProcessMessageToSend>,
+    pub waku_node: Sender<WakuMessageToSend>,
     pub rooms: Mutex<HashSet<String>>,
     pub content_topics: Arc<Mutex<Vec<WakuContentTopic>>>,
     pub pubsub: tokio::sync::broadcast::Sender<WakuMessage>,
@@ -73,18 +73,6 @@ impl GroupAnnouncement {
     pub fn encrypt(&self, data: Vec<u8>) -> Result<Vec<u8>, MessageError> {
         let encrypted = encrypt_message(&data, &self.pub_key)?;
         Ok(encrypted)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppMessage {
-    pub sender: Vec<u8>,
-    pub message: Vec<u8>,
-}
-
-impl AppMessage {
-    pub fn new(sender: Vec<u8>, message: Vec<u8>) -> Self {
-        AppMessage { sender, message }
     }
 }
 
@@ -147,22 +135,6 @@ pub fn decrypt_message(message: &[u8], secret_key: SecretKey) -> Result<Vec<u8>,
     let secret_key_serialized = secret_key.serialize();
     let decrypted = decrypt(&secret_key_serialized, message)?;
     Ok(decrypted)
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum IdentityError {
-    #[error("Failed to create new key package: {0}")]
-    MlsKeyPackageCreationError(#[from] KeyPackageNewError<MemoryKeyStoreError>),
-    #[error(transparent)]
-    MlsLibraryError(#[from] LibraryError),
-    #[error("Failed to create signature: {0}")]
-    MlsCryptoError(#[from] CryptoError),
-    #[error("Failed to save signature key: {0}")]
-    MlsKeyStoreError(#[from] MemoryKeyStoreError),
-    #[error("Failed to create credential: {0}")]
-    MlsCredentialError(#[from] CredentialError),
-    #[error("An unknown error occurred: {0}")]
-    Other(anyhow::Error),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -251,14 +223,21 @@ pub enum UserError {
     SignerParsingError(#[from] LocalSignerError),
 
     #[error("Failed to publish message: {0}")]
-    KameoPublishMessageError(#[from] SendError<ProcessMessageToSend, DeliveryServiceError>),
+    KameoPublishMessageError(#[from] SendError<WakuMessageToSend, DeliveryServiceError>),
     #[error("Failed to create group: {0}")]
     KameoCreateGroupError(String),
     #[error("Failed to send message to user: {0}")]
     KameoSendMessageError(String),
 
+    #[error("Failed to get income key packages: {0}")]
+    GetIncomeKeyPackagesError(String),
+    #[error("Failed to process admin message: {0}")]
+    ProcessAdminMessageError(String),
+    #[error("Failed to process invite users: {0}")]
+    ProcessInviteUsersError(String),
+
     #[error("Failed to send message to waku: {0}")]
-    WakuSendMessageError(#[from] tokio::sync::mpsc::error::SendError<ProcessMessageToSend>),
+    WakuSendMessageError(#[from] tokio::sync::mpsc::error::SendError<WakuMessageToSend>),
 }
 
 /// Check if a content topic exists in a list of topics or if the list is empty

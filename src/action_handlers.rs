@@ -1,61 +1,57 @@
-use std::sync::Arc;
-
 use kameo::actor::ActorRef;
 use log::info;
+use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 use waku_bindings::WakuMessage;
 
 use crate::{
-    user::{ProcessLeaveGroup, ProcessRemoveUser, ProcessSendMessage, User, UserAction},
+    user::{ProcessLeaveGroup, ProcessRemoveUser, SendGroupMessage, User, UserAction},
     ws_actor::{RawWsMessage, WsAction, WsActor},
     AppState, MessageToPrint,
 };
-use ds::waku_actor::ProcessMessageToSend;
+use ds::waku_actor::WakuMessageToSend;
 
 pub async fn handle_user_actions(
     msg: WakuMessage,
-    waku_node: Sender<ProcessMessageToSend>,
+    waku_node: Sender<WakuMessageToSend>,
     ws_actor: ActorRef<WsActor>,
     user_actor: ActorRef<User>,
     app_state: Arc<AppState>,
     cancel_token: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let actions = user_actor.ask(msg).await?;
-    for action in actions {
-        match action {
-            UserAction::SendToWaku(msg) => {
-                waku_node.send(msg).await?;
-            }
-            UserAction::SendToGroup(msg) => {
-                info!("Send to group: {:?}", msg);
-                ws_actor.ask(msg).await?;
-            }
-            UserAction::RemoveGroup(group_name) => {
-                // TODO: remove from content topics
-                user_actor
-                    .ask(ProcessLeaveGroup {
-                        group_name: group_name.clone(),
-                    })
-                    .await?;
-                info!("Leave group: {:?}", &group_name);
-                app_state
-                    .content_topics
-                    .lock()
-                    .unwrap()
-                    .retain(|topic| topic.application_name != group_name);
-
-                ws_actor
-                    .ask(MessageToPrint {
-                        sender: "system".to_string(),
-                        message: format!("Group {} removed you", group_name),
-                        group_name: group_name.clone(),
-                    })
-                    .await?;
-                cancel_token.cancel();
-            }
-            UserAction::DoNothing => {}
+    let action = user_actor.ask(msg).await?;
+    match action {
+        UserAction::SendToWaku(msg) => {
+            waku_node.send(msg).await?;
         }
+        UserAction::SendToGroup(msg) => {
+            info!("Send to group: {:?}", msg);
+            ws_actor.ask(msg).await?;
+        }
+        UserAction::RemoveGroup(group_name) => {
+            user_actor
+                .ask(ProcessLeaveGroup {
+                    group_name: group_name.clone(),
+                })
+                .await?;
+
+            app_state
+                .content_topics
+                .lock()
+                .unwrap()
+                .retain(|topic| topic.application_name != group_name);
+            info!("Leave group: {:?}", &group_name);
+            ws_actor
+                .ask(MessageToPrint {
+                    sender: "system".to_string(),
+                    message: format!("You're removed from the group {}", group_name),
+                    group_name: group_name.clone(),
+                })
+                .await?;
+            cancel_token.cancel();
+        }
+        UserAction::DoNothing => {}
     }
     Ok(())
 }
@@ -64,7 +60,7 @@ pub async fn handle_ws_action(
     msg: RawWsMessage,
     ws_actor: ActorRef<WsActor>,
     user_actor: ActorRef<User>,
-    waku_node: Sender<ProcessMessageToSend>,
+    waku_node: Sender<WakuMessageToSend>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let action = ws_actor.ask(msg).await?;
     match action {
@@ -81,7 +77,7 @@ pub async fn handle_ws_action(
             ws_actor.ask(mtp).await?;
 
             let pmt = user_actor
-                .ask(ProcessSendMessage {
+                .ask(SendGroupMessage {
                     msg: msg.message,
                     group_name: msg.group_id,
                 })

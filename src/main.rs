@@ -26,7 +26,7 @@ use de_mls::{
     ws_actor::{RawWsMessage, WsAction, WsActor},
     AppState, Connection,
 };
-use ds::waku_actor::{run_waku_node, ProcessMessageToSend};
+use ds::waku_actor::{run_waku_node, WakuMessageToSend};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let content_topics = Arc::new(Mutex::new(Vec::new()));
 
     let (waku_sender, mut waku_receiver) = channel::<WakuMessage>(100);
-    let (sender, mut reciever) = channel::<ProcessMessageToSend>(100);
+    let (sender, mut reciever) = channel::<WakuMessageToSend>(100);
     let (tx, _) = tokio::sync::broadcast::channel(100);
 
     let app_state = Arc::new(AppState {

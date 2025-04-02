@@ -12,21 +12,18 @@ use std::{
 };
 use waku_bindings::WakuMessage;
 
-use ds::{
-    ds_waku::{APP_MSG_SUBTOPIC, COMMIT_MSG_SUBTOPIC, WELCOME_SUBTOPIC},
-    waku_actor::ProcessMessageToSend,
-};
-use mls_crypto::openmls_provider::*;
+use ds::{waku_actor::WakuMessageToSend, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
+use mls_crypto::{identity::Identity, openmls_provider::*};
 
+use crate::UserError;
 use crate::{
     group::{Group, GroupAction},
-    AppMessage, GroupAnnouncement, MessageToPrint, WelcomeMessage, WelcomeMessageType,
+    GroupAnnouncement, MessageToPrint, WelcomeMessage, WelcomeMessageType,
 };
-use crate::{identity::Identity, UserError};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum UserAction {
-    SendToWaku(ProcessMessageToSend),
+    SendToWaku(WakuMessageToSend),
     SendToGroup(MessageToPrint),
     RemoveGroup(String),
     DoNothing,
@@ -41,15 +38,14 @@ pub struct User {
 }
 
 impl Message<WakuMessage> for User {
-    type Reply = Result<Vec<UserAction>, UserError>;
+    type Reply = Result<UserAction, UserError>;
 
     async fn handle(
         &mut self,
         msg: WakuMessage,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        let actions = self.process_waku_msg(msg).await?;
-        Ok(actions)
+        self.process_waku_msg(msg).await
     }
 }
 
@@ -77,7 +73,7 @@ pub struct ProcessAdminMessage {
 }
 
 impl Message<ProcessAdminMessage> for User {
-    type Reply = Result<ProcessMessageToSend, UserError>;
+    type Reply = Result<WakuMessageToSend, UserError>;
 
     async fn handle(
         &mut self,
@@ -105,20 +101,20 @@ impl Message<ProcessLeaveGroup> for User {
     }
 }
 
-pub struct ProcessSendMessage {
+pub struct SendGroupMessage {
     pub msg: String,
     pub group_name: String,
 }
 
-impl Message<ProcessSendMessage> for User {
-    type Reply = Result<ProcessMessageToSend, UserError>;
+impl Message<SendGroupMessage> for User {
+    type Reply = Result<WakuMessageToSend, UserError>;
 
     async fn handle(
         &mut self,
-        msg: ProcessSendMessage,
+        msg: SendGroupMessage,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.prepare_msg_to_send(&msg.msg, msg.group_name.clone())
+        self.create_group_message(&msg.msg, msg.group_name.clone())
             .await
     }
 }
@@ -129,7 +125,7 @@ pub struct ProcessRemoveUser {
 }
 
 impl Message<ProcessRemoveUser> for User {
-    type Reply = Result<ProcessMessageToSend, UserError>;
+    type Reply = Result<WakuMessageToSend, UserError>;
 
     async fn handle(
         &mut self,
@@ -164,7 +160,7 @@ pub struct ProcessInviteUsers {
 }
 
 impl Message<ProcessInviteUsers> for User {
-    type Reply = Result<Vec<ProcessMessageToSend>, UserError>;
+    type Reply = Result<Vec<WakuMessageToSend>, UserError>;
 
     async fn handle(
         &mut self,
@@ -206,8 +202,8 @@ impl User {
                 group_name.clone(),
                 true,
                 Some(&self.provider),
-                Some(&self.identity.signer),
-                Some(&self.identity.credential_with_key),
+                Some(&self.identity.signer()),
+                Some(&self.identity.credential_with_key()),
             )?
         } else {
             Group::new(group_name.clone(), false, None, None, None)?
@@ -232,7 +228,7 @@ impl User {
         &mut self,
         msg: WakuMessage,
         group_name: String,
-    ) -> Result<Vec<UserAction>, UserError> {
+    ) -> Result<UserAction, UserError> {
         let group = match self.groups.get_mut(&group_name) {
             Some(g) => g,
             None => return Err(UserError::GroupNotFoundError(group_name)),
@@ -243,7 +239,7 @@ impl User {
                 let app_id = group.app_id();
                 if group.is_admin() || group.is_kp_shared() {
                     info!("Its admin or key package already shared");
-                    Ok(vec![UserAction::DoNothing])
+                    Ok(UserAction::DoNothing)
                 } else {
                     info!(
                         "User {:?} received group announcement message for group {:?}",
@@ -270,12 +266,12 @@ impl User {
 
                     group.set_kp_shared(true);
 
-                    Ok(vec![UserAction::SendToWaku(ProcessMessageToSend {
+                    Ok(UserAction::SendToWaku(WakuMessageToSend::new(
                         msg,
-                        subtopic: WELCOME_SUBTOPIC.to_string(),
-                        group_id: group_name.clone(),
-                        app_id: app_id.clone(),
-                    })])
+                        WELCOME_SUBTOPIC.to_string(),
+                        group_name.clone(),
+                        app_id.clone(),
+                    )))
                 }
             }
             WelcomeMessageType::UserKeyPackage => {
@@ -289,11 +285,11 @@ impl User {
                     let key_package = group.decrypt_admin_msg(welcome_msg.message_payload)?;
                     group.push_income_key_package(key_package.clone())?;
                 }
-                Ok(vec![UserAction::DoNothing])
+                Ok(UserAction::DoNothing)
             }
             WelcomeMessageType::InvitationToJoin => {
                 if group.is_admin() {
-                    Ok(vec![UserAction::DoNothing])
+                    Ok(UserAction::DoNothing)
                 } else {
                     info!(
                         "User {:?} received invitation to join group {:?}",
@@ -316,15 +312,38 @@ impl User {
                     }) {
                         self.join_group(welcome)?;
                         let msg = self
-                            .prepare_msg_to_send("User joined to the group", group_name)
+                            .create_group_message("User joined to the group", group_name)
                             .await?;
-                        Ok(vec![UserAction::SendToWaku(msg)])
+                        Ok(UserAction::SendToWaku(msg))
                     } else {
-                        Ok(vec![UserAction::DoNothing])
+                        Ok(UserAction::DoNothing)
                     }
                 }
             }
         }
+    }
+
+    pub async fn handle_app_msg_subtopic(
+        &mut self,
+        msg: WakuMessage,
+        group_name: String,
+    ) -> Result<UserAction, UserError> {
+        info!(
+            "User {:?} received app message for group {:?}",
+            self.identity.identity_string(),
+            group_name
+        );
+        let res = MlsMessageIn::tls_deserialize_bytes(msg.payload())?;
+        let action = match res.extract() {
+            MlsMessageInBody::PrivateMessage(message) => {
+                self.process_protocol_msg(message.into()).await?
+            }
+            MlsMessageInBody::PublicMessage(message) => {
+                self.process_protocol_msg(message.into()).await?
+            }
+            _ => return Err(UserError::UnsupportedMessageType),
+        };
+        Ok(action)
     }
 
     pub async fn processed_group_income_key_packages(
@@ -350,12 +369,8 @@ impl User {
         Ok(group.push_income_key_package(kp)?)
     }
 
-    pub async fn process_waku_msg(
-        &mut self,
-        msg: WakuMessage,
-    ) -> Result<Vec<UserAction>, UserError> {
-        let ct = msg.content_topic.clone();
-        let group_name = ct.application_name.to_string();
+    pub async fn process_waku_msg(&mut self, msg: WakuMessage) -> Result<UserAction, UserError> {
+        let group_name = msg.content_topic.application_name.to_string();
         let group = match self.groups.get(&group_name) {
             Some(g) => g,
             None => return Err(UserError::GroupNotFoundError(group_name)),
@@ -363,56 +378,13 @@ impl User {
         let app_id = group.app_id();
         if msg.meta == app_id {
             info!("Message is from the same app, skipping");
-            return Ok(vec![UserAction::DoNothing]);
+            return Ok(UserAction::DoNothing);
         }
-        let ct = ct.content_topic_name.to_string();
-        match ct.as_str() {
+        let ct_name = msg.content_topic.content_topic_name.to_string();
+        match ct_name.as_str() {
             WELCOME_SUBTOPIC => self.handle_welcome_subtopic(msg, group_name).await,
-            COMMIT_MSG_SUBTOPIC => {
-                if group.is_mls_group_initialized() {
-                    info!(
-                        "User {:?} received commit message for group {:?}",
-                        self.identity.identity_string(),
-                        group_name
-                    );
-                    let res = MlsMessageIn::tls_deserialize_bytes(msg.payload())?;
-                    let action = match res.extract() {
-                        MlsMessageInBody::PrivateMessage(message) => {
-                            self.process_protocol_msg(message.into()).await?
-                        }
-                        MlsMessageInBody::PublicMessage(message) => {
-                            self.process_protocol_msg(message.into()).await?
-                        }
-                        _ => return Err(UserError::UnsupportedMessageType),
-                    };
-                    Ok(vec![action])
-                } else {
-                    Ok(vec![UserAction::DoNothing])
-                }
-            }
-            APP_MSG_SUBTOPIC => {
-                info!(
-                    "User {:?} received app message for group {:?}",
-                    self.identity.identity_string(),
-                    group_name
-                );
-                let buf: AppMessage = serde_json::from_slice(msg.payload())?;
-                if buf.sender == self.identity.identity() {
-                    return Ok(vec![UserAction::DoNothing]);
-                }
-                let res = MlsMessageIn::tls_deserialize_bytes(&buf.message)?;
-                let action = match res.extract() {
-                    MlsMessageInBody::PrivateMessage(message) => {
-                        self.process_protocol_msg(message.into()).await?
-                    }
-                    MlsMessageInBody::PublicMessage(message) => {
-                        self.process_protocol_msg(message.into()).await?
-                    }
-                    _ => return Err(UserError::UnsupportedMessageType),
-                };
-                Ok(vec![action])
-            }
-            _ => Err(UserError::UnknownContentTopicType(ct)),
+            APP_MSG_SUBTOPIC => self.handle_app_msg_subtopic(msg, group_name).await,
+            _ => Err(UserError::UnknownContentTopicType(ct_name)),
         }
     }
 
@@ -420,14 +392,14 @@ impl User {
         &mut self,
         users_kp: Vec<KeyPackage>,
         group_name: String,
-    ) -> Result<Vec<ProcessMessageToSend>, UserError> {
+    ) -> Result<Vec<WakuMessageToSend>, UserError> {
         // Build a proposal with this key package and do the MLS bits.
         let group = match self.groups.get_mut(&group_name) {
             Some(g) => g,
             None => return Err(UserError::GroupNotFoundError(group_name)),
         };
         let out_messages = group
-            .add_members(users_kp, &self.provider, &self.identity.signer)
+            .add_members(users_kp, &self.provider, &self.identity.signer())
             .await?;
         info!(
             "User {:?} invited users to group {:?}",
@@ -477,15 +449,7 @@ impl User {
             return Ok(UserAction::DoNothing);
         }
         let res = group
-            .process_protocol_msg(
-                message,
-                &self.provider,
-                self.identity
-                    .credential_with_key
-                    .signature_key
-                    .as_slice()
-                    .to_vec(),
-            )
+            .process_protocol_msg(message, &self.provider, self.identity.signature_key())
             .await?;
 
         match res {
@@ -498,7 +462,7 @@ impl User {
     pub async fn prepare_admin_msg(
         &mut self,
         group_name: String,
-    ) -> Result<ProcessMessageToSend, UserError> {
+    ) -> Result<WakuMessageToSend, UserError> {
         if !self.if_group_exists(group_name.clone()) {
             return Err(UserError::GroupNotFoundError(group_name));
         }
@@ -510,42 +474,36 @@ impl User {
         Ok(msg_to_send)
     }
 
-    pub async fn prepare_msg_to_send(
+    pub async fn create_group_message(
         &mut self,
         msg: &str,
         group_name: String,
-    ) -> Result<ProcessMessageToSend, UserError> {
+    ) -> Result<WakuMessageToSend, UserError> {
         let group = match self.groups.get_mut(&group_name) {
             Some(g) => g,
             None => return Err(UserError::GroupNotFoundError(group_name)),
         };
 
         if !group.is_mls_group_initialized() {
-            Err(UserError::GroupNotFoundError(group_name))
-        } else {
-            let msg_to_send = group
-                .create_message(
-                    &self.provider,
-                    &self.identity.signer,
-                    msg,
-                    self.identity.identity().to_vec(),
-                )
-                .await?;
-            Ok(msg_to_send)
+            return Err(UserError::GroupNotFoundError(group_name));
         }
+        let msg_to_send = group
+            .create_message(&self.provider, &self.identity.signer(), msg)
+            .await?;
+        Ok(msg_to_send)
     }
 
     pub async fn remove_users_from_group(
         &mut self,
         users: Vec<String>,
         group_name: String,
-    ) -> Result<ProcessMessageToSend, UserError> {
+    ) -> Result<WakuMessageToSend, UserError> {
         if !self.if_group_exists(group_name.clone()) {
             return Err(UserError::GroupNotFoundError(group_name));
         }
         let group = self.groups.get_mut(&group_name).unwrap();
         let msg = group
-            .remove_members(users, &self.provider, &self.identity.signer)
+            .remove_members(users, &self.provider, &self.identity.signer())
             .await?;
 
         Ok(msg)
