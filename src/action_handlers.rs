@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use waku_bindings::WakuMessage;
 
 use crate::{
-    user::{ProcessLeaveGroup, ProcessRemoveUser, SendGroupMessage, User, UserAction},
+    user::{LeaveGroupRequest, RemoveUserRequest, SendGroupMessage, User, UserAction},
     ws_actor::{RawWsMessage, WsAction, WsActor},
     AppState, MessageToPrint,
 };
@@ -31,7 +31,7 @@ pub async fn handle_user_actions(
         }
         UserAction::RemoveGroup(group_name) => {
             user_actor
-                .ask(ProcessLeaveGroup {
+                .ask(LeaveGroupRequest {
                     group_name: group_name.clone(),
                 })
                 .await?;
@@ -87,7 +87,7 @@ pub async fn handle_ws_action(
         WsAction::RemoveUser(user_to_ban, group_name) => {
             info!("Got remove user: {:?}", &user_to_ban);
             let pmt = user_actor
-                .ask(ProcessRemoveUser {
+                .ask(RemoveUserRequest {
                     user_to_ban: user_to_ban.clone(),
                     group_name: group_name.clone(),
                 })

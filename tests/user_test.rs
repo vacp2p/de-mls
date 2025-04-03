@@ -36,7 +36,7 @@ async fn test_invite_users_flow() {
         .expect("Failed to build waku message");
 
     let bob_action = bob
-        .process_waku_msg(group_announcement_message.clone())
+        .handle_waku_message(group_announcement_message.clone())
         .await
         .expect("Failed to process waku message");
     let bob_kp_message = match bob_action {
@@ -47,13 +47,13 @@ async fn test_invite_users_flow() {
         .build_waku_message()
         .expect("Failed to build waku message");
 
-    let alice_action = alice
-        .process_waku_msg(bob_kp_waku_message)
+    let _alice_action = alice
+        .handle_waku_message(bob_kp_waku_message)
         .await
         .expect("Failed to process waku message");
 
     let carol_action = carol
-        .process_waku_msg(group_announcement_message.clone())
+        .handle_waku_message(group_announcement_message.clone())
         .await
         .expect("Failed to process waku message");
     let carol_kp_message = match carol_action {
@@ -64,13 +64,13 @@ async fn test_invite_users_flow() {
         .build_waku_message()
         .expect("Failed to build waku message");
 
-    let alice_action = alice
-        .process_waku_msg(carol_kp_waku_message)
+    let _alice_action = alice
+        .handle_waku_message(carol_kp_waku_message)
         .await
         .expect("Failed to process waku message");
 
     let users_to_invite = alice
-        .processed_group_income_key_packages(group_name.clone())
+        .get_processed_income_key_packages(group_name.clone())
         .await
         .expect("Failed to process income key packages");
     assert!(users_to_invite.len() == 2, "Expected 2 users to invite");
@@ -86,12 +86,12 @@ async fn test_invite_users_flow() {
         .expect("Failed to build waku message");
 
     let _bob_action = bob
-        .process_waku_msg(welcome_message.clone())
+        .handle_waku_message(welcome_message.clone())
         .await
         .expect("Failed to process waku message");
 
     let _carol_action = carol
-        .process_waku_msg(welcome_message.clone())
+        .handle_waku_message(welcome_message.clone())
         .await
         .expect("Failed to process waku message");
 
@@ -167,7 +167,7 @@ async fn test_remove_user_flow() {
         .expect("Failed to build waku message");
 
     let bob_action = bob
-        .process_waku_msg(group_announcement_message.clone())
+        .handle_waku_message(group_announcement_message.clone())
         .await
         .expect("Failed to process waku message");
     let bob_kp_message = match bob_action {
@@ -178,13 +178,13 @@ async fn test_remove_user_flow() {
         .build_waku_message()
         .expect("Failed to build waku message");
 
-    let alice_action = alice
-        .process_waku_msg(bob_kp_waku_message)
+    let _alice_action = alice
+        .handle_waku_message(bob_kp_waku_message)
         .await
         .expect("Failed to process waku message");
 
     let carol_action = carol
-        .process_waku_msg(group_announcement_message.clone())
+        .handle_waku_message(group_announcement_message.clone())
         .await
         .expect("Failed to process waku message");
     let carol_kp_message = match carol_action {
@@ -195,13 +195,13 @@ async fn test_remove_user_flow() {
         .build_waku_message()
         .expect("Failed to build waku message");
 
-    let alice_action = alice
-        .process_waku_msg(carol_kp_waku_message)
+    let _alice_action = alice
+        .handle_waku_message(carol_kp_waku_message)
         .await
         .expect("Failed to process waku message");
 
     let users_to_invite = alice
-        .processed_group_income_key_packages(group_name.clone())
+        .get_processed_income_key_packages(group_name.clone())
         .await
         .expect("Failed to process income key packages");
     assert!(users_to_invite.len() == 2, "Expected 2 users to invite");
@@ -216,13 +216,13 @@ async fn test_remove_user_flow() {
         .build_waku_message()
         .expect("Failed to build waku message");
 
-    let bob_action = bob
-        .process_waku_msg(welcome_message.clone())
+    let _bob_action = bob
+        .handle_waku_message(welcome_message.clone())
         .await
         .expect("Failed to process waku message");
 
-    let carol_action = carol
-        .process_waku_msg(welcome_message.clone())
+    let _carol_action = carol
+        .handle_waku_message(welcome_message.clone())
         .await
         .expect("Failed to process waku message");
 
@@ -307,7 +307,7 @@ async fn test_remove_user_flow() {
 
     let pmt = match ws_action {
         WsAction::RemoveUser(user_to_ban, group_name) => alice
-            .remove_users_from_group(vec![user_to_ban], group_name.clone())
+            .remove_group_users(vec![user_to_ban], group_name.clone())
             .await
             .expect("Failed to remove user from group"),
         _ => panic!("User action is not RemoveUser"),
@@ -318,7 +318,7 @@ async fn test_remove_user_flow() {
         .expect("Failed to build waku message");
 
     let _ = carol
-        .process_waku_msg(waku_commit_message.clone())
+        .handle_waku_message(waku_commit_message.clone())
         .await
         .expect("Failed to process waku message");
     let carol_group = carol
@@ -331,7 +331,7 @@ async fn test_remove_user_flow() {
     );
 
     let bob_action = bob
-        .process_waku_msg(waku_commit_message.clone())
+        .handle_waku_message(waku_commit_message.clone())
         .await
         .expect("Failed to process waku message");
     assert_eq!(

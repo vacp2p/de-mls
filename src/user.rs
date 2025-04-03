@@ -45,21 +45,21 @@ impl Message<WakuMessage> for User {
         msg: WakuMessage,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.process_waku_msg(msg).await
+        self.handle_waku_message(msg).await
     }
 }
 
-pub struct ProcessCreateGroup {
+pub struct CreateGroupRequest {
     pub group_name: String,
     pub is_creation: bool,
 }
 
-impl Message<ProcessCreateGroup> for User {
+impl Message<CreateGroupRequest> for User {
     type Reply = Result<(), UserError>;
 
     async fn handle(
         &mut self,
-        msg: ProcessCreateGroup,
+        msg: CreateGroupRequest,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
         self.create_group(msg.group_name.clone(), msg.is_creation)
@@ -68,36 +68,89 @@ impl Message<ProcessCreateGroup> for User {
     }
 }
 
-pub struct ProcessAdminMessage {
+pub struct AdminMessageRequest {
     pub group_name: String,
 }
 
-impl Message<ProcessAdminMessage> for User {
+impl Message<AdminMessageRequest> for User {
     type Reply = Result<WakuMessageToSend, UserError>;
 
     async fn handle(
         &mut self,
-        msg: ProcessAdminMessage,
+        msg: AdminMessageRequest,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
         self.prepare_admin_msg(msg.group_name.clone()).await
     }
 }
 
-pub struct ProcessLeaveGroup {
+pub struct LeaveGroupRequest {
     pub group_name: String,
 }
 
-impl Message<ProcessLeaveGroup> for User {
+impl Message<LeaveGroupRequest> for User {
     type Reply = Result<(), UserError>;
 
     async fn handle(
         &mut self,
-        msg: ProcessLeaveGroup,
+        msg: LeaveGroupRequest,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
         self.leave_group(msg.group_name.clone()).await?;
         Ok(())
+    }
+}
+
+pub struct RemoveUserRequest {
+    pub user_to_ban: String,
+    pub group_name: String,
+}
+
+impl Message<RemoveUserRequest> for User {
+    type Reply = Result<WakuMessageToSend, UserError>;
+
+    async fn handle(
+        &mut self,
+        msg: RemoveUserRequest,
+        _ctx: Context<'_, Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.remove_group_users(vec![msg.user_to_ban], msg.group_name.clone())
+            .await
+    }
+}
+
+pub struct GetIncomeKeyPackagesRequest {
+    pub group_name: String,
+}
+
+impl Message<GetIncomeKeyPackagesRequest> for User {
+    type Reply = Result<Vec<KeyPackage>, UserError>;
+
+    async fn handle(
+        &mut self,
+        msg: GetIncomeKeyPackagesRequest,
+        _ctx: Context<'_, Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.get_processed_income_key_packages(msg.group_name.clone())
+            .await
+    }
+}
+
+pub struct InviteUsersRequest {
+    pub group_name: String,
+    pub users: Vec<KeyPackage>,
+}
+
+impl Message<InviteUsersRequest> for User {
+    type Reply = Result<Vec<WakuMessageToSend>, UserError>;
+
+    async fn handle(
+        &mut self,
+        msg: InviteUsersRequest,
+        _ctx: Context<'_, Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.invite_users(msg.users.clone(), msg.group_name.clone())
+            .await
     }
 }
 
@@ -114,60 +167,7 @@ impl Message<SendGroupMessage> for User {
         msg: SendGroupMessage,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.create_group_message(&msg.msg, msg.group_name.clone())
-            .await
-    }
-}
-
-pub struct ProcessRemoveUser {
-    pub user_to_ban: String,
-    pub group_name: String,
-}
-
-impl Message<ProcessRemoveUser> for User {
-    type Reply = Result<WakuMessageToSend, UserError>;
-
-    async fn handle(
-        &mut self,
-        msg: ProcessRemoveUser,
-        _ctx: Context<'_, Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.remove_users_from_group(vec![msg.user_to_ban], msg.group_name.clone())
-            .await
-    }
-}
-
-pub struct ProcessGetIncomeKeyPackages {
-    pub group_name: String,
-}
-
-impl Message<ProcessGetIncomeKeyPackages> for User {
-    type Reply = Result<Vec<KeyPackage>, UserError>;
-
-    async fn handle(
-        &mut self,
-        msg: ProcessGetIncomeKeyPackages,
-        _ctx: Context<'_, Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.processed_group_income_key_packages(msg.group_name.clone())
-            .await
-    }
-}
-
-pub struct ProcessInviteUsers {
-    pub group_name: String,
-    pub users: Vec<KeyPackage>,
-}
-
-impl Message<ProcessInviteUsers> for User {
-    type Reply = Result<Vec<WakuMessageToSend>, UserError>;
-
-    async fn handle(
-        &mut self,
-        msg: ProcessInviteUsers,
-        _ctx: Context<'_, Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.invite_users(msg.users.clone(), msg.group_name.clone())
+        self.build_group_message(&msg.msg, msg.group_name.clone())
             .await
     }
 }
@@ -312,7 +312,7 @@ impl User {
                     }) {
                         self.join_group(welcome)?;
                         let msg = self
-                            .create_group_message("User joined to the group", group_name)
+                            .build_group_message("User joined to the group", group_name)
                             .await?;
                         Ok(UserAction::SendToWaku(msg))
                     } else {
@@ -346,7 +346,7 @@ impl User {
         Ok(action)
     }
 
-    pub async fn processed_group_income_key_packages(
+    pub async fn get_processed_income_key_packages(
         &mut self,
         group_name: String,
     ) -> Result<Vec<KeyPackage>, UserError> {
@@ -357,7 +357,7 @@ impl User {
         Ok(group.processed_key_packages()?)
     }
 
-    pub async fn push_income_key_package(
+    pub async fn add_income_key_package(
         &mut self,
         kp: KeyPackage,
         group_name: String,
@@ -369,7 +369,7 @@ impl User {
         Ok(group.push_income_key_package(kp)?)
     }
 
-    pub async fn process_waku_msg(&mut self, msg: WakuMessage) -> Result<UserAction, UserError> {
+    pub async fn handle_waku_message(&mut self, msg: WakuMessage) -> Result<UserAction, UserError> {
         let group_name = msg.content_topic.application_name.to_string();
         let group = match self.groups.get(&group_name) {
             Some(g) => g,
@@ -474,7 +474,7 @@ impl User {
         Ok(msg_to_send)
     }
 
-    pub async fn create_group_message(
+    pub async fn build_group_message(
         &mut self,
         msg: &str,
         group_name: String,
@@ -488,12 +488,12 @@ impl User {
             return Err(UserError::GroupNotFoundError(group_name));
         }
         let msg_to_send = group
-            .create_message(&self.provider, &self.identity.signer(), msg)
+            .build_message(&self.provider, &self.identity.signer(), msg)
             .await?;
         Ok(msg_to_send)
     }
 
-    pub async fn remove_users_from_group(
+    pub async fn remove_group_users(
         &mut self,
         users: Vec<String>,
         group_name: String,

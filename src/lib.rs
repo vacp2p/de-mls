@@ -228,7 +228,6 @@ pub enum UserError {
     KameoCreateGroupError(String),
     #[error("Failed to send message to user: {0}")]
     KameoSendMessageError(String),
-
     #[error("Failed to get income key packages: {0}")]
     GetIncomeKeyPackagesError(String),
     #[error("Failed to process admin message: {0}")]

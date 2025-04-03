@@ -20,7 +20,7 @@ pub async fn create_user_instance(
     let user = User::new(&connection.eth_private_key)?;
     let user_ref = kameo::spawn(user);
     user_ref
-        .ask(ProcessCreateGroup {
+        .ask(CreateGroupRequest {
             group_name: group_name.clone(),
             is_creation: connection.should_create_group,
         })
@@ -78,7 +78,7 @@ pub async fn handle_admin_flow_per_epoch(
 ) -> Result<(), UserError> {
     // Move all income key packages to processed queue
     let key_packages = user
-        .ask(ProcessGetIncomeKeyPackages {
+        .ask(GetIncomeKeyPackagesRequest {
             group_name: group_name.clone(),
         })
         .await
@@ -86,7 +86,7 @@ pub async fn handle_admin_flow_per_epoch(
 
     // Send new admin key to the waku node for new epoch and next message will be saved in the messaged queue
     let msg = user
-        .ask(ProcessAdminMessage {
+        .ask(AdminMessageRequest {
             group_name: group_name.clone(),
         })
         .await
@@ -97,7 +97,7 @@ pub async fn handle_admin_flow_per_epoch(
     // update message to the other members
     if !key_packages.is_empty() {
         let msgs = user
-            .ask(ProcessInviteUsers {
+            .ask(InviteUsersRequest {
                 group_name: group_name.clone(),
                 users: key_packages,
             })

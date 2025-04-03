@@ -20,7 +20,7 @@ pub enum GroupAction {
 pub struct Group {
     group_name: String,
     mls_group: Option<Arc<Mutex<MlsGroup>>>,
-    admin: Option<Admin>,
+    admin: Option<GroupAdmin>,
     is_kp_shared: bool,
     app_id: Vec<u8>,
 }
@@ -50,7 +50,7 @@ impl Group {
             Ok(Group {
                 group_name,
                 mls_group: Some(Arc::new(Mutex::new(mls_group))),
-                admin: Some(Admin::new()),
+                admin: Some(GroupAdmin::new_admin()),
                 is_kp_shared: true,
                 app_id: uuid.clone(),
             })
@@ -103,7 +103,7 @@ impl Group {
         if !self.is_admin() {
             return Err(GroupError::AdminNotSetError);
         }
-        let msg: KeyPackage = self.admin.as_ref().unwrap().decrypt_msg(message)?;
+        let msg: KeyPackage = self.admin.as_ref().unwrap().decrypt_message(message)?;
         Ok(msg)
     }
 
@@ -114,7 +114,7 @@ impl Group {
         self.admin
             .as_mut()
             .unwrap()
-            .add_income_key_package(key_package);
+            .add_incoming_key_package(key_package);
         Ok(())
     }
 
@@ -122,7 +122,7 @@ impl Group {
         if !self.is_admin() {
             return Err(GroupError::AdminNotSetError);
         }
-        Ok(self.admin.as_mut().unwrap().processed_key_packages())
+        Ok(self.admin.as_mut().unwrap().drain_processed_key_packages())
     }
 
     pub async fn add_members(
@@ -273,8 +273,8 @@ impl Group {
             Some(a) => a,
             None => return Err(GroupError::AdminNotSetError),
         };
-        admin.generate_new_key_pair();
-        let admin_msg = admin.generate_admin_message();
+        admin.refresh_key_pair();
+        let admin_msg = admin.create_admin_announcement();
 
         let wm = WelcomeMessage {
             message_type: WelcomeMessageType::GroupAnnouncement,
@@ -289,7 +289,7 @@ impl Group {
         Ok(msg_to_send)
     }
 
-    pub async fn create_message(
+    pub async fn build_message(
         &mut self,
         provider: &MlsCryptoProvider,
         signer: &SignatureKeyPair,
