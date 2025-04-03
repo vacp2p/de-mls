@@ -1,7 +1,6 @@
 use ds::{
-    ds_waku::APP_MSG_SUBTOPIC,
-    waku_actor::{ProcessMessageToSend, WakuNode},
-    DeliveryServiceError,
+    waku_actor::{WakuMessageToSend, WakuNode},
+    DeliveryServiceError, APP_MSG_SUBTOPIC,
 };
 use kameo::{
     actor::pubsub::PubSub,
@@ -90,12 +89,12 @@ async fn test_waku_client() {
     tokio::task::block_in_place(move || {
         tokio::runtime::Handle::current().block_on(async move {
             let res = waku_node
-                .send_message(ProcessMessageToSend {
-                    msg: format!("test_message_1").as_bytes().to_vec(),
-                    subtopic: APP_MSG_SUBTOPIC.to_string(),
-                    group_id: group_name.clone(),
-                    app_id: uuid.clone(),
-                })
+                .send_message(WakuMessageToSend::new(
+                    format!("test_message_1").as_bytes().to_vec(),
+                    APP_MSG_SUBTOPIC.to_string(),
+                    group_name.clone(),
+                    uuid.clone(),
+                ))
                 .await;
             info!("res: {:?}", res);
             info!("sender handle is finished");

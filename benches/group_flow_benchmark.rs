@@ -1,6 +1,6 @@
 use alloy::primitives::{Address, U160};
 use criterion::{criterion_group, criterion_main, Criterion};
-use de_mls::user::{ProcessCreateGroup, User, UserAction};
+use de_mls::user::{CreateGroupRequest, User, UserAction};
 use mls_crypto::openmls_provider::{MlsCryptoProvider, CIPHERSUITE};
 use openmls::prelude::{
     Credential, CredentialType, CredentialWithKey, CryptoConfig, KeyPackage, ProtocolVersion,
@@ -50,7 +50,7 @@ fn create_user_with_group_benchmark(c: &mut Criterion) {
                         .unwrap();
                 let user_ref = kameo::spawn(user);
                 user_ref
-                    .ask(ProcessCreateGroup {
+                    .ask(CreateGroupRequest {
                         group_name: "group".to_string(),
                         is_creation: true,
                     })
@@ -74,7 +74,7 @@ fn create_group_benchmark(c: &mut Criterion) {
             rt.block_on(async {
                 let group_name = "group".to_string() + &rand::thread_rng().gen::<u64>().to_string();
                 user_ref
-                    .ask(ProcessCreateGroup {
+                    .ask(CreateGroupRequest {
                         group_name,
                         is_creation: true,
                     })
@@ -155,10 +155,10 @@ fn share_kp_benchmark(c: &mut Criterion) {
                     .expect("Failed to build waku message");
 
                 let bob_action = bob
-                    .process_waku_msg(group_announcement_message.clone())
+                    .handle_waku_message(group_announcement_message.clone())
                     .await
                     .expect("Failed to process waku message");
-                let bob_kp_message = match bob_action[0].clone() {
+                let bob_kp_message = match bob_action {
                     UserAction::SendToWaku(msg) => msg,
                     _ => panic!("User action is not SendToWaku"),
                 };
@@ -167,12 +167,12 @@ fn share_kp_benchmark(c: &mut Criterion) {
                     .expect("Failed to build waku message");
 
                 let _ = alice
-                    .process_waku_msg(bob_kp_waku_message)
+                    .handle_waku_message(bob_kp_waku_message)
                     .await
                     .expect("Failed to process waku message");
 
                 let users_to_invite = alice
-                    .processed_group_income_key_packages(group_name.clone())
+                    .get_processed_income_key_packages(group_name.clone())
                     .await
                     .expect("Failed to process income key packages");
 
@@ -186,7 +186,7 @@ fn share_kp_benchmark(c: &mut Criterion) {
                     .expect("Failed to build waku message");
 
                 let _ = bob
-                    .process_waku_msg(welcome_message.clone())
+                    .handle_waku_message(welcome_message.clone())
                     .await
                     .expect("Failed to process waku message");
             });

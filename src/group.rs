@@ -1,8 +1,5 @@
 use alloy::hex;
-use ds::{
-    ds_waku::{APP_MSG_SUBTOPIC, COMMIT_MSG_SUBTOPIC, WELCOME_SUBTOPIC},
-    waku_actor::ProcessMessageToSend,
-};
+use ds::{waku_actor::WakuMessageToSend, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 use kameo::Actor;
 use openmls::{group::*, prelude::*};
 use openmls_basic_credential::SignatureKeyPair;
@@ -23,7 +20,7 @@ pub enum GroupAction {
 pub struct Group {
     group_name: String,
     mls_group: Option<Arc<Mutex<MlsGroup>>>,
-    admin: Option<Admin>,
+    admin: Option<GroupAdmin>,
     is_kp_shared: bool,
     app_id: Vec<u8>,
 }
@@ -53,7 +50,7 @@ impl Group {
             Ok(Group {
                 group_name,
                 mls_group: Some(Arc::new(Mutex::new(mls_group))),
-                admin: Some(Admin::new()),
+                admin: Some(GroupAdmin::new_admin()),
                 is_kp_shared: true,
                 app_id: uuid.clone(),
             })
@@ -106,7 +103,7 @@ impl Group {
         if !self.is_admin() {
             return Err(GroupError::AdminNotSetError);
         }
-        let msg: KeyPackage = self.admin.as_ref().unwrap().decrypt_msg(message)?;
+        let msg: KeyPackage = self.admin.as_ref().unwrap().decrypt_message(message)?;
         Ok(msg)
     }
 
@@ -117,7 +114,7 @@ impl Group {
         self.admin
             .as_mut()
             .unwrap()
-            .add_income_key_package(key_package);
+            .add_incoming_key_package(key_package);
         Ok(())
     }
 
@@ -125,7 +122,7 @@ impl Group {
         if !self.is_admin() {
             return Err(GroupError::AdminNotSetError);
         }
-        Ok(self.admin.as_mut().unwrap().processed_key_packages())
+        Ok(self.admin.as_mut().unwrap().drain_processed_key_packages())
     }
 
     pub async fn add_members(
@@ -133,7 +130,7 @@ impl Group {
         users_kp: Vec<KeyPackage>,
         provider: &MlsCryptoProvider,
         signer: &SignatureKeyPair,
-    ) -> Result<Vec<ProcessMessageToSend>, GroupError> {
+    ) -> Result<Vec<WakuMessageToSend>, GroupError> {
         if !self.is_mls_group_initialized() {
             return Err(GroupError::MlsGroupNotInitializedError);
         }
@@ -142,12 +139,13 @@ impl Group {
             mls_group.add_members(provider, signer, &users_kp)?;
 
         mls_group.merge_pending_commit(provider)?;
-        let msg_to_send_commit = ProcessMessageToSend {
-            msg: out_messages.tls_serialize_detached()?,
-            subtopic: COMMIT_MSG_SUBTOPIC.to_string(),
-            group_id: self.group_name.clone(),
-            app_id: self.app_id.clone(),
-        };
+
+        let msg_to_send_commit = WakuMessageToSend::new(
+            out_messages.tls_serialize_detached()?,
+            APP_MSG_SUBTOPIC.to_string(),
+            self.group_name.clone(),
+            self.app_id.clone(),
+        );
 
         let welcome_serialized = welcome.tls_serialize_detached()?;
         let welcome_msg: Vec<u8> = serde_json::to_vec(&WelcomeMessage {
@@ -155,12 +153,12 @@ impl Group {
             message_payload: welcome_serialized,
         })?;
 
-        let msg_to_send_welcome = ProcessMessageToSend {
-            msg: welcome_msg,
-            subtopic: WELCOME_SUBTOPIC.to_string(),
-            group_id: self.group_name.clone(),
-            app_id: self.app_id.clone(),
-        };
+        let msg_to_send_welcome = WakuMessageToSend::new(
+            welcome_msg,
+            WELCOME_SUBTOPIC.to_string(),
+            self.group_name.clone(),
+            self.app_id.clone(),
+        );
 
         Ok(vec![msg_to_send_commit, msg_to_send_welcome])
     }
@@ -170,7 +168,7 @@ impl Group {
         users: Vec<String>,
         provider: &MlsCryptoProvider,
         signer: &SignatureKeyPair,
-    ) -> Result<ProcessMessageToSend, GroupError> {
+    ) -> Result<WakuMessageToSend, GroupError> {
         if !self.is_mls_group_initialized() {
             return Err(GroupError::MlsGroupNotInitializedError);
         }
@@ -191,12 +189,12 @@ impl Group {
         // Second, process the removal on our end.
         mls_group.merge_pending_commit(provider)?;
 
-        let msg_to_send_commit = ProcessMessageToSend {
-            msg: remove_message.tls_serialize_detached()?,
-            subtopic: COMMIT_MSG_SUBTOPIC.to_string(),
-            group_id: self.group_name.clone(),
-            app_id: self.app_id.clone(),
-        };
+        let msg_to_send_commit = WakuMessageToSend::new(
+            remove_message.tls_serialize_detached()?,
+            APP_MSG_SUBTOPIC.to_string(),
+            self.group_name.clone(),
+            self.app_id.clone(),
+        );
 
         Ok(msg_to_send_commit)
     }
@@ -270,34 +268,33 @@ impl Group {
         Ok(GroupAction::DoNothing)
     }
 
-    pub fn generate_admin_message(&mut self) -> Result<ProcessMessageToSend, GroupError> {
+    pub fn generate_admin_message(&mut self) -> Result<WakuMessageToSend, GroupError> {
         let admin = match self.admin.as_mut() {
             Some(a) => a,
             None => return Err(GroupError::AdminNotSetError),
         };
-        admin.generate_new_key_pair();
-        let admin_msg = admin.generate_admin_message();
+        admin.refresh_key_pair();
+        let admin_msg = admin.create_admin_announcement();
 
         let wm = WelcomeMessage {
             message_type: WelcomeMessageType::GroupAnnouncement,
             message_payload: serde_json::to_vec(&admin_msg)?,
         };
-        let msg_to_send = ProcessMessageToSend {
-            msg: serde_json::to_vec(&wm)?,
-            subtopic: WELCOME_SUBTOPIC.to_string(),
-            group_id: self.group_name.clone(),
-            app_id: self.app_id.clone(),
-        };
+        let msg_to_send = WakuMessageToSend::new(
+            serde_json::to_vec(&wm)?,
+            WELCOME_SUBTOPIC.to_string(),
+            self.group_name.clone(),
+            self.app_id.clone(),
+        );
         Ok(msg_to_send)
     }
 
-    pub async fn create_message(
+    pub async fn build_message(
         &mut self,
         provider: &MlsCryptoProvider,
         signer: &SignatureKeyPair,
         msg: &str,
-        identity: Vec<u8>,
-    ) -> Result<ProcessMessageToSend, GroupError> {
+    ) -> Result<WakuMessageToSend, GroupError> {
         let message_out = self
             .mls_group
             .as_mut()
@@ -306,16 +303,12 @@ impl Group {
             .await
             .create_message(provider, signer, msg.as_bytes())?
             .tls_serialize_detached()?;
-        let app_msg = serde_json::to_vec(&AppMessage {
-            sender: identity,
-            message: message_out,
-        })?;
-        Ok(ProcessMessageToSend {
-            msg: app_msg,
-            subtopic: APP_MSG_SUBTOPIC.to_string(),
-            group_id: self.group_name.clone(),
-            app_id: self.app_id.clone(),
-        })
+        Ok(WakuMessageToSend::new(
+            message_out,
+            APP_MSG_SUBTOPIC.to_string(),
+            self.group_name.clone(),
+            self.app_id.clone(),
+        ))
     }
 }
 

@@ -5,8 +5,7 @@ use openmls::{credentials::CredentialWithKey, key_packages::*, prelude::*};
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_traits::types::Ciphersuite;
 
-use mls_crypto::openmls_provider::MlsCryptoProvider;
-
+use crate::openmls_provider::MlsCryptoProvider;
 use crate::IdentityError;
 
 pub struct Identity {
@@ -16,7 +15,7 @@ pub struct Identity {
 }
 
 impl Identity {
-    pub(crate) fn new(
+    pub fn new(
         ciphersuite: Ciphersuite,
         crypto: &MlsCryptoProvider,
         user_wallet_address: &[u8],
@@ -68,8 +67,8 @@ impl Identity {
     }
 
     /// Get the plain identity as byte vector.
-    pub fn identity(&self) -> Vec<u8> {
-        self.credential_with_key.credential.identity().to_vec()
+    pub fn identity(&self) -> &[u8] {
+        self.credential_with_key.credential.identity()
     }
 
     pub fn identity_string(&self) -> String {
@@ -78,6 +77,18 @@ impl Identity {
 
     pub fn signature_pub_key(&self) -> Vec<u8> {
         self.signer.public().to_vec()
+    }
+
+    pub fn signer(&self) -> SignatureKeyPair {
+        self.signer.clone()
+    }
+
+    pub fn credential_with_key(&self) -> CredentialWithKey {
+        self.credential_with_key.clone()
+    }
+
+    pub fn signature_key(&self) -> Vec<u8> {
+        self.credential_with_key.signature_key.as_slice().to_vec()
     }
 }
 

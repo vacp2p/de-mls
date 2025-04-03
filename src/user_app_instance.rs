@@ -1,5 +1,5 @@
 use alloy::signers::local::PrivateKeySigner;
-use ds::ds_waku::build_content_topics;
+use ds::build_content_topics;
 use kameo::actor::ActorRef;
 use log::{error, info};
 use std::{str::FromStr, sync::Arc, time::Duration};
@@ -20,7 +20,7 @@ pub async fn create_user_instance(
     let user = User::new(&connection.eth_private_key)?;
     let user_ref = kameo::spawn(user);
     user_ref
-        .ask(ProcessCreateGroup {
+        .ask(CreateGroupRequest {
             group_name: group_name.clone(),
             is_creation: connection.should_create_group,
         })
@@ -78,32 +78,34 @@ pub async fn handle_admin_flow_per_epoch(
 ) -> Result<(), UserError> {
     // Move all income key packages to processed queue
     let key_packages = user
-        .ask(ProcessGetIncomeKeyPackages {
+        .ask(GetIncomeKeyPackagesRequest {
             group_name: group_name.clone(),
         })
         .await
-        .map_err(|e| UserError::KameoSendMessageError(e.to_string()))?;
+        .map_err(|e| UserError::GetIncomeKeyPackagesError(e.to_string()))?;
 
     // Send new admin key to the waku node for new epoch and next message will be saved in the messaged queue
     let msg = user
-        .ask(ProcessAdminMessage {
+        .ask(AdminMessageRequest {
             group_name: group_name.clone(),
         })
         .await
-        .map_err(|e| UserError::KameoSendMessageError(e.to_string()))?;
+        .map_err(|e| UserError::ProcessAdminMessageError(e.to_string()))?;
     app_state.waku_node.send(msg).await?;
 
     // Process the income key packages from previous epoch and send welcome message to the new members and
     // update message to the other members
-    let msgs = user
-        .ask(ProcessInviteUsers {
-            group_name: group_name.clone(),
-            users: key_packages,
-        })
-        .await
-        .map_err(|e| UserError::KameoSendMessageError(e.to_string()))?;
-    for msg in msgs {
-        app_state.waku_node.send(msg).await?;
+    if !key_packages.is_empty() {
+        let msgs = user
+            .ask(InviteUsersRequest {
+                group_name: group_name.clone(),
+                users: key_packages,
+            })
+            .await
+            .map_err(|e| UserError::ProcessInviteUsersError(e.to_string()))?;
+        for msg in msgs {
+            app_state.waku_node.send(msg).await?;
+        }
     }
 
     Ok(())

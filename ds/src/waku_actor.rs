@@ -1,4 +1,4 @@
-use log::{debug, info};
+use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::{thread::sleep, time::Duration};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -7,8 +7,7 @@ use waku_bindings::{
     waku_new, Initialized, LibwakuResponse, Multiaddr, Running, WakuEvent, WakuMessage,
 };
 
-use crate::ds_waku::{pubsub_topic, GROUP_VERSION};
-use crate::{ds_waku::build_content_topic, DeliveryServiceError};
+use crate::{build_content_topic, pubsub_topic, DeliveryServiceError, GROUP_VERSION};
 
 pub struct WakuNode<State> {
     node: WakuNodeHandle<State>,
@@ -77,7 +76,7 @@ impl WakuNode<Initialized> {
         // issue - https://github.com/waku-org/nwaku/issues/3246
         // waku.relay_subscribe(&pubsub_topic()).await.map_err(|e| {
         //     debug!("Failed to subscribe to the Waku Node: {:?}", e);
-        //     DeliveryServiceError::WakuSubscribeToGroupError(e)
+        //     DeliveryServiceError::WakuSubscribeToPubsubTopicError(e)
         // })?;
 
         Ok(WakuNode { node: waku })
@@ -87,7 +86,7 @@ impl WakuNode<Initialized> {
 impl WakuNode<Running> {
     pub async fn send_message(
         &self,
-        msg: ProcessMessageToSend,
+        msg: WakuMessageToSend,
     ) -> Result<String, DeliveryServiceError> {
         let waku_message = msg.build_waku_message()?;
         let msg_id = self
@@ -95,7 +94,7 @@ impl WakuNode<Running> {
             .relay_publish_message(&waku_message, &pubsub_topic(), None)
             .await
             .map_err(|e| {
-                debug!("Failed to relay publish the message: {:?}", e);
+                error!("Failed to relay publish the message: {:?}", e);
                 DeliveryServiceError::WakuPublishMessageError(e)
             })?;
 
@@ -114,7 +113,6 @@ impl WakuNode<Running> {
                 .map_err(|e| DeliveryServiceError::WakuConnectPeerError(e.to_string()))?;
             info!("Connected to peer: {:?}", peer_address);
         }
-        info!("Connected to all peers");
         Ok(())
     }
 
@@ -136,14 +134,28 @@ impl WakuNode<Running> {
 /// - group_id: The group to send the message to
 /// - app_id: The app is unique identifier for the application that is sending the message for filtering own messages
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ProcessMessageToSend {
-    pub msg: Vec<u8>,
-    pub subtopic: String,
-    pub group_id: String,
-    pub app_id: Vec<u8>,
+pub struct WakuMessageToSend {
+    msg: Vec<u8>,
+    subtopic: String,
+    group_id: String,
+    app_id: Vec<u8>,
 }
 
-impl ProcessMessageToSend {
+impl WakuMessageToSend {
+    /// Create a new WakuMessageToSend
+    /// Input:
+    /// - msg: The message to send
+    /// - subtopic: The subtopic to send the message to
+    /// - group_id: The group to send the message to
+    /// - app_id: The app is unique identifier for the application that is sending the message for filtering own messages
+    pub fn new(msg: Vec<u8>, subtopic: String, group_id: String, app_id: Vec<u8>) -> Self {
+        Self {
+            msg,
+            subtopic,
+            group_id,
+            app_id,
+        }
+    }
     /// Build a WakuMessage from the message to send
     /// Input:
     /// - msg: The message to send
@@ -166,35 +178,22 @@ pub async fn run_waku_node(
     node_port: String,
     peer_addresses: Option<Vec<Multiaddr>>,
     waku_sender: Sender<WakuMessage>,
-    reciever: &mut Receiver<ProcessMessageToSend>,
-) -> Result<(), Box<dyn std::error::Error>> {
+    reciever: &mut Receiver<WakuMessageToSend>,
+) -> Result<(), DeliveryServiceError> {
     info!("Initializing waku node");
-    let waku_node_init = WakuNode::new(node_port.parse::<usize>().unwrap())
-        .await
-        .expect("Failed to initialize waku node");
-
-    let waku_node = waku_node_init
-        .start(waku_sender)
-        .await
-        .expect("Failed to start waku node");
+    let waku_node_init = WakuNode::new(node_port.parse::<usize>().unwrap()).await?;
+    let waku_node = waku_node_init.start(waku_sender).await?;
     info!("Waku node started");
 
     if let Some(peer_addresses) = peer_addresses {
-        info!("Connecting to peers");
-        waku_node
-            .connect_to_peers(peer_addresses)
-            .await
-            .expect("Failed to connect to peers");
-        info!("Waku node connected to peers");
+        waku_node.connect_to_peers(peer_addresses).await?;
+        info!("Connected to all peers");
     }
 
     info!("Waiting for message to send to waku");
     while let Some(msg) = reciever.recv().await {
         info!("Received message to send to waku");
-        let id = waku_node
-            .send_message(msg)
-            .await
-            .expect("Failed to send message to waku");
+        let id = waku_node.send_message(msg).await?;
         info!("Successfully publish message with id: {:?}", id);
     }
 
