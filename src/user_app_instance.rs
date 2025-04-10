@@ -70,7 +70,7 @@ pub async fn create_user_instance(
 /// 1. Get all collected key packages from previous epoch (not processed yet, just drained messaged queue)
 /// 2. Send new admin key to the waku node for new epoch and next message will be saved in the messaged queue
 /// 3. Process the income key packages from previous epoch and send welcome message to the new members and
-///     update message to the other members
+///    update message to the other members
 pub async fn handle_admin_flow_per_epoch(
     user: ActorRef<User>,
     group_name: String,

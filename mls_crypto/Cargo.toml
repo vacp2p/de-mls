@@ -14,11 +14,4 @@ openmls_traits = "0.2.0"
 anyhow = "1.0.81"
 thiserror = "1.0.39"
 
-alloy = { version = "0.11.0", features = [
-    "providers",
-    "node-bindings",
-    "network",
-    "transports",
-    "k256",
-    "signer-local",
-] }
+alloy = { version = "0.14.0", features = ["network", "signers"] }
