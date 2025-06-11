@@ -1,0 +1,28 @@
+// src/protos/messages/v1/welcome.proto
+
+syntax = "proto3";
+
+package de_mls.messages.v1;
+
+// The main message container. It can only contain ONE of the following
+// message types in its `payload` field.
+message WelcomeMessage {
+  oneof payload {
+    GroupAnnouncement group_announcement = 1;
+    UserKeyPackage user_key_package = 2;
+    InvitationToJoin invitation_to_join = 3;
+  }
+}
+
+message GroupAnnouncement {
+  bytes eth_pub_key = 1;
+  bytes signature = 2;
+}
+
+message UserKeyPackage {
+  bytes encrypt_kp = 1;
+}
+
+message InvitationToJoin {
+  bytes mls_message_out_bytes = 1;
+}

@@ -16,6 +16,8 @@ pub enum IdentityError {
     MlsKeyStoreError(#[from] MemoryKeyStoreError),
     #[error("Failed to create credential: {0}")]
     MlsCredentialError(#[from] CredentialError),
+    #[error("Invalid key")]
+    InvalidKey,
     #[error("An unknown error occurred: {0}")]
     Other(anyhow::Error),
 }

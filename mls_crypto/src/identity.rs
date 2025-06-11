@@ -1,11 +1,11 @@
 use alloy::primitives::Address;
-use std::{collections::HashMap, fmt::Display};
-
+use alloy::signers::local::PrivateKeySigner;
 use openmls::{credentials::CredentialWithKey, key_packages::*, prelude::*};
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_traits::types::Ciphersuite;
+use std::{collections::HashMap, fmt::Display};
 
-use crate::openmls_provider::MlsCryptoProvider;
+use crate::openmls_provider::{MlsCryptoProvider, CIPHERSUITE};
 use crate::IdentityError;
 
 pub struct Identity {
@@ -51,11 +51,10 @@ impl Identity {
     /// Create an additional key package using the credential_with_key/signer bound to this identity
     pub fn generate_key_package(
         &mut self,
-        ciphersuite: Ciphersuite,
         crypto: &MlsCryptoProvider,
     ) -> Result<KeyPackage, IdentityError> {
         let key_package = KeyPackage::builder().build(
-            CryptoConfig::with_default_version(ciphersuite),
+            CryptoConfig::with_default_version(CIPHERSUITE),
             crypto,
             &self.signer,
             self.credential_with_key.clone(),
@@ -104,4 +103,13 @@ impl Display for Identity {
 
 pub fn address_string(identity: &[u8]) -> String {
     Address::from_slice(identity).to_string()
+}
+
+pub fn random_identity() -> Result<Identity, IdentityError> {
+    let signer = PrivateKeySigner::random();
+    let user_address = signer.address();
+
+    let crypto = MlsCryptoProvider::default();
+    let id = Identity::new(CIPHERSUITE, &crypto, user_address.as_slice())?;
+    Ok(id)
 }

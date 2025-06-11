@@ -6,10 +6,8 @@ use openmls::prelude::*;
 use openmls_rust_crypto::MemoryKeyStoreError;
 use rand::thread_rng;
 use secp256k1::hashes::{sha256, Hash};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
-    fmt::Display,
     str::Utf8Error,
     string::FromUtf8Error,
     sync::{Arc, Mutex},
@@ -23,9 +21,19 @@ use mls_crypto::IdentityError;
 pub mod action_handlers;
 pub mod admin;
 pub mod group;
+pub mod message;
 pub mod user;
+pub mod user_actor;
 pub mod user_app_instance;
 pub mod ws_actor;
+
+pub mod protos {
+    pub mod messages {
+        pub mod v1 {
+            include!(concat!(env!("OUT_DIR"), "/de_mls.messages.v1.rs"));
+        }
+    }
+}
 
 pub struct AppState {
     pub waku_node: Sender<WakuMessageToSend>,
@@ -39,64 +47,6 @@ pub struct Connection {
     pub eth_private_key: String,
     pub group_id: String,
     pub should_create_group: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum WelcomeMessageType {
-    GroupAnnouncement,
-    UserKeyPackage,
-    InvitationToJoin,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WelcomeMessage {
-    pub message_type: WelcomeMessageType,
-    pub message_payload: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GroupAnnouncement {
-    pub_key: Vec<u8>,
-    signature: Vec<u8>,
-}
-
-impl GroupAnnouncement {
-    pub fn new(pub_key: Vec<u8>, signature: Vec<u8>) -> Self {
-        GroupAnnouncement { pub_key, signature }
-    }
-
-    pub fn verify(&self) -> Result<bool, MessageError> {
-        let verified = verify_message(&self.pub_key, &self.signature, &self.pub_key)?;
-        Ok(verified)
-    }
-
-    pub fn encrypt(&self, data: Vec<u8>) -> Result<Vec<u8>, MessageError> {
-        let encrypted = encrypt_message(&data, &self.pub_key)?;
-        Ok(encrypted)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct MessageToPrint {
-    pub sender: String,
-    pub message: String,
-    pub group_name: String,
-}
-
-impl MessageToPrint {
-    pub fn new(sender: String, message: String, group_name: String) -> Self {
-        MessageToPrint {
-            sender,
-            message,
-            group_name,
-        }
-    }
-}
-
-impl Display for MessageToPrint {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.sender, self.message)
-    }
 }
 
 pub fn generate_keypair() -> (PublicKey, SecretKey) {
@@ -162,6 +112,10 @@ pub enum GroupError {
     MlsRemoveMembersError(#[from] RemoveMembersError<MemoryKeyStoreError>),
     #[error("Group still active")]
     GroupStillActiveError,
+    #[error("Error while creating proposal to add members: {0}")]
+    MlsCreateProposalError(#[from] ProposeAddMemberError),
+    #[error("Error while committing to pending proposals: {0}")]
+    MlsCommitToPendingProposalsError(#[from] CommitToPendingProposalsError<MemoryKeyStoreError>),
 
     #[error("UTF-8 parsing error: {0}")]
     Utf8ParsingError(#[from] FromUtf8Error),
@@ -169,6 +123,8 @@ pub enum GroupError {
     JsonError(#[from] serde_json::Error),
     #[error("Serialization error: {0}")]
     SerializationError(#[from] tls_codec::Error),
+    #[error("Failed to decode app message: {0}")]
+    AppMessageDecodeError(String),
 
     #[error("An unknown error occurred: {0}")]
     Other(anyhow::Error),
@@ -180,6 +136,8 @@ pub enum MessageError {
     SignatureVerificationError(#[from] libsecp256k1::Error),
     #[error("JSON processing error: {0}")]
     JsonError(#[from] serde_json::Error),
+    #[error("Serialization error: {0}")]
+    SerializationError(#[from] tls_codec::Error),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -232,8 +190,16 @@ pub enum UserError {
     GetIncomeKeyPackagesError(String),
     #[error("Failed to process admin message: {0}")]
     ProcessAdminMessageError(String),
-    #[error("Failed to process invite users: {0}")]
-    ProcessInviteUsersError(String),
+    #[error("Failed to process proposals: {0}")]
+    ProcessProposalsError(String),
+    #[error("Unsupported mls message type")]
+    UnsupportedMlsMessageType,
+    #[error("Failed to decode welcome message: {0}")]
+    WelcomeMessageDecodeError(#[from] prost::DecodeError),
+    #[error("Failed to apply proposals: {0}")]
+    ApplyProposalsError(String),
+    #[error("Failed to deserialize mls message in: {0}")]
+    MlsMessageInDeserializeError(String),
 
     #[error("Failed to send message to waku: {0}")]
     WakuSendMessageError(#[from] tokio::sync::mpsc::error::SendError<WakuMessageToSend>),

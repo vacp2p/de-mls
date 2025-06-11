@@ -6,9 +6,11 @@ use tokio_util::sync::CancellationToken;
 use waku_bindings::WakuMessage;
 
 use crate::{
-    user::{LeaveGroupRequest, RemoveUserRequest, SendGroupMessage, User, UserAction},
+    message::wrap_conversation_message_into_application_msg,
+    user::{User, UserAction},
+    user_actor::{LeaveGroupRequest, RemoveUserRequest, SendGroupMessage},
     ws_actor::{RawWsMessage, WsAction, WsActor},
-    AppState, MessageToPrint,
+    AppState,
 };
 use ds::waku_actor::WakuMessageToSend;
 
@@ -25,11 +27,11 @@ pub async fn handle_user_actions(
         UserAction::SendToWaku(msg) => {
             waku_node.send(msg).await?;
         }
-        UserAction::SendToGroup(msg) => {
+        UserAction::SendToApp(msg) => {
             info!("Send to group: {:?}", msg);
             ws_actor.ask(msg).await?;
         }
-        UserAction::RemoveGroup(group_name) => {
+        UserAction::LeaveGroup(group_name) => {
             user_actor
                 .ask(LeaveGroupRequest {
                     group_name: group_name.clone(),
@@ -42,13 +44,12 @@ pub async fn handle_user_actions(
                 .unwrap()
                 .retain(|topic| topic.application_name != group_name);
             info!("Leave group: {:?}", &group_name);
-            ws_actor
-                .ask(MessageToPrint {
-                    sender: "system".to_string(),
-                    message: format!("You're removed from the group {}", group_name),
-                    group_name: group_name.clone(),
-                })
-                .await?;
+            let app_message = wrap_conversation_message_into_application_msg(
+                format!("You're removed from the group {}", group_name).into_bytes(),
+                "system".to_string(),
+                group_name.clone(),
+            );
+            ws_actor.ask(app_message).await?;
             cancel_token.cancel();
         }
         UserAction::DoNothing => {}
@@ -69,12 +70,12 @@ pub async fn handle_ws_action(
         }
         WsAction::UserMessage(msg) => {
             info!("Got user message: {:?}", &msg);
-            let mtp = MessageToPrint {
-                message: msg.message.clone(),
-                group_name: msg.group_id.clone(),
-                sender: "me".to_string(),
-            };
-            ws_actor.ask(mtp).await?;
+            let app_message = wrap_conversation_message_into_application_msg(
+                msg.message.clone().into_bytes(),
+                "me".to_string(),
+                msg.group_id.clone(),
+            );
+            ws_actor.ask(app_message).await?;
 
             let pmt = user_actor
                 .ask(SendGroupMessage {
@@ -93,13 +94,12 @@ pub async fn handle_ws_action(
                 })
                 .await?;
             waku_node.send(pmt).await?;
-            ws_actor
-                .ask(MessageToPrint {
-                    sender: "system".to_string(),
-                    message: format!("User {} was removed from group", user_to_ban),
-                    group_name: group_name.clone(),
-                })
-                .await?;
+            let app_message = wrap_conversation_message_into_application_msg(
+                format!("User {} was removed from group", user_to_ban).into_bytes(),
+                "system".to_string(),
+                group_name.clone(),
+            );
+            ws_actor.ask(app_message).await?;
         }
         WsAction::DoNothing => {}
     }

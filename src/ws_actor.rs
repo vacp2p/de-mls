@@ -6,7 +6,7 @@ use kameo::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::MessageToPrint;
+use crate::protos::messages::v1::AppMessage;
 
 /// This actor is used to handle messages from web socket
 #[derive(Debug, Actor)]
@@ -107,12 +107,12 @@ impl Message<RawWsMessage> for WsActor {
 }
 
 /// This impl is used to send messages to the websocket
-impl Message<MessageToPrint> for WsActor {
+impl Message<AppMessage> for WsActor {
     type Reply = Result<(), WsError>;
 
     async fn handle(
         &mut self,
-        msg: MessageToPrint,
+        msg: AppMessage,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
         self.ws_sender

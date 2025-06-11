@@ -91,7 +91,7 @@ async fn test_waku_client() {
             let res = waku_node
                 .send_message(WakuMessageToSend::new(
                     format!("test_message_1").as_bytes().to_vec(),
-                    APP_MSG_SUBTOPIC.to_string(),
+                    APP_MSG_SUBTOPIC,
                     group_name.clone(),
                     uuid.clone(),
                 ))

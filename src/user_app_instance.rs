@@ -4,10 +4,11 @@ use kameo::actor::ActorRef;
 use log::{error, info};
 use std::{str::FromStr, sync::Arc, time::Duration};
 
-use crate::user::*;
+use crate::user::User;
+use crate::user_actor::*;
 use crate::{AppState, Connection, UserError};
 
-pub const ADMIN_EPOCH: u64 = 30;
+pub const ADMIN_EPOCH: u64 = 50;
 
 pub async fn create_user_instance(
     connection: Connection,
@@ -70,15 +71,15 @@ pub async fn create_user_instance(
 /// 1. Get all collected key packages from previous epoch (not processed yet, just drained messaged queue)
 /// 2. Send new admin key to the waku node for new epoch and next message will be saved in the messaged queue
 /// 3. Process the income key packages from previous epoch and send welcome message to the new members and
-///     update message to the other members
+///    update message to the other members
 pub async fn handle_admin_flow_per_epoch(
     user: ActorRef<User>,
     group_name: String,
     app_state: Arc<AppState>,
 ) -> Result<(), UserError> {
-    // Move all income key packages to processed queue
-    let key_packages = user
-        .ask(GetIncomeKeyPackagesRequest {
+    // Get all pending proposals for current group from previous epoch
+    let proposals = user
+        .ask(GetProposalsHrefRequest {
             group_name: group_name.clone(),
         })
         .await
@@ -95,14 +96,22 @@ pub async fn handle_admin_flow_per_epoch(
 
     // Process the income key packages from previous epoch and send welcome message to the new members and
     // update message to the other members
-    if !key_packages.is_empty() {
-        let msgs = user
-            .ask(InviteUsersRequest {
+    if !proposals.is_empty() {
+        let msg = user
+            .ask(ProcessProposalsRequest {
                 group_name: group_name.clone(),
-                users: key_packages,
+                proposals,
             })
             .await
-            .map_err(|e| UserError::ProcessInviteUsersError(e.to_string()))?;
+            .map_err(|e| UserError::ProcessProposalsError(e.to_string()))?;
+        app_state.waku_node.send(msg).await?;
+
+        let msgs = user
+            .ask(ApplyProposalsRequest {
+                group_name: group_name.clone(),
+            })
+            .await
+            .map_err(|e| UserError::ApplyProposalsError(e.to_string()))?;
         for msg in msgs {
             app_state.waku_node.send(msg).await?;
         }

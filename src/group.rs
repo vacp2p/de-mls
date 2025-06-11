@@ -1,18 +1,28 @@
 use alloy::hex;
 use ds::{waku_actor::WakuMessageToSend, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 use kameo::Actor;
-use openmls::{group::*, prelude::*};
+use log::info;
+use openmls::{
+    group::*,
+    prelude::{hash_ref::ProposalRef, *},
+};
 use openmls_basic_credential::SignatureKeyPair;
+use prost::Message;
 use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 
-use crate::{admin::*, *};
+use crate::{
+    admin::*,
+    message::*,
+    protos::messages::v1::{app_message, AppMessage},
+    *,
+};
 use mls_crypto::openmls_provider::*;
 
 #[derive(Clone, Debug)]
 pub enum GroupAction {
-    MessageToPrint(MessageToPrint),
-    RemoveGroup,
+    GroupAppMsg(AppMessage),
+    LeaveGroup,
     DoNothing,
 }
 
@@ -125,9 +135,55 @@ impl Group {
         Ok(self.admin.as_mut().unwrap().drain_processed_key_packages())
     }
 
+    pub async fn create_proposal_to_add_members(
+        &mut self,
+        key_package: KeyPackage,
+        provider: &MlsCryptoProvider,
+        signer: &SignatureKeyPair,
+    ) -> Result<(), GroupError> {
+        if !self.is_mls_group_initialized() {
+            return Err(GroupError::MlsGroupNotInitializedError);
+        }
+        if !self.is_admin() {
+            return Err(GroupError::AdminNotSetError);
+        }
+        let mut mls_group = self.mls_group.as_mut().unwrap().lock().await;
+
+        let (_, href) = mls_group.propose_add_member(provider, signer, &key_package)?;
+
+        self.admin
+            .as_mut()
+            .unwrap()
+            .add_pending_proposal(href.clone());
+
+        println!(
+            "nof proposals: {:?}",
+            mls_group.pending_proposals().collect::<Vec<_>>().len()
+        );
+        println!(
+            "Pending proposals: {:?}",
+            mls_group.pending_proposals().collect::<Vec<_>>()
+        );
+
+        Ok(())
+    }
+
+    pub fn get_pending_proposals(&self) -> Result<Vec<ProposalRef>, GroupError> {
+        if !self.is_admin() {
+            return Err(GroupError::AdminNotSetError);
+        }
+        Ok(self.admin.as_ref().unwrap().get_pending_proposals())
+    }
+
+    pub fn drain_pending_proposals(&mut self) -> Result<Vec<ProposalRef>, GroupError> {
+        if !self.is_admin() {
+            return Err(GroupError::AdminNotSetError);
+        }
+        Ok(self.admin.as_mut().unwrap().drain_pending_proposals())
+    }
+
     pub async fn add_members(
         &mut self,
-        users_kp: Vec<KeyPackage>,
         provider: &MlsCryptoProvider,
         signer: &SignatureKeyPair,
     ) -> Result<Vec<WakuMessageToSend>, GroupError> {
@@ -136,26 +192,28 @@ impl Group {
         }
         let mut mls_group = self.mls_group.as_mut().unwrap().lock().await;
         let (out_messages, welcome, _group_info) =
-            mls_group.add_members(provider, signer, &users_kp)?;
+            mls_group.commit_to_pending_proposals(provider, signer)?;
 
         mls_group.merge_pending_commit(provider)?;
 
         let msg_to_send_commit = WakuMessageToSend::new(
             out_messages.tls_serialize_detached()?,
-            APP_MSG_SUBTOPIC.to_string(),
+            APP_MSG_SUBTOPIC,
             self.group_name.clone(),
             self.app_id.clone(),
         );
 
+        println!("Welcome message before serialize: {:?}", welcome);
         let welcome_serialized = welcome.tls_serialize_detached()?;
-        let welcome_msg: Vec<u8> = serde_json::to_vec(&WelcomeMessage {
-            message_type: WelcomeMessageType::InvitationToJoin,
-            message_payload: welcome_serialized,
-        })?;
+        println!("Welcome message after serialize: {:?}", welcome_serialized);
+
+        let test_deserialized =
+            MlsMessageIn::tls_deserialize_exact(welcome_serialized.as_slice().clone())?;
+        println!("Test deserialized: {:?}", test_deserialized);
 
         let msg_to_send_welcome = WakuMessageToSend::new(
-            welcome_msg,
-            WELCOME_SUBTOPIC.to_string(),
+            wrap_invitation_into_welcome_msg(welcome_serialized)?.encode_to_vec(),
+            WELCOME_SUBTOPIC,
             self.group_name.clone(),
             self.app_id.clone(),
         );
@@ -191,7 +249,7 @@ impl Group {
 
         let msg_to_send_commit = WakuMessageToSend::new(
             remove_message.tls_serialize_detached()?,
-            APP_MSG_SUBTOPIC.to_string(),
+            APP_MSG_SUBTOPIC,
             self.group_name.clone(),
             self.app_id.clone(),
         );
@@ -240,14 +298,32 @@ impl Group {
                     user_id.unwrap()
                 };
 
-                let conversation_message = MessageToPrint::new(
-                    sender_name,
-                    String::from_utf8(application_message.into_bytes())?,
-                    self.group_name.clone(),
-                );
-                return Ok(GroupAction::MessageToPrint(conversation_message));
+                let app_msg = AppMessage::decode(application_message.into_bytes().as_slice())
+                    .map_err(|e| GroupError::AppMessageDecodeError(e.to_string()))?;
+
+                match app_msg.payload {
+                    Some(app_message::Payload::ConversationMessage(conversation_message)) => {
+                        let msg_to_send = wrap_conversation_message_into_application_msg(
+                            conversation_message.message,
+                            sender_name,
+                            self.group_name.clone(),
+                        );
+                        return Ok(GroupAction::GroupAppMsg(msg_to_send));
+                    }
+                    Some(app_message::Payload::VoteStartMessage(vote_start_message)) => {
+                        let msg_to_send = wrap_conversation_message_into_application_msg(
+                            vote_start_message.group_name,
+                            sender_name,
+                            self.group_name.clone(),
+                        );
+                        return Ok(GroupAction::GroupAppMsg(msg_to_send));
+                    }
+                    _ => return Ok(GroupAction::DoNothing),
+                }
             }
-            ProcessedMessageContent::ProposalMessage(_proposal_ptr) => (),
+            ProcessedMessageContent::ProposalMessage(proposal_ptr) => {
+                mls_group.store_pending_proposal(proposal_ptr.as_ref().clone());
+            }
             ProcessedMessageContent::ExternalJoinProposalMessage(_external_proposal_ptr) => (),
             ProcessedMessageContent::StagedCommitMessage(commit_ptr) => {
                 let mut remove_proposal: bool = false;
@@ -261,7 +337,7 @@ impl Group {
                     if mls_group.is_active() {
                         return Err(GroupError::GroupStillActiveError);
                     }
-                    return Ok(GroupAction::RemoveGroup);
+                    return Ok(GroupAction::LeaveGroup);
                 }
             }
         };
@@ -274,15 +350,11 @@ impl Group {
             None => return Err(GroupError::AdminNotSetError),
         };
         admin.refresh_key_pair();
-        let admin_msg = admin.create_admin_announcement();
 
-        let wm = WelcomeMessage {
-            message_type: WelcomeMessageType::GroupAnnouncement,
-            message_payload: serde_json::to_vec(&admin_msg)?,
-        };
         let msg_to_send = WakuMessageToSend::new(
-            serde_json::to_vec(&wm)?,
-            WELCOME_SUBTOPIC.to_string(),
+            wrap_group_announcement_in_welcome_msg(admin.create_admin_announcement())
+                .encode_to_vec(),
+            WELCOME_SUBTOPIC,
             self.group_name.clone(),
             self.app_id.clone(),
         );
@@ -305,7 +377,7 @@ impl Group {
             .tls_serialize_detached()?;
         Ok(WakuMessageToSend::new(
             message_out,
-            APP_MSG_SUBTOPIC.to_string(),
+            APP_MSG_SUBTOPIC,
             self.group_name.clone(),
             self.app_id.clone(),
         ))
@@ -315,5 +387,63 @@ impl Group {
 impl Display for Group {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Group: {:#?}", self.group_name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mls_crypto::identity::random_identity;
+
+    use crate::user::User;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_create_proposal_to_add_members() {
+        let group_name = "new_group".to_string();
+
+        let crypto = MlsCryptoProvider::default();
+        let id_admin = random_identity().expect("Failed to create identity");
+        let mut id_user = random_identity().expect("Failed to create identity");
+
+        let mut group_admin = Group::new(
+            group_name.clone(),
+            true,
+            Some(&crypto),
+            Some(&id_admin.signer()),
+            Some(&id_admin.credential_with_key()),
+        )
+        .expect("Failed to create group");
+
+        let group_user = Group::new(group_name.clone(), false, None, None, None)
+            .expect("Failed to create group");
+
+        let kp_user = id_user
+            .generate_key_package(&crypto)
+            .expect("Failed to generate key package");
+
+        group_admin
+            .create_proposal_to_add_members(kp_user, &crypto, &id_admin.signer())
+            .await
+            .expect("Failed to create proposal");
+
+        let pending_proposals = group_admin
+            .get_pending_proposals()
+            .expect("Failed to get pending proposals");
+        assert_eq!(pending_proposals.len(), 1);
+
+        let out = group_admin
+            .add_members(&crypto, &id_admin.signer())
+            .await
+            .expect("Failed to add members");
+
+        info!("Out: {:?}", out);
+
+        let waku_msg_with_welcome = out[1]
+            .build_waku_message()
+            .expect("Failed to build waku message");
+        info!("Waku message: {:?}", waku_msg_with_welcome);
+
+        // group_user.join_group(waku_msg_with_welcome).await.expect("Failed to join group");
     }
 }

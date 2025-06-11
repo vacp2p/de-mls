@@ -1,13 +1,14 @@
 use libsecp256k1::{PublicKey, SecretKey};
-use openmls::prelude::*;
+use openmls::prelude::{hash_ref::ProposalRef, *};
 
-use crate::*;
+use crate::{protos::messages::v1::GroupAnnouncement, *};
 
 #[derive(Clone, Debug)]
 pub struct GroupAdmin {
-    public_key: PublicKey,
-    private_key: SecretKey,
+    eth_pub: PublicKey,
+    eth_secr: SecretKey,
     incoming_key_packages: Arc<Mutex<Vec<KeyPackage>>>,
+    pending_proposals: Arc<Mutex<Vec<ProposalRef>>>,
 }
 
 impl Default for GroupAdmin {
@@ -20,25 +21,26 @@ impl GroupAdmin {
     pub fn new_admin() -> Self {
         let (public_key, private_key) = generate_keypair();
         GroupAdmin {
-            public_key,
-            private_key,
+            eth_pub: public_key,
+            eth_secr: private_key,
             incoming_key_packages: Arc::new(Mutex::new(Vec::new())),
+            pending_proposals: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     pub fn refresh_key_pair(&mut self) {
         let (public_key, private_key) = generate_keypair();
-        self.public_key = public_key;
-        self.private_key = private_key;
+        self.eth_pub = public_key;
+        self.eth_secr = private_key;
     }
 
     pub fn create_admin_announcement(&self) -> GroupAnnouncement {
-        let signature = sign_message(&self.public_key.serialize_compressed(), &self.private_key);
-        GroupAnnouncement::new(self.public_key.serialize_compressed().to_vec(), signature)
+        let signature = sign_message(&self.eth_pub.serialize_compressed(), &self.eth_secr);
+        GroupAnnouncement::new(self.eth_pub.serialize_compressed().to_vec(), signature)
     }
 
     pub fn decrypt_message(&self, message: Vec<u8>) -> Result<KeyPackage, MessageError> {
-        let msg: Vec<u8> = decrypt_message(&message, self.private_key)?;
+        let msg: Vec<u8> = decrypt_message(&message, self.eth_secr)?;
         let key_package: KeyPackage = serde_json::from_slice(&msg)?;
         Ok(key_package)
     }
@@ -53,5 +55,24 @@ impl GroupAdmin {
             .unwrap()
             .drain(0..)
             .collect()
+    }
+
+    pub fn add_pending_proposal(&mut self, proposal: ProposalRef) {
+        self.pending_proposals.lock().unwrap().push(proposal);
+    }
+
+    pub fn get_pending_proposals(&self) -> Vec<ProposalRef> {
+        self.pending_proposals.lock().unwrap().clone()
+    }
+
+    pub fn remove_pending_proposal(&mut self, proposal: ProposalRef) {
+        self.pending_proposals
+            .lock()
+            .unwrap()
+            .retain(|p| p != &proposal);
+    }
+
+    pub fn drain_pending_proposals(&mut self) -> Vec<ProposalRef> {
+        self.pending_proposals.lock().unwrap().drain(0..).collect()
     }
 }

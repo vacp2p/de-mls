@@ -1,11 +1,11 @@
 use alloy::{network::EthereumWallet, signers::local::PrivateKeySigner};
-use kameo::{
-    message::{Context, Message},
-    Actor,
-};
+use kameo::Actor;
 use log::info;
-use openmls::{group::*, prelude::*};
-use serde::{Deserialize, Serialize};
+use openmls::{
+    group::*,
+    prelude::{hash_ref::ProposalRef, *},
+};
+use prost::Message;
 use std::{
     collections::HashMap,
     str::{from_utf8, FromStr},
@@ -18,14 +18,15 @@ use mls_crypto::{identity::Identity, openmls_provider::*};
 use crate::UserError;
 use crate::{
     group::{Group, GroupAction},
-    GroupAnnouncement, MessageToPrint, WelcomeMessage, WelcomeMessageType,
+    message::*,
+    protos::messages::v1::{welcome_message, AppMessage, WelcomeMessage},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum UserAction {
     SendToWaku(WakuMessageToSend),
-    SendToGroup(MessageToPrint),
-    RemoveGroup(String),
+    SendToApp(AppMessage),
+    LeaveGroup(String),
     DoNothing,
 }
 
@@ -35,141 +36,6 @@ pub struct User {
     groups: HashMap<String, Group>,
     provider: MlsCryptoProvider,
     eth_signer: PrivateKeySigner,
-}
-
-impl Message<WakuMessage> for User {
-    type Reply = Result<UserAction, UserError>;
-
-    async fn handle(
-        &mut self,
-        msg: WakuMessage,
-        _ctx: Context<'_, Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.handle_waku_message(msg).await
-    }
-}
-
-pub struct CreateGroupRequest {
-    pub group_name: String,
-    pub is_creation: bool,
-}
-
-impl Message<CreateGroupRequest> for User {
-    type Reply = Result<(), UserError>;
-
-    async fn handle(
-        &mut self,
-        msg: CreateGroupRequest,
-        _ctx: Context<'_, Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.create_group(msg.group_name.clone(), msg.is_creation)
-            .await?;
-        Ok(())
-    }
-}
-
-pub struct AdminMessageRequest {
-    pub group_name: String,
-}
-
-impl Message<AdminMessageRequest> for User {
-    type Reply = Result<WakuMessageToSend, UserError>;
-
-    async fn handle(
-        &mut self,
-        msg: AdminMessageRequest,
-        _ctx: Context<'_, Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.prepare_admin_msg(msg.group_name.clone()).await
-    }
-}
-
-pub struct LeaveGroupRequest {
-    pub group_name: String,
-}
-
-impl Message<LeaveGroupRequest> for User {
-    type Reply = Result<(), UserError>;
-
-    async fn handle(
-        &mut self,
-        msg: LeaveGroupRequest,
-        _ctx: Context<'_, Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.leave_group(msg.group_name.clone()).await?;
-        Ok(())
-    }
-}
-
-pub struct RemoveUserRequest {
-    pub user_to_ban: String,
-    pub group_name: String,
-}
-
-impl Message<RemoveUserRequest> for User {
-    type Reply = Result<WakuMessageToSend, UserError>;
-
-    async fn handle(
-        &mut self,
-        msg: RemoveUserRequest,
-        _ctx: Context<'_, Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.remove_group_users(vec![msg.user_to_ban], msg.group_name.clone())
-            .await
-    }
-}
-
-pub struct GetIncomeKeyPackagesRequest {
-    pub group_name: String,
-}
-
-impl Message<GetIncomeKeyPackagesRequest> for User {
-    type Reply = Result<Vec<KeyPackage>, UserError>;
-
-    async fn handle(
-        &mut self,
-        msg: GetIncomeKeyPackagesRequest,
-        _ctx: Context<'_, Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.get_processed_income_key_packages(msg.group_name.clone())
-            .await
-    }
-}
-
-pub struct InviteUsersRequest {
-    pub group_name: String,
-    pub users: Vec<KeyPackage>,
-}
-
-impl Message<InviteUsersRequest> for User {
-    type Reply = Result<Vec<WakuMessageToSend>, UserError>;
-
-    async fn handle(
-        &mut self,
-        msg: InviteUsersRequest,
-        _ctx: Context<'_, Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.invite_users(msg.users.clone(), msg.group_name.clone())
-            .await
-    }
-}
-
-pub struct SendGroupMessage {
-    pub msg: String,
-    pub group_name: String,
-}
-
-impl Message<SendGroupMessage> for User {
-    type Reply = Result<WakuMessageToSend, UserError>;
-
-    async fn handle(
-        &mut self,
-        msg: SendGroupMessage,
-        _ctx: Context<'_, Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.build_group_message(&msg.msg, msg.group_name.clone())
-            .await
-    }
 }
 
 impl User {
@@ -224,7 +90,7 @@ impl User {
         self.groups.contains_key(&group_name)
     }
 
-    pub async fn handle_welcome_subtopic(
+    pub async fn process_welcome_subtopic(
         &mut self,
         msg: WakuMessage,
         group_name: String,
@@ -233,97 +99,102 @@ impl User {
             Some(g) => g,
             None => return Err(UserError::GroupNotFoundError(group_name)),
         };
-        let welcome_msg: WelcomeMessage = serde_json::from_slice(msg.payload())?;
-        match welcome_msg.message_type {
-            WelcomeMessageType::GroupAnnouncement => {
-                let app_id = group.app_id();
-                if group.is_admin() || group.is_kp_shared() {
-                    info!("Its admin or key package already shared");
-                    Ok(UserAction::DoNothing)
-                } else {
-                    info!(
-                        "User {:?} received group announcement message for group {:?}",
-                        self.identity.identity_string(),
-                        group_name
-                    );
-                    let group_announcement: GroupAnnouncement =
-                        serde_json::from_slice(&welcome_msg.message_payload)?;
-                    if !group_announcement.verify()? {
-                        return Err(UserError::MessageVerificationFailed);
-                    }
 
-                    let key_package = serde_json::to_vec(
-                        &self
-                            .identity
-                            .generate_key_package(CIPHERSUITE, &self.provider)?,
-                    )?;
-
-                    let encrypted_key_package = group_announcement.encrypt(key_package)?;
-                    let msg: Vec<u8> = serde_json::to_vec(&WelcomeMessage {
-                        message_type: WelcomeMessageType::UserKeyPackage,
-                        message_payload: encrypted_key_package,
-                    })?;
-
-                    group.set_kp_shared(true);
-
-                    Ok(UserAction::SendToWaku(WakuMessageToSend::new(
-                        msg,
-                        WELCOME_SUBTOPIC.to_string(),
-                        group_name.clone(),
-                        app_id.clone(),
-                    )))
-                }
-            }
-            WelcomeMessageType::UserKeyPackage => {
-                // We already shared the key package with the group admin and we don't need to do it again
-                if group.is_admin() {
-                    info!(
-                        "Admin {:?} received key package for the group {:?}",
-                        self.identity.identity_string(),
-                        group_name
-                    );
-                    let key_package = group.decrypt_admin_msg(welcome_msg.message_payload)?;
-                    group.push_income_key_package(key_package.clone())?;
-                }
-                Ok(UserAction::DoNothing)
-            }
-            WelcomeMessageType::InvitationToJoin => {
-                if group.is_admin() {
-                    Ok(UserAction::DoNothing)
-                } else {
-                    info!(
-                        "User {:?} received invitation to join group {:?}",
-                        self.identity.identity_string(),
-                        group_name
-                    );
-                    let welc = MlsMessageIn::tls_deserialize_bytes(welcome_msg.message_payload)?;
-                    let welcome = match welc.into_welcome() {
-                        Some(w) => w,
-                        None => return Err(UserError::EmptyWelcomeMessageError),
-                    };
-                    // find the key package in the welcome message
-                    if welcome.secrets().iter().any(|egs| {
-                        let hash_ref = egs.new_member().as_slice().to_vec();
-                        self.provider
-                            .key_store()
-                            .read(&hash_ref)
-                            .map(|kp: KeyPackage| (kp, hash_ref))
-                            .is_some()
-                    }) {
-                        self.join_group(welcome)?;
-                        let msg = self
-                            .build_group_message("User joined to the group", group_name)
-                            .await?;
-                        Ok(UserAction::SendToWaku(msg))
-                    } else {
+        let received_msg = WelcomeMessage::decode(msg.payload())?;
+        if let Some(payload) = &received_msg.payload {
+            match payload {
+                welcome_message::Payload::GroupAnnouncement(group_announcement) => {
+                    let app_id = group.app_id();
+                    if group.is_admin() || group.is_kp_shared() {
+                        info!("Its admin or key package already shared");
                         Ok(UserAction::DoNothing)
+                    } else {
+                        info!(
+                            "User {:?} received group announcement message for group {:?}",
+                            self.identity.identity_string(),
+                            group_name
+                        );
+                        if !group_announcement.verify()? {
+                            return Err(UserError::MessageVerificationFailed);
+                        }
+
+                        let new_kp = self.identity.generate_key_package(&self.provider)?;
+                        let encrypted_key_package = group_announcement.encrypt(new_kp)?;
+                        group.set_kp_shared(true);
+
+                        Ok(UserAction::SendToWaku(WakuMessageToSend::new(
+                            wrap_user_kp_into_welcome_msg(encrypted_key_package)?.encode_to_vec(),
+                            WELCOME_SUBTOPIC,
+                            group_name.clone(),
+                            app_id.clone(),
+                        )))
+                    }
+                }
+                welcome_message::Payload::UserKeyPackage(user_key_package) => {
+                    if group.is_admin() {
+                        info!(
+                            "Admin {:?} received key package for the group {:?}",
+                            self.identity.identity_string(),
+                            group_name
+                        );
+                        let key_package =
+                            group.decrypt_admin_msg(user_key_package.encrypt_kp.clone())?;
+                        group
+                            .create_proposal_to_add_members(
+                                key_package,
+                                &self.provider,
+                                &self.identity.signer(),
+                            )
+                            .await?;
+                    }
+                    Ok(UserAction::DoNothing)
+                }
+                welcome_message::Payload::InvitationToJoin(invitation_to_join) => {
+                    if group.is_admin() {
+                        Ok(UserAction::DoNothing)
+                    } else {
+                        info!(
+                            "User {:?} received invitation to join group {:?}",
+                            self.identity.identity_string(),
+                            group_name
+                        );
+                        info!("Invitation to join: {:?}", invitation_to_join);
+                        let welc = MlsMessageIn::tls_deserialize_bytes(
+                            invitation_to_join.mls_message_out_bytes.clone(),
+                        ).map_err(|e| UserError::MlsMessageInDeserializeError(e.to_string()))?;
+                        info!("Deserialized invitation to join: {:?}", welc);
+                        
+                        let welcome = welc
+                            .into_welcome()
+                            .ok_or(UserError::EmptyWelcomeMessageError)?;
+
+                        info!("Welcome message: {:?}", welcome);
+                        // find the key package in the welcome message
+                        if welcome.secrets().iter().any(|egs| {
+                            let hash_ref = egs.new_member().as_slice().to_vec();
+                            self.provider
+                                .key_store()
+                                .read(&hash_ref)
+                                .map(|kp: KeyPackage| (kp, hash_ref))
+                                .is_some()
+                        }) {
+                            self.join_group(welcome)?;
+                            let msg = self
+                                .build_group_message("User joined to the group", group_name)
+                                .await?;
+                            Ok(UserAction::SendToWaku(msg))
+                        } else {
+                            Ok(UserAction::DoNothing)
+                        }
                     }
                 }
             }
+        } else {
+            Err(UserError::EmptyWelcomeMessageError)
         }
     }
 
-    pub async fn handle_app_msg_subtopic(
+    pub async fn process_app_subtopic(
         &mut self,
         msg: WakuMessage,
         group_name: String,
@@ -333,43 +204,40 @@ impl User {
             self.identity.identity_string(),
             group_name
         );
-        let res = MlsMessageIn::tls_deserialize_bytes(msg.payload())?;
-        let action = match res.extract() {
-            MlsMessageInBody::PrivateMessage(message) => {
-                self.process_protocol_msg(message.into()).await?
-            }
-            MlsMessageInBody::PublicMessage(message) => {
-                self.process_protocol_msg(message.into()).await?
-            }
-            _ => return Err(UserError::UnsupportedMessageType),
-        };
-        Ok(action)
-    }
+        let mls_message_in = MlsMessageIn::tls_deserialize_exact(msg.payload())?;
+        let mls_message = mls_message_in
+            .into_protocol_message()
+            .ok_or(UserError::UnsupportedMlsMessageType)?;
 
-    pub async fn get_processed_income_key_packages(
-        &mut self,
-        group_name: String,
-    ) -> Result<Vec<KeyPackage>, UserError> {
+        let group_name = from_utf8(mls_message.group_id().as_slice())?.to_string();
         let group = match self.groups.get_mut(&group_name) {
             Some(g) => g,
             None => return Err(UserError::GroupNotFoundError(group_name)),
         };
-        Ok(group.processed_key_packages()?)
+        if !group.is_mls_group_initialized() {
+            return Ok(UserAction::DoNothing);
+        }
+        let res = group
+            .process_protocol_msg(mls_message, &self.provider, self.identity.signature_key())
+            .await?;
+
+        match res {
+            GroupAction::GroupAppMsg(msg) => Ok(UserAction::SendToApp(msg)),
+            GroupAction::LeaveGroup => Ok(UserAction::LeaveGroup(group_name)),
+            GroupAction::DoNothing => Ok(UserAction::DoNothing),
+        }
     }
 
-    pub async fn add_income_key_package(
+    /// This function is used to process waku messages
+    /// After processing the message, it returns an action to be performed by the user
+    ///  - SendToWaku - send a message to the waku network
+    ///  - SendToGroup - send a message to the group (print to the application)
+    ///  - LeaveGroup - leave a group
+    ///  - DoNothing - do nothing
+    pub async fn process_waku_message(
         &mut self,
-        kp: KeyPackage,
-        group_name: String,
-    ) -> Result<(), UserError> {
-        let group = match self.groups.get_mut(&group_name) {
-            Some(g) => g,
-            None => return Err(UserError::GroupNotFoundError(group_name)),
-        };
-        Ok(group.push_income_key_package(kp)?)
-    }
-
-    pub async fn handle_waku_message(&mut self, msg: WakuMessage) -> Result<UserAction, UserError> {
+        msg: WakuMessage,
+    ) -> Result<UserAction, UserError> {
         let group_name = msg.content_topic.application_name.to_string();
         let group = match self.groups.get(&group_name) {
             Some(g) => g,
@@ -382,33 +250,13 @@ impl User {
         }
         let ct_name = msg.content_topic.content_topic_name.to_string();
         match ct_name.as_str() {
-            WELCOME_SUBTOPIC => self.handle_welcome_subtopic(msg, group_name).await,
-            APP_MSG_SUBTOPIC => self.handle_app_msg_subtopic(msg, group_name).await,
+            WELCOME_SUBTOPIC => self.process_welcome_subtopic(msg, group_name).await,
+            APP_MSG_SUBTOPIC => self.process_app_subtopic(msg, group_name).await,
             _ => Err(UserError::UnknownContentTopicType(ct_name)),
         }
     }
 
-    pub async fn invite_users(
-        &mut self,
-        users_kp: Vec<KeyPackage>,
-        group_name: String,
-    ) -> Result<Vec<WakuMessageToSend>, UserError> {
-        // Build a proposal with this key package and do the MLS bits.
-        let group = match self.groups.get_mut(&group_name) {
-            Some(g) => g,
-            None => return Err(UserError::GroupNotFoundError(group_name)),
-        };
-        let out_messages = group
-            .add_members(users_kp, &self.provider, &self.identity.signer())
-            .await?;
-        info!(
-            "User {:?} invited users to group {:?}",
-            self.identity.identity_string(),
-            group_name
-        );
-        Ok(out_messages)
-    }
-
+    /// This function is used to join a group after receiving a welcome message
     fn join_group(&mut self, welcome: Welcome) -> Result<(), UserError> {
         let group_config = MlsGroupConfig::builder()
             .use_ratchet_tree_extension(true)
@@ -436,27 +284,13 @@ impl User {
         Ok(())
     }
 
-    pub async fn process_protocol_msg(
-        &mut self,
-        message: ProtocolMessage,
-    ) -> Result<UserAction, UserError> {
-        let group_name = from_utf8(message.group_id().as_slice())?.to_string();
-        let group = match self.groups.get_mut(&group_name) {
-            Some(g) => g,
-            None => return Err(UserError::GroupNotFoundError(group_name)),
-        };
-        if !group.is_mls_group_initialized() {
-            return Ok(UserAction::DoNothing);
+    /// This function is used to leave a group after receiving a commit message
+    pub async fn leave_group(&mut self, group_name: String) -> Result<(), UserError> {
+        if !self.if_group_exists(group_name.clone()) {
+            return Err(UserError::GroupNotFoundError(group_name));
         }
-        let res = group
-            .process_protocol_msg(message, &self.provider, self.identity.signature_key())
-            .await?;
-
-        match res {
-            GroupAction::MessageToPrint(msg) => Ok(UserAction::SendToGroup(msg)),
-            GroupAction::RemoveGroup => Ok(UserAction::RemoveGroup(group_name)),
-            GroupAction::DoNothing => Ok(UserAction::DoNothing),
-        }
+        self.groups.remove(&group_name);
+        Ok(())
     }
 
     pub async fn prepare_admin_msg(
@@ -509,15 +343,76 @@ impl User {
         Ok(msg)
     }
 
-    pub async fn leave_group(&mut self, group_name: String) -> Result<(), UserError> {
-        if !self.if_group_exists(group_name.clone()) {
-            return Err(UserError::GroupNotFoundError(group_name));
-        }
-        self.groups.remove(&group_name);
+    pub fn wallet(&self) -> EthereumWallet {
+        EthereumWallet::from(self.eth_signer.clone())
+    }
+
+    pub async fn create_invite_proposal(
+        &mut self,
+        users_kp: KeyPackage,
+        group_name: String,
+    ) -> Result<(), UserError> {
+        let group = match self.groups.get_mut(&group_name) {
+            Some(g) => g,
+            None => return Err(UserError::GroupNotFoundError(group_name)),
+        };
+        group
+            .create_proposal_to_add_members(users_kp, &self.provider, &self.identity.signer())
+            .await?;
+
         Ok(())
     }
 
-    pub fn wallet(&self) -> EthereumWallet {
-        EthereumWallet::from(self.eth_signer.clone())
+    pub async fn group_drain_pending_proposals(
+        &mut self,
+        group_name: String,
+    ) -> Result<Vec<ProposalRef>, UserError> {
+        let group = match self.groups.get_mut(&group_name) {
+            Some(g) => g,
+            None => return Err(UserError::GroupNotFoundError(group_name)),
+        };
+        Ok(group.drain_pending_proposals()?)
+    }
+
+    pub async fn process_proposals(
+        &mut self,
+        group_name: String,
+        proposals: Vec<ProposalRef>,
+    ) -> Result<WakuMessageToSend, UserError> {
+        let group = match self.groups.get_mut(&group_name) {
+            Some(g) => g,
+            None => return Err(UserError::GroupNotFoundError(group_name)),
+        };
+
+        let nof_proposals = proposals.len();
+        let format_msg = format!(
+            "Vote start for group {} with {} proposals",
+            group_name, nof_proposals
+        );
+        let app_msg = wrap_vote_start_message_into_application_msg(format_msg.clone());
+        let msg = WakuMessageToSend::new(
+            app_msg.encode_to_vec(),
+            APP_MSG_SUBTOPIC,
+            group_name.clone(),
+            group.app_id().clone(),
+        );
+
+        Ok(msg)
+    }
+
+    pub async fn apply_proposals(
+        &mut self,
+        group_name: String,
+    ) -> Result<Vec<WakuMessageToSend>, UserError> {
+        let group = match self.groups.get_mut(&group_name) {
+            Some(g) => g,
+            None => return Err(UserError::GroupNotFoundError(group_name)),
+        };
+
+        let msg = group
+            .add_members(&self.provider, &self.identity.signer())
+            .await?;
+
+        Ok(msg)
     }
 }

@@ -148,10 +148,10 @@ impl WakuMessageToSend {
     /// - subtopic: The subtopic to send the message to
     /// - group_id: The group to send the message to
     /// - app_id: The app is unique identifier for the application that is sending the message for filtering own messages
-    pub fn new(msg: Vec<u8>, subtopic: String, group_id: String, app_id: Vec<u8>) -> Self {
+    pub fn new(msg: Vec<u8>, subtopic: &str, group_id: String, app_id: Vec<u8>) -> Self {
         Self {
             msg,
-            subtopic,
+            subtopic: subtopic.to_string(),
             group_id,
             app_id,
         }

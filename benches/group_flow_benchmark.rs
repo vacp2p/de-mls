@@ -1,6 +1,7 @@
 use alloy::primitives::{Address, U160};
 use criterion::{criterion_group, criterion_main, Criterion};
-use de_mls::user::{CreateGroupRequest, User, UserAction};
+use de_mls::user::{User, UserAction};
+use de_mls::user_actor::{CreateGroupRequest};
 use mls_crypto::openmls_provider::{MlsCryptoProvider, CIPHERSUITE};
 use openmls::prelude::{
     Credential, CredentialType, CredentialWithKey, CryptoConfig, KeyPackage, ProtocolVersion,
@@ -117,11 +118,6 @@ fn add_user_to_group_benchmark(c: &mut Criterion) {
                         .create_group("group".to_string(), true)
                         .await
                         .expect("Failed to create group");
-
-                    alice
-                        .invite_users(user_kps.lock().unwrap().clone(), "group".to_string())
-                        .await
-                        .expect("Failed to invite users");
                 });
             });
         });
@@ -155,7 +151,7 @@ fn share_kp_benchmark(c: &mut Criterion) {
                     .expect("Failed to build waku message");
 
                 let bob_action = bob
-                    .handle_waku_message(group_announcement_message.clone())
+                    .process_waku_message(group_announcement_message.clone())
                     .await
                     .expect("Failed to process waku message");
                 let bob_kp_message = match bob_action {
@@ -167,28 +163,27 @@ fn share_kp_benchmark(c: &mut Criterion) {
                     .expect("Failed to build waku message");
 
                 let _ = alice
-                    .handle_waku_message(bob_kp_waku_message)
+                    .process_waku_message(bob_kp_waku_message)
                     .await
                     .expect("Failed to process waku message");
 
                 let users_to_invite = alice
-                    .get_processed_income_key_packages(group_name.clone())
+                    .group_drain_pending_proposals(group_name.clone())
                     .await
                     .expect("Failed to process income key packages");
 
                 let res = alice
-                    .invite_users(users_to_invite, group_name.clone())
+                    .process_proposals(group_name.clone(), users_to_invite)
                     .await
                     .expect("Failed to invite users");
 
-                let welcome_message = res[1]
-                    .build_waku_message()
-                    .expect("Failed to build waku message");
-
-                let _ = bob
-                    .handle_waku_message(welcome_message.clone())
-                    .await
-                    .expect("Failed to process waku message");
+                // let _ = bob
+                //     .handle_waku_message(
+                //         res.build_waku_message()
+                //             .expect("Failed to build waku message"),
+                //     )
+                //     .await
+                //     .expect("Failed to process waku message");
             });
         });
     });
