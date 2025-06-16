@@ -1,5 +1,9 @@
-use openmls::{error::LibraryError, prelude::*};
-use openmls_rust_crypto::MemoryKeyStoreError;
+use openmls::{
+    error::LibraryError,
+    prelude::{CredentialError, KeyPackageNewError},
+};
+use openmls_rust_crypto::MemoryStorageError;
+use openmls_traits::types::CryptoError;
 
 pub mod identity;
 pub mod openmls_provider;
@@ -7,13 +11,13 @@ pub mod openmls_provider;
 #[derive(Debug, thiserror::Error)]
 pub enum IdentityError {
     #[error("Failed to create new key package: {0}")]
-    MlsKeyPackageCreationError(#[from] KeyPackageNewError<MemoryKeyStoreError>),
+    MlsKeyPackageCreationError(#[from] KeyPackageNewError),
     #[error(transparent)]
     MlsLibraryError(#[from] LibraryError),
-    #[error("Failed to create signature: {0}")]
+    #[error(transparent)]
     MlsCryptoError(#[from] CryptoError),
     #[error("Failed to save signature key: {0}")]
-    MlsKeyStoreError(#[from] MemoryKeyStoreError),
+    MlsKeyStoreError(#[from] MemoryStorageError),
     #[error("Failed to create credential: {0}")]
     MlsCredentialError(#[from] CredentialError),
     #[error("Invalid key")]

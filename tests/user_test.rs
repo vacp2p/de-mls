@@ -1,4 +1,5 @@
 use de_mls::{
+    protos::messages::v1::app_message,
     user::{User, UserAction},
     ws_actor::{RawWsMessage, UserMessage, WsAction},
 };
@@ -75,7 +76,7 @@ async fn test_invite_users_flow() {
         .expect("Failed to get pending proposals");
     assert_eq!(pending_proposals.len(), 2);
 
-    let proposals = alice
+    let _ = alice
         .process_proposals(group_name.clone(), pending_proposals)
         .await
         .expect("Failed to process proposals");
@@ -85,36 +86,46 @@ async fn test_invite_users_flow() {
         .await
         .expect("Failed to apply proposals");
 
-    let msg = out[1].build_waku_message().expect("Failed to build waku message");
-    let _ = bob.process_waku_message(msg.clone()).await.expect("Failed to process waku message");
-    let _ = carol.process_waku_message(msg).await.expect("Failed to process waku message");
-    
+    let msg = out[1]
+        .build_waku_message()
+        .expect("Failed to build waku message");
+    let bob_res_action = bob
+        .process_waku_message(msg.clone())
+        .await
+        .expect("Failed to process waku message");
+    println!("Bob result: {:?}", bob_res_action);
+    let bob_res = match bob_res_action {
+        UserAction::SendToWaku(msg) => msg,
+        _ => panic!("User action is not SendToWaku"),
+    };
+    let bob_res_waku_message = bob_res
+        .build_waku_message()
+        .expect("Failed to build waku message");
 
-    // let users_to_invite = alice
-    //     .get_processed_income_key_packages(group_name.clone())
-    //     .await
-    //     .expect("Failed to process income key packages");
-    // assert!(users_to_invite.len() == 2, "Expected 2 users to invite");
+    let res_alice = alice
+        .process_waku_message(bob_res_waku_message.clone())
+        .await
+        .expect("Failed to process waku message");
+    println!("Alice result: {:?}", res_alice);
+    let res_alice_msg = match res_alice {
+        UserAction::SendToApp(msg) => msg,
+        _ => panic!("User action is not SendToApp"),
+    };
 
-    // let res = alice
-    //     .invite_users(users_to_invite, group_name.clone())
-    //     .await
-    //     .expect("Failed to invite users");
-    // assert!(res.len() == 2, "Expected 2 messages to send");
+    let inside_msg = match res_alice_msg.payload.unwrap() {
+        app_message::Payload::ConversationMessage(msg) => msg,
+        _ => panic!("User action is not SendToApp"),
+    };
+    println!(
+        "Alice message: {:?}",
+        String::from_utf8(inside_msg.message).unwrap()
+    );
 
-    // let welcome_message = res[1]
-    //         .build_waku_message()
-    //         .expect("Failed to build waku message");
-
-    // let _bob_action = bob
-    //     .process_waku_message(welcome_message.clone())
-    //     .await
-    //     .expect("Failed to process waku message");
-
-    // let _carol_action = carol
-    //     .process_waku_message(welcome_message.clone())
-    //     .await
-    //     .expect("Failed to process waku message");
+    let res_carol = carol
+        .process_waku_message(msg)
+        .await
+        .expect("Failed to process waku message");
+    println!("Carol result: {:?}", res_carol);
 
     let carol_group = carol
         .get_group(group_name.clone())

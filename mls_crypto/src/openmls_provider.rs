@@ -1,20 +1,19 @@
-use openmls::prelude::*;
-use openmls_rust_crypto::MemoryKeyStore;
-use openmls_rust_crypto::RustCrypto;
-use openmls_traits::OpenMlsCryptoProvider;
+use openmls::prelude::Ciphersuite;
+use openmls_rust_crypto::{MemoryStorage, RustCrypto};
+use openmls_traits::OpenMlsProvider;
 
 pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
 #[derive(Default)]
 pub struct MlsCryptoProvider {
     crypto: RustCrypto,
-    key_storage: MemoryKeyStore,
+    storage: MemoryStorage,
 }
 
-impl OpenMlsCryptoProvider for MlsCryptoProvider {
+impl OpenMlsProvider for MlsCryptoProvider {
     type CryptoProvider = RustCrypto;
     type RandProvider = RustCrypto;
-    type KeyStoreProvider = MemoryKeyStore;
+    type StorageProvider = MemoryStorage;
 
     fn crypto(&self) -> &Self::CryptoProvider {
         &self.crypto
@@ -24,7 +23,7 @@ impl OpenMlsCryptoProvider for MlsCryptoProvider {
         &self.crypto
     }
 
-    fn key_store(&self) -> &Self::KeyStoreProvider {
-        &self.key_storage
+    fn storage(&self) -> &Self::StorageProvider {
+        &self.storage
     }
 }

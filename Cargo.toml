@@ -20,10 +20,10 @@ bench = false
 
 [dependencies]
 # foundry-contracts.workspace = true
-openmls = { version = "0.5.0", features = ["test-utils"] }
-openmls_basic_credential = "0.2.0"
-openmls_rust_crypto = "0.2.0"
-openmls_traits = "0.2.0"
+openmls = { version = "0.6.0"}
+openmls_basic_credential = "0.3.0"
+openmls_rust_crypto = "0.3.0"
+openmls_traits = "0.3.0"
 
 axum = { version = "0.6.10", features = ["ws"] }
 futures = "0.3.26"

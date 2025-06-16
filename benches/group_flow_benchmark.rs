@@ -1,13 +1,11 @@
 use alloy::primitives::{Address, U160};
 use criterion::{criterion_group, criterion_main, Criterion};
 use de_mls::user::{User, UserAction};
-use de_mls::user_actor::{CreateGroupRequest};
+use de_mls::user_actor::CreateGroupRequest;
 use mls_crypto::openmls_provider::{MlsCryptoProvider, CIPHERSUITE};
-use openmls::prelude::{
-    Credential, CredentialType, CredentialWithKey, CryptoConfig, KeyPackage, ProtocolVersion,
-};
+use openmls::prelude::{BasicCredential, CredentialWithKey, KeyPackage};
 use openmls_basic_credential::SignatureKeyPair;
-use openmls_traits::OpenMlsCryptoProvider;
+use openmls_traits::OpenMlsProvider;
 use rand::{thread_rng, Rng};
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
@@ -15,29 +13,24 @@ use tokio::runtime::Runtime;
 fn generate_random_key_package() -> KeyPackage {
     let rand_bytes = thread_rng().gen::<[u8; 20]>();
     let rand_wallet_address = Address::from(U160::from_be_bytes(rand_bytes));
-    let credential = Credential::new(
-        rand_wallet_address.to_string().as_bytes().to_vec(),
-        CredentialType::Basic,
-    )
-    .unwrap();
+    let credential = BasicCredential::new(rand_wallet_address.to_string().as_bytes().to_vec());
     let signature_keys = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm()).unwrap();
     let credential_with_key = CredentialWithKey {
-        credential,
+        credential: credential.into(),
         signature_key: signature_keys.to_public_vec().into(),
     };
     let crypto = &MlsCryptoProvider::default();
-    signature_keys.store(crypto.key_store()).unwrap();
+    signature_keys.store(crypto.storage()).unwrap();
     KeyPackage::builder()
         .build(
-            CryptoConfig {
-                ciphersuite: CIPHERSUITE,
-                version: ProtocolVersion::default(),
-            },
+            CIPHERSUITE,
             crypto,
             &signature_keys,
             credential_with_key.clone(),
         )
         .unwrap()
+        .key_package()
+        .clone()
 }
 
 /// Benchmark for creating user with group - that means it creates mls group instance

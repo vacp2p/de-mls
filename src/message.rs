@@ -30,10 +30,9 @@ use crate::{
     protos::messages::v1::{app_message, UserKeyPackage, VoteStartMessage},
     verify_message, MessageError,
 };
-use log::info;
+// use log::info;
 use openmls::prelude::{KeyPackage, MlsMessageOut};
 use std::fmt::Display;
-use tls_codec::Serialize as TlsSerialize;
 
 // use crate::protos::messages::v1::{
 //     welcome_message, GroupAnnouncement, InvitationToJoin, WelcomeMessage, AppMessage, ConversationMessage, UserKeyPackage,
@@ -67,20 +66,21 @@ pub fn wrap_user_kp_into_welcome_msg(
     Ok(welcome_message)
 }
 pub fn wrap_invitation_into_welcome_msg(
-    mls_message: Vec<u8>,
+    mls_message: MlsMessageOut,
 ) -> Result<WelcomeMessage, MessageError> {
-    // let mls_bytes = mls_message.tls_serialize_detached()?;
-
-    println!("Mls message bytes: {:?}", mls_message);
-
+    println!(
+        "Start wrapping invitation into welcome message: {:?}",
+        mls_message.body()
+    );
+    let mls_bytes = mls_message.to_bytes()?;
     let invitation = InvitationToJoin {
-        mls_message_out_bytes: mls_message,
+        mls_message_out_bytes: mls_bytes,
     };
 
     let welcome_message = WelcomeMessage {
         payload: Some(welcome_message::Payload::InvitationToJoin(invitation)),
     };
-    println!("Welcome message: {:?}", welcome_message);
+    println!("End wrapping invitation into welcome message");
     Ok(welcome_message)
 }
 

@@ -1,10 +1,14 @@
 use alloy::hex;
 use ds::{waku_actor::WakuMessageToSend, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 use kameo::Actor;
-use log::info;
+// use log::info;
+use openmls::{group::*, prelude::*};
 use openmls::{
-    group::*,
-    prelude::{hash_ref::ProposalRef, *},
+    group::{GroupId, MlsGroup},
+    prelude::{
+        hash_ref::ProposalRef, Credential, CredentialWithKey, KeyPackage, ProcessedMessageContent,
+        ProtocolMessage,
+    },
 };
 use openmls_basic_credential::SignatureKeyPair;
 use prost::Message;
@@ -17,7 +21,7 @@ use crate::{
     protos::messages::v1::{app_message, AppMessage},
     *,
 };
-use mls_crypto::openmls_provider::*;
+use mls_crypto::openmls_provider::MlsCryptoProvider;
 
 #[derive(Clone, Debug)]
 pub enum GroupAction {
@@ -47,7 +51,7 @@ impl Group {
         if is_creation {
             let group_id = group_name.as_bytes();
             // Create a new MLS group instance
-            let group_config = MlsGroupConfig::builder()
+            let group_config = MlsGroupCreateConfig::builder()
                 .use_ratchet_tree_extension(true)
                 .build();
             let mls_group = MlsGroup::new_with_group_id(
@@ -79,7 +83,7 @@ impl Group {
         let mls_group = self.mls_group.as_ref().unwrap().lock().await;
         mls_group
             .members()
-            .map(|m| hex::encode(m.credential.identity()))
+            .map(|m| hex::encode(m.credential.serialized_content()))
             .collect()
     }
 
@@ -197,28 +201,23 @@ impl Group {
         mls_group.merge_pending_commit(provider)?;
 
         let msg_to_send_commit = WakuMessageToSend::new(
-            out_messages.tls_serialize_detached()?,
+            out_messages.to_bytes()?,
             APP_MSG_SUBTOPIC,
             self.group_name.clone(),
             self.app_id.clone(),
         );
 
-        println!("Welcome message before serialize: {:?}", welcome);
-        let welcome_serialized = welcome.tls_serialize_detached()?;
-        println!("Welcome message after serialize: {:?}", welcome_serialized);
+        if let Some(welcome) = welcome {
+            let msg_to_send_welcome = WakuMessageToSend::new(
+                wrap_invitation_into_welcome_msg(welcome)?.encode_to_vec(),
+                WELCOME_SUBTOPIC,
+                self.group_name.clone(),
+                self.app_id.clone(),
+            );
+            return Ok(vec![msg_to_send_commit, msg_to_send_welcome]);
+        }
 
-        let test_deserialized =
-            MlsMessageIn::tls_deserialize_exact(welcome_serialized.as_slice().clone())?;
-        println!("Test deserialized: {:?}", test_deserialized);
-
-        let msg_to_send_welcome = WakuMessageToSend::new(
-            wrap_invitation_into_welcome_msg(welcome_serialized)?.encode_to_vec(),
-            WELCOME_SUBTOPIC,
-            self.group_name.clone(),
-            self.app_id.clone(),
-        );
-
-        Ok(vec![msg_to_send_commit, msg_to_send_welcome])
+        Ok(vec![msg_to_send_commit])
     }
 
     pub async fn remove_members(
@@ -235,7 +234,7 @@ impl Group {
         let members = mls_group.members().collect::<Vec<_>>();
         for user in users {
             for m in members.iter() {
-                if hex::encode(m.credential.identity()) == user {
+                if hex::encode(m.credential.serialized_content()) == user {
                     leaf_indexs.push(m.index);
                 }
             }
@@ -248,7 +247,7 @@ impl Group {
         mls_group.merge_pending_commit(provider)?;
 
         let msg_to_send_commit = WakuMessageToSend::new(
-            remove_message.tls_serialize_detached()?,
+            remove_message.to_bytes()?,
             APP_MSG_SUBTOPIC,
             self.group_name.clone(),
             self.app_id.clone(),
@@ -280,14 +279,19 @@ impl Group {
         let processed_message = mls_group.process_message(provider, message)?;
         let processed_message_credential: Credential = processed_message.credential().clone();
 
+        println!(
+            "[process_protocol_msg] processed_message: {:?}",
+            processed_message
+        );
         match processed_message.into_content() {
             ProcessedMessageContent::ApplicationMessage(application_message) => {
                 let sender_name = {
                     let user_id = mls_group.members().find_map(|m| {
-                        if m.credential.identity() == processed_message_credential.identity()
+                        if m.credential.serialized_content()
+                            == processed_message_credential.serialized_content()
                             && (signature_key != m.signature_key.as_slice())
                         {
-                            Some(hex::encode(m.credential.identity()))
+                            Some(hex::encode(m.credential.serialized_content()))
                         } else {
                             None
                         }
@@ -298,7 +302,14 @@ impl Group {
                     user_id.unwrap()
                 };
 
-                let app_msg = AppMessage::decode(application_message.into_bytes().as_slice())
+                let app_msg_bytes = application_message.into_bytes();
+                let app_msg_bytes_slice = app_msg_bytes.as_slice();
+
+                println!(
+                    "[process_protocol_msg] application_message: {:?}",
+                    app_msg_bytes.clone()
+                );
+                let app_msg = AppMessage::decode(app_msg_bytes_slice)
                     .map_err(|e| GroupError::AppMessageDecodeError(e.to_string()))?;
 
                 match app_msg.payload {
@@ -322,7 +333,8 @@ impl Group {
                 }
             }
             ProcessedMessageContent::ProposalMessage(proposal_ptr) => {
-                mls_group.store_pending_proposal(proposal_ptr.as_ref().clone());
+                let _ = mls_group
+                    .store_pending_proposal(provider.storage(), proposal_ptr.as_ref().clone());
             }
             ProcessedMessageContent::ExternalJoinProposalMessage(_external_proposal_ptr) => (),
             ProcessedMessageContent::StagedCommitMessage(commit_ptr) => {
@@ -365,16 +377,18 @@ impl Group {
         &mut self,
         provider: &MlsCryptoProvider,
         signer: &SignatureKeyPair,
-        msg: &str,
+        msg: &AppMessage,
     ) -> Result<WakuMessageToSend, GroupError> {
+        println!("Building message: {:?}", msg);
         let message_out = self
             .mls_group
             .as_mut()
             .unwrap()
             .lock()
             .await
-            .create_message(provider, signer, msg.as_bytes())?
-            .tls_serialize_detached()?;
+            .create_message(provider, signer, &msg.encode_to_vec())?
+            .to_bytes()?;
+        println!("Message out: {:?}", message_out);
         Ok(WakuMessageToSend::new(
             message_out,
             APP_MSG_SUBTOPIC,
@@ -395,6 +409,7 @@ mod tests {
     use mls_crypto::identity::random_identity;
 
     use crate::user::User;
+    use log::info;
 
     use super::*;
 

@@ -2,8 +2,15 @@ use alloy::signers::local::LocalSignerError;
 use ecies::{decrypt, encrypt};
 use kameo::error::SendError;
 use libsecp256k1::{sign, verify, Message, PublicKey, SecretKey, Signature as libSignature};
-use openmls::prelude::*;
-use openmls_rust_crypto::MemoryKeyStoreError;
+use openmls::{
+    framing::errors::MlsMessageError,
+    prelude::{
+        AddMembersError, CommitToPendingProposalsError, CreateMessageError, MergeCommitError,
+        MergePendingCommitError, NewGroupError, ProcessMessageError, ProposeAddMemberError,
+        RemoveMembersError, WelcomeError,
+    },
+};
+use openmls_rust_crypto::MemoryStorageError;
 use rand::thread_rng;
 use secp256k1::hashes::{sha256, Hash};
 use std::{
@@ -97,25 +104,27 @@ pub enum GroupError {
     MlsGroupNotInitializedError,
 
     #[error("Error while creating MLS group: {0}")]
-    MlsGroupCreationError(#[from] NewGroupError<MemoryKeyStoreError>),
+    MlsGroupCreationError(#[from] NewGroupError<MemoryStorageError>),
     #[error("Error while adding member to MLS group: {0}")]
-    MlsAddMemberError(#[from] AddMembersError<MemoryKeyStoreError>),
+    MlsAddMemberError(#[from] AddMembersError<MemoryStorageError>),
     #[error("Error while merging pending commit in MLS group: {0}")]
-    MlsMergePendingCommitError(#[from] MergePendingCommitError<MemoryKeyStoreError>),
+    MlsMergePendingCommitError(#[from] MergePendingCommitError<MemoryStorageError>),
     #[error("Error while merging commit in MLS group: {0}")]
-    MlsMergeCommitError(#[from] MergeCommitError<MemoryKeyStoreError>),
+    MlsMergeCommitError(#[from] MergeCommitError<MemoryStorageError>),
     #[error("Error processing unverified message: {0}")]
     MlsProcessMessageError(#[from] ProcessMessageError),
     #[error("Error while creating message: {0}")]
     MlsCreateMessageError(#[from] CreateMessageError),
     #[error("Failed to remove members: {0}")]
-    MlsRemoveMembersError(#[from] RemoveMembersError<MemoryKeyStoreError>),
+    MlsRemoveMembersError(#[from] RemoveMembersError<MemoryStorageError>),
     #[error("Group still active")]
     GroupStillActiveError,
     #[error("Error while creating proposal to add members: {0}")]
-    MlsCreateProposalError(#[from] ProposeAddMemberError),
+    MlsCreateProposalError(#[from] ProposeAddMemberError<MemoryStorageError>),
     #[error("Error while committing to pending proposals: {0}")]
-    MlsCommitToPendingProposalsError(#[from] CommitToPendingProposalsError<MemoryKeyStoreError>),
+    MlsCommitToPendingProposalsError(#[from] CommitToPendingProposalsError<MemoryStorageError>),
+    #[error("Failed to serialize mls message: {0}")]
+    MlsMessageError(#[from] MlsMessageError),
 
     #[error("UTF-8 parsing error: {0}")]
     Utf8ParsingError(#[from] FromUtf8Error),
@@ -138,6 +147,8 @@ pub enum MessageError {
     JsonError(#[from] serde_json::Error),
     #[error("Serialization error: {0}")]
     SerializationError(#[from] tls_codec::Error),
+    #[error("Failed to serialize mls message: {0}")]
+    MlsMessageError(#[from] MlsMessageError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -167,7 +178,7 @@ pub enum UserError {
     UnknownContentTopicType(String),
 
     #[error("Failed to create staged join: {0}")]
-    MlsWelcomeError(#[from] WelcomeError<MemoryKeyStoreError>),
+    MlsWelcomeError(#[from] WelcomeError<MemoryStorageError>),
 
     #[error("UTF-8 parsing error: {0}")]
     Utf8ParsingError(#[from] FromUtf8Error),

@@ -1,5 +1,5 @@
 use kameo::message::{Context, Message};
-use openmls::prelude::{hash_ref::ProposalRef, *};
+use openmls::prelude::hash_ref::ProposalRef;
 use waku_bindings::WakuMessage;
 
 use ds::waku_actor::WakuMessageToSend;

@@ -51,3 +51,8 @@ In chat message block run ban command, note that user wallet address should be i
 ```bash
 /ban f39555ce6ab55579cfffb922665825e726880af6
 ```
+
+
+RUST_BACKTRACE=full RUST_LOG=info NODE_PORT=60002 PORT=3002 PEER_ADDRESSES=/ip4/139.59.24.82/tcp/60000/p2p/16Uiu2HAmVRsMfqoHiJtkPjrN6hhimPA7rLR8E8tn4iU7GdzN8fGg cargo run --  --nocapture
+
+RUST_BACKTRACE=full RUST_LOG=info NODE_PORT=60003 PORT=3003 PEER_ADDRESSES=/ip4/139.59.24.82/tcp/60000/p2p/16Uiu2HAmVRsMfqoHiJtkPjrN6hhimPA7rLR8E8tn4iU7GdzN8fGg cargo run --  --nocapture

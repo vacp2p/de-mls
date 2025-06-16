@@ -68,7 +68,7 @@ impl User {
                 group_name.clone(),
                 true,
                 Some(&self.provider),
-                Some(&self.identity.signer()),
+                Some(self.identity.signer()),
                 Some(&self.identity.credential_with_key()),
             )?
         } else {
@@ -143,7 +143,7 @@ impl User {
                             .create_proposal_to_add_members(
                                 key_package,
                                 &self.provider,
-                                &self.identity.signer(),
+                                self.identity.signer(),
                             )
                             .await?;
                     }
@@ -153,39 +153,27 @@ impl User {
                     if group.is_admin() {
                         Ok(UserAction::DoNothing)
                     } else {
-                        info!(
+                        println!(
                             "User {:?} received invitation to join group {:?}",
                             self.identity.identity_string(),
                             group_name
                         );
-                        info!("Invitation to join: {:?}", invitation_to_join);
-                        let welc = MlsMessageIn::tls_deserialize_bytes(
-                            invitation_to_join.mls_message_out_bytes.clone(),
-                        ).map_err(|e| UserError::MlsMessageInDeserializeError(e.to_string()))?;
-                        info!("Deserialized invitation to join: {:?}", welc);
-                        
-                        let welcome = welc
-                            .into_welcome()
-                            .ok_or(UserError::EmptyWelcomeMessageError)?;
 
-                        info!("Welcome message: {:?}", welcome);
-                        // find the key package in the welcome message
-                        if welcome.secrets().iter().any(|egs| {
-                            let hash_ref = egs.new_member().as_slice().to_vec();
-                            self.provider
-                                .key_store()
-                                .read(&hash_ref)
-                                .map(|kp: KeyPackage| (kp, hash_ref))
-                                .is_some()
-                        }) {
-                            self.join_group(welcome)?;
-                            let msg = self
-                                .build_group_message("User joined to the group", group_name)
-                                .await?;
-                            Ok(UserAction::SendToWaku(msg))
-                        } else {
-                            Ok(UserAction::DoNothing)
-                        }
+                        let (mls_in, _) = MlsMessageIn::tls_deserialize_bytes(
+                            &invitation_to_join.mls_message_out_bytes,
+                        )
+                        .map_err(|e| UserError::MlsMessageInDeserializeError(e.to_string()))?;
+
+                        let welcome = match mls_in.extract() {
+                            MlsMessageBodyIn::Welcome(welcome) => welcome,
+                            _ => return Err(UserError::EmptyWelcomeMessageError),
+                        };
+
+                        self.join_group(welcome)?;
+                        let msg = self
+                            .build_group_message("User joined to the group", group_name)
+                            .await?;
+                        Ok(UserAction::SendToWaku(msg))
                     }
                 }
             }
@@ -199,15 +187,18 @@ impl User {
         msg: WakuMessage,
         group_name: String,
     ) -> Result<UserAction, UserError> {
-        info!(
-            "User {:?} received app message for group {:?}",
+        println!(
+            "[process_app_subtopic]: User {:?} received app message for group {:?}",
             self.identity.identity_string(),
             group_name
         );
-        let mls_message_in = MlsMessageIn::tls_deserialize_exact(msg.payload())?;
+
+        println!("[process_app_subtopic] message: {:?}", msg.payload());
+        let (mls_message_in, _) = MlsMessageIn::tls_deserialize_bytes(msg.payload())
+            .map_err(|e| UserError::MlsMessageInDeserializeError(e.to_string()))?;
         let mls_message = mls_message_in
-            .into_protocol_message()
-            .ok_or(UserError::UnsupportedMlsMessageType)?;
+            .try_into_protocol_message()
+            .map_err(|e| UserError::MlsMessageInDeserializeError(e.to_string()))?;
 
         let group_name = from_utf8(mls_message.group_id().as_slice())?.to_string();
         let group = match self.groups.get_mut(&group_name) {
@@ -217,6 +208,7 @@ impl User {
         if !group.is_mls_group_initialized() {
             return Ok(UserAction::DoNothing);
         }
+        println!("[process_app_subtopic] mls_message: {:?}", mls_message);
         let res = group
             .process_protocol_msg(mls_message, &self.provider, self.identity.signature_key())
             .await?;
@@ -238,6 +230,7 @@ impl User {
         &mut self,
         msg: WakuMessage,
     ) -> Result<UserAction, UserError> {
+        println!("Processing waku message: {:?}", msg);
         let group_name = msg.content_topic.application_name.to_string();
         let group = match self.groups.get(&group_name) {
             Some(g) => g,
@@ -249,6 +242,7 @@ impl User {
             return Ok(UserAction::DoNothing);
         }
         let ct_name = msg.content_topic.content_topic_name.to_string();
+        println!("Processing waku message: {:?}", ct_name);
         match ct_name.as_str() {
             WELCOME_SUBTOPIC => self.process_welcome_subtopic(msg, group_name).await,
             APP_MSG_SUBTOPIC => self.process_app_subtopic(msg, group_name).await,
@@ -258,11 +252,13 @@ impl User {
 
     /// This function is used to join a group after receiving a welcome message
     fn join_group(&mut self, welcome: Welcome) -> Result<(), UserError> {
-        let group_config = MlsGroupConfig::builder()
+        let group_config = MlsGroupJoinConfig::builder()
             .use_ratchet_tree_extension(true)
             .build();
 
-        let mls_group = MlsGroup::new_from_welcome(&self.provider, &group_config, welcome, None)?;
+        let mls_group =
+            StagedWelcome::new_from_welcome(&self.provider, &group_config, welcome, None)?
+                .into_group(&self.provider)?;
 
         let group_id = mls_group.group_id().to_vec();
         let group_name = String::from_utf8(group_id)?;
@@ -313,6 +309,7 @@ impl User {
         msg: &str,
         group_name: String,
     ) -> Result<WakuMessageToSend, UserError> {
+        println!("Building group message: {:?}", msg);
         let group = match self.groups.get_mut(&group_name) {
             Some(g) => g,
             None => return Err(UserError::GroupNotFoundError(group_name)),
@@ -321,8 +318,13 @@ impl User {
         if !group.is_mls_group_initialized() {
             return Err(UserError::GroupNotFoundError(group_name));
         }
+        let app_msg = wrap_conversation_message_into_application_msg(
+            msg.as_bytes().to_vec(),
+            self.identity.identity_string(),
+            group_name.clone(),
+        );
         let msg_to_send = group
-            .build_message(&self.provider, &self.identity.signer(), msg)
+            .build_message(&self.provider, self.identity.signer(), &app_msg)
             .await?;
         Ok(msg_to_send)
     }
@@ -337,7 +339,7 @@ impl User {
         }
         let group = self.groups.get_mut(&group_name).unwrap();
         let msg = group
-            .remove_members(users, &self.provider, &self.identity.signer())
+            .remove_members(users, &self.provider, self.identity.signer())
             .await?;
 
         Ok(msg)
@@ -357,7 +359,7 @@ impl User {
             None => return Err(UserError::GroupNotFoundError(group_name)),
         };
         group
-            .create_proposal_to_add_members(users_kp, &self.provider, &self.identity.signer())
+            .create_proposal_to_add_members(users_kp, &self.provider, self.identity.signer())
             .await?;
 
         Ok(())
@@ -410,7 +412,7 @@ impl User {
         };
 
         let msg = group
-            .add_members(&self.provider, &self.identity.signer())
+            .add_members(&self.provider, self.identity.signer())
             .await?;
 
         Ok(msg)
