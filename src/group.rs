@@ -15,7 +15,7 @@ use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 
 use crate::{
-    admin::GroupAdmin,
+    steward::Steward,
     message::{
         wrap_conversation_message_into_application_msg, wrap_group_announcement_in_welcome_msg,
         wrap_invitation_into_welcome_msg,
@@ -36,7 +36,7 @@ pub enum GroupAction {
 pub struct Group {
     group_name: String,
     mls_group: Option<Arc<Mutex<MlsGroup>>>,
-    admin: Option<GroupAdmin>,
+    steward: Option<Steward>,
     is_kp_shared: bool,
     app_id: Vec<u8>,
 }
@@ -66,7 +66,7 @@ impl Group {
             Ok(Group {
                 group_name,
                 mls_group: Some(Arc::new(Mutex::new(mls_group))),
-                admin: Some(GroupAdmin::new_admin()),
+                steward: Some(Steward::new()),
                 is_kp_shared: true,
                 app_id: uuid.clone(),
             })
@@ -74,7 +74,7 @@ impl Group {
             Ok(Group {
                 group_name,
                 mls_group: None,
-                admin: None,
+                steward: None,
                 is_kp_shared: false,
                 app_id: uuid.clone(),
             })
@@ -107,27 +107,27 @@ impl Group {
         self.is_kp_shared = is_kp_shared;
     }
 
-    pub fn is_admin(&self) -> bool {
-        self.admin.is_some()
+    pub fn is_steward(&self) -> bool {
+        self.steward.is_some()
     }
 
     pub fn app_id(&self) -> Vec<u8> {
         self.app_id.clone()
     }
 
-    pub fn decrypt_admin_msg(&self, message: Vec<u8>) -> Result<KeyPackage, GroupError> {
-        if !self.is_admin() {
-            return Err(GroupError::AdminNotSetError);
+    pub fn decrypt_steward_msg(&self, message: Vec<u8>) -> Result<KeyPackage, GroupError> {
+        if !self.is_steward() {
+            return Err(GroupError::StewardNotSetError);
         }
-        let msg: KeyPackage = self.admin.as_ref().unwrap().decrypt_message(message)?;
+        let msg: KeyPackage = self.steward.as_ref().unwrap().decrypt_message(message)?;
         Ok(msg)
     }
 
     pub fn push_income_key_package(&mut self, key_package: KeyPackage) -> Result<(), GroupError> {
-        if !self.is_admin() {
-            return Err(GroupError::AdminNotSetError);
+        if !self.is_steward() {
+            return Err(GroupError::StewardNotSetError);
         }
-        self.admin
+        self.steward
             .as_mut()
             .unwrap()
             .add_incoming_key_package(key_package);
@@ -135,10 +135,10 @@ impl Group {
     }
 
     pub fn processed_key_packages(&mut self) -> Result<Vec<KeyPackage>, GroupError> {
-        if !self.is_admin() {
-            return Err(GroupError::AdminNotSetError);
+        if !self.is_steward() {
+            return Err(GroupError::StewardNotSetError);
         }
-        Ok(self.admin.as_mut().unwrap().drain_processed_key_packages())
+        Ok(self.steward.as_mut().unwrap().drain_processed_key_packages())
     }
 
     pub async fn create_proposal_to_add_members(
@@ -150,14 +150,14 @@ impl Group {
         if !self.is_mls_group_initialized() {
             return Err(GroupError::MlsGroupNotInitializedError);
         }
-        if !self.is_admin() {
-            return Err(GroupError::AdminNotSetError);
+        if !self.is_steward() {
+            return Err(GroupError::StewardNotSetError);
         }
         let mut mls_group = self.mls_group.as_mut().unwrap().lock().await;
 
         let (_, href) = mls_group.propose_add_member(provider, signer, &key_package)?;
 
-        self.admin
+        self.steward
             .as_mut()
             .unwrap()
             .add_pending_proposal(href.clone());
@@ -175,17 +175,17 @@ impl Group {
     }
 
     pub fn get_pending_proposals(&self) -> Result<Vec<ProposalRef>, GroupError> {
-        if !self.is_admin() {
-            return Err(GroupError::AdminNotSetError);
+        if !self.is_steward() {
+            return Err(GroupError::StewardNotSetError);
         }
-        Ok(self.admin.as_ref().unwrap().get_pending_proposals())
+        Ok(self.steward.as_ref().unwrap().get_pending_proposals())
     }
 
     pub fn drain_pending_proposals(&mut self) -> Result<Vec<ProposalRef>, GroupError> {
-        if !self.is_admin() {
-            return Err(GroupError::AdminNotSetError);
+        if !self.is_steward() {
+            return Err(GroupError::StewardNotSetError);
         }
-        Ok(self.admin.as_mut().unwrap().drain_pending_proposals())
+        Ok(self.steward.as_mut().unwrap().drain_pending_proposals())
     }
 
     pub async fn add_members(
@@ -358,15 +358,15 @@ impl Group {
         Ok(GroupAction::DoNothing)
     }
 
-    pub fn generate_admin_message(&mut self) -> Result<WakuMessageToSend, GroupError> {
-        let admin = match self.admin.as_mut() {
+    pub fn generate_steward_message(&mut self) -> Result<WakuMessageToSend, GroupError> {
+        let steward = match self.steward.as_mut() {
             Some(a) => a,
-            None => return Err(GroupError::AdminNotSetError),
+            None => return Err(GroupError::StewardNotSetError),
         };
-        admin.refresh_key_pair();
+        steward.refresh_key_pair();
 
         let msg_to_send = WakuMessageToSend::new(
-            wrap_group_announcement_in_welcome_msg(admin.create_admin_announcement())
+            wrap_group_announcement_in_welcome_msg(steward.create_announcement())
                 .encode_to_vec(),
             WELCOME_SUBTOPIC,
             self.group_name.clone(),
@@ -420,15 +420,15 @@ mod tests {
         let group_name = "new_group".to_string();
 
         let crypto = MlsProvider::default();
-        let id_admin = random_identity().expect("Failed to create identity");
+        let id_steward = random_identity().expect("Failed to create identity");
         let mut id_user = random_identity().expect("Failed to create identity");
 
-        let mut group_admin = Group::new(
+        let mut group_steward = Group::new(
             group_name.clone(),
             true,
             Some(&crypto),
-            Some(&id_admin.signer()),
-            Some(&id_admin.credential_with_key()),
+            Some(&id_steward.signer()),
+            Some(&id_steward.credential_with_key()),
         )
         .expect("Failed to create group");
 
@@ -439,18 +439,18 @@ mod tests {
             .generate_key_package(&crypto)
             .expect("Failed to generate key package");
 
-        group_admin
-            .create_proposal_to_add_members(kp_user, &crypto, &id_admin.signer())
+        group_steward
+            .create_proposal_to_add_members(kp_user, &crypto, &id_steward.signer())
             .await
             .expect("Failed to create proposal");
 
-        let pending_proposals = group_admin
+        let pending_proposals = group_steward
             .get_pending_proposals()
             .expect("Failed to get pending proposals");
         assert_eq!(pending_proposals.len(), 1);
 
-        let out = group_admin
-            .add_members(&crypto, &id_admin.signer())
+        let out = group_steward
+            .add_members(&crypto, &id_steward.signer())
             .await
             .expect("Failed to add members");
 

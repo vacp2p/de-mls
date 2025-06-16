@@ -115,8 +115,8 @@ impl User {
             match payload {
                 welcome_message::Payload::GroupAnnouncement(group_announcement) => {
                     let app_id = group.app_id();
-                    if group.is_admin() || group.is_kp_shared() {
-                        info!("Its admin or key package already shared");
+                    if group.is_steward() || group.is_kp_shared() {
+                        info!("Its steward or key package already shared");
                         Ok(UserAction::DoNothing)
                     } else {
                         info!(
@@ -141,14 +141,14 @@ impl User {
                     }
                 }
                 welcome_message::Payload::UserKeyPackage(user_key_package) => {
-                    if group.is_admin() {
+                    if group.is_steward() {
                         info!(
-                            "Admin {:?} received key package for the group {:?}",
+                            "Steward {:?} received key package for the group {:?}",
                             self.identity.identity_string(),
                             group_name
                         );
                         let key_package =
-                            group.decrypt_admin_msg(user_key_package.encrypt_kp.clone())?;
+                            group.decrypt_steward_msg(user_key_package.encrypt_kp.clone())?;
                         group
                             .create_proposal_to_add_members(
                                 key_package,
@@ -160,7 +160,7 @@ impl User {
                     Ok(UserAction::DoNothing)
                 }
                 welcome_message::Payload::InvitationToJoin(invitation_to_join) => {
-                    if group.is_admin() {
+                    if group.is_steward() {
                         Ok(UserAction::DoNothing)
                     } else {
                         println!(
@@ -299,7 +299,7 @@ impl User {
         Ok(())
     }
 
-    pub async fn prepare_admin_msg(
+    pub async fn prepare_steward_msg(
         &mut self,
         group_name: String,
     ) -> Result<WakuMessageToSend, UserError> {
@@ -310,7 +310,7 @@ impl User {
             .groups
             .get_mut(&group_name)
             .unwrap()
-            .generate_admin_message()?;
+            .generate_steward_message()?;
         Ok(msg_to_send)
     }
 

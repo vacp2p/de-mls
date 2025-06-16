@@ -29,9 +29,9 @@ async fn test_invite_users_flow() {
         .expect("Failed to create group");
 
     let group_announcement = alice
-        .prepare_admin_msg(group_name.clone())
+        .prepare_steward_msg(group_name.clone())
         .await
-        .expect("Failed to prepare admin message");
+        .expect("Failed to prepare steward message");
     let group_announcement_message = group_announcement
         .build_waku_message()
         .expect("Failed to build waku message");
@@ -191,9 +191,9 @@ async fn test_remove_user_flow() {
         .expect("Failed to create group");
 
     let group_announcement = alice
-        .prepare_admin_msg(group_name.clone())
+        .prepare_steward_msg(group_name.clone())
         .await
-        .expect("Failed to prepare admin message");
+        .expect("Failed to prepare steward message");
     let group_announcement_message = group_announcement
         .build_waku_message()
         .expect("Failed to build waku message");

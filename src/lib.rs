@@ -26,9 +26,9 @@ use ds::{waku_actor::WakuMessageToSend, DeliveryServiceError};
 use mls_crypto::IdentityError;
 
 pub mod action_handlers;
-pub mod admin;
 pub mod group;
 pub mod message;
+pub mod steward;
 pub mod user;
 pub mod user_actor;
 pub mod user_app_instance;
@@ -96,8 +96,8 @@ pub fn decrypt_message(message: &[u8], secret_key: SecretKey) -> Result<Vec<u8>,
 
 #[derive(Debug, thiserror::Error)]
 pub enum GroupError {
-    #[error("Admin not set")]
-    AdminNotSetError,
+    #[error("Steward not set")]
+    StewardNotSetError,
     #[error(transparent)]
     MessageError(#[from] MessageError),
     #[error("MLS group not initialized")]
@@ -199,8 +199,8 @@ pub enum UserError {
     KameoSendMessageError(String),
     #[error("Failed to get income key packages: {0}")]
     GetIncomeKeyPackagesError(String),
-    #[error("Failed to process admin message: {0}")]
-    ProcessAdminMessageError(String),
+    #[error("Failed to process steward message: {0}")]
+    ProcessStewardMessageError(String),
     #[error("Failed to process proposals: {0}")]
     ProcessProposalsError(String),
     #[error("Unsupported mls message type")]
@@ -227,9 +227,7 @@ pub fn match_content_topic(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        decrypt_message, encrypt_message, generate_keypair, sign_message, verify_message,
-    };
+    use super::{decrypt_message, encrypt_message, generate_keypair, sign_message, verify_message};
 
     #[test]
     fn test_verify_message() {

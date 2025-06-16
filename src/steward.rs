@@ -4,23 +4,23 @@ use openmls::prelude::{hash_ref::ProposalRef, *};
 use crate::{protos::messages::v1::GroupAnnouncement, *};
 
 #[derive(Clone, Debug)]
-pub struct GroupAdmin {
+pub struct Steward {
     eth_pub: PublicKey,
     eth_secr: SecretKey,
     incoming_key_packages: Arc<Mutex<Vec<KeyPackage>>>,
     pending_proposals: Arc<Mutex<Vec<ProposalRef>>>,
 }
 
-impl Default for GroupAdmin {
+impl Default for Steward {
     fn default() -> Self {
-        Self::new_admin()
+        Self::new()
     }
 }
 
-impl GroupAdmin {
-    pub fn new_admin() -> Self {
+impl Steward {
+    pub fn new() -> Self {
         let (public_key, private_key) = generate_keypair();
-        GroupAdmin {
+        Steward {
             eth_pub: public_key,
             eth_secr: private_key,
             incoming_key_packages: Arc::new(Mutex::new(Vec::new())),
@@ -34,7 +34,7 @@ impl GroupAdmin {
         self.eth_secr = private_key;
     }
 
-    pub fn create_admin_announcement(&self) -> GroupAnnouncement {
+    pub fn create_announcement(&self) -> GroupAnnouncement {
         let signature = sign_message(&self.eth_pub.serialize_compressed(), &self.eth_secr);
         GroupAnnouncement::new(self.eth_pub.serialize_compressed().to_vec(), signature)
     }

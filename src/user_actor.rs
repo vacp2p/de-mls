@@ -40,19 +40,19 @@ impl Message<CreateGroupRequest> for User {
     }
 }
 
-pub struct AdminMessageRequest {
+pub struct StewardMessageRequest {
     pub group_name: String,
 }
 
-impl Message<AdminMessageRequest> for User {
+impl Message<StewardMessageRequest> for User {
     type Reply = Result<WakuMessageToSend, UserError>;
 
     async fn handle(
         &mut self,
-        msg: AdminMessageRequest,
+        msg: StewardMessageRequest,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.prepare_admin_msg(msg.group_name.clone()).await
+        self.prepare_steward_msg(msg.group_name.clone()).await
     }
 }
 
