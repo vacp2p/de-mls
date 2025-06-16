@@ -5,10 +5,10 @@
 //! Based on the [`ContentTopic`](waku_bindings::WakuContentTopic) we distinguish between:
 //!  - [`WelcomeMessage`](crate::message::WelcomeMessage) which includes next message types:
 //!    - [`GroupAnnouncement`](crate::message::WelcomeMessageType::GroupAnnouncement)
-//!         - GroupAnnouncement {
+//!         - `GroupAnnouncement {
 //!             eth_pub_key: Vec<u8>,
 //!             signature: Vec<u8>,
-//!           }
+//!           }`
 //!    - [`UserKeyPackage`](crate::message::WelcomeMessageType::UserKeyPackage)
 //!         - Encrypted KeyPackage: Vec<u8>
 //!    - [`InvitationToJoin`](crate::message::WelcomeMessageType::InvitationToJoin)

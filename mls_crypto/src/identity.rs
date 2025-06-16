@@ -1,12 +1,10 @@
-use alloy::primitives::Address;
-use alloy::signers::local::PrivateKeySigner;
-use openmls::{credentials::CredentialWithKey, key_packages::*, prelude::*};
+use alloy::{primitives::Address, signers::local::PrivateKeySigner};
+use openmls::{credentials::CredentialWithKey, key_packages::KeyPackage, prelude::BasicCredential};
 use openmls_basic_credential::SignatureKeyPair;
-use openmls_traits::types::Ciphersuite;
-use openmls_traits::OpenMlsProvider;
+use openmls_traits::{types::Ciphersuite, OpenMlsProvider};
 use std::{collections::HashMap, fmt::Display};
 
-use crate::openmls_provider::{MlsCryptoProvider, CIPHERSUITE};
+use crate::openmls_provider::{MlsProvider, CIPHERSUITE};
 use crate::IdentityError;
 
 pub struct Identity {
@@ -18,7 +16,7 @@ pub struct Identity {
 impl Identity {
     pub fn new(
         ciphersuite: Ciphersuite,
-        crypto: &MlsCryptoProvider,
+        provider: &MlsProvider,
         user_wallet_address: &[u8],
     ) -> Result<Identity, IdentityError> {
         let credential = BasicCredential::new(user_wallet_address.to_vec());
@@ -27,17 +25,17 @@ impl Identity {
             credential: credential.into(),
             signature_key: signer.to_public_vec().into(),
         };
-        signer.store(crypto.storage())?;
+        signer.store(provider.storage())?;
 
         let mut kps = HashMap::new();
         let key_package_bundle = KeyPackage::builder().build(
             CIPHERSUITE,
-            crypto,
+            provider,
             &signer,
             credential_with_key.clone(),
         )?;
         let key_package = key_package_bundle.key_package();
-        let kp = key_package.hash_ref(crypto.crypto())?;
+        let kp = key_package.hash_ref(provider.crypto())?;
         kps.insert(kp.as_slice().to_vec(), key_package.clone());
 
         Ok(Identity {
@@ -50,7 +48,7 @@ impl Identity {
     /// Create an additional key package using the credential_with_key/signer bound to this identity
     pub fn generate_key_package(
         &mut self,
-        crypto: &MlsCryptoProvider,
+        crypto: &MlsProvider,
     ) -> Result<KeyPackage, IdentityError> {
         let key_package_bundle = KeyPackage::builder().build(
             CIPHERSUITE,
@@ -108,7 +106,7 @@ pub fn random_identity() -> Result<Identity, IdentityError> {
     let signer = PrivateKeySigner::random();
     let user_address = signer.address();
 
-    let crypto = MlsCryptoProvider::default();
+    let crypto = MlsProvider::default();
     let id = Identity::new(CIPHERSUITE, &crypto, user_address.as_slice())?;
     Ok(id)
 }

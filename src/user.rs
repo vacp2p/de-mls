@@ -2,8 +2,12 @@ use alloy::{network::EthereumWallet, signers::local::PrivateKeySigner};
 use kameo::Actor;
 use log::info;
 use openmls::{
-    group::*,
-    prelude::{hash_ref::ProposalRef, *},
+    group::MlsGroupJoinConfig,
+    key_packages::KeyPackage,
+    prelude::{
+        hash_ref::ProposalRef, DeserializeBytes, MlsMessageBodyIn, MlsMessageIn, StagedWelcome,
+        Welcome,
+    },
 };
 use prost::Message;
 use std::{
@@ -13,12 +17,18 @@ use std::{
 use waku_bindings::WakuMessage;
 
 use ds::{waku_actor::WakuMessageToSend, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
-use mls_crypto::{identity::Identity, openmls_provider::*};
+use mls_crypto::{
+    identity::Identity,
+    openmls_provider::{MlsProvider, CIPHERSUITE},
+};
 
 use crate::UserError;
 use crate::{
     group::{Group, GroupAction},
-    message::*,
+    message::{
+        wrap_conversation_message_into_application_msg, wrap_user_kp_into_welcome_msg,
+        wrap_vote_start_message_into_application_msg,
+    },
     protos::messages::v1::{welcome_message, AppMessage, WelcomeMessage},
 };
 
@@ -34,7 +44,7 @@ pub enum UserAction {
 pub struct User {
     identity: Identity,
     groups: HashMap<String, Group>,
-    provider: MlsCryptoProvider,
+    provider: MlsProvider,
     eth_signer: PrivateKeySigner,
 }
 
@@ -43,7 +53,7 @@ impl User {
         let signer = PrivateKeySigner::from_str(user_eth_priv_key)?;
         let user_address = signer.address();
 
-        let crypto = MlsCryptoProvider::default();
+        let crypto = MlsProvider::default();
         let id = Identity::new(CIPHERSUITE, &crypto, user_address.as_slice())?;
 
         let user = User {

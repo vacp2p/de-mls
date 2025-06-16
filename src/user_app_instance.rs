@@ -5,7 +5,10 @@ use log::{error, info};
 use std::{str::FromStr, sync::Arc, time::Duration};
 
 use crate::user::User;
-use crate::user_actor::*;
+use crate::user_actor::{
+    AdminMessageRequest, ApplyProposalsRequest, CreateGroupRequest, GetProposalsHrefRequest,
+    ProcessProposalsRequest,
+};
 use crate::{AppState, Connection, UserError};
 
 pub const ADMIN_EPOCH: u64 = 50;

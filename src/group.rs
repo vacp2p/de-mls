@@ -2,12 +2,11 @@ use alloy::hex;
 use ds::{waku_actor::WakuMessageToSend, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 use kameo::Actor;
 // use log::info;
-use openmls::{group::*, prelude::*};
 use openmls::{
-    group::{GroupId, MlsGroup},
+    group::{GroupId, MlsGroup, MlsGroupCreateConfig},
     prelude::{
-        hash_ref::ProposalRef, Credential, CredentialWithKey, KeyPackage, ProcessedMessageContent,
-        ProtocolMessage,
+        hash_ref::ProposalRef, Credential, CredentialWithKey, KeyPackage, OpenMlsProvider,
+        ProcessedMessageContent, ProtocolMessage,
     },
 };
 use openmls_basic_credential::SignatureKeyPair;
@@ -16,12 +15,15 @@ use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 
 use crate::{
-    admin::*,
-    message::*,
+    admin::GroupAdmin,
+    message::{
+        wrap_conversation_message_into_application_msg, wrap_group_announcement_in_welcome_msg,
+        wrap_invitation_into_welcome_msg,
+    },
     protos::messages::v1::{app_message, AppMessage},
     *,
 };
-use mls_crypto::openmls_provider::MlsCryptoProvider;
+use mls_crypto::openmls_provider::MlsProvider;
 
 #[derive(Clone, Debug)]
 pub enum GroupAction {
@@ -43,7 +45,7 @@ impl Group {
     pub fn new(
         group_name: String,
         is_creation: bool,
-        provider: Option<&MlsCryptoProvider>,
+        provider: Option<&MlsProvider>,
         signer: Option<&SignatureKeyPair>,
         credential_with_key: Option<&CredentialWithKey>,
     ) -> Result<Self, GroupError> {
@@ -142,7 +144,7 @@ impl Group {
     pub async fn create_proposal_to_add_members(
         &mut self,
         key_package: KeyPackage,
-        provider: &MlsCryptoProvider,
+        provider: &MlsProvider,
         signer: &SignatureKeyPair,
     ) -> Result<(), GroupError> {
         if !self.is_mls_group_initialized() {
@@ -188,7 +190,7 @@ impl Group {
 
     pub async fn add_members(
         &mut self,
-        provider: &MlsCryptoProvider,
+        provider: &MlsProvider,
         signer: &SignatureKeyPair,
     ) -> Result<Vec<WakuMessageToSend>, GroupError> {
         if !self.is_mls_group_initialized() {
@@ -223,7 +225,7 @@ impl Group {
     pub async fn remove_members(
         &mut self,
         users: Vec<String>,
-        provider: &MlsCryptoProvider,
+        provider: &MlsProvider,
         signer: &SignatureKeyPair,
     ) -> Result<WakuMessageToSend, GroupError> {
         if !self.is_mls_group_initialized() {
@@ -259,7 +261,7 @@ impl Group {
     pub async fn process_protocol_msg(
         &mut self,
         message: ProtocolMessage,
-        provider: &MlsCryptoProvider,
+        provider: &MlsProvider,
         signature_key: Vec<u8>,
     ) -> Result<GroupAction, GroupError> {
         let group_id = message.group_id().as_slice().to_vec();
@@ -375,7 +377,7 @@ impl Group {
 
     pub async fn build_message(
         &mut self,
-        provider: &MlsCryptoProvider,
+        provider: &MlsProvider,
         signer: &SignatureKeyPair,
         msg: &AppMessage,
     ) -> Result<WakuMessageToSend, GroupError> {
@@ -408,16 +410,16 @@ impl Display for Group {
 mod tests {
     use mls_crypto::identity::random_identity;
 
-    use crate::user::User;
     use log::info;
 
-    use super::*;
+    use super::Group;
+    use mls_crypto::openmls_provider::MlsProvider;
 
     #[tokio::test]
     async fn test_create_proposal_to_add_members() {
         let group_name = "new_group".to_string();
 
-        let crypto = MlsCryptoProvider::default();
+        let crypto = MlsProvider::default();
         let id_admin = random_identity().expect("Failed to create identity");
         let mut id_user = random_identity().expect("Failed to create identity");
 

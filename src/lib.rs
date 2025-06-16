@@ -227,7 +227,9 @@ pub fn match_content_topic(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        decrypt_message, encrypt_message, generate_keypair, sign_message, verify_message,
+    };
 
     #[test]
     fn test_verify_message() {

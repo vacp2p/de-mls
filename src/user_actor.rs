@@ -4,8 +4,10 @@ use waku_bindings::WakuMessage;
 
 use ds::waku_actor::WakuMessageToSend;
 
-use crate::user::*;
-use crate::UserError;
+use crate::{
+    user::{User, UserAction},
+    UserError,
+};
 
 impl Message<WakuMessage> for User {
     type Reply = Result<UserAction, UserError>;

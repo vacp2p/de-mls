@@ -2,7 +2,7 @@ use alloy::primitives::{Address, U160};
 use criterion::{criterion_group, criterion_main, Criterion};
 use de_mls::user::{User, UserAction};
 use de_mls::user_actor::CreateGroupRequest;
-use mls_crypto::openmls_provider::{MlsCryptoProvider, CIPHERSUITE};
+use mls_crypto::openmls_provider::{MlsProvider, CIPHERSUITE};
 use openmls::prelude::{BasicCredential, CredentialWithKey, KeyPackage};
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_traits::OpenMlsProvider;
@@ -19,7 +19,7 @@ fn generate_random_key_package() -> KeyPackage {
         credential: credential.into(),
         signature_key: signature_keys.to_public_vec().into(),
     };
-    let crypto = &MlsCryptoProvider::default();
+    let crypto = &MlsProvider::default();
     signature_keys.store(crypto.storage()).unwrap();
     KeyPackage::builder()
         .build(
