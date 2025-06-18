@@ -3,10 +3,10 @@ use ds::{waku_actor::WakuMessageToSend, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 use kameo::Actor;
 // use log::info;
 use openmls::{
-    group::{GroupId, MlsGroup, MlsGroupCreateConfig},
+    group::{GroupEpoch, GroupId, MlsGroup, MlsGroupCreateConfig, StagedCommit},
     prelude::{
-        hash_ref::ProposalRef, Credential, CredentialWithKey, KeyPackage, OpenMlsProvider,
-        ProcessedMessageContent, ProtocolMessage,
+        hash_ref::ProposalRef, Credential, CredentialWithKey, KeyPackage, LeafNodeIndex,
+        MlsMessageOut, OpenMlsProvider, ProcessedMessageContent, Proposal, ProtocolMessage,
     },
 };
 use openmls_basic_credential::SignatureKeyPair;
@@ -15,12 +15,12 @@ use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 
 use crate::{
-    steward::Steward,
     message::{
         wrap_conversation_message_into_application_msg, wrap_group_announcement_in_welcome_msg,
-        wrap_invitation_into_welcome_msg,
+        wrap_invitation_into_welcome_msg, wrap_mls_out_message_into_application_msg,
     },
     protos::messages::v1::{app_message, AppMessage},
+    steward::{GroupUpdateRequest, Steward},
     *,
 };
 use mls_crypto::openmls_provider::MlsProvider;
@@ -81,12 +81,42 @@ impl Group {
         }
     }
 
-    pub async fn members_identity(&self) -> Vec<String> {
+    pub async fn members_identity(&self) -> Result<Vec<String>, GroupError> {
+        if !self.is_mls_group_initialized() {
+            return Err(GroupError::MlsGroupNotSet);
+        }
         let mls_group = self.mls_group.as_ref().unwrap().lock().await;
-        mls_group
+        let x = mls_group
             .members()
             .map(|m| hex::encode(m.credential.serialized_content()))
-            .collect()
+            .collect();
+        Ok(x)
+    }
+
+    pub async fn find_member_index(
+        &self,
+        identity: Vec<u8>,
+    ) -> Result<Option<LeafNodeIndex>, GroupError> {
+        if !self.is_mls_group_initialized() {
+            return Err(GroupError::MlsGroupNotSet);
+        }
+        let mls_group = self.mls_group.as_ref().unwrap().lock().await;
+        let x = mls_group.members().find_map(|m| {
+            if m.credential.serialized_content() == identity {
+                Some(m.index)
+            } else {
+                None
+            }
+        });
+        Ok(x)
+    }
+
+    pub async fn epoch(&self) -> Result<GroupEpoch, GroupError> {
+        if !self.is_mls_group_initialized() {
+            return Err(GroupError::MlsGroupNotSet);
+        }
+        let mls_group = self.mls_group.as_ref().unwrap().lock().await;
+        Ok(mls_group.epoch())
     }
 
     pub fn set_mls_group(&mut self, mls_group: MlsGroup) -> Result<(), GroupError> {
@@ -117,84 +147,107 @@ impl Group {
 
     pub fn decrypt_steward_msg(&self, message: Vec<u8>) -> Result<KeyPackage, GroupError> {
         if !self.is_steward() {
-            return Err(GroupError::StewardNotSetError);
+            return Err(GroupError::StewardNotSet);
         }
         let msg: KeyPackage = self.steward.as_ref().unwrap().decrypt_message(message)?;
         Ok(msg)
     }
 
-    pub fn push_income_key_package(&mut self, key_package: KeyPackage) -> Result<(), GroupError> {
+    pub fn store_invite_proposal(&mut self, key_package: KeyPackage) -> Result<(), GroupError> {
         if !self.is_steward() {
-            return Err(GroupError::StewardNotSetError);
+            return Err(GroupError::StewardNotSet);
         }
         self.steward
             .as_mut()
             .unwrap()
-            .add_incoming_key_package(key_package);
+            .put_invite_proposal(key_package);
         Ok(())
     }
 
-    pub fn processed_key_packages(&mut self) -> Result<Vec<KeyPackage>, GroupError> {
+    pub fn drain_proposals(&mut self) -> Result<Vec<GroupUpdateRequest>, GroupError> {
         if !self.is_steward() {
-            return Err(GroupError::StewardNotSetError);
+            return Err(GroupError::StewardNotSet);
         }
-        Ok(self.steward.as_mut().unwrap().drain_processed_key_packages())
+        Ok(self.steward.as_mut().unwrap().drain_proposals())
     }
 
-    pub async fn create_proposal_to_add_members(
+    pub async fn create_proposal_to_add_member(
         &mut self,
-        key_package: KeyPackage,
         provider: &MlsProvider,
         signer: &SignatureKeyPair,
-    ) -> Result<(), GroupError> {
+        key_package: KeyPackage,
+    ) -> Result<(WakuMessageToSend, ProposalRef), GroupError> {
         if !self.is_mls_group_initialized() {
-            return Err(GroupError::MlsGroupNotInitializedError);
+            return Err(GroupError::MlsGroupNotSet);
         }
         if !self.is_steward() {
-            return Err(GroupError::StewardNotSetError);
+            return Err(GroupError::StewardNotSet);
         }
         let mut mls_group = self.mls_group.as_mut().unwrap().lock().await;
 
-        let (_, href) = mls_group.propose_add_member(provider, signer, &key_package)?;
-
-        self.steward
-            .as_mut()
-            .unwrap()
-            .add_pending_proposal(href.clone());
+        let (mls_message_out, proposal_ref) =
+            mls_group.propose_add_member(provider, signer, &key_package)?;
 
         println!(
             "nof proposals: {:?}",
             mls_group.pending_proposals().collect::<Vec<_>>().len()
         );
-        println!(
-            "Pending proposals: {:?}",
-            mls_group.pending_proposals().collect::<Vec<_>>()
+        let wmts = WakuMessageToSend::new(
+            mls_message_out.to_bytes()?,
+            APP_MSG_SUBTOPIC,
+            self.group_name.clone(),
+            self.app_id.clone(),
         );
-
-        Ok(())
+        Ok((wmts, proposal_ref))
     }
 
-    pub fn get_pending_proposals(&self) -> Result<Vec<ProposalRef>, GroupError> {
-        if !self.is_steward() {
-            return Err(GroupError::StewardNotSetError);
+    pub async fn create_proposal_to_remove_member(
+        &mut self,
+        provider: &MlsProvider,
+        signer: &SignatureKeyPair,
+        identity: Vec<u8>,
+    ) -> Result<(WakuMessageToSend, ProposalRef), GroupError> {
+        if !self.is_mls_group_initialized() {
+            return Err(GroupError::MlsGroupNotSet);
         }
-        Ok(self.steward.as_ref().unwrap().get_pending_proposals())
-    }
-
-    pub fn drain_pending_proposals(&mut self) -> Result<Vec<ProposalRef>, GroupError> {
-        if !self.is_steward() {
-            return Err(GroupError::StewardNotSetError);
+        let member_index = self.find_member_index(identity).await?;
+        if member_index.is_some() {
+            let mut mls_group = self.mls_group.as_mut().unwrap().lock().await;
+            let (mls_message_out, proposal_ref) =
+                mls_group.propose_remove_member(provider, signer, member_index.unwrap())?;
+            let wmts = WakuMessageToSend::new(
+                mls_message_out.to_bytes()?,
+                APP_MSG_SUBTOPIC,
+                self.group_name.clone(),
+                self.app_id.clone(),
+            );
+            Ok((wmts, proposal_ref))
+        } else {
+            return Err(GroupError::MemberNotFound);
         }
-        Ok(self.steward.as_mut().unwrap().drain_pending_proposals())
     }
 
-    pub async fn add_members(
+    // pub fn get_pending_proposals(&self) -> Result<Vec<ProposalRef>, GroupError> {
+    //     if !self.is_steward() {
+    //         return Err(GroupError::StewardNotSet);
+    //     }
+    //     Ok(self.steward.as_ref().unwrap().get_pending_proposals())
+    // }
+
+    // pub fn drain_pending_proposals(&mut self) -> Result<Vec<ProposalRef>, GroupError> {
+    //     if !self.is_steward() {
+    //         return Err(GroupError::StewardNotSet);
+    //     }
+    //     Ok(self.steward.as_mut().unwrap().drain_pending_proposals())
+    // }
+
+    pub async fn apply_proposals(
         &mut self,
         provider: &MlsProvider,
         signer: &SignatureKeyPair,
     ) -> Result<Vec<WakuMessageToSend>, GroupError> {
         if !self.is_mls_group_initialized() {
-            return Err(GroupError::MlsGroupNotInitializedError);
+            return Err(GroupError::MlsGroupNotSet);
         }
         let mut mls_group = self.mls_group.as_mut().unwrap().lock().await;
         let (out_messages, welcome, _group_info) =
@@ -217,9 +270,9 @@ impl Group {
                 self.app_id.clone(),
             );
             return Ok(vec![msg_to_send_commit, msg_to_send_welcome]);
+        } else {
+            return Err(GroupError::EmptyWelcomeMessage);
         }
-
-        Ok(vec![msg_to_send_commit])
     }
 
     pub async fn remove_members(
@@ -229,7 +282,7 @@ impl Group {
         signer: &SignatureKeyPair,
     ) -> Result<WakuMessageToSend, GroupError> {
         if !self.is_mls_group_initialized() {
-            return Err(GroupError::MlsGroupNotInitializedError);
+            return Err(GroupError::MlsGroupNotSet);
         }
         let mut mls_group = self.mls_group.as_mut().unwrap().lock().await;
         let mut leaf_indexs = Vec::new();
@@ -248,6 +301,8 @@ impl Group {
         // Second, process the removal on our end.
         mls_group.merge_pending_commit(provider)?;
 
+        // let app_msg =
+        //     wrap_mls_out_message_into_application_msg(remove_message, sender, self.group_name.clone());
         let msg_to_send_commit = WakuMessageToSend::new(
             remove_message.to_bytes()?,
             APP_MSG_SUBTOPIC,
@@ -269,7 +324,7 @@ impl Group {
             return Ok(GroupAction::DoNothing);
         }
         if !self.is_mls_group_initialized() {
-            return Err(GroupError::MlsGroupNotInitializedError);
+            return Err(GroupError::MlsGroupNotSet);
         }
         let mut mls_group = self.mls_group.as_mut().unwrap().lock().await;
 
@@ -349,7 +404,7 @@ impl Group {
                     // here we need to remove group instance locally and
                     // also remove correspond key package from local storage ans sc storage
                     if mls_group.is_active() {
-                        return Err(GroupError::GroupStillActiveError);
+                        return Err(GroupError::GroupStillActive);
                     }
                     return Ok(GroupAction::LeaveGroup);
                 }
@@ -361,13 +416,12 @@ impl Group {
     pub fn generate_steward_message(&mut self) -> Result<WakuMessageToSend, GroupError> {
         let steward = match self.steward.as_mut() {
             Some(a) => a,
-            None => return Err(GroupError::StewardNotSetError),
+            None => return Err(GroupError::StewardNotSet),
         };
         steward.refresh_key_pair();
 
         let msg_to_send = WakuMessageToSend::new(
-            wrap_group_announcement_in_welcome_msg(steward.create_announcement())
-                .encode_to_vec(),
+            wrap_group_announcement_in_welcome_msg(steward.create_announcement()).encode_to_vec(),
             WELCOME_SUBTOPIC,
             self.group_name.clone(),
             self.app_id.clone(),
@@ -412,6 +466,8 @@ mod tests {
 
     use log::info;
 
+    use crate::steward::GroupUpdateRequest;
+
     use super::Group;
     use mls_crypto::openmls_provider::MlsProvider;
 
@@ -432,7 +488,7 @@ mod tests {
         )
         .expect("Failed to create group");
 
-        let group_user = Group::new(group_name.clone(), false, None, None, None)
+        let _ = Group::new(group_name.clone(), false, None, None, None)
             .expect("Failed to create group");
 
         let kp_user = id_user
@@ -440,19 +496,22 @@ mod tests {
             .expect("Failed to generate key package");
 
         group_steward
-            .create_proposal_to_add_members(kp_user, &crypto, &id_steward.signer())
-            .await
+            .store_invite_proposal(kp_user.clone())
             .expect("Failed to create proposal");
 
         let pending_proposals = group_steward
-            .get_pending_proposals()
+            .drain_proposals()
             .expect("Failed to get pending proposals");
         assert_eq!(pending_proposals.len(), 1);
+        assert_eq!(
+            pending_proposals[0],
+            GroupUpdateRequest::AddMember(kp_user.clone())
+        );
 
         let out = group_steward
-            .add_members(&crypto, &id_steward.signer())
+            .apply_proposals(&crypto, &id_steward.signer())
             .await
-            .expect("Failed to add members");
+            .expect("Failed to apply proposals");
 
         info!("Out: {:?}", out);
 

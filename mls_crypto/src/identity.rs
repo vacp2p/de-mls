@@ -4,8 +4,8 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_traits::{types::Ciphersuite, OpenMlsProvider};
 use std::{collections::HashMap, fmt::Display};
 
+use crate::error::IdentityError;
 use crate::openmls_provider::{MlsProvider, CIPHERSUITE};
-use crate::IdentityError;
 
 pub struct Identity {
     pub(crate) kp: HashMap<Vec<u8>, KeyPackage>,
@@ -85,6 +85,10 @@ impl Identity {
 
     pub fn signature_key(&self) -> Vec<u8> {
         self.credential_with_key.signature_key.as_slice().to_vec()
+    }
+
+    pub fn is_key_package_exists(&self, kp_hash_ref: &[u8]) -> bool {
+        self.kp.contains_key(kp_hash_ref)
     }
 }
 

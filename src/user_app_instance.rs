@@ -6,8 +6,8 @@ use std::{str::FromStr, sync::Arc, time::Duration};
 
 use crate::user::User;
 use crate::user_actor::{
-    StewardMessageRequest, ApplyProposalsRequest, CreateGroupRequest, GetProposalsHrefRequest,
-    ProcessProposalsRequest,
+    ApplyProposalsRequest, CreateGroupRequest, GetGroupUpdateRequest, ProcessProposalsRequest,
+    StewardMessageRequest,
 };
 use crate::{AppState, Connection, UserError};
 
@@ -80,13 +80,13 @@ pub async fn handle_steward_flow_per_epoch(
     group_name: String,
     app_state: Arc<AppState>,
 ) -> Result<(), UserError> {
-    // Get all pending proposals for current group from previous epoch
+    // Get all income proposals from previous epoch
     let proposals = user
-        .ask(GetProposalsHrefRequest {
+        .ask(GetGroupUpdateRequest {
             group_name: group_name.clone(),
         })
         .await
-        .map_err(|e| UserError::GetIncomeKeyPackagesError(e.to_string()))?;
+        .map_err(|e| UserError::GetGroupUpdateRequestsError(e.to_string()))?;
 
     // Send new steward key to the waku node for new epoch and next message will be saved in the messaged queue
     let msg = user

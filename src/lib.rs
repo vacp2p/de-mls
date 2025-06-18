@@ -2,14 +2,7 @@ use alloy::signers::local::LocalSignerError;
 use ecies::{decrypt, encrypt};
 use kameo::error::SendError;
 use libsecp256k1::{sign, verify, Message, PublicKey, SecretKey, Signature as libSignature};
-use openmls::{
-    framing::errors::MlsMessageError,
-    prelude::{
-        AddMembersError, CommitToPendingProposalsError, CreateMessageError, MergeCommitError,
-        MergePendingCommitError, NewGroupError, ProcessMessageError, ProposeAddMemberError,
-        RemoveMembersError, WelcomeError,
-    },
-};
+use openmls::group::WelcomeError;
 use openmls_rust_crypto::MemoryStorageError;
 use rand::thread_rng;
 use secp256k1::hashes::{sha256, Hash};
@@ -23,9 +16,11 @@ use tokio::sync::mpsc::Sender;
 use waku_bindings::{WakuContentTopic, WakuMessage};
 
 use ds::{waku_actor::WakuMessageToSend, DeliveryServiceError};
-use mls_crypto::IdentityError;
+use error::{MessageError, GroupError};
+use mls_crypto::error::IdentityError;
 
 pub mod action_handlers;
+pub mod error;
 pub mod group;
 pub mod message;
 pub mod steward;
@@ -95,63 +90,6 @@ pub fn decrypt_message(message: &[u8], secret_key: SecretKey) -> Result<Vec<u8>,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum GroupError {
-    #[error("Steward not set")]
-    StewardNotSetError,
-    #[error(transparent)]
-    MessageError(#[from] MessageError),
-    #[error("MLS group not initialized")]
-    MlsGroupNotInitializedError,
-
-    #[error("Error while creating MLS group: {0}")]
-    MlsGroupCreationError(#[from] NewGroupError<MemoryStorageError>),
-    #[error("Error while adding member to MLS group: {0}")]
-    MlsAddMemberError(#[from] AddMembersError<MemoryStorageError>),
-    #[error("Error while merging pending commit in MLS group: {0}")]
-    MlsMergePendingCommitError(#[from] MergePendingCommitError<MemoryStorageError>),
-    #[error("Error while merging commit in MLS group: {0}")]
-    MlsMergeCommitError(#[from] MergeCommitError<MemoryStorageError>),
-    #[error("Error processing unverified message: {0}")]
-    MlsProcessMessageError(#[from] ProcessMessageError),
-    #[error("Error while creating message: {0}")]
-    MlsCreateMessageError(#[from] CreateMessageError),
-    #[error("Failed to remove members: {0}")]
-    MlsRemoveMembersError(#[from] RemoveMembersError<MemoryStorageError>),
-    #[error("Group still active")]
-    GroupStillActiveError,
-    #[error("Error while creating proposal to add members: {0}")]
-    MlsCreateProposalError(#[from] ProposeAddMemberError<MemoryStorageError>),
-    #[error("Error while committing to pending proposals: {0}")]
-    MlsCommitToPendingProposalsError(#[from] CommitToPendingProposalsError<MemoryStorageError>),
-    #[error("Failed to serialize mls message: {0}")]
-    MlsMessageError(#[from] MlsMessageError),
-
-    #[error("UTF-8 parsing error: {0}")]
-    Utf8ParsingError(#[from] FromUtf8Error),
-    #[error("JSON processing error: {0}")]
-    JsonError(#[from] serde_json::Error),
-    #[error("Serialization error: {0}")]
-    SerializationError(#[from] tls_codec::Error),
-    #[error("Failed to decode app message: {0}")]
-    AppMessageDecodeError(String),
-
-    #[error("An unknown error occurred: {0}")]
-    Other(anyhow::Error),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum MessageError {
-    #[error("Failed to verify signature: {0}")]
-    SignatureVerificationError(#[from] libsecp256k1::Error),
-    #[error("JSON processing error: {0}")]
-    JsonError(#[from] serde_json::Error),
-    #[error("Serialization error: {0}")]
-    SerializationError(#[from] tls_codec::Error),
-    #[error("Failed to serialize mls message: {0}")]
-    MlsMessageError(#[from] MlsMessageError),
-}
-
-#[derive(Debug, thiserror::Error)]
 pub enum UserError {
     #[error(transparent)]
     DeliveryServiceError(#[from] DeliveryServiceError),
@@ -211,6 +149,12 @@ pub enum UserError {
     ApplyProposalsError(String),
     #[error("Failed to deserialize mls message in: {0}")]
     MlsMessageInDeserializeError(String),
+    #[error("Failed to create invite proposal: {0}")]
+    CreateInviteProposalError(String),
+    #[error("Failed to try into protocol message: {0}")]
+    TryIntoProtocolMessageError(String),
+    #[error("Failed to get group update requests: {0}")]
+    GetGroupUpdateRequestsError(String),
 
     #[error("Failed to send message to waku: {0}")]
     WakuSendMessageError(#[from] tokio::sync::mpsc::error::SendError<WakuMessageToSend>),

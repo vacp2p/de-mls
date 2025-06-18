@@ -31,7 +31,7 @@ use crate::{
     verify_message, MessageError,
 };
 // use log::info;
-use openmls::prelude::{KeyPackage, MlsMessageOut};
+use openmls::prelude::{key_package_in, tls_codec::Serialize, KeyPackage, MlsMessageOut};
 use std::fmt::Display;
 
 // use crate::protos::messages::v1::{
@@ -98,6 +98,7 @@ impl GroupAnnouncement {
     }
 
     pub fn encrypt(&self, kp: KeyPackage) -> Result<Vec<u8>, MessageError> {
+        // TODO: replace json in encryption and decryption
         let key_package = serde_json::to_vec(&kp)?;
         let encrypted = encrypt_message(&key_package, &self.eth_pub_key)?;
         Ok(encrypted)
@@ -129,6 +130,25 @@ pub fn wrap_vote_start_message_into_application_msg(group_name: String) -> AppMe
         })),
     }
 }
+
+pub fn wrap_mls_out_message_into_application_msg(
+    mls_message: MlsMessageOut,
+    sender: String,
+    group_name: String,
+) -> Result<AppMessage, MessageError> {
+    let mls_bytes = mls_message.to_bytes()?;
+    let app_message = AppMessage {
+        payload: Some(app_message::Payload::ConversationMessage(
+            ConversationMessage {
+                message: mls_bytes,
+                sender,
+                group_name,
+            },
+        )),
+    };
+    Ok(app_message)
+}
+
 impl Display for AppMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.payload {

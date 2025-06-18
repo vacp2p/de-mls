@@ -7,8 +7,15 @@ use crate::{protos::messages::v1::GroupAnnouncement, *};
 pub struct Steward {
     eth_pub: PublicKey,
     eth_secr: SecretKey,
-    incoming_key_packages: Arc<Mutex<Vec<KeyPackage>>>,
-    pending_proposals: Arc<Mutex<Vec<ProposalRef>>>,
+    proposals_queue: Arc<Mutex<Vec<GroupUpdateRequest>>>,
+    // incoming_key_packages: Arc<Mutex<Vec<KeyPackage>>>,
+    // pending_proposals: Arc<Mutex<Vec<ProposalRef>>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum GroupUpdateRequest {
+    AddMember(KeyPackage),
+    RemoveMember(Vec<u8>),
 }
 
 impl Default for Steward {
@@ -23,8 +30,9 @@ impl Steward {
         Steward {
             eth_pub: public_key,
             eth_secr: private_key,
-            incoming_key_packages: Arc::new(Mutex::new(Vec::new())),
-            pending_proposals: Arc::new(Mutex::new(Vec::new())),
+            proposals_queue: Arc::new(Mutex::new(Vec::new())),
+            // incoming_key_packages: Arc::new(Mutex::new(Vec::new())),
+            // pending_proposals: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -41,38 +49,54 @@ impl Steward {
 
     pub fn decrypt_message(&self, message: Vec<u8>) -> Result<KeyPackage, MessageError> {
         let msg: Vec<u8> = decrypt_message(&message, self.eth_secr)?;
+        // TODO: replace json in encryption and decryption
         let key_package: KeyPackage = serde_json::from_slice(&msg)?;
         Ok(key_package)
     }
 
-    pub fn add_incoming_key_package(&mut self, key_package: KeyPackage) {
-        self.incoming_key_packages.lock().unwrap().push(key_package)
+    pub fn put_invite_proposal(&mut self, key_package: KeyPackage) {
+        self.proposals_queue.lock().unwrap().push(GroupUpdateRequest::AddMember(key_package));
     }
 
-    pub fn drain_processed_key_packages(&mut self) -> Vec<KeyPackage> {
-        self.incoming_key_packages
+    pub fn put_remove_proposal(&mut self, identity: Vec<u8>) {
+        self.proposals_queue
             .lock()
             .unwrap()
-            .drain(0..)
-            .collect()
+            .push(GroupUpdateRequest::RemoveMember(identity));
     }
 
-    pub fn add_pending_proposal(&mut self, proposal: ProposalRef) {
-        self.pending_proposals.lock().unwrap().push(proposal);
+    pub fn drain_proposals(&mut self) -> Vec<GroupUpdateRequest> {
+        self.proposals_queue.lock().unwrap().drain(0..).collect()
     }
 
-    pub fn get_pending_proposals(&self) -> Vec<ProposalRef> {
-        self.pending_proposals.lock().unwrap().clone()
-    }
+    // pub fn add_incoming_key_package(&mut self, key_package: KeyPackage) {
+    //     self.incoming_key_packages.lock().unwrap().push(key_package)
+    // }
 
-    pub fn remove_pending_proposal(&mut self, proposal: ProposalRef) {
-        self.pending_proposals
-            .lock()
-            .unwrap()
-            .retain(|p| p != &proposal);
-    }
+    // pub fn drain_processed_key_packages(&mut self) -> Vec<KeyPackage> {
+    //     self.incoming_key_packages
+    //         .lock()
+    //         .unwrap()
+    //         .drain(0..)
+    //         .collect()
+    // }
 
-    pub fn drain_pending_proposals(&mut self) -> Vec<ProposalRef> {
-        self.pending_proposals.lock().unwrap().drain(0..).collect()
-    }
+    // pub fn add_pending_proposal(&mut self, proposal: ProposalRef) {
+    //     self.pending_proposals.lock().unwrap().push(proposal);
+    // }
+
+    // pub fn get_pending_proposals(&self) -> Vec<ProposalRef> {
+    //     self.pending_proposals.lock().unwrap().clone()
+    // }
+
+    // pub fn remove_pending_proposal(&mut self, proposal: ProposalRef) {
+    //     self.pending_proposals
+    //         .lock()
+    //         .unwrap()
+    //         .retain(|p| p != &proposal);
+    // }
+
+    // pub fn drain_pending_proposals(&mut self) -> Vec<ProposalRef> {
+    //     self.pending_proposals.lock().unwrap().drain(0..).collect()
+    // }
 }

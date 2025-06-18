@@ -7,9 +7,16 @@ package de_mls.messages.v1;
 message AppMessage {
   oneof payload {
     ConversationMessage conversation_message = 1;
-    RemoveUserMessage remove_user_message = 2;
-    VoteStartMessage vote_start_message = 3;
+    GroupUpdateMessage group_update_message = 2;
+    RemoveUserMessage remove_user_message = 3;
+    VoteStartMessage vote_start_message = 4;
   }
+}
+
+message GroupUpdateMessage {
+  bytes group_name = 1;
+  bytes commit_message = 2;
+  repeated bytes proposals = 3;
 }
 
 message ConversationMessage {

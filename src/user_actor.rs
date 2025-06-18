@@ -1,10 +1,11 @@
 use kameo::message::{Context, Message};
-use openmls::prelude::hash_ref::ProposalRef;
+use openmls::prelude::{hash_ref::ProposalRef, KeyPackage};
 use waku_bindings::WakuMessage;
 
 use ds::waku_actor::WakuMessageToSend;
 
 use crate::{
+    steward::GroupUpdateRequest,
     user::{User, UserAction},
     UserError,
 };
@@ -91,29 +92,29 @@ impl Message<RemoveUserRequest> for User {
     }
 }
 
-// pub struct GetIncomeKeyPackagesRequest {
-//     pub group_name: String,
-// }
+pub struct GetGroupUpdateRequest {
+    pub group_name: String,
+}
 
-// impl Message<GetIncomeKeyPackagesRequest> for User {
-//     type Reply = Result<Vec<KeyPackage>, UserError>;
+impl Message<GetGroupUpdateRequest> for User {
+    type Reply = Result<Vec<GroupUpdateRequest>, UserError>;
 
-//     async fn handle(
-//         &mut self,
-//         msg: GetIncomeKeyPackagesRequest,
-//         _ctx: Context<'_, Self, Self::Reply>,
-//     ) -> Self::Reply {
-//         self.get_processed_income_key_packages(msg.group_name.clone())
-//             .await
-//     }
-// }
+    async fn handle(
+        &mut self,
+        msg: GetGroupUpdateRequest,
+        _ctx: Context<'_, Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.group_drain_pending_proposals(msg.group_name.clone())
+            .await
+    }
+}
 
 pub struct GetProposalsHrefRequest {
     pub group_name: String,
 }
 
 impl Message<GetProposalsHrefRequest> for User {
-    type Reply = Result<Vec<ProposalRef>, UserError>;
+    type Reply = Result<Vec<GroupUpdateRequest>, UserError>;
 
     async fn handle(
         &mut self,
@@ -127,7 +128,7 @@ impl Message<GetProposalsHrefRequest> for User {
 
 pub struct ProcessProposalsRequest {
     pub group_name: String,
-    pub proposals: Vec<ProposalRef>,
+    pub proposals: Vec<GroupUpdateRequest>,
 }
 
 impl Message<ProcessProposalsRequest> for User {

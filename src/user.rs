@@ -22,15 +22,15 @@ use mls_crypto::{
     openmls_provider::{MlsProvider, CIPHERSUITE},
 };
 
-use crate::UserError;
 use crate::{
     group::{Group, GroupAction},
     message::{
-        wrap_conversation_message_into_application_msg, wrap_user_kp_into_welcome_msg,
-        wrap_vote_start_message_into_application_msg,
+        wrap_conversation_message_into_application_msg, wrap_mls_out_message_into_application_msg,
+        wrap_user_kp_into_welcome_msg, wrap_vote_start_message_into_application_msg,
     },
     protos::messages::v1::{welcome_message, AppMessage, WelcomeMessage},
 };
+use crate::{steward::GroupUpdateRequest, UserError};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum UserAction {
@@ -149,15 +149,18 @@ impl User {
                         );
                         let key_package =
                             group.decrypt_steward_msg(user_key_package.encrypt_kp.clone())?;
-                        group
-                            .create_proposal_to_add_members(
-                                key_package,
+
+                        let (wmts, proposal_ref) = group
+                            .create_proposal_to_add_member(
                                 &self.provider,
                                 self.identity.signer(),
+                                key_package,
                             )
                             .await?;
+                        Ok(UserAction::SendToWaku(wmts))
+                    } else {
+                        Ok(UserAction::DoNothing)
                     }
-                    Ok(UserAction::DoNothing)
                 }
                 welcome_message::Payload::InvitationToJoin(invitation_to_join) => {
                     if group.is_steward() {
@@ -179,11 +182,23 @@ impl User {
                             _ => return Err(UserError::EmptyWelcomeMessageError),
                         };
 
-                        self.join_group(welcome)?;
-                        let msg = self
-                            .build_group_message("User joined to the group", group_name)
-                            .await?;
-                        Ok(UserAction::SendToWaku(msg))
+                        if welcome.secrets().iter().any(|egs| {
+                            let hash_ref = egs.new_member().as_slice().to_vec();
+                            self.identity.is_key_package_exists(&hash_ref)
+                        }) {
+                            self.join_group(welcome)?;
+                            let msg = self
+                                .build_group_message("User joined to the group", group_name)
+                                .await?;
+                            Ok(UserAction::SendToWaku(msg))
+                        } else {
+                            info!(
+                                "User {:?} received invitation to join group {:?}, but key package is not shared",
+                                self.identity.identity_string(),
+                                group_name
+                            );
+                            Ok(UserAction::DoNothing)
+                        }
                     }
                 }
             }
@@ -208,7 +223,7 @@ impl User {
             .map_err(|e| UserError::MlsMessageInDeserializeError(e.to_string()))?;
         let mls_message = mls_message_in
             .try_into_protocol_message()
-            .map_err(|e| UserError::MlsMessageInDeserializeError(e.to_string()))?;
+            .map_err(|e| UserError::TryIntoProtocolMessageError(e.to_string()))?;
 
         let group_name = from_utf8(mls_message.group_id().as_slice())?.to_string();
         let group = match self.groups.get_mut(&group_name) {
@@ -240,7 +255,7 @@ impl User {
         &mut self,
         msg: WakuMessage,
     ) -> Result<UserAction, UserError> {
-        println!("Processing waku message: {:?}", msg);
+        info!("Processing waku message: {:?}", msg);
         let group_name = msg.content_topic.application_name.to_string();
         let group = match self.groups.get(&group_name) {
             Some(g) => g,
@@ -252,7 +267,7 @@ impl User {
             return Ok(UserAction::DoNothing);
         }
         let ct_name = msg.content_topic.content_topic_name.to_string();
-        println!("Processing waku message: {:?}", ct_name);
+        info!("Processing waku message: {:?}", ct_name);
         match ct_name.as_str() {
             WELCOME_SUBTOPIC => self.process_welcome_subtopic(msg, group_name).await,
             APP_MSG_SUBTOPIC => self.process_app_subtopic(msg, group_name).await,
@@ -368,38 +383,36 @@ impl User {
             Some(g) => g,
             None => return Err(UserError::GroupNotFoundError(group_name)),
         };
-        group
-            .create_proposal_to_add_members(users_kp, &self.provider, self.identity.signer())
-            .await?;
 
+        group.store_invite_proposal(users_kp)?;
         Ok(())
     }
 
     pub async fn group_drain_pending_proposals(
         &mut self,
         group_name: String,
-    ) -> Result<Vec<ProposalRef>, UserError> {
+    ) -> Result<Vec<GroupUpdateRequest>, UserError> {
         let group = match self.groups.get_mut(&group_name) {
             Some(g) => g,
             None => return Err(UserError::GroupNotFoundError(group_name)),
         };
-        Ok(group.drain_pending_proposals()?)
+        Ok(group.drain_proposals()?)
     }
 
     pub async fn process_proposals(
         &mut self,
         group_name: String,
-        proposals: Vec<ProposalRef>,
+        proposals: Vec<GroupUpdateRequest>,
     ) -> Result<WakuMessageToSend, UserError> {
         let group = match self.groups.get_mut(&group_name) {
             Some(g) => g,
             None => return Err(UserError::GroupNotFoundError(group_name)),
         };
 
-        let nof_proposals = proposals.len();
         let format_msg = format!(
             "Vote start for group {} with {} proposals",
-            group_name, nof_proposals
+            group_name,
+            proposals.len()
         );
         let app_msg = wrap_vote_start_message_into_application_msg(format_msg.clone());
         let msg = WakuMessageToSend::new(
@@ -420,11 +433,9 @@ impl User {
             Some(g) => g,
             None => return Err(UserError::GroupNotFoundError(group_name)),
         };
-
         let msg = group
-            .add_members(&self.provider, self.identity.signer())
+            .apply_proposals(&self.provider, &self.identity.signer())
             .await?;
-
         Ok(msg)
     }
 }
