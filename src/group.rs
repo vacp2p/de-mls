@@ -3,10 +3,10 @@ use ds::{waku_actor::WakuMessageToSend, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 use kameo::Actor;
 // use log::info;
 use openmls::{
-    group::{GroupEpoch, GroupId, MlsGroup, MlsGroupCreateConfig, StagedCommit},
+    group::{GroupEpoch, GroupId, MlsGroup, MlsGroupCreateConfig},
     prelude::{
         hash_ref::ProposalRef, Credential, CredentialWithKey, KeyPackage, LeafNodeIndex,
-        MlsMessageOut, OpenMlsProvider, ProcessedMessageContent, Proposal, ProtocolMessage,
+        OpenMlsProvider, ProcessedMessageContent, ProtocolMessage,
     },
 };
 use openmls_basic_credential::SignatureKeyPair;
@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 use crate::{
     message::{
         wrap_conversation_message_into_application_msg, wrap_group_announcement_in_welcome_msg,
-        wrap_invitation_into_welcome_msg, wrap_mls_out_message_into_application_msg,
+        wrap_invitation_into_welcome_msg,
     },
     protos::messages::v1::{app_message, AppMessage},
     steward::{GroupUpdateRequest, Steward},

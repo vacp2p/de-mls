@@ -1,11 +1,13 @@
 use std::string::FromUtf8Error;
 
 use openmls::{
-    framing::errors::MlsMessageError, group::ProposeRemoveMemberError, prelude::{
-        AddMembersError, CommitToPendingProposalsError, CreateMessageError, MergeCommitError,
+    framing::errors::MlsMessageError,
+    group::ProposeRemoveMemberError,
+    prelude::{
+        CommitToPendingProposalsError, CreateMessageError, MergeCommitError,
         MergePendingCommitError, NewGroupError, ProcessMessageError, ProposeAddMemberError,
-        RemoveMembersError, WelcomeError,
-    }
+        RemoveMembersError,
+    },
 };
 use openmls_rust_crypto::MemoryStorageError;
 
@@ -52,7 +54,9 @@ pub enum GroupError {
     #[error("Unable to create proposal to remove members: {0}")]
     UnableToCreateProposalToRemoveMembers(#[from] ProposeRemoveMemberError<MemoryStorageError>),
     #[error("Unable to revert commit to pending proposals: {0}")]
-    UnableToRevertCommitToPendingProposals(#[from] CommitToPendingProposalsError<MemoryStorageError>),
+    UnableToRevertCommitToPendingProposals(
+        #[from] CommitToPendingProposalsError<MemoryStorageError>,
+    ),
 
     #[error("Failed to serialize mls message: {0}")]
     MlsMessageError(#[from] MlsMessageError),

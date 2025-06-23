@@ -1,5 +1,5 @@
 use libsecp256k1::{PublicKey, SecretKey};
-use openmls::prelude::{hash_ref::ProposalRef, *};
+use openmls::prelude::KeyPackage;
 
 use crate::{protos::messages::v1::GroupAnnouncement, *};
 
@@ -55,7 +55,10 @@ impl Steward {
     }
 
     pub fn put_invite_proposal(&mut self, key_package: KeyPackage) {
-        self.proposals_queue.lock().unwrap().push(GroupUpdateRequest::AddMember(key_package));
+        self.proposals_queue
+            .lock()
+            .unwrap()
+            .push(GroupUpdateRequest::AddMember(key_package));
     }
 
     pub fn put_remove_proposal(&mut self, identity: Vec<u8>) {

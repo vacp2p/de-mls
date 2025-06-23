@@ -4,10 +4,7 @@ use log::info;
 use openmls::{
     group::MlsGroupJoinConfig,
     key_packages::KeyPackage,
-    prelude::{
-        hash_ref::ProposalRef, DeserializeBytes, MlsMessageBodyIn, MlsMessageIn, StagedWelcome,
-        Welcome,
-    },
+    prelude::{DeserializeBytes, MlsMessageBodyIn, MlsMessageIn, StagedWelcome, Welcome},
 };
 use prost::Message;
 use std::{
@@ -25,8 +22,8 @@ use mls_crypto::{
 use crate::{
     group::{Group, GroupAction},
     message::{
-        wrap_conversation_message_into_application_msg, wrap_mls_out_message_into_application_msg,
-        wrap_user_kp_into_welcome_msg, wrap_vote_start_message_into_application_msg,
+        wrap_conversation_message_into_application_msg, wrap_user_kp_into_welcome_msg,
+        wrap_vote_start_message_into_application_msg,
     },
     protos::messages::v1::{welcome_message, AppMessage, WelcomeMessage},
 };
@@ -150,7 +147,7 @@ impl User {
                         let key_package =
                             group.decrypt_steward_msg(user_key_package.encrypt_kp.clone())?;
 
-                        let (wmts, proposal_ref) = group
+                        let (wmts, _) = group
                             .create_proposal_to_add_member(
                                 &self.provider,
                                 self.identity.signer(),

@@ -31,7 +31,7 @@ use crate::{
     verify_message, MessageError,
 };
 // use log::info;
-use openmls::prelude::{key_package_in, tls_codec::Serialize, KeyPackage, MlsMessageOut};
+use openmls::prelude::{KeyPackage, MlsMessageOut};
 use std::fmt::Display;
 
 // use crate::protos::messages::v1::{
