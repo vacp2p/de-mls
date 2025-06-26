@@ -6,12 +6,13 @@ use std::{str::FromStr, sync::Arc, time::Duration};
 
 use crate::user::User;
 use crate::user_actor::{
-    ApplyProposalsRequest, CreateGroupRequest, GetGroupUpdateRequest, ProcessProposalsRequest,
+    ApplyProposalsAndCompleteRequest, CompleteVotingRequest, CreateGroupRequest,
+    RemoveProposalsAndCompleteRequest, StartStewardEpochRequest, StartVotingRequest,
     StewardMessageRequest,
 };
-use crate::{AppState, Connection, UserError};
+use crate::{error::UserError, AppState, Connection};
 
-pub const STEWARD_EPOCH: u64 = 30;
+pub const STEWARD_EPOCH: u64 = 60;
 
 pub async fn create_user_instance(
     connection: Connection,
@@ -69,26 +70,28 @@ pub async fn create_user_instance(
     Ok(user_ref)
 }
 
-/// Each epoch steward of the group will send the steward key to the waku node, which will be used to share
-/// key packages for current group and for the current epoch steward do next steps:
-/// 1. Get all collected key packages from previous epoch (not processed yet, just drained messaged queue)
-/// 2. Send new steward key to the waku node for new epoch and next message will be saved in the messaged queue
-/// 3. Process the income key packages from previous epoch and send welcome message to the new members and
-///    update message to the other members
+/// Enhanced steward epoch flow with state machine:
+/// 1. Start steward epoch (collect pending proposals, change state to Waiting if there are proposals)
+/// 2. Send new steward key to the waku node
+/// 3. If there are proposals, start voting process (change state to Voting)
+/// 4. Complete voting (change state based on result)
+/// 5. If vote passed, apply proposals and complete (change state back to Working)
 pub async fn handle_steward_flow_per_epoch(
     user: ActorRef<User>,
     group_name: String,
     app_state: Arc<AppState>,
 ) -> Result<(), UserError> {
-    // Get all income proposals from previous epoch
-    let proposals = user
-        .ask(GetGroupUpdateRequest {
+    info!("Starting steward epoch for group: {}", group_name);
+
+    // Step 1: Start steward epoch - check for proposals and start epoch if needed
+    let proposals_count = user
+        .ask(StartStewardEpochRequest {
             group_name: group_name.clone(),
         })
         .await
         .map_err(|e| UserError::GetGroupUpdateRequestsError(e.to_string()))?;
 
-    // Send new steward key to the waku node for new epoch and next message will be saved in the messaged queue
+    // Step 2: Send new steward key to the waku node for new epoch
     let msg = user
         .ask(StewardMessageRequest {
             group_name: group_name.clone(),
@@ -97,28 +100,86 @@ pub async fn handle_steward_flow_per_epoch(
         .map_err(|e| UserError::ProcessStewardMessageError(e.to_string()))?;
     app_state.waku_node.send(msg).await?;
 
-    // Process the income key packages from previous epoch and send welcome message to the new members and
-    // update message to the other members
-    if !proposals.is_empty() {
-        let msg = user
-            .ask(ProcessProposalsRequest {
-                group_name: group_name.clone(),
-                proposals,
-            })
-            .await
-            .map_err(|e| UserError::ProcessProposalsError(e.to_string()))?;
-        app_state.waku_node.send(msg).await?;
+    if proposals_count == 0 {
+        info!(
+            "No proposals to vote on for group: {}, completing epoch without voting",
+            group_name
+        );
 
+        info!(
+            "Steward epoch completed for group: {} (no proposals)",
+            group_name
+        );
+        return Ok(());
+    }
+
+    info!(
+        "Found {} proposals to vote on for group: {}",
+        proposals_count, group_name
+    );
+
+    // Step 3: Start voting process
+    let vote_id = user
+        .ask(StartVotingRequest {
+            group_name: group_name.clone(),
+        })
+        .await
+        .map_err(|e| UserError::ProcessProposalsError(e.to_string()))?;
+
+    info!(
+        "Started voting with vote_id: {:?} for group: {}",
+        vote_id, group_name
+    );
+
+    // Step 4: Complete voting (in a real implementation, this would wait for actual votes)
+    // For now, we'll simulate the voting process
+    let vote_result = user
+        .ask(CompleteVotingRequest {
+            group_name: group_name.clone(),
+            vote_id: vote_id.clone(),
+        })
+        .await
+        .map_err(|e| UserError::ApplyProposalsError(e.to_string()))?;
+
+    info!(
+        "Voting completed with result: {} for group: {}",
+        vote_result, group_name
+    );
+
+    // Step 5: If vote passed, apply proposals and complete
+    if vote_result {
         let msgs = user
-            .ask(ApplyProposalsRequest {
+            .ask(ApplyProposalsAndCompleteRequest {
                 group_name: group_name.clone(),
             })
             .await
             .map_err(|e| UserError::ApplyProposalsError(e.to_string()))?;
+
+        // Only send messages if there are any (when there are proposals)
         for msg in msgs {
             app_state.waku_node.send(msg).await?;
         }
+
+        info!(
+            "Proposals applied and steward epoch completed for group: {}",
+            group_name
+        );
+    } else {
+        info!(
+            "Vote failed, returning to working state for group: {}",
+            group_name
+        );
     }
 
+    user.ask(RemoveProposalsAndCompleteRequest {
+        group_name: group_name.clone(),
+    })
+    .await
+    .map_err(|e| UserError::ApplyProposalsError(e.to_string()))?;
+
+    info!(
+        "Removing proposals and completing steward epoch for group: {}",
+        group_name
+    );
     Ok(())
 }

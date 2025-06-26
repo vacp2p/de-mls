@@ -1,16 +1,12 @@
-use alloy::{network::EthereumWallet, signers::local::PrivateKeySigner};
+use alloy::signers::local::PrivateKeySigner;
 use kameo::Actor;
 use log::info;
 use openmls::{
     group::MlsGroupJoinConfig,
-    key_packages::KeyPackage,
     prelude::{DeserializeBytes, MlsMessageBodyIn, MlsMessageIn, StagedWelcome, Welcome},
 };
 use prost::Message;
-use std::{
-    collections::HashMap,
-    str::{from_utf8, FromStr},
-};
+use std::{collections::HashMap, str::FromStr};
 use waku_bindings::WakuMessage;
 
 use ds::{waku_actor::WakuMessageToSend, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
@@ -20,14 +16,13 @@ use mls_crypto::{
 };
 
 use crate::{
+    error::UserError,
     group::{Group, GroupAction},
-    message::{
-        wrap_conversation_message_into_application_msg, wrap_user_kp_into_welcome_msg,
-        wrap_vote_start_message_into_application_msg,
+    message::{wrap_conversation_message_into_application_msg, wrap_user_kp_into_welcome_msg},
+    protos::messages::v1::{
+        app_message, welcome_message, AppMessage, BatchProposalsMessage, WelcomeMessage,
     },
-    protos::messages::v1::{welcome_message, AppMessage, WelcomeMessage},
 };
-use crate::{steward::GroupUpdateRequest, UserError};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum UserAction {
@@ -42,7 +37,7 @@ pub struct User {
     identity: Identity,
     groups: HashMap<String, Group>,
     provider: MlsProvider,
-    eth_signer: PrivateKeySigner,
+    _eth_signer: PrivateKeySigner,
 }
 
 impl User {
@@ -56,7 +51,7 @@ impl User {
         let user = User {
             groups: HashMap::new(),
             identity: id,
-            eth_signer: signer,
+            _eth_signer: signer,
             provider: crypto,
         };
         Ok(user)
@@ -147,14 +142,8 @@ impl User {
                         let key_package =
                             group.decrypt_steward_msg(user_key_package.encrypt_kp.clone())?;
 
-                        let (wmts, _) = group
-                            .create_proposal_to_add_member(
-                                &self.provider,
-                                self.identity.signer(),
-                                key_package,
-                            )
-                            .await?;
-                        Ok(UserAction::SendToWaku(wmts))
+                        group.store_invite_proposal(Box::new(key_package)).await?;
+                        Ok(UserAction::DoNothing)
                     } else {
                         Ok(UserAction::DoNothing)
                     }
@@ -163,7 +152,7 @@ impl User {
                     if group.is_steward() {
                         Ok(UserAction::DoNothing)
                     } else {
-                        println!(
+                        info!(
                             "User {:?} received invitation to join group {:?}",
                             self.identity.identity_string(),
                             group_name
@@ -209,20 +198,6 @@ impl User {
         msg: WakuMessage,
         group_name: String,
     ) -> Result<UserAction, UserError> {
-        println!(
-            "[process_app_subtopic]: User {:?} received app message for group {:?}",
-            self.identity.identity_string(),
-            group_name
-        );
-
-        println!("[process_app_subtopic] message: {:?}", msg.payload());
-        let (mls_message_in, _) = MlsMessageIn::tls_deserialize_bytes(msg.payload())
-            .map_err(|e| UserError::MlsMessageInDeserializeError(e.to_string()))?;
-        let mls_message = mls_message_in
-            .try_into_protocol_message()
-            .map_err(|e| UserError::TryIntoProtocolMessageError(e.to_string()))?;
-
-        let group_name = from_utf8(mls_message.group_id().as_slice())?.to_string();
         let group = match self.groups.get_mut(&group_name) {
             Some(g) => g,
             None => return Err(UserError::GroupNotFoundError(group_name)),
@@ -230,9 +205,104 @@ impl User {
         if !group.is_mls_group_initialized() {
             return Ok(UserAction::DoNothing);
         }
-        println!("[process_app_subtopic] mls_message: {:?}", mls_message);
+        info!(
+            "[process_app_subtopic]: User {:?} received app message for group {:?}",
+            self.identity.identity_string(),
+            group_name
+        );
+
+        // Try to parse as AppMessage first
+        if let Ok(app_message) = AppMessage::decode(msg.payload()) {
+            return self.process_app_message(app_message, group_name).await;
+        }
+
+        // Fall back to MLS protocol message
+        let (mls_message_in, _) = MlsMessageIn::tls_deserialize_bytes(msg.payload())
+            .map_err(|e| UserError::MlsMessageInDeserializeError(e.to_string()))?;
+        let mls_message = mls_message_in
+            .try_into_protocol_message()
+            .map_err(|e| UserError::TryIntoProtocolMessageError(e.to_string()))?;
+
         let res = group
             .process_protocol_msg(mls_message, &self.provider, self.identity.signature_key())
+            .await?;
+
+        match res {
+            GroupAction::GroupAppMsg(msg) => Ok(UserAction::SendToApp(msg)),
+            GroupAction::LeaveGroup => Ok(UserAction::LeaveGroup(group_name)),
+            GroupAction::DoNothing => Ok(UserAction::DoNothing),
+        }
+    }
+
+    /// Process AppMessage payload
+    async fn process_app_message(
+        &mut self,
+        app_message: AppMessage,
+        group_name: String,
+    ) -> Result<UserAction, UserError> {
+        match app_message.payload {
+            Some(app_message::Payload::BatchProposalsMessage(batch_msg)) => {
+                self.process_batch_proposals_message(batch_msg, group_name)
+                    .await
+            }
+            Some(app_message::Payload::ConversationMessage(conv_msg)) => {
+                Ok(UserAction::SendToApp(AppMessage {
+                    payload: Some(app_message::Payload::ConversationMessage(conv_msg)),
+                }))
+            }
+            Some(app_message::Payload::VoteStartMessage(vote_msg)) => {
+                Ok(UserAction::SendToApp(AppMessage {
+                    payload: Some(app_message::Payload::VoteStartMessage(vote_msg)),
+                }))
+            }
+            _ => Ok(UserAction::DoNothing),
+        }
+    }
+
+    /// Process batch proposals message
+    async fn process_batch_proposals_message(
+        &mut self,
+        batch_msg: BatchProposalsMessage,
+        group_name: String,
+    ) -> Result<UserAction, UserError> {
+        let group = match self.groups.get_mut(&group_name) {
+            Some(g) => g,
+            None => return Err(UserError::GroupNotFoundError(group_name)),
+        };
+
+        // First, process all proposals before the commit
+        for proposal_bytes in batch_msg.mls_proposals {
+            let (mls_message_in, _) = MlsMessageIn::tls_deserialize_bytes(&proposal_bytes)
+                .map_err(|e| UserError::MlsMessageInDeserializeError(e.to_string()))?;
+
+            let protocol_message = mls_message_in
+                .try_into_protocol_message()
+                .map_err(|e| UserError::TryIntoProtocolMessageError(e.to_string()))?;
+
+            // Process the proposal
+            let _res = group
+                .process_protocol_msg(
+                    protocol_message,
+                    &self.provider,
+                    self.identity.signature_key(),
+                )
+                .await?;
+        }
+
+        // Then process the commit message
+        let (mls_message_in, _) = MlsMessageIn::tls_deserialize_bytes(&batch_msg.commit_message)
+            .map_err(|e| UserError::MlsMessageInDeserializeError(e.to_string()))?;
+
+        let protocol_message = mls_message_in
+            .try_into_protocol_message()
+            .map_err(|e| UserError::TryIntoProtocolMessageError(e.to_string()))?;
+
+        let res = group
+            .process_protocol_msg(
+                protocol_message,
+                &self.provider,
+                self.identity.signature_key(),
+            )
             .await?;
 
         match res {
@@ -252,7 +322,6 @@ impl User {
         &mut self,
         msg: WakuMessage,
     ) -> Result<UserAction, UserError> {
-        info!("Processing waku message: {:?}", msg);
         let group_name = msg.content_topic.application_name.to_string();
         let group = match self.groups.get(&group_name) {
             Some(g) => g,
@@ -264,7 +333,7 @@ impl User {
             return Ok(UserAction::DoNothing);
         }
         let ct_name = msg.content_topic.content_topic_name.to_string();
-        info!("Processing waku message: {:?}", ct_name);
+        info!("Processing waku message from content topic: {:?}", ct_name);
         match ct_name.as_str() {
             WELCOME_SUBTOPIC => self.process_welcome_subtopic(msg, group_name).await,
             APP_MSG_SUBTOPIC => self.process_app_subtopic(msg, group_name).await,
@@ -331,7 +400,7 @@ impl User {
         msg: &str,
         group_name: String,
     ) -> Result<WakuMessageToSend, UserError> {
-        println!("Building group message: {:?}", msg);
+        info!("Start building group message");
         let group = match self.groups.get_mut(&group_name) {
             Some(g) => g,
             None => return Err(UserError::GroupNotFoundError(group_name)),
@@ -348,80 +417,16 @@ impl User {
         let msg_to_send = group
             .build_message(&self.provider, self.identity.signer(), &app_msg)
             .await?;
+        info!("End building group message");
         Ok(msg_to_send)
     }
 
-    pub async fn remove_group_users(
-        &mut self,
-        users: Vec<String>,
-        group_name: String,
-    ) -> Result<WakuMessageToSend, UserError> {
-        if !self.if_group_exists(group_name.clone()) {
-            return Err(UserError::GroupNotFoundError(group_name));
-        }
-        let group = self.groups.get_mut(&group_name).unwrap();
-        let msg = group
-            .remove_members(users, &self.provider, self.identity.signer())
-            .await?;
-
-        Ok(msg)
+    /// Get the identity string for debugging purposes
+    pub fn identity_string(&self) -> String {
+        self.identity.identity_string()
     }
 
-    pub fn wallet(&self) -> EthereumWallet {
-        EthereumWallet::from(self.eth_signer.clone())
-    }
-
-    pub async fn create_invite_proposal(
-        &mut self,
-        users_kp: KeyPackage,
-        group_name: String,
-    ) -> Result<(), UserError> {
-        let group = match self.groups.get_mut(&group_name) {
-            Some(g) => g,
-            None => return Err(UserError::GroupNotFoundError(group_name)),
-        };
-
-        group.store_invite_proposal(users_kp)?;
-        Ok(())
-    }
-
-    pub async fn group_drain_pending_proposals(
-        &mut self,
-        group_name: String,
-    ) -> Result<Vec<GroupUpdateRequest>, UserError> {
-        let group = match self.groups.get_mut(&group_name) {
-            Some(g) => g,
-            None => return Err(UserError::GroupNotFoundError(group_name)),
-        };
-        Ok(group.drain_proposals()?)
-    }
-
-    pub async fn process_proposals(
-        &mut self,
-        group_name: String,
-        proposals: Vec<GroupUpdateRequest>,
-    ) -> Result<WakuMessageToSend, UserError> {
-        let group = match self.groups.get_mut(&group_name) {
-            Some(g) => g,
-            None => return Err(UserError::GroupNotFoundError(group_name)),
-        };
-
-        let format_msg = format!(
-            "Vote start for group {} with {} proposals",
-            group_name,
-            proposals.len()
-        );
-        let app_msg = wrap_vote_start_message_into_application_msg(format_msg.clone());
-        let msg = WakuMessageToSend::new(
-            app_msg.encode_to_vec(),
-            APP_MSG_SUBTOPIC,
-            group_name.clone(),
-            group.app_id().clone(),
-        );
-
-        Ok(msg)
-    }
-
+    /// Apply proposals for the given group, returning the batch message(s).
     pub async fn apply_proposals(
         &mut self,
         group_name: String,
@@ -430,9 +435,131 @@ impl User {
             Some(g) => g,
             None => return Err(UserError::GroupNotFoundError(group_name)),
         };
-        let msg = group
-            .apply_proposals(&self.provider, &self.identity.signer())
+
+        let messages = group
+            .create_batch_proposals_message(&self.provider, self.identity.signer())
             .await?;
-        Ok(msg)
+        Ok(messages)
+    }
+
+    /// Remove proposals and complete the steward epoch for the given group.
+    pub async fn remove_proposals_and_complete(
+        &mut self,
+        group_name: String,
+    ) -> Result<(), UserError> {
+        let group = match self.groups.get_mut(&group_name) {
+            Some(g) => g,
+            None => return Err(UserError::GroupNotFoundError(group_name)),
+        };
+        group.remove_proposals_and_complete().await?;
+        Ok(())
+    }
+
+    /// Start a new steward epoch for the given group.
+    /// Returns the number of proposals that will be voted on.
+    /// If there are no proposals, returns 0 and doesn't change state.
+    pub async fn start_steward_epoch(&mut self, group_name: String) -> Result<usize, UserError> {
+        let group = match self.groups.get_mut(&group_name) {
+            Some(g) => g,
+            None => return Err(UserError::GroupNotFoundError(group_name)),
+        };
+
+        // Check if there are proposals in the current epoch
+        let proposal_count = group.get_pending_proposals_count().await;
+
+        if proposal_count == 0 {
+            // No proposals to vote on, return 0 and don't change state
+            info!("No proposals to vote on, skipping steward epoch");
+            return Ok(0);
+        }
+
+        // There are proposals, start the steward epoch
+        info!("Starting steward epoch with {} proposals", proposal_count);
+        group.start_steward_epoch().await?;
+        Ok(proposal_count)
+    }
+
+    /// Start voting for the given group, returning the vote ID.
+    pub async fn start_voting(&mut self, group_name: String) -> Result<Vec<u8>, UserError> {
+        let current_identity = self.identity.identity_string();
+        let group = match self.groups.get_mut(&group_name) {
+            Some(g) => g,
+            None => return Err(UserError::GroupNotFoundError(group_name)),
+        };
+        group.start_voting()?;
+        let members = group.members_identity().await?;
+        let participant_ids: Vec<Vec<u8>> = members.into_iter().collect();
+        println!(
+            "User: start_voting - participants: {:?}",
+            participant_ids
+                .iter()
+                .map(alloy::hex::encode)
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "User: start_voting - current user identity: {}",
+            current_identity
+        );
+        let vote_id = uuid::Uuid::new_v4().as_bytes().to_vec();
+
+        Ok(vote_id)
+    }
+
+    /// Complete voting for the given group and vote ID, returning the result.
+    pub async fn complete_voting(
+        &mut self,
+        group_name: String,
+        _vote_id: Vec<u8>,
+    ) -> Result<bool, UserError> {
+        let group = match self.groups.get_mut(&group_name) {
+            Some(g) => g,
+            None => return Err(UserError::GroupNotFoundError(group_name)),
+        };
+
+        // Get vote result from HashGraph consensus
+        let vote_result = true;
+
+        // Update group state based on vote result
+        group.complete_voting(vote_result)?;
+        Ok(vote_result)
+    }
+
+    /// Submit a vote for the given vote ID.
+    pub async fn submit_vote(&mut self, vote_id: Vec<u8>, vote: bool) -> Result<(), UserError> {
+        let current_identity = self.identity.identity_string();
+        info!("User: submit_vote - vote_id: {:?}, vote: {}", vote_id, vote);
+        info!(
+            "User: submit_vote - current user identity: {}",
+            current_identity
+        );
+        Ok(())
+    }
+
+    /// Add a remove proposal to the steward for the given group.
+    pub async fn add_remove_proposal(
+        &mut self,
+        group_name: String,
+        identity: String,
+    ) -> Result<(), UserError> {
+        let group = match self.groups.get_mut(&group_name) {
+            Some(g) => g,
+            None => return Err(UserError::GroupNotFoundError(group_name)),
+        };
+        let identity_bytes = alloy::hex::decode(&identity)
+            .map_err(|e| UserError::ApplyProposalsError(format!("Invalid hex string: {}", e)))?;
+        group.store_remove_proposal(identity_bytes).await?;
+        Ok(())
+    }
+
+    /// Get the number of pending proposals for the given group.
+    pub async fn get_pending_proposals_count(
+        &self,
+        group_name: String,
+    ) -> Result<usize, UserError> {
+        let group = self
+            .groups
+            .get(&group_name)
+            .ok_or(UserError::GroupNotFoundError(group_name))?;
+        Ok(group.get_pending_proposals_count().await)
     }
 }

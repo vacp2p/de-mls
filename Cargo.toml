@@ -20,7 +20,7 @@ bench = false
 
 [dependencies]
 # foundry-contracts.workspace = true
-openmls = { version = "0.6.0"}
+openmls = { version = "0.6.0" }
 openmls_basic_credential = "0.3.0"
 openmls_rust_crypto = "0.3.0"
 openmls_traits = "0.3.0"
@@ -42,14 +42,15 @@ kameo = "0.13.0"
 
 criterion = { version = "0.4.0", features = ["html_reports"] }
 
-waku-bindings = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "rln-fix-deps"}
-waku-sys = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "rln-fix-deps"}
+waku-bindings = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "rln-fix-deps" }
+waku-sys = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "rln-fix-deps" }
 
 rand = "0.8.5"
 serde_json = "1.0"
 serde = { version = "1.0.163", features = ["derive"] }
 tls_codec = "0.3.0"
 chrono = "0.4"
+sha2 = "0.10.8"
 
 secp256k1 = { version = "0.30.0", features = [
     "rand",
@@ -75,7 +76,3 @@ bytes = "1.10.1"
 
 [build-dependencies]
 prost-build = "0.13.5"
-
-# [[bench]]
-# name = "group_flow_benchmark"
-# harness = false

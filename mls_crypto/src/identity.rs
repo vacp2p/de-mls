@@ -71,10 +71,6 @@ impl Identity {
         address_string(self.credential_with_key.credential.serialized_content())
     }
 
-    pub fn signature_pub_key(&self) -> Vec<u8> {
-        self.signer.public().to_vec()
-    }
-
     pub fn signer(&self) -> &SignatureKeyPair {
         &self.signer
     }

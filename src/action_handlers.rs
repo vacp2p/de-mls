@@ -28,7 +28,6 @@ pub async fn handle_user_actions(
             waku_node.send(msg).await?;
         }
         UserAction::SendToApp(msg) => {
-            info!("Send to group: {:?}", msg);
             ws_actor.ask(msg).await?;
         }
         UserAction::LeaveGroup(group_name) => {
@@ -69,7 +68,6 @@ pub async fn handle_ws_action(
             info!("Got unexpected connect: {:?}", &connect);
         }
         WsAction::UserMessage(msg) => {
-            info!("Got user message: {:?}", &msg);
             let app_message = wrap_conversation_message_into_application_msg(
                 msg.message.clone().into_bytes(),
                 "me".to_string(),
@@ -79,7 +77,7 @@ pub async fn handle_ws_action(
 
             let pmt = user_actor
                 .ask(SendGroupMessage {
-                    msg: msg.message,
+                    message: msg.message.clone(),
                     group_name: msg.group_id,
                 })
                 .await?;
@@ -87,15 +85,19 @@ pub async fn handle_ws_action(
         }
         WsAction::RemoveUser(user_to_ban, group_name) => {
             info!("Got remove user: {:?}", &user_to_ban);
-            let pmt = user_actor
+            user_actor
                 .ask(RemoveUserRequest {
                     user_to_ban: user_to_ban.clone(),
                     group_name: group_name.clone(),
                 })
                 .await?;
-            waku_node.send(pmt).await?;
+
             let app_message = wrap_conversation_message_into_application_msg(
-                format!("User {} was removed from group", user_to_ban).into_bytes(),
+                format!(
+                    "Remove proposal for user {} added to steward queue",
+                    user_to_ban
+                )
+                .into_bytes(),
                 "system".to_string(),
                 group_name.clone(),
             );

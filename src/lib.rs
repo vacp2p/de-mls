@@ -1,28 +1,111 @@
-use alloy::signers::local::LocalSignerError;
+//! # DE-MLS: Distributed MLS Group Management System
+//!
+//! This crate provides a distributed group management system built on top of MLS (Message Layer Security).
+//! It implements a steward-based epoch management system with HashGraph-like consensus for secure group operations.
+//!
+//! ## Architecture Overview
+//!
+//! The system consists of several key components:
+//!
+//! ### Core Components
+//!
+//! - **Group Management** (`group.rs`): Orchestrates MLS group operations and state transitions
+//! - **State Machine** (`state_machine.rs`): Manages steward epoch states and transitions
+//! - **Steward** (`steward.rs`): Handles proposal collection and management
+//! - **Consensus** (`consensus/`): Provides distributed consensus for voting based on HashGraph-like protocol
+//! - **User Management** (`user.rs`): Manages individual user operations and message handling
+//!
+//! ### Actor System
+//!
+//! - **User Actor** (`user_actor.rs`): Actor-based user management with message handling
+//! - **WebSocket Actor** (`ws_actor.rs`): Handles WebSocket connections and message routing
+//! - **Action Handlers** (`action_handlers.rs`): Processes various system actions
+//!
+//! ### Communication
+//!
+//! - **Message Handling** (`message.rs`): Protobuf message serialization/deserialization
+//! - **Protocol Buffers** (`protos/`): Message definitions for network communication
+//! - **Consensus Messages** (`protos/messages/v1/consensus.proto`): Consensus-specific message types
+//!
+//! ## Steward Epoch Flow
+//!
+//! The system operates in epochs managed by a steward:
+//!
+//! 1. **Working State**: Normal operation, all users can send messages
+//! 2. **Waiting State**: Steward epoch active, collecting proposals
+//! 3. **Voting State**: Consensus voting on collected proposals
+//!
+//! ### State Transitions
+//!
+//! ```text
+//! Working --start_steward_epoch()--> Waiting (if proposals exist)
+//! Working --start_steward_epoch()--> Working (if no proposals)
+//! Waiting --start_voting()---------> Voting
+//! Voting --complete_voting(true)--> Waiting (vote passed)
+//! Voting --complete_voting(false)-> Working (vote failed)
+//! Waiting --apply_proposals_and_complete()--> Working
+//! ```
+//!
+//! ## Message Flow
+//!
+//! ### Regular Messages
+//! ```text
+//! User --> Group --> MLS Group --> Other Users
+//! ```
+//!
+//! ### Steward Messages
+//! ```text
+//! Steward (with proposals) --> Group --> MLS Group --> Other Users
+//! ```
+//!
+//! ### Batch Proposals
+//! ```text
+//! Group --> Create MLS Proposals --> Commit --> Batch Message --> Users
+//! Users --> Parse Batch --> Apply Proposals --> Update MLS Group
+//! ```
+//!
+//! ## Testing
+//!
+//! The system includes comprehensive tests:
+//!
+//! - State machine transitions
+//! - Message handling
+//!
+//! Run tests with:
+//! ```bash
+//! cargo test
+//! ```
+//!
+//! ## Dependencies
+//!
+//! - **MLS**: Message Layer Security for group key management
+//! - **Tokio**: Async runtime for concurrent operations
+//! - **Kameo**: Actor system for distributed operations
+//! - **Prost**: Protocol buffer serialization
+//! - **OpenMLS**: MLS implementation
+//! - **Waku**: Decentralized messaging protocol
+//! - **Alloy**: Ethereum wallet and signing
+
 use ecies::{decrypt, encrypt};
-use kameo::error::SendError;
 use libsecp256k1::{sign, verify, Message, PublicKey, SecretKey, Signature as libSignature};
-use openmls::group::WelcomeError;
-use openmls_rust_crypto::MemoryStorageError;
 use rand::thread_rng;
 use secp256k1::hashes::{sha256, Hash};
 use std::{
     collections::HashSet,
-    str::Utf8Error,
-    string::FromUtf8Error,
     sync::{Arc, Mutex},
 };
 use tokio::sync::mpsc::Sender;
 use waku_bindings::{WakuContentTopic, WakuMessage};
 
-use ds::{waku_actor::WakuMessageToSend, DeliveryServiceError};
-use error::{MessageError, GroupError};
-use mls_crypto::error::IdentityError;
+use ds::waku_actor::WakuMessageToSend;
+use error::{GroupError, MessageError};
 
 pub mod action_handlers;
+// pub mod consensus;
 pub mod error;
 pub mod group;
 pub mod message;
+pub mod state_machine;
 pub mod steward;
 pub mod user;
 pub mod user_actor;
@@ -33,6 +116,7 @@ pub mod protos {
     pub mod messages {
         pub mod v1 {
             include!(concat!(env!("OUT_DIR"), "/de_mls.messages.v1.rs"));
+            include!(concat!(env!("OUT_DIR"), "/consensus.v1.rs"));
         }
     }
 }
@@ -87,77 +171,6 @@ pub fn decrypt_message(message: &[u8], secret_key: SecretKey) -> Result<Vec<u8>,
     let secret_key_serialized = secret_key.serialize();
     let decrypted = decrypt(&secret_key_serialized, message)?;
     Ok(decrypted)
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum UserError {
-    #[error(transparent)]
-    DeliveryServiceError(#[from] DeliveryServiceError),
-    #[error(transparent)]
-    IdentityError(#[from] IdentityError),
-    #[error(transparent)]
-    GroupError(#[from] GroupError),
-    #[error(transparent)]
-    MessageError(#[from] MessageError),
-
-    #[error("Group already exists: {0}")]
-    GroupAlreadyExistsError(String),
-    #[error("Group not found: {0}")]
-    GroupNotFoundError(String),
-
-    #[error("Unsupported message type.")]
-    UnsupportedMessageType,
-    #[error("Welcome message cannot be empty.")]
-    EmptyWelcomeMessageError,
-    #[error("Message verification failed")]
-    MessageVerificationFailed,
-
-    #[error("Unknown content topic type: {0}")]
-    UnknownContentTopicType(String),
-
-    #[error("Failed to create staged join: {0}")]
-    MlsWelcomeError(#[from] WelcomeError<MemoryStorageError>),
-
-    #[error("UTF-8 parsing error: {0}")]
-    Utf8ParsingError(#[from] FromUtf8Error),
-    #[error("UTF-8 string parsing error: {0}")]
-    Utf8StringParsingError(#[from] Utf8Error),
-    #[error("JSON processing error: {0}")]
-    JsonError(#[from] serde_json::Error),
-    #[error("Serialization error: {0}")]
-    SerializationError(#[from] tls_codec::Error),
-    #[error("Failed to parse signer: {0}")]
-    SignerParsingError(#[from] LocalSignerError),
-
-    #[error("Failed to publish message: {0}")]
-    KameoPublishMessageError(#[from] SendError<WakuMessageToSend, DeliveryServiceError>),
-    #[error("Failed to create group: {0}")]
-    KameoCreateGroupError(String),
-    #[error("Failed to send message to user: {0}")]
-    KameoSendMessageError(String),
-    #[error("Failed to get income key packages: {0}")]
-    GetIncomeKeyPackagesError(String),
-    #[error("Failed to process steward message: {0}")]
-    ProcessStewardMessageError(String),
-    #[error("Failed to process proposals: {0}")]
-    ProcessProposalsError(String),
-    #[error("Unsupported mls message type")]
-    UnsupportedMlsMessageType,
-    #[error("Failed to decode welcome message: {0}")]
-    WelcomeMessageDecodeError(#[from] prost::DecodeError),
-    #[error("Failed to apply proposals: {0}")]
-    ApplyProposalsError(String),
-    #[error("Failed to deserialize mls message in: {0}")]
-    MlsMessageInDeserializeError(String),
-    #[error("Failed to create invite proposal: {0}")]
-    CreateInviteProposalError(String),
-    #[error("Failed to try into protocol message: {0}")]
-    TryIntoProtocolMessageError(String),
-    #[error("Failed to get group update requests: {0}")]
-    GetGroupUpdateRequestsError(String),
-
-    #[error("Failed to send message to waku: {0}")]
-    WakuSendMessageError(#[from] tokio::sync::mpsc::error::SendError<WakuMessageToSend>),
 }
 
 /// Check if a content topic exists in a list of topics or if the list is empty

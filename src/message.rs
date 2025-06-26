@@ -27,19 +27,20 @@
 
 use crate::{
     encrypt_message,
-    protos::messages::v1::{app_message, UserKeyPackage, VoteStartMessage},
+    protos::messages::v1::{app_message, UserKeyPackage},
     verify_message, MessageError,
 };
 // use log::info;
 use openmls::prelude::{KeyPackage, MlsMessageOut};
+use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
 // use crate::protos::messages::v1::{
 //     welcome_message, GroupAnnouncement, InvitationToJoin, WelcomeMessage, AppMessage, ConversationMessage, UserKeyPackage,
 // };
 use crate::protos::messages::v1::{
-    welcome_message, AppMessage, ConversationMessage, GroupAnnouncement, InvitationToJoin,
-    WelcomeMessage,
+    welcome_message, AppMessage, BatchProposalsMessage, ConversationMessage, GroupAnnouncement,
+    InvitationToJoin, WelcomeMessage,
 };
 
 // WELCOME MESSAGE SUBTOPIC
@@ -68,10 +69,6 @@ pub fn wrap_user_kp_into_welcome_msg(
 pub fn wrap_invitation_into_welcome_msg(
     mls_message: MlsMessageOut,
 ) -> Result<WelcomeMessage, MessageError> {
-    println!(
-        "Start wrapping invitation into welcome message: {:?}",
-        mls_message.body()
-    );
     let mls_bytes = mls_message.to_bytes()?;
     let invitation = InvitationToJoin {
         mls_message_out_bytes: mls_bytes,
@@ -80,7 +77,6 @@ pub fn wrap_invitation_into_welcome_msg(
     let welcome_message = WelcomeMessage {
         payload: Some(welcome_message::Payload::InvitationToJoin(invitation)),
     };
-    println!("End wrapping invitation into welcome message");
     Ok(welcome_message)
 }
 
@@ -123,30 +119,20 @@ pub fn wrap_conversation_message_into_application_msg(
     }
 }
 
-pub fn wrap_vote_start_message_into_application_msg(group_name: String) -> AppMessage {
-    AppMessage {
-        payload: Some(app_message::Payload::VoteStartMessage(VoteStartMessage {
-            group_name: group_name.into_bytes(),
-        })),
-    }
-}
-
-pub fn wrap_mls_out_message_into_application_msg(
-    mls_message: MlsMessageOut,
-    sender: String,
+pub fn wrap_batch_proposals_into_application_msg(
     group_name: String,
-) -> Result<AppMessage, MessageError> {
-    let mls_bytes = mls_message.to_bytes()?;
-    let app_message = AppMessage {
-        payload: Some(app_message::Payload::ConversationMessage(
-            ConversationMessage {
-                message: mls_bytes,
-                sender,
-                group_name,
+    mls_proposals: Vec<Vec<u8>>,
+    commit_message: Vec<u8>,
+) -> AppMessage {
+    AppMessage {
+        payload: Some(app_message::Payload::BatchProposalsMessage(
+            BatchProposalsMessage {
+                group_name: group_name.into_bytes(),
+                mls_proposals,
+                commit_message,
             },
         )),
-    };
-    Ok(app_message)
+    }
 }
 
 impl Display for AppMessage {
@@ -163,4 +149,22 @@ impl Display for AppMessage {
             _ => write!(f, "Invalid message"),
         }
     }
+}
+
+/// This struct is used to represent the message from the user that we got from web socket
+#[derive(Deserialize, Debug, PartialEq, Serialize)]
+pub struct UserMessage {
+    pub message: String,
+    pub group_id: String,
+}
+
+/// This struct is used to represent the connection data that web socket sends to the user
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub struct ConnectMessage {
+    /// This is the private key of the user that we will use to authenticate the user
+    pub eth_private_key: String,
+    /// This is the id of the group that the user is joining
+    pub group_id: String,
+    /// This is the flag that indicates if the user should create a new group or subscribe to an existing one
+    pub should_create: bool,
 }

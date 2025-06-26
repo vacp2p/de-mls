@@ -4,9 +4,11 @@ use kameo::{
     message::{Context, Message},
     Actor,
 };
-use serde::{Deserialize, Serialize};
 
-use crate::protos::messages::v1::AppMessage;
+use crate::{
+    message::{ConnectMessage, UserMessage},
+    protos::messages::v1::AppMessage,
+};
 
 /// This actor is used to handle messages from web socket
 #[derive(Debug, Actor)]
@@ -39,29 +41,11 @@ pub enum WsAction {
     DoNothing,
 }
 
-/// This struct is used to represent the message from the user that we got from web socket
-#[derive(Deserialize, Debug, PartialEq, Serialize)]
-pub struct UserMessage {
-    pub message: String,
-    pub group_id: String,
-}
-
-/// This struct is used to represent the connection data that web socket sends to the user
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct ConnectMessage {
-    /// This is the private key of the user that we will use to authenticate the user
-    pub eth_private_key: String,
-    /// This is the id of the group that the user is joining
-    pub group_id: String,
-    /// This is the flag that indicates if the user should create a new group or subscribe to an existing one
-    pub should_create: bool,
-}
-
 /// This struct is used to represent the raw message from the web socket.
 /// It is used to handle the message from the web socket and return it to the user
 /// We can parse it to the ConnectMessage or UserMessage
 ///     if it starts with "/ban" it will be parsed to RemoveUser, otherwise it will be parsed to UserMessage
-#[derive(Deserialize, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct RawWsMessage {
     pub message: String,
 }
@@ -126,8 +110,8 @@ impl Message<AppMessage> for WsActor {
 pub enum WsError {
     #[error("Invalid message")]
     InvalidMessage,
-    #[error("Malformed json")]
+    #[error("Malformed json: {0}")]
     MalformedJson(#[from] serde_json::Error),
-    #[error("Failed to send message")]
+    #[error("Failed to send message to websocket: {0}")]
     SendMessageError(#[from] axum::Error),
 }

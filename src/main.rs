@@ -172,10 +172,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 error!("Content topic not match: {:?}", content_topic);
                 return;
             };
-            info!(
-                "Received message from waku that matches content topic: {:?}",
-                msg.timestamp
-            );
+            info!("Received message from waku that matches content topic",);
             let res = handle_user_actions(
                 msg,
                 state_clone.waku_node.clone(),

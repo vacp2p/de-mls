@@ -1,5 +1,7 @@
 use libsecp256k1::{PublicKey, SecretKey};
 use openmls::prelude::KeyPackage;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use crate::{protos::messages::v1::GroupAnnouncement, *};
 
@@ -7,14 +9,13 @@ use crate::{protos::messages::v1::GroupAnnouncement, *};
 pub struct Steward {
     eth_pub: PublicKey,
     eth_secr: SecretKey,
-    proposals_queue: Arc<Mutex<Vec<GroupUpdateRequest>>>,
-    // incoming_key_packages: Arc<Mutex<Vec<KeyPackage>>>,
-    // pending_proposals: Arc<Mutex<Vec<ProposalRef>>>,
+    current_epoch_proposals: Arc<Mutex<Vec<GroupUpdateRequest>>>,
+    voting_epoch_proposals: Arc<Mutex<Vec<GroupUpdateRequest>>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum GroupUpdateRequest {
-    AddMember(KeyPackage),
+    AddMember(Box<KeyPackage>),
     RemoveMember(Vec<u8>),
 }
 
@@ -30,9 +31,8 @@ impl Steward {
         Steward {
             eth_pub: public_key,
             eth_secr: private_key,
-            proposals_queue: Arc::new(Mutex::new(Vec::new())),
-            // incoming_key_packages: Arc::new(Mutex::new(Vec::new())),
-            // pending_proposals: Arc::new(Mutex::new(Vec::new())),
+            current_epoch_proposals: Arc::new(Mutex::new(Vec::new())),
+            voting_epoch_proposals: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -54,52 +54,50 @@ impl Steward {
         Ok(key_package)
     }
 
-    pub fn put_invite_proposal(&mut self, key_package: KeyPackage) {
-        self.proposals_queue
+    /// Start a new steward epoch, moving current proposals to the epoch proposals map and incrementing the epoch.
+    pub async fn start_new_epoch(&mut self) {
+        // Get proposals from current epoch and store them for this epoch
+        let proposals = self
+            .current_epoch_proposals
             .lock()
-            .unwrap()
-            .push(GroupUpdateRequest::AddMember(key_package));
+            .await
+            .drain(0..)
+            .collect::<Vec<_>>();
+
+        // Store proposals for this epoch (for voting and application)
+        if !proposals.is_empty() {
+            self.voting_epoch_proposals
+                .lock()
+                .await
+                .extend(proposals.clone());
+        }
     }
 
-    pub fn put_remove_proposal(&mut self, identity: Vec<u8>) {
-        self.proposals_queue
-            .lock()
-            .unwrap()
-            .push(GroupUpdateRequest::RemoveMember(identity));
+    pub async fn get_current_epoch_proposals(&self) -> Vec<GroupUpdateRequest> {
+        self.current_epoch_proposals.lock().await.clone()
     }
 
-    pub fn drain_proposals(&mut self) -> Vec<GroupUpdateRequest> {
-        self.proposals_queue.lock().unwrap().drain(0..).collect()
+    pub async fn get_current_epoch_proposals_count(&self) -> usize {
+        self.current_epoch_proposals.lock().await.len()
     }
 
-    // pub fn add_incoming_key_package(&mut self, key_package: KeyPackage) {
-    //     self.incoming_key_packages.lock().unwrap().push(key_package)
-    // }
+    /// Get proposals for the current epoch (for voting).
+    pub async fn get_voting_epoch_proposals(&self) -> Vec<GroupUpdateRequest> {
+        self.voting_epoch_proposals.lock().await.clone()
+    }
 
-    // pub fn drain_processed_key_packages(&mut self) -> Vec<KeyPackage> {
-    //     self.incoming_key_packages
-    //         .lock()
-    //         .unwrap()
-    //         .drain(0..)
-    //         .collect()
-    // }
+    /// Get the count of proposals in the current epoch.
+    pub async fn get_voting_epoch_proposals_count(&self) -> usize {
+        self.voting_epoch_proposals.lock().await.len()
+    }
 
-    // pub fn add_pending_proposal(&mut self, proposal: ProposalRef) {
-    //     self.pending_proposals.lock().unwrap().push(proposal);
-    // }
+    /// Apply proposals for the current epoch (called after successful voting).
+    pub async fn empty_voting_epoch_proposals(&mut self) {
+        self.voting_epoch_proposals.lock().await.clear();
+    }
 
-    // pub fn get_pending_proposals(&self) -> Vec<ProposalRef> {
-    //     self.pending_proposals.lock().unwrap().clone()
-    // }
-
-    // pub fn remove_pending_proposal(&mut self, proposal: ProposalRef) {
-    //     self.pending_proposals
-    //         .lock()
-    //         .unwrap()
-    //         .retain(|p| p != &proposal);
-    // }
-
-    // pub fn drain_pending_proposals(&mut self) -> Vec<ProposalRef> {
-    //     self.pending_proposals.lock().unwrap().drain(0..).collect()
-    // }
+    /// Add a proposal to the current epoch
+    pub async fn add_proposal(&mut self, proposal: GroupUpdateRequest) {
+        self.current_epoch_proposals.lock().await.push(proposal);
+    }
 }
