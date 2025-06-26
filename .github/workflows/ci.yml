@@ -67,8 +67,6 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: protoc@${{ env.PROTOC_VERSION }}
-      - name: install ninja
-        uses: ./.github/actions/setup-ninja
       - name: install cargo-udeps
         uses: taiki-e/install-action@cargo-udeps
       - name: cargo udeps
