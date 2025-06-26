@@ -23,6 +23,12 @@ impl Application {
     }
 }
 
+impl Default for Application {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Message<WakuMessage> for Application {
     type Reply = Result<WakuMessage, DeliveryServiceError>;
 
@@ -90,8 +96,8 @@ async fn test_waku_client() {
         tokio::runtime::Handle::current().block_on(async move {
             let res = waku_node
                 .send_message(WakuMessageToSend::new(
-                    format!("test_message_1").as_bytes().to_vec(),
-                    APP_MSG_SUBTOPIC.to_string(),
+                    "test_message_1".as_bytes().to_vec(),
+                    APP_MSG_SUBTOPIC,
                     group_name.clone(),
                     uuid.clone(),
                 ))

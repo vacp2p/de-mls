@@ -1,0 +1,24 @@
+// src/protos/messages/v1/application.proto
+
+syntax = "proto3";
+
+package de_mls.messages.v1;
+
+message AppMessage {
+  oneof payload {
+    ConversationMessage conversation_message = 1;
+    BatchProposalsMessage batch_proposals_message = 2;
+  }
+}
+
+message ConversationMessage {
+  bytes message = 1;
+  string sender = 2;
+  string group_name = 3;
+}
+
+message BatchProposalsMessage {
+  bytes group_name = 1;
+  repeated bytes mls_proposals = 2;  // Individual MLS proposal messages
+  bytes commit_message = 3;          // MLS commit message
+}

@@ -7,63 +7,157 @@ on:
 
 name: "CI"
 
+env:
+  PROTOC_VERSION: '3.25.3'
+
 jobs:
-  # ds_test:
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Checkout code
-  #       uses: actions/checkout@v3
-  #     - name: Install stable toolchain
-  #       uses: actions-rs/toolchain@v1
-  #       with:
-  #         profile: minimal
-  #         toolchain: stable
-  #         override: true
-  #     - uses: Swatinem/rust-cache@v2
-  #     - name: cargo test
-  #       run: |
-  #         cargo test --release
-  #       working-directory: ds
-  user_test:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
-      - name: cargo test
-        run: |
-          cargo test --release
-        working-directory: tests
-
-  # benches:
-  #   if: github.event_name == 'pull_request'
-  #   runs-on: ubuntu-latest
-  #   timeout-minutes: 60
-  #   steps:
-  #     - name: Checkout sources
-  #       uses: actions/checkout@v3
-  #     - uses: Swatinem/rust-cache@v2
-  #     - uses: boa-dev/criterion-compare-action@v3
-  #       with:
-  #         branchName: ${{ github.base_ref }}
-
-  lint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - name: Checkout sources
-        uses: actions/checkout@v3
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
+        uses: actions/checkout@v4
         with:
-          profile: minimal
-          toolchain: stable
-          override: true
+          submodules: 'recursive'
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: cargo fmt
-        if: success() || failure()
-        run: cargo fmt -- --check
-      - name: cargo clippy
-        if: success() || failure()
+      - name: Cache protoc
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin
+          key: protoc-${{ env.PROTOC_VERSION }}-${{ runner.os }}
+          restore-keys: |
+            protoc-${{ env.PROTOC_VERSION }}-
+            protoc-
+      - name: install protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc@${{ env.PROTOC_VERSION }}
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Run clippy
+        run: cargo clippy --all-features --tests -- -D warnings
+
+  unused_dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Cache protoc
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin
+          key: protoc-${{ env.PROTOC_VERSION }}-${{ runner.os }}
+          restore-keys: |
+            protoc-${{ env.PROTOC_VERSION }}-
+            protoc-
+      - name: install protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc@${{ env.PROTOC_VERSION }}
+      - name: Cache cargo-udeps
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: cargo-udeps-${{ runner.os }}
+      - name: install cargo-udeps
+        uses: taiki-e/install-action@cargo-udeps
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+      - name: cargo udeps
+        run: cargo +nightly udeps
+      - name: cargo udeps all-targets
+        run: cargo +nightly udeps --all-targets  
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+      - name: Cache protoc
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin
+          key: protoc-${{ env.PROTOC_VERSION }}-${{ runner.os }}
+          restore-keys: |
+            protoc-${{ env.PROTOC_VERSION }}-
+            protoc-
+      - name: install protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc@${{ env.PROTOC_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+      - name: "doc --lib --all-features"
         run: |
-          cargo clippy --release -- -D warnings
+          cargo doc --lib --no-deps --all-features --document-private-items
+        env:
+          RUSTDOCFLAGS: -Dwarnings  
+
+  test:
+    needs: [lint, unused_dependencies]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+      - name: Cache protoc
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin
+          key: protoc-${{ env.PROTOC_VERSION }}-${{ runner.os }}
+          restore-keys: |
+            protoc-${{ env.PROTOC_VERSION }}-
+            protoc-
+      - name: install protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc@${{ env.PROTOC_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+      - name: Build and test
+        run: |
+          cargo build --release
+          cargo test --release

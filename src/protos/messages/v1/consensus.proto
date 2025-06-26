@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package consensus.v1;
+
+// Proposal represents a consensus proposal that needs voting
+message Proposal {
+  string name = 10;                 // Proposal name
+  int32 proposal_id = 11;           // Unique identifier of the proposal
+  bytes proposal_owner = 12;        // Public key of the creator 
+  repeated Vote votes = 13;         // Vote list in the proposal
+  int32 expected_voters_count = 14; // Maximum number of distinct voters
+  int32 round = 15;                 // Number of Votes 
+  int64 timestamp = 16;             // Creation time of proposal
+  int64 expiration_time = 17;       // The time interval that the proposal is active.  
+  bool liveness_criteria_yes = 18;  // Shows how managing the silent peers vote
+}
+
+// Vote represents a single vote in a consensus proposal
+message Vote {
+  int32 vote_id = 20;             // Unique identifier of the vote
+  bytes vote_owner = 21;          // Voter's public key
+  int64 timestamp = 22;           // Time when the vote was cast
+  bool vote = 23;                 // Vote bool value (true/false)
+  bytes parent_hash = 24;         // Hash of previous owner's Vote
+  bytes received_hash = 25;       // Hash of previous received Vote
+  bytes vote_hash = 26;           // Hash of all previously defined fields in Vote
+  bytes signature = 27;           // Signature of vote_hash
+}
+
+// ConsensusMessage wraps consensus-related messages
+message ConsensusMessage {
+  oneof payload {
+    Proposal proposal = 1;
+    Vote vote = 2;
+    ConsensusResult result = 3;
+  }
+}
+
+// ConsensusResult represents the final result of a consensus round
+message ConsensusResult {
+  int32 proposal_id = 1;          // ID of the proposal this result belongs to
+  bool consensus_reached = 2;      // Whether consensus was reached
+  bool final_decision = 3;         // The final decision (true/false)
+  int32 total_votes = 4;          // Total number of votes received
+  int32 yes_votes = 5;            // Number of yes votes
+  int32 no_votes = 6;             // Number of no votes
+  int64 consensus_time = 7;       // Time when consensus was reached
+  repeated bytes participants = 8; // List of participant public keys
+} 
