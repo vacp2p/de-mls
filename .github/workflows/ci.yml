@@ -20,6 +20,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
 
   clippy:
@@ -36,6 +37,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-features --tests -- -D warnings
   
   unused_dependencies:
@@ -52,6 +54,7 @@ jobs:
           tool: protoc@${{ env.PROTOC_VERSION }}
       - name: install cargo-udeps
         uses: taiki-e/install-action@cargo-udeps
+      - uses: Swatinem/rust-cache@v2
       - name: cargo udeps
         run: cargo +nightly udeps
       - name: cargo udeps all-targets
@@ -70,14 +73,12 @@ jobs:
         with:
           tool: protoc@${{ env.PROTOC_VERSION }}
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: "doc --lib --all-features"
         run: |
           cargo doc --lib --no-deps --all-features --document-private-items
         env:
           RUSTDOCFLAGS: -Dwarnings  
-  
-
-
 
   user_test:
     needs: [rustfmt, clippy, docs, unused_dependencies]
@@ -89,6 +90,7 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: protoc@${{ env.PROTOC_VERSION }}
+      - uses: Swatinem/rust-cache@v2
       - name: cargo test
         run: |
           cargo test --release
