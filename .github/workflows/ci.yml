@@ -34,9 +34,16 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: protoc@${{ env.PROTOC_VERSION }}
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
         with:
-          cache-on-failure: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Run clippy
@@ -68,9 +75,16 @@ jobs:
           key: cargo-udeps-${{ runner.os }}
       - name: install cargo-udeps
         uses: taiki-e/install-action@cargo-udeps
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
         with:
-          cache-on-failure: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
       - name: cargo udeps
         run: cargo +nightly udeps
       - name: cargo udeps all-targets
@@ -96,9 +110,16 @@ jobs:
         with:
           tool: protoc@${{ env.PROTOC_VERSION }}
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
         with:
-          cache-on-failure: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
       - name: "doc --lib --all-features"
         run: |
           cargo doc --lib --no-deps --all-features --document-private-items
@@ -126,19 +147,17 @@ jobs:
         with:
           tool: protoc@${{ env.PROTOC_VERSION }}
       - uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo-chef
+      - name: Cache Rust dependencies
         uses: actions/cache@v4
         with:
-          path: ~/.cargo/bin
-          key: cargo-chef-${{ runner.os }}
-      - name: Install cargo-chef
-        run: cargo install cargo-chef --locked
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - name: Prepare cargo-chef cache
-        run: cargo chef prepare --recipe-path recipe.json
-      - name: Build dependencies
-        run: cargo chef cook --recipe-path recipe.json --release
-      - name: Run tests
-        run: cargo test --release
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+      - name: Build and test
+        run: |
+          cargo build --release
+          cargo test --release
