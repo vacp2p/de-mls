@@ -3,27 +3,20 @@
 //! Inside the [`WakuMessage`](waku_bindings::WakuMessage) we have a [`ContentTopic`](waku_bindings::WakuContentTopic) and a payload
 //! The [`ContentTopic`](waku_bindings::WakuContentTopic) is used to identify the type of message and the payload is the actual message
 //! Based on the [`ContentTopic`](waku_bindings::WakuContentTopic) we distinguish between:
-//!  - [`WelcomeMessage`](crate::message::WelcomeMessage) which includes next message types:
-//!    - [`GroupAnnouncement`](crate::message::WelcomeMessageType::GroupAnnouncement)
+//!  - [`WelcomeMessage`] which includes next message types:
+//!    - [`GroupAnnouncement`]
 //!         - `GroupAnnouncement {
 //!             eth_pub_key: Vec<u8>,
 //!             signature: Vec<u8>,
 //!           }`
-//!    - [`UserKeyPackage`](crate::message::WelcomeMessageType::UserKeyPackage)
-//!         - Encrypted KeyPackage: Vec<u8>
-//!    - [`InvitationToJoin`](crate::message::WelcomeMessageType::InvitationToJoin)
-//!         - Serialized MlsMessageOut: Vec<u8>
-//!  - [`ProtocolMessage`](crate::message::ProtocolMessage)
-//!    
+//!    - [`UserKeyPackage`]
+//!         - `Encrypted KeyPackage: Vec<u8>`
+//!    - [`InvitationToJoin`]
+//!         - `Serialized MlsMessageOut: Vec<u8>`
+//!  - [`AppMessage`]
+//!    - [`ConversationMessage`]
+//!    - [`BatchProposalsMessage`]
 //!
-//!
-//! Next level of abstraction is the [ProtocolMessage](openmls::group::ProtocolMessage)
-//! This is the message that is used to communicate between the group members
-//! It contains the group id, the message type, the message payload and the signature
-//! The message type is used to identify the type of message and the payload is the actual message
-//! The signature is used to verify the message
-//!
-//! The [ProtocolMessage] is used to communicate between the group members
 
 use crate::{
     encrypt_message,

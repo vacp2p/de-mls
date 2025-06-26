@@ -267,7 +267,7 @@ mod tests {
         assert_eq!(state_machine.current_state(), GroupState::Working);
 
         // Test start_steward_epoch
-        let proposals = state_machine
+        state_machine
             .start_steward_epoch()
             .await
             .expect("Failed to start steward epoch");
@@ -286,12 +286,11 @@ mod tests {
         assert_eq!(state_machine.current_state(), GroupState::Waiting);
 
         // Test apply_proposals_and_complete
-        let applied_proposals = state_machine
+        state_machine
             .remove_proposals_and_complete()
             .await
             .expect("Failed to apply proposals");
         assert_eq!(state_machine.current_state(), GroupState::Working);
-        assert_eq!(applied_proposals, proposals);
     }
 
     #[tokio::test]

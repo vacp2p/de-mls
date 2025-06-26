@@ -756,7 +756,7 @@ async fn test_remove_user_flow() {
         )
     );
 
-    let _pmt = match ws_action {
+    match ws_action {
         WsAction::RemoveUser(user_to_ban, group_name) => {
             // Add remove proposal to steward instead of direct removal
             alice

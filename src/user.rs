@@ -250,11 +250,6 @@ impl User {
                     payload: Some(app_message::Payload::ConversationMessage(conv_msg)),
                 }))
             }
-            Some(app_message::Payload::VoteStartMessage(vote_msg)) => {
-                Ok(UserAction::SendToApp(AppMessage {
-                    payload: Some(app_message::Payload::VoteStartMessage(vote_msg)),
-                }))
-            }
             _ => Ok(UserAction::DoNothing),
         }
     }

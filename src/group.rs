@@ -237,14 +237,6 @@ impl Group {
                         );
                         return Ok(GroupAction::GroupAppMsg(msg_to_send));
                     }
-                    Some(app_message::Payload::VoteStartMessage(vote_start_message)) => {
-                        let msg_to_send = wrap_conversation_message_into_application_msg(
-                            vote_start_message.group_name,
-                            sender_name,
-                            self.group_name.clone(),
-                        );
-                        return Ok(GroupAction::GroupAppMsg(msg_to_send));
-                    }
                     _ => return Ok(GroupAction::DoNothing),
                 }
             }
