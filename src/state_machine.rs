@@ -13,7 +13,8 @@
 //! # State Transitions
 //!
 //! ```text
-//! Working --start_steward_epoch()--> Waiting
+//! Working --start_steward_epoch()--> Waiting (if proposals exist)
+//! Working --start_steward_epoch()--> Working (if no proposals)
 //! Waiting --start_voting()---------> Voting
 //! Voting --complete_voting(true)--> Waiting (vote passed)
 //! Voting --complete_voting(false)-> Working (vote failed)
