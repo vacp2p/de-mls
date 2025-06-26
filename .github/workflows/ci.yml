@@ -37,26 +37,9 @@ jobs:
         with:
           components: clippy
       - run: cargo clippy --all-features --tests -- -D warnings
-
-  docs:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          submodules: 'recursive'
-      - name: install protoc
-        uses: taiki-e/install-action@v2
-        with:
-          tool: protoc@${{ env.PROTOC_VERSION }}
-      - uses: dtolnay/rust-toolchain@stable
-      - name: "doc --lib --all-features"
-        run: |
-          cargo doc --lib --no-deps --all-features --document-private-items
-        env:
-          RUSTDOCFLAGS: -Dwarnings  
   
   unused_dependencies:
+    needs: [rustfmt, clippy]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,8 +57,30 @@ jobs:
       - name: cargo udeps all-targets
         run: cargo +nightly udeps --all-targets  
 
+  docs:
+    needs: [rustfmt, clippy, unused_dependencies]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+      - name: install protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc@${{ env.PROTOC_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: "doc --lib --all-features"
+        run: |
+          cargo doc --lib --no-deps --all-features --document-private-items
+        env:
+          RUSTDOCFLAGS: -Dwarnings  
+  
+
+
 
   user_test:
+    needs: [rustfmt, clippy, docs, unused_dependencies]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
