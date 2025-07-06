@@ -43,6 +43,7 @@ jobs:
         run: cargo build --release
 
   lint:
+    needs: [build-stable-release]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
