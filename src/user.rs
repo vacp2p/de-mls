@@ -328,7 +328,7 @@ impl User {
             return Ok(UserAction::DoNothing);
         }
         let ct_name = msg.content_topic.content_topic_name.to_string();
-        info!("Processing waku message from content topic: {:?}", ct_name);
+        info!("Processing waku message from content topic: {ct_name:?}");
         match ct_name.as_str() {
             WELCOME_SUBTOPIC => self.process_welcome_subtopic(msg, group_name).await,
             APP_MSG_SUBTOPIC => self.process_app_subtopic(msg, group_name).await,
@@ -469,7 +469,7 @@ impl User {
         }
 
         // There are proposals, start the steward epoch
-        info!("Starting steward epoch with {} proposals", proposal_count);
+        info!("Starting steward epoch with {proposal_count} proposals");
         group.start_steward_epoch().await?;
         Ok(proposal_count)
     }
@@ -491,10 +491,7 @@ impl User {
                 .map(alloy::hex::encode)
                 .collect::<Vec<_>>()
         );
-        println!(
-            "User: start_voting - current user identity: {}",
-            current_identity
-        );
+        println!("User: start_voting - current user identity: {current_identity}");
         let vote_id = uuid::Uuid::new_v4().as_bytes().to_vec();
 
         Ok(vote_id)
@@ -522,11 +519,8 @@ impl User {
     /// Submit a vote for the given vote ID.
     pub async fn submit_vote(&mut self, vote_id: Vec<u8>, vote: bool) -> Result<(), UserError> {
         let current_identity = self.identity.identity_string();
-        info!("User: submit_vote - vote_id: {:?}, vote: {}", vote_id, vote);
-        info!(
-            "User: submit_vote - current user identity: {}",
-            current_identity
-        );
+        info!("User: submit_vote - vote_id: {vote_id:?}, vote: {vote}");
+        info!("User: submit_vote - current user identity: {current_identity}");
         Ok(())
     }
 
@@ -541,7 +535,7 @@ impl User {
             None => return Err(UserError::GroupNotFoundError(group_name)),
         };
         let identity_bytes = alloy::hex::decode(&identity)
-            .map_err(|e| UserError::ApplyProposalsError(format!("Invalid hex string: {}", e)))?;
+            .map_err(|e| UserError::ApplyProposalsError(format!("Invalid hex string: {e}")))?;
         group.store_remove_proposal(identity_bytes).await?;
         Ok(())
     }

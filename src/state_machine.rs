@@ -44,7 +44,7 @@ impl Display for GroupState {
             GroupState::Waiting => "Waiting - Steward epoch active",
             GroupState::Voting => "Voting - Vote in progress",
         };
-        write!(f, "{}", state)
+        write!(f, "{state}")
     }
 }
 
