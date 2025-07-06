@@ -9,28 +9,9 @@ name: "CI"
 
 env:
   PROTOC_VERSION: "3.25.3"
-  CARGO_INCREMENTAL: 0
-  CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
-  build-stable:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "stable"
-      - name: Install protoc
-        uses: taiki-e/install-action@v2
-        with:
-          tool: protoc@${{ env.PROTOC_VERSION }}
-      - name: Build stable toolchain
-        run: cargo build --release
-
   lint:
-    needs: [build-stable]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -52,7 +33,6 @@ jobs:
         run: cargo clippy --all-features --tests -- -D warnings
 
   docs:
-    needs: [build-stable]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -72,7 +52,6 @@ jobs:
           RUSTDOCFLAGS: -Dwarnings
 
   test:
-    needs: [build-stable]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
