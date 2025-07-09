@@ -81,10 +81,7 @@ async fn test_invite_users_flow() {
         .get_pending_proposals_count(group_name.clone())
         .await
         .expect("Failed to get proposal count");
-    println!(
-        "Debug: Proposal count before steward epoch: {}",
-        proposal_count_before
-    );
+    println!("Debug: Proposal count before steward epoch: {proposal_count_before}");
 
     // Add Bob and Carol to the group initially using steward epoch flow
     // State machine: start steward epoch, voting, complete voting
@@ -93,10 +90,7 @@ async fn test_invite_users_flow() {
         .await
         .expect("Failed to start steward epoch");
 
-    println!(
-        "Debug: Steward epoch returned {} proposals",
-        steward_epoch_proposals
-    );
+    println!("Debug: Steward epoch returned {steward_epoch_proposals} proposals");
 
     let vote_id = alice
         .start_voting(group_name.clone())
@@ -146,7 +140,7 @@ async fn test_invite_users_flow() {
         .process_waku_message(bob_res_waku_message.clone())
         .await
         .expect("Failed to process waku message");
-    println!("Alice result: {:?}", res_alice);
+    println!("Alice result: {res_alice:?}");
     let res_alice_msg = match res_alice {
         UserAction::SendToApp(msg) => msg,
         _ => panic!("User action is not SendToApp"),
@@ -170,7 +164,7 @@ async fn test_invite_users_flow() {
         )
         .await
         .expect("Failed to process waku message");
-    println!("Carol result: {:?}", res_carol);
+    println!("Carol result: {res_carol:?}");
 
     let carol_group = carol
         .get_group(group_name.clone())
@@ -298,7 +292,7 @@ async fn test_add_user_in_different_epoch() {
     );
 
     // Submit a vote (Alice votes yes for her own proposals)
-    println!("Test: Submitting vote with ID: {:?}", vote_id);
+    println!("Test: Submitting vote with ID: {vote_id:?}");
     println!("Test: Alice's identity: {}", alice.identity_string());
     alice
         .submit_vote(vote_id.clone(), true)
@@ -397,7 +391,7 @@ async fn test_add_user_in_different_epoch() {
     );
 
     // Submit a vote (Alice votes yes for her own proposals)
-    println!("Test: Submitting vote with ID: {:?}", vote_id);
+    println!("Test: Submitting vote with ID: {vote_id:?}");
     println!("Test: Alice's identity: {}", alice.identity_string());
     alice
         .submit_vote(vote_id.clone(), true)
@@ -446,7 +440,7 @@ async fn test_add_user_in_different_epoch() {
         .expect("Failed to process waku message apply commit to the Bob")
     {
         UserAction::SendToWaku(msg) => {
-            println!("Bob action is SendToWaku: {:?}", msg);
+            println!("Bob action is SendToWaku: {msg:?}");
         }
         UserAction::DoNothing => {
             println!("Bob action is DoNothing");
@@ -581,10 +575,7 @@ async fn test_remove_user_flow() {
         .get_pending_proposals_count(group_name.clone())
         .await
         .expect("Failed to get proposal count");
-    println!(
-        "Debug: Proposal count before steward epoch: {}",
-        proposal_count_before
-    );
+    println!("Debug: Proposal count before steward epoch: {proposal_count_before}");
 
     // Add Bob and Carol to the group initially using steward epoch flow
     // State machine: start steward epoch, voting, complete voting
@@ -593,10 +584,7 @@ async fn test_remove_user_flow() {
         .await
         .expect("Failed to start steward epoch");
 
-    println!(
-        "Debug: Steward epoch returned {} proposals",
-        steward_epoch_proposals
-    );
+    println!("Debug: Steward epoch returned {steward_epoch_proposals} proposals");
 
     let vote_id = alice
         .start_voting(group_name.clone())
@@ -646,7 +634,7 @@ async fn test_remove_user_flow() {
         .process_waku_message(bob_res_waku_message.clone())
         .await
         .expect("Failed to process waku message");
-    println!("Alice result: {:?}", res_alice);
+    println!("Alice result: {res_alice:?}");
     let res_alice_msg = match res_alice {
         UserAction::SendToApp(msg) => msg,
         _ => panic!("User action is not SendToApp"),
@@ -670,7 +658,7 @@ async fn test_remove_user_flow() {
         )
         .await
         .expect("Failed to process waku message");
-    println!("Carol result: {:?}", res_carol);
+    println!("Carol result: {res_carol:?}");
 
     let carol_group = carol
         .get_group(group_name.clone())
@@ -778,7 +766,7 @@ async fn test_remove_user_flow() {
         .expect("Failed to start voting (removal)");
 
     // Submit a vote (Alice votes yes for the removal)
-    println!("Test: Submitting vote with ID: {:?}", vote_id);
+    println!("Test: Submitting vote with ID: {vote_id:?}");
     println!("Test: Alice's identity: {}", alice.identity_string());
     alice
         .submit_vote(vote_id.clone(), true)

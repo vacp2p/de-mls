@@ -49,12 +49,12 @@ impl WakuNode<Initialized> {
                             .expect("Failed to send message to waku");
                     }
                     WakuEvent::RelayTopicHealthChange(evt) => {
-                        info!("Relay topic change evt: {:?}", evt);
+                        info!("Relay topic change evt: {evt:?}");
                     }
                     WakuEvent::ConnectionChange(evt) => {
-                        info!("Conn change evt: {:?}", evt);
+                        info!("Conn change evt: {evt:?}");
                     }
-                    WakuEvent::Unrecognized(err) => panic!("Unrecognized waku event: {:?}", err),
+                    WakuEvent::Unrecognized(e) => panic!("Unrecognized waku event: {e:?}"),
                     _ => panic!("event case not expected"),
                 };
             }
@@ -65,7 +65,7 @@ impl WakuNode<Initialized> {
             .expect("set event call back working");
 
         let waku = self.node.start().await.map_err(|e| {
-            debug!("Failed to start the Waku Node: {:?}", e);
+            debug!("Failed to start the Waku Node: {e:?}");
             DeliveryServiceError::WakuNodeAlreadyInitialized(e.to_string())
         })?;
 
@@ -94,7 +94,7 @@ impl WakuNode<Running> {
             .relay_publish_message(&waku_message, &pubsub_topic(), None)
             .await
             .map_err(|e| {
-                error!("Failed to relay publish the message: {:?}", e);
+                error!("Failed to relay publish the message: {e:?}");
                 DeliveryServiceError::WakuPublishMessageError(e)
             })?;
 
@@ -106,19 +106,19 @@ impl WakuNode<Running> {
         peer_addresses: Vec<Multiaddr>,
     ) -> Result<(), DeliveryServiceError> {
         for peer_address in peer_addresses {
-            info!("Connecting to peer: {:?}", peer_address);
+            info!("Connecting to peer: {peer_address:?}");
             self.node
                 .connect(&peer_address, None)
                 .await
                 .map_err(|e| DeliveryServiceError::WakuConnectPeerError(e.to_string()))?;
-            info!("Connected to peer: {:?}", peer_address);
+            info!("Connected to peer: {peer_address:?}");
         }
         Ok(())
     }
 
     pub async fn listen_addresses(&self) -> Result<Vec<Multiaddr>, DeliveryServiceError> {
         let addresses = self.node.listen_addresses().await.map_err(|e| {
-            debug!("Failed to get the listen addresses: {:?}", e);
+            debug!("Failed to get the listen addresses: {e:?}");
             DeliveryServiceError::WakuGetListenAddressesError(e)
         })?;
 
@@ -194,7 +194,7 @@ pub async fn run_waku_node(
     while let Some(msg) = reciever.recv().await {
         info!("Received message to send to waku");
         let id = waku_node.send_message(msg).await?;
-        info!("Successfully publish message with id: {:?}", id);
+        info!("Successfully publish message with id: {id:?}");
     }
 
     Ok(())

@@ -83,12 +83,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::select! {
         result = recv_messages => {
             if let Err(w) = result {
-                error!("Error receiving messages from waku: {}", w);
+                error!("Error receiving messages from waku: {w}");
             }
         }
         result = server_task => {
             if let Err(e) = result {
-                error!("Error hosting server: {}", e);
+                error!("Error hosting server: {e}");
             }
         }
     }
@@ -110,7 +110,7 @@ async fn run_server(
         .with_state(app_state)
         .layer(cors);
 
-    info!("Hosted on {:?}", addr);
+    info!("Hosted on {addr:?}");
 
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
@@ -142,14 +142,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 if !rooms.contains(&connect.group_id.clone()) {
                     rooms.insert(connect.group_id.clone());
                 }
-                info!("Prepare info for main loop: {:?}", main_loop_connection);
+                info!("Prepare info for main loop: {main_loop_connection:?}");
                 break;
             }
             Ok(_) => {
                 info!("Got chat message for non-existent user");
             }
 
-            Err(e) => error!("Error handling message: {}", e),
+            Err(e) => error!("Error handling message: {e}"),
         }
     }
 
@@ -169,10 +169,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             let content_topic = msg.content_topic.clone();
             // Check if message belongs to a relevant topic
             if !match_content_topic(&state_clone.content_topics, &content_topic) {
-                error!("Content topic not match: {:?}", content_topic);
+                error!("Content topic not match: {content_topic:?}");
                 return;
             };
-            info!("Received message from waku that matches content topic",);
+            info!("Received message from waku that matches content topic");
             let res = handle_user_actions(
                 msg,
                 state_clone.waku_node.clone(),
@@ -183,7 +183,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             )
             .await;
             if let Err(e) = res {
-                error!("Error handling waku message: {}", e);
+                error!("Error handling waku message: {e}");
             }
         }
     });
@@ -201,7 +201,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 )
                 .await;
                 if let Err(e) = res {
-                    error!("Error handling websocket message: {}", e);
+                    error!("Error handling websocket message: {e}");
                 }
             }
         })

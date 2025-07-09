@@ -44,7 +44,7 @@ pub async fn handle_user_actions(
                 .retain(|topic| topic.application_name != group_name);
             info!("Leave group: {:?}", &group_name);
             let app_message = wrap_conversation_message_into_application_msg(
-                format!("You're removed from the group {}", group_name).into_bytes(),
+                format!("You're removed from the group {group_name}").into_bytes(),
                 "system".to_string(),
                 group_name.clone(),
             );
@@ -93,11 +93,8 @@ pub async fn handle_ws_action(
                 .await?;
 
             let app_message = wrap_conversation_message_into_application_msg(
-                format!(
-                    "Remove proposal for user {} added to steward queue",
-                    user_to_ban
-                )
-                .into_bytes(),
+                format!("Remove proposal for user {user_to_ban} added to steward queue")
+                    .into_bytes(),
                 "system".to_string(),
                 group_name.clone(),
             );

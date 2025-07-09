@@ -33,7 +33,7 @@ pub async fn create_user_instance(
         .map_err(|e| UserError::KameoCreateGroupError(e.to_string()))?;
 
     let mut content_topics = build_content_topics(&group_name);
-    info!("Building content topics: {:?}", content_topics);
+    info!("Building content topics: {content_topics:?}");
     app_state
         .content_topics
         .lock()
@@ -41,10 +41,7 @@ pub async fn create_user_instance(
         .append(&mut content_topics);
 
     if connection.should_create_group {
-        info!(
-            "User {:?} start sending steward message for group {:?}",
-            user_address, group_name
-        );
+        info!("User {user_address:?} start sending steward message for group {group_name:?}");
         let user_clone = user_ref.clone();
         let group_name_clone = group_name.clone();
         tokio::spawn(async move {
@@ -62,7 +59,7 @@ pub async fn create_user_instance(
                     Ok::<(), UserError>(())
                 }
                 .await
-                .inspect_err(|e| error!("Error sending steward message to waku: {}", e));
+                .inspect_err(|e| error!("Error sending steward message to waku: {e}"));
             }
         });
     };
@@ -81,7 +78,7 @@ pub async fn handle_steward_flow_per_epoch(
     group_name: String,
     app_state: Arc<AppState>,
 ) -> Result<(), UserError> {
-    info!("Starting steward epoch for group: {}", group_name);
+    info!("Starting steward epoch for group: {group_name}");
 
     // Step 1: Start steward epoch - check for proposals and start epoch if needed
     let proposals_count = user
@@ -101,22 +98,12 @@ pub async fn handle_steward_flow_per_epoch(
     app_state.waku_node.send(msg).await?;
 
     if proposals_count == 0 {
-        info!(
-            "No proposals to vote on for group: {}, completing epoch without voting",
-            group_name
-        );
-
-        info!(
-            "Steward epoch completed for group: {} (no proposals)",
-            group_name
-        );
+        info!("No proposals to vote on for group: {group_name}, completing epoch without voting");
+        info!("Steward epoch completed for group: {group_name} (no proposals)");
         return Ok(());
     }
 
-    info!(
-        "Found {} proposals to vote on for group: {}",
-        proposals_count, group_name
-    );
+    info!("Found {proposals_count} proposals to vote on for group: {group_name}");
 
     // Step 3: Start voting process
     let vote_id = user
@@ -126,10 +113,7 @@ pub async fn handle_steward_flow_per_epoch(
         .await
         .map_err(|e| UserError::ProcessProposalsError(e.to_string()))?;
 
-    info!(
-        "Started voting with vote_id: {:?} for group: {}",
-        vote_id, group_name
-    );
+    info!("Started voting with vote_id: {vote_id:?} for group: {group_name}");
 
     // Step 4: Complete voting (in a real implementation, this would wait for actual votes)
     // For now, we'll simulate the voting process
@@ -141,10 +125,7 @@ pub async fn handle_steward_flow_per_epoch(
         .await
         .map_err(|e| UserError::ApplyProposalsError(e.to_string()))?;
 
-    info!(
-        "Voting completed with result: {} for group: {}",
-        vote_result, group_name
-    );
+    info!("Voting completed with result: {vote_result} for group: {group_name}");
 
     // Step 5: If vote passed, apply proposals and complete
     if vote_result {
@@ -160,15 +141,9 @@ pub async fn handle_steward_flow_per_epoch(
             app_state.waku_node.send(msg).await?;
         }
 
-        info!(
-            "Proposals applied and steward epoch completed for group: {}",
-            group_name
-        );
+        info!("Proposals applied and steward epoch completed for group: {group_name}");
     } else {
-        info!(
-            "Vote failed, returning to working state for group: {}",
-            group_name
-        );
+        info!("Vote failed, returning to working state for group: {group_name}");
     }
 
     user.ask(RemoveProposalsAndCompleteRequest {
@@ -177,9 +152,6 @@ pub async fn handle_steward_flow_per_epoch(
     .await
     .map_err(|e| UserError::ApplyProposalsError(e.to_string()))?;
 
-    info!(
-        "Removing proposals and completing steward epoch for group: {}",
-        group_name
-    );
+    info!("Removing proposals and completing steward epoch for group: {group_name}");
     Ok(())
 }

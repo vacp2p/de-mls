@@ -325,14 +325,14 @@ impl Group {
     /// Get the number of pending proposals for the current epoch
     pub async fn get_pending_proposals_count(&self) -> usize {
         let count = self.state_machine.get_current_epoch_proposals_count().await;
-        info!("State machine reports {} current epoch proposals", count);
+        info!("State machine reports {count} current epoch proposals");
         count
     }
 
     /// Get the number of pending proposals for the voting epoch
     pub async fn get_voting_proposals_count(&self) -> usize {
         let count = self.state_machine.get_voting_epoch_proposals_count().await;
-        info!("State machine reports {} voting proposals", count);
+        info!("State machine reports {count} voting proposals");
         count
     }
 
