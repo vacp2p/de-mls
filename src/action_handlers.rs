@@ -1,14 +1,17 @@
 use kameo::actor::ActorRef;
 use log::info;
+use prost::Message;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 use waku_bindings::WakuMessage;
 
 use crate::{
-    message::wrap_conversation_message_into_application_msg,
+    message::{
+        wrap_ban_request_into_application_msg, wrap_conversation_message_into_application_msg,
+    },
     user::{User, UserAction},
-    user_actor::{LeaveGroupRequest, RemoveUserRequest, SendGroupMessage},
+    user_actor::{LeaveGroupRequest, SendGroupMessage},
     ws_actor::{RawWsMessage, WsAction, WsActor},
     AppState,
 };
@@ -39,8 +42,8 @@ pub async fn handle_user_actions(
 
             app_state
                 .content_topics
-                .lock()
-                .unwrap()
+                .write()
+                .await
                 .retain(|topic| topic.application_name != group_name);
             info!("Leave group: {:?}", &group_name);
             let app_message = wrap_conversation_message_into_application_msg(
@@ -85,16 +88,26 @@ pub async fn handle_ws_action(
         }
         WsAction::RemoveUser(user_to_ban, group_name) => {
             info!("Got remove user: {:?}", &user_to_ban);
-            user_actor
-                .ask(RemoveUserRequest {
-                    user_to_ban: user_to_ban.clone(),
-                    group_name: group_name.clone(),
-                })
-                .await?;
 
+            // Create a ban request message to send to the group
+            let ban_request_msg = wrap_ban_request_into_application_msg(
+                user_to_ban.clone(),
+                "me".to_string(), // The current user is the requester
+                group_name.clone(),
+            );
+
+            // Send the ban request directly via Waku
+            let waku_msg = WakuMessageToSend::new(
+                ban_request_msg.encode_to_vec(),
+                "app_msg",
+                group_name.clone(),
+                "app".into(), // This should be the app_id, but we'll use a simple one for now
+            );
+            waku_node.send(waku_msg).await?;
+
+            // Send a local confirmation message
             let app_message = wrap_conversation_message_into_application_msg(
-                format!("Remove proposal for user {user_to_ban} added to steward queue")
-                    .into_bytes(),
+                format!("Ban request for user {user_to_ban} sent to group").into_bytes(),
                 "system".to_string(),
                 group_name.clone(),
             );

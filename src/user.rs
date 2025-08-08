@@ -1,4 +1,7 @@
-use alloy::signers::local::PrivateKeySigner;
+use alloy::{
+    primitives::Address,
+    signers::{local::PrivateKeySigner, Signer},
+};
 use kameo::Actor;
 use log::info;
 use openmls::{
@@ -6,7 +9,8 @@ use openmls::{
     prelude::{DeserializeBytes, MlsMessageBodyIn, MlsMessageIn, StagedWelcome, Welcome},
 };
 use prost::Message;
-use std::{collections::HashMap, str::FromStr};
+use std::{collections::HashMap, fmt::Display, str::FromStr, sync::Arc};
+use tokio::sync::RwLock;
 use waku_bindings::WakuMessage;
 
 use ds::{waku_actor::WakuMessageToSend, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
@@ -16,12 +20,15 @@ use mls_crypto::{
 };
 
 use crate::{
+    consensus::{ConsensusConfig, ConsensusService},
     error::UserError,
     group::{Group, GroupAction},
     message::{wrap_conversation_message_into_application_msg, wrap_user_kp_into_welcome_msg},
     protos::messages::v1::{
-        app_message, welcome_message, AppMessage, BatchProposalsMessage, WelcomeMessage,
+        app_message, consensus::v1::Proposal, welcome_message, AppMessage, BanRequest,
+        BatchProposalsMessage, WelcomeMessage,
     },
+    LocalSigner,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -32,12 +39,25 @@ pub enum UserAction {
     DoNothing,
 }
 
+impl Display for UserAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UserAction::SendToWaku(_) => write!(f, "SendToWaku"),
+            UserAction::SendToApp(_) => write!(f, "SendToApp"),
+            UserAction::LeaveGroup(group_name) => write!(f, "LeaveGroup({group_name})"),
+            UserAction::DoNothing => write!(f, "DoNothing"),
+        }
+    }
+}
+
 #[derive(Actor)]
 pub struct User {
     identity: Identity,
-    groups: HashMap<String, Group>,
+    // Each group has its own lock for better concurrency
+    groups: Arc<RwLock<HashMap<String, Arc<RwLock<Group>>>>>,
     provider: MlsProvider,
-    _eth_signer: PrivateKeySigner,
+    consensus_service: ConsensusService,
+    eth_signer: PrivateKeySigner,
 }
 
 impl User {
@@ -49,10 +69,11 @@ impl User {
         let id = Identity::new(CIPHERSUITE, &crypto, user_address.as_slice())?;
 
         let user = User {
-            groups: HashMap::new(),
+            groups: Arc::new(RwLock::new(HashMap::new())),
             identity: id,
-            _eth_signer: signer,
+            eth_signer: signer,
             provider: crypto,
+            consensus_service: ConsensusService::new(ConsensusConfig::default()),
         };
         Ok(user)
     }
@@ -62,7 +83,8 @@ impl User {
         group_name: String,
         is_creation: bool,
     ) -> Result<(), UserError> {
-        if self.if_group_exists(group_name.clone()) {
+        let mut groups = self.groups.write().await;
+        if groups.contains_key(&group_name) {
             return Err(UserError::GroupAlreadyExistsError(group_name));
         }
         let group = if is_creation {
@@ -77,19 +99,21 @@ impl User {
             Group::new(group_name.clone(), false, None, None, None)?
         };
 
-        self.groups.insert(group_name.clone(), group);
+        groups.insert(group_name.clone(), Arc::new(RwLock::new(group)));
         Ok(())
     }
 
-    pub fn get_group(&self, group_name: String) -> Result<Group, UserError> {
-        match self.groups.get(&group_name) {
-            Some(g) => Ok(g.clone()),
+    pub async fn get_group(&self, group_name: String) -> Result<Group, UserError> {
+        let groups = self.groups.read().await;
+        match groups.get(&group_name) {
+            Some(g) => Ok(g.read().await.clone()),
             None => Err(UserError::GroupNotFoundError(group_name)),
         }
     }
 
-    pub fn if_group_exists(&self, group_name: String) -> bool {
-        self.groups.contains_key(&group_name)
+    pub async fn if_group_exists(&self, group_name: String) -> bool {
+        let groups = self.groups.read().await;
+        groups.contains_key(&group_name)
     }
 
     pub async fn process_welcome_subtopic(
@@ -97,17 +121,23 @@ impl User {
         msg: WakuMessage,
         group_name: String,
     ) -> Result<UserAction, UserError> {
-        let group = match self.groups.get_mut(&group_name) {
-            Some(g) => g,
-            None => return Err(UserError::GroupNotFoundError(group_name)),
+        // Get the group lock first
+        let group_lock = {
+            let groups = self.groups.read().await;
+            match groups.get(&group_name) {
+                Some(lock) => lock.clone(),
+                None => return Err(UserError::GroupNotFoundError(group_name.clone())),
+            }
         };
 
         let received_msg = WelcomeMessage::decode(msg.payload())?;
         if let Some(payload) = &received_msg.payload {
             match payload {
                 welcome_message::Payload::GroupAnnouncement(group_announcement) => {
-                    let app_id = group.app_id();
-                    if group.is_steward() || group.is_kp_shared() {
+                    let app_id = group_lock.read().await.app_id();
+                    if group_lock.read().await.is_steward().await
+                        || group_lock.read().await.is_kp_shared()
+                    {
                         info!("Its steward or key package already shared");
                         Ok(UserAction::DoNothing)
                     } else {
@@ -122,7 +152,7 @@ impl User {
 
                         let new_kp = self.identity.generate_key_package(&self.provider)?;
                         let encrypted_key_package = group_announcement.encrypt(new_kp)?;
-                        group.set_kp_shared(true);
+                        group_lock.write().await.set_kp_shared(true);
 
                         Ok(UserAction::SendToWaku(WakuMessageToSend::new(
                             wrap_user_kp_into_welcome_msg(encrypted_key_package)?.encode_to_vec(),
@@ -133,35 +163,39 @@ impl User {
                     }
                 }
                 welcome_message::Payload::UserKeyPackage(user_key_package) => {
-                    if group.is_steward() {
+                    if group_lock.read().await.is_steward().await {
                         info!(
                             "Steward {:?} received key package for the group {:?}",
                             self.identity.identity_string(),
                             group_name
                         );
-                        let key_package =
-                            group.decrypt_steward_msg(user_key_package.encrypt_kp.clone())?;
+                        let key_package = group_lock
+                            .write()
+                            .await
+                            .decrypt_steward_msg(user_key_package.encrypt_kp.clone())
+                            .await?;
 
-                        group.store_invite_proposal(Box::new(key_package)).await?;
+                        group_lock
+                            .write()
+                            .await
+                            .store_invite_proposal(Box::new(key_package))
+                            .await?;
                         Ok(UserAction::DoNothing)
                     } else {
                         Ok(UserAction::DoNothing)
                     }
                 }
                 welcome_message::Payload::InvitationToJoin(invitation_to_join) => {
-                    if group.is_steward() {
+                    if group_lock.read().await.is_steward().await {
                         Ok(UserAction::DoNothing)
                     } else {
-                        info!(
-                            "User {:?} received invitation to join group {:?}",
-                            self.identity.identity_string(),
-                            group_name
-                        );
+                        // Release the lock before calling join_group
+                        drop(group_lock);
 
+                        // Parse the MLS message to get the welcome
                         let (mls_in, _) = MlsMessageIn::tls_deserialize_bytes(
                             &invitation_to_join.mls_message_out_bytes,
-                        )
-                        .map_err(|e| UserError::MlsMessageInDeserializeError(e.to_string()))?;
+                        )?;
 
                         let welcome = match mls_in.extract() {
                             MlsMessageBodyIn::Welcome(welcome) => welcome,
@@ -172,14 +206,15 @@ impl User {
                             let hash_ref = egs.new_member().as_slice().to_vec();
                             self.identity.is_key_package_exists(&hash_ref)
                         }) {
-                            self.join_group(welcome)?;
+                            self.join_group(welcome).await?;
                             let msg = self
                                 .build_group_message("User joined to the group", group_name)
-                                .await?;
+                                .await?; // TODO: check if this is correct
                             Ok(UserAction::SendToWaku(msg))
                         } else {
                             info!(
-                                "User {:?} received invitation to join group {:?}, but key package is not shared",
+                                "User {:?} received invitation to join group {:?}, 
+                                but key package is not shared or already joined",
                                 self.identity.identity_string(),
                                 group_name
                             );
@@ -198,15 +233,27 @@ impl User {
         msg: WakuMessage,
         group_name: String,
     ) -> Result<UserAction, UserError> {
-        let group = match self.groups.get_mut(&group_name) {
-            Some(g) => g,
-            None => return Err(UserError::GroupNotFoundError(group_name)),
+        // First check if group exists
+        if !self.if_group_exists(group_name.clone()).await {
+            return Err(UserError::GroupNotFoundError(group_name.clone()));
+        }
+
+        // Get group and check if initialized
+        let is_initialized = {
+            let groups = self.groups.read().await;
+            if let Some(_group_lock) = groups.get(&group_name) {
+                _group_lock.read().await.is_mls_group_initialized()
+            } else {
+                false
+            }
         };
-        if !group.is_mls_group_initialized() {
+
+        if !is_initialized {
             return Ok(UserAction::DoNothing);
         }
+
         info!(
-            "[process_app_subtopic]: User {:?} received app message for group {:?}",
+            "[user::process_app_subtopic]: User {:?} received app message for group {:?}",
             self.identity.identity_string(),
             group_name
         );
@@ -217,20 +264,38 @@ impl User {
         }
 
         // Fall back to MLS protocol message
-        let (mls_message_in, _) = MlsMessageIn::tls_deserialize_bytes(msg.payload())
-            .map_err(|e| UserError::MlsMessageInDeserializeError(e.to_string()))?;
-        let mls_message = mls_message_in
-            .try_into_protocol_message()
-            .map_err(|e| UserError::TryIntoProtocolMessageError(e.to_string()))?;
+        let (mls_message_in, _) = MlsMessageIn::tls_deserialize_bytes(msg.payload())?;
+        let mls_message = mls_message_in.try_into_protocol_message()?;
 
-        let res = group
-            .process_protocol_msg(mls_message, &self.provider, self.identity.signature_key())
-            .await?;
+        // Process the message
+        let res = {
+            let groups = self.groups.read().await;
+            if let Some(_group_lock) = groups.get(&group_name) {
+                _group_lock
+                    .write()
+                    .await
+                    .process_protocol_msg(
+                        mls_message,
+                        &self.provider,
+                        self.identity.signature_key(),
+                    )
+                    .await
+            } else {
+                return Err(UserError::GroupNotFoundError(group_name.clone()));
+            }
+        }?;
 
+        info!("[user::process_app_subtopic]: start processing group_action");
+
+        // Handle the result outside of any lock scope
         match res {
             GroupAction::GroupAppMsg(msg) => Ok(UserAction::SendToApp(msg)),
             GroupAction::LeaveGroup => Ok(UserAction::LeaveGroup(group_name)),
             GroupAction::DoNothing => Ok(UserAction::DoNothing),
+            GroupAction::GroupProposal(proposal) => {
+                self.process_consensus_proposal(proposal, group_name).await
+            }
+            GroupAction::GroupVote(vote) => self.process_consensus_vote(vote, group_name).await,
         }
     }
 
@@ -240,18 +305,69 @@ impl User {
         app_message: AppMessage,
         group_name: String,
     ) -> Result<UserAction, UserError> {
-        match app_message.payload {
-            Some(app_message::Payload::BatchProposalsMessage(batch_msg)) => {
-                self.process_batch_proposals_message(batch_msg, group_name)
-                    .await
+        // Get the group and process the message
+        let result = {
+            let groups = self.groups.read().await;
+            if let Some(_group_lock) = groups.get(&group_name) {
+                match app_message.payload {
+                    Some(app_message::Payload::BatchProposalsMessage(batch_msg)) => {
+                        info!(
+                            "[user::process_app_message]: Processing batch proposals message for group {group_name}"
+                        );
+                        // Release the lock before calling self methods
+                        drop(groups);
+                        self.process_batch_proposals_message(batch_msg, group_name)
+                            .await
+                    }
+                    Some(app_message::Payload::ConversationMessage(conversation_msg)) => {
+                        info!(
+                            "[user::process_app_message]: Processing conversation message for group {group_name}"
+                        );
+                        // Release the lock before calling self methods
+                        drop(groups);
+                        // For now, just return the conversation message as-is
+                        Ok(UserAction::SendToApp(AppMessage {
+                            payload: Some(app_message::Payload::ConversationMessage(
+                                conversation_msg,
+                            )),
+                        }))
+                    }
+                    Some(app_message::Payload::Proposal(proposal)) => {
+                        info!(
+                            "[user::process_app_message]: Processing consensus proposal for group {group_name}"
+                        );
+                        // Release the lock before calling self methods
+                        drop(groups);
+                        self.process_consensus_proposal(proposal, group_name).await
+                    }
+                    Some(app_message::Payload::Vote(vote)) => {
+                        info!(
+                            "[user::process_app_message]: Processing consensus vote for group {group_name}"
+                        );
+                        // Release the lock before calling self methods
+                        drop(groups);
+                        self.process_consensus_vote(vote, group_name).await
+                    }
+                    Some(app_message::Payload::BanRequest(ban_request)) => {
+                        info!(
+                            "[user::process_app_message]: Processing ban request for group {group_name}"
+                        );
+                        // Release the lock before calling self methods
+                        drop(groups);
+                        self.process_ban_request(ban_request, group_name).await
+                    }
+                    None => {
+                        info!(
+                            "[user::process_app_message]: No payload found in app message for group {group_name}"
+                        );
+                        Ok(UserAction::DoNothing)
+                    }
+                }
+            } else {
+                return Err(UserError::GroupNotFoundError(group_name));
             }
-            Some(app_message::Payload::ConversationMessage(conv_msg)) => {
-                Ok(UserAction::SendToApp(AppMessage {
-                    payload: Some(app_message::Payload::ConversationMessage(conv_msg)),
-                }))
-            }
-            _ => Ok(UserAction::DoNothing),
-        }
+        };
+        result
     }
 
     /// Process batch proposals message
@@ -260,22 +376,28 @@ impl User {
         batch_msg: BatchProposalsMessage,
         group_name: String,
     ) -> Result<UserAction, UserError> {
-        let group = match self.groups.get_mut(&group_name) {
-            Some(g) => g,
-            None => return Err(UserError::GroupNotFoundError(group_name)),
+        info!(
+            "[user::process_batch_proposals_message]: Processing batch proposals for group {group_name}"
+        );
+
+        // Get the group lock
+        let group_lock = {
+            let groups = self.groups.read().await;
+            match groups.get(&group_name) {
+                Some(lock) => lock.clone(),
+                None => return Err(UserError::GroupNotFoundError(group_name.clone())),
+            }
         };
 
-        // First, process all proposals before the commit
+        // Process all proposals before the commit
         for proposal_bytes in batch_msg.mls_proposals {
-            let (mls_message_in, _) = MlsMessageIn::tls_deserialize_bytes(&proposal_bytes)
-                .map_err(|e| UserError::MlsMessageInDeserializeError(e.to_string()))?;
-
-            let protocol_message = mls_message_in
-                .try_into_protocol_message()
-                .map_err(|e| UserError::TryIntoProtocolMessageError(e.to_string()))?;
+            let (mls_message_in, _) = MlsMessageIn::tls_deserialize_bytes(&proposal_bytes)?;
+            let protocol_message = mls_message_in.try_into_protocol_message()?;
 
             // Process the proposal
-            let _res = group
+            let _res = group_lock
+                .write()
+                .await
                 .process_protocol_msg(
                     protocol_message,
                     &self.provider,
@@ -285,14 +407,12 @@ impl User {
         }
 
         // Then process the commit message
-        let (mls_message_in, _) = MlsMessageIn::tls_deserialize_bytes(&batch_msg.commit_message)
-            .map_err(|e| UserError::MlsMessageInDeserializeError(e.to_string()))?;
+        let (mls_message_in, _) = MlsMessageIn::tls_deserialize_bytes(&batch_msg.commit_message)?;
+        let protocol_message = mls_message_in.try_into_protocol_message()?;
 
-        let protocol_message = mls_message_in
-            .try_into_protocol_message()
-            .map_err(|e| UserError::TryIntoProtocolMessageError(e.to_string()))?;
-
-        let res = group
+        let res = group_lock
+            .write()
+            .await
             .process_protocol_msg(
                 protocol_message,
                 &self.provider,
@@ -300,10 +420,15 @@ impl User {
             )
             .await?;
 
+        // Handle the result outside of any lock scope
         match res {
             GroupAction::GroupAppMsg(msg) => Ok(UserAction::SendToApp(msg)),
             GroupAction::LeaveGroup => Ok(UserAction::LeaveGroup(group_name)),
             GroupAction::DoNothing => Ok(UserAction::DoNothing),
+            GroupAction::GroupProposal(proposal) => {
+                self.process_consensus_proposal(proposal, group_name).await
+            }
+            GroupAction::GroupVote(vote) => self.process_consensus_vote(vote, group_name).await,
         }
     }
 
@@ -318,17 +443,31 @@ impl User {
         msg: WakuMessage,
     ) -> Result<UserAction, UserError> {
         let group_name = msg.content_topic.application_name.to_string();
-        let group = match self.groups.get(&group_name) {
-            Some(g) => g,
-            None => return Err(UserError::GroupNotFoundError(group_name)),
+
+        // Check if group exists and get app_id
+        let (group_exists, app_id) = {
+            let groups = self.groups.read().await;
+            let group = groups.get(&group_name);
+            match group {
+                Some(g) => (true, g.read().await.app_id()),
+                None => (false, Vec::new()),
+            }
         };
-        let app_id = group.app_id();
+
+        if !group_exists {
+            return Err(UserError::GroupNotFoundError(group_name));
+        }
+
         if msg.meta == app_id {
             info!("Message is from the same app, skipping");
             return Ok(UserAction::DoNothing);
         }
+
         let ct_name = msg.content_topic.content_topic_name.to_string();
-        info!("Processing waku message from content topic: {ct_name:?}");
+        info!(
+            "[user::process_waku_message]: Processing waku message from content topic: {ct_name}"
+        );
+
         match ct_name.as_str() {
             WELCOME_SUBTOPIC => self.process_welcome_subtopic(msg, group_name).await,
             APP_MSG_SUBTOPIC => self.process_app_subtopic(msg, group_name).await,
@@ -337,11 +476,8 @@ impl User {
     }
 
     /// This function is used to join a group after receiving a welcome message
-    fn join_group(&mut self, welcome: Welcome) -> Result<(), UserError> {
-        let group_config = MlsGroupJoinConfig::builder()
-            .use_ratchet_tree_extension(true)
-            .build();
-
+    async fn join_group(&mut self, welcome: Welcome) -> Result<(), UserError> {
+        let group_config = MlsGroupJoinConfig::builder().build();
         let mls_group =
             StagedWelcome::new_from_welcome(&self.provider, &group_config, welcome, None)?
                 .into_group(&self.provider)?;
@@ -349,14 +485,20 @@ impl User {
         let group_id = mls_group.group_id().to_vec();
         let group_name = String::from_utf8(group_id)?;
 
-        if !self.if_group_exists(group_name.clone()) {
+        if !self.if_group_exists(group_name.clone()).await {
             return Err(UserError::GroupNotFoundError(group_name));
         }
 
-        self.groups
-            .get_mut(&group_name)
-            .unwrap()
-            .set_mls_group(mls_group)?;
+        // Get the group lock and set the MLS group
+        let group_lock = {
+            let groups = self.groups.read().await;
+            match groups.get(&group_name) {
+                Some(lock) => lock.clone(),
+                None => return Err(UserError::GroupNotFoundError(group_name.clone())),
+            }
+        };
+
+        group_lock.write().await.set_mls_group(mls_group)?;
 
         info!(
             "User {:?} joined group {:?}",
@@ -368,10 +510,11 @@ impl User {
 
     /// This function is used to leave a group after receiving a commit message
     pub async fn leave_group(&mut self, group_name: String) -> Result<(), UserError> {
-        if !self.if_group_exists(group_name.clone()) {
+        if !self.if_group_exists(group_name.clone()).await {
             return Err(UserError::GroupNotFoundError(group_name));
         }
-        self.groups.remove(&group_name);
+        let mut groups = self.groups.write().await;
+        groups.remove(&group_name);
         Ok(())
     }
 
@@ -379,14 +522,20 @@ impl User {
         &mut self,
         group_name: String,
     ) -> Result<WakuMessageToSend, UserError> {
-        if !self.if_group_exists(group_name.clone()) {
+        if !self.if_group_exists(group_name.clone()).await {
             return Err(UserError::GroupNotFoundError(group_name));
         }
-        let msg_to_send = self
-            .groups
-            .get_mut(&group_name)
-            .unwrap()
-            .generate_steward_message()?;
+
+        // Get the group lock
+        let group_lock = {
+            let groups = self.groups.read().await;
+            match groups.get(&group_name) {
+                Some(lock) => lock.clone(),
+                None => return Err(UserError::GroupNotFoundError(group_name.clone())),
+            }
+        };
+
+        let msg_to_send = group_lock.write().await.generate_steward_message().await?;
         Ok(msg_to_send)
     }
 
@@ -396,22 +545,32 @@ impl User {
         group_name: String,
     ) -> Result<WakuMessageToSend, UserError> {
         info!("Start building group message");
-        let group = match self.groups.get_mut(&group_name) {
-            Some(g) => g,
-            None => return Err(UserError::GroupNotFoundError(group_name)),
+
+        // Get the group lock
+        let group_lock = {
+            let groups = self.groups.read().await;
+            match groups.get(&group_name) {
+                Some(lock) => lock.clone(),
+                None => return Err(UserError::GroupNotFoundError(group_name.clone())),
+            }
         };
 
-        if !group.is_mls_group_initialized() {
+        if !group_lock.read().await.is_mls_group_initialized() {
             return Err(UserError::GroupNotFoundError(group_name));
         }
+
         let app_msg = wrap_conversation_message_into_application_msg(
             msg.as_bytes().to_vec(),
             self.identity.identity_string(),
             group_name.clone(),
         );
-        let msg_to_send = group
+
+        let msg_to_send = group_lock
+            .write()
+            .await
             .build_message(&self.provider, self.identity.signer(), &app_msg)
             .await?;
+
         info!("End building group message");
         Ok(msg_to_send)
     }
@@ -426,27 +585,50 @@ impl User {
         &mut self,
         group_name: String,
     ) -> Result<Vec<WakuMessageToSend>, UserError> {
-        let group = match self.groups.get_mut(&group_name) {
-            Some(g) => g,
-            None => return Err(UserError::GroupNotFoundError(group_name)),
+        if !self.if_group_exists(group_name.clone()).await {
+            return Err(UserError::GroupNotFoundError(group_name));
+        }
+
+        // Get the group lock
+        let group_lock = {
+            let groups = self.groups.read().await;
+            match groups.get(&group_name) {
+                Some(lock) => lock.clone(),
+                None => return Err(UserError::GroupNotFoundError(group_name.clone())),
+            }
         };
 
-        let messages = group
+        let messages = group_lock
+            .write()
+            .await
             .create_batch_proposals_message(&self.provider, self.identity.signer())
             .await?;
         Ok(messages)
     }
 
     /// Remove proposals and complete the steward epoch for the given group.
-    pub async fn remove_proposals_and_complete(
+    pub async fn empty_proposals_queue_and_complete(
         &mut self,
         group_name: String,
     ) -> Result<(), UserError> {
-        let group = match self.groups.get_mut(&group_name) {
-            Some(g) => g,
-            None => return Err(UserError::GroupNotFoundError(group_name)),
+        if !self.if_group_exists(group_name.clone()).await {
+            return Err(UserError::GroupNotFoundError(group_name));
+        }
+
+        // Get the group lock
+        let group_lock = {
+            let groups = self.groups.read().await;
+            match groups.get(&group_name) {
+                Some(lock) => lock.clone(),
+                None => return Err(UserError::GroupNotFoundError(group_name.clone())),
+            }
         };
-        group.remove_proposals_and_complete().await?;
+
+        group_lock
+            .write()
+            .await
+            .remove_proposals_and_complete()
+            .await?;
         Ok(())
     }
 
@@ -454,13 +636,21 @@ impl User {
     /// Returns the number of proposals that will be voted on.
     /// If there are no proposals, returns 0 and doesn't change state.
     pub async fn start_steward_epoch(&mut self, group_name: String) -> Result<usize, UserError> {
-        let group = match self.groups.get_mut(&group_name) {
-            Some(g) => g,
-            None => return Err(UserError::GroupNotFoundError(group_name)),
+        if !self.if_group_exists(group_name.clone()).await {
+            return Err(UserError::GroupNotFoundError(group_name));
+        }
+
+        // Get the group lock
+        let group_lock = {
+            let groups = self.groups.read().await;
+            match groups.get(&group_name) {
+                Some(lock) => lock.clone(),
+                None => return Err(UserError::GroupNotFoundError(group_name.clone())),
+            }
         };
 
         // Check if there are proposals in the current epoch
-        let proposal_count = group.get_pending_proposals_count().await;
+        let proposal_count = group_lock.read().await.get_pending_proposals_count().await;
 
         if proposal_count == 0 {
             // No proposals to vote on, return 0 and don't change state
@@ -470,58 +660,78 @@ impl User {
 
         // There are proposals, start the steward epoch
         info!("Starting steward epoch with {proposal_count} proposals");
-        group.start_steward_epoch().await?;
+        group_lock.write().await.start_steward_epoch().await?;
         Ok(proposal_count)
     }
 
-    /// Start voting for the given group, returning the vote ID.
-    pub async fn start_voting(&mut self, group_name: String) -> Result<Vec<u8>, UserError> {
-        let current_identity = self.identity.identity_string();
-        let group = match self.groups.get_mut(&group_name) {
-            Some(g) => g,
-            None => return Err(UserError::GroupNotFoundError(group_name)),
-        };
-        group.start_voting()?;
-        let members = group.members_identity().await?;
-        let participant_ids: Vec<Vec<u8>> = members.into_iter().collect();
-        println!(
-            "User: start_voting - participants: {:?}",
-            participant_ids
-                .iter()
-                .map(alloy::hex::encode)
-                .collect::<Vec<_>>()
-        );
-        println!("User: start_voting - current user identity: {current_identity}");
-        let vote_id = uuid::Uuid::new_v4().as_bytes().to_vec();
-
-        Ok(vote_id)
-    }
-
-    /// Complete voting for the given group and vote ID, returning the result.
-    pub async fn complete_voting(
+    /// Start voting for the given group, returning the proposal ID.
+    pub async fn start_voting(
         &mut self,
         group_name: String,
-        _vote_id: Vec<u8>,
-    ) -> Result<bool, UserError> {
-        let group = match self.groups.get_mut(&group_name) {
-            Some(g) => g,
-            None => return Err(UserError::GroupNotFoundError(group_name)),
+    ) -> Result<(u32, UserAction), UserError> {
+        // Get the group lock
+        let group_lock = {
+            let groups = self.groups.read().await;
+            match groups.get(&group_name) {
+                Some(lock) => lock.clone(),
+                None => return Err(UserError::GroupNotFoundError(group_name.clone())),
+            }
         };
 
-        // Get vote result from HashGraph consensus
-        let vote_result = true;
+        // If this is the steward, create proposal with vote and send to group
+        if group_lock.read().await.is_steward().await {
+            let proposals = group_lock
+                .read()
+                .await
+                .get_proposals_for_voting_epoch()
+                .await;
+            if !proposals.is_empty() {
+                // Change state to Voting
+                group_lock.write().await.start_voting().await?;
 
-        // Update group state based on vote result
-        group.complete_voting(vote_result)?;
-        Ok(vote_result)
-    }
+                // Get group members for expected voters count
+                let members = group_lock.read().await.members_identity().await?;
+                let participant_ids: Vec<Vec<u8>> = members.into_iter().collect();
+                let expected_voters_count = participant_ids.len() as u32;
 
-    /// Submit a vote for the given vote ID.
-    pub async fn submit_vote(&mut self, vote_id: Vec<u8>, vote: bool) -> Result<(), UserError> {
-        let current_identity = self.identity.identity_string();
-        info!("User: submit_vote - vote_id: {vote_id:?}, vote: {vote}");
-        info!("User: submit_vote - current user identity: {current_identity}");
-        Ok(())
+                // Create proposal with steward's vote
+                let (proposal, _steward_vote) = self
+                    .consensus_service
+                    .create_proposal_with_vote(
+                        group_name.clone(),
+                        "Group Update Proposal".to_string(),
+                        format!("{proposals:?}"),
+                        self.eth_signer.address().to_string().as_bytes().to_vec(),
+                        true, // Steward votes yes
+                        expected_voters_count,
+                        300,  // 5 minutes expiration
+                        true, // liveness criteria yes
+                        self.eth_signer.clone(),
+                    )
+                    .await?;
+
+                info!(
+                    "[user::start_voting] expected voters: {expected_voters_count} for proposal: {:?}", proposal.proposal_id
+                );
+
+                // Send proposal as APP message to group
+                let app_message = AppMessage {
+                    payload: Some(app_message::Payload::Proposal(proposal.clone())),
+                };
+
+                let waku_msg = WakuMessageToSend::new(
+                    app_message.encode_to_vec(),
+                    APP_MSG_SUBTOPIC,
+                    group_name.clone(),
+                    group_lock.read().await.app_id(),
+                );
+
+                // Send the message and return the proposal ID as vote_id
+                return Ok((proposal.proposal_id, UserAction::SendToWaku(waku_msg)));
+            }
+        }
+
+        Ok((0, UserAction::DoNothing))
     }
 
     /// Add a remove proposal to the steward for the given group.
@@ -530,14 +740,77 @@ impl User {
         group_name: String,
         identity: String,
     ) -> Result<(), UserError> {
-        let group = match self.groups.get_mut(&group_name) {
-            Some(g) => g,
-            None => return Err(UserError::GroupNotFoundError(group_name)),
+        if !self.if_group_exists(group_name.clone()).await {
+            return Err(UserError::GroupNotFoundError(group_name));
+        }
+
+        // Get the group lock
+        let group_lock = {
+            let groups = self.groups.read().await;
+            match groups.get(&group_name) {
+                Some(lock) => lock.clone(),
+                None => return Err(UserError::GroupNotFoundError(group_name.clone())),
+            }
         };
-        let identity_bytes = alloy::hex::decode(&identity)
-            .map_err(|e| UserError::ApplyProposalsError(format!("Invalid hex string: {e}")))?;
-        group.store_remove_proposal(identity_bytes).await?;
+
+        let identity_bytes = alloy::hex::decode(&identity)?;
+        group_lock
+            .write()
+            .await
+            .store_remove_proposal(identity_bytes)
+            .await?;
         Ok(())
+    }
+
+    /// Complete voting for the given group and vote ID, returning the result.
+    /// This method waits for consensus to be reached with a timeout.
+    pub async fn complete_voting(
+        &mut self,
+        group_name: String,
+        proposal_id: u32,
+    ) -> Result<bool, UserError> {
+        if !self.if_group_exists(group_name.clone()).await {
+            return Err(UserError::GroupNotFoundError(group_name));
+        }
+
+        // Get the group lock
+        let group_lock = {
+            let groups = self.groups.read().await;
+            match groups.get(&group_name) {
+                Some(lock) => lock.clone(),
+                None => return Err(UserError::GroupNotFoundError(group_name.clone())),
+            }
+        };
+
+        // Steward behavior: wait for all votes or timeout, then check 2n/3 threshold
+        info!("Steward: Waiting for consensus on proposal {proposal_id} for group {group_name}");
+
+        // Wait for consensus to be reached (timeout after 30 seconds)
+        if let Ok(vote_result) = self
+            .consensus_service
+            .wait_for_consensus(group_name.clone(), proposal_id, 30)
+            .await
+        {
+            // Update group state based on vote result
+            group_lock
+                .write()
+                .await
+                .complete_voting(vote_result)
+                .await?;
+
+            info!("Steward: Consensus reached for proposal {proposal_id}: {vote_result}");
+
+            // If vote passed, send commit message
+            if vote_result {
+                info!("Steward: Vote passed, sending commit message");
+            }
+
+            Ok(vote_result)
+        } else {
+            // Timeout reached without consensus
+            info!("Steward: Unexpected timeout for proposal {proposal_id}");
+            Ok(false)
+        }
     }
 
     /// Get the number of pending proposals for the given group.
@@ -545,10 +818,156 @@ impl User {
         &self,
         group_name: String,
     ) -> Result<usize, UserError> {
-        let group = self
-            .groups
-            .get(&group_name)
-            .ok_or(UserError::GroupNotFoundError(group_name))?;
-        Ok(group.get_pending_proposals_count().await)
+        // Get the group lock
+        let group_lock = {
+            let groups = self.groups.read().await;
+            match groups.get(&group_name) {
+                Some(lock) => lock.clone(),
+                None => return Err(UserError::GroupNotFoundError(group_name.clone())),
+            }
+        };
+
+        let count = group_lock.read().await.get_pending_proposals_count().await;
+        Ok(count)
+    }
+
+    /// Process incoming ban request
+    async fn process_ban_request(
+        &mut self,
+        ban_request: BanRequest,
+        group_name: String,
+    ) -> Result<UserAction, UserError> {
+        let user_to_ban = String::from_utf8_lossy(&ban_request.user_to_ban);
+        info!(
+            "[user::process_ban_request]: Processing ban request from {} for user {} in group {}",
+            ban_request.requester, user_to_ban, group_name
+        );
+
+        // Check if this user is the steward for this group
+        let is_steward = {
+            let groups = self.groups.read().await;
+            if let Some(group_lock) = groups.get(&group_name) {
+                group_lock.read().await.is_steward().await
+            } else {
+                false
+            }
+        };
+
+        if is_steward {
+            // Steward: add the remove proposal to the queue
+            info!(
+                "[user::process_ban_request]: Steward adding remove proposal for user {user_to_ban}"
+            );
+            self.add_remove_proposal(group_name.clone(), user_to_ban.to_string())
+                .await?;
+
+            // Send system message to the group
+            let system_message = format!(
+                "Remove proposal for user {} added to steward queue by {}",
+                user_to_ban, ban_request.requester
+            );
+            let app_message = wrap_conversation_message_into_application_msg(
+                system_message.into_bytes(),
+                "system".to_string(),
+                group_name.clone(),
+            );
+            Ok(UserAction::SendToApp(app_message))
+        } else {
+            // Non-steward: just show a system message
+            info!("[user::process_ban_request]: Non-steward user received ban request for user {user_to_ban}" );
+            let system_message = format!(
+                "User {} wants to ban user {} (only steward can execute)",
+                ban_request.requester, user_to_ban
+            );
+            let app_message = wrap_conversation_message_into_application_msg(
+                system_message.into_bytes(),
+                "system".to_string(),
+                group_name.clone(),
+            );
+            Ok(UserAction::SendToApp(app_message))
+        }
+    }
+
+    /// Process incoming consensus proposal
+    async fn process_consensus_proposal(
+        &mut self,
+        proposal: Proposal,
+        group_name: String,
+    ) -> Result<UserAction, UserError> {
+        // Get the group lock
+        let group_lock = {
+            let groups = self.groups.read().await;
+            match groups.get(&group_name) {
+                Some(lock) => lock.clone(),
+                None => return Err(UserError::GroupNotFoundError(group_name.clone())),
+            }
+        };
+
+        // Change state to Voting if not already
+        if group_lock.read().await.get_state().await != crate::state_machine::GroupState::Voting {
+            group_lock.write().await.start_voting().await?;
+        }
+
+        // Process the proposal in consensus service
+        let vote = self
+            .consensus_service
+            .process_incoming_proposal(group_name.clone(), proposal, self.eth_signer.clone())
+            .await?;
+
+        // Send vote as APP message to group
+        let app_message = AppMessage {
+            payload: Some(app_message::Payload::Vote(vote.clone())),
+        };
+
+        let waku_msg = WakuMessageToSend::new(
+            app_message.encode_to_vec(),
+            APP_MSG_SUBTOPIC,
+            group_name.clone(),
+            group_lock.read().await.app_id(),
+        );
+
+        Ok(UserAction::SendToWaku(waku_msg))
+    }
+
+    /// Process incoming consensus vote
+    async fn process_consensus_vote(
+        &mut self,
+        vote: crate::protos::messages::v1::consensus::v1::Vote,
+        group_name: String,
+    ) -> Result<UserAction, UserError> {
+        // Process the vote in consensus service
+        self.consensus_service
+            .process_incoming_vote(group_name.clone(), vote.clone())
+            .await?;
+
+        // Check if consensus has been reached immediately after adding this vote
+        if let Some(result) = self
+            .consensus_service
+            .get_consensus_result(group_name.clone(), vote.vote_id)
+            .await
+        {
+            // Consensus reached, handle result
+            if result {
+                // Vote passed - steward should send commit message
+                info!("Consensus reached: YES - steward should send commit message");
+            } else {
+                // Vote failed - return to working state
+                info!("Consensus reached: NO - returning to working state");
+            }
+        }
+
+        Ok(UserAction::DoNothing)
+    }
+}
+
+impl LocalSigner for PrivateKeySigner {
+    async fn local_sign_message(&self, message: &[u8]) -> Result<Vec<u8>, anyhow::Error> {
+        let signature = self.sign_message(message).await?;
+        let signature_bytes = signature.as_bytes().to_vec();
+        Ok(signature_bytes)
+    }
+
+    fn get_address(&self) -> Address {
+        self.address()
     }
 }

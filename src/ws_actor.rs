@@ -15,7 +15,8 @@ use crate::{
 pub struct WsActor {
     /// This is the sender of the open web socket connection
     pub ws_sender: SplitSink<WebSocket, WsMessage>,
-    /// This variable is used to check if the user has connected to the ws, if not, we parce message as ConnectMessage
+    /// This variable is used to check if the user has connected to the ws,
+    ///   if not, we parse message as ConnectMessage
     pub is_initialized: bool,
 }
 
@@ -31,7 +32,6 @@ impl WsActor {
 /// This enum is used to represent the actions that can be performed on the web socket
 /// Connect - this action is used to return connection data to the user
 /// UserMessage - this action is used to handle message from web socket and return it to the user
-/// RemoveUser - this action is used to remove a user from the group
 /// DoNothing - this action is used for test purposes (return empty action if message is not valid)
 #[derive(Debug, PartialEq)]
 pub enum WsAction {
@@ -44,7 +44,6 @@ pub enum WsAction {
 /// This struct is used to represent the raw message from the web socket.
 /// It is used to handle the message from the web socket and return it to the user
 /// We can parse it to the ConnectMessage or UserMessage
-///     if it starts with "/ban" it will be parsed to RemoveUser, otherwise it will be parsed to UserMessage
 #[derive(Debug, PartialEq)]
 pub struct RawWsMessage {
     pub message: String,

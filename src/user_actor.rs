@@ -72,25 +72,6 @@ impl Message<LeaveGroupRequest> for User {
     }
 }
 
-pub struct RemoveUserRequest {
-    pub user_to_ban: String,
-    pub group_name: String,
-}
-
-impl Message<RemoveUserRequest> for User {
-    type Reply = Result<(), UserError>;
-
-    async fn handle(
-        &mut self,
-        msg: RemoveUserRequest,
-        _ctx: Context<'_, Self, Self::Reply>,
-    ) -> Self::Reply {
-        // Add remove proposal to steward instead of direct removal
-        self.add_remove_proposal(msg.group_name, msg.user_to_ban)
-            .await
-    }
-}
-
 pub struct SendGroupMessage {
     pub message: String,
     pub group_name: String,
@@ -107,6 +88,7 @@ impl Message<SendGroupMessage> for User {
         self.build_group_message(&msg.message, msg.group_name).await
     }
 }
+
 // New state machine message types
 pub struct StartStewardEpochRequest {
     pub group_name: String,
@@ -129,7 +111,7 @@ pub struct StartVotingRequest {
 }
 
 impl Message<StartVotingRequest> for User {
-    type Reply = Result<Vec<u8>, UserError>; // Returns vote_id
+    type Reply = Result<(u32, UserAction), UserError>; // Returns proposal_id
 
     async fn handle(
         &mut self,
@@ -142,7 +124,7 @@ impl Message<StartVotingRequest> for User {
 
 pub struct CompleteVotingRequest {
     pub group_name: String,
-    pub vote_id: Vec<u8>,
+    pub proposal_id: u32,
 }
 
 impl Message<CompleteVotingRequest> for User {
@@ -153,7 +135,7 @@ impl Message<CompleteVotingRequest> for User {
         msg: CompleteVotingRequest,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.complete_voting(msg.group_name, msg.vote_id).await
+        self.complete_voting(msg.group_name, msg.proposal_id).await
     }
 }
 
@@ -173,18 +155,19 @@ impl Message<ApplyProposalsAndCompleteRequest> for User {
     }
 }
 
-pub struct RemoveProposalsAndCompleteRequest {
+pub struct EmptyProposalsAndCompleteRequest {
     pub group_name: String,
 }
 
-impl Message<RemoveProposalsAndCompleteRequest> for User {
+impl Message<EmptyProposalsAndCompleteRequest> for User {
     type Reply = Result<(), UserError>;
 
     async fn handle(
         &mut self,
-        msg: RemoveProposalsAndCompleteRequest,
+        msg: EmptyProposalsAndCompleteRequest,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.remove_proposals_and_complete(msg.group_name).await
+        self.empty_proposals_queue_and_complete(msg.group_name)
+            .await
     }
 }

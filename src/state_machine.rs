@@ -23,6 +23,8 @@
 
 use std::fmt::Display;
 
+use log::info;
+
 use crate::steward::Steward;
 use crate::{steward::GroupUpdateRequest, GroupError};
 
@@ -84,92 +86,82 @@ impl GroupStateMachine {
         match self.state {
             GroupState::Working => true, // Anyone can send messages in working state
             GroupState::Waiting => is_steward && has_proposals, // Only steward with proposals can send
-            GroupState::Voting => false, // No one can send messages during voting
+            GroupState::Voting => true, //Only [AppMessagePayload::Vote] is allowed
         }
     }
 
     /// Start a new steward epoch, transitioning to Waiting state
     pub async fn start_steward_epoch(&mut self) -> Result<(), GroupError> {
-        println!(
-            "State machine: start_steward_epoch called, current state: {:?}",
-            self.state
-        );
         if self.state != GroupState::Working {
-            println!(
-                "State machine: Invalid state transition from {:?} to Waiting",
-                self.state
-            );
-            return Err(GroupError::InvalidStateTransition);
+            return Err(GroupError::InvalidStateTransition {
+                from: self.state.to_string(),
+                to: "Waiting".to_string(),
+            });
         }
-
         self.state = GroupState::Waiting;
-        println!("State machine: Transitioned from Working to Waiting");
-
-        self.steward.as_mut().unwrap().start_new_epoch().await;
-        println!("State machine: Started new epoch");
-
+        self.steward
+            .as_mut()
+            .ok_or(GroupError::StewardNotSet)?
+            .start_new_epoch()
+            .await;
         Ok(())
     }
 
     /// Start voting on proposals for the current epoch, transitioning to Voting state
     pub fn start_voting(&mut self) -> Result<(), GroupError> {
-        println!(
-            "State machine: start_voting called, current state: {:?}",
-            self.state
-        );
-        if self.state != GroupState::Waiting {
-            println!(
-                "State machine: Invalid state transition from {:?} to Voting",
-                self.state
-            );
-            return Err(GroupError::InvalidStateTransition);
+        if self.state == GroupState::Voting {
+            return Err(GroupError::InvalidStateTransition {
+                from: self.state.to_string(),
+                to: "Voting".to_string(),
+            });
         }
-
         self.state = GroupState::Voting;
-        println!("State machine: Transitioned from Waiting to Voting");
         Ok(())
     }
 
     /// Complete voting and update state based on result
     pub fn complete_voting(&mut self, vote_result: bool) -> Result<(), GroupError> {
-        println!(
-            "State machine: complete_voting called with result {}, current state: {:?}",
-            vote_result, self.state
-        );
         if self.state != GroupState::Voting {
-            println!(
-                "State machine: Invalid state transition from {:?} to {}",
-                self.state,
-                if vote_result { "Waiting" } else { "Working" }
-            );
-            return Err(GroupError::InvalidStateTransition);
+            return Err(GroupError::InvalidStateTransition {
+                from: self.state.to_string(),
+                to: if vote_result { "Waiting" } else { "Working" }.to_string(),
+            });
         }
 
         if vote_result {
             // Vote passed - stay in waiting state for proposal application
             self.state = GroupState::Waiting;
-            println!("State machine: Vote passed, staying in Waiting state");
+            info!("[complete_voting] Vote passed, staying in Waiting state");
         } else {
             // Vote failed - return to working state
             self.state = GroupState::Working;
-            println!("State machine: Vote failed, returning to Working state");
+            info!("[complete_voting] Vote failed, returning to Working state");
         }
 
         Ok(())
     }
 
+    /// Start working state (for non-steward peers after consensus)
+    pub fn start_working(&mut self) -> Result<(), GroupError> {
+        self.state = GroupState::Working;
+        info!("[start_working] Transitioning to Working state");
+        Ok(())
+    }
+
+    /// Start waiting state (for non-steward peers after consensus)
+    pub fn start_waiting(&mut self) -> Result<(), GroupError> {
+        self.state = GroupState::Waiting;
+        info!("[start_waiting] Transitioning to Waiting state");
+        Ok(())
+    }
+
     /// Apply proposals and complete the steward epoch
     pub async fn remove_proposals_and_complete(&mut self) -> Result<(), GroupError> {
-        println!(
-            "State machine: remove_proposals_and_complete called, current state: {:?}",
-            self.state
-        );
         if self.state != GroupState::Waiting {
-            println!(
-                "State machine: Invalid state transition from {:?} to Working",
-                self.state
-            );
-            return Err(GroupError::InvalidStateTransition);
+            return Err(GroupError::InvalidStateTransition {
+                from: self.state.to_string(),
+                to: "Working".to_string(),
+            });
         }
 
         // Apply proposals for current epoch from steward
@@ -180,7 +172,6 @@ impl GroupStateMachine {
         }
 
         self.state = GroupState::Working;
-        println!("State machine: Transitioned from Waiting to Working");
 
         Ok(())
     }
@@ -319,28 +310,30 @@ mod tests {
             .start_voting()
             .expect("Failed to start voting");
 
-        // Voting state - no one can send messages
-        assert!(!state_machine.can_send_message(false, false));
-        assert!(!state_machine.can_send_message(false, true));
-        assert!(!state_machine.can_send_message(true, false));
-        assert!(!state_machine.can_send_message(true, true));
+        // Voting state - everyone can send messages
+        assert!(state_machine.can_send_message(false, false));
+        assert!(state_machine.can_send_message(false, true));
+        assert!(state_machine.can_send_message(true, false));
+        assert!(state_machine.can_send_message(true, true));
     }
 
     #[tokio::test]
     async fn test_invalid_state_transitions() {
         let mut state_machine = GroupStateMachine::new();
 
-        // Cannot start voting from Working state
-        let result = state_machine.start_voting();
-        assert!(matches!(result, Err(GroupError::InvalidStateTransition)));
-
         // Cannot complete voting from Working state
         let result = state_machine.complete_voting(true);
-        assert!(matches!(result, Err(GroupError::InvalidStateTransition)));
+        assert!(matches!(
+            result,
+            Err(GroupError::InvalidStateTransition { .. })
+        ));
 
         // Cannot apply proposals from Working state
         let result = state_machine.remove_proposals_and_complete().await;
-        assert!(matches!(result, Err(GroupError::InvalidStateTransition)));
+        assert!(matches!(
+            result,
+            Err(GroupError::InvalidStateTransition { .. })
+        ));
     }
 
     #[tokio::test]
@@ -373,5 +366,33 @@ mod tests {
 
         // Proposals should be applied and count should be reset
         assert_eq!(state_machine.get_current_epoch_proposals_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_state_snapshot_consistency() {
+        let mut state_machine = GroupStateMachine::new_with_steward();
+
+        // Add some proposals
+        state_machine
+            .add_proposal(GroupUpdateRequest::RemoveMember(vec![1, 2, 3]))
+            .await;
+
+        // Get a snapshot before state transition
+        let snapshot1 = state_machine.get_current_epoch_proposals_count().await;
+        assert_eq!(snapshot1, 1);
+
+        // Start steward epoch
+        state_machine
+            .start_steward_epoch()
+            .await
+            .expect("Failed to start steward epoch");
+
+        // Get a snapshot after state transition
+        let snapshot2 = state_machine.get_current_epoch_proposals_count().await;
+        assert_eq!(snapshot2, 0);
+
+        // Verify that the snapshots are consistent within themselves
+        assert!(snapshot1 > 0);
+        assert_ne!(snapshot1, snapshot2);
     }
 }

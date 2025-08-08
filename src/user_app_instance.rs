@@ -4,10 +4,10 @@ use kameo::actor::ActorRef;
 use log::{error, info};
 use std::{str::FromStr, sync::Arc, time::Duration};
 
-use crate::user::User;
+use crate::user::{User, UserAction};
 use crate::user_actor::{
     ApplyProposalsAndCompleteRequest, CompleteVotingRequest, CreateGroupRequest,
-    RemoveProposalsAndCompleteRequest, StartStewardEpochRequest, StartVotingRequest,
+    EmptyProposalsAndCompleteRequest, StartStewardEpochRequest, StartVotingRequest,
     StewardMessageRequest,
 };
 use crate::{error::UserError, AppState, Connection};
@@ -30,14 +30,14 @@ pub async fn create_user_instance(
             is_creation: connection.should_create_group,
         })
         .await
-        .map_err(|e| UserError::KameoCreateGroupError(e.to_string()))?;
+        .map_err(|e| UserError::UnableToCreateGroup(e.to_string()))?;
 
     let mut content_topics = build_content_topics(&group_name);
     info!("Building content topics: {content_topics:?}");
     app_state
         .content_topics
-        .lock()
-        .unwrap()
+        .write()
+        .await
         .append(&mut content_topics);
 
     if connection.should_create_group {
@@ -55,7 +55,7 @@ pub async fn create_user_instance(
                         app_state.clone(),
                     )
                     .await
-                    .map_err(|e| UserError::KameoSendMessageError(e.to_string()))?;
+                    .map_err(|e| UserError::UnableToHandleStewardEpoch(e.to_string()))?;
                     Ok::<(), UserError>(())
                 }
                 .await
@@ -105,27 +105,41 @@ pub async fn handle_steward_flow_per_epoch(
 
     info!("Found {proposals_count} proposals to vote on for group: {group_name}");
 
-    // Step 3: Start voting process
-    let vote_id = user
+    // Step 3: Start voting process - steward creates proposal with vote and sends to group
+    let (proposal_id, action) = user
         .ask(StartVotingRequest {
             group_name: group_name.clone(),
         })
         .await
-        .map_err(|e| UserError::ProcessProposalsError(e.to_string()))?;
+        .map_err(|e| UserError::UnableToStartVoting(e.to_string()))?;
 
-    info!("Started voting with vote_id: {vote_id:?} for group: {group_name}");
+    match action {
+        UserAction::SendToWaku(waku_msg) => {
+            app_state.waku_node.send(waku_msg).await?;
+        }
+        UserAction::DoNothing => {
+            info!("No action to take for group: {group_name}");
+            return Ok(());
+        }
+        _ => {
+            return Err(UserError::InvalidUserAction(action.to_string()));
+        }
+    }
+    info!("Started voting with vote_id: {proposal_id:?} for group: {group_name}");
 
-    // Step 4: Complete voting (in a real implementation, this would wait for actual votes)
-    // For now, we'll simulate the voting process
+    // Step 4: Wait for consensus to be reached (2n/3 votes)
+    // This will wait for actual consensus signals from the consensus service
+    info!("Waiting for consensus to be reached for group: {group_name}");
+
     let vote_result = user
         .ask(CompleteVotingRequest {
             group_name: group_name.clone(),
-            vote_id: vote_id.clone(),
+            proposal_id,
         })
         .await
-        .map_err(|e| UserError::ApplyProposalsError(e.to_string()))?;
+        .map_err(|e| UserError::UnableToCompleteVoting(e.to_string()))?;
 
-    info!("Voting completed with result: {vote_result} for group: {group_name}");
+    info!("Consensus reached with result: {vote_result} for group: {group_name}");
 
     // Step 5: If vote passed, apply proposals and complete
     if vote_result {
@@ -134,7 +148,7 @@ pub async fn handle_steward_flow_per_epoch(
                 group_name: group_name.clone(),
             })
             .await
-            .map_err(|e| UserError::ApplyProposalsError(e.to_string()))?;
+            .map_err(|e| UserError::UnableToApplyProposals(e.to_string()))?;
 
         // Only send messages if there are any (when there are proposals)
         for msg in msgs {
@@ -146,11 +160,11 @@ pub async fn handle_steward_flow_per_epoch(
         info!("Vote failed, returning to working state for group: {group_name}");
     }
 
-    user.ask(RemoveProposalsAndCompleteRequest {
+    user.ask(EmptyProposalsAndCompleteRequest {
         group_name: group_name.clone(),
     })
     .await
-    .map_err(|e| UserError::ApplyProposalsError(e.to_string()))?;
+    .map_err(|e| UserError::EmptyProposalsAndCompleteError(e.to_string()))?;
 
     info!("Removing proposals and completing steward epoch for group: {group_name}");
     Ok(())

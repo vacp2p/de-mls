@@ -17,31 +17,32 @@ async fn test_state_machine_transitions() {
     .expect("Failed to create group");
 
     // Initial state should be Working
-    assert_eq!(group.get_state(), GroupState::Working);
+    assert_eq!(group.get_state().await, GroupState::Working);
 
     // Test start_steward_epoch
     group
         .start_steward_epoch()
         .await
         .expect("Failed to start steward epoch");
-    assert_eq!(group.get_state(), GroupState::Waiting);
+    assert_eq!(group.get_state().await, GroupState::Waiting);
 
     // Test start_voting
-    group.start_voting().expect("Failed to start voting");
-    assert_eq!(group.get_state(), GroupState::Voting);
+    group.start_voting().await.expect("Failed to start voting");
+    assert_eq!(group.get_state().await, GroupState::Voting);
 
     // Test complete_voting with success
     group
         .complete_voting(true)
+        .await
         .expect("Failed to complete voting");
-    assert_eq!(group.get_state(), GroupState::Waiting);
+    assert_eq!(group.get_state().await, GroupState::Waiting);
 
     // Test apply_proposals
     group
         .remove_proposals_and_complete()
         .await
         .expect("Failed to remove proposals");
-    assert_eq!(group.get_state(), GroupState::Working);
+    assert_eq!(group.get_state().await, GroupState::Working);
     assert_eq!(group.get_pending_proposals_count().await, 0);
 }
 
@@ -60,9 +61,9 @@ async fn test_state_machine_permissions() {
     .expect("Failed to create group");
 
     // Working state - anyone can send messages
-    assert!(group.can_send_message(false, false)); // Regular user, no proposals
-    assert!(group.can_send_message(true, false)); // Steward, no proposals
-    assert!(group.can_send_message(true, true)); // Steward, with proposals
+    assert!(group.can_send_message(false, false).await); // Regular user, no proposals
+    assert!(group.can_send_message(true, false).await); // Steward, no proposals
+    assert!(group.can_send_message(true, true).await); // Steward, with proposals
 
     // Start steward epoch
     group
@@ -71,19 +72,19 @@ async fn test_state_machine_permissions() {
         .expect("Failed to start steward epoch");
 
     // Waiting state - only steward with proposals can send messages
-    assert!(!group.can_send_message(false, false)); // Regular user, no proposals
-    assert!(!group.can_send_message(false, true)); // Regular user, with proposals
-    assert!(!group.can_send_message(true, false)); // Steward, no proposals
-    assert!(group.can_send_message(true, true)); // Steward, with proposals
+    assert!(!group.can_send_message(false, false).await); // Regular user, no proposals
+    assert!(!group.can_send_message(false, true).await); // Regular user, with proposals
+    assert!(!group.can_send_message(true, false).await); // Steward, no proposals
+    assert!(group.can_send_message(true, true).await); // Steward, with proposals
 
     // Start voting
-    group.start_voting().expect("Failed to start voting");
+    group.start_voting().await.expect("Failed to start voting");
 
-    // Voting state - no one can send messages
-    assert!(!group.can_send_message(false, false));
-    assert!(!group.can_send_message(false, true));
-    assert!(!group.can_send_message(true, false));
-    assert!(!group.can_send_message(true, true));
+    // Voting state - everyone can send messages
+    assert!(group.can_send_message(false, false).await);
+    assert!(group.can_send_message(false, true).await);
+    assert!(group.can_send_message(true, false).await);
+    assert!(group.can_send_message(true, true).await);
 }
 
 #[tokio::test]
@@ -100,17 +101,19 @@ async fn test_invalid_state_transitions() {
     )
     .expect("Failed to create group");
 
-    // Cannot start voting from Working state
-    let result = group.start_voting();
-    assert!(matches!(result, Err(GroupError::InvalidStateTransition)));
-
     // Cannot complete voting from Working state
-    let result = group.complete_voting(true);
-    assert!(matches!(result, Err(GroupError::InvalidStateTransition)));
+    let result = group.complete_voting(true).await;
+    assert!(matches!(
+        result,
+        Err(GroupError::InvalidStateTransition { .. })
+    ));
 
     // Cannot apply proposals from Working state
     let result = group.remove_proposals_and_complete().await;
-    assert!(matches!(result, Err(GroupError::InvalidStateTransition)));
+    assert!(matches!(
+        result,
+        Err(GroupError::InvalidStateTransition { .. })
+    ));
 
     // Start steward epoch
     group
@@ -160,9 +163,10 @@ async fn test_proposal_counting() {
     assert_eq!(group.get_voting_proposals_count().await, 2);
 
     // Complete the flow
-    group.start_voting().expect("Failed to start voting");
+    group.start_voting().await.expect("Failed to start voting");
     group
         .complete_voting(true)
+        .await
         .expect("Failed to complete voting");
     group
         .remove_proposals_and_complete()

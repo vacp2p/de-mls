@@ -28,12 +28,9 @@ use openmls::prelude::{KeyPackage, MlsMessageOut};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
-// use crate::protos::messages::v1::{
-//     welcome_message, GroupAnnouncement, InvitationToJoin, WelcomeMessage, AppMessage, ConversationMessage, UserKeyPackage,
-// };
 use crate::protos::messages::v1::{
-    welcome_message, AppMessage, BatchProposalsMessage, ConversationMessage, GroupAnnouncement,
-    InvitationToJoin, WelcomeMessage,
+    welcome_message, AppMessage, BanRequest, BatchProposalsMessage, ConversationMessage,
+    GroupAnnouncement, InvitationToJoin, WelcomeMessage,
 };
 
 // WELCOME MESSAGE SUBTOPIC
@@ -125,6 +122,20 @@ pub fn wrap_batch_proposals_into_application_msg(
                 commit_message,
             },
         )),
+    }
+}
+
+pub fn wrap_ban_request_into_application_msg(
+    user_to_ban: String,
+    requester: String,
+    group_name: String,
+) -> AppMessage {
+    AppMessage {
+        payload: Some(app_message::Payload::BanRequest(BanRequest {
+            user_to_ban: user_to_ban.into(),
+            requester,
+            group_name,
+        })),
     }
 }
 

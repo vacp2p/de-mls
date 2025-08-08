@@ -4,11 +4,22 @@ syntax = "proto3";
 
 package de_mls.messages.v1;
 
+import "messages/v1/consensus.proto";
+
 message AppMessage {
   oneof payload {
     ConversationMessage conversation_message = 1;
     BatchProposalsMessage batch_proposals_message = 2;
+    BanRequest ban_request = 3;
+    consensus.v1.Proposal proposal = 4;
+    consensus.v1.Vote vote = 5;
   }
+}
+
+message BanRequest {
+  bytes user_to_ban = 1;
+  string requester = 2;
+  string group_name = 3;
 }
 
 message ConversationMessage {
