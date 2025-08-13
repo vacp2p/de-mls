@@ -106,7 +106,7 @@ async fn test_invite_users_flow() {
         .complete_voting(group_name.clone(), proposal_id)
         .await
         .expect("Failed to complete voting");
-    assert_eq!(vote_result, true);
+    assert!(vote_result);
 
     let res = alice
         .apply_proposals(group_name.clone())
@@ -308,7 +308,7 @@ async fn test_add_user_in_different_epoch() {
         .complete_voting(group_name.clone(), proposal_id)
         .await
         .expect("Failed to complete voting");
-    assert_eq!(vote_result, true);
+    assert!(vote_result);
 
     let res = alice
         .apply_proposals(group_name.clone())
@@ -478,7 +478,7 @@ async fn test_add_user_in_different_epoch() {
             .get_state()
             .await
     );
-    assert_eq!(vote_result, true);
+    assert!(vote_result);
 
     // 3. Apply proposals to add Carol to the group
     let _out = alice
@@ -900,7 +900,7 @@ async fn test_remove_user_flow() {
         .complete_voting(group_name.clone(), proposal_id)
         .await
         .expect("Failed to complete voting (removal)");
-    assert_eq!(vote_result, true);
+    assert!(vote_result);
     let out = alice
         .apply_proposals(group_name.clone())
         .await

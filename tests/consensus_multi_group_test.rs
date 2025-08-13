@@ -227,7 +227,7 @@ async fn test_consensus_threshold_calculation() {
     // because 4 out of 5 votes meets the 2n/3 threshold
     let mut previous_vote_hash = proposal.votes[0].vote_hash.clone(); // Start with steward's vote hash
 
-    for i in 2..5 {
+    for _ in 2..5 {
         let signer = PrivateKeySigner::random();
         let proposal_owner = signer.address().to_string().as_bytes().to_vec();
         let mut vote = Vote {
@@ -276,7 +276,7 @@ async fn test_consensus_threshold_calculation() {
 
     // Should have consensus result based on 2n/3 threshold
     assert!(consensus_result.is_ok());
-    assert_eq!(consensus_result.unwrap(), true); // All votes were true
+    assert!(consensus_result.unwrap()); // All votes were true
 }
 
 #[tokio::test]

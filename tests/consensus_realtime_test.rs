@@ -41,11 +41,11 @@ async fn test_realtime_consensus_waiting() {
     let proposal_id = proposal.proposal_id;
 
     let consensus_waiter = tokio::spawn(async move {
-        println!("Starting consensus waiter for proposal {}", proposal_id);
+        println!("Starting consensus waiter for proposal {proposal_id:?}");
         let result = consensus_service_clone
             .wait_for_consensus(group_name_clone, proposal_id, 10)
             .await;
-        println!("Consensus waiter completed with result: {:?}", result);
+        println!("Consensus waiter completed with result: {result:?}");
         result
     });
 
@@ -139,14 +139,11 @@ async fn test_consensus_timeout() {
     let proposal_id = proposal.proposal_id;
 
     let consensus_waiter = tokio::spawn(async move {
-        println!(
-            "Starting consensus waiter with timeout for proposal {}",
-            proposal_id
-        );
+        println!("Starting consensus waiter with timeout for proposal {proposal_id:?}");
         let result = consensus_service_clone
             .wait_for_consensus(group_name_clone, proposal_id, 2) // 2 second timeout
             .await;
-        println!("Consensus waiter completed with result: {:?}", result);
+        println!("Consensus waiter completed with result: {result:?}");
         result
     });
 
@@ -158,7 +155,7 @@ async fn test_consensus_timeout() {
     // Verify timeout occurred and liveness criteria was applied
     // With liveness_criteria_yes = true, should return Some(true)
     assert!(consensus_result.is_ok());
-    assert_eq!(consensus_result.unwrap(), true);
+    assert!(consensus_result.unwrap());
 
     println!("Test completed successfully - timeout occurred and liveness criteria applied!");
 }
@@ -198,11 +195,11 @@ async fn test_consensus_with_mixed_votes() {
     let proposal_id = proposal.proposal_id;
 
     let consensus_waiter = tokio::spawn(async move {
-        println!("Starting consensus waiter for proposal {}", proposal_id);
+        println!("Starting consensus waiter for proposal {proposal_id:?}");
         let result = consensus_service_clone
             .wait_for_consensus(group_name_clone, proposal_id, 10)
             .await;
-        println!("Consensus waiter completed with result: {:?}", result);
+        println!("Consensus waiter completed with result: {result:?}");
         result
     });
 
@@ -260,7 +257,7 @@ async fn test_consensus_with_mixed_votes() {
     // Verify consensus was reached
     assert!(consensus_result.is_ok());
     // With 2 yes votes and 1 no vote, consensus should be yes
-    assert_eq!(consensus_result.unwrap(), false);
+    assert!(!consensus_result.unwrap());
 
     println!("Test completed successfully - consensus reached with mixed votes!");
 }
@@ -330,8 +327,7 @@ async fn test_rfc_vote_chain_validation() {
     let validation_result = consensus_service.validate_proposal(&test_proposal);
     assert!(
         validation_result.is_ok(),
-        "RFC validation should pass: {:?}",
-        validation_result
+        "RFC validation should pass: {validation_result:?}"
     );
 
     // Test invalid vote chain (wrong received_hash)

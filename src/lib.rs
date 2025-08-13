@@ -250,12 +250,9 @@ mod tests {
             .await
             .expect("Failed to sign message");
 
-        let verified = verify_vote_hash(
-            &signature,
-            &signer.address().to_string().as_bytes(),
-            message,
-        )
-        .expect("Failed to verify vote hash");
+        let verified =
+            verify_vote_hash(&signature, signer.address().to_string().as_bytes(), message)
+                .expect("Failed to verify vote hash");
         assert!(verified);
     }
 }

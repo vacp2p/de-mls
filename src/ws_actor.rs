@@ -69,14 +69,14 @@ impl Message<RawWsMessage> for WsActor {
                     match tokens.next() {
                         Some("/ban") => {
                             let user_to_ban = tokens.next();
-                            if user_to_ban.is_none() {
-                                return Err(WsError::InvalidMessage);
-                            } else {
-                                let user_to_ban = user_to_ban.unwrap().to_lowercase();
+                            if let Some(user_to_ban) = user_to_ban {
+                                let user_to_ban = user_to_ban.to_lowercase();
                                 return Ok(WsAction::RemoveUser(
                                     user_to_ban.to_string(),
                                     group_id.clone(),
                                 ));
+                            } else {
+                                return Err(WsError::InvalidMessage);
                             }
                         }
                         _ => return Err(WsError::InvalidMessage),
