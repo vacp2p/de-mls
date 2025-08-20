@@ -11,7 +11,7 @@ use crate::user_actor::{
 };
 use crate::{error::UserError, AppState, Connection};
 
-pub const STEWARD_EPOCH: u64 = 60;
+pub const STEWARD_EPOCH: u64 = 40;
 
 pub async fn create_user_instance(
     connection: Connection,

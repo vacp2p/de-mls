@@ -11,7 +11,7 @@ use crate::{
         wrap_ban_request_into_application_msg, wrap_conversation_message_into_application_msg,
     },
     user::{User, UserAction},
-    user_actor::{LeaveGroupRequest, SendGroupMessage},
+    user_actor::{LeaveGroupRequest, SendGroupMessage, UserVoteRequest},
     ws_actor::{RawWsMessage, WsAction, WsActor},
     AppState,
 };
@@ -110,6 +110,37 @@ pub async fn handle_ws_action(
                 format!("Ban request for user {user_to_ban} sent to group").into_bytes(),
                 "system".to_string(),
                 group_name.clone(),
+            );
+            ws_actor.ask(app_message).await?;
+        }
+        WsAction::UserVote {
+            proposal_id,
+            vote,
+            group_id,
+        } => {
+            info!("Got user vote: proposal_id={proposal_id}, vote={vote}, group={group_id}");
+
+            // Send the user vote to the user actor
+            let user_vote_result = user_actor
+                .ask(UserVoteRequest {
+                    group_name: group_id.clone(),
+                    proposal_id,
+                    vote,
+                })
+                .await?;
+
+            // Send the vote result to Waku
+            waku_node.send(user_vote_result).await?;
+
+            // Send a local confirmation message
+            let app_message = wrap_conversation_message_into_application_msg(
+                format!(
+                    "Your vote ({}) has been submitted for proposal {proposal_id}",
+                    if vote { "YES" } else { "NO" },
+                )
+                .into_bytes(),
+                "system".to_string(),
+                group_id.clone(),
             );
             ws_actor.ask(app_message).await?;
         }

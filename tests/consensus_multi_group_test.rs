@@ -1,14 +1,14 @@
 use alloy::signers::local::PrivateKeySigner;
-use de_mls::consensus::{compute_vote_hash, ConsensusConfig, ConsensusService};
+use de_mls::consensus::{compute_vote_hash, ConsensusService};
 use de_mls::protos::messages::v1::consensus::v1::Vote;
 use de_mls::LocalSigner;
 use prost::Message;
+use uuid::Uuid;
 
 #[tokio::test]
 async fn test_basic_consensus_service() {
     // Create consensus service
-    let config = ConsensusConfig::default();
-    let consensus_service = ConsensusService::new(config);
+    let consensus_service = ConsensusService::new();
 
     let group_name = "test_group".to_string();
     let expected_voters_count = 3;
@@ -58,8 +58,9 @@ async fn test_basic_consensus_service() {
     let proposal_owner_2 = signer_2.address().to_string().as_bytes().to_vec();
     // Add 1 more vote (total 2 votes)
     let mut vote = Vote {
-        vote_id: proposal.proposal_id,
+        vote_id: Uuid::new_v4().as_u128() as u32,
         vote_owner: proposal_owner_2,
+        proposal_id: proposal.proposal_id,
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("Failed to get current time")
@@ -95,8 +96,7 @@ async fn test_basic_consensus_service() {
 #[tokio::test]
 async fn test_multi_group_consensus_service() {
     // Create consensus service with max 10 sessions per group
-    let config = ConsensusConfig::default();
-    let consensus_service = ConsensusService::new_with_max_sessions(config, 10);
+    let consensus_service = ConsensusService::new_with_max_sessions(10);
 
     // Test group 1
     let group1_name = "test_group_1".to_string();
@@ -191,8 +191,7 @@ async fn test_multi_group_consensus_service() {
 
 #[tokio::test]
 async fn test_consensus_threshold_calculation() {
-    let config = ConsensusConfig::default();
-    let consensus_service = ConsensusService::new(config);
+    let consensus_service = ConsensusService::new();
 
     let group_name = "test_group_threshold".to_string();
     let expected_voters_count = 5;
@@ -231,8 +230,9 @@ async fn test_consensus_threshold_calculation() {
         let signer = PrivateKeySigner::random();
         let proposal_owner = signer.address().to_string().as_bytes().to_vec();
         let mut vote = Vote {
-            vote_id: proposal.proposal_id,
+            vote_id: Uuid::new_v4().as_u128() as u32,
             vote_owner: proposal_owner,
+            proposal_id: proposal.proposal_id,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("Failed to get current time")
@@ -281,8 +281,7 @@ async fn test_consensus_threshold_calculation() {
 
 #[tokio::test]
 async fn test_remove_group_sessions() {
-    let config = ConsensusConfig::default();
-    let consensus_service = ConsensusService::new(config);
+    let consensus_service = ConsensusService::new();
 
     let group_name = "test_group_remove".to_string();
     let expected_voters_count = 2;

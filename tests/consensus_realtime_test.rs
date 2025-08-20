@@ -1,15 +1,15 @@
 use alloy::signers::local::PrivateKeySigner;
-use de_mls::consensus::{compute_vote_hash, ConsensusConfig, ConsensusService};
+use de_mls::consensus::{compute_vote_hash, ConsensusService};
 use de_mls::protos::messages::v1::consensus::v1::Vote;
 use de_mls::LocalSigner;
 use prost::Message;
 use std::time::Duration;
+use uuid::Uuid;
 
 #[tokio::test]
 async fn test_realtime_consensus_waiting() {
     // Create consensus service
-    let config = ConsensusConfig::default();
-    let consensus_service = ConsensusService::new(config);
+    let consensus_service = ConsensusService::new();
 
     let group_name = "test_group_realtime".to_string();
     let expected_voters_count = 3;
@@ -59,8 +59,9 @@ async fn test_realtime_consensus_waiting() {
         let signer = PrivateKeySigner::random();
         let proposal_owner = signer.address().to_string().as_bytes().to_vec();
         let mut vote = Vote {
-            vote_id: proposal.proposal_id,
+            vote_id: Uuid::new_v4().as_u128() as u32,
             vote_owner: proposal_owner,
+            proposal_id: proposal.proposal_id,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("Failed to get current time")
@@ -106,8 +107,7 @@ async fn test_realtime_consensus_waiting() {
 #[tokio::test]
 async fn test_consensus_timeout() {
     // Create consensus service
-    let config = ConsensusConfig::default();
-    let consensus_service = ConsensusService::new(config);
+    let consensus_service = ConsensusService::new();
 
     let group_name = "test_group_timeout".to_string();
     let expected_voters_count = 5;
@@ -163,8 +163,7 @@ async fn test_consensus_timeout() {
 #[tokio::test]
 async fn test_consensus_with_mixed_votes() {
     // Create consensus service
-    let config = ConsensusConfig::default();
-    let consensus_service = ConsensusService::new(config);
+    let consensus_service = ConsensusService::new();
     let signer = PrivateKeySigner::random();
     let proposal_owner = signer.address().to_string().as_bytes().to_vec();
 
@@ -214,8 +213,9 @@ async fn test_consensus_with_mixed_votes() {
         let signer = PrivateKeySigner::random();
         let proposal_owner = signer.address().to_string().as_bytes().to_vec();
         let mut vote = Vote {
-            vote_id: proposal.proposal_id,
+            vote_id: Uuid::new_v4().as_u128() as u32,
             vote_owner: proposal_owner,
+            proposal_id: proposal.proposal_id,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("Failed to get current time")
@@ -268,8 +268,7 @@ async fn test_rfc_vote_chain_validation() {
     use de_mls::LocalSigner;
 
     // Create consensus service
-    let config = ConsensusConfig::default();
-    let consensus_service = ConsensusService::new(config);
+    let consensus_service = ConsensusService::new();
 
     let group_name = "test_rfc_validation".to_string();
     let expected_voters_count = 3;
@@ -298,8 +297,9 @@ async fn test_rfc_vote_chain_validation() {
 
     // Create second vote from different voter
     let mut vote2 = Vote {
-        vote_id: proposal.proposal_id,
+        vote_id: Uuid::new_v4().as_u128() as u32,
         vote_owner: signer2.address().to_string().as_bytes().to_vec(),
+        proposal_id: proposal.proposal_id,
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("Failed to get current time")

@@ -139,3 +139,29 @@ impl Message<CompleteVotingRequest> for User {
             .await
     }
 }
+
+pub struct UserVoteRequest {
+    pub group_name: String,
+    pub proposal_id: u32,
+    pub vote: bool,
+}
+
+impl Message<UserVoteRequest> for User {
+    type Reply = Result<WakuMessageToSend, UserError>;
+
+    async fn handle(
+        &mut self,
+        msg: UserVoteRequest,
+        _ctx: Context<'_, Self, Self::Reply>,
+    ) -> Self::Reply {
+        let action = self
+            .process_user_vote(msg.proposal_id, msg.vote, msg.group_name)
+            .await?;
+        match action {
+            UserAction::SendToWaku(waku_msg) => Ok(waku_msg),
+            _ => Err(UserError::InvalidUserAction(
+                "Vote action must result in Waku message".to_string(),
+            )),
+        }
+    }
+}

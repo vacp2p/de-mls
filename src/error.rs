@@ -48,6 +48,12 @@ pub enum ConsensusError {
     #[error("Session not found")]
     SessionNotFound,
 
+    #[error("User already voted")]
+    UserAlreadyVoted,
+
+    #[error("Invalid vote action")]
+    InvalidVoteAction,
+
     #[error("Empty signature")]
     EmptySignature,
     #[error("Invalid signature: {0}")]

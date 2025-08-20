@@ -9,10 +9,13 @@
 
 use crate::error::ConsensusError;
 use crate::protos::messages::v1::consensus::v1::{Proposal, Vote};
+use crate::LocalSigner;
 use log::info;
+use prost::Message;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 pub mod service;
 
@@ -66,7 +69,6 @@ pub struct ConsensusSession {
     pub proposal: Proposal,
     pub state: ConsensusState,
     pub votes: HashMap<Vec<u8>, Vote>, // vote_owner -> Vote
-    pub round: u32,
     pub created_at: u64,
     pub last_activity: u64,
     pub config: ConsensusConfig,
@@ -83,7 +85,6 @@ impl ConsensusSession {
             proposal,
             state: ConsensusState::Active,
             votes: HashMap::new(),
-            round: 1,
             created_at: now,
             last_activity: now,
             config,
@@ -128,8 +129,10 @@ impl ConsensusSession {
 
         // Check if we have all expected votes (only calculate consensus immediately if ALL votes received)
         let expected_voters = self.proposal.expected_voters_count as usize;
-        let required_votes = ((expected_voters as f64) * 2.0 / 3.0).ceil() as usize;
+        let required_votes =
+            ((expected_voters as f64) * self.config.consensus_threshold).ceil() as usize;
 
+        // For 2 voters, we require 2 votes to reach consensus
         if total_votes >= required_votes || (total_votes == expected_voters && expected_voters == 2)
         {
             // All votes received - calculate consensus immediately
@@ -168,11 +171,61 @@ pub fn compute_vote_hash(vote: &Vote) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(vote.vote_id.to_le_bytes());
     hasher.update(&vote.vote_owner);
+    hasher.update(vote.proposal_id.to_le_bytes());
     hasher.update(vote.timestamp.to_le_bytes());
     hasher.update([vote.vote as u8]);
     hasher.update(&vote.parent_hash);
     hasher.update(&vote.received_hash);
     hasher.finalize().to_vec()
+}
+
+/// Create a vote for an incoming proposal with user's choice
+async fn create_vote_for_proposal_with_choice<S: LocalSigner>(
+    proposal: &Proposal,
+    user_vote: bool,
+    signer: S,
+) -> Result<Vote, ConsensusError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+
+    // Get the latest vote as parent and received hash
+    let (parent_hash, received_hash) = if let Some(latest_vote) = proposal.votes.last() {
+        // Check if we already voted (same voter)
+        let is_same_voter = latest_vote.vote_owner == signer.get_address().to_string().as_bytes();
+        if is_same_voter {
+            // Same voter: parent_hash should be the hash of our previous vote
+            (latest_vote.vote_hash.clone(), Vec::new())
+        } else {
+            // Different voter: parent_hash is empty, received_hash is the hash of the latest vote
+            (Vec::new(), latest_vote.vote_hash.clone())
+        }
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    // Create our vote with user's choice
+    let mut vote = Vote {
+        vote_id: Uuid::new_v4().as_u128() as u32,
+        vote_owner: signer.get_address().to_string().as_bytes().to_vec(),
+        proposal_id: proposal.proposal_id,
+        timestamp: now,
+        vote: user_vote, // Use the user's actual vote choice
+        parent_hash,
+        received_hash,
+        vote_hash: Vec::new(), // Will be computed below
+        signature: Vec::new(), // Will be signed below
+    };
+
+    // Compute vote hash and signature
+    vote.vote_hash = compute_vote_hash(&vote);
+    let vote_bytes = vote.encode_to_vec();
+    vote.signature = signer
+        .local_sign_message(&vote_bytes)
+        .await
+        .map_err(|e| ConsensusError::InvalidSignature(e.to_string()))?;
+
+    Ok(vote)
 }
 
 /// Statistics about consensus sessions
@@ -186,6 +239,6 @@ pub struct ConsensusStats {
 
 impl Default for ConsensusService {
     fn default() -> Self {
-        Self::new(ConsensusConfig::default())
+        Self::new()
     }
 }

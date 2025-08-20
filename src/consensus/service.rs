@@ -1,7 +1,8 @@
 //! Consensus service for managing consensus sessions and HashGraph integration
 
 use crate::consensus::{
-    compute_vote_hash, ConsensusConfig, ConsensusSession, ConsensusState, ConsensusStats,
+    compute_vote_hash, create_vote_for_proposal_with_choice, ConsensusConfig, ConsensusSession,
+    ConsensusState, ConsensusStats,
 };
 use crate::error::ConsensusError;
 use crate::protos::messages::v1::consensus::v1::{Proposal, Vote};
@@ -19,27 +20,23 @@ use uuid::Uuid;
 pub struct ConsensusService {
     /// Active consensus sessions organized by group: group_name -> proposal_id -> session
     sessions: Arc<RwLock<HashMap<String, HashMap<u32, ConsensusSession>>>>,
-    /// Configuration for consensus
-    config: ConsensusConfig,
     /// Maximum number of voting sessions to keep per group
     max_sessions_per_group: usize,
 }
 
 impl ConsensusService {
     /// Create a new consensus service
-    pub fn new(config: ConsensusConfig) -> Self {
+    pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
-            config,
             max_sessions_per_group: 10,
         }
     }
 
     /// Create a new consensus service with custom max sessions per group
-    pub fn new_with_max_sessions(config: ConsensusConfig, max_sessions_per_group: usize) -> Self {
+    pub fn new_with_max_sessions(max_sessions_per_group: usize) -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
-            config,
             max_sessions_per_group,
         }
     }
@@ -68,6 +65,7 @@ impl ConsensusService {
         let steward_vote_obj = Vote {
             vote_id,
             vote_owner: proposal_owner.clone(),
+            proposal_id,
             timestamp: now,
             vote: steward_vote,
             parent_hash: Vec::new(),   // First vote, no parent
@@ -103,7 +101,7 @@ impl ConsensusService {
         proposal.votes[0] = steward_vote_obj.clone();
 
         // Create consensus session
-        let mut session = ConsensusSession::new(proposal.clone(), self.config.clone());
+        let mut session = ConsensusSession::new(proposal.clone(), ConsensusConfig::default());
 
         // Add steward's vote directly to the session
         session.add_vote(steward_vote_obj.clone())?;
@@ -249,8 +247,8 @@ impl ConsensusService {
         &self,
         group_name: String,
         proposal: Proposal,
-        signer: S,
-    ) -> Result<Vote, ConsensusError> {
+        _signer: S, // We don't need the signer anymore since we don't auto-vote
+    ) -> Result<(), ConsensusError> {
         let mut sessions = self.sessions.write().await;
         let group_sessions = sessions
             .entry(group_name.clone())
@@ -258,25 +256,14 @@ impl ConsensusService {
 
         // Check if proposal already exists
         if group_sessions.contains_key(&proposal.proposal_id) {
-            return Err(ConsensusError::DuplicateProposal);
+            return Err(ConsensusError::InvalidVoteAction);
         }
 
         // Validate proposal including vote chain integrity
         self.validate_proposal(&proposal)?;
 
-        // Create our vote based on the incoming proposal
-        let our_vote = self.create_vote_for_proposal(&proposal, signer).await?;
-
-        // Create new session and add our vote directly
-        let mut session = ConsensusSession::new(proposal.clone(), self.config.clone());
-
-        // Add our vote to the session
-        session.add_vote(our_vote.clone())?;
-
-        // Update proposal with our vote
-        let mut updated_proposal = proposal.clone();
-        updated_proposal.votes.push(our_vote.clone());
-        session.proposal = updated_proposal;
+        // Create new session without our vote - user will vote later
+        let session = ConsensusSession::new(proposal.clone(), ConsensusConfig::default());
 
         group_sessions.insert(proposal.proposal_id, session);
 
@@ -295,64 +282,49 @@ impl ConsensusService {
             }
         }
 
-        info!("[consensus::service::process_incoming_proposal]: prepare to return our vote");
-        Ok(our_vote)
+        info!("[consensus::service::process_incoming_proposal]: Proposal stored, waiting for user vote");
+        Ok(())
     }
 
-    /// Create a vote for an incoming proposal
-    async fn create_vote_for_proposal<S: LocalSigner>(
-        &self,
-        proposal: &Proposal,
-        signer: S,
-    ) -> Result<Vote, ConsensusError> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs();
-
-        // Get the latest vote as parent and received hash
-        let (parent_hash, received_hash) = if let Some(latest_vote) = proposal.votes.last() {
-            // Check if we already voted (same voter)
-            let is_same_voter =
-                latest_vote.vote_owner == signer.get_address().to_string().as_bytes();
-            if is_same_voter {
-                // Same voter: parent_hash should be the hash of our previous vote
-                (latest_vote.vote_hash.clone(), Vec::new())
-            } else {
-                // Different voter: parent_hash is empty, received_hash is the hash of the latest vote
-                (Vec::new(), latest_vote.vote_hash.clone())
-            }
-        } else {
-            (Vec::new(), Vec::new())
-        };
-
-        // Create our vote
-        let mut vote = Vote {
-            vote_id: proposal.proposal_id,
-            vote_owner: signer.get_address().to_string().as_bytes().to_vec(),
-            timestamp: now,
-            vote: true, // TODO: Implement voting logic based on proposal content
-            parent_hash,
-            received_hash,
-            vote_hash: Vec::new(), // Will be computed below
-            signature: Vec::new(), // Will be signed below
-        };
-
-        // Compute vote hash and signature
-        vote.vote_hash = compute_vote_hash(&vote);
-        let vote_bytes = vote.encode_to_vec();
-        vote.signature = signer
-            .local_sign_message(&vote_bytes)
-            .await
-            .map_err(|e| ConsensusError::InvalidSignature(e.to_string()))?;
-
-        Ok(vote)
-    }
-
-    /// Add a vote to a consensus session with proper vote chain validation
-    async fn add_vote_to_session_with_validation(
+    /// Process user vote for a proposal
+    pub async fn process_user_vote<S: LocalSigner>(
         &self,
         group_name: String,
         proposal_id: u32,
+        user_vote: bool,
+        signer: S,
+    ) -> Result<Vote, ConsensusError> {
+        let mut sessions = self.sessions.write().await;
+        let group_sessions = sessions
+            .get_mut(&group_name)
+            .ok_or(ConsensusError::GroupNotFound)?;
+
+        let session = group_sessions
+            .get_mut(&proposal_id)
+            .ok_or(ConsensusError::SessionNotFound)?;
+
+        // Check if user already voted
+        let user_address = signer.get_address().to_string().as_bytes().to_vec();
+        if session.votes.values().any(|v| v.vote_owner == user_address) {
+            return Err(ConsensusError::UserAlreadyVoted);
+        }
+
+        // Create our vote based on the user's choice
+        let our_vote =
+            create_vote_for_proposal_with_choice(&session.proposal, user_vote, signer).await?;
+
+        session.add_vote(our_vote.clone())?;
+
+        // Update proposal with our vote
+        session.proposal.votes.push(our_vote.clone());
+
+        Ok(our_vote)
+    }
+
+    /// Process incoming vote
+    pub async fn process_incoming_vote(
+        &self,
+        group_name: String,
         vote: Vote,
     ) -> Result<(), ConsensusError> {
         let mut sessions = self.sessions.write().await;
@@ -361,7 +333,7 @@ impl ConsensusService {
             .ok_or(ConsensusError::GroupNotFound)?;
 
         let session = group_sessions
-            .get_mut(&proposal_id)
+            .get_mut(&vote.proposal_id)
             .ok_or(ConsensusError::SessionNotFound)?;
 
         self.validate_vote(&vote, session.proposal.expiration_time)?;
@@ -373,16 +345,6 @@ impl ConsensusService {
         session.proposal.votes.push(vote);
 
         Ok(())
-    }
-
-    /// Process incoming vote
-    pub async fn process_incoming_vote(
-        &self,
-        group_name: String,
-        vote: Vote,
-    ) -> Result<(), ConsensusError> {
-        self.add_vote_to_session_with_validation(group_name, vote.vote_id, vote)
-            .await
     }
 
     /// Get consensus result for a proposal
@@ -410,7 +372,8 @@ impl ConsensusService {
             if let Some(session) = group_sessions.get(&proposal_id) {
                 let total_votes = session.votes.len() as u32;
                 let expected_voters = session.proposal.expected_voters_count;
-                let required_votes = ((expected_voters as f64) * 2.0 / 3.0).ceil() as u32;
+                let required_votes =
+                    ((expected_voters as f64) * session.config.consensus_threshold).ceil() as u32;
                 total_votes >= required_votes
             } else {
                 false
@@ -580,7 +543,8 @@ impl ConsensusService {
             if let Some(session) = group_sessions.get(&proposal_id) {
                 let total_votes = session.votes.len() as u32;
                 let expected_voters = session.proposal.expected_voters_count;
-                let required_votes = ((expected_voters as f64) * 2.0 / 3.0).ceil() as u32;
+                let required_votes =
+                    ((expected_voters as f64) * session.config.consensus_threshold).ceil() as u32;
 
                 if total_votes >= required_votes {
                     // We have sufficient votes (2n/3) - calculate result based on votes

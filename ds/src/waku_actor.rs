@@ -178,7 +178,7 @@ pub async fn run_waku_node(
     node_port: String,
     peer_addresses: Option<Vec<Multiaddr>>,
     waku_sender: Sender<WakuMessage>,
-    reciever: &mut Receiver<WakuMessageToSend>,
+    receiver: &mut Receiver<WakuMessageToSend>,
 ) -> Result<(), DeliveryServiceError> {
     info!("Initializing waku node");
     let waku_node_init = WakuNode::new(node_port.parse::<usize>().unwrap()).await?;
@@ -191,7 +191,7 @@ pub async fn run_waku_node(
     }
 
     info!("Waiting for message to send to waku");
-    while let Some(msg) = reciever.recv().await {
+    while let Some(msg) = receiver.recv().await {
         info!("Received message to send to waku");
         let id = waku_node.send_message(msg).await?;
         info!("Successfully publish message with id: {id:?}");

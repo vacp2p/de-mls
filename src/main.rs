@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let content_topics = Arc::new(RwLock::new(Vec::new()));
 
     let (waku_sender, mut waku_receiver) = channel::<WakuMessage>(100);
-    let (sender, mut reciever) = channel::<WakuMessageToSend>(100);
+    let (sender, mut receiver) = channel::<WakuMessageToSend>(100);
     let (tx, _) = tokio::sync::broadcast::channel(100);
 
     let app_state = Arc::new(AppState {
@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting waku node");
     tokio::task::block_in_place(move || {
         tokio::runtime::Handle::current().block_on(async move {
-            run_waku_node(node_port, Some(peer_addresses), waku_sender, &mut reciever).await
+            run_waku_node(node_port, Some(peer_addresses), waku_sender, &mut receiver).await
         })
     })?;
 
@@ -200,7 +200,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let user_ref_clone = user_actor.clone();
     let mut recv_messages_ws = {
         tokio::spawn(async move {
-            info!("Running recieve messages from websocket");
+            info!("Running receive messages from websocket");
             while let Some(Ok(Message::Text(text))) = ws_receiver.next().await {
                 let res = handle_ws_action(
                     RawWsMessage { message: text },
@@ -222,7 +222,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             recv_messages_ws.abort();
         }
         _ = (&mut recv_messages_ws) => {
-            info!("recieve messages from websocket finished");
+            info!("receive messages from websocket finished");
             recv_messages_ws.abort();
         }
         _ = cancel_token.cancelled() => {

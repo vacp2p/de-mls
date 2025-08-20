@@ -13,6 +13,8 @@ message AppMessage {
     BanRequest ban_request = 3;
     consensus.v1.Proposal proposal = 4;
     consensus.v1.Vote vote = 5;
+    VotingProposal voting_proposal = 6;
+    UserVote user_vote = 7;
   }
 }
 
@@ -32,4 +34,17 @@ message BatchProposalsMessage {
   bytes group_name = 1;
   repeated bytes mls_proposals = 2;  // Individual MLS proposal messages
   bytes commit_message = 3;          // MLS commit message
+}
+
+// New message types for voting
+message VotingProposal {
+  uint32 proposal_id = 1;
+  string group_name = 2;
+  string payload = 3;
+}
+
+message UserVote {
+  uint32 proposal_id = 1;
+  bool vote = 2;
+  string group_name = 3;
 }

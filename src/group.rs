@@ -37,6 +37,22 @@ pub enum GroupAction {
     DoNothing,
 }
 
+impl Display for GroupAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GroupAction::GroupAppMsg(_msg) => write!(f, "Message will be printed to the app"),
+            GroupAction::GroupProposal(_proposal) => {
+                write!(f, "Get proposal for voting")
+            }
+            GroupAction::GroupVote(_vote) => {
+                write!(f, "Get vote for proposal")
+            }
+            GroupAction::LeaveGroup => write!(f, "User will leave the group"),
+            GroupAction::DoNothing => write!(f, "Do Nothing"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Actor)]
 pub struct Group {
     group_name: String,

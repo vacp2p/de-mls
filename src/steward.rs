@@ -1,6 +1,7 @@
+use alloy::primitives::Address;
 use libsecp256k1::{PublicKey, SecretKey};
 use openmls::prelude::KeyPackage;
-use std::sync::Arc;
+use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 
 use crate::{protos::messages::v1::GroupAnnouncement, *};
@@ -17,6 +18,21 @@ pub struct Steward {
 pub enum GroupUpdateRequest {
     AddMember(Box<KeyPackage>),
     RemoveMember(Vec<u8>),
+}
+
+impl Display for GroupUpdateRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GroupUpdateRequest::AddMember(kp) => {
+                let id = Address::from_slice(kp.leaf_node().credential().serialized_content());
+                writeln!(f, "Add Member: {id:#?}")
+            }
+            GroupUpdateRequest::RemoveMember(id) => {
+                let id = Address::from_slice(id);
+                writeln!(f, "Remove Member: {id:#?}")
+            }
+        }
+    }
 }
 
 impl Default for Steward {
@@ -94,5 +110,52 @@ impl Steward {
     /// Add a proposal to the current epoch
     pub async fn add_proposal(&mut self, proposal: GroupUpdateRequest) {
         self.current_epoch_proposals.lock().await.push(proposal);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use alloy::signers::local::PrivateKeySigner;
+    use mls_crypto::openmls_provider::{MlsProvider, CIPHERSUITE};
+    use openmls::prelude::{BasicCredential, CredentialWithKey, KeyPackage};
+    use openmls_basic_credential::SignatureKeyPair;
+
+    use crate::steward::GroupUpdateRequest;
+    #[tokio::test]
+    async fn test_display_group_update_request() {
+        let user_eth_priv_key =
+            "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+        let signer = PrivateKeySigner::from_str(user_eth_priv_key).unwrap();
+        let user_address = signer.address();
+
+        let ciphersuite = CIPHERSUITE;
+        let provider = MlsProvider::default();
+
+        let credential = BasicCredential::new(user_address.as_slice().to_vec());
+        let signer = SignatureKeyPair::new(ciphersuite.signature_algorithm())
+            .expect("Error generating a signature key pair.");
+        let credential_with_key = CredentialWithKey {
+            credential: credential.into(),
+            signature_key: signer.public().into(),
+        };
+        let key_package_bundle = KeyPackage::builder()
+            .build(ciphersuite, &provider, &signer, credential_with_key)
+            .unwrap();
+        let key_package = key_package_bundle.key_package();
+
+        let proposal_add_member = GroupUpdateRequest::AddMember(Box::new(key_package.clone()));
+        assert_eq!(
+            proposal_add_member.to_string(),
+            "Add Member: 0x70997970c51812dc3a010c7d01b50e0d17dc79c8\n"
+        );
+
+        let proposal_remove_member =
+            GroupUpdateRequest::RemoveMember(user_address.as_slice().to_vec());
+        assert_eq!(
+            proposal_remove_member.to_string(),
+            "Remove Member: 0x70997970c51812dc3a010c7d01b50e0d17dc79c8\n"
+        );
     }
 }

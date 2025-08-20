@@ -20,7 +20,7 @@ use mls_crypto::{
 };
 
 use crate::{
-    consensus::{ConsensusConfig, ConsensusService},
+    consensus::ConsensusService,
     error::UserError,
     group::{Group, GroupAction},
     message::{wrap_conversation_message_into_application_msg, wrap_user_kp_into_welcome_msg},
@@ -73,7 +73,7 @@ impl User {
             identity: id,
             eth_signer: signer,
             provider: crypto,
-            consensus_service: ConsensusService::new(ConsensusConfig::default()),
+            consensus_service: ConsensusService::new(),
         };
         Ok(user)
     }
@@ -285,7 +285,10 @@ impl User {
             }
         }?;
 
-        info!("[user::process_app_subtopic]: start processing group_action");
+        info!(
+            "[user::process_app_subtopic]: start processing group_action: {:?}",
+            res.to_string()
+        );
 
         // Handle the result outside of any lock scope
         match res {
@@ -355,6 +358,26 @@ impl User {
                         // Release the lock before calling self methods
                         drop(groups);
                         self.process_ban_request(ban_request, group_name).await
+                    }
+                    Some(app_message::Payload::VotingProposal(voting_proposal)) => {
+                        info!(
+                            "[user::process_app_message]: Processing voting proposal for group {group_name}"
+                        );
+                        // Release the lock before calling self methods
+                        drop(groups);
+                        // For now, just return the voting proposal as-is to frontend
+                        Ok(UserAction::SendToApp(AppMessage {
+                            payload: Some(app_message::Payload::VotingProposal(voting_proposal)),
+                        }))
+                    }
+                    Some(app_message::Payload::UserVote(user_vote)) => {
+                        info!(
+                            "[user::process_app_message]: Processing user vote for group {group_name}"
+                        );
+                        // Release the lock before calling self methods
+                        drop(groups);
+                        self.process_user_vote(user_vote.proposal_id, user_vote.vote, group_name)
+                            .await
                     }
                     None => {
                         info!(
@@ -700,7 +723,7 @@ impl User {
                     .create_proposal_with_vote(
                         group_name.clone(),
                         "Group Update Proposal".to_string(),
-                        format!("{proposals:?}"),
+                        proposals.iter().map(|p| p.to_string()).collect(),
                         self.eth_signer.address().to_string().as_bytes().to_vec(),
                         true, // Steward votes yes
                         expected_voters_count,
@@ -843,8 +866,7 @@ impl User {
     ) -> Result<UserAction, UserError> {
         let user_to_ban = String::from_utf8_lossy(&ban_request.user_to_ban);
         info!(
-            "[user::process_ban_request]: Processing ban request from {} for user {} in group {}",
-            ban_request.requester, user_to_ban, group_name
+            "[user::process_ban_request]: Processing ban request for user {user_to_ban} in group {group_name}"
         );
 
         // Check if this user is the steward for this group
@@ -864,32 +886,16 @@ impl User {
             );
             self.add_remove_proposal(group_name.clone(), user_to_ban.to_string())
                 .await?;
-
-            // Send system message to the group
-            let system_message = format!(
-                "Remove proposal for user {} added to steward queue by {}",
-                user_to_ban, ban_request.requester
-            );
-            let app_message = wrap_conversation_message_into_application_msg(
-                system_message.into_bytes(),
-                "system".to_string(),
-                group_name.clone(),
-            );
-            Ok(UserAction::SendToApp(app_message))
-        } else {
-            // Non-steward: just show a system message
-            info!("[user::process_ban_request]: Non-steward user received ban request for user {user_to_ban}" );
-            let system_message = format!(
-                "User {} wants to ban user {} (only steward can execute)",
-                ban_request.requester, user_to_ban
-            );
-            let app_message = wrap_conversation_message_into_application_msg(
-                system_message.into_bytes(),
-                "system".to_string(),
-                group_name.clone(),
-            );
-            Ok(UserAction::SendToApp(app_message))
         }
+        // Send system message to the group
+        let system_message =
+            format!("Remove proposal for user {user_to_ban} added to steward queue");
+        let app_message = wrap_conversation_message_into_application_msg(
+            system_message.into_bytes(),
+            "system".to_string(),
+            group_name.clone(),
+        );
+        Ok(UserAction::SendToApp(app_message))
     }
 
     /// Process incoming consensus proposal
@@ -912,10 +918,45 @@ impl User {
             group_lock.write().await.start_voting().await?;
         }
 
-        // Process the proposal in consensus service
+        // Process the proposal in consensus service (store it without voting)
+        self.consensus_service
+            .process_incoming_proposal(
+                group_name.clone(),
+                proposal.clone(),
+                self.eth_signer.clone(),
+            )
+            .await?;
+
+        // Send proposal to frontend for user to vote on
+        let voting_proposal = AppMessage {
+            payload: Some(app_message::Payload::VotingProposal(
+                crate::protos::messages::v1::VotingProposal {
+                    proposal_id: proposal.proposal_id,
+                    payload: proposal.payload,
+                    group_name: group_name.clone(),
+                },
+            )),
+        };
+
+        Ok(UserAction::SendToApp(voting_proposal))
+    }
+
+    /// Process user vote from frontend
+    pub async fn process_user_vote(
+        &mut self,
+        proposal_id: u32,
+        user_vote: bool,
+        group_name: String,
+    ) -> Result<UserAction, UserError> {
+        // Process the user's vote in consensus service
         let vote = self
             .consensus_service
-            .process_incoming_proposal(group_name.clone(), proposal, self.eth_signer.clone())
+            .process_user_vote(
+                group_name.clone(),
+                proposal_id,
+                user_vote,
+                self.eth_signer.clone(),
+            )
             .await?;
 
         // Send vote as APP message to group
@@ -927,7 +968,14 @@ impl User {
             app_message.encode_to_vec(),
             APP_MSG_SUBTOPIC,
             group_name.clone(),
-            group_lock.read().await.app_id(),
+            {
+                let groups = self.groups.read().await;
+                if let Some(group_lock) = groups.get(&group_name) {
+                    group_lock.read().await.app_id()
+                } else {
+                    return Err(UserError::GroupNotFoundError(group_name));
+                }
+            },
         );
 
         Ok(UserAction::SendToWaku(waku_msg))
@@ -947,7 +995,7 @@ impl User {
         // Check if consensus has been reached immediately after adding this vote
         if let Some(result) = self
             .consensus_service
-            .get_consensus_result(group_name.clone(), vote.vote_id)
+            .get_consensus_result(group_name.clone(), vote.proposal_id)
             .await
         {
             // Consensus reached, handle result
