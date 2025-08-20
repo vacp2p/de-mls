@@ -122,26 +122,37 @@ impl ConsensusSession {
 
     /// Check if consensus has been reached
     fn check_consensus(&mut self) {
-        let total_votes = self.votes.len() as i32;
-        let yes_votes = self.votes.values().filter(|v| v.vote).count() as i32;
+        let total_votes = self.votes.len();
+        let yes_votes = self.votes.values().filter(|v| v.vote).count();
         let no_votes = total_votes - yes_votes;
 
         // Check if we have all expected votes (only calculate consensus immediately if ALL votes received)
-        let expected_voters = self.proposal.expected_voters_count as i32;
+        let expected_voters = self.proposal.expected_voters_count as usize;
+        let required_votes = ((expected_voters as f64) * 2.0 / 3.0).ceil() as usize;
 
-        if total_votes == expected_voters {
+        if total_votes >= required_votes || (total_votes == expected_voters && expected_voters == 2)
+        {
             // All votes received - calculate consensus immediately
             if yes_votes > no_votes {
                 self.state = ConsensusState::ConsensusReached(true);
-                info!("All votes received - consensus reached: YES");
+                info!("Enough votes received - consensus reached: YES");
             } else if no_votes > yes_votes {
                 self.state = ConsensusState::ConsensusReached(false);
-                info!("All votes received - consensus reached: NO");
+                info!("Enough votes received - consensus reached: NO");
             } else {
-                // Tie - apply liveness criteria
-                let result = self.proposal.liveness_criteria_yes;
-                self.state = ConsensusState::ConsensusReached(result);
-                info!("All votes received - tie resolved with liveness criteria: {result}");
+                // Tie - if it's all votes, we use liveness criteria
+                if total_votes == expected_voters {
+                    self.state =
+                        ConsensusState::ConsensusReached(self.proposal.liveness_criteria_yes);
+                    info!(
+                        "All votes received - tie resolved with liveness criteria: {}",
+                        self.proposal.liveness_criteria_yes
+                    );
+                } else {
+                    // Tie - if it's not all votes, we wait for more votes
+                    self.state = ConsensusState::Active;
+                    info!("Not enough votes received - consensus not reached");
+                }
             }
         }
     }

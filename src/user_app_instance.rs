@@ -6,8 +6,7 @@ use std::{str::FromStr, sync::Arc, time::Duration};
 
 use crate::user::{User, UserAction};
 use crate::user_actor::{
-    ApplyProposalsAndCompleteRequest, CompleteVotingRequest, CreateGroupRequest,
-    EmptyProposalsAndCompleteRequest, StartStewardEpochRequest, StartVotingRequest,
+    CompleteVotingRequest, CreateGroupRequest, StartStewardEpochRequest, StartVotingRequest,
     StewardMessageRequest,
 };
 use crate::{error::UserError, AppState, Connection};
@@ -99,7 +98,6 @@ pub async fn handle_steward_flow_per_epoch(
 
     if proposals_count == 0 {
         info!("No proposals to vote on for group: {group_name}, completing epoch without voting");
-        info!("Steward epoch completed for group: {group_name} (no proposals)");
         return Ok(());
     }
 
@@ -130,8 +128,7 @@ pub async fn handle_steward_flow_per_epoch(
     // Step 4: Wait for consensus to be reached (2n/3 votes)
     // This will wait for actual consensus signals from the consensus service
     info!("Waiting for consensus to be reached for group: {group_name}");
-
-    let vote_result = user
+    let messages = user
         .ask(CompleteVotingRequest {
             group_name: group_name.clone(),
             proposal_id,
@@ -139,33 +136,14 @@ pub async fn handle_steward_flow_per_epoch(
         .await
         .map_err(|e| UserError::UnableToCompleteVoting(e.to_string()))?;
 
-    info!("Consensus reached with result: {vote_result} for group: {group_name}");
+    info!("Consensus reached for group: {group_name}");
 
     // Step 5: If vote passed, apply proposals and complete
-    if vote_result {
-        let msgs = user
-            .ask(ApplyProposalsAndCompleteRequest {
-                group_name: group_name.clone(),
-            })
-            .await
-            .map_err(|e| UserError::UnableToApplyProposals(e.to_string()))?;
-
-        // Only send messages if there are any (when there are proposals)
-        for msg in msgs {
+    if !messages.is_empty() {
+        for msg in messages {
             app_state.waku_node.send(msg).await?;
         }
-
-        info!("Proposals applied and steward epoch completed for group: {group_name}");
-    } else {
-        info!("Vote failed, returning to working state for group: {group_name}");
     }
 
-    user.ask(EmptyProposalsAndCompleteRequest {
-        group_name: group_name.clone(),
-    })
-    .await
-    .map_err(|e| UserError::EmptyProposalsAndCompleteError(e.to_string()))?;
-
-    info!("Removing proposals and completing steward epoch for group: {group_name}");
     Ok(())
 }

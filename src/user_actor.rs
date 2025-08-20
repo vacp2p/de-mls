@@ -128,46 +128,14 @@ pub struct CompleteVotingRequest {
 }
 
 impl Message<CompleteVotingRequest> for User {
-    type Reply = Result<bool, UserError>; // Returns vote result
+    type Reply = Result<Vec<WakuMessageToSend>, UserError>; // Returns vote result
 
     async fn handle(
         &mut self,
         msg: CompleteVotingRequest,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.complete_voting(msg.group_name, msg.proposal_id).await
-    }
-}
-
-pub struct ApplyProposalsAndCompleteRequest {
-    pub group_name: String,
-}
-
-impl Message<ApplyProposalsAndCompleteRequest> for User {
-    type Reply = Result<Vec<WakuMessageToSend>, UserError>;
-
-    async fn handle(
-        &mut self,
-        msg: ApplyProposalsAndCompleteRequest,
-        _ctx: Context<'_, Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.apply_proposals(msg.group_name).await
-    }
-}
-
-pub struct EmptyProposalsAndCompleteRequest {
-    pub group_name: String,
-}
-
-impl Message<EmptyProposalsAndCompleteRequest> for User {
-    type Reply = Result<(), UserError>;
-
-    async fn handle(
-        &mut self,
-        msg: EmptyProposalsAndCompleteRequest,
-        _ctx: Context<'_, Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.empty_proposals_queue_and_complete(msg.group_name)
+        self.complete_voting_for_steward(msg.group_name, msg.proposal_id)
             .await
     }
 }

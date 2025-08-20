@@ -256,7 +256,7 @@ async fn test_consensus_with_mixed_votes() {
 
     // Verify consensus was reached
     assert!(consensus_result.is_ok());
-    // With 2 yes votes and 1 no vote, consensus should be yes
+    // With 2 no votes and 1 yes vote, consensus should be no
     assert!(!consensus_result.unwrap());
 
     println!("Test completed successfully - consensus reached with mixed votes!");

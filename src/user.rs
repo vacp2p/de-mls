@@ -209,7 +209,7 @@ impl User {
                             self.join_group(welcome).await?;
                             let msg = self
                                 .build_group_message("User joined to the group", group_name)
-                                .await?; // TODO: check if this is correct
+                                .await?;
                             Ok(UserAction::SendToWaku(msg))
                         } else {
                             info!(
@@ -764,11 +764,11 @@ impl User {
 
     /// Complete voting for the given group and vote ID, returning the result.
     /// This method waits for consensus to be reached with a timeout.
-    pub async fn complete_voting(
+    pub async fn complete_voting_for_steward(
         &mut self,
         group_name: String,
         proposal_id: u32,
-    ) -> Result<bool, UserError> {
+    ) -> Result<Vec<WakuMessageToSend>, UserError> {
         if !self.if_group_exists(group_name.clone()).await {
             return Err(UserError::GroupNotFoundError(group_name));
         }
@@ -803,13 +803,17 @@ impl User {
             // If vote passed, send commit message
             if vote_result {
                 info!("Steward: Vote passed, sending commit message");
+                let messages = self.apply_proposals(group_name.clone()).await?;
+                self.empty_proposals_queue_and_complete(group_name.clone())
+                    .await?;
+                Ok(messages)
+            } else {
+                Ok(vec![])
             }
-
-            Ok(vote_result)
         } else {
             // Timeout reached without consensus
             info!("Steward: Unexpected timeout for proposal {proposal_id}");
-            Ok(false)
+            Ok(vec![])
         }
     }
 
@@ -950,9 +954,20 @@ impl User {
             if result {
                 // Vote passed - steward should send commit message
                 info!("Consensus reached: YES - steward should send commit message");
+
+                let group_lock = {
+                    let groups = self.groups.read().await;
+                    match groups.get(&group_name) {
+                        Some(lock) => lock.clone(),
+                        None => return Err(UserError::GroupNotFoundError(group_name.clone())),
+                    }
+                };
+
+                if !group_lock.read().await.is_steward().await {
+                    group_lock.write().await.complete_voting(result).await?;
+                }
             } else {
-                // Vote failed - return to working state
-                info!("Consensus reached: NO - returning to working state");
+                info!("Consensus not reached yet");
             }
         }
 

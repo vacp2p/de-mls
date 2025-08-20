@@ -102,26 +102,14 @@ async fn test_invite_users_flow() {
         _ => panic!("User action is not SendToWaku"),
     };
 
-    let vote_result = alice
-        .complete_voting(group_name.clone(), proposal_id)
+    let vote_result_messages = alice
+        .complete_voting_for_steward(group_name.clone(), proposal_id)
         .await
         .expect("Failed to complete voting");
-    assert!(vote_result);
-
-    let res = alice
-        .apply_proposals(group_name.clone())
-        .await
-        .expect("Failed to apply proposals");
-
-    // 4. Remove proposals and complete the steward epoch
-    alice
-        .empty_proposals_queue_and_complete(group_name.clone())
-        .await
-        .expect("Failed to remove proposals and complete the steward epoch");
 
     // Bob processes the welcome message to join the group
     bob.process_waku_message(
-        res[1]
+        vote_result_messages[1]
             .build_waku_message()
             .expect("Failed to build waku welcome message for Bob"),
     )
@@ -158,7 +146,7 @@ async fn test_invite_users_flow() {
     // Carol processes the welcome message to join the group
     let res_carol = carol
         .process_waku_message(
-            res[1]
+            vote_result_messages[1]
                 .build_waku_message()
                 .expect("Failed to build waku welcome message for Carol"),
         )
@@ -304,26 +292,14 @@ async fn test_add_user_in_different_epoch() {
         _ => panic!("User action is not SendToWaku"),
     };
 
-    let vote_result = alice
-        .complete_voting(group_name.clone(), proposal_id)
+    let vote_result_messages = alice
+        .complete_voting_for_steward(group_name.clone(), proposal_id)
         .await
         .expect("Failed to complete voting");
-    assert!(vote_result);
-
-    let res = alice
-        .apply_proposals(group_name.clone())
-        .await
-        .expect("Failed to apply proposals");
-
-    // 4. Remove proposals and complete the steward epoch
-    alice
-        .empty_proposals_queue_and_complete(group_name.clone())
-        .await
-        .expect("Failed to remove proposals and complete the steward epoch");
 
     // Bob processes the welcome message to join the group
     bob.process_waku_message(
-        res[1]
+        vote_result_messages[1]
             .build_waku_message()
             .expect("Failed to build waku welcome message for Bob"),
     )
@@ -465,8 +441,17 @@ async fn test_add_user_in_different_epoch() {
         .await
         .expect("Failed to process waku message");
 
-    let vote_result = alice
-        .complete_voting(group_name.clone(), proposal_id)
+    println!(
+        "Test: Before complete_voting (Carol), group state: {:?}",
+        alice
+            .get_group(group_name.clone())
+            .await
+            .expect("Failed to get group")
+            .get_state()
+            .await
+    );
+    let vote_result_messages_2 = alice
+        .complete_voting_for_steward(group_name.clone(), proposal_id)
         .await
         .expect("Failed to complete voting (Carol)");
     println!(
@@ -478,24 +463,11 @@ async fn test_add_user_in_different_epoch() {
             .get_state()
             .await
     );
-    assert!(vote_result);
-
-    // 3. Apply proposals to add Carol to the group
-    let _out = alice
-        .apply_proposals(group_name.clone())
-        .await
-        .expect("Failed to apply proposals while adding Bob to the group");
-
-    // 4. Remove proposals and complete the steward epoch
-    alice
-        .empty_proposals_queue_and_complete(group_name.clone())
-        .await
-        .expect("Failed to remove proposals and complete the steward epoch");
 
     // Carol process join message
     carol
         .process_waku_message(
-            _out[1]
+            vote_result_messages_2[1]
                 .build_waku_message()
                 .expect("Failed to build waku message for Carol to join to the group"),
         )
@@ -505,7 +477,7 @@ async fn test_add_user_in_different_epoch() {
     // 5. Bob process commit message
     match bob
         .process_waku_message(
-            _out[0]
+            vote_result_messages_2[0]
                 .build_waku_message()
                 .expect("Failed to build waku message apply commit to the Bob"),
         )
@@ -668,25 +640,14 @@ async fn test_remove_user_flow() {
         .expect("Failed to start voting");
 
     // Submit a vote (Alice votes yes for her own proposals)
-    let _vote_result = alice
-        .complete_voting(group_name.clone(), proposal_id)
+    let vote_result_messages = alice
+        .complete_voting_for_steward(group_name.clone(), proposal_id)
         .await
         .expect("Failed to complete voting");
 
-    let res = alice
-        .apply_proposals(group_name.clone())
-        .await
-        .expect("Failed to apply proposals");
-
-    // 4. Remove proposals and complete the steward epoch
-    alice
-        .empty_proposals_queue_and_complete(group_name.clone())
-        .await
-        .expect("Failed to remove proposals and complete the steward epoch");
-
     // Bob processes the welcome message to join the group
     bob.process_waku_message(
-        res[1]
+        vote_result_messages[1]
             .build_waku_message()
             .expect("Failed to build waku welcome message for Bob"),
     )
@@ -723,7 +684,7 @@ async fn test_remove_user_flow() {
     // Carol processes the welcome message to join the group
     let res_carol = carol
         .process_waku_message(
-            res[1]
+            vote_result_messages[1]
                 .build_waku_message()
                 .expect("Failed to build waku welcome message for Carol"),
         )
@@ -896,23 +857,12 @@ async fn test_remove_user_flow() {
         .await
         .expect("Failed to process waku message");
 
-    let vote_result = alice
-        .complete_voting(group_name.clone(), proposal_id)
+    let vote_result_messages = alice
+        .complete_voting_for_steward(group_name.clone(), proposal_id)
         .await
         .expect("Failed to complete voting (removal)");
-    assert!(vote_result);
-    let out = alice
-        .apply_proposals(group_name.clone())
-        .await
-        .expect("Failed to apply proposals (removal)");
 
-    // 4. Remove proposals and complete the steward epoch
-    alice
-        .empty_proposals_queue_and_complete(group_name.clone())
-        .await
-        .expect("Failed to remove proposals and complete the steward epoch");
-
-    let waku_commit_message = out[0]
+    let waku_commit_message = vote_result_messages[0]
         .build_waku_message()
         .expect("Failed to build waku message");
 
