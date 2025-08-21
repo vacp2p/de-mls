@@ -51,8 +51,8 @@ pub enum ConsensusError {
     #[error("User already voted")]
     UserAlreadyVoted,
 
-    #[error("Invalid vote action")]
-    InvalidVoteAction,
+    #[error("Proposal already exist in consensus service")]
+    ProposalAlreadyExist,
 
     #[error("Empty signature")]
     EmptySignature,

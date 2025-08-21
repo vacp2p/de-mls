@@ -256,7 +256,7 @@ impl ConsensusService {
 
         // Check if proposal already exists
         if group_sessions.contains_key(&proposal.proposal_id) {
-            return Err(ConsensusError::InvalidVoteAction);
+            return Err(ConsensusError::ProposalAlreadyExist);
         }
 
         // Validate proposal including vote chain integrity
@@ -373,7 +373,11 @@ impl ConsensusService {
                 let total_votes = session.votes.len() as u32;
                 let expected_voters = session.proposal.expected_voters_count;
                 let required_votes =
-                    ((expected_voters as f64) * session.config.consensus_threshold).ceil() as u32;
+                    ((expected_voters as f64) * session.config.consensus_threshold) as u32;
+                println!(
+                    "total_votes: {}, required_votes: {}, expected_voters: {}",
+                    total_votes, required_votes, expected_voters
+                );
                 total_votes >= required_votes
             } else {
                 false
@@ -544,7 +548,7 @@ impl ConsensusService {
                 let total_votes = session.votes.len() as u32;
                 let expected_voters = session.proposal.expected_voters_count;
                 let required_votes =
-                    ((expected_voters as f64) * session.config.consensus_threshold).ceil() as u32;
+                    ((expected_voters as f64) * session.config.consensus_threshold) as u32;
 
                 if total_votes >= required_votes {
                     // We have sufficient votes (2n/3) - calculate result based on votes

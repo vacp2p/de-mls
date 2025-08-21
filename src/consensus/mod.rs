@@ -129,8 +129,7 @@ impl ConsensusSession {
 
         // Check if we have all expected votes (only calculate consensus immediately if ALL votes received)
         let expected_voters = self.proposal.expected_voters_count as usize;
-        let required_votes =
-            ((expected_voters as f64) * self.config.consensus_threshold).ceil() as usize;
+        let required_votes = ((expected_voters as f64) * self.config.consensus_threshold) as usize;
 
         // For 2 voters, we require 2 votes to reach consensus
         if total_votes >= required_votes || (total_votes == expected_voters && expected_voters == 2)

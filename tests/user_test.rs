@@ -426,8 +426,18 @@ async fn test_add_user_in_different_epoch() {
         )
         .await
         .expect("Failed to process waku message");
-    let bob_vote_waku_message = match bob_vote_message {
-        UserAction::SendToWaku(waku_msg) => waku_msg,
+
+    let bob_proposal_to_vote = match bob_vote_message {
+        UserAction::SendToApp(msg) => msg,
+        _ => panic!("User action is not SendToAPP"),
+    };
+    println!("Bob will vote: {bob_proposal_to_vote:?}");
+    let bob_vote_waku_message = match bob
+        .process_user_vote(proposal_id, true, group_name.clone())
+        .await
+        .expect("Can't get waku msg")
+    {
+        UserAction::SendToWaku(wmts) => wmts,
         _ => panic!("User action is not SendToWaku"),
     };
 
@@ -808,7 +818,6 @@ async fn test_remove_user_flow() {
     // Submit a vote (Alice votes yes for the removal)
     println!("Test: Submitting vote with ID: {proposal_id:?}");
     println!("Test: Alice's identity: {}", alice.identity_string());
-
     let bob_vote_message = bob
         .process_waku_message(
             alice_proposal_waku_message
@@ -818,8 +827,18 @@ async fn test_remove_user_flow() {
         )
         .await
         .expect("Failed to process waku message");
-    let bob_vote_waku_message = match bob_vote_message {
-        UserAction::SendToWaku(waku_msg) => waku_msg,
+
+    let bob_proposal_to_vote = match bob_vote_message {
+        UserAction::SendToApp(msg) => msg,
+        _ => panic!("User action is not SendToAPP"),
+    };
+    println!("Bob will vote: {bob_proposal_to_vote:?}");
+    let bob_vote_waku_message = match bob
+        .process_user_vote(proposal_id, true, group_name.clone())
+        .await
+        .expect("Can't get waku msg")
+    {
+        UserAction::SendToWaku(wmts) => wmts,
         _ => panic!("User action is not SendToWaku"),
     };
 
@@ -842,8 +861,18 @@ async fn test_remove_user_flow() {
         )
         .await
         .expect("Failed to process waku message");
-    let carol_vote_waku_message = match carol_vote_message {
-        UserAction::SendToWaku(waku_msg) => waku_msg,
+
+    let carol_proposal_to_vote = match carol_vote_message {
+        UserAction::SendToApp(msg) => msg,
+        _ => panic!("User action is not SendToAPP"),
+    };
+    println!("Carol will vote: {carol_proposal_to_vote:?}");
+    let carol_vote_waku_message = match carol
+        .process_user_vote(proposal_id, true, group_name.clone())
+        .await
+        .expect("Can't get waku msg")
+    {
+        UserAction::SendToWaku(wmts) => wmts,
         _ => panic!("User action is not SendToWaku"),
     };
 
