@@ -108,7 +108,7 @@ impl WakuNode<Running> {
         for peer_address in peer_addresses {
             info!("Connecting to peer: {peer_address:?}");
             self.node
-                .connect(&peer_address, None)
+                .connect(&peer_address, Some(Duration::from_secs(10)))
                 .await
                 .map_err(|e| DeliveryServiceError::WakuConnectPeerError(e.to_string()))?;
             info!("Connected to peer: {peer_address:?}");
@@ -148,11 +148,11 @@ impl WakuMessageToSend {
     /// - subtopic: The subtopic to send the message to
     /// - group_id: The group to send the message to
     /// - app_id: The app is unique identifier for the application that is sending the message for filtering own messages
-    pub fn new(msg: Vec<u8>, subtopic: &str, group_id: String, app_id: Vec<u8>) -> Self {
+    pub fn new(msg: Vec<u8>, subtopic: &str, group_id: &str, app_id: Vec<u8>) -> Self {
         Self {
             msg,
             subtopic: subtopic.to_string(),
-            group_id,
+            group_id: group_id.to_string(),
             app_id,
         }
     }

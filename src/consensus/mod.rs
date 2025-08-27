@@ -15,6 +15,7 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 pub mod service;
@@ -26,6 +27,15 @@ pub mod v1 {
 
 pub use service::ConsensusService;
 
+/// Consensus events emitted when consensus state changes
+#[derive(Debug, Clone)]
+pub enum ConsensusEvent {
+    /// Consensus has been reached for a proposal
+    ConsensusReached { proposal_id: u32, result: bool },
+    /// Consensus failed due to timeout or other reasons
+    ConsensusFailed { proposal_id: u32, reason: String },
+}
+
 /// Consensus configuration
 #[derive(Debug, Clone)]
 pub struct ConsensusConfig {
@@ -36,16 +46,16 @@ pub struct ConsensusConfig {
     /// Maximum number of rounds before consensus is considered failed
     pub max_rounds: u32,
     /// Whether to use liveness criteria for silent peers
-    pub use_liveness_criteria: bool,
+    pub liveness_criteria: bool,
 }
 
 impl Default for ConsensusConfig {
     fn default() -> Self {
         Self {
             consensus_threshold: 0.67, // 67% supermajority
-            consensus_timeout: 30,     // 30 seconds
+            consensus_timeout: 10,     // 10 seconds
             max_rounds: 3,             // Maximum 3 rounds
-            use_liveness_criteria: true,
+            liveness_criteria: true,
         }
     }
 }
@@ -72,10 +82,17 @@ pub struct ConsensusSession {
     pub created_at: u64,
     pub last_activity: u64,
     pub config: ConsensusConfig,
+    pub event_sender: Option<broadcast::Sender<(String, ConsensusEvent)>>,
+    pub group_name: String,
 }
 
 impl ConsensusSession {
-    pub fn new(proposal: Proposal, config: ConsensusConfig) -> Self {
+    pub fn new(
+        proposal: Proposal,
+        config: ConsensusConfig,
+        event_sender: Option<broadcast::Sender<(String, ConsensusEvent)>>,
+        group_name: &str,
+    ) -> Self {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("Failed to get current time")
@@ -88,6 +105,8 @@ impl ConsensusSession {
             created_at: now,
             last_activity: now,
             config,
+            event_sender,
+            group_name: group_name.to_string(),
         }
     }
 
@@ -95,30 +114,29 @@ impl ConsensusSession {
     pub fn add_vote(&mut self, vote: Vote) -> Result<(), ConsensusError> {
         match self.state {
             ConsensusState::Active => {
-                // do nothing
+                // Check if voter already voted
+                if self.votes.contains_key(&vote.vote_owner) {
+                    return Err(ConsensusError::DuplicateVote);
+                }
+
+                // Add vote
+                self.votes.insert(vote.vote_owner.clone(), vote.clone());
+                self.proposal.votes.push(vote.clone());
+                self.last_activity = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+
+                // Check if consensus can be reached
+                self.check_consensus();
+                Ok(())
             }
             ConsensusState::ConsensusReached(_) => {
-                info!("Consensus already reached, skipping vote");
-                return Ok(());
+                info!(
+                    "Consensus already reached for proposal {}, skipping vote",
+                    self.proposal.proposal_id
+                );
+                Ok(())
             }
-            _ => {
-                return Err(ConsensusError::SessionNotActive);
-            }
+            _ => Err(ConsensusError::SessionNotActive),
         }
-
-        // Check if voter already voted
-        if self.votes.contains_key(&vote.vote_owner) {
-            return Err(ConsensusError::DuplicateVote);
-        }
-
-        // Add vote
-        self.votes.insert(vote.vote_owner.clone(), vote);
-        self.last_activity = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-
-        // Check if consensus can be reached
-        self.check_consensus();
-
-        Ok(())
     }
 
     /// Check if consensus has been reached
@@ -129,33 +147,63 @@ impl ConsensusSession {
 
         // Check if we have all expected votes (only calculate consensus immediately if ALL votes received)
         let expected_voters = self.proposal.expected_voters_count as usize;
-        let required_votes = ((expected_voters as f64) * self.config.consensus_threshold) as usize;
-
-        // For 2 voters, we require 2 votes to reach consensus
-        if total_votes >= required_votes || (total_votes == expected_voters && expected_voters == 2)
-        {
+        let required_votes = if expected_voters <= 2 {
+            expected_voters
+        } else {
+            ((expected_voters as f64) * self.config.consensus_threshold) as usize
+        };
+        println!(
+            "[consensus::mod::check_consensus]: Checking consensus for proposal {}. Total votes: {}. Yes votes: {}. No votes: {}. Expected voters: {}. Required votes: {}",
+            self.proposal.proposal_id,
+            total_votes,
+            yes_votes,
+            no_votes,
+            expected_voters,
+            required_votes
+        );
+        // For <= 2 voters, we require all votes to reach consensus
+        if total_votes >= required_votes {
             // All votes received - calculate consensus immediately
             if yes_votes > no_votes {
                 self.state = ConsensusState::ConsensusReached(true);
-                info!("Enough votes received - consensus reached: YES");
+                info!("Enough votes received {yes_votes}-{no_votes} - consensus reached: YES");
+                self.emit_consensus_event(ConsensusEvent::ConsensusReached {
+                    proposal_id: self.proposal.proposal_id,
+                    result: true,
+                });
             } else if no_votes > yes_votes {
                 self.state = ConsensusState::ConsensusReached(false);
-                info!("Enough votes received - consensus reached: NO");
+                info!("Enough votes received {yes_votes}-{no_votes} - consensus reached: NO");
+                self.emit_consensus_event(ConsensusEvent::ConsensusReached {
+                    proposal_id: self.proposal.proposal_id,
+                    result: false,
+                });
             } else {
                 // Tie - if it's all votes, we use liveness criteria
                 if total_votes == expected_voters {
-                    self.state =
-                        ConsensusState::ConsensusReached(self.proposal.liveness_criteria_yes);
+                    let result = self.proposal.liveness_criteria_yes;
+                    self.state = ConsensusState::ConsensusReached(result);
                     info!(
                         "All votes received - tie resolved with liveness criteria: {}",
-                        self.proposal.liveness_criteria_yes
+                        result
                     );
+                    self.emit_consensus_event(ConsensusEvent::ConsensusReached {
+                        proposal_id: self.proposal.proposal_id,
+                        result,
+                    });
                 } else {
                     // Tie - if it's not all votes, we wait for more votes
                     self.state = ConsensusState::Active;
                     info!("Not enough votes received - consensus not reached");
                 }
             }
+        }
+    }
+
+    /// Emit a consensus event
+    fn emit_consensus_event(&self, event: ConsensusEvent) {
+        if let Some(sender) = &self.event_sender {
+            let _ = sender.send((self.group_name.clone(), event));
         }
     }
 
@@ -179,7 +227,7 @@ pub fn compute_vote_hash(vote: &Vote) -> Vec<u8> {
 }
 
 /// Create a vote for an incoming proposal with user's choice
-async fn create_vote_for_proposal_with_choice<S: LocalSigner>(
+async fn create_vote_for_proposal<S: LocalSigner>(
     proposal: &Proposal,
     user_vote: bool,
     signer: S,
@@ -191,7 +239,7 @@ async fn create_vote_for_proposal_with_choice<S: LocalSigner>(
     // Get the latest vote as parent and received hash
     let (parent_hash, received_hash) = if let Some(latest_vote) = proposal.votes.last() {
         // Check if we already voted (same voter)
-        let is_same_voter = latest_vote.vote_owner == signer.get_address().to_string().as_bytes();
+        let is_same_voter = latest_vote.vote_owner == signer.address_bytes();
         if is_same_voter {
             // Same voter: parent_hash should be the hash of our previous vote
             (latest_vote.vote_hash.clone(), Vec::new())
@@ -206,7 +254,7 @@ async fn create_vote_for_proposal_with_choice<S: LocalSigner>(
     // Create our vote with user's choice
     let mut vote = Vote {
         vote_id: Uuid::new_v4().as_u128() as u32,
-        vote_owner: signer.get_address().to_string().as_bytes().to_vec(),
+        vote_owner: signer.address_bytes(),
         proposal_id: proposal.proposal_id,
         timestamp: now,
         vote: user_vote, // Use the user's actual vote choice

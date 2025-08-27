@@ -136,8 +136,8 @@ pub enum UserError {
 
     #[error("Group already exists: {0}")]
     GroupAlreadyExistsError(String),
-    #[error("Group not found: {0}")]
-    GroupNotFoundError(String),
+    #[error("Group not found")]
+    GroupNotFoundError,
     #[error("Welcome message cannot be empty.")]
     EmptyWelcomeMessageError,
     #[error("Message verification failed")]
@@ -162,6 +162,12 @@ pub enum UserError {
     UnableToStartVoting(String),
     #[error("Unknown content topic type: {0}")]
     UnknownContentTopicType(String),
+    #[error("Failed to send message to ws: {0}")]
+    UnableToSendMessageToWs(String),
+    #[error("Invalid action to process: {0}")]
+    InvalidAction(String),
+    #[error("Invalid state: {0}")]
+    InvalidState(String),
 
     #[error("Failed to create staged join: {0}")]
     MlsWelcomeError(#[from] WelcomeError<MemoryStorageError>),

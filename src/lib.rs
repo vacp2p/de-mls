@@ -29,23 +29,29 @@
 //!
 //! ## Steward Epoch Flow
 //!
-//! The system operates in epochs managed by a steward:
+//! The system operates in epochs managed by a steward with robust state management:
 //!
-//! 1. **Working State**: Normal operation, all users can send messages
-//! 2. **Waiting State**: Steward epoch active, collecting proposals
-//! 3. **Voting State**: Consensus voting on collected proposals
+//! 1. **Working State**: Normal operation, all users can send any message freely
+//! 2. **Waiting State**: Steward epoch active, only steward can send BATCH_PROPOSALS_MESSAGE
+//! 3. **Voting State**: Consensus voting, restricted message types (VOTE/USER_VOTE for all, VOTING_PROPOSAL/PROPOSAL for steward only)
 //!
-//! ### State Transitions
+//! ### Complete State Transitions
 //!
 //! ```text
 //! Working --start_steward_epoch()--> Waiting (if proposals exist)
-//! Working --start_steward_epoch()--> Working (if no proposals)
+//! Working --start_steward_epoch()--> Working (if no proposals - no state change)
 //! Waiting --start_voting()---------> Voting
-//! Voting --complete_voting(true)--> Waiting (vote passed)
-//! Voting --complete_voting(false)-> Working (vote failed)
-//! Waiting --apply_proposals_and_complete()--> Working
+//! Waiting --no_proposals_found()---> Working (edge case: proposals disappear during voting)
+//! Voting --complete_voting(YES)----> Waiting --apply_proposals()--> Working
+//! Voting --complete_voting(NO)-----> Working
 //! ```
 //!
+//! ### Steward State Guarantees
+//!
+//! - **Always returns to Working**: Steward transitions back to Working state after every epoch
+//! - **No proposals handling**: If no proposals exist, steward stays in Working state
+//! - **Edge case coverage**: All scenarios including proposal disappearance are handled
+//! - **Robust error handling**: Invalid state transitions are prevented and logged
 //! ## Message Flow
 //!
 //! ### Regular Messages
@@ -192,7 +198,9 @@ pub trait LocalSigner {
         message: &[u8],
     ) -> impl std::future::Future<Output = Result<Vec<u8>, anyhow::Error>> + Send;
 
-    fn get_address(&self) -> Address;
+    fn address(&self) -> Address;
+    fn address_string(&self) -> String;
+    fn address_bytes(&self) -> Vec<u8>;
 }
 
 pub fn verify_vote_hash(
@@ -209,7 +217,7 @@ pub fn verify_vote_hash(
             })?;
     let signature = PrimitiveSignature::from_raw_array(&signature_bytes)?;
     let address = signature.recover_address_from_msg(message)?;
-    let address_bytes = address.to_string().as_bytes().to_vec();
+    let address_bytes = address.as_slice().to_vec();
     Ok(address_bytes == public_key)
 }
 
@@ -250,9 +258,8 @@ mod tests {
             .await
             .expect("Failed to sign message");
 
-        let verified =
-            verify_vote_hash(&signature, signer.address().to_string().as_bytes(), message)
-                .expect("Failed to verify vote hash");
+        let verified = verify_vote_hash(&signature, &signer.address_bytes(), message)
+            .expect("Failed to verify vote hash");
         assert!(verified);
     }
 }

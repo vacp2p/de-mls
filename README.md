@@ -44,6 +44,48 @@ Run from the root directory
 RUST_BACKTRACE=full RUST_LOG=info NODE_PORT=60001 PEER_ADDRESSES=/ip4/x.x.x.x/tcp/60000/p2p/xxxx...xxxx,/ip4/y.y.y.y/tcp/60000/p2p/yyyy...yyyy cargo run --  --nocapture
 ```
 
+## Steward State Management
+
+The system implements a robust state machine for managing steward epochs with the following states:
+
+### States
+
+- **Working**: Normal operation where all users can send any message type freely
+- **Waiting**: Steward epoch active, only steward can send BATCH_PROPOSALS_MESSAGE
+- **Voting**: Consensus voting phase with only voting-related messages:
+  - Everyone: VOTE, USER_VOTE
+  - Steward only: VOTING_PROPOSAL, PROPOSAL
+  - All other messages blocked during voting
+
+### State Transitions
+
+```text
+Working --start_steward_epoch()--> Waiting (if proposals exist)
+Working --start_steward_epoch()--> Working (if no proposals - no state change)
+Waiting --start_voting()---------> Voting
+Waiting --no_proposals_found()---> Working (edge case: proposals disappear)
+Voting --complete_voting(YES)----> Waiting --apply_proposals()--> Working
+Voting --complete_voting(NO)-----> Working
+```
+
+### Steward Flow Scenarios
+
+1. **No Proposals**: Steward stays in Working state throughout epoch
+2. **Successful Vote**: 
+   - **Steward**: Working → Waiting → Voting → Waiting → Working
+   - **Non-Steward**: Working → Waiting → Voting → Working
+3. **Failed Vote**: 
+   - **Steward**: Working → Waiting → Voting → Working  
+   - **Non-Steward**: Working → Waiting → Voting → Working
+4. **Edge Case**: Working → Waiting → Working (if proposals disappear during voting)
+
+### Guarantees
+
+- Steward always returns to Working state after epoch completion
+- No infinite loops or stuck states
+- All edge cases properly handled
+- Robust error handling with detailed logging
+
 ### Example of ban user
 
 In chat message block run ban command, note that user wallet address should be in the format without `0x`

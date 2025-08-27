@@ -1,11 +1,11 @@
 use alloy::hex;
 use kameo::Actor;
-use log::info;
+use log::{error, info};
 use openmls::{
     group::{GroupEpoch, GroupId, MlsGroup, MlsGroupCreateConfig},
     prelude::{
-        Credential, CredentialWithKey, KeyPackage, LeafNodeIndex, OpenMlsProvider,
-        ProcessedMessageContent, ProtocolMessage,
+        CredentialWithKey, KeyPackage, LeafNodeIndex, OpenMlsProvider, ProcessedMessageContent,
+        ProtocolMessage,
     },
 };
 use openmls_basic_credential::SignatureKeyPair;
@@ -17,11 +17,8 @@ use uuid;
 use crate::{
     consensus::v1::{Proposal, Vote},
     error::GroupError,
-    message::{
-        wrap_batch_proposals_into_application_msg, wrap_conversation_message_into_application_msg,
-        wrap_group_announcement_in_welcome_msg, wrap_invitation_into_welcome_msg,
-    },
-    protos::messages::v1::{app_message, AppMessage},
+    message::{message_types, MessageType},
+    protos::messages::v1::{app_message, AppMessage, BatchProposalsMessage, WelcomeMessage},
     state_machine::{GroupState, GroupStateMachine},
     steward::GroupUpdateRequest,
 };
@@ -40,13 +37,9 @@ pub enum GroupAction {
 impl Display for GroupAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GroupAction::GroupAppMsg(_msg) => write!(f, "Message will be printed to the app"),
-            GroupAction::GroupProposal(_proposal) => {
-                write!(f, "Get proposal for voting")
-            }
-            GroupAction::GroupVote(_vote) => {
-                write!(f, "Get vote for proposal")
-            }
+            GroupAction::GroupAppMsg(_) => write!(f, "Message will be printed to the app"),
+            GroupAction::GroupProposal(_) => write!(f, "Get proposal for voting"),
+            GroupAction::GroupVote(_) => write!(f, "Get vote for proposal"),
             GroupAction::LeaveGroup => write!(f, "User will leave the group"),
             GroupAction::DoNothing => write!(f, "Do Nothing"),
         }
@@ -64,7 +57,7 @@ pub struct Group {
 
 impl Group {
     pub fn new(
-        group_name: String,
+        group_name: &str,
         is_creation: bool,
         provider: Option<&MlsProvider>,
         signer: Option<&SignatureKeyPair>,
@@ -72,7 +65,7 @@ impl Group {
     ) -> Result<Self, GroupError> {
         let uuid = uuid::Uuid::new_v4().as_bytes().to_vec();
         let mut group = Group {
-            group_name: group_name.clone(),
+            group_name: group_name.to_string(),
             mls_group: None,
             is_kp_shared: false,
             app_id: uuid.clone(),
@@ -171,6 +164,27 @@ impl Group {
         self.app_id.clone()
     }
 
+    pub fn group_name_bytes(&self) -> Vec<u8> {
+        self.group_name.as_bytes().to_vec()
+    }
+
+    pub async fn generate_steward_message(&mut self) -> Result<WakuMessageToSend, GroupError> {
+        let mut state_machine = self.state_machine.write().await;
+        let steward = state_machine
+            .get_steward_mut()
+            .ok_or(GroupError::StewardNotSet)?;
+        steward.refresh_key_pair().await;
+
+        let welcome_msg: WelcomeMessage = steward.create_announcement().await.into();
+        let msg_to_send = WakuMessageToSend::new(
+            welcome_msg.encode_to_vec(),
+            WELCOME_SUBTOPIC,
+            &self.group_name,
+            self.app_id(),
+        );
+        Ok(msg_to_send)
+    }
+
     pub async fn decrypt_steward_msg(
         &mut self,
         message: Vec<u8>,
@@ -196,8 +210,7 @@ impl Group {
         Ok(())
     }
 
-    // Right now using only for testing
-    pub async fn store_remove_proposal(&mut self, identity: Vec<u8>) -> Result<(), GroupError> {
+    pub async fn store_remove_proposal(&mut self, identity: String) -> Result<(), GroupError> {
         let mut state_machine = self.state_machine.write().await;
         state_machine
             .add_proposal(GroupUpdateRequest::RemoveMember(identity))
@@ -210,10 +223,9 @@ impl Group {
         &mut self,
         message: ProtocolMessage,
         provider: &MlsProvider,
-        signature_key: Vec<u8>,
     ) -> Result<GroupAction, GroupError> {
         let group_id = message.group_id().as_slice().to_vec();
-        if group_id != self.group_name.as_bytes().to_vec() {
+        if group_id != self.group_name_bytes() {
             return Ok(GroupAction::DoNothing);
         }
         if !self.is_mls_group_initialized() {
@@ -227,41 +239,16 @@ impl Group {
         }
 
         let processed_message = mls_group.process_message(provider, message)?;
-        let processed_message_credential: Credential = processed_message.credential().clone();
 
         match processed_message.into_content() {
             ProcessedMessageContent::ApplicationMessage(application_message) => {
                 info!("[group::process_protocol_msg]: Processing application message");
-                let sender_name = {
-                    let user_id = mls_group.members().find_map(|m| {
-                        if m.credential.serialized_content()
-                            == processed_message_credential.serialized_content()
-                            && (signature_key != m.signature_key.as_slice())
-                        {
-                            Some(hex::encode(m.credential.serialized_content()))
-                        } else {
-                            None
-                        }
-                    });
-                    if user_id.is_none() {
-                        return Ok(GroupAction::DoNothing);
-                    }
-                    // Fine to do unwrap here because we know that user_id is not none
-                    user_id.unwrap()
-                };
-
-                let app_msg_bytes = application_message.into_bytes();
-                let app_msg_bytes_slice = app_msg_bytes.as_slice();
-                let app_msg = AppMessage::decode(app_msg_bytes_slice)?;
+                drop(mls_group);
+                let app_msg = AppMessage::decode(application_message.into_bytes().as_slice())?;
                 match app_msg.payload {
                     Some(app_message::Payload::ConversationMessage(conversation_message)) => {
                         info!("[group::process_protocol_msg]: Processing conversation message");
-                        let msg_to_send = wrap_conversation_message_into_application_msg(
-                            conversation_message.message,
-                            sender_name,
-                            self.group_name.clone(),
-                        );
-                        return Ok(GroupAction::GroupAppMsg(msg_to_send));
+                        return Ok(GroupAction::GroupAppMsg(conversation_message.into()));
                     }
                     Some(app_message::Payload::Proposal(proposal)) => {
                         info!("[group::process_protocol_msg]: Processing proposal message");
@@ -270,6 +257,24 @@ impl Group {
                     Some(app_message::Payload::Vote(vote)) => {
                         info!("[group::process_protocol_msg]: Processing vote message");
                         return Ok(GroupAction::GroupVote(vote));
+                    }
+                    Some(app_message::Payload::BanRequest(ban_request)) => {
+                        info!("[group::process_protocol_msg]: Processing ban request message");
+
+                        if self.is_steward().await {
+                            info!(
+                                "[group::process_protocol_msg]: Steward adding remove proposal for user {}",
+                                ban_request.user_to_ban.clone()
+                            );
+                            self.store_remove_proposal(ban_request.user_to_ban.clone())
+                                .await?;
+                        } else {
+                            info!(
+                                "[group::process_protocol_msg]: Non-steward received ban request message"
+                            );
+                        }
+
+                        return Ok(GroupAction::GroupAppMsg(ban_request.into()));
                     }
                     _ => return Ok(GroupAction::DoNothing),
                 }
@@ -286,8 +291,6 @@ impl Group {
                 }
                 mls_group.merge_staged_commit(provider, *commit_ptr)?;
                 if remove_proposal {
-                    // here we need to remove group instance locally and
-                    // also remove correspond key package from local storage ans sc storage
                     if mls_group.is_active() {
                         return Err(GroupError::GroupStillActive);
                     }
@@ -296,23 +299,6 @@ impl Group {
             }
         };
         Ok(GroupAction::DoNothing)
-    }
-
-    pub async fn generate_steward_message(&mut self) -> Result<WakuMessageToSend, GroupError> {
-        let mut state_machine = self.state_machine.write().await;
-        let steward = state_machine
-            .get_steward_mut()
-            .ok_or(GroupError::StewardNotSet)?;
-        steward.refresh_key_pair().await;
-
-        let msg_to_send = WakuMessageToSend::new(
-            wrap_group_announcement_in_welcome_msg(steward.create_announcement().await)
-                .encode_to_vec(),
-            WELCOME_SUBTOPIC,
-            self.group_name.clone(),
-            self.app_id.clone(),
-        );
-        Ok(msg_to_send)
     }
 
     pub async fn build_message(
@@ -324,9 +310,21 @@ impl Group {
         let is_steward = self.is_steward().await;
         let has_proposals = self.get_pending_proposals_count().await > 0;
 
+        // Determine message type for state checking using trait
+        let message_type = msg
+            .payload
+            .as_ref()
+            .map(|p| p.message_type())
+            .unwrap_or(message_types::UNKNOWN);
+
         // Check if message can be sent in current state
         let state_machine = self.state_machine.read().await;
-        if !state_machine.can_send_message(is_steward, has_proposals) {
+        let current_state = state_machine.current_state();
+        if !state_machine.can_send_message_type(is_steward, has_proposals, message_type) {
+            info!(
+                "[group::build_message]: Unable to send message - Current state: {}, Message type: {}, Is steward: {}, Has proposals: {}",
+                current_state, message_type, is_steward, has_proposals
+            );
             return Err(GroupError::UnableToSendMessage);
         }
         let message_out = self
@@ -340,21 +338,14 @@ impl Group {
         Ok(WakuMessageToSend::new(
             message_out,
             APP_MSG_SUBTOPIC,
-            self.group_name.clone(),
-            self.app_id.clone(),
+            &self.group_name,
+            self.app_id(),
         ))
     }
 
     // State management methods
     pub async fn get_state(&self) -> GroupState {
         self.state_machine.read().await.current_state()
-    }
-
-    pub async fn can_send_message(&self, is_steward: bool, has_proposals: bool) -> bool {
-        self.state_machine
-            .read()
-            .await
-            .can_send_message(is_steward, has_proposals)
     }
 
     /// Get the number of pending proposals for the current epoch
@@ -384,41 +375,67 @@ impl Group {
             .await
     }
 
-    /// Start a new steward epoch, moving proposals from the previous epoch to the voting epoch
-    /// and transitioning to Waiting state.
-    pub async fn start_steward_epoch(&mut self) -> Result<(), GroupError> {
-        if !self.is_steward().await {
-            return Err(GroupError::StewardNotSet);
-        }
-
-        // Start new epoch and move proposals from current epoch to voting epoch
-        let mut state_machine = self.state_machine.write().await;
-        state_machine.start_steward_epoch().await?;
-        Ok(())
-    }
-
-    /// Start voting on proposals for the current epoch, transitioning to Voting state.
+    /// Start voting on proposals for the current epoch
     pub async fn start_voting(&mut self) -> Result<(), GroupError> {
-        let mut state_machine = self.state_machine.write().await;
-        state_machine.start_voting()
+        self.state_machine.write().await.start_voting()
     }
 
-    /// Complete voting, updating group state based on the result.
+    /// Complete voting and update state based on result
     pub async fn complete_voting(&mut self, vote_result: bool) -> Result<(), GroupError> {
-        let mut state_machine = self.state_machine.write().await;
-        state_machine.complete_voting(vote_result)
+        self.state_machine
+            .write()
+            .await
+            .complete_voting(vote_result)
     }
 
-    /// Start working state (for non-steward peers after consensus)
-    pub async fn start_working(&mut self) -> Result<(), GroupError> {
-        let mut state_machine = self.state_machine.write().await;
-        state_machine.start_working()
+    /// Start working state (for non-steward peers after consensus or edge case recovery)
+    pub async fn start_working(&mut self) {
+        self.state_machine.write().await.start_working();
     }
 
-    /// Start waiting state (for non-steward peers after consensus)
-    pub async fn start_waiting(&mut self) -> Result<(), GroupError> {
-        let mut state_machine = self.state_machine.write().await;
-        state_machine.start_waiting()
+    /// Start consensus reached state (for non-steward peers after consensus)
+    pub async fn start_consensus_reached(&mut self) {
+        self.state_machine.write().await.start_consensus_reached();
+    }
+
+    /// Recover from consensus failure by transitioning back to Working state
+    pub async fn recover_from_consensus_failure(&mut self) -> Result<(), GroupError> {
+        self.state_machine
+            .write()
+            .await
+            .recover_from_consensus_failure()
+    }
+
+    /// Start waiting state (for non-steward peers after consensus or edge case recovery)
+    pub async fn start_waiting(&mut self) {
+        self.state_machine.write().await.start_waiting();
+    }
+
+    /// Start steward epoch with validation using centralized logic
+    pub async fn start_steward_epoch_with_validation(&mut self) -> Result<usize, GroupError> {
+        self.state_machine
+            .write()
+            .await
+            .start_steward_epoch_with_validation()
+            .await
+    }
+
+    /// Apply proposals and complete using centralized logic
+    pub async fn handle_yes_vote(&mut self) -> Result<(), GroupError> {
+        self.state_machine.write().await.handle_yes_vote().await
+    }
+
+    /// Handle failed vote using centralized logic
+    pub async fn handle_no_vote(&mut self) -> Result<(), GroupError> {
+        self.state_machine.write().await.handle_no_vote().await
+    }
+
+    /// Start waiting state when steward sends batch proposals after consensus
+    pub async fn start_waiting_after_consensus(&mut self) -> Result<(), GroupError> {
+        self.state_machine
+            .write()
+            .await
+            .start_waiting_after_consensus()
     }
 
     /// Create a batch proposals message and welcome message for the current epoch.
@@ -442,7 +459,22 @@ impl Group {
         let mut member_indices = Vec::new();
         for proposal in &proposals {
             if let GroupUpdateRequest::RemoveMember(identity) = proposal {
-                let member_index = self.find_member_index(identity.clone()).await?;
+                // Convert the address string to bytes for proper MLS credential matching
+                let identity_bytes = if let Some(hex_string) = identity.strip_prefix("0x") {
+                    // Remove 0x prefix and convert to bytes
+                    hex::decode(hex_string).map_err(|e| {
+                        error!("[create_batch_proposals_message]: Failed to decode hex address '{}': {}", identity, e);
+                        GroupError::UnableToSendMessage
+                    })?
+                } else {
+                    // Assume it's already a hex string without 0x prefix
+                    hex::decode(identity).map_err(|e| {
+                        error!("[create_batch_proposals_message]: Failed to decode hex address '{}': {}", identity, e);
+                        GroupError::UnableToSendMessage
+                    })?
+                };
+
+                let member_index = self.find_member_index(identity_bytes).await?;
                 member_indices.push(member_index);
             } else {
                 member_indices.push(None);
@@ -463,11 +495,13 @@ impl Group {
                     )?;
                     mls_proposals.push(mls_message_out.to_bytes()?);
                 }
-                GroupUpdateRequest::RemoveMember(_identity) => {
+                GroupUpdateRequest::RemoveMember(identity) => {
                     if let Some(index) = member_indices[i] {
                         let (mls_message_out, _proposal_ref) =
                             mls_group.propose_remove_member(provider, signer, index)?;
                         mls_proposals.push(mls_message_out.to_bytes()?);
+                    } else {
+                        error!("[create_batch_proposals_message]: Failed to find member index for identity: {:?}", identity);
                     }
                 }
             }
@@ -480,43 +514,38 @@ impl Group {
         // Merge the commit
         mls_group.merge_pending_commit(provider)?;
 
+        drop(mls_group);
+
         // Create batch proposals message (without welcome)
-        let batch_msg = wrap_batch_proposals_into_application_msg(
-            self.group_name.clone(),
+        let batch_msg: AppMessage = BatchProposalsMessage {
+            group_name: self.group_name_bytes(),
             mls_proposals,
-            out_messages.to_bytes()?,
-        );
+            commit_message: out_messages.to_bytes()?,
+        }
+        .into();
 
         let batch_waku_msg = WakuMessageToSend::new(
             batch_msg.encode_to_vec(),
             APP_MSG_SUBTOPIC,
-            self.group_name.clone(),
-            self.app_id.clone(),
+            &self.group_name,
+            self.app_id(),
         );
 
         let mut messages = vec![batch_waku_msg];
 
         // Create separate welcome message if there are new members
         if let Some(welcome) = welcome {
-            let welcome_msg = wrap_invitation_into_welcome_msg(welcome)?;
-
+            let welcome_msg: WelcomeMessage = welcome.try_into()?;
             let welcome_waku_msg = WakuMessageToSend::new(
                 welcome_msg.encode_to_vec(),
                 WELCOME_SUBTOPIC,
-                self.group_name.clone(),
-                self.app_id.clone(),
+                &self.group_name,
+                self.app_id(),
             );
-
             messages.push(welcome_waku_msg);
         }
 
         Ok(messages)
-    }
-
-    pub async fn remove_proposals_and_complete(&mut self) -> Result<(), GroupError> {
-        let mut state_machine = self.state_machine.write().await;
-        state_machine.remove_proposals_and_complete().await?;
-        Ok(())
     }
 }
 

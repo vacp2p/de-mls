@@ -4,6 +4,7 @@ use kameo::{
     message::{Context, Message},
     Actor,
 };
+use log::info;
 use serde_json::Value;
 
 use crate::{
@@ -113,7 +114,7 @@ impl Message<RawWsMessage> for WsActor {
                     }
 
                     return Ok(WsAction::UserMessage(UserMessage {
-                        message: message.to_string(),
+                        message: message.as_bytes().to_vec(),
                         group_id: group_id.to_string(),
                     }));
                 }
@@ -144,6 +145,7 @@ impl Message<AppMessage> for WsActor {
         let message_text =
             if let Some(app_message::Payload::VotingProposal(voting_proposal)) = &msg.payload {
                 // Format as JSON for the frontend to parse
+                info!("[ws_actor::handle]: Sending voting proposal to ws");
                 serde_json::json!({
                     "type": "voting_proposal",
                     "proposal": {

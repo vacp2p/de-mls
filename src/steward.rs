@@ -1,7 +1,7 @@
 use alloy::primitives::Address;
 use libsecp256k1::{PublicKey, SecretKey};
 use openmls::prelude::KeyPackage;
-use std::{fmt::Display, sync::Arc};
+use std::{fmt::Display, str::FromStr, sync::Arc};
 use tokio::sync::Mutex;
 
 use crate::{protos::messages::v1::GroupAnnouncement, *};
@@ -17,7 +17,7 @@ pub struct Steward {
 #[derive(Clone, Debug, PartialEq)]
 pub enum GroupUpdateRequest {
     AddMember(Box<KeyPackage>),
-    RemoveMember(Vec<u8>),
+    RemoveMember(String),
 }
 
 impl Display for GroupUpdateRequest {
@@ -28,7 +28,7 @@ impl Display for GroupUpdateRequest {
                 writeln!(f, "Add Member: {id:#?}")
             }
             GroupUpdateRequest::RemoveMember(id) => {
-                let id = Address::from_slice(id);
+                let id = Address::from_str(id).unwrap();
                 writeln!(f, "Remove Member: {id:#?}")
             }
         }
@@ -68,12 +68,12 @@ impl Steward {
     pub async fn decrypt_message(&self, message: Vec<u8>) -> Result<KeyPackage, MessageError> {
         let sec_key = self.eth_secr.lock().await;
         let msg: Vec<u8> = decrypt_message(&message, *sec_key)?;
-        // TODO: replace json in encryption and decryption
+        // Using JSON deserialization for KeyPackage decryption
         let key_package: KeyPackage = serde_json::from_slice(&msg)?;
         Ok(key_package)
     }
 
-    /// Start a new steward epoch, moving current proposals to the epoch proposals map and incrementing the epoch.
+    /// Start a new steward epoch, moving current proposals to the epoch proposals map.
     pub async fn start_new_epoch(&mut self) {
         // Use a single atomic operation to move proposals between epochs
         let proposals = {
@@ -151,8 +151,7 @@ mod tests {
             "Add Member: 0x70997970c51812dc3a010c7d01b50e0d17dc79c8\n"
         );
 
-        let proposal_remove_member =
-            GroupUpdateRequest::RemoveMember(user_address.as_slice().to_vec());
+        let proposal_remove_member = GroupUpdateRequest::RemoveMember(user_address.to_string());
         assert_eq!(
             proposal_remove_member.to_string(),
             "Remove Member: 0x70997970c51812dc3a010c7d01b50e0d17dc79c8\n"

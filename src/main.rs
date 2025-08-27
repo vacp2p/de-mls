@@ -162,9 +162,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         }
     }
 
-    let user_actor = create_user_instance(main_loop_connection.unwrap().clone(), state.clone())
-        .await
-        .expect("Failed to start main loop");
+    let user_actor = create_user_instance(
+        main_loop_connection.unwrap().clone(),
+        state.clone(),
+        ws_actor.clone(),
+    )
+    .await
+    .expect("Failed to create user instance");
 
     let user_actor_clone = user_actor.clone();
     let state_clone = state.clone();
