@@ -2,7 +2,8 @@
 
 Decentralized MLS PoC using a smart contract for group coordination
 
-> Note: The frontend implementation is based on [chatr](https://github.com/0xLaurens/chatr), a real-time chat application built with Rust and SvelteKit
+> Note: The frontend implementation is based on [chatr](https://github.com/0xLaurens/chatr),
+> a real-time chat application built with Rust and SvelteKit
 
 ## Run Test Waku Node
 
@@ -71,10 +72,10 @@ Voting --complete_voting(NO)-----> Working
 ### Steward Flow Scenarios
 
 1. **No Proposals**: Steward stays in Working state throughout epoch
-2. **Successful Vote**: 
+2. **Successful Vote**:
    - **Steward**: Working → Waiting → Voting → Waiting → Working
    - **Non-Steward**: Working → Waiting → Voting → Working
-3. **Failed Vote**: 
+3. **Failed Vote**:
    - **Steward**: Working → Waiting → Voting → Working  
    - **Non-Steward**: Working → Waiting → Voting → Working
 4. **Edge Case**: Working → Waiting → Working (if proposals disappear during voting)
