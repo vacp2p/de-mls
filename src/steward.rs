@@ -68,7 +68,6 @@ impl Steward {
     pub async fn decrypt_message(&self, message: Vec<u8>) -> Result<KeyPackage, MessageError> {
         let sec_key = self.eth_secr.lock().await;
         let msg: Vec<u8> = decrypt_message(&message, *sec_key)?;
-        // Using JSON deserialization for KeyPackage decryption
         let key_package: KeyPackage = serde_json::from_slice(&msg)?;
         Ok(key_package)
     }
@@ -127,7 +126,8 @@ mod tests {
     async fn test_display_group_update_request() {
         let user_eth_priv_key =
             "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
-        let signer = PrivateKeySigner::from_str(user_eth_priv_key).unwrap();
+        let signer =
+            PrivateKeySigner::from_str(user_eth_priv_key).expect("Failed to create signer");
         let user_address = signer.address();
 
         let ciphersuite = CIPHERSUITE;
@@ -142,7 +142,7 @@ mod tests {
         };
         let key_package_bundle = KeyPackage::builder()
             .build(ciphersuite, &provider, &signer, credential_with_key)
-            .unwrap();
+            .expect("Error building key package bundle.");
         let key_package = key_package_bundle.key_package();
 
         let proposal_add_member = GroupUpdateRequest::AddMember(Box::new(key_package.clone()));

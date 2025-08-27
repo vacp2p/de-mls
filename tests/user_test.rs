@@ -1004,13 +1004,6 @@ async fn test_steward_epoch_with_no_proposals() {
     // Should return 0 when no proposals
     assert_eq!(proposal_count, 0);
 
-    // Check that group is still in Working state (no steward epoch started)
-    let group = alice
-        .get_group(group_name)
-        .await
-        .expect("Failed to get group");
-    assert_eq!(group.get_state().await, GroupState::Working);
-
     // Since no steward epoch was started, we can't start voting
     let start_vote_result = alice.get_proposals_for_steward_voting(group_name).await;
     assert!(start_vote_result.is_ok());

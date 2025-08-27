@@ -163,10 +163,13 @@ pub fn verify_message(
     signature: &[u8],
     public_key: &[u8],
 ) -> Result<bool, MessageError> {
+    const COMPRESSED_PUBLIC_KEY_SIZE: usize = 33;
+
     let digest = sha256::Hash::hash(message);
     let msg = Message::parse(&digest.to_byte_array());
     let signature = libSignature::parse_der(signature)?;
-    let mut pub_key_bytes: [u8; 33] = [0; 33];
+
+    let mut pub_key_bytes: [u8; COMPRESSED_PUBLIC_KEY_SIZE] = [0; COMPRESSED_PUBLIC_KEY_SIZE];
     pub_key_bytes[..].copy_from_slice(public_key);
     let public_key = PublicKey::parse_compressed(&pub_key_bytes)?;
     Ok(verify(&msg, &signature, &public_key))

@@ -38,9 +38,6 @@ pub enum ConsensusError {
     #[error("Invalid vote timestamp")]
     InvalidVoteTimestamp,
 
-    #[error("Duplicate proposal")]
-    DuplicateProposal,
-
     #[error("Session not active")]
     SessionNotActive,
     #[error("Group not found")]
@@ -92,9 +89,11 @@ pub enum GroupError {
     InvalidStateTransition { from: String, to: String },
     #[error("Empty proposals for current epoch")]
     EmptyProposals,
-    #[error("Unable to send message")]
-    UnableToSendMessage,
+    #[error("Invalid state [{state}] to send message [{message_type}]")]
+    InvalidStateToMessageSend { state: String, message_type: String },
 
+    #[error("Failed to decode hex address: {0}")]
+    HexDecodeError(#[from] alloy::hex::FromHexError),
     #[error("Unable to create MLS group: {0}")]
     UnableToCreateGroup(#[from] NewGroupError<MemoryStorageError>),
     #[error("Unable to merge pending commit in MLS group: {0}")]
@@ -134,12 +133,16 @@ pub enum UserError {
     #[error(transparent)]
     ConsensusError(#[from] ConsensusError),
 
-    #[error("Group already exists: {0}")]
-    GroupAlreadyExistsError(String),
+    #[error("Group already exists")]
+    GroupAlreadyExistsError,
     #[error("Group not found")]
     GroupNotFoundError,
+    #[error("MLS group not initialized")]
+    MlsGroupNotInitialized,
     #[error("Welcome message cannot be empty.")]
     EmptyWelcomeMessageError,
+    #[error("Failed to extract welcome message")]
+    FailedToExtractWelcomeMessage,
     #[error("Message verification failed")]
     MessageVerificationFailed,
     #[error("Failed to create group: {0}")]
@@ -148,26 +151,22 @@ pub enum UserError {
     UnableToHandleStewardEpoch(String),
     #[error("Failed to process steward message: {0}")]
     ProcessStewardMessageError(String),
-    #[error("Failed to apply proposals: {0}")]
-    UnableToApplyProposals(String),
     #[error("Failed to get group update requests: {0}")]
     GetGroupUpdateRequestsError(String),
     #[error("Invalid user action: {0}")]
     InvalidUserAction(String),
-    #[error("Failed to complete voting: {0}")]
-    UnableToCompleteVoting(String),
-    #[error("Failed to empty proposals and complete: {0}")]
-    EmptyProposalsAndCompleteError(String),
     #[error("Failed to start voting: {0}")]
     UnableToStartVoting(String),
     #[error("Unknown content topic type: {0}")]
     UnknownContentTopicType(String),
     #[error("Failed to send message to ws: {0}")]
     UnableToSendMessageToWs(String),
-    #[error("Invalid action to process: {0}")]
-    InvalidAction(String),
-    #[error("Invalid state: {0}")]
-    InvalidState(String),
+    #[error("Invalid group state: {0}")]
+    InvalidGroupState(String),
+    #[error("No proposals found")]
+    NoProposalsFound,
+    #[error("Invalid app message type")]
+    InvalidAppMessageType,
 
     #[error("Failed to create staged join: {0}")]
     MlsWelcomeError(#[from] WelcomeError<MemoryStorageError>),
@@ -177,8 +176,6 @@ pub enum UserError {
     SignerParsingError(#[from] LocalSignerError),
     #[error("Failed to decode welcome message: {0}")]
     WelcomeMessageDecodeError(#[from] prost::DecodeError),
-    #[error("Failed to decode alloy hex string: {0}")]
-    HexDecodeError(#[from] alloy::hex::FromHexError),
     #[error("Failed to deserialize mls message in: {0}")]
     MlsMessageInDeserializeError(#[from] openmls::prelude::Error),
     #[error("Failed to try into protocol message: {0}")]

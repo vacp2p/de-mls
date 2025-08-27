@@ -83,7 +83,6 @@ impl GroupAnnouncement {
     }
 
     pub fn encrypt(&self, kp: KeyPackage) -> Result<Vec<u8>, MessageError> {
-        // Using JSON serialization for KeyPackage encryption
         let key_package = serde_json::to_vec(&kp)?;
         let encrypted = encrypt_message(&key_package, &self.eth_pub_key)?;
         Ok(encrypted)

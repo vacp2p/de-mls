@@ -4,8 +4,8 @@ use log::{error, info};
 use openmls::{
     group::{GroupEpoch, GroupId, MlsGroup, MlsGroupCreateConfig},
     prelude::{
-        CredentialWithKey, KeyPackage, LeafNodeIndex, OpenMlsProvider, ProcessedMessageContent,
-        ProtocolMessage,
+        ApplicationMessage, CredentialWithKey, KeyPackage, LeafNodeIndex, OpenMlsProvider,
+        ProcessedMessageContent, ProtocolMessage,
     },
 };
 use openmls_basic_credential::SignatureKeyPair;
@@ -25,6 +25,10 @@ use crate::{
 use ds::{waku_actor::WakuMessageToSend, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 use mls_crypto::openmls_provider::MlsProvider;
 
+/// Represents the action to take after processing a group message or event.
+///
+/// This enum defines the possible outcomes when processing group-related operations,
+/// allowing the caller to determine the appropriate next steps.
 #[derive(Clone, Debug)]
 pub enum GroupAction {
     GroupAppMsg(AppMessage),
@@ -46,6 +50,18 @@ impl Display for GroupAction {
     }
 }
 
+/// Represents a group in the MLS-based messaging system.
+///
+/// The Group struct manages the lifecycle of an MLS group, including member management,
+/// proposal handling, and state transitions. It integrates with the state machine
+/// to enforce proper group operations and steward epoch management.
+///
+/// ## Key Features:
+/// - MLS group management and message processing
+/// - Steward epoch coordination and proposal handling
+/// - State machine integration for proper workflow enforcement
+/// - Member addition/removal through proposals
+/// - Message validation and permission checking
 #[derive(Clone, Debug, Actor)]
 pub struct Group {
     group_name: String,
@@ -99,11 +115,20 @@ impl Group {
         Ok(group)
     }
 
+    /// Get the identities of all current group members.
+    ///
+    /// ## Returns:
+    /// - Vector of member identity bytes
+    ///
+    /// ## Errors:
+    /// - `GroupError::MlsGroupNotSet` if MLS group is not initialized
     pub async fn members_identity(&self) -> Result<Vec<Vec<u8>>, GroupError> {
-        if !self.is_mls_group_initialized() {
-            return Err(GroupError::MlsGroupNotSet);
-        }
-        let mls_group = self.mls_group.as_ref().unwrap().lock().await;
+        let mls_group = self
+            .mls_group
+            .as_ref()
+            .ok_or_else(|| GroupError::MlsGroupNotSet)?
+            .lock()
+            .await;
         let x = mls_group
             .members()
             .map(|m| m.credential.serialized_content().to_vec())
@@ -111,14 +136,26 @@ impl Group {
         Ok(x)
     }
 
+    /// Find the leaf node index of a member by their identity.
+    ///
+    /// ## Parameters:
+    /// - `identity`: The member's identity bytes
+    ///
+    /// ## Returns:
+    /// - `Some(LeafNodeIndex)` if member is found, `None` otherwise
+    ///
+    /// ## Errors:
+    /// - `GroupError::MlsGroupNotSet` if MLS group is not initialized
     pub async fn find_member_index(
         &self,
         identity: Vec<u8>,
     ) -> Result<Option<LeafNodeIndex>, GroupError> {
-        if !self.is_mls_group_initialized() {
-            return Err(GroupError::MlsGroupNotSet);
-        }
-        let mls_group = self.mls_group.as_ref().unwrap().lock().await;
+        let mls_group = self
+            .mls_group
+            .as_ref()
+            .ok_or_else(|| GroupError::MlsGroupNotSet)?
+            .lock()
+            .await;
         let x = mls_group.members().find_map(|m| {
             if m.credential.serialized_content() == identity {
                 Some(m.index)
@@ -129,45 +166,96 @@ impl Group {
         Ok(x)
     }
 
+    /// Get the current epoch of the MLS group.
+    ///
+    /// ## Returns:
+    /// - Current group epoch
+    ///
+    /// ## Errors:
+    /// - `GroupError::MlsGroupNotSet` if MLS group is not initialized
     pub async fn epoch(&self) -> Result<GroupEpoch, GroupError> {
-        if !self.is_mls_group_initialized() {
-            return Err(GroupError::MlsGroupNotSet);
-        }
-        let mls_group = self.mls_group.as_ref().unwrap().lock().await;
+        let mls_group = self
+            .mls_group
+            .as_ref()
+            .ok_or_else(|| GroupError::MlsGroupNotSet)?
+            .lock()
+            .await;
         Ok(mls_group.epoch())
     }
 
+    /// Set the MLS group instance for this group.
+    ///
+    /// ## Parameters:
+    /// - `mls_group`: The MLS group instance to set
+    ///
+    /// ## Effects:
+    /// - Sets `is_kp_shared` to `true`
+    /// - Stores the MLS group in an `Arc<Mutex<MlsGroup>>`
     pub fn set_mls_group(&mut self, mls_group: MlsGroup) -> Result<(), GroupError> {
         self.is_kp_shared = true;
         self.mls_group = Some(Arc::new(Mutex::new(mls_group)));
         Ok(())
     }
 
+    /// Check if the MLS group is initialized.
+    ///
+    /// ## Returns:
+    /// - `true` if MLS group is set, `false` otherwise
     pub fn is_mls_group_initialized(&self) -> bool {
         self.mls_group.is_some()
     }
 
+    /// Check if the key package has been shared.
+    ///
+    /// ## Returns:
+    /// - `true` if key package is shared, `false` otherwise
     pub fn is_kp_shared(&self) -> bool {
         self.is_kp_shared
     }
 
+    /// Set the key package shared status.
+    ///
+    /// ## Parameters:
+    /// - `is_kp_shared`: Whether the key package is shared
     pub fn set_kp_shared(&mut self, is_kp_shared: bool) {
         self.is_kp_shared = is_kp_shared;
     }
 
+    /// Check if this group has a steward configured.
+    ///
+    /// ## Returns:
+    /// - `true` if steward is configured, `false` otherwise
     pub async fn is_steward(&self) -> bool {
-        let state_machine = self.state_machine.read().await;
-        state_machine.has_steward()
+        self.state_machine.read().await.has_steward()
     }
 
-    pub fn app_id(&self) -> Vec<u8> {
-        self.app_id.clone()
+    /// Get the application ID for this group.
+    ///
+    /// ## Returns:
+    /// - Reference to the application ID bytes
+    pub fn app_id(&self) -> &[u8] {
+        &self.app_id
     }
 
-    pub fn group_name_bytes(&self) -> Vec<u8> {
-        self.group_name.as_bytes().to_vec()
+    /// Get the group name as bytes.
+    ///
+    /// ## Returns:
+    /// - Reference to the group name bytes
+    pub fn group_name_bytes(&self) -> &[u8] {
+        self.group_name.as_bytes()
     }
 
+    /// Generate a steward announcement message for this group.
+    ///
+    /// ## Returns:
+    /// - Waku message containing the steward announcement
+    ///
+    /// ## Errors:
+    /// - `GroupError::StewardNotSet` if no steward is configured
+    ///
+    /// ## Effects:
+    /// - Refreshes the steward's key pair
+    /// - Creates a new group announcement
     pub async fn generate_steward_message(&mut self) -> Result<WakuMessageToSend, GroupError> {
         let mut state_machine = self.state_machine.write().await;
         let steward = state_machine
@@ -185,6 +273,17 @@ impl Group {
         Ok(msg_to_send)
     }
 
+    /// Decrypt a steward message using the group's steward key.
+    ///
+    /// ## Parameters:
+    /// - `message`: The encrypted message bytes
+    ///
+    /// ## Returns:
+    /// - Decrypted KeyPackage
+    ///
+    /// ## Errors:
+    /// - `GroupError::StewardNotSet` if no steward is configured
+    /// - Various decryption errors from the steward
     pub async fn decrypt_steward_msg(
         &mut self,
         message: Vec<u8>,
@@ -197,8 +296,14 @@ impl Group {
         Ok(msg)
     }
 
-    // Functions to store proposals in steward queue
-
+    /// Store an invite proposal in the steward queue for the current epoch.
+    ///
+    /// ## Parameters:
+    /// - `key_package`: The key package of the member to add
+    ///
+    /// ## Effects:
+    /// - Adds an AddMember proposal to the current epoch
+    /// - Proposal will be processed in the next steward epoch
     pub async fn store_invite_proposal(
         &mut self,
         key_package: Box<KeyPackage>,
@@ -210,6 +315,14 @@ impl Group {
         Ok(())
     }
 
+    /// Store a remove proposal in the steward queue for the current epoch.
+    ///
+    /// ## Parameters:
+    /// - `identity`: The identity string of the member to remove
+    ///
+    /// ## Effects:
+    /// - Adds a RemoveMember proposal to the current epoch
+    /// - Proposal will be processed in the next steward epoch
     pub async fn store_remove_proposal(&mut self, identity: String) -> Result<(), GroupError> {
         let mut state_machine = self.state_machine.write().await;
         state_machine
@@ -218,21 +331,97 @@ impl Group {
         Ok(())
     }
 
-    // Functions to process protocol messages
+    /// Process an application message and determine the appropriate action.
+    ///
+    /// ## Parameters:
+    /// - `message`: The application message to process
+    ///
+    /// ## Returns:
+    /// - `GroupAction` indicating what action should be taken
+    ///
+    /// ## Effects:
+    /// - For ban requests from stewards: automatically adds remove proposals
+    /// - For other messages: processes normally
+    ///
+    /// ## Supported Message Types:
+    /// - Conversation messages
+    /// - Proposals
+    /// - Votes
+    /// - Ban requests
+    pub async fn process_application_message(
+        &mut self,
+        message: ApplicationMessage,
+    ) -> Result<GroupAction, GroupError> {
+        let app_msg = AppMessage::decode(message.into_bytes().as_slice())?;
+        match app_msg.payload {
+            Some(app_message::Payload::ConversationMessage(conversation_message)) => {
+                info!("[group::process_application_message]: Processing conversation message");
+                Ok(GroupAction::GroupAppMsg(conversation_message.into()))
+            }
+            Some(app_message::Payload::Proposal(proposal)) => {
+                info!("[group::process_application_message]: Processing proposal message");
+                Ok(GroupAction::GroupProposal(proposal))
+            }
+            Some(app_message::Payload::Vote(vote)) => {
+                info!("[group::process_application_message]: Processing vote message");
+                Ok(GroupAction::GroupVote(vote))
+            }
+            Some(app_message::Payload::BanRequest(ban_request)) => {
+                info!("[group::process_application_message]: Processing ban request message");
+
+                if self.is_steward().await {
+                    info!(
+                        "[group::process_application_message]: Steward adding remove proposal for user {}",
+                        ban_request.user_to_ban.clone()
+                    );
+                    self.store_remove_proposal(ban_request.user_to_ban.clone())
+                        .await?;
+                } else {
+                    info!(
+                        "[group::process_application_message]: Non-steward received ban request message"
+                    );
+                }
+
+                Ok(GroupAction::GroupAppMsg(ban_request.into()))
+            }
+            _ => Ok(GroupAction::DoNothing),
+        }
+    }
+
+    /// Process a protocol message from the MLS group.
+    ///
+    /// ## Parameters:
+    /// - `message`: The protocol message to process
+    /// - `provider`: The MLS provider for processing
+    ///
+    /// ## Returns:
+    /// - `GroupAction` indicating what action should be taken
+    ///
+    /// ## Effects:
+    /// - Processes MLS group messages
+    /// - Handles member removal scenarios
+    /// - Stores pending proposals
+    ///
+    /// ## Supported Message Types:
+    /// - Application messages
+    /// - Proposal messages
+    /// - External join proposals
+    /// - Staged commit messages
     pub async fn process_protocol_msg(
         &mut self,
         message: ProtocolMessage,
         provider: &MlsProvider,
     ) -> Result<GroupAction, GroupError> {
-        let group_id = message.group_id().as_slice().to_vec();
+        let group_id = message.group_id().as_slice();
         if group_id != self.group_name_bytes() {
             return Ok(GroupAction::DoNothing);
         }
-        if !self.is_mls_group_initialized() {
-            return Err(GroupError::MlsGroupNotSet);
-        }
-        let mut mls_group = self.mls_group.as_mut().unwrap().lock().await;
-
+        let mut mls_group = self
+            .mls_group
+            .as_ref()
+            .ok_or_else(|| GroupError::MlsGroupNotSet)?
+            .lock()
+            .await;
         // If the message is from a previous epoch, we don't need to process it and it's a commit for welcome message
         if message.epoch() < mls_group.epoch() && message.epoch() == 0.into() {
             return Ok(GroupAction::DoNothing);
@@ -242,42 +431,9 @@ impl Group {
 
         match processed_message.into_content() {
             ProcessedMessageContent::ApplicationMessage(application_message) => {
-                info!("[group::process_protocol_msg]: Processing application message");
                 drop(mls_group);
-                let app_msg = AppMessage::decode(application_message.into_bytes().as_slice())?;
-                match app_msg.payload {
-                    Some(app_message::Payload::ConversationMessage(conversation_message)) => {
-                        info!("[group::process_protocol_msg]: Processing conversation message");
-                        return Ok(GroupAction::GroupAppMsg(conversation_message.into()));
-                    }
-                    Some(app_message::Payload::Proposal(proposal)) => {
-                        info!("[group::process_protocol_msg]: Processing proposal message");
-                        return Ok(GroupAction::GroupProposal(proposal));
-                    }
-                    Some(app_message::Payload::Vote(vote)) => {
-                        info!("[group::process_protocol_msg]: Processing vote message");
-                        return Ok(GroupAction::GroupVote(vote));
-                    }
-                    Some(app_message::Payload::BanRequest(ban_request)) => {
-                        info!("[group::process_protocol_msg]: Processing ban request message");
-
-                        if self.is_steward().await {
-                            info!(
-                                "[group::process_protocol_msg]: Steward adding remove proposal for user {}",
-                                ban_request.user_to_ban.clone()
-                            );
-                            self.store_remove_proposal(ban_request.user_to_ban.clone())
-                                .await?;
-                        } else {
-                            info!(
-                                "[group::process_protocol_msg]: Non-steward received ban request message"
-                            );
-                        }
-
-                        return Ok(GroupAction::GroupAppMsg(ban_request.into()));
-                    }
-                    _ => return Ok(GroupAction::DoNothing),
-                }
+                self.process_application_message(application_message)
+                    .await?;
             }
             ProcessedMessageContent::ProposalMessage(proposal_ptr) => {
                 mls_group
@@ -301,6 +457,23 @@ impl Group {
         Ok(GroupAction::DoNothing)
     }
 
+    /// Build and validate a message for sending to the group.
+    ///
+    /// ## Parameters:
+    /// - `provider`: The MLS provider for message creation
+    /// - `signer`: The signature key pair for signing
+    /// - `msg`: The application message to build
+    ///
+    /// ## Returns:
+    /// - Waku message ready for transmission
+    ///
+    /// ## Effects:
+    /// - Validates message can be sent in current state
+    /// - Creates MLS message with proper signing
+    ///
+    /// ## Validation:
+    /// - Checks state machine permissions
+    /// - Ensures steward status and proposal availability
     pub async fn build_message(
         &mut self,
         provider: &MlsProvider,
@@ -310,7 +483,6 @@ impl Group {
         let is_steward = self.is_steward().await;
         let has_proposals = self.get_pending_proposals_count().await > 0;
 
-        // Determine message type for state checking using trait
         let message_type = msg
             .payload
             .as_ref()
@@ -321,16 +493,15 @@ impl Group {
         let state_machine = self.state_machine.read().await;
         let current_state = state_machine.current_state();
         if !state_machine.can_send_message_type(is_steward, has_proposals, message_type) {
-            info!(
-                "[group::build_message]: Unable to send message - Current state: {}, Message type: {}, Is steward: {}, Has proposals: {}",
-                current_state, message_type, is_steward, has_proposals
-            );
-            return Err(GroupError::UnableToSendMessage);
+            return Err(GroupError::InvalidStateToMessageSend {
+                state: current_state.to_string(),
+                message_type: message_type.to_string(),
+            });
         }
         let message_out = self
             .mls_group
             .as_mut()
-            .unwrap()
+            .ok_or_else(|| GroupError::MlsGroupNotSet)?
             .lock()
             .await
             .create_message(provider, signer, &msg.encode_to_vec())?
@@ -343,7 +514,10 @@ impl Group {
         ))
     }
 
-    // State management methods
+    /// Get the current state of the group state machine.
+    ///
+    /// ## Returns:
+    /// - Current `GroupState` of the group
     pub async fn get_state(&self) -> GroupState {
         self.state_machine.read().await.current_state()
     }
@@ -411,7 +585,7 @@ impl Group {
         self.state_machine.write().await.start_waiting();
     }
 
-    /// Start steward epoch with validation using centralized logic
+    /// Start steward epoch with validation
     pub async fn start_steward_epoch_with_validation(&mut self) -> Result<usize, GroupError> {
         self.state_machine
             .write()
@@ -420,12 +594,12 @@ impl Group {
             .await
     }
 
-    /// Apply proposals and complete using centralized logic
+    /// Handle successful vote for group
     pub async fn handle_yes_vote(&mut self) -> Result<(), GroupError> {
         self.state_machine.write().await.handle_yes_vote().await
     }
 
-    /// Handle failed vote using centralized logic
+    /// Handle failed vote for group
     pub async fn handle_no_vote(&mut self) -> Result<(), GroupError> {
         self.state_machine.write().await.handle_no_vote().await
     }
@@ -439,7 +613,32 @@ impl Group {
     }
 
     /// Create a batch proposals message and welcome message for the current epoch.
-    /// Returns [batch_proposals_msg, welcome_msg] where welcome_msg is only included if there are new members.
+    ///
+    /// ## Parameters:
+    /// - `provider`: The MLS provider for proposal creation
+    /// - `signer`: The signature key pair for signing
+    ///
+    /// ## Returns:
+    /// - Vector of Waku messages: [batch_proposals_msg, welcome_msg]
+    /// - Welcome message is only included if there are new members to add
+    ///
+    /// ## Preconditions:
+    /// - Must be a steward
+    /// - Must have proposals in the voting epoch
+    ///
+    /// ## Effects:
+    /// - Creates MLS proposals for all pending group updates
+    /// - Commits all proposals to the MLS group
+    /// - Merges the commit to apply changes
+    ///
+    /// ## Supported Proposal Types:
+    /// - AddMember: Adds new member with key package
+    /// - RemoveMember: Removes member by identity
+    ///
+    /// ## Errors:
+    /// - `GroupError::StewardNotSet` if not a steward
+    /// - `GroupError::EmptyProposals` if no proposals exist
+    /// - Various MLS processing errors
     pub async fn create_batch_proposals_message(
         &mut self,
         provider: &MlsProvider,
@@ -455,23 +654,16 @@ impl Group {
             return Err(GroupError::EmptyProposals);
         }
 
-        // Pre-collect member indices to avoid borrow checker issues
         let mut member_indices = Vec::new();
         for proposal in &proposals {
             if let GroupUpdateRequest::RemoveMember(identity) = proposal {
                 // Convert the address string to bytes for proper MLS credential matching
                 let identity_bytes = if let Some(hex_string) = identity.strip_prefix("0x") {
                     // Remove 0x prefix and convert to bytes
-                    hex::decode(hex_string).map_err(|e| {
-                        error!("[create_batch_proposals_message]: Failed to decode hex address '{}': {}", identity, e);
-                        GroupError::UnableToSendMessage
-                    })?
+                    hex::decode(hex_string)?
                 } else {
                     // Assume it's already a hex string without 0x prefix
-                    hex::decode(identity).map_err(|e| {
-                        error!("[create_batch_proposals_message]: Failed to decode hex address '{}': {}", identity, e);
-                        GroupError::UnableToSendMessage
-                    })?
+                    hex::decode(identity)?
                 };
 
                 let member_index = self.find_member_index(identity_bytes).await?;
@@ -480,45 +672,49 @@ impl Group {
                 member_indices.push(None);
             }
         }
-
         let mut mls_proposals = Vec::new();
-        let mut mls_group = self.mls_group.as_mut().unwrap().lock().await;
+        let (out_messages, welcome) = {
+            let mut mls_group = self
+                .mls_group
+                .as_mut()
+                .ok_or_else(|| GroupError::MlsGroupNotSet)?
+                .lock()
+                .await;
 
-        // Convert each GroupUpdateRequest to MLS proposal
-        for (i, proposal) in proposals.iter().enumerate() {
-            match proposal {
-                GroupUpdateRequest::AddMember(boxed_key_package) => {
-                    let (mls_message_out, _proposal_ref) = mls_group.propose_add_member(
-                        provider,
-                        signer,
-                        boxed_key_package.as_ref(),
-                    )?;
-                    mls_proposals.push(mls_message_out.to_bytes()?);
-                }
-                GroupUpdateRequest::RemoveMember(identity) => {
-                    if let Some(index) = member_indices[i] {
-                        let (mls_message_out, _proposal_ref) =
-                            mls_group.propose_remove_member(provider, signer, index)?;
+            // Convert each GroupUpdateRequest to MLS proposal
+            for (i, proposal) in proposals.iter().enumerate() {
+                match proposal {
+                    GroupUpdateRequest::AddMember(boxed_key_package) => {
+                        let (mls_message_out, _proposal_ref) = mls_group.propose_add_member(
+                            provider,
+                            signer,
+                            boxed_key_package.as_ref(),
+                        )?;
                         mls_proposals.push(mls_message_out.to_bytes()?);
-                    } else {
-                        error!("[create_batch_proposals_message]: Failed to find member index for identity: {:?}", identity);
+                    }
+                    GroupUpdateRequest::RemoveMember(identity) => {
+                        if let Some(index) = member_indices[i] {
+                            let (mls_message_out, _proposal_ref) =
+                                mls_group.propose_remove_member(provider, signer, index)?;
+                            mls_proposals.push(mls_message_out.to_bytes()?);
+                        } else {
+                            error!("[create_batch_proposals_message]: Failed to find member index for identity: {:?}", identity);
+                        }
                     }
                 }
             }
-        }
 
-        // Create commit with all proposals
-        let (out_messages, welcome, _group_info) =
-            mls_group.commit_to_pending_proposals(provider, signer)?;
+            // Create commit with all proposals
+            let (out_messages, welcome, _group_info) =
+                mls_group.commit_to_pending_proposals(provider, signer)?;
 
-        // Merge the commit
-        mls_group.merge_pending_commit(provider)?;
-
-        drop(mls_group);
-
+            // Merge the commit
+            mls_group.merge_pending_commit(provider)?;
+            (out_messages, welcome)
+        };
         // Create batch proposals message (without welcome)
         let batch_msg: AppMessage = BatchProposalsMessage {
-            group_name: self.group_name_bytes(),
+            group_name: self.group_name_bytes().to_vec(),
             mls_proposals,
             commit_message: out_messages.to_bytes()?,
         }

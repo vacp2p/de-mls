@@ -99,7 +99,7 @@ async fn test_waku_client() {
                     "test_message_1".as_bytes().to_vec(),
                     APP_MSG_SUBTOPIC,
                     group_name,
-                    uuid.clone(),
+                    &uuid,
                 ))
                 .await;
             info!("res: {:?}", res);

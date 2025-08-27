@@ -80,7 +80,6 @@ pub struct ConsensusSession {
     pub state: ConsensusState,
     pub votes: HashMap<Vec<u8>, Vote>, // vote_owner -> Vote
     pub created_at: u64,
-    pub last_activity: u64,
     pub config: ConsensusConfig,
     pub event_sender: Option<broadcast::Sender<(String, ConsensusEvent)>>,
     pub group_name: String,
@@ -103,7 +102,6 @@ impl ConsensusSession {
             state: ConsensusState::Active,
             votes: HashMap::new(),
             created_at: now,
-            last_activity: now,
             config,
             event_sender,
             group_name: group_name.to_string(),
@@ -119,18 +117,17 @@ impl ConsensusSession {
                     return Err(ConsensusError::DuplicateVote);
                 }
 
-                // Add vote
+                // Add vote into the session and proposal
                 self.votes.insert(vote.vote_owner.clone(), vote.clone());
                 self.proposal.votes.push(vote.clone());
-                self.last_activity = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
 
-                // Check if consensus can be reached
+                // Check if consensus can be reached after adding the vote
                 self.check_consensus();
                 Ok(())
             }
             ConsensusState::ConsensusReached(_) => {
                 info!(
-                    "Consensus already reached for proposal {}, skipping vote",
+                    "[consensus::mod::add_vote]: Consensus already reached for proposal {}, skipping vote",
                     self.proposal.proposal_id
                 );
                 Ok(())
@@ -139,7 +136,25 @@ impl ConsensusSession {
         }
     }
 
+    /// Count the number of required votes to reach consensus
+    fn count_required_votes(&self) -> usize {
+        let expected_voters = self.proposal.expected_voters_count as usize;
+        if expected_voters <= 2 {
+            expected_voters
+        } else {
+            ((expected_voters as f64) * self.config.consensus_threshold) as usize
+        }
+    }
+
     /// Check if consensus has been reached
+    ///
+    /// - `ConsensusReached(true)` if yes votes > no votes
+    /// - `ConsensusReached(false)`
+    ///     - if no votes > yes votes
+    ///     - if no votes == yes votes and we have all votes
+    /// - `Active`
+    ///     - if no votes == yes votes and we don't have all votes
+    ///     - if total votes < required votes (we wait for more votes)
     fn check_consensus(&mut self) {
         let total_votes = self.votes.len();
         let yes_votes = self.votes.values().filter(|v| v.vote).count();
@@ -147,20 +162,7 @@ impl ConsensusSession {
 
         // Check if we have all expected votes (only calculate consensus immediately if ALL votes received)
         let expected_voters = self.proposal.expected_voters_count as usize;
-        let required_votes = if expected_voters <= 2 {
-            expected_voters
-        } else {
-            ((expected_voters as f64) * self.config.consensus_threshold) as usize
-        };
-        println!(
-            "[consensus::mod::check_consensus]: Checking consensus for proposal {}. Total votes: {}. Yes votes: {}. No votes: {}. Expected voters: {}. Required votes: {}",
-            self.proposal.proposal_id,
-            total_votes,
-            yes_votes,
-            no_votes,
-            expected_voters,
-            required_votes
-        );
+        let required_votes = self.count_required_votes();
         // For <= 2 voters, we require all votes to reach consensus
         if total_votes >= required_votes {
             // All votes received - calculate consensus immediately
@@ -179,17 +181,15 @@ impl ConsensusSession {
                     result: false,
                 });
             } else {
-                // Tie - if it's all votes, we use liveness criteria
+                // Tie - if it's all votes, we reject the proposal
                 if total_votes == expected_voters {
-                    let result = self.proposal.liveness_criteria_yes;
-                    self.state = ConsensusState::ConsensusReached(result);
+                    self.state = ConsensusState::ConsensusReached(false);
                     info!(
-                        "All votes received - tie resolved with liveness criteria: {}",
-                        result
+                        "[consensus::mod::check_consensus]: All votes received and tie - consensus not reached"
                     );
                     self.emit_consensus_event(ConsensusEvent::ConsensusReached {
                         proposal_id: self.proposal.proposal_id,
-                        result,
+                        result: false,
                     });
                 } else {
                     // Tie - if it's not all votes, we wait for more votes
@@ -226,7 +226,7 @@ pub fn compute_vote_hash(vote: &Vote) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-/// Create a vote for an incoming proposal with user's choice
+/// Create a vote for an incoming proposal based on user's vote
 async fn create_vote_for_proposal<S: LocalSigner>(
     proposal: &Proposal,
     user_vote: bool,
