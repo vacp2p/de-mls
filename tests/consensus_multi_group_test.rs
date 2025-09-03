@@ -115,7 +115,7 @@ async fn test_multi_group_consensus_service() {
     // Create proposals for group 1
     let proposal_1 = consensus_service
         .create_proposal(
-            &group1_name,
+            group1_name,
             "Test Proposal".to_string(),
             "Test payload".to_string(),
             proposal_owner_1,
@@ -127,13 +127,13 @@ async fn test_multi_group_consensus_service() {
         .expect("Failed to create proposal");
 
     let _proposal_1 = consensus_service
-        .vote_on_proposal(&group1_name, proposal_1.proposal_id, true, signer_1)
+        .vote_on_proposal(group1_name, proposal_1.proposal_id, true, signer_1)
         .await
         .expect("Failed to vote on proposal");
 
     let proposal_2 = consensus_service
         .create_proposal(
-            &&group2_name,
+            group2_name,
             "Test Proposal".to_string(),
             "Test payload".to_string(),
             proposal_owner_2.clone(),
@@ -145,14 +145,14 @@ async fn test_multi_group_consensus_service() {
         .expect("Failed to create proposal");
 
     let _proposal_2 = consensus_service
-        .vote_on_proposal(&group2_name, proposal_2.proposal_id, true, signer_2.clone())
+        .vote_on_proposal(group2_name, proposal_2.proposal_id, true, signer_2.clone())
         .await
         .expect("Failed to vote on proposal");
 
     // Create proposal for group 2
     let proposal_3 = consensus_service
         .create_proposal(
-            &group2_name,
+            group2_name,
             "Test Proposal".to_string(),
             "Test payload".to_string(),
             proposal_owner_2,
@@ -164,20 +164,20 @@ async fn test_multi_group_consensus_service() {
         .expect("Failed to create proposal");
 
     let _proposal_3 = consensus_service
-        .vote_on_proposal(&&group2_name, proposal_3.proposal_id, true, signer_2)
+        .vote_on_proposal(group2_name, proposal_3.proposal_id, true, signer_2)
         .await
         .expect("Failed to vote on proposal");
 
     // Verify proposals are created for both groups
     let group1_proposals = consensus_service.get_active_proposals(group1_name).await;
-    let group2_proposals = consensus_service.get_active_proposals(&group2_name).await;
+    let group2_proposals = consensus_service.get_active_proposals(group2_name).await;
 
     assert_eq!(group1_proposals.len(), 1);
     assert_eq!(group2_proposals.len(), 2);
 
     // Verify group statistics
     let group1_stats = consensus_service.get_group_stats(group1_name).await;
-    let group2_stats = consensus_service.get_group_stats(&group2_name).await;
+    let group2_stats = consensus_service.get_group_stats(group2_name).await;
 
     assert_eq!(group1_stats.total_sessions, 1);
     assert_eq!(group1_stats.active_sessions, 1);

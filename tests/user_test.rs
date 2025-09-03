@@ -1,9 +1,9 @@
 use de_mls::{
-    message::UserMessage,
-    protos::messages::v1::app_message,
+    // message::UserMessage,
+    // protos::messages::v1::app_message,
+    // state_machine::GroupState,
     state_machine::GroupState,
-    user::{User, UserAction},
-    ws_actor::{RawWsMessage, WsAction},
+    user::User, // ws_actor::{RawWsMessage, WsAction},
 };
 use log::info;
 
@@ -1003,14 +1003,13 @@ async fn test_steward_epoch_with_no_proposals() {
 
     // Should return 0 when no proposals
     assert_eq!(proposal_count, 0);
-
-    // Since no steward epoch was started, we can't start voting
-    let start_vote_result = alice.get_proposals_for_steward_voting(group_name).await;
-    assert!(start_vote_result.is_ok());
-
-    let (proposal_id, action) = start_vote_result.expect("Failed to start voting");
-    assert_eq!(proposal_id, 0);
-    assert_eq!(action, UserAction::DoNothing);
+    assert_eq!(
+        alice
+            .get_group_state(group_name)
+            .await
+            .expect("Failed to get group state"),
+        GroupState::Working
+    );
 
     info!("Steward epoch correctly skipped when no proposals exist");
 }

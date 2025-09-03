@@ -590,6 +590,13 @@ mod tests {
         // Initial state should be Working
         assert_eq!(state_machine.current_state(), GroupState::Working);
 
+        // Add a proposal to switch to waiting state
+        state_machine
+            .add_proposal(GroupUpdateRequest::RemoveMember(
+                "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc".to_string(),
+            ))
+            .await;
+
         // Test start_steward_epoch
         state_machine
             .start_steward_epoch_with_validation()
@@ -640,6 +647,13 @@ mod tests {
             message_types::BATCH_PROPOSALS_MESSAGE
         ));
 
+        // Add a proposal to switch to waiting state
+        state_machine
+            .add_proposal(GroupUpdateRequest::RemoveMember(
+                "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc".to_string(),
+            ))
+            .await;
+
         // Start steward epoch
         state_machine
             .start_steward_epoch_with_validation()
@@ -647,7 +661,7 @@ mod tests {
             .expect("Failed to start steward epoch");
 
         // Waiting state - test specific message types
-        // All messages allowed from anyone EXCEPT BATCH_PROPOSALS_MESSAGE
+        // All messages not allowed from anyone EXCEPT BATCH_PROPOSALS_MESSAGE
         assert!(!state_machine.can_send_message_type(false, false, message_types::BAN_REQUEST));
         assert!(!state_machine.can_send_message_type(
             false,

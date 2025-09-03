@@ -164,6 +164,27 @@ impl User {
         groups.contains_key(group_name)
     }
 
+    /// Get the state of a group.
+    ///
+    /// ## Parameters:
+    /// - `group_name`: The name of the group to get the state of
+    ///
+    /// ## Returns:
+    /// - `GroupState` of the group
+    pub async fn get_group_state(&self, group_name: &str) -> Result<GroupState, UserError> {
+        let groups = self.groups.read().await;
+        let state = groups
+            .get(group_name)
+            .cloned()
+            .ok_or_else(|| UserError::GroupNotFoundError)?
+            .read()
+            .await
+            .get_state()
+            .await;
+
+        Ok(state)
+    }
+
     /// Process messages from the welcome subtopic.
     ///
     /// ## Parameters:
