@@ -1,5 +1,4 @@
 use alloy::signers::local::LocalSignerError;
-use kameo::error::SendError;
 use openmls::group::WelcomeError;
 use openmls::{
     framing::errors::MlsMessageError,
@@ -7,41 +6,58 @@ use openmls::{
     prelude::{
         CommitToPendingProposalsError, CreateMessageError, MergeCommitError,
         MergePendingCommitError, NewGroupError, ProcessMessageError, ProposeAddMemberError,
-        RemoveMembersError,
     },
 };
 use openmls_rust_crypto::MemoryStorageError;
-use std::{str::Utf8Error, string::FromUtf8Error};
+use std::string::FromUtf8Error;
 
 use ds::{waku_actor::WakuMessageToSend, DeliveryServiceError};
 use mls_crypto::error::IdentityError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConsensusError {
-    #[error("Invalid vote ID")]
-    InvalidVoteId,
-    #[error("Invalid vote hash")]
-    InvalidVoteHash,
+    #[error(transparent)]
+    MessageError(#[from] MessageError),
+
+    #[error("Verification failed")]
+    InvalidVoteSignature,
     #[error("Duplicate vote")]
     DuplicateVote,
+    #[error("Empty vote owner")]
+    EmptyVoteOwner,
+    #[error("Vote expired")]
+    VoteExpired,
+    #[error("Invalid vote hash")]
+    InvalidVoteHash,
+    #[error("Empty vote hash")]
+    EmptyVoteHash,
+    #[error("Received hash mismatch")]
+    ReceivedHashMismatch,
+    #[error("Parent hash mismatch")]
+    ParentHashMismatch,
+    #[error("Invalid vote timestamp")]
+    InvalidVoteTimestamp,
+
     #[error("Session not active")]
     SessionNotActive,
-    #[error("Invalid message")]
-    InvalidMessage,
-    #[error("Proposal not found")]
-    ProposalNotFound,
-    #[error("Vote validation failed")]
-    VoteValidationFailed,
-    #[error("Consensus timeout")]
-    ConsensusTimeout,
-    #[error("Insufficient votes for consensus")]
-    InsufficientVotes,
-    #[error("Invalid signature")]
-    InvalidSignature,
-    #[error("Proposal expired")]
-    ProposalExpired,
-    #[error("An unknown consensus error occurred: {0}")]
-    Other(String),
+    #[error("Group not found")]
+    GroupNotFound,
+    #[error("Session not found")]
+    SessionNotFound,
+
+    #[error("User already voted")]
+    UserAlreadyVoted,
+
+    #[error("Proposal already exist in consensus service")]
+    ProposalAlreadyExist,
+
+    #[error("Empty signature")]
+    EmptySignature,
+    #[error("Invalid signature: {0}")]
+    InvalidSignature(String),
+
+    #[error("Failed to get current time")]
+    FailedToGetCurrentTime(#[from] std::time::SystemTimeError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -52,6 +68,10 @@ pub enum MessageError {
     InvalidJson(#[from] serde_json::Error),
     #[error("Failed to serialize or deserialize MLS message: {0}")]
     InvalidMlsMessage(#[from] MlsMessageError),
+    #[error("Invalid alloy signature: {0}")]
+    InvalidAlloySignature(#[from] alloy::primitives::SignatureError),
+    #[error("Mismatched length: expected {expect}, got {actual}")]
+    MismatchedLength { expect: usize, actual: usize },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -65,15 +85,15 @@ pub enum GroupError {
     MlsGroupNotSet,
     #[error("Group still active")]
     GroupStillActive,
-    #[error("Empty welcome message")]
-    EmptyWelcomeMessage,
-    #[error("Member not found")]
-    MemberNotFound,
-    #[error("Invalid state transition")]
-    InvalidStateTransition,
+    #[error("Invalid state transition from {from} to {to}")]
+    InvalidStateTransition { from: String, to: String },
     #[error("Empty proposals for current epoch")]
     EmptyProposals,
+    #[error("Invalid state [{state}] to send message [{message_type}]")]
+    InvalidStateToMessageSend { state: String, message_type: String },
 
+    #[error("Failed to decode hex address: {0}")]
+    HexDecodeError(#[from] alloy::hex::FromHexError),
     #[error("Unable to create MLS group: {0}")]
     UnableToCreateGroup(#[from] NewGroupError<MemoryStorageError>),
     #[error("Unable to merge pending commit in MLS group: {0}")]
@@ -84,8 +104,6 @@ pub enum GroupError {
     InvalidProcessMessage(#[from] ProcessMessageError),
     #[error("Unable to encrypt MLS message: {0}")]
     UnableToEncryptMlsMessage(#[from] CreateMessageError),
-    #[error("Unable to remove members: {0}")]
-    UnableToRemoveMembers(#[from] RemoveMembersError<MemoryStorageError>),
     #[error("Unable to create proposal to add members: {0}")]
     UnableToCreateProposal(#[from] ProposeAddMemberError<MemoryStorageError>),
     #[error("Unable to create proposal to remove members: {0}")]
@@ -96,21 +114,10 @@ pub enum GroupError {
     ),
     #[error("Unable to store pending proposal: {0}")]
     UnableToStorePendingProposal(#[from] MemoryStorageError),
-
     #[error("Failed to serialize mls message: {0}")]
     MlsMessageError(#[from] MlsMessageError),
-
-    #[error("UTF-8 parsing error: {0}")]
-    Utf8ParsingError(#[from] FromUtf8Error),
-    #[error("JSON processing error: {0}")]
-    JsonError(#[from] serde_json::Error),
-    #[error("Serialization error: {0}")]
-    SerializationError(#[from] tls_codec::Error),
     #[error("Failed to decode app message: {0}")]
-    AppMessageDecodeError(String),
-
-    #[error("An unknown error occurred: {0}")]
-    Other(anyhow::Error),
+    AppMessageDecodeError(#[from] prost::DecodeError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -123,63 +130,56 @@ pub enum UserError {
     GroupError(#[from] GroupError),
     #[error(transparent)]
     MessageError(#[from] MessageError),
+    #[error(transparent)]
+    ConsensusError(#[from] ConsensusError),
 
-    #[error("Group already exists: {0}")]
-    GroupAlreadyExistsError(String),
-    #[error("Group not found: {0}")]
-    GroupNotFoundError(String),
-
-    #[error("Unsupported message type.")]
-    UnsupportedMessageType,
+    #[error("Group already exists")]
+    GroupAlreadyExistsError,
+    #[error("Group not found")]
+    GroupNotFoundError,
+    #[error("MLS group not initialized")]
+    MlsGroupNotInitialized,
     #[error("Welcome message cannot be empty.")]
     EmptyWelcomeMessageError,
+    #[error("Failed to extract welcome message")]
+    FailedToExtractWelcomeMessage,
     #[error("Message verification failed")]
     MessageVerificationFailed,
-
+    #[error("Failed to create group: {0}")]
+    UnableToCreateGroup(String),
+    #[error("Failed to send message to user: {0}")]
+    UnableToHandleStewardEpoch(String),
+    #[error("Failed to process steward message: {0}")]
+    ProcessStewardMessageError(String),
+    #[error("Failed to get group update requests: {0}")]
+    GetGroupUpdateRequestsError(String),
+    #[error("Invalid user action: {0}")]
+    InvalidUserAction(String),
+    #[error("Failed to start voting: {0}")]
+    UnableToStartVoting(String),
     #[error("Unknown content topic type: {0}")]
     UnknownContentTopicType(String),
+    #[error("Failed to send message to ws: {0}")]
+    UnableToSendMessageToWs(String),
+    #[error("Invalid group state: {0}")]
+    InvalidGroupState(String),
+    #[error("No proposals found")]
+    NoProposalsFound,
+    #[error("Invalid app message type")]
+    InvalidAppMessageType,
 
     #[error("Failed to create staged join: {0}")]
     MlsWelcomeError(#[from] WelcomeError<MemoryStorageError>),
-
     #[error("UTF-8 parsing error: {0}")]
     Utf8ParsingError(#[from] FromUtf8Error),
-    #[error("UTF-8 string parsing error: {0}")]
-    Utf8StringParsingError(#[from] Utf8Error),
-    #[error("JSON processing error: {0}")]
-    JsonError(#[from] serde_json::Error),
-    #[error("Serialization error: {0}")]
-    SerializationError(#[from] tls_codec::Error),
     #[error("Failed to parse signer: {0}")]
     SignerParsingError(#[from] LocalSignerError),
-
-    #[error("Failed to publish message: {0}")]
-    KameoPublishMessageError(#[from] SendError<WakuMessageToSend, DeliveryServiceError>),
-    #[error("Failed to create group: {0}")]
-    KameoCreateGroupError(String),
-    #[error("Failed to send message to user: {0}")]
-    KameoSendMessageError(String),
-    #[error("Failed to get income key packages: {0}")]
-    GetIncomeKeyPackagesError(String),
-    #[error("Failed to process steward message: {0}")]
-    ProcessStewardMessageError(String),
-    #[error("Failed to process proposals: {0}")]
-    ProcessProposalsError(String),
-    #[error("Unsupported mls message type")]
-    UnsupportedMlsMessageType,
     #[error("Failed to decode welcome message: {0}")]
     WelcomeMessageDecodeError(#[from] prost::DecodeError),
-    #[error("Failed to apply proposals: {0}")]
-    ApplyProposalsError(String),
     #[error("Failed to deserialize mls message in: {0}")]
-    MlsMessageInDeserializeError(String),
-    #[error("Failed to create invite proposal: {0}")]
-    CreateInviteProposalError(String),
+    MlsMessageInDeserializeError(#[from] openmls::prelude::Error),
     #[error("Failed to try into protocol message: {0}")]
-    TryIntoProtocolMessageError(String),
-    #[error("Failed to get group update requests: {0}")]
-    GetGroupUpdateRequestsError(String),
-
+    TryIntoProtocolMessageError(#[from] openmls::framing::errors::ProtocolMessageError),
     #[error("Failed to send message to waku: {0}")]
     WakuSendMessageError(#[from] tokio::sync::mpsc::error::SendError<WakuMessageToSend>),
 }

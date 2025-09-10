@@ -16,63 +16,59 @@
 //!  - [`AppMessage`]
 //!    - [`ConversationMessage`]
 //!    - [`BatchProposalsMessage`]
+//!    - [`BanRequest`]
+//!    - [`VotingProposal`]
+//!    - [`UserVote`]
 //!
 
 use crate::{
+    consensus::v1::{Proposal, Vote},
     encrypt_message,
-    protos::messages::v1::{app_message, UserKeyPackage},
+    protos::messages::v1::{app_message, UserKeyPackage, UserVote, VotingProposal},
     verify_message, MessageError,
 };
-// use log::info;
 use openmls::prelude::{KeyPackage, MlsMessageOut};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
-// use crate::protos::messages::v1::{
-//     welcome_message, GroupAnnouncement, InvitationToJoin, WelcomeMessage, AppMessage, ConversationMessage, UserKeyPackage,
-// };
 use crate::protos::messages::v1::{
-    welcome_message, AppMessage, BatchProposalsMessage, ConversationMessage, GroupAnnouncement,
-    InvitationToJoin, WelcomeMessage,
+    welcome_message, AppMessage, BanRequest, BatchProposalsMessage, ConversationMessage,
+    GroupAnnouncement, InvitationToJoin, WelcomeMessage,
 };
 
-// WELCOME MESSAGE SUBTOPIC
+// Message type constants for consistency and type safety
+pub mod message_types {
+    pub const CONVERSATION_MESSAGE: &str = "ConversationMessage";
+    pub const BATCH_PROPOSALS_MESSAGE: &str = "BatchProposalsMessage";
+    pub const BAN_REQUEST: &str = "BanRequest";
+    pub const PROPOSAL: &str = "Proposal";
+    pub const VOTE: &str = "Vote";
+    pub const VOTING_PROPOSAL: &str = "VotingProposal";
+    pub const USER_VOTE: &str = "UserVote";
+    pub const UNKNOWN: &str = "Unknown";
+}
 
-pub fn wrap_group_announcement_in_welcome_msg(
-    group_announcement: GroupAnnouncement,
-) -> WelcomeMessage {
-    WelcomeMessage {
-        payload: Some(welcome_message::Payload::GroupAnnouncement(
-            group_announcement,
-        )),
+/// Trait for getting message type as a string constant
+pub trait MessageType {
+    fn message_type(&self) -> &'static str;
+}
+
+impl MessageType for app_message::Payload {
+    fn message_type(&self) -> &'static str {
+        use message_types::*;
+        match self {
+            app_message::Payload::ConversationMessage(_) => CONVERSATION_MESSAGE,
+            app_message::Payload::BatchProposalsMessage(_) => BATCH_PROPOSALS_MESSAGE,
+            app_message::Payload::BanRequest(_) => BAN_REQUEST,
+            app_message::Payload::Proposal(_) => PROPOSAL,
+            app_message::Payload::Vote(_) => VOTE,
+            app_message::Payload::VotingProposal(_) => VOTING_PROPOSAL,
+            app_message::Payload::UserVote(_) => USER_VOTE,
+        }
     }
 }
 
-pub fn wrap_user_kp_into_welcome_msg(
-    encrypted_kp: Vec<u8>,
-) -> Result<WelcomeMessage, MessageError> {
-    let user_key_package = UserKeyPackage {
-        encrypt_kp: encrypted_kp,
-    };
-    let welcome_message = WelcomeMessage {
-        payload: Some(welcome_message::Payload::UserKeyPackage(user_key_package)),
-    };
-    Ok(welcome_message)
-}
-pub fn wrap_invitation_into_welcome_msg(
-    mls_message: MlsMessageOut,
-) -> Result<WelcomeMessage, MessageError> {
-    let mls_bytes = mls_message.to_bytes()?;
-    let invitation = InvitationToJoin {
-        mls_message_out_bytes: mls_bytes,
-    };
-
-    let welcome_message = WelcomeMessage {
-        payload: Some(welcome_message::Payload::InvitationToJoin(invitation)),
-    };
-    Ok(welcome_message)
-}
-
+// WELCOME MESSAGE SUBTOPIC
 impl GroupAnnouncement {
     pub fn new(pub_key: Vec<u8>, signature: Vec<u8>) -> Self {
         GroupAnnouncement {
@@ -87,47 +83,45 @@ impl GroupAnnouncement {
     }
 
     pub fn encrypt(&self, kp: KeyPackage) -> Result<Vec<u8>, MessageError> {
-        // TODO: replace json in encryption and decryption
         let key_package = serde_json::to_vec(&kp)?;
         let encrypted = encrypt_message(&key_package, &self.eth_pub_key)?;
         Ok(encrypted)
     }
 }
 
-// APPLICATION MESSAGE SUBTOPIC
-
-pub fn wrap_conversation_message_into_application_msg(
-    message: Vec<u8>,
-    sender: String,
-    group_name: String,
-) -> AppMessage {
-    AppMessage {
-        payload: Some(app_message::Payload::ConversationMessage(
-            ConversationMessage {
-                message,
-                sender,
-                group_name,
-            },
-        )),
+impl From<GroupAnnouncement> for WelcomeMessage {
+    fn from(group_announcement: GroupAnnouncement) -> Self {
+        WelcomeMessage {
+            payload: Some(welcome_message::Payload::GroupAnnouncement(
+                group_announcement,
+            )),
+        }
     }
 }
 
-pub fn wrap_batch_proposals_into_application_msg(
-    group_name: String,
-    mls_proposals: Vec<Vec<u8>>,
-    commit_message: Vec<u8>,
-) -> AppMessage {
-    AppMessage {
-        payload: Some(app_message::Payload::BatchProposalsMessage(
-            BatchProposalsMessage {
-                group_name: group_name.into_bytes(),
-                mls_proposals,
-                commit_message,
-            },
-        )),
+impl TryFrom<MlsMessageOut> for WelcomeMessage {
+    type Error = MessageError;
+    fn try_from(mls_message: MlsMessageOut) -> Result<Self, MessageError> {
+        let mls_bytes = mls_message.to_bytes()?;
+        let invitation = InvitationToJoin {
+            mls_message_out_bytes: mls_bytes,
+        };
+
+        Ok(WelcomeMessage {
+            payload: Some(welcome_message::Payload::InvitationToJoin(invitation)),
+        })
     }
 }
 
+impl From<UserKeyPackage> for WelcomeMessage {
+    fn from(user_key_package: UserKeyPackage) -> Self {
+        WelcomeMessage {
+            payload: Some(welcome_message::Payload::UserKeyPackage(user_key_package)),
+        }
+    }
+}
+
+// APP MESSAGE SUBTOPIC
 impl Display for AppMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.payload {
@@ -139,15 +133,123 @@ impl Display for AppMessage {
                     String::from_utf8_lossy(&conversation_message.message)
                 )
             }
-            _ => write!(f, "Invalid message"),
+            Some(app_message::Payload::BatchProposalsMessage(batch_msg)) => {
+                write!(
+                    f,
+                    "BatchProposalsMessage: {} proposals for group {}",
+                    batch_msg.mls_proposals.len(),
+                    String::from_utf8_lossy(&batch_msg.group_name)
+                )
+            }
+            Some(app_message::Payload::BanRequest(ban_request)) => {
+                write!(
+                    f,
+                    "SYSTEM: {} wants to ban {}",
+                    ban_request.requester, ban_request.user_to_ban
+                )
+            }
+            Some(app_message::Payload::Proposal(proposal)) => {
+                write!(
+                    f,
+                    "Proposal: ID {} with {} votes for {} voters",
+                    proposal.proposal_id,
+                    proposal.votes.len(),
+                    proposal.expected_voters_count
+                )
+            }
+            Some(app_message::Payload::Vote(vote)) => {
+                write!(
+                    f,
+                    "Vote: {} for proposal {} ({})",
+                    if vote.vote { "YES" } else { "NO" },
+                    vote.proposal_id,
+                    vote.vote_id
+                )
+            }
+            Some(app_message::Payload::VotingProposal(voting_proposal)) => {
+                write!(
+                    f,
+                    "VotingProposal: ID {} for group {}",
+                    voting_proposal.proposal_id, voting_proposal.group_name
+                )
+            }
+            Some(app_message::Payload::UserVote(user_vote)) => {
+                write!(
+                    f,
+                    "UserVote: {} for proposal {} in group {}",
+                    if user_vote.vote { "YES" } else { "NO" },
+                    user_vote.proposal_id,
+                    user_vote.group_name
+                )
+            }
+            None => write!(f, "Empty message"),
         }
     }
 }
 
+impl From<VotingProposal> for AppMessage {
+    fn from(voting_proposal: VotingProposal) -> Self {
+        AppMessage {
+            payload: Some(app_message::Payload::VotingProposal(voting_proposal)),
+        }
+    }
+}
+
+impl From<UserVote> for AppMessage {
+    fn from(user_vote: UserVote) -> Self {
+        AppMessage {
+            payload: Some(app_message::Payload::UserVote(user_vote)),
+        }
+    }
+}
+
+impl From<ConversationMessage> for AppMessage {
+    fn from(conversation_message: ConversationMessage) -> Self {
+        AppMessage {
+            payload: Some(app_message::Payload::ConversationMessage(
+                conversation_message,
+            )),
+        }
+    }
+}
+
+impl From<BatchProposalsMessage> for AppMessage {
+    fn from(batch_proposals_message: BatchProposalsMessage) -> Self {
+        AppMessage {
+            payload: Some(app_message::Payload::BatchProposalsMessage(
+                batch_proposals_message,
+            )),
+        }
+    }
+}
+
+impl From<BanRequest> for AppMessage {
+    fn from(ban_request: BanRequest) -> Self {
+        AppMessage {
+            payload: Some(app_message::Payload::BanRequest(ban_request)),
+        }
+    }
+}
+
+impl From<Proposal> for AppMessage {
+    fn from(proposal: Proposal) -> Self {
+        AppMessage {
+            payload: Some(app_message::Payload::Proposal(proposal)),
+        }
+    }
+}
+
+impl From<Vote> for AppMessage {
+    fn from(vote: Vote) -> Self {
+        AppMessage {
+            payload: Some(app_message::Payload::Vote(vote)),
+        }
+    }
+}
 /// This struct is used to represent the message from the user that we got from web socket
 #[derive(Deserialize, Debug, PartialEq, Serialize)]
 pub struct UserMessage {
-    pub message: String,
+    pub message: Vec<u8>,
     pub group_id: String,
 }
 

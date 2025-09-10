@@ -108,7 +108,7 @@ impl WakuNode<Running> {
         for peer_address in peer_addresses {
             info!("Connecting to peer: {peer_address:?}");
             self.node
-                .connect(&peer_address, None)
+                .connect(&peer_address, Some(Duration::from_secs(10)))
                 .await
                 .map_err(|e| DeliveryServiceError::WakuConnectPeerError(e.to_string()))?;
             info!("Connected to peer: {peer_address:?}");
@@ -148,12 +148,12 @@ impl WakuMessageToSend {
     /// - subtopic: The subtopic to send the message to
     /// - group_id: The group to send the message to
     /// - app_id: The app is unique identifier for the application that is sending the message for filtering own messages
-    pub fn new(msg: Vec<u8>, subtopic: &str, group_id: String, app_id: Vec<u8>) -> Self {
+    pub fn new(msg: Vec<u8>, subtopic: &str, group_id: &str, app_id: &[u8]) -> Self {
         Self {
             msg,
             subtopic: subtopic.to_string(),
-            group_id,
-            app_id,
+            group_id: group_id.to_string(),
+            app_id: app_id.to_vec(),
         }
     }
     /// Build a WakuMessage from the message to send
@@ -178,10 +178,15 @@ pub async fn run_waku_node(
     node_port: String,
     peer_addresses: Option<Vec<Multiaddr>>,
     waku_sender: Sender<WakuMessage>,
-    reciever: &mut Receiver<WakuMessageToSend>,
+    receiver: &mut Receiver<WakuMessageToSend>,
 ) -> Result<(), DeliveryServiceError> {
     info!("Initializing waku node");
-    let waku_node_init = WakuNode::new(node_port.parse::<usize>().unwrap()).await?;
+    let waku_node_init = WakuNode::new(
+        node_port
+            .parse::<usize>()
+            .expect("Failed to parse node port"),
+    )
+    .await?;
     let waku_node = waku_node_init.start(waku_sender).await?;
     info!("Waku node started");
 
@@ -191,7 +196,7 @@ pub async fn run_waku_node(
     }
 
     info!("Waiting for message to send to waku");
-    while let Some(msg) = reciever.recv().await {
+    while let Some(msg) = receiver.recv().await {
         info!("Received message to send to waku");
         let id = waku_node.send_message(msg).await?;
         info!("Successfully publish message with id: {id:?}");

@@ -45,7 +45,7 @@ impl Message<WakuMessage> for Application {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_waku_client() {
     env_logger::init();
-    let group_name = "new_group".to_string();
+    let group_name = "new_group";
     let mut pubsub = PubSub::<WakuMessage>::new();
 
     let (sender, _) = channel::<WakuMessage>(100);
@@ -98,8 +98,8 @@ async fn test_waku_client() {
                 .send_message(WakuMessageToSend::new(
                     "test_message_1".as_bytes().to_vec(),
                     APP_MSG_SUBTOPIC,
-                    group_name.clone(),
-                    uuid.clone(),
+                    group_name,
+                    &uuid,
                 ))
                 .await;
             info!("res: {:?}", res);

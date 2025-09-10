@@ -14,7 +14,7 @@ use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
-use tokio::sync::mpsc::channel;
+use tokio::sync::{mpsc::channel, RwLock};
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
 use waku_bindings::{Multiaddr, WakuMessage};
@@ -39,15 +39,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let peer_addresses = std::env::var("PEER_ADDRESSES")
         .map(|val| {
             val.split(",")
-                .map(|addr| addr.parse::<Multiaddr>().unwrap())
+                .map(|addr| {
+                    addr.parse::<Multiaddr>()
+                        .expect("Failed to parse peer address")
+                })
                 .collect()
         })
         .expect("PEER_ADDRESSES is not set");
 
-    let content_topics = Arc::new(Mutex::new(Vec::new()));
+    let content_topics = Arc::new(RwLock::new(Vec::new()));
 
     let (waku_sender, mut waku_receiver) = channel::<WakuMessage>(100);
-    let (sender, mut reciever) = channel::<WakuMessageToSend>(100);
+    let (sender, mut receiver) = channel::<WakuMessageToSend>(100);
     let (tx, _) = tokio::sync::broadcast::channel(100);
 
     let app_state = Arc::new(AppState {
@@ -76,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting waku node");
     tokio::task::block_in_place(move || {
         tokio::runtime::Handle::current().block_on(async move {
-            run_waku_node(node_port, Some(peer_addresses), waku_sender, &mut reciever).await
+            run_waku_node(node_port, Some(peer_addresses), waku_sender, &mut receiver).await
         })
     })?;
 
@@ -138,7 +141,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     group_id: connect.group_id.clone(),
                     should_create_group: connect.should_create,
                 });
-                let mut rooms = state.rooms.lock().unwrap();
+                let mut rooms = match state.rooms.lock() {
+                    Ok(rooms) => rooms,
+                    Err(e) => {
+                        log::error!("Failed to acquire rooms lock: {e}");
+                        continue;
+                    }
+                };
                 if !rooms.contains(&connect.group_id.clone()) {
                     rooms.insert(connect.group_id.clone());
                 }
@@ -153,9 +162,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         }
     }
 
-    let user_actor = create_user_instance(main_loop_connection.unwrap().clone(), state.clone())
-        .await
-        .expect("Failed to start main loop");
+    let user_actor = create_user_instance(
+        main_loop_connection.unwrap().clone(),
+        state.clone(),
+        ws_actor.clone(),
+    )
+    .await
+    .expect("Failed to create user instance");
 
     let user_actor_clone = user_actor.clone();
     let state_clone = state.clone();
@@ -168,11 +181,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         while let Ok(msg) = user_waku_receiver.recv().await {
             let content_topic = msg.content_topic.clone();
             // Check if message belongs to a relevant topic
-            if !match_content_topic(&state_clone.content_topics, &content_topic) {
+            if !match_content_topic(&state_clone.content_topics, &content_topic).await {
                 error!("Content topic not match: {content_topic:?}");
                 return;
             };
-            info!("Received message from waku that matches content topic");
+            info!("[handle_socket]: Received message from waku that matches content topic");
             let res = handle_user_actions(
                 msg,
                 state_clone.waku_node.clone(),
@@ -191,7 +204,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let user_ref_clone = user_actor.clone();
     let mut recv_messages_ws = {
         tokio::spawn(async move {
-            info!("Running recieve messages from websocket");
+            info!("Running receive messages from websocket");
             while let Some(Ok(Message::Text(text))) = ws_receiver.next().await {
                 let res = handle_ws_action(
                     RawWsMessage { message: text },
@@ -213,7 +226,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             recv_messages_ws.abort();
         }
         _ = (&mut recv_messages_ws) => {
-            info!("recieve messages from websocket finished");
+            info!("receive messages from websocket finished");
             recv_messages_ws.abort();
         }
         _ = cancel_token.cancelled() => {
@@ -227,7 +240,17 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
 }
 
 async fn get_rooms(State(state): State<Arc<AppState>>) -> String {
-    let rooms = state.rooms.lock().unwrap();
+    let rooms = match state.rooms.lock() {
+        Ok(rooms) => rooms,
+        Err(e) => {
+            log::error!("Failed to acquire rooms lock: {e}");
+            return json!({
+                "status": "Error acquiring rooms lock",
+                "rooms": []
+            })
+            .to_string();
+        }
+    };
     let vec = rooms.iter().collect::<Vec<&String>>();
     match vec.len() {
         0 => json!({

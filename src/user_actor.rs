@@ -4,7 +4,9 @@ use waku_bindings::WakuMessage;
 use ds::waku_actor::WakuMessageToSend;
 
 use crate::{
+    consensus::ConsensusEvent,
     error::UserError,
+    protos::messages::v1::BanRequest,
     user::{User, UserAction},
 };
 
@@ -33,8 +35,7 @@ impl Message<CreateGroupRequest> for User {
         msg: CreateGroupRequest,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.create_group(msg.group_name.clone(), msg.is_creation)
-            .await?;
+        self.create_group(&msg.group_name, msg.is_creation).await?;
         Ok(())
     }
 }
@@ -51,7 +52,7 @@ impl Message<StewardMessageRequest> for User {
         msg: StewardMessageRequest,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.prepare_steward_msg(msg.group_name.clone()).await
+        self.prepare_steward_msg(&msg.group_name).await
     }
 }
 
@@ -67,32 +68,13 @@ impl Message<LeaveGroupRequest> for User {
         msg: LeaveGroupRequest,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.leave_group(msg.group_name.clone()).await?;
+        self.leave_group(&msg.group_name).await?;
         Ok(())
     }
 }
 
-pub struct RemoveUserRequest {
-    pub user_to_ban: String,
-    pub group_name: String,
-}
-
-impl Message<RemoveUserRequest> for User {
-    type Reply = Result<(), UserError>;
-
-    async fn handle(
-        &mut self,
-        msg: RemoveUserRequest,
-        _ctx: Context<'_, Self, Self::Reply>,
-    ) -> Self::Reply {
-        // Add remove proposal to steward instead of direct removal
-        self.add_remove_proposal(msg.group_name, msg.user_to_ban)
-            .await
-    }
-}
-
 pub struct SendGroupMessage {
-    pub message: String,
+    pub message: Vec<u8>,
     pub group_name: String,
 }
 
@@ -104,9 +86,28 @@ impl Message<SendGroupMessage> for User {
         msg: SendGroupMessage,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.build_group_message(&msg.message, msg.group_name).await
+        self.build_group_message(msg.message, &msg.group_name).await
     }
 }
+
+pub struct BuildBanMessage {
+    pub ban_request: BanRequest,
+    pub group_name: String,
+}
+
+impl Message<BuildBanMessage> for User {
+    type Reply = Result<WakuMessageToSend, UserError>;
+
+    async fn handle(
+        &mut self,
+        msg: BuildBanMessage,
+        _ctx: Context<'_, Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.process_ban_request(msg.ban_request, &msg.group_name)
+            .await
+    }
+}
+
 // New state machine message types
 pub struct StartStewardEpochRequest {
     pub group_name: String,
@@ -120,71 +121,71 @@ impl Message<StartStewardEpochRequest> for User {
         msg: StartStewardEpochRequest,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.start_steward_epoch(msg.group_name).await
+        self.start_steward_epoch(&msg.group_name).await
     }
 }
 
-pub struct StartVotingRequest {
+pub struct GetProposalsForStewardVotingRequest {
     pub group_name: String,
 }
 
-impl Message<StartVotingRequest> for User {
-    type Reply = Result<Vec<u8>, UserError>; // Returns vote_id
+impl Message<GetProposalsForStewardVotingRequest> for User {
+    type Reply = Result<UserAction, UserError>; // Returns proposal_id
 
     async fn handle(
         &mut self,
-        msg: StartVotingRequest,
+        msg: GetProposalsForStewardVotingRequest,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.start_voting(msg.group_name).await
+        let (_, action) = self
+            .get_proposals_for_steward_voting(&msg.group_name)
+            .await?;
+        Ok(action)
     }
 }
 
-pub struct CompleteVotingRequest {
+pub struct UserVoteRequest {
     pub group_name: String,
-    pub vote_id: Vec<u8>,
+    pub proposal_id: u32,
+    pub vote: bool,
 }
 
-impl Message<CompleteVotingRequest> for User {
-    type Reply = Result<bool, UserError>; // Returns vote result
+impl Message<UserVoteRequest> for User {
+    type Reply = Result<Option<WakuMessageToSend>, UserError>;
 
     async fn handle(
         &mut self,
-        msg: CompleteVotingRequest,
+        msg: UserVoteRequest,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.complete_voting(msg.group_name, msg.vote_id).await
+        let action = self
+            .process_user_vote(msg.proposal_id, msg.vote, &msg.group_name)
+            .await?;
+        match action {
+            UserAction::SendToWaku(waku_msg) => Ok(Some(waku_msg)),
+            UserAction::DoNothing => Ok(None),
+            _ => Err(UserError::InvalidUserAction(
+                "Vote action must result in Waku message".to_string(),
+            )),
+        }
     }
 }
 
-pub struct ApplyProposalsAndCompleteRequest {
+// Consensus event message handler
+pub struct ConsensusEventMessage {
     pub group_name: String,
+    pub event: ConsensusEvent,
 }
 
-impl Message<ApplyProposalsAndCompleteRequest> for User {
+impl Message<ConsensusEventMessage> for User {
     type Reply = Result<Vec<WakuMessageToSend>, UserError>;
 
     async fn handle(
         &mut self,
-        msg: ApplyProposalsAndCompleteRequest,
+        msg: ConsensusEventMessage,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.apply_proposals(msg.group_name).await
-    }
-}
-
-pub struct RemoveProposalsAndCompleteRequest {
-    pub group_name: String,
-}
-
-impl Message<RemoveProposalsAndCompleteRequest> for User {
-    type Reply = Result<(), UserError>;
-
-    async fn handle(
-        &mut self,
-        msg: RemoveProposalsAndCompleteRequest,
-        _ctx: Context<'_, Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.remove_proposals_and_complete(msg.group_name).await
+        self.handle_consensus_event(&msg.group_name, msg.event)
+            .await
     }
 }

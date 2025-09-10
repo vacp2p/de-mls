@@ -68,7 +68,7 @@ impl Identity {
     }
 
     pub fn identity_string(&self) -> String {
-        address_string(self.credential_with_key.credential.serialized_content())
+        Address::from_slice(self.credential_with_key.credential.serialized_content()).to_string()
     }
 
     pub fn signer(&self) -> &SignatureKeyPair {
@@ -90,16 +90,8 @@ impl Identity {
 
 impl Display for Identity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            Address::from_slice(self.credential_with_key.credential.serialized_content())
-        )
+        write!(f, "{}", self.identity_string())
     }
-}
-
-pub fn address_string(identity: &[u8]) -> String {
-    Address::from_slice(identity).to_string()
 }
 
 pub fn random_identity() -> Result<Identity, IdentityError> {
