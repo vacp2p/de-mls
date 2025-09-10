@@ -432,14 +432,16 @@ impl Group {
         match processed_message.into_content() {
             ProcessedMessageContent::ApplicationMessage(application_message) => {
                 drop(mls_group);
-                self.process_application_message(application_message)
-                    .await?;
+                self.process_application_message(application_message).await
             }
             ProcessedMessageContent::ProposalMessage(proposal_ptr) => {
                 mls_group
                     .store_pending_proposal(provider.storage(), proposal_ptr.as_ref().clone())?;
+                Ok(GroupAction::DoNothing)
             }
-            ProcessedMessageContent::ExternalJoinProposalMessage(_external_proposal_ptr) => (),
+            ProcessedMessageContent::ExternalJoinProposalMessage(_external_proposal_ptr) => {
+                Ok(GroupAction::DoNothing)
+            }
             ProcessedMessageContent::StagedCommitMessage(commit_ptr) => {
                 let mut remove_proposal: bool = false;
                 if commit_ptr.self_removed() {
@@ -450,11 +452,12 @@ impl Group {
                     if mls_group.is_active() {
                         return Err(GroupError::GroupStillActive);
                     }
-                    return Ok(GroupAction::LeaveGroup);
+                    Ok(GroupAction::LeaveGroup)
+                } else {
+                    Ok(GroupAction::DoNothing)
                 }
             }
-        };
-        Ok(GroupAction::DoNothing)
+        }
     }
 
     /// Build and validate a message for sending to the group.
@@ -698,7 +701,7 @@ impl Group {
                                 mls_group.propose_remove_member(provider, signer, index)?;
                             mls_proposals.push(mls_message_out.to_bytes()?);
                         } else {
-                            error!("[create_batch_proposals_message]: Failed to find member index for identity: {:?}", identity);
+                            error!("[create_batch_proposals_message]: Failed to find member index for identity: {identity}");
                         }
                     }
                 }

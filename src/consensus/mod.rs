@@ -108,6 +108,10 @@ impl ConsensusSession {
         }
     }
 
+    pub fn set_consensus_threshold(&mut self, consensus_threshold: f64) {
+        self.config.consensus_threshold = consensus_threshold
+    }
+
     /// Add a vote to the session
     pub fn add_vote(&mut self, vote: Vote) -> Result<(), ConsensusError> {
         match self.state {
@@ -168,14 +172,18 @@ impl ConsensusSession {
             // All votes received - calculate consensus immediately
             if yes_votes > no_votes {
                 self.state = ConsensusState::ConsensusReached(true);
-                info!("Enough votes received {yes_votes}-{no_votes} - consensus reached: YES");
+                info!(
+                    "[consensus::mod::check_consensus]: Enough votes received {yes_votes}-{no_votes} - consensus reached: YES"
+                );
                 self.emit_consensus_event(ConsensusEvent::ConsensusReached {
                     proposal_id: self.proposal.proposal_id,
                     result: true,
                 });
             } else if no_votes > yes_votes {
                 self.state = ConsensusState::ConsensusReached(false);
-                info!("Enough votes received {yes_votes}-{no_votes} - consensus reached: NO");
+                info!(
+                    "[consensus::mod::check_consensus]: Enough votes received {yes_votes}-{no_votes} - consensus reached: NO"
+                );
                 self.emit_consensus_event(ConsensusEvent::ConsensusReached {
                     proposal_id: self.proposal.proposal_id,
                     result: false,
@@ -194,7 +202,9 @@ impl ConsensusSession {
                 } else {
                     // Tie - if it's not all votes, we wait for more votes
                     self.state = ConsensusState::Active;
-                    info!("Not enough votes received - consensus not reached");
+                    info!(
+                        "[consensus::mod::check_consensus]: Not enough votes received - consensus not reached"
+                    );
                 }
             }
         }
@@ -203,6 +213,10 @@ impl ConsensusSession {
     /// Emit a consensus event
     fn emit_consensus_event(&self, event: ConsensusEvent) {
         if let Some(sender) = &self.event_sender {
+            info!(
+                "[consensus::mod::emit_consensus_event]: Emitting consensus event: {event:?} for proposal {}",
+                self.proposal.proposal_id
+            );
             let _ = sender.send((self.group_name.clone(), event));
         }
     }

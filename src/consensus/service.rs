@@ -52,6 +52,25 @@ impl ConsensusService {
         self.event_sender.subscribe()
     }
 
+    pub async fn set_consensus_threshold_for_group_session(
+        &mut self,
+        group_name: &str,
+        proposal_id: u32,
+        consensus_threshold: f64,
+    ) -> Result<(), ConsensusError> {
+        let mut sessions = self.sessions.write().await;
+        let group_sessions = sessions
+            .entry(group_name.to_string())
+            .or_insert_with(HashMap::new);
+
+        let session = group_sessions
+            .get_mut(&proposal_id)
+            .ok_or(ConsensusError::SessionNotFound)?;
+
+        session.set_consensus_threshold(consensus_threshold);
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn create_proposal(
         &self,

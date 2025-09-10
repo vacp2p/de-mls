@@ -113,6 +113,18 @@ impl User {
         self.consensus_service.subscribe_to_events()
     }
 
+    pub async fn set_up_consensus_threshold_for_group(
+        &mut self,
+        group_name: &str,
+        proposal_id: u32,
+        consensus_threshold: f64,
+    ) -> Result<(), UserError> {
+        self.consensus_service
+            .set_consensus_threshold_for_group_session(group_name, proposal_id, consensus_threshold)
+            .await?;
+        Ok(())
+    }
+
     /// Create a new group for this user.
     ///
     /// ## Parameters:
@@ -183,6 +195,80 @@ impl User {
             .await;
 
         Ok(state)
+    }
+
+    /// Get the number of members in a group.
+    ///
+    /// ## Parameters:
+    /// - `group_name`: The name of the group to get the number of members of
+    ///
+    /// ## Returns:
+    /// - The number of members in the group
+    ///
+    /// ## Errors:
+    /// - `UserError::GroupNotFoundError` if group doesn't exist
+    pub async fn get_group_number_of_members(&self, group_name: &str) -> Result<usize, UserError> {
+        let groups = self.groups.read().await;
+        let members = groups
+            .get(group_name)
+            .cloned()
+            .ok_or_else(|| UserError::GroupNotFoundError)?
+            .read()
+            .await
+            .members_identity()
+            .await?;
+        Ok(members.len())
+    }
+
+    /// Get the MLS epoch of a group.
+    ///
+    /// ## Parameters:
+    /// - `group_name`: The name of the group to get the MLS epoch of
+    ///
+    /// ## Returns:
+    /// - The MLS epoch of the group
+    ///
+    /// ## Errors:
+    /// - `UserError::GroupNotFoundError` if group doesn't exist
+    pub async fn get_group_mls_epoch(&self, group_name: &str) -> Result<u64, UserError> {
+        let groups = self.groups.read().await;
+        let epoch = groups
+            .get(group_name)
+            .cloned()
+            .ok_or_else(|| UserError::GroupNotFoundError)?
+            .read()
+            .await
+            .epoch()
+            .await?;
+        Ok(epoch.as_u64())
+    }
+
+    /// Check if a user is in a group.
+    ///
+    /// ## Parameters:
+    /// - `group_name`: The name of the group to check if the user is in
+    /// - `user_address`: The address of the user to check if they are in the group
+    ///
+    /// ## Returns:
+    /// - `true` if the user is in the group, `false` otherwise
+    ///
+    /// ## Errors:
+    /// - `UserError::GroupNotFoundError` if group doesn't exist
+    pub async fn check_if_user_in_group(
+        &self,
+        group_name: &str,
+        user_address: &str,
+    ) -> Result<bool, UserError> {
+        let groups = self.groups.read().await;
+        let members = groups
+            .get(group_name)
+            .cloned()
+            .ok_or_else(|| UserError::GroupNotFoundError)?
+            .read()
+            .await
+            .members_identity()
+            .await?;
+        Ok(members.contains(&user_address.as_bytes().to_vec()))
     }
 
     /// Process messages from the welcome subtopic.

@@ -1,1015 +1,714 @@
 use de_mls::{
-    // message::UserMessage,
-    // protos::messages::v1::app_message,
-    // state_machine::GroupState,
+    protos::messages::v1::app_message,
     state_machine::GroupState,
-    user::User, // ws_actor::{RawWsMessage, WsAction},
+    user::{User, UserAction},
 };
-use log::info;
-
-// #[tokio::test]
-// async fn test_invite_users_flow() {
-//     let group_name = "new_group".to_string();
-
-//     let alice_priv_key = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
-//     let mut alice = User::new(alice_priv_key).expect("Failed to create user");
-//     alice
-//         .create_group(group_name.clone(), true)
-//         .await
-//         .expect("Failed to create group");
-
-//     let bob_priv_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-//     let mut bob = User::new(bob_priv_key).expect("Failed to create user");
-//     bob.create_group(group_name.clone(), false)
-//         .await
-//         .expect("Failed to create group");
-
-//     let carol_priv_key = "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
-//     let mut carol = User::new(carol_priv_key).expect("Failed to create user");
-//     carol
-//         .create_group(group_name.clone(), false)
-//         .await
-//         .expect("Failed to create group");
-
-//     let group_announcement_message = alice
-//         .prepare_steward_msg(group_name.clone())
-//         .await
-//         .expect("Failed to prepare steward message")
-//         .build_waku_message()
-//         .expect("Failed to build waku message");
-
-//     // Bob parse GA message and share his KP to Alice
-//     let bob_kp_message = match bob
-//         .process_waku_message(group_announcement_message.clone())
-//         .await
-//         .expect("Failed to process waku message")
-//     {
-//         UserAction::SendToWaku(msg) => msg,
-//         _ => panic!("User action is not SendToWaku"),
-//     };
-//     let bob_kp_waku_message = bob_kp_message
-//         .build_waku_message()
-//         .expect("Failed to build waku message");
-
-//     // Alice parse Bob's KP and add it to the queue of income key packages
-//     let _alice_action = alice
-//         .process_waku_message(bob_kp_waku_message)
-//         .await
-//         .expect("Failed to process waku message");
-
-//     // Carol parse GA message and share her KP to Alice
-//     let carol_kp_message = match carol
-//         .process_waku_message(group_announcement_message.clone())
-//         .await
-//         .expect("Failed to process waku message")
-//     {
-//         UserAction::SendToWaku(msg) => msg,
-//         _ => panic!("User action is not SendToWaku"),
-//     };
-//     let carol_kp_waku_message = carol_kp_message
-//         .build_waku_message()
-//         .expect("Failed to build waku message");
-
-//     // Alice parse Carol's KP and add it to the queue of income key packages
-//     let _alice_action = alice
-//         .process_waku_message(carol_kp_waku_message)
-//         .await
-//         .expect("Failed to process waku message");
-
-//     // Debug: Check how many proposals we have
-//     let proposal_count_before = alice
-//         .get_pending_proposals_count(group_name.clone())
-//         .await
-//         .expect("Failed to get proposal count");
-//     println!("Debug: Proposal count before steward epoch: {proposal_count_before}");
-
-//     // Add Bob and Carol to the group initially using steward epoch flow
-//     // State machine: start steward epoch, voting, complete voting
-//     let steward_epoch_proposals = alice
-//         .start_steward_epoch(group_name.clone())
-//         .await
-//         .expect("Failed to start steward epoch");
-
-//     println!("Debug: Steward epoch returned {steward_epoch_proposals} proposals");
-
-//     let (proposal_id, action) = alice
-//         .get_proposals_for_steward_voting(group_name.clone())
-//         .await
-//         .expect("Failed to start voting");
-
-//     let _alice_proposal_app_message = match action {
-//         UserAction::SendToApp(app_msg) => app_msg,
-//         _ => panic!("User action is not SendToWaku"),
-//     };
-
-//     let _alice_vote_result = alice
-//         .process_user_vote(proposal_id, true, group_name.clone())
-//         .await
-//         .expect("Failed to process user vote");
-
-//     let vote_result_messages = alice
-//         .complete_voting_for_steward(group_name.clone(), proposal_id)
-//         .await
-//         .expect("Failed to complete voting");
-
-//     // Bob processes the welcome message to join the group
-//     bob.process_waku_message(
-//         vote_result_messages[1]
-//             .build_waku_message()
-//             .expect("Failed to build waku welcome message for Bob"),
-//     )
-//     .await
-//     .expect("Failed to process waku welcome message for Bob");
-
-//     // Bob sends a message after joining
-//     let bob_res_waku_message = bob
-//         .build_group_message(
-//             "User joined to the group".as_bytes().to_vec(),
-//             group_name.clone(),
-//         )
-//         .await
-//         .expect("Failed to build group message")
-//         .build_waku_message()
-//         .expect("Failed to build waku message");
-
-//     let res_alice = alice
-//         .process_waku_message(bob_res_waku_message.clone())
-//         .await
-//         .expect("Failed to process waku message");
-//     println!("Alice result: {res_alice:?}");
-//     let res_alice_msg = match res_alice {
-//         UserAction::SendToApp(msg) => msg,
-//         _ => panic!("User action is not SendToApp"),
-//     };
-
-//     let inside_msg = match res_alice_msg.payload.expect("Payload is none") {
-//         app_message::Payload::ConversationMessage(msg) => msg,
-//         _ => panic!("User action is not SendToApp"),
-//     };
-//     println!(
-//         "Alice message: {:?}",
-//         String::from_utf8(inside_msg.message).expect("Failed to convert message to string")
-//     );
-
-//     // Carol processes the welcome message to join the group
-//     let res_carol = carol
-//         .process_waku_message(
-//             vote_result_messages[1]
-//                 .build_waku_message()
-//                 .expect("Failed to build waku welcome message for Carol"),
-//         )
-//         .await
-//         .expect("Failed to process waku message");
-//     println!("Carol result: {res_carol:?}");
-//     let carol_group = carol
-//         .get_group(group_name.clone())
-//         .await
-//         .expect("Failed to get group");
-//     let carol_members = carol_group
-//         .members_identity()
-//         .await
-//         .expect("Failed to get members");
-//     assert!(
-//         carol_members.len() == 3,
-//         "Wrong number of members in the group for Carol"
-//     );
-//     let carol_group_epoch = carol_group.epoch().await.expect("Failed to get epoch");
-//     assert_eq!(carol_group_epoch.as_u64(), 1, "Carol group epoch is not 1");
-
-//     let bob_group = bob
-//         .get_group(group_name.clone())
-//         .await
-//         .expect("Failed to get group");
-//     let bob_members = bob_group
-//         .members_identity()
-//         .await
-//         .expect("Failed to get members");
-//     assert!(
-//         bob_members.len() == 3,
-//         "Wrong number of members in the group for Bob"
-//     );
-//     let bob_group_epoch = bob_group.epoch().await.expect("Failed to get epoch");
-//     assert_eq!(bob_group_epoch.as_u64(), 1, "Bob group epoch is not 1");
-
-//     let alice_group = alice
-//         .get_group(group_name.clone())
-//         .await
-//         .expect("Failed to get group");
-//     let alice_members = alice_group
-//         .members_identity()
-//         .await
-//         .expect("Failed to get members");
-//     assert!(
-//         alice_members.len() == 3,
-//         "Wrong number of members in the group for Alice"
-//     );
-//     let alice_group_epoch = alice_group.epoch().await.expect("Failed to get epoch");
-//     assert_eq!(alice_group_epoch.as_u64(), 1, "Alice group epoch is not 1");
-
-//     assert_eq!(
-//         alice_members, bob_members,
-//         "Alice and Bob have different members"
-//     );
-//     assert_eq!(
-//         alice_members, carol_members,
-//         "Alice and Carol have different members"
-//     );
-//     assert_eq!(
-//         bob_members, carol_members,
-//         "Bob and Carol have different members"
-//     );
-// }
-
-// #[tokio::test]
-// async fn test_add_user_in_different_epoch() {
-//     let group_name = "new_group".to_string();
-
-//     let alice_priv_key = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
-//     let mut alice = User::new(alice_priv_key).expect("Failed to create user");
-//     alice
-//         .create_group(group_name.clone(), true)
-//         .await
-//         .expect("Failed to create group for Alice");
-
-//     let bob_priv_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-//     let mut bob = User::new(bob_priv_key).expect("Failed to create user");
-//     bob.create_group(group_name.clone(), false)
-//         .await
-//         .expect("Failed to create group for Bob");
-
-//     // First group announcement to add Bob to the group
-//     let group_announcement_message = alice
-//         .prepare_steward_msg(group_name.clone())
-//         .await
-//         .expect("Failed to prepare steward message for Bob")
-//         .build_waku_message()
-//         .expect("Failed to build waku message with group announcement for Bob");
-
-//     // Bob parse GA message and share his KP to Alice
-//     let bob_kp_message = match bob
-//         .process_waku_message(group_announcement_message.clone())
-//         .await
-//         .expect("Failed to process waku message with group announcement for Bob")
-//     {
-//         UserAction::SendToWaku(msg) => msg,
-//         _ => panic!("Bob action is not SendToWaku"),
-//     };
-
-//     let bob_kp_waku_message = bob_kp_message
-//         .build_waku_message()
-//         .expect("Failed to build waku message with Bob's KP");
-
-//     // Alice parse Bob's KP and add it to the queue of income key packages
-//     let _alice_action = alice
-//         .process_waku_message(bob_kp_waku_message)
-//         .await
-//         .expect("Failed to process waku message with Bob's KP");
-
-//     // Alice start adding Bob into group
-//     // State machine: start steward epoch, voting, complete voting (Bob)
-//     println!(
-//         "Test: Before start_steward_epoch (Bob), group state: {:?}",
-//         alice
-//             .get_group(group_name.clone())
-//             .await
-//             .expect("Failed to get group")
-//             .get_state()
-//             .await
-//     );
-//     alice
-//         .start_steward_epoch(group_name.clone())
-//         .await
-//         .expect("Failed to start steward epoch (Bob)");
-//     println!(
-//         "Test: After start_steward_epoch (Bob), group state: {:?}",
-//         alice
-//             .get_group(group_name.clone())
-//             .await
-//             .expect("Failed to get group")
-//             .get_state()
-//             .await
-//     );
-
-//     let (proposal_id, action) = alice
-//         .get_proposals_for_steward_voting(group_name.clone())
-//         .await
-//         .expect("Failed to start voting");
-
-//     let _alice_proposal_app_message = match action {
-//         UserAction::SendToApp(app_msg) => app_msg,
-//         _ => panic!("User action is not SendToWaku"),
-//     };
-
-//     let _alice_vote_result = alice
-//         .process_user_vote(proposal_id, true, group_name.clone())
-//         .await
-//         .expect("Failed to process user vote");
-
-//     let vote_result_messages = alice
-//         .complete_voting_for_steward(group_name.clone(), proposal_id)
-//         .await
-//         .expect("Failed to complete voting");
-
-//     // Bob processes the welcome message to join the group
-//     bob.process_waku_message(
-//         vote_result_messages[1]
-//             .build_waku_message()
-//             .expect("Failed to build waku welcome message for Bob"),
-//     )
-//     .await
-//     .expect("Failed to process waku welcome message for Bob");
-
-//     // Bob sends a message after joining
-//     let bob_res_waku_message = bob
-//         .build_group_message(
-//             "User joined to the group".as_bytes().to_vec(),
-//             group_name.clone(),
-//         )
-//         .await
-//         .expect("Failed to build group message")
-//         .build_waku_message()
-//         .expect("Failed to build waku message");
-
-//     let res_alice = alice
-//         .process_waku_message(bob_res_waku_message.clone())
-//         .await
-//         .expect("Failed to process waku message");
-//     println!("Alice result: {res_alice:?}");
-//     let res_alice_msg = match res_alice {
-//         UserAction::SendToApp(msg) => msg,
-//         _ => panic!("User action is not SendToApp"),
-//     };
-
-//     let inside_msg = match res_alice_msg.payload.expect("Payload is none") {
-//         app_message::Payload::ConversationMessage(msg) => msg,
-//         _ => panic!("User action is not SendToApp"),
-//     };
-//     println!(
-//         "Alice message: {:?}",
-//         String::from_utf8(inside_msg.message).expect("Failed to convert message to string")
-//     );
-
-//     // Adding Carol to the group in different epoch
-//     let carol_priv_key = "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
-//     let mut carol = User::new(carol_priv_key).expect("Failed to create user");
-//     carol
-//         .create_group(group_name.clone(), false)
-//         .await
-//         .expect("Failed to create group");
-
-//     // Second group announcement to add Carol to the group
-//     let group_announcement_message_2 = alice
-//         .prepare_steward_msg(group_name.clone())
-//         .await
-//         .expect("Failed to prepare steward message for Carol")
-//         .build_waku_message()
-//         .expect("Failed to build waku message with group announcement for Carol");
-
-//     // Carol parse GA message and share her KP to Alice
-//     let carol_kp_message = match carol
-//         .process_waku_message(group_announcement_message_2.clone())
-//         .await
-//         .expect("Failed to process waku message with group announcement for Carol")
-//     {
-//         UserAction::SendToWaku(msg) => msg,
-//         _ => panic!("Carol action is not SendToWaku"),
-//     };
-
-//     let carol_kp_waku_message = carol_kp_message
-//         .build_waku_message()
-//         .expect("Failed to build waku message with Carol's KP");
-
-//     // Alice parse Carol's KP and add it to the queue of income key packages
-//     alice
-//         .process_waku_message(carol_kp_waku_message)
-//         .await
-//         .expect("Failed to process waku message with Carol's KP");
-
-//     // Alice start adding Carol into group
-
-//     // State machine: start steward epoch, voting, complete voting (Carol)
-//     println!(
-//         "Test: Before start_steward_epoch (Carol), group state: {:?}",
-//         alice
-//             .get_group(group_name.clone())
-//             .await
-//             .expect("Failed to get group")
-//             .get_state()
-//             .await
-//     );
-//     alice
-//         .start_steward_epoch(group_name.clone())
-//         .await
-//         .expect("Failed to start steward epoch (Carol)");
-//     println!(
-//         "Test: After start_steward_epoch (Carol), group state: {:?}",
-//         alice
-//             .get_group(group_name.clone())
-//             .await
-//             .expect("Failed to get group")
-//             .get_state()
-//             .await
-//     );
-
-//     let (proposal_id, action) = alice
-//         .get_proposals_for_steward_voting(group_name.clone())
-//         .await
-//         .expect("Failed to start voting");
-
-//     let _alice_proposal_app_message = match action {
-//         UserAction::SendToApp(app_msg) => app_msg,
-//         _ => panic!("User action is not SendToWaku"),
-//     };
-
-//     let alice_vote_result = alice
-//         .process_user_vote(proposal_id, true, group_name.clone())
-//         .await
-//         .expect("Failed to process user vote");
-
-//     println!(
-//         "Test: After start_voting (Carol), group state: {:?}",
-//         alice
-//             .get_group(group_name.clone())
-//             .await
-//             .expect("Failed to get group")
-//             .get_state()
-//             .await
-//     );
-
-//     let alice_proposal_waku_message = match alice_vote_result {
-//         UserAction::SendToWaku(waku_msg) => waku_msg,
-//         _ => panic!("User action is not SendToWaku"),
-//     };
-
-//     // Submit a vote (Alice votes yes for her own proposals)
-//     println!("Test: Submitting vote with ID: {proposal_id:?}");
-//     println!("Test: Alice's identity: {}", alice.identity_string());
-//     let bob_vote_message = bob
-//         .process_waku_message(
-//             alice_proposal_waku_message
-//                 .clone()
-//                 .build_waku_message()
-//                 .expect("Failed to build waku message"),
-//         )
-//         .await
-//         .expect("Failed to process waku message");
-
-//     let bob_proposal_to_vote = match bob_vote_message {
-//         UserAction::SendToApp(msg) => msg,
-//         _ => panic!("User action is not SendToAPP"),
-//     };
-//     println!("Bob will vote: {bob_proposal_to_vote:?}");
-//     let bob_vote_waku_message = match bob
-//         .process_user_vote(proposal_id, true, group_name.clone())
-//         .await
-//         .expect("Can't get waku msg")
-//     {
-//         UserAction::SendToWaku(wmts) => wmts,
-//         _ => panic!("User action is not SendToWaku"),
-//     };
-
-//     alice
-//         .process_waku_message(
-//             bob_vote_waku_message
-//                 .clone()
-//                 .build_waku_message()
-//                 .expect("Failed to build waku message"),
-//         )
-//         .await
-//         .expect("Failed to process waku message");
-
-//     println!(
-//         "Test: Before complete_voting (Carol), group state: {:?}",
-//         alice
-//             .get_group(group_name.clone())
-//             .await
-//             .expect("Failed to get group")
-//             .get_state()
-//             .await
-//     );
-//     let vote_result_messages_2 = alice
-//         .complete_voting_for_steward(group_name.clone(), proposal_id)
-//         .await
-//         .expect("Failed to complete voting (Carol)");
-//     println!(
-//         "Test: After complete_voting (Carol), group state: {:?}",
-//         alice
-//             .get_group(group_name.clone())
-//             .await
-//             .expect("Failed to get group")
-//             .get_state()
-//             .await
-//     );
-
-//     // Carol process join message
-//     carol
-//         .process_waku_message(
-//             vote_result_messages_2[1]
-//                 .build_waku_message()
-//                 .expect("Failed to build waku message for Carol to join to the group"),
-//         )
-//         .await
-//         .expect("Failed to process waku message for Carol to join to the group");
-
-//     // 5. Bob process commit message
-//     match bob
-//         .process_waku_message(
-//             vote_result_messages_2[0]
-//                 .build_waku_message()
-//                 .expect("Failed to build waku message apply commit to the Bob"),
-//         )
-//         .await
-//         .expect("Failed to process waku message apply commit to the Bob")
-//     {
-//         UserAction::SendToWaku(msg) => {
-//             println!("Bob action is SendToWaku: {msg:?}");
-//         }
-//         UserAction::DoNothing => {
-//             println!("Bob action is DoNothing");
-//         }
-//         _ => panic!("Bob action is not SendToWaku"),
-//     };
-
-//     let carol_group = carol
-//         .get_group(group_name.clone())
-//         .await
-//         .expect("Failed to get group");
-//     let carol_members = carol_group
-//         .members_identity()
-//         .await
-//         .expect("Failed to get members");
-//     assert!(
-//         carol_members.len() == 3,
-//         "Wrong number of members in the group for Carol"
-//     );
-//     let carol_group_epoch = carol_group.epoch().await.expect("Failed to get epoch");
-//     assert_eq!(carol_group_epoch.as_u64(), 2, "Carol group epoch is not 2");
-
-//     let bob_group = bob
-//         .get_group(group_name.clone())
-//         .await
-//         .expect("Failed to get group");
-//     let bob_members = bob_group
-//         .members_identity()
-//         .await
-//         .expect("Failed to get members");
-//     assert!(
-//         bob_members.len() == 3,
-//         "Wrong number of members in the group for Bob"
-//     );
-//     let bob_group_epoch = bob_group.epoch().await.expect("Failed to get epoch");
-//     assert_eq!(bob_group_epoch.as_u64(), 2, "Bob group epoch is not 2");
-
-//     let alice_group = alice
-//         .get_group(group_name.clone())
-//         .await
-//         .expect("Failed to get group");
-//     let alice_members = alice_group
-//         .members_identity()
-//         .await
-//         .expect("Failed to get members");
-//     assert!(
-//         alice_members.len() == 3,
-//         "Wrong number of members in the group for Alice"
-//     );
-//     let alice_group_epoch = alice_group.epoch().await.expect("Failed to get epoch");
-//     assert_eq!(alice_group_epoch.as_u64(), 2, "Alice group epoch is not 2");
-
-//     assert_eq!(
-//         alice_members, bob_members,
-//         "Alice and Bob have different members"
-//     );
-//     assert_eq!(
-//         alice_members, carol_members,
-//         "Alice and Carol have different members"
-//     );
-//     assert_eq!(
-//         bob_members, carol_members,
-//         "Bob and Carol have different members"
-//     );
-// }
-
-// #[tokio::test]
-// async fn test_remove_user_flow() {
-//     let group_name = "new_group".to_string();
-
-//     let alice_priv_key = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
-//     let mut alice = User::new(alice_priv_key).expect("Failed to create user");
-//     alice
-//         .create_group(group_name.clone(), true)
-//         .await
-//         .expect("Failed to create group");
-
-//     let bob_priv_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-//     let mut bob = User::new(bob_priv_key).expect("Failed to create user");
-//     bob.create_group(group_name.clone(), false)
-//         .await
-//         .expect("Failed to create group");
-
-//     let carol_priv_key = "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
-//     let mut carol = User::new(carol_priv_key).expect("Failed to create user");
-//     carol
-//         .create_group(group_name.clone(), false)
-//         .await
-//         .expect("Failed to create group");
-
-//     let group_announcement = alice
-//         .prepare_steward_msg(group_name.clone())
-//         .await
-//         .expect("Failed to prepare steward message");
-//     let group_announcement_message = group_announcement
-//         .build_waku_message()
-//         .expect("Failed to build waku message");
-
-//     let bob_action = bob
-//         .process_waku_message(group_announcement_message.clone())
-//         .await
-//         .expect("Failed to process waku message");
-//     let bob_kp_message = match bob_action {
-//         UserAction::SendToWaku(msg) => msg,
-//         _ => panic!("User action is not SendToWaku"),
-//     };
-//     let bob_kp_waku_message = bob_kp_message
-//         .build_waku_message()
-//         .expect("Failed to build waku message");
-
-//     let _alice_action = alice
-//         .process_waku_message(bob_kp_waku_message)
-//         .await
-//         .expect("Failed to process waku message");
-
-//     let carol_action = carol
-//         .process_waku_message(group_announcement_message.clone())
-//         .await
-//         .expect("Failed to process waku message");
-//     let carol_kp_message = match carol_action {
-//         UserAction::SendToWaku(msg) => msg,
-//         _ => panic!("User action is not SendToWaku"),
-//     };
-//     let carol_kp_waku_message = carol_kp_message
-//         .build_waku_message()
-//         .expect("Failed to build waku message");
-
-//     let _alice_action = alice
-//         .process_waku_message(carol_kp_waku_message)
-//         .await
-//         .expect("Failed to process waku message");
-
-//     // Debug: Check how many proposals we have
-//     let proposal_count_before = alice
-//         .get_pending_proposals_count(group_name.clone())
-//         .await
-//         .expect("Failed to get proposal count");
-//     println!("Debug: Proposal count before steward epoch: {proposal_count_before}");
-
-//     // Add Bob and Carol to the group initially using steward epoch flow
-//     // State machine: start steward epoch, voting, complete voting
-//     let steward_epoch_proposals = alice
-//         .start_steward_epoch(group_name.clone())
-//         .await
-//         .expect("Failed to start steward epoch");
-
-//     println!("Debug: Steward epoch returned {steward_epoch_proposals} proposals");
-
-//     let (proposal_id, action) = alice
-//         .get_proposals_for_steward_voting(group_name.clone())
-//         .await
-//         .expect("Failed to start voting");
-
-//     let _alice_proposal_app_message = match action {
-//         UserAction::SendToApp(app_msg) => app_msg,
-//         _ => panic!("User action is not SendToWaku"),
-//     };
-
-//     let _alice_vote_result = alice
-//         .process_user_vote(proposal_id, true, group_name.clone())
-//         .await
-//         .expect("Failed to process user vote");
-
-//     // Submit a vote (Alice votes yes for her own proposals)
-//     let vote_result_messages = alice
-//         .complete_voting_for_steward(group_name.clone(), proposal_id)
-//         .await
-//         .expect("Failed to complete voting");
-
-//     // Bob processes the welcome message to join the group
-//     bob.process_waku_message(
-//         vote_result_messages[1]
-//             .build_waku_message()
-//             .expect("Failed to build waku welcome message for Bob"),
-//     )
-//     .await
-//     .expect("Failed to process waku welcome message for Bob");
-
-//     // Bob sends a message after joining
-//     let bob_res_waku_message = bob
-//         .build_group_message(
-//             "User joined to the group".as_bytes().to_vec(),
-//             group_name.clone(),
-//         )
-//         .await
-//         .expect("Failed to build group message")
-//         .build_waku_message()
-//         .expect("Failed to build waku message");
-
-//     let res_alice = alice
-//         .process_waku_message(bob_res_waku_message.clone())
-//         .await
-//         .expect("Failed to process waku message");
-//     println!("Alice result: {res_alice:?}");
-//     let res_alice_msg = match res_alice {
-//         UserAction::SendToApp(msg) => msg,
-//         _ => panic!("User action is not SendToApp"),
-//     };
-
-//     let inside_msg = match res_alice_msg.payload.expect("Payload is none") {
-//         app_message::Payload::ConversationMessage(msg) => msg,
-//         _ => panic!("User action is not SendToApp"),
-//     };
-//     println!(
-//         "Alice message: {:?}",
-//         String::from_utf8(inside_msg.message).expect("Failed to convert message to string")
-//     );
-
-//     // Carol processes the welcome message to join the group
-//     let res_carol = carol
-//         .process_waku_message(
-//             vote_result_messages[1]
-//                 .build_waku_message()
-//                 .expect("Failed to build waku welcome message for Carol"),
-//         )
-//         .await
-//         .expect("Failed to process waku message");
-//     println!("Carol result: {res_carol:?}");
-
-//     let carol_group = carol
-//         .get_group(group_name.clone())
-//         .await
-//         .expect("Failed to get group");
-//     let carol_members = carol_group
-//         .members_identity()
-//         .await
-//         .expect("Failed to get members");
-//     assert!(
-//         carol_members.len() == 3,
-//         "Wrong number of members in the group for Carol"
-//     );
-//     let bob_group = bob
-//         .get_group(group_name.clone())
-//         .await
-//         .expect("Failed to get group");
-//     let bob_members = bob_group
-//         .members_identity()
-//         .await
-//         .expect("Failed to get members");
-//     assert!(
-//         bob_members.len() == 3,
-//         "Wrong number of members in the group for Bob"
-//     );
-//     let alice_group = alice
-//         .get_group(group_name.clone())
-//         .await
-//         .expect("Failed to get group");
-//     let alice_members = alice_group
-//         .members_identity()
-//         .await
-//         .expect("Failed to get members");
-//     assert!(
-//         alice_members.len() == 3,
-//         "Wrong number of members in the group for Alice"
-//     );
-
-//     assert_eq!(
-//         alice_members, bob_members,
-//         "Alice and Bob have different members"
-//     );
-//     assert_eq!(
-//         alice_members, carol_members,
-//         "Alice and Carol have different members"
-//     );
-//     assert_eq!(
-//         bob_members, carol_members,
-//         "Bob and Carol have different members"
-//     );
-
-//     let msg = "/ban f39fd6e51aad88f6f4ce6ab8827279cfffb92266";
-
-//     let raw_msg = RawWsMessage {
-//         message: serde_json::to_string(&UserMessage {
-//             message: msg.as_bytes().to_vec(),
-//             group_id: group_name.clone(),
-//         })
-//         .expect("Failed to serialize user message"),
-//     };
-
-//     let ws_action = match serde_json::from_str(&raw_msg.message) {
-//         Ok(UserMessage { message, group_id }) => {
-//             if msg.starts_with("/") {
-//                 let mut tokens = msg.split_whitespace();
-//                 match tokens.next() {
-//                     Some("/ban") => {
-//                         let user_to_ban = tokens.next().expect("Failed to get user to ban");
-//                         WsAction::RemoveUser(user_to_ban.to_string(), group_id.clone())
-//                     }
-//                     _ => {
-//                         panic!("Invalid user message");
-//                     }
-//                 }
-//             } else {
-//                 WsAction::UserMessage(UserMessage { message, group_id })
-//             }
-//         }
-//         Err(_) => {
-//             panic!("Failed to parse user message");
-//         }
-//     };
-//     assert_eq!(
-//         ws_action,
-//         WsAction::RemoveUser(
-//             "f39fd6e51aad88f6f4ce6ab8827279cfffb92266".to_string(),
-//             group_name.clone()
-//         )
-//     );
-
-//     match ws_action {
-//         WsAction::RemoveUser(user_to_ban, group_name) => {
-//             // Add remove proposal to steward instead of direct removal
-//             alice
-//                 .add_remove_proposal(group_name.clone(), user_to_ban.clone())
-//                 .await
-//                 .expect("Failed to add remove proposal to steward");
-//         }
-//         _ => panic!("User action is not RemoveUser"),
-//     };
-
-//     // State machine: start steward epoch, voting, complete voting (removal)
-//     alice
-//         .start_steward_epoch(group_name.clone())
-//         .await
-//         .expect("Failed to start steward epoch (removal)");
-
-//     let (proposal_id, action) = alice
-//         .get_proposals_for_steward_voting(group_name.clone())
-//         .await
-//         .expect("Failed to start voting");
-
-//     let _alice_proposal_app_message = match action {
-//         UserAction::SendToApp(app_msg) => app_msg,
-//         _ => panic!("User action is not SendToWaku"),
-//     };
-
-//     let alice_vote_result = alice
-//         .process_user_vote(proposal_id, true, group_name.clone())
-//         .await
-//         .expect("Failed to process user vote");
-
-//     let alice_proposal_waku_message = match alice_vote_result {
-//         UserAction::SendToWaku(waku_msg) => waku_msg,
-//         _ => panic!("User action is not SendToWaku"),
-//     };
-
-//     // Submit a vote (Alice votes yes for the removal)
-//     println!("Test: Submitting vote with ID: {proposal_id:?}");
-//     println!("Test: Alice's identity: {}", alice.identity_string());
-//     let bob_vote_message = bob
-//         .process_waku_message(
-//             alice_proposal_waku_message
-//                 .clone()
-//                 .build_waku_message()
-//                 .expect("Failed to build waku message"),
-//         )
-//         .await
-//         .expect("Failed to process waku message");
-
-//     let bob_proposal_to_vote = match bob_vote_message {
-//         UserAction::SendToApp(msg) => msg,
-//         _ => panic!("User action is not SendToAPP"),
-//     };
-//     println!("Bob will vote: {bob_proposal_to_vote:?}");
-//     let bob_vote_waku_message = match bob
-//         .process_user_vote(proposal_id, true, group_name.clone())
-//         .await
-//         .expect("Can't get waku msg")
-//     {
-//         UserAction::SendToWaku(wmts) => wmts,
-//         _ => panic!("User action is not SendToWaku"),
-//     };
-
-//     alice
-//         .process_waku_message(
-//             bob_vote_waku_message
-//                 .clone()
-//                 .build_waku_message()
-//                 .expect("Failed to build waku message"),
-//         )
-//         .await
-//         .expect("Failed to process waku message");
-
-//     let carol_vote_message = carol
-//         .process_waku_message(
-//             alice_proposal_waku_message
-//                 .clone()
-//                 .build_waku_message()
-//                 .expect("Failed to build waku message"),
-//         )
-//         .await
-//         .expect("Failed to process waku message");
-
-//     let carol_proposal_to_vote = match carol_vote_message {
-//         UserAction::SendToApp(msg) => msg,
-//         _ => panic!("User action is not SendToAPP"),
-//     };
-//     println!("Carol will vote: {carol_proposal_to_vote:?}");
-//     let carol_vote_waku_message = match carol
-//         .process_user_vote(proposal_id, true, group_name.clone())
-//         .await
-//         .expect("Can't get waku msg")
-//     {
-//         UserAction::SendToWaku(wmts) => wmts,
-//         _ => panic!("User action is not SendToWaku"),
-//     };
-
-//     alice
-//         .process_waku_message(
-//             carol_vote_waku_message
-//                 .clone()
-//                 .build_waku_message()
-//                 .expect("Failed to build waku message"),
-//         )
-//         .await
-//         .expect("Failed to process waku message");
-
-//     let vote_result_messages = alice
-//         .complete_voting_for_steward(group_name.clone(), proposal_id)
-//         .await
-//         .expect("Failed to complete voting (removal)");
-
-//     let waku_commit_message = vote_result_messages[0]
-//         .build_waku_message()
-//         .expect("Failed to build waku message");
-
-//     let _ = carol
-//         .process_waku_message(waku_commit_message.clone())
-//         .await
-//         .expect("Failed to process waku message");
-//     let carol_group = carol
-//         .get_group(group_name.clone())
-//         .await
-//         .expect("Failed to get group");
-//     let carol_members = carol_group
-//         .members_identity()
-//         .await
-//         .expect("Failed to get members");
-//     assert!(
-//         carol_members.len() == 2,
-//         "Bob is not removed from the group"
-//     );
-
-//     let bob_action = bob
-//         .process_waku_message(waku_commit_message.clone())
-//         .await
-//         .expect("Failed to process waku message");
-//     assert_eq!(
-//         bob_action,
-//         UserAction::LeaveGroup(group_name.clone()),
-//         "User action is not RemoveGroup"
-//     );
-//     bob.leave_group(group_name.clone())
-//         .await
-//         .expect("Failed to leave group");
-//     assert!(
-//         !bob.if_group_exists(group_name.clone()).await,
-//         "Bob is still in the group"
-//     );
-// }
-
-#[tokio::test]
-async fn test_steward_epoch_with_no_proposals() {
-    let group_name = "test_steward_no_proposals";
-
-    // Create steward group
-    let alice_priv_key = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
-    let mut alice = User::new(alice_priv_key).expect("Failed to create user");
+use ds::waku_actor::WakuMessageToSend;
+use waku_bindings::WakuMessage;
+
+const EXPECTED_EPOCH_1: u64 = 1;
+const EXPECTED_EPOCH_2: u64 = 2;
+
+const EXPECTED_MEMBERS_2: usize = 2;
+const EXPECTED_MEMBERS_3: usize = 3;
+
+const ALICE_PRIVATE_KEY: &str =
+    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+// const ALICE_WALLET_ADDRESS: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+const BOB_PRIVATE_KEY: &str = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+// const BOB_WALLET_ADDRESS: &str = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+const CAROL_PRIVATE_KEY: &str =
+    "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
+// const CAROL_WALLET_ADDRESS: &str = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
+
+const GROUP_NAME: &str = "new_group";
+
+async fn create_two_test_user_with_group(group_name: &str) -> (User, User) {
+    let mut alice = User::new(ALICE_PRIVATE_KEY).expect("Failed to create user for Alice");
     alice
         .create_group(group_name, true)
         .await
-        .expect("Failed to create group");
+        .expect("Failed to create group for Alice");
 
-    // Start steward epoch (should return 0 when no proposals)
-    let proposal_count = alice
+    let mut bob = User::new(BOB_PRIVATE_KEY).expect("Failed to create user for Bob");
+    bob.create_group(group_name, false)
+        .await
+        .expect("Failed to create group for Bob");
+
+    (alice, bob)
+}
+
+async fn create_three_test_user_with_group(group_name: &str) -> (User, User, User) {
+    let mut alice = User::new(ALICE_PRIVATE_KEY).expect("Failed to create user");
+    alice
+        .create_group(group_name, true)
+        .await
+        .expect("Failed to create group for Alice");
+
+    let mut bob = User::new(BOB_PRIVATE_KEY).expect("Failed to create user");
+    bob.create_group(group_name, false)
+        .await
+        .expect("Failed to create group for Bob");
+
+    let mut carol = User::new(CAROL_PRIVATE_KEY).expect("Failed to create user");
+    carol
+        .create_group(group_name, false)
+        .await
+        .expect("Failed to create group for Carol");
+
+    (alice, bob, carol)
+}
+
+async fn get_group_announcement_message(steward: &mut User, group_name: &str) -> WakuMessage {
+    steward
+        .prepare_steward_msg(group_name)
+        .await
+        .expect("Failed to prepare steward message")
+        .build_waku_message()
+        .expect("Failed to build waku message with group announcement")
+}
+
+async fn share_group_announcement_for_one_user(
+    steward: &mut User,
+    invite_user: &mut User,
+    group_announcement_message: WakuMessage,
+) {
+    // Newcomer parse GA message and share his KP to Steward
+    let invite_user_kp_message = match invite_user
+        .process_waku_message(group_announcement_message.clone())
+        .await
+        .expect("Failed to process waku message with group announcement")
+    {
+        UserAction::SendToWaku(msg) => msg,
+        _ => panic!("User action is not SendToWaku"),
+    };
+    let invite_user_kp_waku_message = invite_user_kp_message
+        .build_waku_message()
+        .expect("Failed to build waku message with invite user's KP");
+
+    // Steward parse invite user's KP and add it to the queue of income key packages
+    let _steward_action = steward
+        .process_waku_message(invite_user_kp_waku_message)
+        .await
+        .expect("Failed to process waku message with invite user's KP");
+}
+
+// In this function, we are starting steward epoch without any user in the group
+// So as result we don't expect another vote from another user
+// and have `GroupState::Working` after processing steward vote
+async fn steward_epoch_without_user_in_group(
+    steward: &mut User,
+    group_name: &str,
+) -> Vec<WakuMessage> {
+    // Set up consensus event subscription before voting
+    let mut consensus_events = steward.subscribe_to_consensus_events();
+
+    // State machine: start steward epoch, voting, complete voting
+    let steward_epoch_proposals = steward
         .start_steward_epoch(group_name)
         .await
         .expect("Failed to start steward epoch");
 
-    // Should return 0 when no proposals
-    assert_eq!(proposal_count, 0);
-    assert_eq!(
-        alice
-            .get_group_state(group_name)
+    println!("Debug: Steward epoch returned {steward_epoch_proposals} proposals");
+
+    let (proposal_id, action) = steward
+        .get_proposals_for_steward_voting(group_name)
+        .await
+        .expect("Failed to start voting");
+
+    println!("Debug: Proposal ID: {proposal_id}");
+
+    // This message will be printed to the app and allow steward to vote
+    let _steward_voting_proposal_app_message = match action {
+        UserAction::SendToApp(app_msg) => app_msg,
+        _ => panic!("User action is not SendToWaku"),
+    };
+
+    let steward_state = steward
+        .get_group_state(group_name)
+        .await
+        .expect("Failed to get group state for steward after making voting proposal");
+    println!("Debug: Steward state after making voting proposal: {steward_state:?}");
+    assert_eq!(steward_state, GroupState::Voting);
+
+    // Now steward can vote
+    steward
+        .process_user_vote(proposal_id, true, group_name)
+        .await
+        .expect("Failed to process steward vote on proposal");
+
+    let mut msgs_to_send: Vec<WakuMessageToSend> = vec![];
+    // Process any consensus events that were emitted during voting
+    while let Ok((group_name, ev)) = consensus_events.try_recv() {
+        println!(
+            "Debug: Processing consensus event in steward_epoch: {ev:?} for group {group_name}"
+        );
+
+        let wmts = steward
+            .handle_consensus_event(&group_name, ev)
             .await
-            .expect("Failed to get group state"),
-        GroupState::Working
+            .expect("Failed to handle consensus event");
+        msgs_to_send.extend(wmts);
+    }
+
+    let steward_state = steward
+        .get_group_state(group_name)
+        .await
+        .expect("Failed to get group state for steward after voting");
+    println!("Debug: Steward state after voting: {steward_state:?}");
+    assert_eq!(steward_state, GroupState::Working);
+
+    let mut res_msgs_to_send: Vec<WakuMessage> = vec![];
+    for msg in msgs_to_send {
+        let waku_message = msg
+            .build_waku_message()
+            .expect("Failed to build waku message");
+        res_msgs_to_send.push(waku_message);
+    }
+
+    res_msgs_to_send
+}
+
+// In this function, we are starting steward epoch with users in the group
+// So as result we expect another vote from another user
+// and have `GroupState::Working` after processing steward vote
+async fn steward_epoch_with_user_in_group(
+    steward: &mut User,
+    group_name: &str,
+) -> (Vec<WakuMessage>, u32) {
+    // Set up consensus event subscription before voting
+    let mut consensus_events = steward.subscribe_to_consensus_events();
+
+    // State machine: start steward epoch, voting, complete voting
+    let steward_epoch_proposals = steward
+        .start_steward_epoch(group_name)
+        .await
+        .expect("Failed to start steward epoch");
+
+    println!("Debug: Steward epoch returned {steward_epoch_proposals} proposals");
+
+    let (proposal_id, action) = steward
+        .get_proposals_for_steward_voting(group_name)
+        .await
+        .expect("Failed to start voting");
+
+    println!("Debug: Proposal ID: {proposal_id}");
+
+    // This message will be printed to the app and allow steward to vote
+    let _steward_voting_proposal_app_message = match action {
+        UserAction::SendToApp(app_msg) => app_msg,
+        _ => panic!("User action is not SendToWaku"),
+    };
+
+    let steward_state = steward
+        .get_group_state(group_name)
+        .await
+        .expect("Failed to get group state for steward after making voting proposal");
+    println!("Debug: Steward state after making voting proposal: {steward_state:?}");
+    assert_eq!(steward_state, GroupState::Voting);
+
+    // Now steward can vote
+    let steward_action = steward
+        .process_user_vote(proposal_id, true, group_name)
+        .await
+        .expect("Failed to process steward vote on proposal");
+
+    let mut msgs_to_send: Vec<WakuMessageToSend> = vec![];
+    // Process any consensus events that were emitted during voting
+    while let Ok((group_name, ev)) = consensus_events.try_recv() {
+        println!(
+            "Debug: Processing consensus event in steward_epoch: {ev:?} for group {group_name}"
+        );
+
+        let wmts = steward
+            .handle_consensus_event(&group_name, ev)
+            .await
+            .expect("Failed to handle consensus event");
+        msgs_to_send.extend(wmts);
+    }
+
+    let steward_state = steward
+        .get_group_state(group_name)
+        .await
+        .expect("Failed to get group state for steward after voting");
+    println!("Debug: Steward state after voting: {steward_state:?}");
+    assert_eq!(steward_state, GroupState::Voting);
+
+    let steward_voting_proposal_waku_message = match steward_action {
+        UserAction::SendToWaku(msg) => msg,
+        _ => panic!("User action is not SendToWaku"),
+    };
+
+    // Build the voting proposal message for other users
+    let voting_proposal_waku_message = steward_voting_proposal_waku_message
+        .build_waku_message()
+        .expect("Failed to build waku message with steward voting proposal");
+
+    (vec![voting_proposal_waku_message], proposal_id)
+}
+
+async fn user_join_group(user: &mut User, welcome_message: WakuMessage) {
+    let user_res_action = user
+        .process_waku_message(welcome_message)
+        .await
+        .expect("Failed to process waku message for user to join the group");
+
+    match user_res_action {
+        UserAction::SendToWaku(_) => {
+            println!("Debug: user join group");
+        }
+        _ => panic!("User action is not SendToWaku: {user_res_action:?}"),
+    };
+}
+
+async fn user_vote_on_proposal(
+    user: &mut User,
+    waku_proposal_message: WakuMessage,
+    vote: bool,
+    group_name: &str,
+) -> WakuMessage {
+    println!("Debug: user vote on proposal: {waku_proposal_message:?}");
+    let mut consensus_events = user.subscribe_to_consensus_events();
+    let user_action = user
+        .process_waku_message(waku_proposal_message)
+        .await
+        .expect("Failed to process waku message for user to vote on proposal");
+
+    let msg = match user_action {
+        UserAction::SendToApp(msg) => {
+            println!("Debug: user got message: {msg:?}");
+            msg
+        }
+        _ => panic!("User action is not SendToApp or DoNothing: {user_action:?}"),
+    };
+
+    let user_state = user
+        .get_group_state(group_name)
+        .await
+        .expect("Failed to get group state for user after making voting proposal");
+    println!("Debug: User state after making voting proposal: {user_state:?}");
+    assert_eq!(user_state, GroupState::Voting);
+
+    let proposal_id = match msg.payload {
+        Some(app_message::Payload::VotingProposal(proposal)) => proposal.proposal_id,
+        _ => panic!("User got an unexpected message: {msg:?}"),
+    };
+
+    // after getting voting proposal, user actually should send it into app and get vote result
+    // here we mock it and start to process user vote
+    let user_action = user
+        .process_user_vote(proposal_id, vote, group_name)
+        .await
+        .expect("Failed to process steward vote on proposal");
+
+    let mut msgs_to_send: Vec<WakuMessageToSend> = vec![];
+    while let Ok((group_name, ev)) = consensus_events.try_recv() {
+        println!(
+            "Debug: Processing consensus event in user_vote_on_proposal: {ev:?} for group {group_name}"
+        );
+
+        let wmts = user
+            .handle_consensus_event(&group_name, ev)
+            .await
+            .expect("Failed to handle consensus event");
+        msgs_to_send.extend(wmts);
+    }
+
+    let user_state = user
+        .get_group_state(group_name)
+        .await
+        .expect("Failed to get group state for user after vote");
+    println!("Debug: User state after vote: {user_state:?}");
+    assert_eq!(user_state, GroupState::Waiting);
+
+    let msg = match user_action {
+        UserAction::SendToWaku(msg) => msg,
+        _ => panic!("User action is not SendToWaku: {user_action:?}"),
+    };
+
+    msg.build_waku_message()
+        .expect("Failed to build waku message")
+}
+
+async fn process_and_handle_trigger_event_message(
+    user: &mut User,
+    waku_message: WakuMessage,
+    expected_group_state: GroupState,
+) -> Vec<WakuMessage> {
+    let mut consensus_events = user.subscribe_to_consensus_events();
+
+    user.process_waku_message(waku_message)
+        .await
+        .expect("Failed to process waku message");
+
+    let mut msgs_to_send: Vec<WakuMessageToSend> = vec![];
+    // Process any consensus events that were emitted during voting
+    while let Ok((group_name, ev)) = consensus_events.try_recv() {
+        println!(
+            "Debug: Processing consensus event in steward_epoch: {ev:?} for group {group_name}"
+        );
+
+        let wmts = user
+            .handle_consensus_event(&group_name, ev)
+            .await
+            .expect("Failed to handle consensus event");
+        msgs_to_send.extend(wmts);
+    }
+
+    let mut waku_msgs_to_send: Vec<WakuMessage> = vec![];
+    for msg in msgs_to_send {
+        let waku_msg = msg
+            .build_waku_message()
+            .expect("Failed to build waku message");
+        waku_msgs_to_send.push(waku_msg);
+    }
+
+    let user_state = user
+        .get_group_state(GROUP_NAME)
+        .await
+        .expect("Failed to get group state for user after processing trigger event message");
+    println!("Debug: User state after voting: {user_state:?}");
+    assert_eq!(user_state, expected_group_state);
+
+    waku_msgs_to_send
+}
+
+async fn check_users_have_same_group_stats(
+    alice: &User,
+    bob: &User,
+    group_name: &str,
+    expected_members: usize,
+    expected_epoch: u64,
+) {
+    let alice_group_state = alice
+        .get_group_state(group_name)
+        .await
+        .expect("Failed to get group state for Alice");
+    assert_eq!(alice_group_state, GroupState::Working);
+    let bob_group_state = bob
+        .get_group_state(group_name)
+        .await
+        .expect("Failed to get group state for Bob");
+    assert_eq!(bob_group_state, GroupState::Working);
+
+    let bob_members = bob
+        .get_group_number_of_members(group_name)
+        .await
+        .expect("Failed to get number of members for Bob");
+    let bob_epoch = bob
+        .get_group_mls_epoch(group_name)
+        .await
+        .expect("Failed to get MLS epoch for Bob");
+    assert_eq!(
+        bob_members, expected_members,
+        "Wrong number of members in the group for Bob"
+    );
+    assert_eq!(
+        bob_epoch, expected_epoch,
+        "Bob group epoch is not {expected_epoch}"
     );
 
-    info!("Steward epoch correctly skipped when no proposals exist");
+    let alice_members = alice
+        .get_group_number_of_members(group_name)
+        .await
+        .expect("Failed to get number of members for Alice");
+    let alice_epoch = alice
+        .get_group_mls_epoch(group_name)
+        .await
+        .expect("Failed to get MLS epoch for Alice");
+    assert_eq!(
+        alice_members, expected_members,
+        "Wrong number of members in the group for Alice"
+    );
+    assert_eq!(
+        alice_epoch, expected_epoch,
+        "Alice group epoch is not {expected_epoch}"
+    );
+
+    assert_eq!(
+        bob_members, alice_members,
+        "Bob and Alice have different members"
+    );
+    assert_eq!(
+        bob_epoch, alice_epoch,
+        "Bob and Alice have different MLS epochs"
+    );
 }
+
+// async fn create_ban_request_message(user: &mut User, group_name: &str) -> WakuMessage {
+//     let ban_request_msg = BanRequest {
+//         user_to_ban: CAROL_WALLET_ADDRESS.to_string(),
+//         requester: ALICE_WALLET_ADDRESS.to_string(), // The current user is the requester
+//         group_name: group_name.to_string(),
+//     };
+
+//     let waku_msg = user
+//         .process_ban_request(ban_request_msg, group_name)
+//         .await
+//         .expect("Failed to process ban request");
+
+//     let waku_msg = waku_msg
+//         .build_waku_message()
+//         .expect("Failed to build waku message");
+//     waku_msg
+// }
+
+#[tokio::test]
+async fn test_invite_user_to_group_flow() {
+    let (mut steward, mut user) = create_two_test_user_with_group(GROUP_NAME).await;
+
+    let ga_message = get_group_announcement_message(&mut steward, GROUP_NAME).await;
+
+    share_group_announcement_for_one_user(&mut steward, &mut user, ga_message.clone()).await;
+
+    let steward_epoch_messages =
+        steward_epoch_without_user_in_group(&mut steward, GROUP_NAME).await;
+
+    user_join_group(&mut user, steward_epoch_messages[1].clone()).await;
+
+    check_users_have_same_group_stats(
+        &steward,
+        &user,
+        GROUP_NAME,
+        EXPECTED_MEMBERS_2,
+        EXPECTED_EPOCH_1,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_invite_users_to_group_same_epoch_flow() {
+    let (mut steward, mut user, mut user2) = create_three_test_user_with_group(GROUP_NAME).await;
+
+    let ga_message = get_group_announcement_message(&mut steward, GROUP_NAME).await;
+
+    share_group_announcement_for_one_user(&mut steward, &mut user, ga_message.clone()).await;
+    share_group_announcement_for_one_user(&mut steward, &mut user2, ga_message.clone()).await;
+
+    let steward_epoch_messages =
+        steward_epoch_without_user_in_group(&mut steward, GROUP_NAME).await;
+
+    user_join_group(&mut user, steward_epoch_messages[1].clone()).await;
+    user_join_group(&mut user2, steward_epoch_messages[1].clone()).await;
+
+    check_users_have_same_group_stats(
+        &steward,
+        &user,
+        GROUP_NAME,
+        EXPECTED_MEMBERS_3,
+        EXPECTED_EPOCH_1,
+    )
+    .await;
+
+    check_users_have_same_group_stats(
+        &steward,
+        &user2,
+        GROUP_NAME,
+        EXPECTED_MEMBERS_3,
+        EXPECTED_EPOCH_1,
+    )
+    .await;
+
+    check_users_have_same_group_stats(
+        &user,
+        &user2,
+        GROUP_NAME,
+        EXPECTED_MEMBERS_3,
+        EXPECTED_EPOCH_1,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_invite_users_to_group_different_epoch_flow() {
+    let (mut steward, mut bob, mut carol) = create_three_test_user_with_group(GROUP_NAME).await;
+
+    let ga_message = get_group_announcement_message(&mut steward, GROUP_NAME).await;
+    share_group_announcement_for_one_user(&mut steward, &mut bob, ga_message.clone()).await;
+
+    let steward_epoch_messages =
+        steward_epoch_without_user_in_group(&mut steward, GROUP_NAME).await;
+    user_join_group(&mut bob, steward_epoch_messages[1].clone()).await;
+
+    check_users_have_same_group_stats(
+        &steward,
+        &bob,
+        GROUP_NAME,
+        EXPECTED_MEMBERS_2,
+        EXPECTED_EPOCH_1,
+    )
+    .await;
+
+    println!("START NEW EPOCH");
+    println!("--------------------------------");
+
+    let ga_message_2 = get_group_announcement_message(&mut steward, GROUP_NAME).await;
+    share_group_announcement_for_one_user(&mut steward, &mut carol, ga_message_2.clone()).await;
+
+    let (steward_epoch_messages_2, _) =
+        steward_epoch_with_user_in_group(&mut steward, GROUP_NAME).await;
+
+    println!("Debug: steward vote, wait for user vote");
+    println!("--------------------------------");
+
+    let waku_vote_message = user_vote_on_proposal(
+        &mut bob,
+        steward_epoch_messages_2[0].clone(),
+        true,
+        GROUP_NAME,
+    )
+    .await;
+
+    let waku_msgs_to_send = process_and_handle_trigger_event_message(
+        &mut steward,
+        waku_vote_message,
+        GroupState::Working,
+    )
+    .await;
+
+    bob.process_waku_message(waku_msgs_to_send[0].clone())
+        .await
+        .expect("Failed to process waku message");
+
+    user_join_group(&mut carol, waku_msgs_to_send[1].clone()).await;
+
+    check_users_have_same_group_stats(
+        &steward,
+        &bob,
+        GROUP_NAME,
+        EXPECTED_MEMBERS_3,
+        EXPECTED_EPOCH_2,
+    )
+    .await;
+
+    check_users_have_same_group_stats(
+        &steward,
+        &carol,
+        GROUP_NAME,
+        EXPECTED_MEMBERS_3,
+        EXPECTED_EPOCH_2,
+    )
+    .await;
+
+    check_users_have_same_group_stats(
+        &bob,
+        &carol,
+        GROUP_NAME,
+        EXPECTED_MEMBERS_3,
+        EXPECTED_EPOCH_2,
+    )
+    .await;
+}
+
+// #[tokio::test]
+// async fn test_remove_user_flow_request_from_steward() {
+//     let (mut steward, mut bob, mut carol) = create_three_test_user_with_group(GROUP_NAME).await;
+
+//     let ga_message = get_group_announcement_message(&mut steward, GROUP_NAME).await;
+
+//     share_group_announcement_for_one_user(&mut steward, &mut bob, ga_message.clone()).await;
+//     share_group_announcement_for_one_user(&mut steward, &mut carol, ga_message.clone()).await;
+
+//     let steward_epoch_messages =
+//         steward_epoch_without_user_in_group(&mut steward, GROUP_NAME).await;
+
+//     user_join_group(&mut bob, steward_epoch_messages[1].clone()).await;
+//     user_join_group(&mut carol, steward_epoch_messages[1].clone()).await;
+
+//     check_users_have_same_group_stats(
+//         &steward,
+//         &bob,
+//         GROUP_NAME,
+//         EXPECTED_MEMBERS_3,
+//         EXPECTED_EPOCH_1,
+//     )
+//     .await;
+
+//     check_users_have_same_group_stats(
+//         &steward,
+//         &carol,
+//         GROUP_NAME,
+//         EXPECTED_MEMBERS_3,
+//         EXPECTED_EPOCH_1,
+//     )
+//     .await;
+
+//     check_users_have_same_group_stats(
+//         &bob,
+//         &carol,
+//         GROUP_NAME,
+//         EXPECTED_MEMBERS_3,
+//         EXPECTED_EPOCH_1,
+//     )
+//     .await;
+
+//     let ban_request_message = create_ban_request_message(&mut steward, GROUP_NAME).await;
+
+//     let action = bob
+//         .process_waku_message(ban_request_message.clone())
+//         .await
+//         .expect("Failed to process ban request");
+
+//     match action {
+//         UserAction::SendToApp(_) => {
+//             println!("Debug: SendToApp action");
+//         }
+//         _ => panic!("Expected SendToApp action"),
+//     }
+
+//     let action = carol
+//         .process_waku_message(ban_request_message.clone())
+//         .await
+//         .expect("Failed to process ban request");
+
+//     match action {
+//         UserAction::SendToApp(_) => {
+//             println!("Debug: SendToApp action");
+//         }
+//         _ => panic!("Expected SendToApp action"),
+//     }
+
+//     let (steward_epoch_messages, proposal_id) =
+//         steward_epoch_with_user_in_group(&mut steward, GROUP_NAME).await;
+
+//     steward
+//         .set_up_consensus_threshold_for_group(GROUP_NAME, proposal_id, 1f64)
+//         .await
+//         .expect("Can't setup threshold");
+
+//     println!("Debug: Bob vote");
+//     let waku_vote_message = user_vote_on_proposal(
+//         &mut bob,
+//         steward_epoch_messages[0].clone(),
+//         true,
+//         GROUP_NAME,
+//     )
+//     .await;
+
+//     println!("Debug: Carol vote");
+//     let waku_vote_message_2 = user_vote_on_proposal(
+//         &mut carol,
+//         steward_epoch_messages[0].clone(),
+//         true,
+//         GROUP_NAME,
+//     )
+//     .await;
+
+//     println!("Debug: steward process bob vote");
+//     let waku_msgs_to_send = process_and_handle_trigger_event_message(
+//         &mut steward,
+//         waku_vote_message,
+//         GroupState::Voting,
+//     )
+//     .await;
+//     println!("Debug: waku_msgs_to_send after bob vote: {waku_msgs_to_send:?}");
+
+//     println!("Debug: steward process carol vote");
+//     let waku_msgs_to_send_2 = process_and_handle_trigger_event_message(
+//         &mut steward,
+//         waku_vote_message_2,
+//         GroupState::Working,
+//     )
+//     .await;
+//     println!("Debug: waku_msgs_to_send_2 after carol vote: {waku_msgs_to_send_2:?}");
+// }
