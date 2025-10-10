@@ -92,28 +92,33 @@
 //! - **Waku**: Decentralized messaging protocol
 //! - **Alloy**: Ethereum wallet and signing
 
-use alloy::primitives::{Address, PrimitiveSignature};
+use alloy::primitives::{Address, Signature};
 use ecies::{decrypt, encrypt};
 use libsecp256k1::{sign, verify, Message, PublicKey, SecretKey, Signature as libSignature};
 use rand::thread_rng;
 use secp256k1::hashes::{sha256, Hash};
-use std::{
-    collections::HashSet,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 use tokio::sync::{mpsc::Sender, RwLock};
 use waku_bindings::{WakuContentTopic, WakuMessage};
 
 use ds::waku_actor::WakuMessageToSend;
 use error::{GroupError, MessageError};
+use group_registry::GroupRegistry;
 
 pub mod action_handlers;
+pub mod app_runtime;
+pub mod bootstrap;
+pub use bootstrap::{bootstrap_core, bootstrap_core_from_env, Bootstrap, BootstrapConfig};
+
+use crate::topic_filter::TopicFilter;
 pub mod consensus;
 pub mod error;
 pub mod group;
+pub mod group_registry;
 pub mod message;
 pub mod state_machine;
 pub mod steward;
+pub mod topic_filter;
 pub mod user;
 pub mod user_actor;
 pub mod user_app_instance;
@@ -133,9 +138,24 @@ pub mod protos {
 }
 pub struct AppState {
     pub waku_node: Sender<WakuMessageToSend>,
-    pub rooms: Mutex<HashSet<String>>,
-    pub content_topics: Arc<RwLock<Vec<WakuContentTopic>>>,
+    // pub content_topics: Arc<RwLock<Vec<WakuContentTopic>>>,
     pub pubsub: tokio::sync::broadcast::Sender<WakuMessage>,
+}
+
+pub struct CoreCtx {
+    pub app_state: Arc<AppState>,
+    pub groups: Arc<GroupRegistry>,
+    pub topics: Arc<TopicFilter>,
+}
+
+impl CoreCtx {
+    pub fn new(app_state: Arc<AppState>) -> Self {
+        Self {
+            app_state,
+            groups: Arc::new(GroupRegistry::new()),
+            topics: Arc::new(TopicFilter::new()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -218,7 +238,7 @@ pub fn verify_vote_hash(
                 expect: 65,
                 actual: signature.len(),
             })?;
-    let signature = PrimitiveSignature::from_raw_array(&signature_bytes)?;
+    let signature = Signature::from_raw_array(&signature_bytes)?;
     let address = signature.recover_address_from_msg(message)?;
     let address_bytes = address.as_slice().to_vec();
     Ok(address_bytes == public_key)

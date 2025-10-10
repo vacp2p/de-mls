@@ -6,11 +6,7 @@ use tokio_util::sync::CancellationToken;
 use waku_bindings::WakuMessage;
 
 use crate::{
-    protos::messages::v1::{AppMessage, BanRequest, ConversationMessage},
-    user::{User, UserAction},
-    user_actor::{BuildBanMessage, LeaveGroupRequest, SendGroupMessage, UserVoteRequest},
-    ws_actor::{RawWsMessage, WsAction, WsActor},
-    AppState,
+    protos::messages::v1::{AppMessage, BanRequest, ConversationMessage}, topic_filter::TopicFilter, user::{User, UserAction}, user_actor::{BuildBanMessage, LeaveGroupRequest, SendGroupMessage, UserVoteRequest}, ws_actor::{RawWsMessage, WsAction, WsActor}, AppState
 };
 use ds::waku_actor::WakuMessageToSend;
 
@@ -19,7 +15,7 @@ pub async fn handle_user_actions(
     waku_node: Sender<WakuMessageToSend>,
     ws_actor: ActorRef<WsActor>,
     user_actor: ActorRef<User>,
-    app_state: Arc<AppState>,
+    topics: Arc<TopicFilter>,
     cancel_token: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let action = user_actor.ask(msg).await?;
@@ -37,11 +33,7 @@ pub async fn handle_user_actions(
                 })
                 .await?;
 
-            app_state
-                .content_topics
-                .write()
-                .await
-                .retain(|topic| topic.application_name != group_name);
+            topics.remove_many(&group_name).await;
             info!("Leave group: {:?}", &group_name);
             let app_message: AppMessage = ConversationMessage {
                 message: format!("You're removed from the group {group_name}").into_bytes(),

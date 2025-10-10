@@ -158,7 +158,7 @@ impl Message<AppMessage> for WsActor {
             } else {
                 msg.to_string()
             };
-        self.ws_sender.send(WsMessage::Text(message_text)).await?;
+        self.ws_sender.send(WsMessage::Text(message_text.into())).await?;
         Ok(())
     }
 }

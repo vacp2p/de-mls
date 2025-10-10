@@ -1,100 +1,82 @@
 use axum::{
-    extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    extract::State,
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        State,
+    },
     http::Method,
     response::IntoResponse,
     routing::get,
     Router,
 };
+use axum_server::Server;
 use futures::StreamExt;
 use log::{error, info};
-use serde_json::json;
-use std::{
-    collections::HashSet,
-    net::SocketAddr,
-    sync::{Arc, Mutex},
-};
-use tokio::sync::{mpsc::channel, RwLock};
+use std::{net::SocketAddr, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
-use waku_bindings::{Multiaddr, WakuMessage};
+use waku_bindings::Multiaddr;
 
 use de_mls::{
-    action_handlers::{handle_user_actions, handle_ws_action},
-    match_content_topic,
-    user_app_instance::create_user_instance,
+    app_runtime::{start_node, SessionHandle},
+    topic_filter::TopicFilter,
+};
+use de_mls::{
     ws_actor::{RawWsMessage, WsAction, WsActor},
     AppState, Connection,
 };
-use ds::waku_actor::{run_waku_node, WakuMessageToSend};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
+
     let port = std::env::var("PORT")
         .map(|val| val.parse::<u16>())
         .unwrap_or(Ok(3000))?;
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
+
     let node_port = std::env::var("NODE_PORT").expect("NODE_PORT is not set");
-    let peer_addresses = std::env::var("PEER_ADDRESSES")
-        .map(|val| {
-            val.split(",")
-                .map(|addr| {
-                    addr.parse::<Multiaddr>()
-                        .expect("Failed to parse peer address")
-                })
-                .collect()
+    let peer_addresses: Vec<Multiaddr> = std::env::var("PEER_ADDRESSES")
+        .expect("PEER_ADDRESSES is not set")
+        .split(',')
+        .map(|addr| {
+            addr.parse::<Multiaddr>()
+                .expect("Failed to parse peer address")
         })
-        .expect("PEER_ADDRESSES is not set");
+        .collect();
 
-    let content_topics = Arc::new(RwLock::new(Vec::new()));
+    let node = start_node(node_port, peer_addresses).await?;
+    info!("Node runtime initialized");
 
-    let (waku_sender, mut waku_receiver) = channel::<WakuMessage>(100);
-    let (sender, mut receiver) = channel::<WakuMessageToSend>(100);
-    let (tx, _) = tokio::sync::broadcast::channel(100);
-
-    let app_state = Arc::new(AppState {
-        waku_node: sender,
-        rooms: Mutex::new(HashSet::new()),
-        content_topics,
-        pubsub: tx.clone(),
-    });
-    info!("App state initialized");
-
-    let recv_messages = tokio::spawn(async move {
-        info!("Running recv messages from waku");
-        while let Some(msg) = waku_receiver.recv().await {
-            let _ = tx.send(msg);
-        }
-    });
-    info!("Waku receiver initialized");
-
+    // 2) Start HTTP server
+    let app_state = node.app_state.clone();
     let server_task = tokio::spawn(async move {
         info!("Running server");
         run_server(app_state, addr)
             .await
-            .expect("Failed to run server")
+            .expect("Failed to run server");
     });
 
-    info!("Starting waku node");
-    tokio::task::block_in_place(move || {
-        tokio::runtime::Handle::current().block_on(async move {
-            run_waku_node(node_port, Some(peer_addresses), waku_sender, &mut receiver).await
-        })
-    })?;
-
+    // 3) Observe node tasks
     tokio::select! {
-        result = recv_messages => {
-            if let Err(w) = result {
-                error!("Error receiving messages from waku: {w}");
-            }
-        }
         result = server_task => {
             if let Err(e) = result {
                 error!("Error hosting server: {e}");
             }
         }
+        result = node.fanout_task => {
+            if let Err(e) = result {
+                error!("Fanout task crashed: {e}");
+            }
+        }
+        result = node.waku_join => {
+            match result {
+                Ok(Ok(_)) => info!("Waku node exited normally"),
+                Ok(Err(e)) => error!("Waku node error: {e:#}"),
+                Err(join_err) => error!("Join error waiting waku thread: {join_err:#}"),
+            }
+        }
     }
+
     Ok(())
 }
 
@@ -103,21 +85,19 @@ async fn run_server(
     addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(vec![Method::GET]);
+        .allow_methods([Method::GET])
+        .allow_origin(Any);
 
     let app = Router::new()
         .route("/", get(|| async { "Hello World!" }))
         .route("/ws", get(handler))
-        .route("/rooms", get(get_rooms))
+        // .route("/rooms", get(get_rooms))
         .with_state(app_state)
         .layer(cors);
 
     info!("Hosted on {addr:?}");
 
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .await?;
+    Server::bind(addr).serve(app.into_make_service()).await?;
     Ok(())
 }
 
@@ -126,13 +106,22 @@ async fn handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> im
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
+    let t = TopicFilter::new();
+    let topics = Arc::new(t);
     info!("Handling socket");
+    // Split WS and create WsActor just like before
     let (ws_sender, mut ws_receiver) = socket.split();
     let ws_actor = kameo::spawn(WsActor::new(ws_sender));
+
+    // === Initial “Connect” handshake (unchanged) ===
     let mut main_loop_connection = None::<Connection>;
     let cancel_token = CancellationToken::new();
     while let Some(Ok(Message::Text(data))) = ws_receiver.next().await {
-        let res = ws_actor.ask(RawWsMessage { message: data }).await;
+        let res = ws_actor
+            .ask(RawWsMessage {
+                message: data.to_string(),
+            })
+            .await;
         match res {
             Ok(WsAction::Connect(connect)) => {
                 info!("Got connect: {:?}", &connect);
@@ -141,127 +130,80 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     group_id: connect.group_id.clone(),
                     should_create_group: connect.should_create,
                 });
-                let mut rooms = match state.rooms.lock() {
-                    Ok(rooms) => rooms,
-                    Err(e) => {
-                        log::error!("Failed to acquire rooms lock: {e}");
-                        continue;
-                    }
-                };
-                if !rooms.contains(&connect.group_id.clone()) {
-                    rooms.insert(connect.group_id.clone());
-                }
-                info!("Prepare info for main loop: {main_loop_connection:?}");
+                // // Track room
+                // if let Ok(mut rooms) = state.rooms.lock() {
+                //     rooms.insert(connect.group_id.clone());
+                // }
                 break;
             }
             Ok(_) => {
                 info!("Got chat message for non-existent user");
             }
-
             Err(e) => error!("Error handling message: {e}"),
         }
     }
 
-    let user_actor = create_user_instance(
-        main_loop_connection.unwrap().clone(),
-        state.clone(),
-        ws_actor.clone(),
-    )
-    .await
-    .expect("Failed to create user instance");
-
-    let user_actor_clone = user_actor.clone();
-    let state_clone = state.clone();
-    let ws_actor_clone = ws_actor.clone();
-    let cancel_token_clone = cancel_token.clone();
-
-    let mut user_waku_receiver = state.pubsub.subscribe();
-    let mut recv_messages_waku = tokio::spawn(async move {
-        info!("Running recv messages from waku for current user");
-        while let Ok(msg) = user_waku_receiver.recv().await {
-            let content_topic = msg.content_topic.clone();
-            // Check if message belongs to a relevant topic
-            if !match_content_topic(&state_clone.content_topics, &content_topic).await {
-                error!("Content topic not match: {content_topic:?}");
-                return;
-            };
-            info!("[handle_socket]: Received message from waku that matches content topic");
-            let res = handle_user_actions(
-                msg,
-                state_clone.waku_node.clone(),
-                ws_actor_clone.clone(),
-                user_actor_clone.clone(),
-                state_clone.clone(),
-                cancel_token_clone.clone(),
-            )
-            .await;
-            if let Err(e) = res {
-                error!("Error handling waku message: {e}");
-            }
+    let connection = match main_loop_connection {
+        Some(c) => c,
+        None => {
+            error!("No Connect message received; closing session");
+            return;
         }
-    });
-
-    let user_ref_clone = user_actor.clone();
-    let mut recv_messages_ws = {
-        tokio::spawn(async move {
-            info!("Running receive messages from websocket");
-            while let Some(Ok(Message::Text(text))) = ws_receiver.next().await {
-                let res = handle_ws_action(
-                    RawWsMessage { message: text },
-                    ws_actor.clone(),
-                    user_ref_clone.clone(),
-                    state.waku_node.clone(),
-                )
-                .await;
-                if let Err(e) = res {
-                    error!("Error handling websocket message: {e}");
-                }
-            }
-        })
     };
 
+    // === Start per-user session with extracted runtime ===
+    // This internally spawns:
+    //   - Waku → handle_user_actions
+    //   - WS   → handle_ws_action
+    let SessionHandle {
+        mut recv_waku,
+        mut recv_ws,
+        ..
+    } = de_mls::app_runtime::spawn_user_session(
+        state.clone(),
+        topics,
+        connection,
+        ws_actor.clone(),
+        ws_receiver,
+    )
+    .await
+    .expect("Failed to spawn user session");
+
+    // Wait for either loop to end or cancellation
     tokio::select! {
-        _ = (&mut recv_messages_waku) => {
+        _ = (&mut recv_waku) => {
             info!("recv messages from waku finished");
-            recv_messages_ws.abort();
+            recv_ws.abort();
         }
-        _ = (&mut recv_messages_ws) => {
+        _ = (&mut recv_ws) => {
             info!("receive messages from websocket finished");
-            recv_messages_ws.abort();
+            recv_waku.abort();
         }
         _ = cancel_token.cancelled() => {
             info!("Cancel token cancelled");
-            recv_messages_ws.abort();
-            recv_messages_waku.abort();
+            recv_ws.abort();
+            recv_waku.abort();
         }
     };
 
-    info!("Main loop finished");
+    info!("Session finished");
 }
 
-async fn get_rooms(State(state): State<Arc<AppState>>) -> String {
-    let rooms = match state.rooms.lock() {
-        Ok(rooms) => rooms,
-        Err(e) => {
-            log::error!("Failed to acquire rooms lock: {e}");
-            return json!({
-                "status": "Error acquiring rooms lock",
-                "rooms": []
-            })
-            .to_string();
-        }
-    };
-    let vec = rooms.iter().collect::<Vec<&String>>();
-    match vec.len() {
-        0 => json!({
-            "status": "No rooms found yet!",
-            "rooms": []
-        })
-        .to_string(),
-        _ => json!({
-            "status": "Success!",
-            "rooms": vec
-        })
-        .to_string(),
-    }
-}
+// async fn get_rooms(State(state): State<Arc<AppState>>) -> String {
+//     let rooms = match state.rooms.lock() {
+//         Ok(rooms) => rooms,
+//         Err(e) => {
+//             log::error!("Failed to acquire rooms lock: {e}");
+//             return json!({
+//                 "status": "Error acquiring rooms lock",
+//                 "rooms": []
+//             })
+//             .to_string();
+//         }
+//     };
+//     let vec = rooms.iter().collect::<Vec<&String>>();
+//     match vec.len() {
+//         0 => json!({ "status": "No rooms found yet!", "rooms": [] }).to_string(),
+//         _ => json!({ "status": "Success!", "rooms": vec }).to_string(),
+//     }
+// }

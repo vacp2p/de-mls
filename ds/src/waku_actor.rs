@@ -24,7 +24,7 @@ impl WakuNode<Initialized> {
             tcp_port: Some(port),
             cluster_id: Some(15),
             shards: vec![1],
-            log_level: Some("INFO"), // Supported: TRACE, DEBUG, INFO, NOTICE, WARN, ERROR or FATAL
+            log_level: Some("FATAL"), // Supported: TRACE, DEBUG, INFO, NOTICE, WARN, ERROR or FATAL
             ..Default::default()
         }))
         .await

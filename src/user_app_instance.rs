@@ -4,6 +4,7 @@ use kameo::actor::ActorRef;
 use log::{error, info};
 use std::{str::FromStr, sync::Arc, time::Duration};
 
+use crate::topic_filter::TopicFilter;
 use crate::user::{User, UserAction};
 use crate::user_actor::{
     ConsensusEventMessage, CreateGroupRequest, GetProposalsForStewardVotingRequest,
@@ -15,10 +16,63 @@ use crate::{error::UserError, AppState, Connection};
 
 pub const STEWARD_EPOCH: u64 = 15;
 
-pub async fn create_user_instance(
+pub async fn create_user_instance_only(
+    eth_private_key: String,
+    app_state: Arc<AppState>,
+) -> Result<(ActorRef<User>, String), UserError> {
+    let signer = PrivateKeySigner::from_str(&eth_private_key)?;
+    let user_address = signer.address_string();
+    // Create user
+    let user = User::new(&eth_private_key)?;
+
+    // Set up consensus event forwarding before spawning the actor
+    let consensus_events = user.subscribe_to_consensus_events();
+
+    let user_ref = kameo::spawn(user);
+    let app_state_consensus = app_state.clone();
+    let user_ref_consensus = user_ref.clone();
+    let mut consensus_events_receiver = consensus_events;
+    tokio::spawn(async move {
+        info!("Starting consensus event forwarding loop (user-only)");
+        while let Ok((group_name, event)) = consensus_events_receiver.recv().await {
+            let result = user_ref_consensus
+                .ask(ConsensusEventMessage {
+                    group_name: group_name.clone(),
+                    event,
+                })
+                .await;
+
+            match result {
+                Ok(commit_messages) => {
+                    if !commit_messages.is_empty() {
+                        info!(
+                            "Sending {} commit messages to Waku for group {}",
+                            commit_messages.len(),
+                            group_name
+                        );
+                        for msg in commit_messages {
+                            if let Err(e) = app_state_consensus.waku_node.send(msg).await {
+                                error!("Error sending commit message to Waku: {e}");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Error forwarding consensus event: {e}");
+                }
+            }
+        }
+        info!("Consensus forwarding loop ended");
+    });
+
+    Ok((user_ref, user_address))
+}
+
+pub async fn create_user_instance_with_group(
     connection: Connection,
     app_state: Arc<AppState>,
     ws_actor: ActorRef<WsActor>,
+    topics: Arc<TopicFilter>,
 ) -> Result<ActorRef<User>, UserError> {
     let signer = PrivateKeySigner::from_str(&connection.eth_private_key)?;
     let user_address = signer.address_string();
@@ -38,13 +92,7 @@ pub async fn create_user_instance(
         .await
         .map_err(|e| UserError::UnableToCreateGroup(e.to_string()))?;
 
-    let mut content_topics = build_content_topics(&group_name);
-    info!("Building content topics: {content_topics:?}");
-    app_state
-        .content_topics
-        .write()
-        .await
-        .append(&mut content_topics);
+    topics.add_many(&group_name).await;
 
     if connection.should_create_group {
         info!("User {user_address:?} start sending steward message for group {group_name:?}");
@@ -56,7 +104,7 @@ pub async fn create_user_instance(
             loop {
                 interval.tick().await;
                 let _ = async {
-                    handle_steward_flow_per_epoch(
+                    handle_steward_flow_per_epoch_old(
                         user_clone.clone(),
                         group_name_clone.clone(),
                         app_state_steward.clone(),
@@ -72,44 +120,44 @@ pub async fn create_user_instance(
         });
     };
 
-    // Set up consensus event forwarding loop
-    let user_ref_consensus = user_ref.clone();
-    let mut consensus_events_receiver = consensus_events;
-    let app_state_consensus = app_state.clone();
-    tokio::spawn(async move {
-        info!("Starting consensus event forwarding loop");
-        while let Ok((group_name, event)) = consensus_events_receiver.recv().await {
-            info!("Forwarding consensus event for group {group_name}: {event:?}");
-            let result = user_ref_consensus
-                .ask(ConsensusEventMessage {
-                    group_name: group_name.clone(),
-                    event,
-                })
-                .await;
+    // // Set up consensus event forwarding loop
+    // let user_ref_consensus = user_ref.clone();
+    // let mut consensus_events_receiver = consensus_events;
+    // let app_state_consensus = app_state.clone();
+    // tokio::spawn(async move {
+    //     info!("Starting consensus event forwarding loop");
+    //     while let Ok((group_name, event)) = consensus_events_receiver.recv().await {
+    //         info!("Forwarding consensus event for group {group_name}: {event:?}");
+    //         let result = user_ref_consensus
+    //             .ask(ConsensusEventMessage {
+    //                 group_name: group_name.clone(),
+    //                 event,
+    //             })
+    //             .await;
 
-            match result {
-                Ok(commit_messages) => {
-                    // Send commit messages to Waku if any
-                    if !commit_messages.is_empty() {
-                        info!(
-                            "Sending {} commit messages to Waku for group {}",
-                            commit_messages.len(),
-                            group_name
-                        );
-                        for msg in commit_messages {
-                            if let Err(e) = app_state_consensus.waku_node.send(msg).await {
-                                error!("Error sending commit message to Waku: {e}");
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Error forwarding consensus event: {e}");
-                }
-            }
-        }
-        info!("Consensus event forwarding loop ended");
-    });
+    //         match result {
+    //             Ok(commit_messages) => {
+    //                 // Send commit messages to Waku if any
+    //                 if !commit_messages.is_empty() {
+    //                     info!(
+    //                         "Sending {} commit messages to Waku for group {}",
+    //                         commit_messages.len(),
+    //                         group_name
+    //                     );
+    //                     for msg in commit_messages {
+    //                         if let Err(e) = app_state_consensus.waku_node.send(msg).await {
+    //                             error!("Error sending commit message to Waku: {e}");
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //             Err(e) => {
+    //                 error!("Error forwarding consensus event: {e}");
+    //             }
+    //         }
+    //     }
+    //     info!("Consensus event forwarding loop ended");
+    // });
 
     Ok(user_ref)
 }
@@ -134,7 +182,7 @@ pub async fn create_user_instance(
 /// - Steward always returns to Working state after epoch completion
 /// - No proposals scenario never leaves Working state
 /// - All edge cases properly handled with state transitions
-pub async fn handle_steward_flow_per_epoch(
+pub async fn handle_steward_flow_per_epoch_old(
     user: ActorRef<User>,
     group_name: String,
     app_state: Arc<AppState>,
@@ -180,6 +228,65 @@ pub async fn handle_steward_flow_per_epoch(
                 ws_actor.ask(app_msg).await.map_err(|e| {
                     UserError::UnableToSendMessageToWs(format!("Failed to send message to ws: {e}"))
                 })?;
+            }
+            UserAction::DoNothing => {
+                info!("No action to take for group: {group_name}");
+                return Ok(());
+            }
+            _ => {
+                return Err(UserError::InvalidUserAction(action.to_string()));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn handle_steward_flow_per_epoch(
+    user: ActorRef<User>,
+    group_name: String,
+    app_state: Arc<AppState>,
+) -> Result<(), UserError> {
+    info!("Starting steward epoch for group: {group_name}");
+
+    // Step 1: Start steward epoch - check for proposals and start epoch if needed
+    let proposals_count = user
+        .ask(StartStewardEpochRequest {
+            group_name: group_name.clone(),
+        })
+        .await
+        .map_err(|e| UserError::GetGroupUpdateRequestsError(e.to_string()))?;
+
+    // Step 2: Send new steward key to the waku node for new epoch
+    let msg = user
+        .ask(StewardMessageRequest {
+            group_name: group_name.clone(),
+        })
+        .await
+        .map_err(|e| UserError::ProcessStewardMessageError(e.to_string()))?;
+    app_state.waku_node.send(msg).await?;
+
+    if proposals_count == 0 {
+        info!("No proposals to vote on for group: {group_name}, completing epoch without voting");
+    } else {
+        info!("Found {proposals_count} proposals to vote on for group: {group_name}");
+
+        // Step 3: Start voting process - steward gets proposals for voting
+        let action = user
+            .ask(GetProposalsForStewardVotingRequest {
+                group_name: group_name.clone(),
+            })
+            .await
+            .map_err(|e| UserError::UnableToStartVoting(e.to_string()))?;
+
+        // Step 4: Send proposals to ws to steward to vote or do nothing if no proposals
+        // After voting, steward sends vote and proposal to waku node and start consensus process
+        match action {
+            UserAction::SendToApp(app_msg) => {
+                info!("Sending app message to ws");
+                // ws_actor.ask(app_msg).await.map_err(|e| {
+                //     UserError::UnableToSendMessageToWs(format!("Failed to send message to ws: {e}"))
+                // })?;
             }
             UserAction::DoNothing => {
                 info!("No action to take for group: {group_name}");
