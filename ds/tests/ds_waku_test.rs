@@ -7,8 +7,8 @@ use kameo::{
     message::{Context, Message},
     Actor,
 };
-use log::info;
 use tokio::sync::mpsc::channel;
+use tracing::info;
 use waku_bindings::WakuMessage;
 
 #[derive(Debug, Clone, Actor)]
@@ -44,7 +44,7 @@ impl Message<WakuMessage> for Application {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_waku_client() {
-    env_logger::init();
+    tracing_subscriber::fmt::init();
     let group_name = "new_group";
     let mut pubsub = PubSub::<WakuMessage>::new();
 

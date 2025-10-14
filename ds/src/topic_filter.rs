@@ -1,7 +1,8 @@
-use ds::build_content_topics;
-// de-mls/src/topic_filter.rs
+//! This module contains the topic filter for the Waku node
 use tokio::sync::RwLock;
 use waku_bindings::WakuContentTopic;
+
+use crate::build_content_topics;
 
 /// Fast allowlist for content topics without requiring Hash.
 /// Internally uses a Vec and dedupes on insert.

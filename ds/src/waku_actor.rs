@@ -1,7 +1,7 @@
-use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::{thread::sleep, time::Duration};
 use tokio::sync::mpsc::{Receiver, Sender};
+use tracing::{debug, error, info};
 use waku_bindings::{
     node::{WakuNodeConfig, WakuNodeHandle},
     waku_new, Initialized, LibwakuResponse, Multiaddr, Running, WakuEvent, WakuMessage,

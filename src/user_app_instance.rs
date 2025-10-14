@@ -1,14 +1,43 @@
 use alloy::signers::local::PrivateKeySigner;
 use kameo::actor::ActorRef;
-use log::{error, info};
 use std::{str::FromStr, sync::Arc};
+use tokio::sync::mpsc::Sender;
+use tracing::{error, info};
+use waku_bindings::WakuMessage;
 
+use ds::topic_filter::TopicFilter;
+use ds::waku_actor::WakuMessageToSend;
+
+use crate::error::UserError;
+use crate::group_registry::GroupRegistry;
 use crate::user::User;
 use crate::user_actor::ConsensusEventMessage;
 use crate::LocalSigner;
-use crate::{error::UserError, AppState};
 
 pub const STEWARD_EPOCH: u64 = 15;
+
+#[derive(Debug, Clone)]
+pub struct AppState {
+    pub waku_node: Sender<WakuMessageToSend>,
+    pub pubsub: tokio::sync::broadcast::Sender<WakuMessage>,
+}
+
+#[derive(Debug)]
+pub struct CoreCtx {
+    pub app_state: Arc<AppState>,
+    pub groups: Arc<GroupRegistry>,
+    pub topics: Arc<TopicFilter>,
+}
+
+impl CoreCtx {
+    pub fn new(app_state: Arc<AppState>) -> Self {
+        Self {
+            app_state,
+            groups: Arc::new(GroupRegistry::new()),
+            topics: Arc::new(TopicFilter::new()),
+        }
+    }
+}
 
 pub async fn create_user_instance(
     eth_private_key: String,

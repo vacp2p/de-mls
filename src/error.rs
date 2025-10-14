@@ -11,7 +11,7 @@ use openmls::{
 use openmls_rust_crypto::MemoryStorageError;
 use std::string::FromUtf8Error;
 
-use ds::{waku_actor::WakuMessageToSend, DeliveryServiceError};
+use ds::DeliveryServiceError;
 use mls_crypto::error::IdentityError;
 
 #[derive(Debug, thiserror::Error)]
@@ -145,22 +145,10 @@ pub enum UserError {
     FailedToExtractWelcomeMessage,
     #[error("Message verification failed")]
     MessageVerificationFailed,
-    #[error("Failed to create group: {0}")]
-    UnableToCreateGroup(String),
-    #[error("Failed to send message to user: {0}")]
-    UnableToHandleStewardEpoch(String),
-    #[error("Failed to process steward message: {0}")]
-    ProcessStewardMessageError(String),
-    #[error("Failed to get group update requests: {0}")]
-    GetGroupUpdateRequestsError(String),
     #[error("Invalid user action: {0}")]
     InvalidUserAction(String),
-    #[error("Failed to start voting: {0}")]
-    UnableToStartVoting(String),
     #[error("Unknown content topic type: {0}")]
     UnknownContentTopicType(String),
-    #[error("Failed to send message to ws: {0}")]
-    UnableToSendMessageToWs(String),
     #[error("Invalid group state: {0}")]
     InvalidGroupState(String),
     #[error("No proposals found")]
@@ -180,6 +168,4 @@ pub enum UserError {
     MlsMessageInDeserializeError(#[from] openmls::prelude::Error),
     #[error("Failed to try into protocol message: {0}")]
     TryIntoProtocolMessageError(#[from] openmls::framing::errors::ProtocolMessageError),
-    #[error("Failed to send message to waku: {0}")]
-    WakuSendMessageError(#[from] tokio::sync::mpsc::error::SendError<WakuMessageToSend>),
 }

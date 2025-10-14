@@ -4,13 +4,11 @@
 //! and pushing `AppEvent` back to the UI via the Gateway.
 //!
 //! It ensures there is a Tokio runtime (desktop app may not have one yet).
-
-use std::sync::Arc;
-
 use futures::channel::mpsc::{unbounded, UnboundedReceiver};
 use futures::StreamExt;
+use std::sync::Arc;
 
-use de_mls::CoreCtx;
+use de_mls::user_app_instance::CoreCtx;
 use de_mls_gateway::{init_core, GATEWAY};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent, ChatMsg};
 

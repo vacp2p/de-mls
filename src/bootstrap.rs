@@ -3,14 +3,12 @@
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
-
-use log::{error, info};
+use tracing::{error, info};
 use waku_bindings::{Multiaddr, WakuMessage};
 
 use ds::waku_actor::{run_waku_node, WakuMessageToSend};
 
-use crate::AppState;
-use crate::CoreCtx;
+use crate::user_app_instance::{AppState, CoreCtx};
 
 #[derive(Clone, Debug)]
 pub struct BootstrapConfig {
@@ -20,7 +18,6 @@ pub struct BootstrapConfig {
     pub peers: Vec<Multiaddr>,
 }
 
-/// What the bootstrap returns to the caller.
 pub struct Bootstrap {
     pub core: Arc<CoreCtx>,
     /// Cancels the Waku→broadcast forwarder task

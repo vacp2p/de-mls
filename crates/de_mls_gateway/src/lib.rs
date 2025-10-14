@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 
-use de_mls::CoreCtx; // re-exported by your core crate
+use de_mls::user_app_instance::CoreCtx;
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent, ChatMsg, VotePayload};
 
 use kameo::actor::ActorRef;

@@ -97,18 +97,12 @@ use ecies::{decrypt, encrypt};
 use libsecp256k1::{sign, verify, Message, PublicKey, SecretKey, Signature as libSignature};
 use rand::thread_rng;
 use secp256k1::hashes::{sha256, Hash};
-use std::sync::Arc;
-use tokio::sync::{mpsc::Sender, RwLock};
-use waku_bindings::{WakuContentTopic, WakuMessage};
 
-use ds::waku_actor::WakuMessageToSend;
 use error::{GroupError, MessageError};
-use group_registry::GroupRegistry;
 
 pub mod bootstrap;
 pub use bootstrap::{bootstrap_core, bootstrap_core_from_env, Bootstrap, BootstrapConfig};
 
-use crate::topic_filter::TopicFilter;
 pub mod consensus;
 pub mod error;
 pub mod group;
@@ -116,7 +110,6 @@ pub mod group_registry;
 pub mod message;
 pub mod state_machine;
 pub mod steward;
-pub mod topic_filter;
 pub mod user;
 pub mod user_actor;
 pub mod user_app_instance;
@@ -132,37 +125,6 @@ pub mod protos {
             include!(concat!(env!("OUT_DIR"), "/de_mls.messages.v1.rs"));
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct AppState {
-    pub waku_node: Sender<WakuMessageToSend>,
-    // pub content_topics: Arc<RwLock<Vec<WakuContentTopic>>>,
-    pub pubsub: tokio::sync::broadcast::Sender<WakuMessage>,
-}
-
-#[derive(Debug)]
-pub struct CoreCtx {
-    pub app_state: Arc<AppState>,
-    pub groups: Arc<GroupRegistry>,
-    pub topics: Arc<TopicFilter>,
-}
-
-impl CoreCtx {
-    pub fn new(app_state: Arc<AppState>) -> Self {
-        Self {
-            app_state,
-            groups: Arc::new(GroupRegistry::new()),
-            topics: Arc::new(TopicFilter::new()),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Connection {
-    pub eth_private_key: String,
-    pub group_id: String,
-    pub should_create_group: bool,
 }
 
 pub fn generate_keypair() -> (PublicKey, SecretKey) {
@@ -204,15 +166,6 @@ pub fn decrypt_message(message: &[u8], secret_key: SecretKey) -> Result<Vec<u8>,
     let secret_key_serialized = secret_key.serialize();
     let decrypted = decrypt(&secret_key_serialized, message)?;
     Ok(decrypted)
-}
-
-/// Check if a content topic exists in a list of topics or if the list is empty
-pub async fn match_content_topic(
-    content_topics: &Arc<RwLock<Vec<WakuContentTopic>>>,
-    topic: &WakuContentTopic,
-) -> bool {
-    let locked_topics = content_topics.read().await;
-    locked_topics.is_empty() || locked_topics.iter().any(|t| t == topic)
 }
 
 pub trait LocalSigner {

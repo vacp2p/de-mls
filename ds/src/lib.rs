@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use waku_bindings::{node::PubsubTopic, Encoding, WakuContentTopic};
 
+pub mod topic_filter;
 pub mod waku_actor;
 
 pub const GROUP_VERSION: &str = "1";

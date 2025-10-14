@@ -6,17 +6,17 @@
 //! - Proposal management
 //! - Vote collection and validation
 //! - Consensus reached detection
-
-use crate::error::ConsensusError;
-use crate::protos::messages::v1::consensus::v1::{Proposal, Vote};
-use crate::LocalSigner;
-use log::info;
 use prost::Message;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
+use tracing::info;
 use uuid::Uuid;
+
+use crate::error::ConsensusError;
+use crate::protos::messages::v1::consensus::v1::{Proposal, Vote};
+use crate::LocalSigner;
 
 pub mod service;
 

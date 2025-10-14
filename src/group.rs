@@ -1,6 +1,5 @@
 use alloy::hex;
 use kameo::Actor;
-use log::{error, info};
 use openmls::{
     group::{GroupEpoch, GroupId, MlsGroup, MlsGroupCreateConfig},
     prelude::{
@@ -12,6 +11,7 @@ use openmls_basic_credential::SignatureKeyPair;
 use prost::Message;
 use std::{fmt::Display, sync::Arc};
 use tokio::sync::{Mutex, RwLock};
+use tracing::{error, info};
 use uuid;
 
 use crate::{

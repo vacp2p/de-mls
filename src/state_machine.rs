@@ -96,8 +96,7 @@
 //! - Failed votes result in proposals being discarded and return to working state
 
 use std::fmt::Display;
-
-use log::info;
+use tracing::info;
 
 use crate::message::message_types;
 use crate::steward::Steward;

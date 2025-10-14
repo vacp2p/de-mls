@@ -58,7 +58,8 @@ anyhow = "1.0.81"
 thiserror = "1.0.39"
 uuid = "1.11.0"
 
-log = "0.4.22"
+tracing = "0.1.41"
+tracing-subscriber = "0.3.20"
 
 ds = { path = "ds" }
 mls_crypto = { path = "mls_crypto" }

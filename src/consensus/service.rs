@@ -1,4 +1,11 @@
 //! Consensus service for managing consensus sessions and HashGraph integration
+use prost::Message;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::{broadcast, RwLock};
+use tracing::info;
+use uuid::Uuid;
 
 use crate::consensus::{
     compute_vote_hash, create_vote_for_proposal, ConsensusConfig, ConsensusEvent, ConsensusSession,
@@ -7,13 +14,6 @@ use crate::consensus::{
 use crate::error::ConsensusError;
 use crate::protos::messages::v1::consensus::v1::{Proposal, Vote};
 use crate::{verify_vote_hash, LocalSigner};
-use log::info;
-use prost::Message;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{broadcast, RwLock};
-use uuid::Uuid;
 
 /// Consensus service that manages multiple consensus sessions for multiple groups
 #[derive(Clone)]

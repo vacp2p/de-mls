@@ -3,7 +3,6 @@ use alloy::{
     signers::{local::PrivateKeySigner, Signer},
 };
 use kameo::Actor;
-use log::{debug, error, info};
 use openmls::{
     group::MlsGroupJoinConfig,
     prelude::{DeserializeBytes, MlsMessageBodyIn, MlsMessageIn, StagedWelcome, Welcome},
@@ -11,6 +10,7 @@ use openmls::{
 use prost::Message;
 use std::{collections::HashMap, fmt::Display, str::FromStr, sync::Arc};
 use tokio::sync::{broadcast, RwLock};
+use tracing::{debug, error, info};
 use waku_bindings::WakuMessage;
 
 use ds::{waku_actor::WakuMessageToSend, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
