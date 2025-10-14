@@ -105,8 +105,6 @@ use ds::waku_actor::WakuMessageToSend;
 use error::{GroupError, MessageError};
 use group_registry::GroupRegistry;
 
-pub mod action_handlers;
-pub mod app_runtime;
 pub mod bootstrap;
 pub use bootstrap::{bootstrap_core, bootstrap_core_from_env, Bootstrap, BootstrapConfig};
 
@@ -122,7 +120,6 @@ pub mod topic_filter;
 pub mod user;
 pub mod user_actor;
 pub mod user_app_instance;
-pub mod ws_actor;
 
 pub mod protos {
     pub mod messages {
@@ -136,12 +133,15 @@ pub mod protos {
         }
     }
 }
+
+#[derive(Debug, Clone)]
 pub struct AppState {
     pub waku_node: Sender<WakuMessageToSend>,
     // pub content_topics: Arc<RwLock<Vec<WakuContentTopic>>>,
     pub pubsub: tokio::sync::broadcast::Sender<WakuMessage>,
 }
 
+#[derive(Debug)]
 pub struct CoreCtx {
     pub app_state: Arc<AppState>,
     pub groups: Arc<GroupRegistry>,

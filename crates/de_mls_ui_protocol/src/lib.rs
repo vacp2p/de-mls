@@ -16,20 +16,40 @@ pub mod v1 {
         pub group_id: String,
         pub message: String,
         pub timeout_ms: u64,
-        pub vote_id: String,
+        pub proposal_id: u32,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[non_exhaustive]
     pub enum AppCmd {
-        Login { private_key: String },
+        Login {
+            private_key: String,
+        },
         ListGroups,
-        CreateGroup { name: String },
-        JoinGroup { name: String },
-        EnterGroup { group_id: String },
-        SendMessage { group_id: String, body: String },
-        LoadHistory { group_id: String },
-        Vote { vote_id: String, choice: bool },
+        CreateGroup {
+            name: String,
+        },
+        JoinGroup {
+            name: String,
+        },
+        EnterGroup {
+            group_id: String,
+        },
+        SendMessage {
+            group_id: String,
+            body: String,
+        },
+        LoadHistory {
+            group_id: String,
+        },
+        Vote {
+            group_id: String,
+            proposal_id: u32,
+            choice: bool,
+        },
+        LeaveGroup {
+            group_id: String,
+        },
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,10 +57,13 @@ pub mod v1 {
     pub enum AppEvent {
         LoggedIn(String),
         Groups(Vec<String>),
+        GroupCreated(String),
+        GroupRemoved(String),
         EnteredGroup { group_id: String },
         ChatMessage(ChatMsg),
         VoteRequested(VotePayload),
-        VoteClosed { vote_id: String },
+        VoteClosed { proposal_id: u32 },
+        LeaveGroup { group_id: String },
         Error(String),
     }
 }

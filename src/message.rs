@@ -28,7 +28,6 @@ use crate::{
     verify_message, MessageError,
 };
 use openmls::prelude::{KeyPackage, MlsMessageOut};
-use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
 use crate::protos::messages::v1::{
@@ -245,21 +244,4 @@ impl From<Vote> for AppMessage {
             payload: Some(app_message::Payload::Vote(vote)),
         }
     }
-}
-/// This struct is used to represent the message from the user that we got from web socket
-#[derive(Deserialize, Debug, PartialEq, Serialize)]
-pub struct UserMessage {
-    pub message: Vec<u8>,
-    pub group_id: String,
-}
-
-/// This struct is used to represent the connection data that web socket sends to the user
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct ConnectMessage {
-    /// This is the private key of the user that we will use to authenticate the user
-    pub eth_private_key: String,
-    /// This is the id of the group that the user is joining
-    pub group_id: String,
-    /// This is the flag that indicates if the user should create a new group or subscribe to an existing one
-    pub should_create: bool,
 }

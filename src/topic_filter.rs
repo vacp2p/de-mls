@@ -5,7 +5,7 @@ use waku_bindings::WakuContentTopic;
 
 /// Fast allowlist for content topics without requiring Hash.
 /// Internally uses a Vec and dedupes on insert.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct TopicFilter {
     list: RwLock<Vec<WakuContentTopic>>,
 }

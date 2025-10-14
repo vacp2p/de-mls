@@ -67,7 +67,7 @@ pub async fn bootstrap_core(cfg: BootstrapConfig) -> anyhow::Result<Bootstrap> {
 
     // Start Waku node on a dedicated thread with its own Tokio runtime
     let node_port = cfg.node_port.clone();
-    let mut peers = cfg.peers.clone();
+    let peers = cfg.peers.clone();
     let waku_thread = std::thread::Builder::new()
         .name("waku-node".into())
         .spawn(move || {

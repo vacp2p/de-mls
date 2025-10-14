@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use tokio::sync::RwLock;
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct GroupRegistry {
     names: RwLock<HashSet<String>>,
 }

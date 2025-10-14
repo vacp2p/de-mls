@@ -12,6 +12,7 @@ target/
 .DS_Store
 src/.DS_Store
 .idea
+apps/de_mls_desktop_ui/logs
 
 # files
 *.env

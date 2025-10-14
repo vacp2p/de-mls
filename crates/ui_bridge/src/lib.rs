@@ -19,11 +19,35 @@ pub fn start_ui_bridge(core: Arc<CoreCtx>) {
     // 1) Give the gateway access to the core context.
     init_core(core);
 
+    // 1.5) Ensure gateway background (pubsub forwarder) is started
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async {
+            if let Err(e) = de_mls_gateway::GATEWAY.start().await {
+                tracing::error!("gateway start failed: {e:?}");
+            }
+        });
+    } else {
+        std::thread::Builder::new()
+            .name("ui-bridge-start".into())
+            .spawn(|| {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime");
+                rt.block_on(async {
+                    if let Err(e) = de_mls_gateway::GATEWAY.start().await {
+                        eprintln!("gateway start failed: {e:?}");
+                    }
+                });
+            })
+            .expect("spawn ui-bridge-start");
+    }
+
     // 2) Create a command channel UI -> gateway and register the sender.
     let (cmd_tx, cmd_rx) = unbounded::<AppCmd>();
     GATEWAY.register_cmd_sink(cmd_tx);
 
-    // 3) Drive the dispatcher loop on a Tokio runtime.
+    // 3) Drive the dispatcher loop on a Tokio runtime (unchanged)
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.spawn(async move {
             if let Err(e) = ui_loop(cmd_rx).await {
@@ -69,17 +93,19 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
             }
 
             AppCmd::CreateGroup { name } => {
-                let _ = GATEWAY.create_group(name.clone()).await;
+                GATEWAY.create_group(name.clone()).await?;
+
                 let groups = GATEWAY.group_list().await?;
                 GATEWAY.push_event(AppEvent::Groups(groups));
             }
 
-            AppCmd::JoinGroup { name: _name } => {
-                // TODO: resolve & join (subscribe to topics, etc.)
+            AppCmd::JoinGroup { name } => {
+                GATEWAY.join_group(name.clone()).await?;
+                let groups = GATEWAY.group_list().await?;
+                GATEWAY.push_event(AppEvent::Groups(groups));
             }
 
             AppCmd::EnterGroup { group_id } => {
-                // TODO: ensure subscription via waku and route messages back.
                 GATEWAY.push_event(AppEvent::EnteredGroup { group_id });
             }
 
@@ -96,20 +122,47 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
 
             // ───────────── Chat ─────────────
             AppCmd::SendMessage { group_id, body } => {
-                // TODO: route to user actor -> waku; echo for now
                 GATEWAY.push_event(AppEvent::ChatMessage(ChatMsg {
                     id: uuid::Uuid::new_v4().to_string(),
-                    group_id,
+                    group_id: group_id.clone(),
                     author: "me".into(),
-                    body,
+                    body: body.clone(),
                     ts_ms: now_ms(),
                 }));
+
+                GATEWAY.send_message(group_id, body).await?;
             }
 
             // ───────────── Votes ─────────────
-            AppCmd::Vote { vote_id, choice: _ } => {
-                // TODO: forward vote; when closed by backend emit VoteClosed
-                GATEWAY.push_event(AppEvent::VoteClosed { vote_id });
+            AppCmd::Vote {
+                group_id,
+                proposal_id,
+                choice,
+            } => {
+                // Process the user vote:
+                // if it come from the user, send the vote result to Waku
+                // if it come from the steward, just process it and return None
+                GATEWAY
+                    .process_user_vote(group_id.clone(), proposal_id, choice)
+                    .await?;
+
+                GATEWAY.push_event(AppEvent::ChatMessage(ChatMsg {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    group_id,
+                    author: "system".into(),
+                    body: format!(
+                        "Your vote ({}) has been submitted for proposal {proposal_id}",
+                        if choice { "YES" } else { "NO" }
+                    ),
+                    ts_ms: now_ms(),
+                }));
+
+                GATEWAY.push_event(AppEvent::VoteClosed {
+                    proposal_id: proposal_id,
+                });
+            }
+            AppCmd::LeaveGroup { group_id } => {
+                GATEWAY.push_event(AppEvent::LeaveGroup { group_id });
             }
 
             other => {
