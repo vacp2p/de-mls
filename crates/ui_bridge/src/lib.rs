@@ -4,6 +4,8 @@
 //! and pushing `AppEvent` back to the UI via the Gateway.
 //!
 //! It ensures there is a Tokio runtime (desktop app may not have one yet).
+
+// crates/ui_bridge/src/lib.rs
 use futures::channel::mpsc::{unbounded, UnboundedReceiver};
 use futures::StreamExt;
 use std::sync::Arc;
@@ -84,7 +86,7 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 }
             }
 
-            // ───────────── Groups (stubs or wire to actors) ─────────────
+            // ───────────── Groups ─────────────
             AppCmd::ListGroups => {
                 let groups = GATEWAY.group_list().await?;
                 GATEWAY.push_event(AppEvent::Groups(groups));
@@ -161,6 +163,21 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
             }
             AppCmd::LeaveGroup { group_id } => {
                 GATEWAY.push_event(AppEvent::LeaveGroup { group_id });
+            }
+
+            AppCmd::QuerySteward { group_id } => {
+                match GATEWAY.query_steward(group_id.clone()).await {
+                    Ok(is_steward) => {
+                        GATEWAY.push_event(AppEvent::StewardStatus {
+                            group_id,
+                            is_steward,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!("query_steward failed: {e:?}");
+                        GATEWAY.push_event(AppEvent::Error("Query steward failed".into()));
+                    }
+                }
             }
 
             other => {

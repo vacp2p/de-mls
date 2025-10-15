@@ -271,6 +271,18 @@ impl User {
         Ok(members.contains(&user_address.as_bytes().to_vec()))
     }
 
+    pub async fn is_user_steward_for_group(&self, group_name: &str) -> Result<bool, UserError> {
+        let group = {
+            let groups = self.groups.read().await;
+            groups
+                .get(group_name)
+                .cloned()
+                .ok_or_else(|| UserError::GroupNotFoundError)?
+        };
+        let is_steward = group.read().await.is_steward().await;
+        Ok(is_steward)
+    }
+
     /// Process messages from the welcome subtopic.
     ///
     /// ## Parameters:
@@ -395,8 +407,13 @@ impl User {
                         }) {
                             self.join_group(welcome).await?;
                             let msg = self
-                                .build_group_message(
-                                    "User joined to the group".as_bytes().to_vec(),
+                                .build_system_message(
+                                    format!(
+                                        "User {} joined to the group",
+                                        self.identity.identity_string()
+                                    )
+                                    .as_bytes()
+                                    .to_vec(),
                                     group_name,
                                 )
                                 .await?;

@@ -1,5 +1,4 @@
 // de-mls/src/bootstrap.rs
-
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -12,7 +11,7 @@ use crate::user_app_instance::{AppState, CoreCtx};
 
 #[derive(Clone, Debug)]
 pub struct BootstrapConfig {
-    /// TCP/UDP port for the embedded Waku node, e.g. "60000"
+    /// TCP/UDP port for the embedded Waku node
     pub node_port: String,
     /// Comma-separated peer multiaddrs parsed into a vec
     pub peers: Vec<Multiaddr>,

@@ -8,8 +8,9 @@
 
 use de_mls::protos::messages::v1::app_message;
 use de_mls::user_actor::{
-    CreateGroupRequest, GetProposalsForStewardVotingRequest, LeaveGroupRequest, SendGroupMessage,
-    StartStewardEpochRequest, StewardMessageRequest, UserVoteRequest,
+    CreateGroupRequest, GetProposalsForStewardVotingRequest, GetUserStatusRequest,
+    LeaveGroupRequest, SendGroupMessage, StartStewardEpochRequest, StewardMessageRequest,
+    UserVoteRequest,
 };
 use de_mls::user_app_instance::{create_user_instance, STEWARD_EPOCH};
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
@@ -163,24 +164,34 @@ impl Gateway {
 
                     UserAction::SendToApp(app_msg) => {
                         // voting
-                        if let Some(app_message::Payload::VotingProposal(vp)) = &app_msg.payload {
-                            let _ = evt_tx.unbounded_send(AppEvent::VoteRequested(VotePayload {
-                                group_id: vp.group_name.clone(),
-                                message: vp.payload.to_string(),
-                                timeout_ms: now_ms() as u64,
-                                proposal_id: vp.proposal_id.clone(),
-                            }));
-                            Ok::<(), anyhow::Error>(())
-                        } else {
-                            // generic chat fallback
-                            let _ = evt_tx.unbounded_send(AppEvent::ChatMessage(ChatMsg {
-                                id: uuid::Uuid::new_v4().to_string(),
-                                group_id: content_topic.application_name.to_string(),
-                                author: "system".to_string(),
-                                body: app_msg.to_string(),
-                                ts_ms: now_ms(),
-                            }));
-                            Ok::<(), anyhow::Error>(())
+                        let res = match &app_msg.payload {
+                            Some(app_message::Payload::VotingProposal(vp)) => evt_tx
+                                .unbounded_send(AppEvent::VoteRequested(VotePayload {
+                                    group_id: vp.group_name.clone(),
+                                    message: vp.payload.to_string(),
+                                    timeout_ms: now_ms() as u64,
+                                    proposal_id: vp.proposal_id.clone(),
+                                }))
+                                .map_err(|e| {
+                                    anyhow::anyhow!("error sending vote requested event: {e}")
+                                }),
+                            Some(app_message::Payload::ConversationMessage(cm)) => evt_tx
+                                .unbounded_send(AppEvent::ChatMessage(ChatMsg {
+                                    id: uuid::Uuid::new_v4().to_string(),
+                                    group_id: cm.group_name.clone(),
+                                    author: cm.sender.clone(),
+                                    body: String::from_utf8_lossy(&cm.message).to_string(),
+                                    ts_ms: now_ms(),
+                                }))
+                                .map_err(|e| anyhow::anyhow!("error sending chat message: {e}")),
+                            _ => {
+                                AppEvent::Error(format!("Invalid app message: {app_msg}"));
+                                Ok::<(), anyhow::Error>(())
+                            }
+                        };
+                        match res {
+                            Ok(()) => Ok(()),
+                            Err(e) => Err(anyhow::anyhow!("error sending app message: {e}")),
                         }
                     }
 
@@ -374,6 +385,14 @@ impl Gateway {
         let core = self.core();
         let groups = core.groups.all().await;
         Ok(groups)
+    }
+
+    pub async fn query_steward(&self, group_name: String) -> anyhow::Result<bool> {
+        let user = self
+            .user()
+            .ok_or_else(|| anyhow::anyhow!("user not logged in"))?;
+        let is_steward = user.ask(GetUserStatusRequest { group_name }).await?;
+        Ok(is_steward)
     }
 }
 

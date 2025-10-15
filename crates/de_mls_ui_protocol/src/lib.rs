@@ -1,4 +1,5 @@
 //! UI <-> Gateway protocol (PoC). Keep it dependency-light (serde only).
+// crates/de_mls_ui_protocol/src/lib.rs
 pub mod v1 {
     use serde::{Deserialize, Serialize};
 
@@ -9,6 +10,17 @@ pub mod v1 {
         pub author: String,
         pub body: String,
         pub ts_ms: i64,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum ProposalKind {
+        AddMember,
+        RemoveMember,
+        AddSteward,
+        RemoveSteward,
+        UpdateEpoch,
+        Custom,  // fallback / proto we don’t model yet
+        Unknown, // parsing failed
     }
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +62,9 @@ pub mod v1 {
         LeaveGroup {
             group_id: String,
         },
+        QuerySteward {
+            group_id: String,
+        },
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +79,7 @@ pub mod v1 {
         VoteRequested(VotePayload),
         VoteClosed { proposal_id: u32 },
         LeaveGroup { group_id: String },
+        StewardStatus { group_id: String, is_steward: bool },
         Error(String),
     }
 }

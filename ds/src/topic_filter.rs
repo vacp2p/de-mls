@@ -40,4 +40,13 @@ impl TopicFilter {
     pub async fn snapshot(&self) -> Vec<WakuContentTopic> {
         self.list.read().await.clone()
     }
+
+    pub async fn get_group_name(&self, t: &WakuContentTopic) -> Option<String> {
+        self.list
+            .read()
+            .await
+            .iter()
+            .find(|x| x == &t)
+            .map(|x| x.application_name.clone().to_string())
+    }
 }

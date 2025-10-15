@@ -189,3 +189,20 @@ impl Message<ConsensusEventMessage> for User {
             .await
     }
 }
+
+pub struct GetUserStatusRequest {
+    pub group_name: String,
+}
+
+impl Message<GetUserStatusRequest> for User {
+    type Reply = Result<bool, UserError>;
+
+    async fn handle(
+        &mut self,
+        msg: GetUserStatusRequest,
+        _ctx: Context<'_, Self, Self::Reply>,
+    ) -> Self::Reply {
+        let is_steward = self.is_user_steward_for_group(&msg.group_name).await?;
+        Ok(is_steward)
+    }
+}

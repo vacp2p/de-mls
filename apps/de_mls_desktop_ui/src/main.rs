@@ -1,3 +1,4 @@
+// apps/de_mls_desktop_ui/src/main.rs
 #![allow(non_snake_case)]
 
 use dioxus::prelude::*;
@@ -19,15 +20,22 @@ struct SessionState {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct GroupsState {
-    items: Vec<String>, // <- names only
+    items: Vec<String>, // names only
     loaded: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct ChatState {
-    group_id: Option<String>,
-    messages: Vec<ChatMsg>,
-    active_vote: Option<VotePayload>,
+    opened_group: Option<String>, // which group is “Open” in the UI
+    messages: Vec<ChatMsg>,       // all messages; filtered per view
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct ConsensusState {
+    is_steward: bool,         
+    pending: Option<VotePayload>, // active/pending proposal for opened group
+    // For now we keep “results” as simple strings; swap to your real type later.
+    latest_results: Vec<(String, String)>, // (vote_id, result text)
 }
 
 // ─────────────────────────── Routing ───────────────────────────
@@ -36,10 +44,8 @@ struct ChatState {
 enum Route {
     #[route("/")]
     Login,
-    #[route("/groups")]
-    Groups,
-    #[route("/chat/:group_id")]
-    Chat { group_id: String },
+    #[route("/home")]
+    Home, // unified page
 }
 
 // ─────────────────────────── Entry ───────────────────────────
@@ -66,7 +72,7 @@ fn main() {
     let config = Config::new().with_window(
         WindowBuilder::new()
             .with_title("DE-MLS Desktop UI")
-            .with_inner_size(LogicalSize::new(800, 600))
+            .with_inner_size(LogicalSize::new(1280, 820))
             .with_resizable(true),
     );
 
@@ -78,6 +84,7 @@ fn App() -> Element {
     use_context_provider(|| Signal::new(SessionState::default()));
     use_context_provider(|| Signal::new(GroupsState::default()));
     use_context_provider(|| Signal::new(ChatState::default()));
+    use_context_provider(|| Signal::new(ConsensusState::default()));
 
     rsx! {
         style { {CSS} }
@@ -87,7 +94,6 @@ fn App() -> Element {
 }
 
 fn HeaderBar() -> Element {
-    tracing::info!("HeaderBar component rendered");
     // local signal to reflect current level in the select
     let level = use_signal(|| std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()));
 
@@ -95,7 +101,6 @@ fn HeaderBar() -> Element {
         let mut level = level.clone();
         move |evt: FormEvent| {
             let new_val = evt.value();
-            // apply live
             if let Err(e) = crate::logging::set_level(&new_val) {
                 tracing::warn!("failed to set log level: {}", e);
             } else {
@@ -139,8 +144,8 @@ fn Login() -> Element {
                 match GATEWAY.next_event().await {
                     Some(AppEvent::LoggedIn(name)) => {
                         sess.write().name = Some(name);
-                        nav.replace(Route::Groups);
-                        break; // leave loop after navigating
+                        nav.replace(Route::Home);
+                        break;
                     }
                     _ => {}
                 }
@@ -160,7 +165,6 @@ fn Login() -> Element {
         }
         sess.write().key = Some(k.clone());
         spawn(async move {
-            let _ = GATEWAY.start().await;
             let _ = GATEWAY.send(AppCmd::Login { private_key: k }).await;
         });
     };
@@ -182,42 +186,67 @@ fn Login() -> Element {
     }
 }
 
-fn Groups() -> Element {
-    let nav = use_navigator();
-    let groups_state = use_context::<Signal<GroupsState>>();
-    let mut show_modal = use_signal(|| false);
-    let mut new_name = use_signal(|| String::new());
-    let mut create_mode = use_signal(|| true); // true=create, false=join
+fn Home() -> Element {
+    let groups = use_context::<Signal<GroupsState>>();
+    let chat = use_context::<Signal<ChatState>>();
+    let cons = use_context::<Signal<ConsensusState>>();
 
     // Ask backend once
     use_future({
-        let groups_state = groups_state.clone();
+        let groups = groups.clone();
         move || async move {
-            if !groups_state.read().loaded {
-                let _ = GATEWAY.start().await;
+            if !groups.read().loaded {
                 let _ = GATEWAY.send(AppCmd::ListGroups).await;
             }
         }
     });
-    // Local single-consumer loop: only Groups() listens for groups-related events
+
+    // Local event loop for: Groups, ChatMessage, VoteRequested, VoteClosed
     use_future({
-        let mut groups_state = groups_state.clone();
+        let mut groups = groups.clone();
+        let mut chat = chat.clone();
+        let mut cons = cons.clone();
         move || async move {
             loop {
                 match GATEWAY.next_event().await {
-                    Some(AppEvent::Groups(names)) => {
-                        groups_state.write().items = names;
-                        groups_state.write().loaded = true;
-                    }
-                    Some(AppEvent::GroupCreated(name)) => {
-                        let mut st = groups_state.write();
-                        if !st.items.iter().any(|g| g == &name) {
-                            st.items.push(name);
+                    Some(AppEvent::StewardStatus {
+                        group_id,
+                        is_steward,
+                    }) => {
+                        // only update if it is the currently opened group
+                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
+                            cons.write().is_steward = is_steward;
                         }
                     }
+                    Some(AppEvent::Groups(names)) => {
+                        groups.write().items = names;
+                        groups.write().loaded = true;
+                    }
+                    Some(AppEvent::ChatMessage(msg)) => {
+                        chat.write().messages.push(msg);
+                    }
+                    Some(AppEvent::VoteRequested(vp)) => {
+                        // only hold if it matches the currently opened group
+                        let opened = chat.read().opened_group.clone();
+                        if opened.as_deref() == Some(vp.group_id.as_str()) {
+                            cons.write().pending = Some(vp);
+                        }
+                        // else ignore (or queue per group if you prefer)
+                    }
+                    Some(AppEvent::VoteClosed { proposal_id }) => {
+                        // Mock a result label for now
+                        cons.write()
+                            .latest_results
+                            .push((proposal_id.to_string(), "closed".into()));
+                        cons.write().pending = None;
+                    }
                     Some(AppEvent::GroupRemoved(name)) => {
-                        let mut st = groups_state.write();
-                        st.items.retain(|g| g != &name);
+                        // keep in sync if backend asks us to remove
+                        let mut g = groups.write();
+                        g.items.retain(|n| n != &name);
+                        if chat.read().opened_group.as_deref() == Some(name.as_str()) {
+                            chat.write().opened_group = None;
+                        }
                     }
                     _ => {}
                 }
@@ -225,65 +254,116 @@ fn Groups() -> Element {
         }
     });
 
+    rsx! {
+        div { class: "page home",
+            // 3 columns
+            div { class: "layout",
+                // 1) Group list
+                GroupListSection {}
+                // 2) Chat
+                ChatSection {}
+                // 3) Consensus
+                ConsensusSection {}
+            }
+        }
+    }
+}
+
+// ─────────────────────────── Sections ───────────────────────────
+
+fn GroupListSection() -> Element {
+    let groups_state = use_context::<Signal<GroupsState>>();
+    let mut chat = use_context::<Signal<ChatState>>();
+    let mut show_modal = use_signal(|| false);
+    let mut new_name = use_signal(|| String::new());
+    let mut create_mode = use_signal(|| true); // true=create, false=join
+
+    // Take a snapshot so RSX/closures don't borrow `groups_state` for 'static.
+    let items_snapshot: Vec<String> = groups_state.read().items.clone();
+    let loaded = groups_state.read().loaded;
+
+    let mut open_group = {
+        move |name: String| {
+            chat.write().opened_group = Some(name.clone());
+            let gname = name.clone();
+            spawn(async move {
+                let _ = GATEWAY
+                    .send(AppCmd::EnterGroup {
+                        group_id: gname.clone(),
+                    })
+                    .await;
+                let _ = GATEWAY
+                    .send(AppCmd::LoadHistory {
+                        group_id: gname.clone(),
+                    })
+                    .await;
+                let _ = GATEWAY
+                    .send(AppCmd::QuerySteward {
+                        group_id: gname.clone(),
+                    })
+                    .await;
+            });
+        }
+    };
+
     let mut modal_submit = {
         let mut show_modal = show_modal.clone();
         let mut new_name = new_name.clone();
         let create_mode = create_mode.clone();
-        let mut groups_state = groups_state.clone();
+        let mut open_group = open_group;
 
         move |_| {
             let name = new_name.read().trim().to_string();
             if name.is_empty() {
                 return;
             }
-
-            groups_state.write().loaded = false;
-
+            // clone name for async action so we can still use `name` locally
+            let action_name = name.clone();
             if *create_mode.read() {
                 spawn(async move {
-                    tracing::debug!("Creating group: {}", name);
                     let _ = GATEWAY
-                        .send(AppCmd::CreateGroup { name: name.clone() })
+                        .send(AppCmd::CreateGroup {
+                            name: action_name.clone(),
+                        })
                         .await;
                     let _ = GATEWAY.send(AppCmd::ListGroups).await;
                 });
             } else {
                 spawn(async move {
-                    let _ = GATEWAY.send(AppCmd::JoinGroup { name: name.clone() }).await;
+                    let _ = GATEWAY
+                        .send(AppCmd::JoinGroup {
+                            name: action_name.clone(),
+                        })
+                        .await;
                     let _ = GATEWAY.send(AppCmd::ListGroups).await;
                 });
             }
-
+            // Immediately open the group in the UI
+            open_group(name);
             new_name.set(String::new());
             show_modal.set(false);
         }
     };
 
     rsx! {
-        div { class: "page groups",
-            h1 { "Groups" }
+        div { class: "panel groups",
+            h2 { "Groups" }
 
-            div { class: "toolbar",
-                button { class: "primary", onclick: move |_| { show_modal.set(true); }, "New / Join" }
-            }
-
-            if !groups_state.read().loaded {
+            if !loaded {
                 div { class: "hint", "Loading groups…" }
-            } else if groups_state.read().items.is_empty() {
+            } else if items_snapshot.is_empty() {
                 div { class: "hint", "No groups yet." }
             } else {
                 ul { class: "group-list",
-                    for name in groups_state.read().items.iter() {
+                    for name in items_snapshot.into_iter() {
+                        // let name_for_btn = name.clone();
                         li {
                             key: "{name}",
                             class: "group-row",
                             div { class: "title", "{name}" }
                             button {
                                 class: "secondary",
-                                onclick: {
-                                    let group = name.clone();
-                                    move |_| { nav.push(Route::Chat { group_id: group.clone() }); }
-                                },
+                                onclick: move |_| { open_group(name.clone()); },
                                 "Open"
                             }
                         }
@@ -291,9 +371,14 @@ fn Groups() -> Element {
                 }
             }
 
+            div { class: "footer",
+                button { class: "primary", onclick: move |_| { create_mode.set(true); show_modal.set(true); }, "Create" }
+                button { class: "primary", onclick: move |_| { create_mode.set(false); show_modal.set(true); }, "Join" }
+            }
+
             if *show_modal.read() {
                 Modal {
-                    title: "Create / Join Group".to_string(),
+                    title: if *create_mode.read() { "Create Group".to_string() } else { "Join Group".to_string() },
                     on_close: move || { show_modal.set(false); },
                     div { class: "form-row",
                         label { "Group name" }
@@ -304,15 +389,7 @@ fn Groups() -> Element {
                             placeholder: "mls-devs",
                         }
                     }
-                    div { class: "form-row",
-                        label { "Mode" }
-                        select {
-                            value: if *create_mode.read() { "create" } else { "join" },
-                            oninput: move |e| create_mode.set(e.value() == "create"),
-                            option { value: "create", "Create" }
-                            option { value: "join",   "Join" }
-                        }
-                    }
+
                     div { class: "actions",
                         button { class: "primary", onclick: move |_| { modal_submit(()); }, "Confirm" }
                         button { class: "ghost",   onclick: move |_| { show_modal.set(false); }, "Cancel" }
@@ -323,82 +400,95 @@ fn Groups() -> Element {
     }
 }
 
-#[component]
-fn Chat(group_id: String) -> Element {
-    let mut chat_state = use_context::<Signal<ChatState>>();
+fn ChatSection() -> Element {
+    let chat = use_context::<Signal<ChatState>>();
+    let sess = use_context::<Signal<SessionState>>();
     let mut msg_input = use_signal(|| String::new());
 
-    // Enter room + ask history once
-    use_future({
-        let mut chat_state = chat_state.clone();
-        let gid = group_id.clone();
-        move || {
-            let gid = gid.clone();
-            async move {
-                chat_state.write().group_id = Some(gid.clone());
-                let _ = GATEWAY
-                    .send(AppCmd::EnterGroup {
-                        group_id: gid.clone(),
-                    })
-                    .await;
-                let _ = GATEWAY
-                    .send(AppCmd::LoadHistory {
-                        group_id: gid.clone(),
-                    })
-                    .await;
-            }
-        }
-    });
-
-    // Local single-consumer loop: only Chat() listens to chat-related events
-    use_future({
-        let mut chat_state = chat_state.clone();
-        move || async move {
-            loop {
-                match GATEWAY.next_event().await {
-                    Some(AppEvent::ChatMessage(msg)) => {
-                        chat_state.write().messages.push(msg);
-                    }
-                    Some(AppEvent::VoteRequested(vote)) => {
-                        chat_state.write().active_vote = Some(vote);
-                    }
-                    Some(AppEvent::VoteClosed { .. }) => {
-                        chat_state.write().active_vote = None;
-                    }
-                    _ => {}
-                }
-            }
-        }
-    });
-
-    // Handlers
     let send_msg = {
-        let gid = group_id.clone();
         let mut msg_input = msg_input.clone();
+        let chat = chat.clone();
         move |_| {
             let text = msg_input.read().trim().to_string();
             if text.is_empty() {
                 return;
             }
-            msg_input.set(String::new());
+            let Some(gid) = chat.read().opened_group.clone() else {
+                return;
+            };
 
-            let gid2 = gid.clone();
-            let text2 = text.clone();
+            msg_input.set(String::new());
             spawn(async move {
                 let _ = GATEWAY
                     .send(AppCmd::SendMessage {
-                        group_id: gid2,
-                        body: text2,
+                        group_id: gid,
+                        body: text,
                     })
                     .await;
             });
         }
     };
 
+    // Only render messages for the opened group
+    let msgs_for_group = {
+        let opened = chat.read().opened_group.clone();
+        chat.read()
+            .messages
+            .iter()
+            .filter(|m| Some(m.group_id.as_str()) == opened.as_deref())
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    let my_name = sess.read().name.clone();
+
+    rsx! {
+        div { class: "panel chat",
+            h2 { "Chat" }
+            if chat.read().opened_group.is_none() {
+                div { class: "hint", "Pick a group to chat." }
+            } else {
+                div { class: "messages",
+                    for (i, m) in msgs_for_group.iter().enumerate() {
+                        if my_name.as_deref() == Some(m.author.as_str()) || m.author.eq_ignore_ascii_case("me") {
+                            div { key: "{i}", class: "msg me",
+                                span { class: "from", "{m.author}" }
+                                span { class: "body", "{m.body}" }
+                            }
+                        } else if m.author.eq_ignore_ascii_case("system") {
+                            div { key: "{i}", class: "msg system",
+                                span { class: "body", "{m.body}" }
+                            }
+                        } else {
+                            div { key: "{i}", class: "msg",
+                                span { class: "from", "{m.author}" }
+                                span { class: "body", "{m.body}" }
+                            }
+                        }
+                    }
+                }
+                div { class: "composer",
+                    input {
+                        r#type: "text",
+                        value: "{msg_input}",
+                        oninput: move |e| msg_input.set(e.value()),
+                        placeholder: "Type a message…",
+                    }
+                    button { class: "primary", onclick: send_msg, "Send" }
+                }
+            }
+        }
+    }
+}
+
+fn ConsensusSection() -> Element {
+    let chat = use_context::<Signal<ChatState>>();
+    let cons = use_context::<Signal<ConsensusState>>();
+
     let vote_yes = {
-        let chat_state = chat_state.clone();
+        let cons = cons.clone();
         move |_| {
-            if let Some(v) = chat_state.read().active_vote.clone() {
+            if let Some(v) = cons.read().pending.clone() {
                 spawn(async move {
                     let _ = GATEWAY
                         .send(AppCmd::Vote {
@@ -412,9 +502,9 @@ fn Chat(group_id: String) -> Element {
         }
     };
     let vote_no = {
-        let chat_state = chat_state.clone();
+        let cons = cons.clone();
         move |_| {
-            if let Some(v) = chat_state.read().active_vote.clone() {
+            if let Some(v) = cons.read().pending.clone() {
                 spawn(async move {
                     let _ = GATEWAY
                         .send(AppCmd::Vote {
@@ -428,43 +518,72 @@ fn Chat(group_id: String) -> Element {
         }
     };
 
+    // active only when we have an opened group and a pending proposal for it
+    let opened = chat.read().opened_group.clone();
+    let pending = cons
+        .read()
+        .pending
+        .clone()
+        .filter(|p| Some(p.group_id.as_str()) == opened.as_deref());
+
     rsx! {
-        div { class: "page chat",
-            h1 { "Group: {group_id}" }
+        div { class: "panel consensus",
+            h2 { "Consensus" }
 
-            div { class: "messages",
-                for (i, m) in chat_state.read().messages.iter().enumerate() {
-                    div { key: "{i}", class: "msg",
-                        span { class: "from", "{m.author}" }
-                        span { class: "body", "{m.body}" }
+            if let Some(_group) = opened {
+                // Steward status
+                div { class: "status",
+                    span { class: "muted", "You are " }
+                    if cons.read().is_steward {
+                        span { class: "good", "a steward" }
+                    } else {
+                        span { class: "bad", "not a steward" }
                     }
                 }
-            }
 
-            div { class: "composer",
-                input {
-                    r#type: "text",
-                    value: "{msg_input}",
-                    oninput: move |e| msg_input.set(e.value()),
-                    placeholder: "Type a message…",
+                // Current proposal block
+                if let Some(v) = pending {
+                    div { class: "proposal",
+                        div { class: "meta",
+                            span { class: "label", "Proposal ID:" }
+                            code { "{v.proposal_id}" }
+                        }
+                        div { class: "payload",
+                            span { class: "label", "Payload:" }
+                            pre { "{v.message}" }
+                        }
+
+                        // Buttons — active now; when you have epochs, gate here.
+                        div { class: "actions",
+                            button { class: "primary", onclick: vote_yes, "YES" }
+                            button { class: "ghost",   onclick: vote_no,  "NO"  }
+                        }
+                    }
+                } else {
+                    div { class: "hint", "No active proposal." }
                 }
-                button { class: "primary", onclick: send_msg, "Send" }
-            }
 
-            if let Some(v) = chat_state.read().active_vote.as_ref() {
-                Modal {
-                    title: "Vote".to_string(),
-                    on_close: move || { chat_state.write().active_vote = None; },
-                    p { "{v.proposal_id}" }
-                    div { class: "actions",
-                        button { class: "primary", onclick: vote_yes, "YES" }
-                        button { class: "ghost",   onclick: vote_no,  "NO" }
+                // Latest results
+                if cons.read().latest_results.is_empty() {
+                    div { class: "hint small", "No decisions yet." }
+                } else {
+                    div { class: "results",
+                        h3 { "Latest Consensus Results" }
+                        ul {
+                            for (vid, res) in cons.read().latest_results.iter() {
+                                li { "{vid}: {res}" }
+                            }
+                        }
                     }
                 }
+            } else {
+                div { class: "hint", "Open a group to see proposals & voting." }
             }
         }
     }
 }
+
+// ─────────────────────────── Modal ───────────────────────────
 
 #[derive(Props, PartialEq, Clone)]
 struct ModalProps {
@@ -497,15 +616,31 @@ const CSS: &str = r#"
   --primary: #4f8cff;
   --primary-2: #3b6ad1;
   --border: #23262d;
+  --good: #17c964;
+  --bad: #f31260;
 }
 
 * { box-sizing: border-box; }
 html, body, #main { height: 100%; width: 100%; margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, Noto Sans, Apple Color Emoji, Segoe UI Emoji; }
 a { color: var(--primary); text-decoration: none; }
 
-.page { max-width: 960px; margin: 24px auto; padding: 12px; }
+.page { max-width: 1400px; margin: 0 auto; }
 h1 { margin: 0 0 16px 0; font-size: 22px; }
 
+.header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  background: rgba(255,255,255,0.03); position: sticky; top: 0; z-index: 5;
+}
+.header .brand { font-weight: 700; letter-spacing: .5px; }
+.header .spacer { flex: 1; }
+.header .label { color: var(--muted); }
+.header .level {
+  padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--card); color: var(--text); outline: none; font-size: 13px;
+}
+
+.page.login { max-width: 520px; margin-top: 32px; }
 .form-row { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; }
 input, select {
   padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
@@ -520,27 +655,78 @@ button.primary:hover { background: var(--primary-2); }
 button.secondary { background: transparent; }
 button.ghost { background: transparent; border-color: var(--border); color: var(--muted); }
 button.icon { width: 32px; height: 32px; border-radius: 8px; }
+button.mini { padding: 4px 8px; border-radius: 8px; font-size: 12px; }
 
-.toolbar { display: flex; justify-content: flex-end; margin-bottom: 12px; }
-.hint { color: var(--muted); padding: 16px 0; }
-
-ul.group-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
-.group-row {
-  display: flex; align-items: center; justify-content: space-between;
-  background: var(--card); padding: 12px 14px; border-radius: 12px; border: 1px solid var(--border);
+/* Home layout */
+.page.home { padding: 12px; }
+.layout {
+  display: grid;
+  grid-template-columns: 280px 1fr 460px;
+  gap: 12px;
 }
-.group-row .title { font-weight: 600; }
 
-.page.chat .messages {
-  height: 60vh; overflow-y: auto; border: 1px solid var(--border);
-  background: var(--card); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 10px;
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+
+.panel {
+  background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+  padding: 12px; display: flex; flex-direction: column; gap: 10px;
 }
-.msg { display: flex; gap: 8px; }
-.msg .from { color: var(--muted); min-width: 120px; }
-.msg .body { color: var(--text); }
+.panel h2 { margin: 0 0 6px 0; font-size: 18px; }
+.hint { color: var(--muted); padding: 8px 0; }
+.hint.small { font-size: 12px; }
 
-.composer { display: flex; gap: 8px; margin-top: 12px; }
+.panel.groups .group-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
+/* Group list a bit wider rows to align with long names */
+.group-row { display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; }
+.group-row .title { font-weight: 600; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.panel.groups .footer { margin-top: auto; display: flex; justify-content: flex-end; }
+.panel.groups .footer { gap: 8px; }
+.panel.groups .footer .primary { flex: 1; }
 
+/* Chat */
+.panel.chat .messages {
+  min-height: 360px; height: 58vh; overflow-y: auto; border: 1px solid var(--border);
+  border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 10px;
+}
+.msg { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.msg.me { align-items: flex-end; }
+.msg.me .body { background: rgba(79,140,255,0.15); border: 1px solid rgba(79,140,255,0.35); padding: 8px 10px; border-radius: 10px; }
+.msg.system { opacity: 0.9; }
+.msg.system .body { font-style: italic; color: var(--muted); background: transparent; border: none; padding: 0; }
+.msg .from { color: var(--muted); font-size: 16px; }
+.msg .body { color: var(--text); background: rgba(255,255,255,0.05); border: 1px solid var(--border); padding: 8px 10px; border-radius: 10px; }
+.composer { display: flex; gap: 8px; align-items: center; }
+.composer input { flex: 1; min-width: 0; }
+.composer button { flex: 0 0 auto; }
+
+/* Consensus panel */
+.panel.consensus .status { display: flex; align-items: center; gap: 8px; }
+.panel.consensus .status .good { color: var(--good); font-weight: 600; }
+.panel.consensus .status .bad  { color: var(--bad);  font-weight: 600; }
+
+.panel.consensus .proposal {
+  border: 1px solid var(--border); border-radius: 10px; padding: 10px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.panel.consensus .kind-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+}
+.panel.consensus .pill {
+  display: inline-block; padding: 4px 8px; border-radius: 999px;
+  background: rgba(79,140,255,0.12); border: 1px solid rgba(79,140,255,0.35);
+  color: var(--text); font-size: 12px;
+}
+.panel.consensus .id { color: var(--muted); font-size: 12px; }
+.panel.consensus .kv { display: grid; grid-template-columns: 92px 1fr; align-items: baseline; gap: 8px; }
+.panel.consensus .kv .k { color: var(--muted); }
+.panel.consensus .kv .v { color: var(--text); }
+.panel.consensus .raw { margin: 0; padding: 8px; border: 1px dashed var(--border); border-radius: 8px; background: rgba(255,255,255,0.03); font-size: 12px; }
+.panel.consensus .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
+
+/* Modal */
 .modal-backdrop {
   position: fixed; inset: 0; background: rgba(0,0,0,.45);
   display: flex; align-items: center; justify-content: center;
@@ -556,16 +742,4 @@ ul.group-list { list-style: none; padding: 0; margin: 0; display: flex; flex-dir
 }
 .modal-body { padding: 14px; display: flex; flex-direction: column; gap: 10px; }
 .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
-.header {
-  display: flex; align-items: center; gap: 12px;
-  padding: 8px 12px; border-bottom: 1px solid var(--border);
-  background: rgba(255,255,255,0.03); position: sticky; top: 0; z-index: 5;
-}
-.header .brand { font-weight: 700; letter-spacing: .5px; }
-.header .spacer { flex: 1; }
-.header .label { color: var(--muted); }
-.header .level {
-  padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border);
-  background: var(--card); color: var(--text); outline: none; font-size: 13px;
-}
 "#;
