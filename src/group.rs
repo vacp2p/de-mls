@@ -306,15 +306,19 @@ impl Group {
     /// ## Effects:
     /// - Adds an AddMember proposal to the current epoch
     /// - Proposal will be processed in the next steward epoch
+    /// - Returns the proposal details for UI notification
     pub async fn store_invite_proposal(
         &mut self,
         key_package: Box<KeyPackage>,
-    ) -> Result<(), GroupError> {
+    ) -> Result<(String, String), GroupError> {
         let mut state_machine = self.state_machine.write().await;
         state_machine
-            .add_proposal(GroupUpdateRequest::AddMember(key_package))
+            .add_proposal(GroupUpdateRequest::AddMember(key_package.clone()))
             .await;
-        Ok(())
+        
+        // Extract wallet address for UI display
+        let address = format!("0x{}", hex::encode(key_package.leaf_node().credential().serialized_content()));
+        Ok(("Add Member".to_string(), address))
     }
 
     /// Store a remove proposal in the steward queue for the current epoch.
@@ -325,12 +329,13 @@ impl Group {
     /// ## Effects:
     /// - Adds a RemoveMember proposal to the current epoch
     /// - Proposal will be processed in the next steward epoch
-    pub async fn store_remove_proposal(&mut self, identity: String) -> Result<(), GroupError> {
+    /// - Returns the proposal details for UI notification
+    pub async fn store_remove_proposal(&mut self, identity: String) -> Result<(String, String), GroupError> {
         let mut state_machine = self.state_machine.write().await;
         state_machine
-            .add_proposal(GroupUpdateRequest::RemoveMember(identity))
+            .add_proposal(GroupUpdateRequest::RemoveMember(identity.clone()))
             .await;
-        Ok(())
+        Ok(("Remove Member".to_string(), identity))
     }
 
     /// Process an application message and determine the appropriate action.
@@ -533,6 +538,15 @@ impl Group {
             .read()
             .await
             .get_current_epoch_proposals_count()
+            .await
+    }
+
+    /// Get the current epoch proposals for UI display.
+    pub async fn get_current_epoch_proposals(&self) -> Vec<GroupUpdateRequest> {
+        self.state_machine
+            .read()
+            .await
+            .get_current_epoch_proposals()
             .await
     }
 

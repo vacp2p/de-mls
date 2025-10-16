@@ -104,6 +104,11 @@ impl Steward {
         self.voting_epoch_proposals.lock().await.len()
     }
 
+    /// Get the current epoch proposals for UI display.
+    pub async fn get_current_epoch_proposals(&self) -> Vec<GroupUpdateRequest> {
+        self.current_epoch_proposals.lock().await.clone()
+    }
+
     /// Apply proposals for the current epoch (called after successful voting).
     pub async fn empty_voting_epoch_proposals(&mut self) {
         self.voting_epoch_proposals.lock().await.clear();

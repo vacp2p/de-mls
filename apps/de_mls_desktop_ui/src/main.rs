@@ -49,6 +49,8 @@ struct ConsensusState {
     pending: Option<VotePayload>, // active/pending proposal for opened group
     // Store results with timestamps for better display
     latest_results: Vec<(u32, Outcome, u64)>, // (vote_id, result, timestamp_ms)
+    // Store current epoch proposals for stewards
+    current_epoch_proposals: Vec<(String, String)>, // (action, address) pairs
 }
 
 // ─────────────────────────── Routing ───────────────────────────
@@ -231,6 +233,31 @@ fn Home() -> Element {
                             cons.write().is_steward = is_steward;
                         }
                     }
+                    Some(AppEvent::CurrentEpochProposals {
+                        group_id,
+                        proposals,
+                    }) => {
+                        // only update if it is the currently opened group
+                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
+                            cons.write().current_epoch_proposals = proposals;
+                        }
+                    }
+                    Some(AppEvent::ProposalAdded {
+                        group_id,
+                        action,
+                        address,
+                    }) => {
+                        // only update if it is the currently opened group
+                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
+                            cons.write().current_epoch_proposals.push((action, address));
+                        }
+                    }
+                    Some(AppEvent::CurrentEpochProposalsCleared { group_id }) => {
+                        // only update if it is the currently opened group
+                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
+                            cons.write().current_epoch_proposals.clear();
+                        }
+                    }
                     Some(AppEvent::Groups(names)) => {
                         groups.write().items = names;
                         groups.write().loaded = true;
@@ -319,6 +346,11 @@ fn GroupListSection() -> Element {
                     .await;
                 let _ = GATEWAY
                     .send(AppCmd::QuerySteward {
+                        group_id: gname.clone(),
+                    })
+                    .await;
+                let _ = GATEWAY
+                    .send(AppCmd::GetCurrentEpochProposals {
                         group_id: gname.clone(),
                     })
                     .await;
@@ -506,9 +538,12 @@ fn ConsensusSection() -> Element {
     let cons = use_context::<Signal<ConsensusState>>();
 
     let vote_yes = {
-        let cons = cons.clone();
+        let mut cons = cons.clone();
         move |_| {
-            if let Some(v) = cons.read().pending.clone() {
+            let pending_proposal = cons.read().pending.clone();
+            if let Some(v) = pending_proposal {
+                // Clear the pending proposal immediately to close the vote window
+                cons.write().pending = None;
                 spawn(async move {
                     let _ = GATEWAY
                         .send(AppCmd::Vote {
@@ -522,9 +557,12 @@ fn ConsensusSection() -> Element {
         }
     };
     let vote_no = {
-        let cons = cons.clone();
+        let mut cons = cons.clone();
         move |_| {
-            if let Some(v) = cons.read().pending.clone() {
+            let pending_proposal = cons.read().pending.clone();
+            if let Some(v) = pending_proposal {
+                // Clear the pending proposal immediately to close the vote window
+                cons.write().pending = None;
                 spawn(async move {
                     let _ = GATEWAY
                         .send(AppCmd::Vote {
@@ -561,41 +599,61 @@ fn ConsensusSection() -> Element {
                     }
                 }
 
-                // Current proposal block
-                if let Some(v) = pending {
-                    div { class: "proposal",
-                        div { class: "proposal-header",
-                            span { class: "proposal-label", "Proposal:" }
-                            span { class: "proposal-id", "{v.proposal_id}" }
-                        }
-                        div { class: "proposal-payload",
-                            span { class: "payload-label", "Payload:" }
-                            div { class: "payload-items",
-                                for (action, id) in convert_group_requests_to_display(&v.group_requests) {
-                                    div { class: "payload-item",
-                                        span { class: "action", "{action}:" }
-                                        span { class: "id", "{id}" }
-                                    }
+                // Pending Requests section
+                div { class: "consensus-section",
+                    h3 { "Pending Requests" }
+                    if cons.read().is_steward && !cons.read().current_epoch_proposals.is_empty() {
+                        div { class: "proposals-window",
+                            for (action, address) in &cons.read().current_epoch_proposals {
+                                div { class: "proposal-item",
+                                    span { class: "action", "{action}:" }
+                                    span { class: "address", "{address}" }
                                 }
                             }
                         }
-
-                        // Buttons — active now; when you have epochs, gate here.
-                        div { class: "actions",
-                            button { class: "primary", onclick: vote_yes, "YES" }
-                            button { class: "ghost",   onclick: vote_no,  "NO"  }
-                        }
+                    } else {
+                        div { class: "no-data", "No pending requests" }
                     }
-                } else {
-                    div { class: "hint", "No active proposal." }
                 }
 
-                // Latest results
-                if cons.read().latest_results.is_empty() {
-                    div { class: "hint small", "No decisions yet." }
-                } else {
-                    div { class: "results",
-                        h3 { "Latest Consensus Results" }
+                // Proposal for Vote section
+                div { class: "consensus-section",
+                    h3 { "Proposal for Vote" }
+                    if let Some(v) = pending {
+                        div { class: "proposal",
+                            div { class: "proposal-header",
+                                span { class: "proposal-label", "Proposal:" }
+                                span { class: "proposal-id", "{v.proposal_id}" }
+                            }
+                            div { class: "proposal-payload",
+                                span { class: "payload-label", "Payload:" }
+                                div { class: "payload-items",
+                                    for (action, id) in convert_group_requests_to_display(&v.group_requests) {
+                                        div { class: "payload-item",
+                                            span { class: "action", "{action}:" }
+                                            span { class: "id", "{id}" }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Buttons — active now; when you have epochs, gate here.
+                            div { class: "actions",
+                                button { class: "primary", onclick: vote_yes, "YES" }
+                                button { class: "ghost",   onclick: vote_no,  "NO"  }
+                            }
+                        }
+                    } else {
+                        div { class: "no-data", "No proposal for vote" }
+                    }
+                }
+
+                // Latest Decisions section
+                div { class: "consensus-section",
+                    h3 { "Latest Decisions" }
+                    if cons.read().latest_results.is_empty() {
+                        div { class: "no-data", "No latest decisions" }
+                    } else {
                         div { class: "results-window",
                             for (vid, res, timestamp_ms) in cons.read().latest_results.iter().rev() {
                                 div { class: "result-item",
@@ -653,15 +711,15 @@ fn Modal(props: ModalProps) -> Element {
 
 const CSS: &str = r#"
 :root {
-  --bg: #0e0f12;
-  --card: #17191e;
-  --text: #e8e9ec;
-  --muted: #a3a7b3;
-  --primary: #4f8cff;
-  --primary-2: #3b6ad1;
-  --border: #23262d;
-  --good: #17c964;
-  --bad: #f31260;
+  --bg: #0b0d10;
+  --card: #14161c;
+  --text: #e5e7ec;
+  --muted: #9094a2;
+  --primary: #00b2ff;
+  --primary-2: #007ad9;
+  --border: #1c1e25;
+  --good: #00f5a0;
+  --bad: #ff005c;
 }
 
 * { box-sizing: border-box; }
@@ -705,7 +763,7 @@ button.mini { padding: 4px 8px; border-radius: 8px; font-size: 12px; }
 .page.home { padding: 12px; }
 .layout {
   display: grid;
-  grid-template-columns: 280px 1fr 460px;
+  grid-template-columns: 280px 1fr 500px;
   gap: 12px;
 }
 
@@ -787,13 +845,65 @@ button.mini { padding: 4px 8px; border-radius: 8px; font-size: 12px; }
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   color: var(--text); font-size: 12px; word-break: break-all;
 }
-.panel.consensus .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
+
+/* Consensus sections */
+.panel.consensus {
+  display: flex; flex-direction: column; gap: 12px;
+}
+.panel.consensus .status {
+  flex-shrink: 0; margin-bottom: 16px;
+}
+.panel.consensus .consensus-section {
+  margin: 8px 0; padding: 12px; border-radius: 10px;
+  background: rgba(255,255,255,0.02); border: 1px solid var(--border);
+  display: flex; flex-direction: column;
+}
+.panel.consensus .consensus-section h3 {
+  margin: 0 0 12px 0; font-size: 14px; color: var(--primary);
+  border-bottom: 1px solid var(--border); padding-bottom: 8px;
+}
+.panel.consensus .no-data {
+  color: var(--muted); font-style: italic; text-align: center;
+  padding: 20px; font-size: 13px;
+}
+.panel.consensus .proposals-window {
+  overflow-y: auto;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.panel.consensus .proposal-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; border-radius: 6px; background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+}
+.panel.consensus .proposal-item .action {
+    color: var(--primary); min-width: 100px;
+}
+.panel.consensus .proposal-item .address {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  color: var(--text); font-size: 12px; word-break: break-all; white-space: pre-wrap;
+}
+.panel.consensus .proposal {
+  display: flex; flex-direction: column;
+}
+.panel.consensus .proposal .proposal-header {
+  margin-bottom: 8px;
+}
+.panel.consensus .proposal .proposal-payload {
+  display: flex; flex-direction: column;
+  margin-bottom: 12px;
+}
+.panel.consensus .proposal .proposal-payload .payload-items {
+  display: flex; flex-direction: column; gap: 4px;
+}
+.panel.consensus .proposal .actions {
+  display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px;
+}
 
 /* Consensus results window */
 .panel.consensus .results-window {
-  max-height: 200px; overflow-y: auto; border: 1px solid var(--border);
+  overflow-y: auto; border: 1px solid var(--border);
   border-radius: 8px; padding: 8px; background: rgba(255,255,255,0.02);
-  display: flex; flex-direction: column; gap: 6px;
+  max-height: 200px; display: flex; flex-direction: column; gap: 6px;
 }
 .panel.consensus .result-item {
   display: flex; justify-content: space-between; align-items: center;
@@ -822,7 +932,7 @@ button.mini { padding: 4px 8px; border-radius: 8px; font-size: 12px; }
 .modal {
   width: 520px; max-width: calc(100vw - 32px);
   background: var(--card); border: 1px solid var(--border); border-radius: 14px;
-  box-shadow: 0 16px 48px rgba(0,0,0,.4);
+  box-shadow: 0 0 6px var(--primary);
 }
 .modal-head {
   display: flex; align-items: center; justify-content: space-between;

@@ -2328,6 +2328,7 @@ dependencies = [
  "de_mls_ui_protocol",
  "ds",
  "futures",
+ "hex",
  "kameo",
  "mls_crypto",
  "once_cell",

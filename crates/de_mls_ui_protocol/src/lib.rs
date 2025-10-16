@@ -41,6 +41,9 @@ pub mod v1 {
         QuerySteward {
             group_id: String,
         },
+        GetCurrentEpochProposals {
+            group_id: String,
+        },
     }
 
     #[derive(Debug, Clone)]
@@ -58,6 +61,9 @@ pub mod v1 {
 
         VoteRequested(VotePayload),
         ProposalDecided(ProposalResult),
+        CurrentEpochProposals { group_id: String, proposals: Vec<(String, String)> },
+        ProposalAdded { group_id: String, action: String, address: String },
+        CurrentEpochProposalsCleared { group_id: String },
         Error(String),
     }
 }

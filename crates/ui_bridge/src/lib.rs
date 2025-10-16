@@ -173,6 +173,21 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 }
             }
 
+            AppCmd::GetCurrentEpochProposals { group_id } => {
+                match GATEWAY.get_current_epoch_proposals(group_id.clone()).await {
+                    Ok(proposals) => {
+                        GATEWAY.push_event(AppEvent::CurrentEpochProposals {
+                            group_id,
+                            proposals,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!("get_current_epoch_proposals failed: {e:?}");
+                        GATEWAY.push_event(AppEvent::Error("Get current epoch proposals failed".into()));
+                    }
+                }
+            }
+
             other => {
                 tracing::warn!("unhandled AppCmd: {:?}", other);
             }

@@ -206,3 +206,20 @@ impl Message<GetUserStatusRequest> for User {
         Ok(is_steward)
     }
 }
+
+pub struct GetCurrentEpochProposalsRequest {
+    pub group_name: String,
+}
+
+impl Message<GetCurrentEpochProposalsRequest> for User {
+    type Reply = Result<Vec<crate::steward::GroupUpdateRequest>, UserError>;
+
+    async fn handle(
+        &mut self,
+        msg: GetCurrentEpochProposalsRequest,
+        _ctx: Context<'_, Self, Self::Reply>,
+    ) -> Self::Reply {
+        let proposals = self.get_current_epoch_proposals(&msg.group_name).await?;
+        Ok(proposals)
+    }
+}

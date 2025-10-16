@@ -8,9 +8,9 @@
 
 use de_mls::protos::de_mls::messages::v1::app_message;
 use de_mls::user_actor::{
-    CreateGroupRequest, GetProposalsForStewardVotingRequest, GetUserStatusRequest,
-    LeaveGroupRequest, SendGroupMessage, StartStewardEpochRequest, StewardMessageRequest,
-    UserVoteRequest,
+    CreateGroupRequest, GetCurrentEpochProposalsRequest, GetProposalsForStewardVotingRequest,
+    GetUserStatusRequest, LeaveGroupRequest, SendGroupMessage, StartStewardEpochRequest,
+    StewardMessageRequest, UserVoteRequest,
 };
 use de_mls::user_app_instance::{create_user_instance, STEWARD_EPOCH};
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
@@ -31,6 +31,8 @@ use kameo::actor::ActorRef;
 
 // If you want to store the user actor here
 use de_mls::user::{User, UserAction}; // adjust to your actual module path
+use de_mls::steward;
+use hex;
 
 pub struct Gateway {
     // UI events (gateway -> UI)
@@ -196,6 +198,31 @@ impl Gateway {
                                 }))
                                 .map_err(|e| {
                                     anyhow::anyhow!("error sending vote requested event: {e}")
+                                })
+                                .and_then(|_| {
+                                    // Also clear current epoch proposals when voting starts
+                                    evt_tx.unbounded_send(AppEvent::CurrentEpochProposalsCleared {
+                                        group_id: vp.group_name.clone(),
+                                    })
+                                    .map_err(|e| {
+                                        anyhow::anyhow!("error sending clear current epoch proposals event: {e}")
+                                    })
+                                }),
+                            Some(app_message::Payload::ProposalAdded(pa)) => evt_tx
+                                .unbounded_send(AppEvent::ProposalAdded {
+                                    group_id: pa.group_id.clone(),
+                                    action: pa.action.clone(),
+                                    address: pa.address.clone(),
+                                })
+                                .map_err(|e| {
+                                    anyhow::anyhow!("error sending proposal added event: {e}")
+                                }),
+                            Some(app_message::Payload::ClearCurrentEpochProposals(ccp)) => evt_tx
+                                .unbounded_send(AppEvent::CurrentEpochProposalsCleared {
+                                    group_id: ccp.group_id.clone(),
+                                })
+                                .map_err(|e| {
+                                    anyhow::anyhow!("error sending clear current epoch proposals event: {e}")
                                 }),
                             Some(app_message::Payload::ConversationMessage(cm)) => evt_tx
                                 .unbounded_send(AppEvent::ChatMessage(ConversationMessage {
@@ -316,8 +343,27 @@ impl Gateway {
                                         proposal_id: vp.proposal_id.clone(),
                                     },
                                 ));
-                            } else {
-                                return Err(anyhow::anyhow!("Invalid app message: {app_msg}"));
+                                
+                                // Also clear current epoch proposals when voting starts
+                                let _ = evt_tx_clone.unbounded_send(AppEvent::CurrentEpochProposalsCleared {
+                                    group_id: group_name.clone(),
+                                });
+                            }
+                            if let Some(app_message::Payload::ProposalAdded(pa)) = &app_msg.payload
+                            {
+                                info!("Sending proposal added event to UI");
+                                let _ = evt_tx_clone.unbounded_send(AppEvent::ProposalAdded {
+                                    group_id: pa.group_id.clone(),
+                                    action: pa.action.clone(),
+                                    address: pa.address.clone(),
+                                });
+                            }
+                            if let Some(app_message::Payload::ClearCurrentEpochProposals(ccp)) = &app_msg.payload
+                            {
+                                info!("Sending clear current epoch proposals event to UI");
+                                let _ = evt_tx_clone.unbounded_send(AppEvent::CurrentEpochProposalsCleared {
+                                    group_id: ccp.group_id.clone(),
+                                });
                             }
                         }
                         UserAction::DoNothing => {
@@ -411,6 +457,30 @@ impl Gateway {
             .ok_or_else(|| anyhow::anyhow!("user not logged in"))?;
         let is_steward = user.ask(GetUserStatusRequest { group_name }).await?;
         Ok(is_steward)
+    }
+
+    /// Get current epoch proposals for the given group
+    pub async fn get_current_epoch_proposals(&self, group_name: String) -> anyhow::Result<Vec<(String, String)>> {
+        let user = self
+            .user()
+            .ok_or_else(|| anyhow::anyhow!("user not logged in"))?;
+        
+        let proposals = user.ask(GetCurrentEpochProposalsRequest { group_name }).await?;
+        let display_proposals: Vec<(String, String)> = proposals
+            .iter()
+            .map(|proposal| {
+                match proposal {
+                    steward::GroupUpdateRequest::AddMember(kp) => {
+                        let address = format!("0x{}", hex::encode(kp.leaf_node().credential().serialized_content()));
+                        ("Add Member".to_string(), address)
+                    }
+                    steward::GroupUpdateRequest::RemoveMember(id) => {
+                        ("Remove Member".to_string(), id.clone())
+                    }
+                }
+            })
+            .collect();
+        Ok(display_proposals)
     }
 }
 

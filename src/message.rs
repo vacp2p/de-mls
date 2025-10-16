@@ -31,7 +31,7 @@ use crate::{
         },
         de_mls::messages::v1::{
             app_message, welcome_message, AppMessage, BanRequest, BatchProposalsMessage,
-            ConversationMessage, GroupAnnouncement, InvitationToJoin, UserKeyPackage, UserVote,
+            ClearCurrentEpochProposals, ConversationMessage, GroupAnnouncement, InvitationToJoin, ProposalAdded, UserKeyPackage, UserVote,
             VotingProposal, WelcomeMessage,
         },
     },
@@ -51,6 +51,8 @@ pub mod message_types {
     pub const VOTE: &str = "Vote";
     pub const VOTING_PROPOSAL: &str = "VotingProposal";
     pub const USER_VOTE: &str = "UserVote";
+    pub const PROPOSAL_ADDED: &str = "ProposalAdded";
+    pub const CLEAR_CURRENT_EPOCH_PROPOSALS: &str = "ClearCurrentEpochProposals";
     pub const UNKNOWN: &str = "Unknown";
 }
 
@@ -70,6 +72,8 @@ impl MessageType for app_message::Payload {
             app_message::Payload::Vote(_) => VOTE,
             app_message::Payload::VotingProposal(_) => VOTING_PROPOSAL,
             app_message::Payload::UserVote(_) => USER_VOTE,
+            app_message::Payload::ProposalAdded(_) => PROPOSAL_ADDED,
+            app_message::Payload::ClearCurrentEpochProposals(_) => CLEAR_CURRENT_EPOCH_PROPOSALS,
         }
     }
 }
@@ -188,6 +192,22 @@ impl Display for AppMessage {
                     user_vote.group_name
                 )
             }
+            Some(app_message::Payload::ProposalAdded(proposal_added)) => {
+                write!(
+                    f,
+                    "ProposalAdded: {} {} in group {}",
+                    proposal_added.action,
+                    proposal_added.address,
+                    proposal_added.group_id
+                )
+            }
+            Some(app_message::Payload::ClearCurrentEpochProposals(clear_proposals)) => {
+                write!(
+                    f,
+                    "ClearCurrentEpochProposals: clearing proposals for group {}",
+                    clear_proposals.group_id
+                )
+            }
             None => write!(f, "Empty message"),
         }
     }
@@ -249,6 +269,22 @@ impl From<Vote> for AppMessage {
     fn from(vote: Vote) -> Self {
         AppMessage {
             payload: Some(app_message::Payload::Vote(vote)),
+        }
+    }
+}
+
+impl From<ProposalAdded> for AppMessage {
+    fn from(proposal_added: ProposalAdded) -> Self {
+        AppMessage {
+            payload: Some(app_message::Payload::ProposalAdded(proposal_added)),
+        }
+    }
+}
+
+impl From<ClearCurrentEpochProposals> for AppMessage {
+    fn from(clear_proposals: ClearCurrentEpochProposals) -> Self {
+        AppMessage {
+            payload: Some(app_message::Payload::ClearCurrentEpochProposals(clear_proposals)),
         }
     }
 }

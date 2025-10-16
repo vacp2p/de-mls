@@ -353,6 +353,21 @@ impl GroupStateMachine {
         }
     }
 
+    /// Get the current epoch proposals for UI display.
+    ///
+    /// ## Returns:
+    /// - Vector of proposals currently collected for the next steward epoch
+    ///
+    /// ## Usage:
+    /// Used to display current proposals in the UI for stewards.
+    pub async fn get_current_epoch_proposals(&self) -> Vec<crate::steward::GroupUpdateRequest> {
+        if let Some(steward) = &self.steward {
+            steward.get_current_epoch_proposals().await
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Get the count of proposals in the voting epoch.
     ///
     /// ## Returns:

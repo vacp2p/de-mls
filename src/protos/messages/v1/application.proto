@@ -15,6 +15,8 @@ message AppMessage {
     consensus.v1.Vote vote = 5;
     VotingProposal voting_proposal = 6;
     UserVote user_vote = 7;
+    ProposalAdded proposal_added = 8;
+    ClearCurrentEpochProposals clear_current_epoch_proposals = 9;
   }
 }
 
@@ -47,4 +49,14 @@ message UserVote {
   uint32 proposal_id = 1;
   bool vote = 2;
   string group_name = 3;
+}
+
+message ProposalAdded {
+  string group_id = 1;
+  string action = 2;
+  string address = 3;
+}
+
+message ClearCurrentEpochProposals {
+  string group_id = 1;
 }

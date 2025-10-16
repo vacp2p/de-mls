@@ -289,6 +289,18 @@ impl User {
         Ok(is_steward)
     }
 
+    pub async fn get_current_epoch_proposals(&self, group_name: &str) -> Result<Vec<crate::steward::GroupUpdateRequest>, UserError> {
+        let group = {
+            let groups = self.groups.read().await;
+            groups
+                .get(group_name)
+                .cloned()
+                .ok_or_else(|| UserError::GroupNotFoundError)?
+        };
+        let proposals = group.read().await.get_current_epoch_proposals().await;
+        Ok(proposals)
+    }
+
     /// Process messages from the welcome subtopic.
     ///
     /// ## Parameters:
@@ -380,12 +392,20 @@ impl User {
                             .decrypt_steward_msg(user_key_package.encrypt_kp.clone())
                             .await?;
 
-                        group
+                        let (action, address) = group
                             .write()
                             .await
                             .store_invite_proposal(Box::new(key_package))
                             .await?;
-                        Ok(UserAction::DoNothing)
+                        
+                        // Send notification to UI about the new proposal
+                        let proposal_added_msg: AppMessage = crate::protos::de_mls::messages::v1::ProposalAdded {
+                            group_id: group_name.to_string(),
+                            action,
+                            address,
+                        }.into();
+                        
+                        Ok(UserAction::SendToApp(proposal_added_msg))
                     } else {
                         Ok(UserAction::DoNothing)
                     }
