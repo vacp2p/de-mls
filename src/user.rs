@@ -90,7 +90,10 @@ impl User {
     ///
     /// ## Errors:
     /// - `UserError` if private key parsing or identity creation fails
-    pub fn new(user_eth_priv_key: &str) -> Result<Self, UserError> {
+    pub fn new(
+        user_eth_priv_key: &str,
+        consensus_service: &ConsensusService,
+    ) -> Result<Self, UserError> {
         let signer = PrivateKeySigner::from_str(user_eth_priv_key)?;
         let user_address = signer.address();
 
@@ -102,7 +105,7 @@ impl User {
             identity: id,
             eth_signer: signer,
             provider: crypto,
-            consensus_service: ConsensusService::new(),
+            consensus_service: consensus_service.clone(),
             pending_batch_proposals: Arc::new(RwLock::new(HashMap::new())),
         };
         Ok(user)

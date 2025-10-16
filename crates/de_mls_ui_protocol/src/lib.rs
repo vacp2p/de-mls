@@ -1,35 +1,20 @@
 //! UI <-> Gateway protocol (PoC). Keep it dependency-light (serde only).
 // crates/de_mls_ui_protocol/src/lib.rs
 pub mod v1 {
+    use de_mls::protos::messages::v1::{
+        consensus::v1::{ProposalResult, VotePayload},
+        ConversationMessage,
+    };
     use serde::{Deserialize, Serialize};
 
-    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    pub struct ChatMsg {
-        pub id: String,
-        pub group_id: String,
-        pub author: String,
-        pub body: String,
-        pub ts_ms: i64,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    pub enum ProposalKind {
-        AddMember,
-        RemoveMember,
-        AddSteward,
-        RemoveSteward,
-        UpdateEpoch,
-        Custom,  // fallback / proto we don’t model yet
-        Unknown, // parsing failed
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    pub struct VotePayload {
-        pub group_id: String,
-        pub message: String,
-        pub timeout_ms: u64,
-        pub proposal_id: u32,
-    }
+    // #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    // pub struct ChatMsg {
+    //     pub id: String,
+    //     pub group_id: String,
+    //     pub author: String,
+    //     pub body: String,
+    //     pub ts_ms: i64,
+    // }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[non_exhaustive]
@@ -67,7 +52,7 @@ pub mod v1 {
         },
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone)]
     #[non_exhaustive]
     pub enum AppEvent {
         LoggedIn(String),
@@ -75,11 +60,13 @@ pub mod v1 {
         GroupCreated(String),
         GroupRemoved(String),
         EnteredGroup { group_id: String },
-        ChatMessage(ChatMsg),
-        VoteRequested(VotePayload),
-        VoteClosed { proposal_id: u32 },
+        ChatMessage(ConversationMessage),
         LeaveGroup { group_id: String },
+
         StewardStatus { group_id: String, is_steward: bool },
+
+        VoteRequested(VotePayload),
+        ProposalDecided(ProposalResult),
         Error(String),
     }
 }

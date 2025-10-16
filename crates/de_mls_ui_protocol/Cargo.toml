@@ -11,3 +11,4 @@ serde = { version = "1.0.163", features = ["derive"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 thiserror = "2.0.17"
 
+de-mls = { path = "../../" }

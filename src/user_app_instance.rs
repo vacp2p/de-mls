@@ -9,6 +9,7 @@ use waku_bindings::WakuMessage;
 use ds::topic_filter::TopicFilter;
 use ds::waku_actor::WakuMessageToSend;
 
+use crate::consensus::ConsensusService;
 use crate::error::UserError;
 use crate::group_registry::GroupRegistry;
 use crate::user::User;
@@ -28,6 +29,7 @@ pub struct CoreCtx {
     pub app_state: Arc<AppState>,
     pub groups: Arc<GroupRegistry>,
     pub topics: Arc<TopicFilter>,
+    pub consensus: Arc<ConsensusService>,
 }
 
 impl CoreCtx {
@@ -36,6 +38,7 @@ impl CoreCtx {
             app_state,
             groups: Arc::new(GroupRegistry::new()),
             topics: Arc::new(TopicFilter::new()),
+            consensus: Arc::new(ConsensusService::new()),
         }
     }
 }
@@ -43,11 +46,12 @@ impl CoreCtx {
 pub async fn create_user_instance(
     eth_private_key: String,
     app_state: Arc<AppState>,
+    consensus_service: &ConsensusService,
 ) -> Result<(ActorRef<User>, String), UserError> {
     let signer = PrivateKeySigner::from_str(&eth_private_key)?;
     let user_address = signer.address_string();
     // Create user
-    let user = User::new(&eth_private_key)?;
+    let user = User::new(&eth_private_key, consensus_service)?;
 
     // Set up consensus event forwarding before spawning the actor
     let consensus_events = user.subscribe_to_consensus_events();

@@ -22,8 +22,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 
+use de_mls::protos::messages::v1::consensus::v1::VotePayload;
+use de_mls::protos::messages::v1::ConversationMessage;
 use de_mls::user_app_instance::CoreCtx;
-use de_mls_ui_protocol::v1::{AppCmd, AppEvent, ChatMsg, VotePayload};
+use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 
 use kameo::actor::ActorRef;
 
@@ -108,14 +110,20 @@ impl Gateway {
     /// Returns a derived display name (e.g., address string).
     pub async fn login_with_private_key(&self, private_key: String) -> anyhow::Result<String> {
         let core = self.core();
+        let consensus_service = core.consensus.as_ref().clone();
 
         // Create user actor via core helper (you implement this inside your core)
-        let (user_ref, user_address) =
-            create_user_instance(private_key.clone(), core.app_state.clone()).await?;
+        let (user_ref, user_address) = create_user_instance(
+            private_key.clone(),
+            core.app_state.clone(),
+            &consensus_service,
+        )
+        .await?;
 
         *self.user.write() = Some(user_ref.clone());
 
-        self.spawn_forwarder_once(core, self.user.read().clone().unwrap());
+        self.spawn_waku_forwarder(core.clone(), self.user.read().clone().unwrap());
+        self.spawn_consensus_forwarder(core.clone())?;
         Ok(user_address)
     }
 
@@ -124,8 +132,22 @@ impl Gateway {
         self.user.read().clone()
     }
 
+    fn spawn_consensus_forwarder(&self, core: Arc<CoreCtx>) -> anyhow::Result<()> {
+        let evt_tx = self.evt_tx.clone();
+        let mut rx = core.consensus.subscribe_decisions();
+
+        tokio::spawn(async move {
+            tracing::info!("gateway: consensus forwarder started");
+            while let Ok(res) = rx.recv().await {
+                let _ = evt_tx.unbounded_send(AppEvent::ProposalDecided(res));
+            }
+            tracing::info!("gateway: consensus forwarder ended");
+        });
+        Ok(())
+    }
+
     /// Spawn the pubsub forwarder once, after first successful login.
-    fn spawn_forwarder_once(&self, core: Arc<CoreCtx>, user: ActorRef<User>) {
+    fn spawn_waku_forwarder(&self, core: Arc<CoreCtx>, user: ActorRef<User>) {
         if self.started.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -168,20 +190,18 @@ impl Gateway {
                             Some(app_message::Payload::VotingProposal(vp)) => evt_tx
                                 .unbounded_send(AppEvent::VoteRequested(VotePayload {
                                     group_id: vp.group_name.clone(),
-                                    message: vp.payload.to_string(),
-                                    timeout_ms: now_ms() as u64,
+                                    payload: vp.payload.to_string(),
+                                    timestamp: now_ms() as u64,
                                     proposal_id: vp.proposal_id.clone(),
                                 }))
                                 .map_err(|e| {
                                     anyhow::anyhow!("error sending vote requested event: {e}")
                                 }),
                             Some(app_message::Payload::ConversationMessage(cm)) => evt_tx
-                                .unbounded_send(AppEvent::ChatMessage(ChatMsg {
-                                    id: uuid::Uuid::new_v4().to_string(),
-                                    group_id: cm.group_name.clone(),
-                                    author: cm.sender.clone(),
-                                    body: String::from_utf8_lossy(&cm.message).to_string(),
-                                    ts_ms: now_ms(),
+                                .unbounded_send(AppEvent::ChatMessage(ConversationMessage {
+                                    message: cm.message.clone(),
+                                    sender: cm.sender.clone(),
+                                    group_name: cm.group_name.clone(),
                                 }))
                                 .map_err(|e| anyhow::anyhow!("error sending chat message: {e}")),
                             _ => {
@@ -211,17 +231,15 @@ impl Gateway {
                             .map_err(|e| anyhow::anyhow!("error sending group removed event: {e}"));
 
                         let _ = evt_tx
-                            .unbounded_send(AppEvent::ChatMessage(ChatMsg {
-                                id: uuid::Uuid::new_v4().to_string(),
-                                group_id: group_name.clone(),
-                                author: "system".to_string(),
-                                body: format!("You're removed from the group {group_name}"),
-                                ts_ms: now_ms(),
+                            .unbounded_send(AppEvent::ChatMessage(ConversationMessage {
+                                message: format!("You're removed from the group {group_name}")
+                                    .into_bytes(),
+                                sender: "system".to_string(),
+                                group_name: group_name.clone(),
                             }))
                             .map_err(|e| anyhow::anyhow!("error sending chat message: {e}"));
                         Ok::<(), anyhow::Error>(())
                     }
-
                     UserAction::DoNothing => Ok(()),
                 };
 
@@ -293,8 +311,8 @@ impl Gateway {
                                 let _ = evt_tx_clone.unbounded_send(AppEvent::VoteRequested(
                                     VotePayload {
                                         group_id: group_name.clone(),
-                                        message: vp.payload.to_string(),
-                                        timeout_ms: now_ms() as u64,
+                                        payload: vp.payload.to_string(),
+                                        timestamp: now_ms() as u64,
                                         proposal_id: vp.proposal_id.clone(),
                                     },
                                 ));

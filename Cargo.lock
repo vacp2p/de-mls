@@ -2300,6 +2300,7 @@ name = "de_mls_desktop_ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "de-mls",
  "de_mls_gateway",
  "de_mls_ui_protocol",
@@ -2340,6 +2341,7 @@ dependencies = [
 name = "de_mls_ui_protocol"
 version = "0.1.0"
 dependencies = [
+ "de-mls",
  "serde",
  "serde_json",
  "thiserror 2.0.17",

@@ -28,3 +28,23 @@ message Vote {
   bytes vote_hash = 27;           // Hash of all previously defined fields in Vote
   bytes signature = 28;           // Signature of vote_hash
 }
+
+enum Outcome {
+  OUTCOME_UNSPECIFIED = 0;
+  OUTCOME_ACCEPTED = 1;
+  OUTCOME_REJECTED = 2;
+}
+
+message ProposalResult {
+  string group_id     = 31;
+  uint32 proposal_id  = 32;
+  Outcome outcome     = 33;
+  uint64 decided_at_ms = 34;
+}
+
+message VotePayload {
+  string group_id = 41;
+  uint32 proposal_id = 42;
+  string payload = 43;
+  uint64 timestamp = 44;
+} 

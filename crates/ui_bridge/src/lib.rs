@@ -10,9 +10,10 @@ use futures::channel::mpsc::{unbounded, UnboundedReceiver};
 use futures::StreamExt;
 use std::sync::Arc;
 
+use de_mls::protos::messages::v1::ConversationMessage;
 use de_mls::user_app_instance::CoreCtx;
 use de_mls_gateway::{init_core, GATEWAY};
-use de_mls_ui_protocol::v1::{AppCmd, AppEvent, ChatMsg};
+use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 
 /// Call once during process startup (before launching the Dioxus UI).
 pub fn start_ui_bridge(core: Arc<CoreCtx>) {
@@ -111,23 +112,19 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
 
             AppCmd::LoadHistory { group_id } => {
                 // TODO: load from storage; stub:
-                GATEWAY.push_event(AppEvent::ChatMessage(ChatMsg {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    group_id,
-                    author: "system".into(),
-                    body: "History loaded (stub)".into(),
-                    ts_ms: now_ms(),
+                GATEWAY.push_event(AppEvent::ChatMessage(ConversationMessage {
+                    message: "History loaded (stub)".as_bytes().to_vec(),
+                    sender: "system".to_string(),
+                    group_name: group_id.clone(),
                 }));
             }
 
             // ───────────── Chat ─────────────
             AppCmd::SendMessage { group_id, body } => {
-                GATEWAY.push_event(AppEvent::ChatMessage(ChatMsg {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    group_id: group_id.clone(),
-                    author: "me".into(),
-                    body: body.clone(),
-                    ts_ms: now_ms(),
+                GATEWAY.push_event(AppEvent::ChatMessage(ConversationMessage {
+                    message: body.as_bytes().to_vec(),
+                    sender: "me".to_string(),
+                    group_name: group_id.clone(),
                 }));
 
                 GATEWAY.send_message(group_id, body).await?;
@@ -146,20 +143,16 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                     .process_user_vote(group_id.clone(), proposal_id, choice)
                     .await?;
 
-                GATEWAY.push_event(AppEvent::ChatMessage(ChatMsg {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    group_id,
-                    author: "system".into(),
-                    body: format!(
+                GATEWAY.push_event(AppEvent::ChatMessage(ConversationMessage {
+                    message: format!(
                         "Your vote ({}) has been submitted for proposal {proposal_id}",
                         if choice { "YES" } else { "NO" }
-                    ),
-                    ts_ms: now_ms(),
+                    )
+                    .as_bytes()
+                    .to_vec(),
+                    sender: "system".to_string(),
+                    group_name: group_id.clone(),
                 }));
-
-                GATEWAY.push_event(AppEvent::VoteClosed {
-                    proposal_id: proposal_id,
-                });
             }
             AppCmd::LeaveGroup { group_id } => {
                 GATEWAY.push_event(AppEvent::LeaveGroup { group_id });
@@ -186,12 +179,4 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
         }
     }
     Ok(())
-}
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
 }

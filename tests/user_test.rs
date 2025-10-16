@@ -1,4 +1,5 @@
 use de_mls::{
+    consensus::ConsensusService,
     protos::messages::v1::app_message,
     state_machine::GroupState,
     user::{User, UserAction},
@@ -24,13 +25,17 @@ const CAROL_PRIVATE_KEY: &str =
 const GROUP_NAME: &str = "new_group";
 
 async fn create_two_test_user_with_group(group_name: &str) -> (User, User) {
-    let mut alice = User::new(ALICE_PRIVATE_KEY).expect("Failed to create user for Alice");
+    let consensus_service = ConsensusService::new();
+    let mut alice =
+        User::new(ALICE_PRIVATE_KEY, &consensus_service).expect("Failed to create user for Alice");
     alice
         .create_group(group_name, true)
         .await
         .expect("Failed to create group for Alice");
 
-    let mut bob = User::new(BOB_PRIVATE_KEY).expect("Failed to create user for Bob");
+    let consensus_service = ConsensusService::new();
+    let mut bob =
+        User::new(BOB_PRIVATE_KEY, &consensus_service).expect("Failed to create user for Bob");
     bob.create_group(group_name, false)
         .await
         .expect("Failed to create group for Bob");
@@ -39,18 +44,23 @@ async fn create_two_test_user_with_group(group_name: &str) -> (User, User) {
 }
 
 async fn create_three_test_user_with_group(group_name: &str) -> (User, User, User) {
-    let mut alice = User::new(ALICE_PRIVATE_KEY).expect("Failed to create user");
+    let consensus_service = ConsensusService::new();
+    let mut alice =
+        User::new(ALICE_PRIVATE_KEY, &consensus_service).expect("Failed to create user");
     alice
         .create_group(group_name, true)
         .await
         .expect("Failed to create group for Alice");
 
-    let mut bob = User::new(BOB_PRIVATE_KEY).expect("Failed to create user");
+    let consensus_service = ConsensusService::new();
+    let mut bob = User::new(BOB_PRIVATE_KEY, &consensus_service).expect("Failed to create user");
     bob.create_group(group_name, false)
         .await
         .expect("Failed to create group for Bob");
 
-    let mut carol = User::new(CAROL_PRIVATE_KEY).expect("Failed to create user");
+    let consensus_service = ConsensusService::new();
+    let mut carol =
+        User::new(CAROL_PRIVATE_KEY, &consensus_service).expect("Failed to create user");
     carol
         .create_group(group_name, false)
         .await

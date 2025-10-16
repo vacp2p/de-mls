@@ -4,11 +4,25 @@
 use dioxus::prelude::*;
 use dioxus_desktop::{launch::launch as desktop_launch, Config, LogicalSize, WindowBuilder};
 
-use de_mls::bootstrap::bootstrap_core_from_env;
+use de_mls::protos::messages::v1::consensus::v1::{Outcome, VotePayload};
+use de_mls::protos::messages::v1::ConversationMessage;
+use de_mls::{
+    bootstrap::bootstrap_core_from_env, protos::messages::v1::consensus::v1::ProposalResult,
+};
 use de_mls_gateway::GATEWAY;
-use de_mls_ui_protocol::v1::{AppCmd, AppEvent, ChatMsg, VotePayload};
+use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 
 mod logging;
+
+// Helper function to format timestamps
+fn format_timestamp(timestamp_ms: u64) -> String {
+    use std::time::UNIX_EPOCH;
+
+    // Convert to SystemTime and format
+    let timestamp = UNIX_EPOCH + std::time::Duration::from_secs(timestamp_ms);
+    let datetime: chrono::DateTime<chrono::Utc> = timestamp.into();
+    datetime.format("%H:%M:%S").to_string()
+}
 
 // ─────────────────────────── App state ───────────────────────────
 
@@ -26,16 +40,16 @@ struct GroupsState {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct ChatState {
-    opened_group: Option<String>, // which group is “Open” in the UI
-    messages: Vec<ChatMsg>,       // all messages; filtered per view
+    opened_group: Option<String>,       // which group is “Open” in the UI
+    messages: Vec<ConversationMessage>, // all messages; filtered per view
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct ConsensusState {
-    is_steward: bool,         
+    is_steward: bool,
     pending: Option<VotePayload>, // active/pending proposal for opened group
-    // For now we keep “results” as simple strings; swap to your real type later.
-    latest_results: Vec<(String, String)>, // (vote_id, result text)
+    // Store results with timestamps for better display
+    latest_results: Vec<(u32, Outcome, u64)>, // (vote_id, result, timestamp_ms)
 }
 
 // ─────────────────────────── Routing ───────────────────────────
@@ -226,18 +240,25 @@ fn Home() -> Element {
                         chat.write().messages.push(msg);
                     }
                     Some(AppEvent::VoteRequested(vp)) => {
-                        // only hold if it matches the currently opened group
                         let opened = chat.read().opened_group.clone();
                         if opened.as_deref() == Some(vp.group_id.as_str()) {
                             cons.write().pending = Some(vp);
                         }
-                        // else ignore (or queue per group if you prefer)
                     }
-                    Some(AppEvent::VoteClosed { proposal_id }) => {
-                        // Mock a result label for now
-                        cons.write()
-                            .latest_results
-                            .push((proposal_id.to_string(), "closed".into()));
+                    Some(AppEvent::ProposalDecided(ProposalResult {
+                        group_id,
+                        proposal_id,
+                        outcome,
+                        decided_at_ms,
+                    })) => {
+                        // store for the opened group (or keep a map per group if you prefer)
+                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
+                            cons.write().latest_results.push((
+                                proposal_id.clone(),
+                                Outcome::try_from(outcome).unwrap_or(Outcome::Unspecified),
+                                decided_at_ms,
+                            ));
+                        }
                         cons.write().pending = None;
                     }
                     Some(AppEvent::GroupRemoved(name)) => {
@@ -435,7 +456,7 @@ fn ChatSection() -> Element {
         chat.read()
             .messages
             .iter()
-            .filter(|m| Some(m.group_id.as_str()) == opened.as_deref())
+            .filter(|m| Some(m.group_name.as_str()) == opened.as_deref())
             .cloned()
             .collect::<Vec<_>>()
     };
@@ -450,19 +471,19 @@ fn ChatSection() -> Element {
             } else {
                 div { class: "messages",
                     for (i, m) in msgs_for_group.iter().enumerate() {
-                        if my_name.as_deref() == Some(m.author.as_str()) || m.author.eq_ignore_ascii_case("me") {
+                        if my_name.as_deref() == Some(m.sender.as_str()) || m.sender.eq_ignore_ascii_case("me") {
                             div { key: "{i}", class: "msg me",
-                                span { class: "from", "{m.author}" }
-                                span { class: "body", "{m.body}" }
+                                span { class: "from", "{m.sender}" }
+                                span { class: "body", "{String::from_utf8_lossy(&m.message)}" }
                             }
-                        } else if m.author.eq_ignore_ascii_case("system") {
+                        } else if m.sender.eq_ignore_ascii_case("system") {
                             div { key: "{i}", class: "msg system",
-                                span { class: "body", "{m.body}" }
+                                span { class: "body", "{String::from_utf8_lossy(&m.message)}" }
                             }
                         } else {
                             div { key: "{i}", class: "msg",
-                                span { class: "from", "{m.author}" }
-                                span { class: "body", "{m.body}" }
+                                span { class: "from", "{m.sender}" }
+                                span { class: "body", "{String::from_utf8_lossy(&m.message)}" }
                             }
                         }
                     }
@@ -550,7 +571,7 @@ fn ConsensusSection() -> Element {
                         }
                         div { class: "payload",
                             span { class: "label", "Payload:" }
-                            pre { "{v.message}" }
+                            pre { "{v.payload}" }
                         }
 
                         // Buttons — active now; when you have epochs, gate here.
@@ -569,9 +590,26 @@ fn ConsensusSection() -> Element {
                 } else {
                     div { class: "results",
                         h3 { "Latest Consensus Results" }
-                        ul {
-                            for (vid, res) in cons.read().latest_results.iter() {
-                                li { "{vid}: {res}" }
+                        div { class: "results-window",
+                            for (vid, res, timestamp_ms) in cons.read().latest_results.iter().rev() {
+                                div { class: "result-item",
+                                    span { class: "proposal-id", "{vid}" }
+                                    span {
+                                        class: match res {
+                                            Outcome::Accepted => "outcome accepted",
+                                            Outcome::Rejected => "outcome rejected",
+                                            Outcome::Unspecified => "outcome unspecified",
+                                        },
+                                        match res {
+                                            Outcome::Accepted => "Accepted",
+                                            Outcome::Rejected => "Rejected",
+                                            Outcome::Unspecified => "Unspecified",
+                                        }
+                                    }
+                                    span { class: "timestamp",
+                                        "{format_timestamp(*timestamp_ms)}"
+                                    }
+                                }
                             }
                         }
                     }
@@ -725,6 +763,31 @@ button.mini { padding: 4px 8px; border-radius: 8px; font-size: 12px; }
 .panel.consensus .kv .v { color: var(--text); }
 .panel.consensus .raw { margin: 0; padding: 8px; border: 1px dashed var(--border); border-radius: 8px; background: rgba(255,255,255,0.03); font-size: 12px; }
 .panel.consensus .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
+
+/* Consensus results window */
+.panel.consensus .results-window {
+  max-height: 200px; overflow-y: auto; border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px; background: rgba(255,255,255,0.02);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.panel.consensus .result-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 6px 8px; border-radius: 6px; background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border); font-size: 13px;
+}
+.panel.consensus .result-item .proposal-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  color: var(--muted); font-weight: 600;
+}
+.panel.consensus .result-item .outcome {
+  font-weight: 600; padding: 2px 6px; border-radius: 4px;
+}
+.panel.consensus .result-item .outcome.accepted { color: var(--good); background: rgba(23,201,100,0.1); }
+.panel.consensus .result-item .outcome.rejected { color: var(--bad); background: rgba(243,18,96,0.1); }
+.panel.consensus .result-item .outcome.unspecified { color: var(--muted); background: rgba(163,167,179,0.1); }
+.panel.consensus .result-item .timestamp {
+  color: var(--muted); font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
 
 /* Modal */
 .modal-backdrop {

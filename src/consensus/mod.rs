@@ -15,7 +15,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::error::ConsensusError;
-use crate::protos::messages::v1::consensus::v1::{Proposal, Vote};
+use crate::protos::messages::v1::consensus::v1::{Outcome, Proposal, ProposalResult, Vote};
 use crate::LocalSigner;
 
 pub mod service;
@@ -81,7 +81,8 @@ pub struct ConsensusSession {
     pub votes: HashMap<Vec<u8>, Vote>, // vote_owner -> Vote
     pub created_at: u64,
     pub config: ConsensusConfig,
-    pub event_sender: Option<broadcast::Sender<(String, ConsensusEvent)>>,
+    pub event_sender: broadcast::Sender<(String, ConsensusEvent)>,
+    pub decisions_tx: broadcast::Sender<ProposalResult>,
     pub group_name: String,
 }
 
@@ -89,7 +90,8 @@ impl ConsensusSession {
     pub fn new(
         proposal: Proposal,
         config: ConsensusConfig,
-        event_sender: Option<broadcast::Sender<(String, ConsensusEvent)>>,
+        event_sender: broadcast::Sender<(String, ConsensusEvent)>,
+        decisions_tx: broadcast::Sender<ProposalResult>,
         group_name: &str,
     ) -> Self {
         let now = SystemTime::now()
@@ -104,6 +106,7 @@ impl ConsensusSession {
             created_at: now,
             config,
             event_sender,
+            decisions_tx,
             group_name: group_name.to_string(),
         }
     }
@@ -212,13 +215,22 @@ impl ConsensusSession {
 
     /// Emit a consensus event
     fn emit_consensus_event(&self, event: ConsensusEvent) {
-        if let Some(sender) = &self.event_sender {
-            info!(
-                "[consensus::mod::emit_consensus_event]: Emitting consensus event: {event:?} for proposal {}",
-                self.proposal.proposal_id
-            );
-            let _ = sender.send((self.group_name.clone(), event));
-        }
+        info!(
+            "[consensus::mod::emit_consensus_event]: Emitting consensus event: {event:?} for proposal {}",
+            self.proposal.proposal_id
+        );
+        let _ = self
+            .event_sender
+            .send((self.group_name.clone(), event.clone()));
+        let _ = self.decisions_tx.send(ProposalResult {
+            group_id: self.group_name.clone(),
+            proposal_id: self.proposal.proposal_id,
+            outcome: Outcome::from(event) as i32,
+            decided_at_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("Failed to get current time")
+                .as_secs(),
+        });
     }
 
     /// Check if the session is still active

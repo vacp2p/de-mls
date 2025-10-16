@@ -22,9 +22,14 @@
 //!
 
 use crate::{
-    consensus::v1::{Proposal, Vote},
+    consensus::{
+        v1::{Proposal, Vote},
+        ConsensusEvent,
+    },
     encrypt_message,
-    protos::messages::v1::{app_message, UserKeyPackage, UserVote, VotingProposal},
+    protos::messages::v1::{
+        app_message, consensus::v1::Outcome, UserKeyPackage, UserVote, VotingProposal,
+    },
     verify_message, MessageError,
 };
 use openmls::prelude::{KeyPackage, MlsMessageOut};
@@ -242,6 +247,25 @@ impl From<Vote> for AppMessage {
     fn from(vote: Vote) -> Self {
         AppMessage {
             payload: Some(app_message::Payload::Vote(vote)),
+        }
+    }
+}
+
+impl From<ConsensusEvent> for Outcome {
+    fn from(consensus_event: ConsensusEvent) -> Self {
+        match consensus_event {
+            ConsensusEvent::ConsensusReached {
+                proposal_id: _,
+                result: true,
+            } => Outcome::Accepted,
+            ConsensusEvent::ConsensusReached {
+                proposal_id: _,
+                result: false,
+            } => Outcome::Rejected,
+            ConsensusEvent::ConsensusFailed {
+                proposal_id: _,
+                reason: _,
+            } => Outcome::Unspecified,
         }
     }
 }
