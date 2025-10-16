@@ -1,6 +1,6 @@
 use alloy::signers::local::PrivateKeySigner;
 use de_mls::consensus::{compute_vote_hash, ConsensusEvent, ConsensusService};
-use de_mls::protos::messages::v1::consensus::v1::Vote;
+use de_mls::protos::consensus::v1::Vote;
 use de_mls::LocalSigner;
 use prost::Message;
 use std::time::Duration;
@@ -23,7 +23,7 @@ async fn test_basic_consensus_service() {
         .create_proposal(
             group_name,
             "Test Proposal".to_string(),
-            "Test payload".to_string(),
+            vec![],
             proposal_owner,
             expected_voters_count,
             300,
@@ -117,7 +117,7 @@ async fn test_multi_group_consensus_service() {
         .create_proposal(
             group1_name,
             "Test Proposal".to_string(),
-            "Test payload".to_string(),
+            vec![],
             proposal_owner_1,
             group1_members_count,
             300,
@@ -135,7 +135,7 @@ async fn test_multi_group_consensus_service() {
         .create_proposal(
             group2_name,
             "Test Proposal".to_string(),
-            "Test payload".to_string(),
+            vec![],
             proposal_owner_2.clone(),
             group2_members_count,
             300,
@@ -154,7 +154,7 @@ async fn test_multi_group_consensus_service() {
         .create_proposal(
             group2_name,
             "Test Proposal".to_string(),
-            "Test payload".to_string(),
+            vec![],
             proposal_owner_2,
             group2_members_count,
             300,
@@ -211,7 +211,7 @@ async fn test_consensus_threshold_calculation() {
         .create_proposal(
             group_name,
             "Test Proposal".to_string(),
-            "Test payload".to_string(),
+            vec![],
             proposal_owner,
             expected_voters_count,
             300,
@@ -328,7 +328,7 @@ async fn test_remove_group_sessions() {
         .create_proposal(
             group_name,
             "Test Proposal".to_string(),
-            "Test payload".to_string(),
+            vec![],
             proposal_owner,
             expected_voters_count,
             300,

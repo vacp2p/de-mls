@@ -6,7 +6,7 @@
 //! - Hold references to the core context (`CoreCtx`) and current user actor
 //! - Offer small helper methods (login_with_private_key, etc.)
 
-use de_mls::protos::messages::v1::app_message;
+use de_mls::protos::de_mls::messages::v1::app_message;
 use de_mls::user_actor::{
     CreateGroupRequest, GetProposalsForStewardVotingRequest, GetUserStatusRequest,
     LeaveGroupRequest, SendGroupMessage, StartStewardEpochRequest, StewardMessageRequest,
@@ -22,8 +22,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 
-use de_mls::protos::messages::v1::consensus::v1::VotePayload;
-use de_mls::protos::messages::v1::ConversationMessage;
+use de_mls::protos::consensus::v1::VotePayload;
+use de_mls::protos::de_mls::messages::v1::ConversationMessage;
 use de_mls::user_app_instance::CoreCtx;
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 
@@ -190,7 +190,7 @@ impl Gateway {
                             Some(app_message::Payload::VotingProposal(vp)) => evt_tx
                                 .unbounded_send(AppEvent::VoteRequested(VotePayload {
                                     group_id: vp.group_name.clone(),
-                                    payload: vp.payload.to_string(),
+                                    group_requests: vp.group_requests.clone(),
                                     timestamp: now_ms() as u64,
                                     proposal_id: vp.proposal_id.clone(),
                                 }))
@@ -311,7 +311,7 @@ impl Gateway {
                                 let _ = evt_tx_clone.unbounded_send(AppEvent::VoteRequested(
                                     VotePayload {
                                         group_id: group_name.clone(),
-                                        payload: vp.payload.to_string(),
+                                        group_requests: vp.group_requests.clone(),
                                         timestamp: now_ms() as u64,
                                         proposal_id: vp.proposal_id.clone(),
                                     },

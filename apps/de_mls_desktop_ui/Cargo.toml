@@ -28,3 +28,4 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2.3"
 chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"

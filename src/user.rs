@@ -20,12 +20,15 @@ use mls_crypto::{
 };
 
 use crate::{
-    consensus::{v1::Vote, ConsensusEvent, ConsensusService},
+    consensus::{ConsensusEvent, ConsensusService},
     error::UserError,
     group::{Group, GroupAction},
-    protos::messages::v1::{
-        app_message, consensus::v1::Proposal, welcome_message, AppMessage, BanRequest,
-        BatchProposalsMessage, ConversationMessage, UserKeyPackage, VotingProposal, WelcomeMessage,
+    protos::{
+        consensus::v1::{Proposal, Vote},
+        de_mls::messages::v1::{
+            app_message, welcome_message, AppMessage, BanRequest, BatchProposalsMessage,
+            ConversationMessage, UserKeyPackage, VotingProposal, WelcomeMessage,
+        },
     },
     state_machine::GroupState,
     LocalSigner,
@@ -1065,7 +1068,11 @@ impl User {
 
         // If this is the steward, create proposal with vote and send to group
         if group.read().await.is_steward().await {
-            let proposals = group.read().await.get_proposals_for_voting_epoch().await;
+            let proposals = group
+                .read()
+                .await
+                .get_proposals_for_voting_epoch_as_ui_update_requests()
+                .await;
             if !proposals.is_empty() {
                 group.write().await.start_voting().await?;
 
@@ -1080,7 +1087,7 @@ impl User {
                     .create_proposal(
                         group_name,
                         "Group Update Proposal".to_string(),
-                        proposals.iter().map(|p| p.to_string()).collect(),
+                        proposals.clone(),
                         self.identity.identity_string().into(),
                         expected_voters_count,
                         3600, // 1 hour expiration
@@ -1096,8 +1103,8 @@ impl User {
                 // Send voting proposal to frontend
                 let voting_proposal: AppMessage = VotingProposal {
                     proposal_id: proposal.proposal_id,
-                    payload: proposal.payload,
                     group_name: group_name.to_string(),
+                    group_requests: proposal.group_requests.clone(),
                 }
                 .into();
 
@@ -1399,7 +1406,7 @@ impl User {
         // Send voting proposal to frontend
         let voting_proposal: AppMessage = VotingProposal {
             proposal_id: proposal.proposal_id,
-            payload: proposal.payload.clone(),
+            group_requests: proposal.group_requests.clone(),
             group_name: group_name.to_string(),
         }
         .into();

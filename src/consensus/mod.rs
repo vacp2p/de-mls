@@ -15,16 +15,10 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::error::ConsensusError;
-use crate::protos::messages::v1::consensus::v1::{Outcome, Proposal, ProposalResult, Vote};
+use crate::protos::consensus::v1::{Outcome, Proposal, ProposalResult, Vote};
 use crate::LocalSigner;
 
 pub mod service;
-
-// Re-export protobuf types for compatibility with generated code
-pub mod v1 {
-    pub use crate::protos::messages::v1::consensus::v1::{Proposal, Vote};
-}
-
 pub use service::ConsensusService;
 
 /// Consensus events emitted when consensus state changes

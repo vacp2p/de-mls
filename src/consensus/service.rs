@@ -12,7 +12,7 @@ use crate::consensus::{
     ConsensusState, ConsensusStats,
 };
 use crate::error::ConsensusError;
-use crate::protos::messages::v1::consensus::v1::{Proposal, ProposalResult, Vote};
+use crate::protos::consensus::v1::{Proposal, ProposalResult, UiUpdateRequest, Vote};
 use crate::{verify_vote_hash, LocalSigner};
 
 /// Consensus service that manages multiple consensus sessions for multiple groups
@@ -92,7 +92,7 @@ impl ConsensusService {
         &self,
         group_name: &str,
         name: String,
-        payload: String,
+        group_requests: Vec<UiUpdateRequest>,
         proposal_owner: Vec<u8>,
         expected_voters_count: u32,
         expiration_time: u64,
@@ -107,7 +107,7 @@ impl ConsensusService {
         // Create proposal with steward's vote
         let proposal = Proposal {
             name,
-            payload,
+            group_requests,
             proposal_id,
             proposal_owner,
             votes: vec![],

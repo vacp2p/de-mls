@@ -22,23 +22,25 @@
 //!
 
 use crate::{
-    consensus::{
-        v1::{Proposal, Vote},
-        ConsensusEvent,
-    },
+    consensus::ConsensusEvent,
     encrypt_message,
-    protos::messages::v1::{
-        app_message, consensus::v1::Outcome, UserKeyPackage, UserVote, VotingProposal,
+    protos::{
+        consensus::v1::{
+            ui_update_request, Outcome, Proposal, UiAddMemberRequest, UiRemoveMemberRequest,
+            UiUpdateRequest, Vote,
+        },
+        de_mls::messages::v1::{
+            app_message, welcome_message, AppMessage, BanRequest, BatchProposalsMessage,
+            ConversationMessage, GroupAnnouncement, InvitationToJoin, UserKeyPackage, UserVote,
+            VotingProposal, WelcomeMessage,
+        },
     },
+    steward::GroupUpdateRequest,
     verify_message, MessageError,
 };
+use alloy::hex;
 use openmls::prelude::{KeyPackage, MlsMessageOut};
 use std::fmt::Display;
-
-use crate::protos::messages::v1::{
-    welcome_message, AppMessage, BanRequest, BatchProposalsMessage, ConversationMessage,
-    GroupAnnouncement, InvitationToJoin, WelcomeMessage,
-};
 
 // Message type constants for consistency and type safety
 pub mod message_types {
@@ -268,4 +270,48 @@ impl From<ConsensusEvent> for Outcome {
             } => Outcome::Unspecified,
         }
     }
+}
+
+impl From<GroupUpdateRequest> for UiUpdateRequest {
+    fn from(group_update_request: GroupUpdateRequest) -> Self {
+        match group_update_request {
+            GroupUpdateRequest::AddMember(kp) => UiUpdateRequest {
+                request: Some(ui_update_request::Request::AddMember(UiAddMemberRequest {
+                    wallet_address: kp.leaf_node().credential().serialized_content().to_vec(),
+                })),
+            },
+            GroupUpdateRequest::RemoveMember(id) => UiUpdateRequest {
+                request: Some(ui_update_request::Request::RemoveMember(
+                    UiRemoveMemberRequest {
+                        wallet_address: id.into(),
+                    },
+                )),
+            },
+        }
+    }
+}
+
+// Helper function to convert protobuf UiUpdateRequest to display format
+pub fn convert_group_requests_to_display(group_requests: &[UiUpdateRequest]) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+
+    for req in group_requests {
+        match &req.request {
+            Some(ui_update_request::Request::AddMember(add_req)) => {
+                // Convert bytes to hex address format
+                let address = format!("0x{}", hex::encode(&add_req.wallet_address));
+                results.push(("Add Member".to_string(), address));
+            }
+            Some(ui_update_request::Request::RemoveMember(remove_req)) => {
+                // Convert bytes to hex address format
+                let address = format!("0x{}", hex::encode(&remove_req.wallet_address));
+                results.push(("Remove Member".to_string(), address));
+            }
+            None => {
+                results.push(("Unknown".to_string(), "Invalid request".to_string()));
+            }
+        }
+    }
+
+    results
 }

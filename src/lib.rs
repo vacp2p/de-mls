@@ -115,14 +115,17 @@ pub mod user_actor;
 pub mod user_app_instance;
 
 pub mod protos {
-    pub mod messages {
+    pub mod consensus {
         pub mod v1 {
-            pub mod consensus {
-                pub mod v1 {
-                    include!(concat!(env!("OUT_DIR"), "/consensus.v1.rs"));
-                }
+            include!(concat!(env!("OUT_DIR"), "/consensus.v1.rs"));
+        }
+    }
+
+    pub mod de_mls {
+        pub mod messages {
+            pub mod v1 {
+                include!(concat!(env!("OUT_DIR"), "/de_mls.messages.v1.rs"));
             }
-            include!(concat!(env!("OUT_DIR"), "/de_mls.messages.v1.rs"));
         }
     }
 }

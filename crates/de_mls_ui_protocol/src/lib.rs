@@ -1,20 +1,11 @@
 //! UI <-> Gateway protocol (PoC). Keep it dependency-light (serde only).
 // crates/de_mls_ui_protocol/src/lib.rs
 pub mod v1 {
-    use de_mls::protos::messages::v1::{
+    use de_mls::protos::{
         consensus::v1::{ProposalResult, VotePayload},
-        ConversationMessage,
+        de_mls::messages::v1::ConversationMessage,
     };
     use serde::{Deserialize, Serialize};
-
-    // #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    // pub struct ChatMsg {
-    //     pub id: String,
-    //     pub group_id: String,
-    //     pub author: String,
-    //     pub body: String,
-    //     pub ts_ms: i64,
-    // }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[non_exhaustive]

@@ -15,10 +15,12 @@ use tracing::{error, info};
 use uuid;
 
 use crate::{
-    consensus::v1::{Proposal, Vote},
     error::GroupError,
     message::{message_types, MessageType},
-    protos::messages::v1::{app_message, AppMessage, BatchProposalsMessage, WelcomeMessage},
+    protos::{
+        consensus::v1::{Proposal, UiUpdateRequest, Vote},
+        de_mls::messages::v1::{app_message, AppMessage, BatchProposalsMessage, WelcomeMessage},
+    },
     state_machine::{GroupState, GroupStateMachine},
     steward::GroupUpdateRequest,
 };
@@ -550,6 +552,16 @@ impl Group {
             .await
             .get_voting_epoch_proposals()
             .await
+    }
+
+    pub async fn get_proposals_for_voting_epoch_as_ui_update_requests(
+        &self,
+    ) -> Vec<UiUpdateRequest> {
+        self.get_proposals_for_voting_epoch()
+            .await
+            .iter()
+            .map(|p| p.clone().into())
+            .collect()
     }
 
     /// Start voting on proposals for the current epoch

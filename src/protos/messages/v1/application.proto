@@ -40,7 +40,7 @@ message BatchProposalsMessage {
 message VotingProposal {
   uint32 proposal_id = 1;
   string group_name = 2;
-  string payload = 3;
+  repeated consensus.v1.UiUpdateRequest group_requests = 3;  // Structured group update requests
 }
 
 message UserVote {

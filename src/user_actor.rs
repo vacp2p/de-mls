@@ -6,7 +6,7 @@ use ds::waku_actor::WakuMessageToSend;
 use crate::{
     consensus::ConsensusEvent,
     error::UserError,
-    protos::messages::v1::BanRequest,
+    protos::de_mls::messages::v1::BanRequest,
     user::{User, UserAction},
 };
 

@@ -1,6 +1,6 @@
 use de_mls::{
     consensus::ConsensusService,
-    protos::messages::v1::app_message,
+    protos::de_mls::messages::v1::app_message,
     state_machine::GroupState,
     user::{User, UserAction},
 };

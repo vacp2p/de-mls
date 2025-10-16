@@ -1,14 +1,13 @@
 // apps/de_mls_desktop_ui/src/main.rs
 #![allow(non_snake_case)]
 
+use de_mls::message::convert_group_requests_to_display;
 use dioxus::prelude::*;
 use dioxus_desktop::{launch::launch as desktop_launch, Config, LogicalSize, WindowBuilder};
 
-use de_mls::protos::messages::v1::consensus::v1::{Outcome, VotePayload};
-use de_mls::protos::messages::v1::ConversationMessage;
-use de_mls::{
-    bootstrap::bootstrap_core_from_env, protos::messages::v1::consensus::v1::ProposalResult,
-};
+use de_mls::protos::consensus::v1::{Outcome, VotePayload};
+use de_mls::protos::de_mls::messages::v1::ConversationMessage;
+use de_mls::{bootstrap::bootstrap_core_from_env, protos::consensus::v1::ProposalResult};
 use de_mls_gateway::GATEWAY;
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 
@@ -565,13 +564,20 @@ fn ConsensusSection() -> Element {
                 // Current proposal block
                 if let Some(v) = pending {
                     div { class: "proposal",
-                        div { class: "meta",
-                            span { class: "label", "Proposal ID:" }
-                            code { "{v.proposal_id}" }
+                        div { class: "proposal-header",
+                            span { class: "proposal-label", "Proposal:" }
+                            span { class: "proposal-id", "{v.proposal_id}" }
                         }
-                        div { class: "payload",
-                            span { class: "label", "Payload:" }
-                            pre { "{v.payload}" }
+                        div { class: "proposal-payload",
+                            span { class: "payload-label", "Payload:" }
+                            div { class: "payload-items",
+                                for (action, id) in convert_group_requests_to_display(&v.group_requests) {
+                                    div { class: "payload-item",
+                                        span { class: "action", "{action}:" }
+                                        span { class: "id", "{id}" }
+                                    }
+                                }
+                            }
                         }
 
                         // Buttons — active now; when you have epochs, gate here.
@@ -746,22 +752,41 @@ button.mini { padding: 4px 8px; border-radius: 8px; font-size: 12px; }
 .panel.consensus .status .bad  { color: var(--bad);  font-weight: 600; }
 
 .panel.consensus .proposal {
-  border: 1px solid var(--border); border-radius: 10px; padding: 10px;
-  display: flex; flex-direction: column; gap: 10px;
+  border: 1px solid var(--border); border-radius: 10px; padding: 12px;
+  display: flex; flex-direction: column; gap: 12px;
 }
-.panel.consensus .kind-row {
-  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+.panel.consensus .proposal-header {
+  display: flex; align-items: center; gap: 8px;
+  padding-bottom: 8px; border-bottom: 1px solid var(--border);
 }
-.panel.consensus .pill {
-  display: inline-block; padding: 4px 8px; border-radius: 999px;
-  background: rgba(79,140,255,0.12); border: 1px solid rgba(79,140,255,0.35);
-  color: var(--text); font-size: 12px;
+.panel.consensus .proposal-label {
+  color: var(--muted); font-weight: 600; font-size: 14px;
 }
-.panel.consensus .id { color: var(--muted); font-size: 12px; }
-.panel.consensus .kv { display: grid; grid-template-columns: 92px 1fr; align-items: baseline; gap: 8px; }
-.panel.consensus .kv .k { color: var(--muted); }
-.panel.consensus .kv .v { color: var(--text); }
-.panel.consensus .raw { margin: 0; padding: 8px; border: 1px dashed var(--border); border-radius: 8px; background: rgba(255,255,255,0.03); font-size: 12px; }
+.panel.consensus .proposal-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  color: var(--text); font-weight: 600; font-size: 14px;
+}
+.panel.consensus .proposal-payload {
+  display: flex; flex-direction: column; gap: 8px;
+}
+.panel.consensus .payload-label {
+  color: var(--muted); font-weight: 600; font-size: 13px;
+}
+.panel.consensus .payload-items {
+  display: flex; flex-direction: column; gap: 6px;
+}
+.panel.consensus .payload-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; border-radius: 6px; background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+}
+.panel.consensus .payload-item .action {
+    font-size: 12px; color: var(--primary); min-width: 60px;
+}
+.panel.consensus .payload-item .id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  color: var(--text); font-size: 12px; word-break: break-all;
+}
 .panel.consensus .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
 
 /* Consensus results window */
