@@ -20,6 +20,9 @@
 //!    - [`VotingProposal`]
 //!    - [`UserVote`]
 //!
+use alloy::hex;
+use openmls::prelude::{KeyPackage, MlsMessageOut};
+use std::fmt::Display;
 
 use crate::{
     consensus::ConsensusEvent,
@@ -31,16 +34,47 @@ use crate::{
         },
         de_mls::messages::v1::{
             app_message, welcome_message, AppMessage, BanRequest, BatchProposalsMessage,
-            ClearCurrentEpochProposals, ConversationMessage, GroupAnnouncement, InvitationToJoin, ProposalAdded, UserKeyPackage, UserVote,
-            VotingProposal, WelcomeMessage,
+            ClearCurrentEpochProposals, ConversationMessage, GroupAnnouncement, InvitationToJoin,
+            ProposalAdded, UserKeyPackage, UserVote, VotingProposal, WelcomeMessage,
         },
     },
     steward::GroupUpdateRequest,
     verify_message, MessageError,
 };
-use alloy::hex;
-use openmls::prelude::{KeyPackage, MlsMessageOut};
-use std::fmt::Display;
+
+fn normalize_wallet_address(raw: &[u8]) -> String {
+    let as_utf8 = std::str::from_utf8(raw)
+        .map(|s| s.trim())
+        .unwrap_or_default();
+
+    if is_prefixed_hex(as_utf8) {
+        return as_utf8.to_string();
+    }
+
+    if is_raw_hex(as_utf8) {
+        return format!("0x{}", as_utf8);
+    }
+
+    if raw.is_empty() {
+        String::new()
+    } else {
+        format!("0x{}", hex::encode(raw))
+    }
+}
+
+fn is_prefixed_hex(input: &str) -> bool {
+    let rest = input
+        .strip_prefix("0x")
+        .or_else(|| input.strip_prefix("0X"));
+    match rest {
+        Some(hex_part) if !hex_part.is_empty() => hex_part.chars().all(|c| c.is_ascii_hexdigit()),
+        _ => false,
+    }
+}
+
+fn is_raw_hex(input: &str) -> bool {
+    !input.is_empty() && input.chars().all(|c| c.is_ascii_hexdigit())
+}
 
 // Message type constants for consistency and type safety
 pub mod message_types {
@@ -196,9 +230,7 @@ impl Display for AppMessage {
                 write!(
                     f,
                     "ProposalAdded: {} {} in group {}",
-                    proposal_added.action,
-                    proposal_added.address,
-                    proposal_added.group_id
+                    proposal_added.action, proposal_added.address, proposal_added.group_id
                 )
             }
             Some(app_message::Payload::ClearCurrentEpochProposals(clear_proposals)) => {
@@ -284,7 +316,9 @@ impl From<ProposalAdded> for AppMessage {
 impl From<ClearCurrentEpochProposals> for AppMessage {
     fn from(clear_proposals: ClearCurrentEpochProposals) -> Self {
         AppMessage {
-            payload: Some(app_message::Payload::ClearCurrentEpochProposals(clear_proposals)),
+            payload: Some(app_message::Payload::ClearCurrentEpochProposals(
+                clear_proposals,
+            )),
         }
     }
 }
@@ -328,20 +362,24 @@ impl From<GroupUpdateRequest> for UiUpdateRequest {
 }
 
 // Helper function to convert protobuf UiUpdateRequest to display format
-pub fn convert_group_requests_to_display(group_requests: &[UiUpdateRequest]) -> Vec<(String, String)> {
+pub fn convert_group_requests_to_display(
+    group_requests: &[UiUpdateRequest],
+) -> Vec<(String, String)> {
     let mut results = Vec::new();
 
     for req in group_requests {
         match &req.request {
             Some(ui_update_request::Request::AddMember(add_req)) => {
-                // Convert bytes to hex address format
-                let address = format!("0x{}", hex::encode(&add_req.wallet_address));
-                results.push(("Add Member".to_string(), address));
+                results.push((
+                    "Add Member".to_string(),
+                    normalize_wallet_address(&add_req.wallet_address),
+                ));
             }
             Some(ui_update_request::Request::RemoveMember(remove_req)) => {
-                // Convert bytes to hex address format
-                let address = format!("0x{}", hex::encode(&remove_req.wallet_address));
-                results.push(("Remove Member".to_string(), address));
+                results.push((
+                    "Remove Member".to_string(),
+                    normalize_wallet_address(&remove_req.wallet_address),
+                ));
             }
             None => {
                 results.push(("Unknown".to_string(), "Invalid request".to_string()));
@@ -350,4 +388,41 @@ pub fn convert_group_requests_to_display(group_requests: &[UiUpdateRequest]) -> 
     }
 
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_prefixed_hex, normalize_wallet_address};
+
+    #[test]
+    fn keeps_prefixed_hex() {
+        let addr = normalize_wallet_address(b"0xAbCd1234");
+        assert_eq!(addr, "0xAbCd1234");
+    }
+
+    #[test]
+    fn prefixes_raw_hex() {
+        let addr = normalize_wallet_address(b"ABCD1234");
+        assert_eq!(addr, "0xABCD1234");
+    }
+
+    #[test]
+    fn encodes_binary_bytes() {
+        let addr = normalize_wallet_address(&[0x11, 0x22, 0x33]);
+        assert_eq!(addr, "0x112233");
+    }
+
+    #[test]
+    fn trims_ascii_input() {
+        let addr = normalize_wallet_address(b"  0x1F  ");
+        assert_eq!(addr, "0x1F");
+    }
+
+    #[test]
+    fn prefixed_hex_helper() {
+        assert!(is_prefixed_hex("0xabc"));
+        assert!(is_prefixed_hex("0XABC"));
+        assert!(!is_prefixed_hex("abc"));
+        assert!(!is_prefixed_hex("0x"));
+    }
 }

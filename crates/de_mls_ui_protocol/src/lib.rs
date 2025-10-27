@@ -44,6 +44,10 @@ pub mod v1 {
         GetCurrentEpochProposals {
             group_id: String,
         },
+        SendBanRequest {
+            group_id: String,
+            user_to_ban: String,
+        },
     }
 
     #[derive(Debug, Clone)]
@@ -53,17 +57,33 @@ pub mod v1 {
         Groups(Vec<String>),
         GroupCreated(String),
         GroupRemoved(String),
-        EnteredGroup { group_id: String },
+        EnteredGroup {
+            group_id: String,
+        },
         ChatMessage(ConversationMessage),
-        LeaveGroup { group_id: String },
+        LeaveGroup {
+            group_id: String,
+        },
 
-        StewardStatus { group_id: String, is_steward: bool },
+        StewardStatus {
+            group_id: String,
+            is_steward: bool,
+        },
 
         VoteRequested(VotePayload),
         ProposalDecided(ProposalResult),
-        CurrentEpochProposals { group_id: String, proposals: Vec<(String, String)> },
-        ProposalAdded { group_id: String, action: String, address: String },
-        CurrentEpochProposalsCleared { group_id: String },
+        CurrentEpochProposals {
+            group_id: String,
+            proposals: Vec<(String, String)>,
+        },
+        ProposalAdded {
+            group_id: String,
+            action: String,
+            address: String,
+        },
+        CurrentEpochProposalsCleared {
+            group_id: String,
+        },
         Error(String),
     }
 }

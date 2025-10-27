@@ -30,8 +30,8 @@ use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 use kameo::actor::ActorRef;
 
 // If you want to store the user actor here
-use de_mls::user::{User, UserAction}; // adjust to your actual module path
 use de_mls::steward;
+use de_mls::user::{User, UserAction}; // adjust to your actual module path
 use hex;
 
 pub struct Gateway {
@@ -217,6 +217,15 @@ impl Gateway {
                                 .map_err(|e| {
                                     anyhow::anyhow!("error sending proposal added event: {e}")
                                 }),
+                            Some(app_message::Payload::BanRequest(br)) => evt_tx
+                                .unbounded_send(AppEvent::ProposalAdded {
+                                    group_id: br.group_name.clone(),
+                                    action: "Remove Member".to_string(),
+                                    address: br.user_to_ban.clone(),
+                                })
+                                .map_err(|e| {
+                                    anyhow::anyhow!("error sending proposal added event (ban request): {e}")
+                                }),
                             Some(app_message::Payload::ClearCurrentEpochProposals(ccp)) => evt_tx
                                 .unbounded_send(AppEvent::CurrentEpochProposalsCleared {
                                     group_id: ccp.group_id.clone(),
@@ -343,11 +352,13 @@ impl Gateway {
                                         proposal_id: vp.proposal_id.clone(),
                                     },
                                 ));
-                                
+
                                 // Also clear current epoch proposals when voting starts
-                                let _ = evt_tx_clone.unbounded_send(AppEvent::CurrentEpochProposalsCleared {
-                                    group_id: group_name.clone(),
-                                });
+                                let _ = evt_tx_clone.unbounded_send(
+                                    AppEvent::CurrentEpochProposalsCleared {
+                                        group_id: group_name.clone(),
+                                    },
+                                );
                             }
                             if let Some(app_message::Payload::ProposalAdded(pa)) = &app_msg.payload
                             {
@@ -358,12 +369,15 @@ impl Gateway {
                                     address: pa.address.clone(),
                                 });
                             }
-                            if let Some(app_message::Payload::ClearCurrentEpochProposals(ccp)) = &app_msg.payload
+                            if let Some(app_message::Payload::ClearCurrentEpochProposals(ccp)) =
+                                &app_msg.payload
                             {
                                 info!("Sending clear current epoch proposals event to UI");
-                                let _ = evt_tx_clone.unbounded_send(AppEvent::CurrentEpochProposalsCleared {
-                                    group_id: ccp.group_id.clone(),
-                                });
+                                let _ = evt_tx_clone.unbounded_send(
+                                    AppEvent::CurrentEpochProposalsCleared {
+                                        group_id: ccp.group_id.clone(),
+                                    },
+                                );
                             }
                         }
                         UserAction::DoNothing => {
@@ -420,6 +434,47 @@ impl Gateway {
         Ok(())
     }
 
+    pub async fn send_ban_request(
+        &self,
+        group_name: String,
+        user_to_ban: String,
+    ) -> anyhow::Result<()> {
+        let core = self.core();
+        let user = if let Some(user) = self.user() {
+            user
+        } else {
+            return Err(anyhow::anyhow!("user not logged in"));
+        };
+
+        let ban_request = de_mls::protos::de_mls::messages::v1::BanRequest {
+            user_to_ban: user_to_ban.clone(),
+            requester: String::new(),
+            group_name: group_name.clone(),
+        };
+
+        let msg = user
+            .ask(de_mls::user_actor::BuildBanMessage {
+                ban_request,
+                group_name: group_name.clone(),
+            })
+            .await?;
+        match msg {
+            UserAction::SendToWaku(msg) => {
+                core.app_state.waku_node.send(msg).await?;
+            }
+            UserAction::SendToApp(msg) => {
+                self.push_event(AppEvent::ProposalAdded {
+                    group_id: group_name.clone(),
+                    action: "Remove Member".to_string(),
+                    address: user_to_ban.clone(),
+                });
+            }
+            _ => return Err(anyhow::anyhow!("Invalid user action")),
+        }
+
+        Ok(())
+    }
+
     pub async fn process_user_vote(
         &self,
         group_name: String,
@@ -460,23 +515,29 @@ impl Gateway {
     }
 
     /// Get current epoch proposals for the given group
-    pub async fn get_current_epoch_proposals(&self, group_name: String) -> anyhow::Result<Vec<(String, String)>> {
+    pub async fn get_current_epoch_proposals(
+        &self,
+        group_name: String,
+    ) -> anyhow::Result<Vec<(String, String)>> {
         let user = self
             .user()
             .ok_or_else(|| anyhow::anyhow!("user not logged in"))?;
-        
-        let proposals = user.ask(GetCurrentEpochProposalsRequest { group_name }).await?;
+
+        let proposals = user
+            .ask(GetCurrentEpochProposalsRequest { group_name })
+            .await?;
         let display_proposals: Vec<(String, String)> = proposals
             .iter()
-            .map(|proposal| {
-                match proposal {
-                    steward::GroupUpdateRequest::AddMember(kp) => {
-                        let address = format!("0x{}", hex::encode(kp.leaf_node().credential().serialized_content()));
-                        ("Add Member".to_string(), address)
-                    }
-                    steward::GroupUpdateRequest::RemoveMember(id) => {
-                        ("Remove Member".to_string(), id.clone())
-                    }
+            .map(|proposal| match proposal {
+                steward::GroupUpdateRequest::AddMember(kp) => {
+                    let address = format!(
+                        "0x{}",
+                        hex::encode(kp.leaf_node().credential().serialized_content())
+                    );
+                    ("Add Member".to_string(), address)
+                }
+                steward::GroupUpdateRequest::RemoveMember(id) => {
+                    ("Remove Member".to_string(), id.clone())
                 }
             })
             .collect();

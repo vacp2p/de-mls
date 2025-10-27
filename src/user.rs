@@ -289,7 +289,10 @@ impl User {
         Ok(is_steward)
     }
 
-    pub async fn get_current_epoch_proposals(&self, group_name: &str) -> Result<Vec<crate::steward::GroupUpdateRequest>, UserError> {
+    pub async fn get_current_epoch_proposals(
+        &self,
+        group_name: &str,
+    ) -> Result<Vec<crate::steward::GroupUpdateRequest>, UserError> {
         let group = {
             let groups = self.groups.read().await;
             groups
@@ -397,14 +400,16 @@ impl User {
                             .await
                             .store_invite_proposal(Box::new(key_package))
                             .await?;
-                        
+
                         // Send notification to UI about the new proposal
-                        let proposal_added_msg: AppMessage = crate::protos::de_mls::messages::v1::ProposalAdded {
-                            group_id: group_name.to_string(),
-                            action,
-                            address,
-                        }.into();
-                        
+                        let proposal_added_msg: AppMessage =
+                            crate::protos::de_mls::messages::v1::ProposalAdded {
+                                group_id: group_name.to_string(),
+                                action,
+                                address,
+                            }
+                            .into();
+
                         Ok(UserAction::SendToApp(proposal_added_msg))
                     } else {
                         Ok(UserAction::DoNothing)
@@ -1552,7 +1557,7 @@ impl User {
         &mut self,
         ban_request: BanRequest,
         group_name: &str,
-    ) -> Result<WakuMessageToSend, UserError> {
+    ) -> Result<UserAction, UserError> {
         let user_to_ban = ban_request.user_to_ban.clone();
         info!(
             "[user::process_ban_request]: Processing ban request for user {user_to_ban} in group {group_name}"
@@ -1578,15 +1583,16 @@ impl User {
             self.add_remove_proposal(group_name, user_to_ban.to_string())
                 .await?;
 
-            let msg_to_send = self
-                .build_system_message(
-                    format!("Remove proposal for user {user_to_ban} added to steward queue")
-                        .into_bytes(),
-                    group_name,
-                )
-                .await?;
+            // Send notification to UI about the new proposal
+            let proposal_added_msg: AppMessage =
+                crate::protos::de_mls::messages::v1::ProposalAdded {
+                    group_id: group_name.to_string(),
+                    action: "Remove Member".to_string(),
+                    address: user_to_ban,
+                }
+                .into();
 
-            Ok(msg_to_send)
+            Ok(UserAction::SendToApp(proposal_added_msg))
         } else {
             // Regular user: send the ban request to the group
             let updated_ban_request = BanRequest {
@@ -1594,8 +1600,10 @@ impl User {
                 requester: self.identity_string(),
                 group_name: ban_request.group_name,
             };
-            self.build_changer_message(updated_ban_request.into(), group_name)
-                .await
+            let msg = self
+                .build_changer_message(updated_ban_request.into(), group_name)
+                .await?;
+            Ok(UserAction::SendToWaku(msg))
         }
     }
 

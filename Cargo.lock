@@ -2289,7 +2289,6 @@ dependencies = [
  "tower-http",
  "tower-layer",
  "tracing",
- "tracing-subscriber 0.3.20",
  "uuid",
  "waku-bindings",
  "waku-sys",

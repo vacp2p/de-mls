@@ -96,7 +96,7 @@ pub struct BuildBanMessage {
 }
 
 impl Message<BuildBanMessage> for User {
-    type Reply = Result<WakuMessageToSend, UserError>;
+    type Reply = Result<UserAction, UserError>;
 
     async fn handle(
         &mut self,

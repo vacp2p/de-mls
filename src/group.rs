@@ -315,9 +315,12 @@ impl Group {
         state_machine
             .add_proposal(GroupUpdateRequest::AddMember(key_package.clone()))
             .await;
-        
+
         // Extract wallet address for UI display
-        let address = format!("0x{}", hex::encode(key_package.leaf_node().credential().serialized_content()));
+        let address = format!(
+            "0x{}",
+            hex::encode(key_package.leaf_node().credential().serialized_content())
+        );
         Ok(("Add Member".to_string(), address))
     }
 
@@ -330,7 +333,10 @@ impl Group {
     /// - Adds a RemoveMember proposal to the current epoch
     /// - Proposal will be processed in the next steward epoch
     /// - Returns the proposal details for UI notification
-    pub async fn store_remove_proposal(&mut self, identity: String) -> Result<(String, String), GroupError> {
+    pub async fn store_remove_proposal(
+        &mut self,
+        identity: String,
+    ) -> Result<(String, String), GroupError> {
         let mut state_machine = self.state_machine.write().await;
         state_machine
             .add_proposal(GroupUpdateRequest::RemoveMember(identity.clone()))

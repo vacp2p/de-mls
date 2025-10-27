@@ -1,10 +1,10 @@
 // apps/de_mls_desktop_ui/src/main.rs
 #![allow(non_snake_case)]
-
-use de_mls::message::convert_group_requests_to_display;
 use dioxus::prelude::*;
 use dioxus_desktop::{launch::launch as desktop_launch, Config, LogicalSize, WindowBuilder};
+use std::sync::Arc;
 
+use de_mls::message::convert_group_requests_to_display;
 use de_mls::protos::consensus::v1::{Outcome, VotePayload};
 use de_mls::protos::de_mls::messages::v1::ConversationMessage;
 use de_mls::{bootstrap::bootstrap_core_from_env, protos::consensus::v1::ProposalResult};
@@ -27,8 +27,8 @@ fn format_timestamp(timestamp_ms: u64) -> String {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct SessionState {
-    name: Option<String>,
-    key: Option<String>,
+    address: String,
+    key: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -158,7 +158,7 @@ fn Login() -> Element {
             loop {
                 match GATEWAY.next_event().await {
                     Some(AppEvent::LoggedIn(name)) => {
-                        sess.write().name = Some(name);
+                        sess.write().address = name;
                         nav.replace(Route::Home);
                         break;
                     }
@@ -178,7 +178,7 @@ fn Login() -> Element {
         if k.is_empty() {
             return;
         }
-        sess.write().key = Some(k.clone());
+        sess.write().key = k.clone();
         spawn(async move {
             let _ = GATEWAY.send(AppCmd::Login { private_key: k }).await;
         });
@@ -492,17 +492,37 @@ fn ChatSection() -> Element {
             .collect::<Vec<_>>()
     };
 
-    let my_name = sess.read().name.clone();
+    // Workaround for borrow after move by wrapping my_name in an Arc
+    let my_name = Arc::new(sess.read().address.clone());
+    let my_name_for_leave = my_name.clone();
 
     rsx! {
         div { class: "panel chat",
-            h2 { "Chat" }
+            div { class: "chat-header",
+                h2 { "Chat" }
+                if let Some(gid) = chat.read().opened_group.clone() {
+                    button {
+                        class: "ghost mini",
+                        onclick: move |_| {
+                            let group_id = gid.clone();
+                            let addr = my_name_for_leave.clone();
+                            // Send a self-ban (leave) request: requester filled by backend
+                            spawn(async move {
+                                let _ = GATEWAY
+                                    .send(AppCmd::SendBanRequest { group_id: group_id.clone(), user_to_ban: (*addr).clone() })
+                                    .await;
+                            });
+                        },
+                        "Leave group"
+                    }
+                }
+            }
             if chat.read().opened_group.is_none() {
                 div { class: "hint", "Pick a group to chat." }
             } else {
                 div { class: "messages",
                     for (i, m) in msgs_for_group.iter().enumerate() {
-                        if my_name.as_deref() == Some(m.sender.as_str()) || m.sender.eq_ignore_ascii_case("me") {
+                        if (*my_name).clone() == m.sender || m.sender.eq_ignore_ascii_case("me") {
                             div { key: "{i}", class: "msg me",
                                 span { class: "from", "{m.sender}" }
                                 span { class: "body", "{String::from_utf8_lossy(&m.message)}" }
@@ -607,7 +627,7 @@ fn ConsensusSection() -> Element {
                             for (action, address) in &cons.read().current_epoch_proposals {
                                 div { class: "proposal-item",
                                     span { class: "action", "{action}:" }
-                                    span { class: "address", "{address}" }
+                                    span { class: "value", "{address}" }
                                 }
                             }
                         }
@@ -620,28 +640,21 @@ fn ConsensusSection() -> Element {
                 div { class: "consensus-section",
                     h3 { "Proposal for Vote" }
                     if let Some(v) = pending {
-                        div { class: "proposal",
-                            div { class: "proposal-header",
-                                span { class: "proposal-label", "Proposal:" }
-                                span { class: "proposal-id", "{v.proposal_id}" }
+                        div { class: "proposals-window",
+                            div { class: "proposal-item proposal-id",
+                                span { class: "action", "Proposal ID:" }
+                                span { class: "value", "{v.proposal_id}" }
                             }
-                            div { class: "proposal-payload",
-                                span { class: "payload-label", "Payload:" }
-                                div { class: "payload-items",
-                                    for (action, id) in convert_group_requests_to_display(&v.group_requests) {
-                                        div { class: "payload-item",
-                                            span { class: "action", "{action}:" }
-                                            span { class: "id", "{id}" }
-                                        }
-                                    }
+                            for (action, id) in convert_group_requests_to_display(&v.group_requests) {
+                                div { class: "proposal-item",
+                                    span { class: "action", "{action}:" }
+                                    span { class: "value", "{id}" }
                                 }
                             }
-
-                            // Buttons — active now; when you have epochs, gate here.
-                            div { class: "actions",
-                                button { class: "primary", onclick: vote_yes, "YES" }
-                                button { class: "ghost",   onclick: vote_no,  "NO"  }
-                            }
+                        }
+                        div { class: "vote-actions",
+                            button { class: "primary", onclick: vote_yes, "YES" }
+                            button { class: "ghost",   onclick: vote_no,  "NO"  }
                         }
                     } else {
                         div { class: "no-data", "No proposal for vote" }
@@ -793,6 +806,7 @@ button.mini { padding: 4px 8px; border-radius: 8px; font-size: 12px; }
   min-height: 360px; height: 58vh; overflow-y: auto; border: 1px solid var(--border);
   border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 10px;
 }
+.panel.chat .chat-header { display: flex; align-items: center; justify-content: space-between; }
 .msg { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
 .msg.me { align-items: flex-end; }
 .msg.me .body { background: rgba(79,140,255,0.15); border: 1px solid rgba(79,140,255,0.35); padding: 8px 10px; border-radius: 10px; }
@@ -809,41 +823,41 @@ button.mini { padding: 4px 8px; border-radius: 8px; font-size: 12px; }
 .panel.consensus .status .good { color: var(--good); font-weight: 600; }
 .panel.consensus .status .bad  { color: var(--bad);  font-weight: 600; }
 
-.panel.consensus .proposal {
-  border: 1px solid var(--border); border-radius: 10px; padding: 12px;
-  display: flex; flex-direction: column; gap: 12px;
-}
-.panel.consensus .proposal-header {
-  display: flex; align-items: center; gap: 8px;
-  padding-bottom: 8px; border-bottom: 1px solid var(--border);
-}
-.panel.consensus .proposal-label {
-  color: var(--muted); font-weight: 600; font-size: 14px;
-}
-.panel.consensus .proposal-id {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  color: var(--text); font-weight: 600; font-size: 14px;
-}
-.panel.consensus .proposal-payload {
-  display: flex; flex-direction: column; gap: 8px;
-}
-.panel.consensus .payload-label {
-  color: var(--muted); font-weight: 600; font-size: 13px;
-}
-.panel.consensus .payload-items {
-  display: flex; flex-direction: column; gap: 6px;
-}
-.panel.consensus .payload-item {
-  display: flex; align-items: center; gap: 8px;
-  padding: 6px 8px; border-radius: 6px; background: rgba(255,255,255,0.03);
+.panel.consensus .proposal-item {
+  display: grid;
+  grid-template-columns: minmax(6rem, max-content) 1fr;
+  align-items: start;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.03);
   border: 1px solid var(--border);
 }
-.panel.consensus .payload-item .action {
-    font-size: 12px; color: var(--primary); min-width: 60px;
+.panel.consensus .proposal-item .action {
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 600;
 }
-.panel.consensus .payload-item .id {
+.panel.consensus .proposal-item .value {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  color: var(--text); font-size: 12px; word-break: break-all;
+  color: var(--text);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.panel.consensus .proposal-item.proposal-id {
+  background: rgba(0, 178, 255, 0.08);
+  border-color: rgba(0, 178, 255, 0.45);
+  box-shadow: inset 0 0 0 1px rgba(0, 178, 255, 0.15);
+}
+.panel.consensus .proposal-item.proposal-id .action {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.panel.consensus .proposal-item.proposal-id .value {
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.03em;
 }
 
 /* Consensus sections */
@@ -870,32 +884,7 @@ button.mini { padding: 4px 8px; border-radius: 8px; font-size: 12px; }
   overflow-y: auto;
   display: flex; flex-direction: column; gap: 6px;
 }
-.panel.consensus .proposal-item {
-  display: flex; align-items: center; gap: 8px;
-  padding: 6px 8px; border-radius: 6px; background: rgba(255,255,255,0.03);
-  border: 1px solid var(--border);
-}
-.panel.consensus .proposal-item .action {
-    color: var(--primary); min-width: 100px;
-}
-.panel.consensus .proposal-item .address {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  color: var(--text); font-size: 12px; word-break: break-all; white-space: pre-wrap;
-}
-.panel.consensus .proposal {
-  display: flex; flex-direction: column;
-}
-.panel.consensus .proposal .proposal-header {
-  margin-bottom: 8px;
-}
-.panel.consensus .proposal .proposal-payload {
-  display: flex; flex-direction: column;
-  margin-bottom: 12px;
-}
-.panel.consensus .proposal .proposal-payload .payload-items {
-  display: flex; flex-direction: column; gap: 4px;
-}
-.panel.consensus .proposal .actions {
+.panel.consensus .vote-actions {
   display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px;
 }
 

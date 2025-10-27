@@ -183,8 +183,30 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                     }
                     Err(e) => {
                         tracing::warn!("get_current_epoch_proposals failed: {e:?}");
-                        GATEWAY.push_event(AppEvent::Error("Get current epoch proposals failed".into()));
+                        GATEWAY.push_event(AppEvent::Error(
+                            "Get current epoch proposals failed".into(),
+                        ));
                     }
+                }
+            }
+
+            AppCmd::SendBanRequest {
+                group_id,
+                user_to_ban,
+            } => {
+                if let Err(e) = GATEWAY
+                    .send_ban_request(group_id.clone(), user_to_ban.clone())
+                    .await
+                {
+                    tracing::warn!("send_ban_request failed: {e:?}");
+                    GATEWAY.push_event(AppEvent::Error("Send ban request failed".into()));
+                } else {
+                    // optional local ack
+                    GATEWAY.push_event(AppEvent::ChatMessage(ConversationMessage {
+                        message: format!("You requested to leave the group").into_bytes(),
+                        sender: "system".to_string(),
+                        group_name: group_id.clone(),
+                    }));
                 }
             }
 
