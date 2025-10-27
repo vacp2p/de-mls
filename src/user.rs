@@ -15,7 +15,8 @@ use waku_bindings::WakuMessage;
 
 use ds::{waku_actor::WakuMessageToSend, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 use mls_crypto::{
-    identity::Identity,
+    identity::{normalize_wallet_address, Identity},
+    normalize_wallet_address_str,
     openmls_provider::{MlsProvider, CIPHERSUITE},
 };
 
@@ -226,6 +227,33 @@ impl User {
         Ok(members.len())
     }
 
+    /// Retrieve the list of member identities for a group.
+    ///
+    /// ## Parameters:
+    /// - `group_name`: Target group
+    ///
+    /// ## Returns:
+    /// - Vector of normalized wallet addresses (e.g., `0xabc...`)
+    ///
+    /// ## Errors:
+    /// - `UserError::GroupNotFoundError` if group is missing
+    pub async fn get_group_members(&self, group_name: &str) -> Result<Vec<String>, UserError> {
+        let groups = self.groups.read().await;
+        let members = groups
+            .get(group_name)
+            .cloned()
+            .ok_or_else(|| UserError::GroupNotFoundError)?
+            .read()
+            .await
+            .members_identity()
+            .await?;
+
+        Ok(members
+            .into_iter()
+            .map(|raw| normalize_wallet_address(raw.as_slice()))
+            .collect())
+    }
+
     /// Get the MLS epoch of a group.
     ///
     /// ## Parameters:
@@ -287,6 +315,21 @@ impl User {
         };
         let is_steward = group.read().await.is_steward().await;
         Ok(is_steward)
+    }
+
+    pub async fn is_user_mls_group_initialized_for_group(
+        &self,
+        group_name: &str,
+    ) -> Result<bool, UserError> {
+        let group = {
+            let groups = self.groups.read().await;
+            groups
+                .get(group_name)
+                .cloned()
+                .ok_or_else(|| UserError::GroupNotFoundError)?
+        };
+        let is_initialized = group.read().await.is_mls_group_initialized();
+        Ok(is_initialized)
     }
 
     pub async fn get_current_epoch_proposals(
@@ -1558,10 +1601,8 @@ impl User {
         ban_request: BanRequest,
         group_name: &str,
     ) -> Result<UserAction, UserError> {
-        let user_to_ban = ban_request.user_to_ban.clone();
-        info!(
-            "[user::process_ban_request]: Processing ban request for user {user_to_ban} in group {group_name}"
-        );
+        let normalized_user_to_ban = normalize_wallet_address_str(&ban_request.user_to_ban)?;
+        info!("[user::process_ban_request]: Processing ban request for user {normalized_user_to_ban} in group {group_name}");
 
         let group = {
             let groups = self.groups.read().await;
@@ -1578,9 +1619,9 @@ impl User {
         if is_steward {
             // Steward: add the remove proposal to the queue
             info!(
-                "[user::process_ban_request]: Steward adding remove proposal for user {user_to_ban}"
+                "[user::process_ban_request]: Steward adding remove proposal for user {normalized_user_to_ban}"
             );
-            self.add_remove_proposal(group_name, user_to_ban.to_string())
+            self.add_remove_proposal(group_name, normalized_user_to_ban.clone())
                 .await?;
 
             // Send notification to UI about the new proposal
@@ -1588,7 +1629,7 @@ impl User {
                 crate::protos::de_mls::messages::v1::ProposalAdded {
                     group_id: group_name.to_string(),
                     action: "Remove Member".to_string(),
-                    address: user_to_ban,
+                    address: normalized_user_to_ban,
                 }
                 .into();
 
@@ -1596,7 +1637,7 @@ impl User {
         } else {
             // Regular user: send the ban request to the group
             let updated_ban_request = BanRequest {
-                user_to_ban: ban_request.user_to_ban,
+                user_to_ban: normalized_user_to_ban,
                 requester: self.identity_string(),
                 group_name: ban_request.group_name,
             };

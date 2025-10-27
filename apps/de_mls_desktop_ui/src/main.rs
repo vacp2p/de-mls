@@ -10,6 +10,7 @@ use de_mls::protos::de_mls::messages::v1::ConversationMessage;
 use de_mls::{bootstrap::bootstrap_core_from_env, protos::consensus::v1::ProposalResult};
 use de_mls_gateway::GATEWAY;
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
+use mls_crypto::normalize_wallet_address_str;
 
 mod logging;
 
@@ -41,6 +42,7 @@ struct GroupsState {
 struct ChatState {
     opened_group: Option<String>,       // which group is “Open” in the UI
     messages: Vec<ConversationMessage>, // all messages; filtered per view
+    members: Vec<String>,               // cached member addresses for opened group
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -110,10 +112,11 @@ fn App() -> Element {
 
 fn HeaderBar() -> Element {
     // local signal to reflect current level in the select
-    let level = use_signal(|| std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()));
+    let mut level = use_signal(|| std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()));
+    let session = use_context::<Signal<SessionState>>();
+    let my_addr = session.read().address.clone();
 
     let on_change = {
-        let mut level = level.clone();
         move |evt: FormEvent| {
             let new_val = evt.value();
             if let Err(e) = crate::logging::set_level(&new_val) {
@@ -127,6 +130,9 @@ fn HeaderBar() -> Element {
     rsx! {
         div { class: "header",
             div { class: "brand", "DE-MLS" }
+            if !my_addr.is_empty() {
+                span { class: "user-hint mono ellipsis", title: "{my_addr}", "{my_addr}" }
+            }
             div { class: "spacer" }
             label { class: "label", "Log level" }
             select {
@@ -147,38 +153,30 @@ fn HeaderBar() -> Element {
 
 fn Login() -> Element {
     let nav = use_navigator();
-    let mut sess = use_context::<Signal<SessionState>>();
-    let key = use_signal(|| String::new());
+    let mut session = use_context::<Signal<SessionState>>();
+    let mut key = use_signal(String::new);
 
     // Local single-consumer loop: only Login() steals LoggedIn events
     use_future({
-        let nav = nav.clone();
-        let mut sess = sess.clone();
         move || async move {
             loop {
-                match GATEWAY.next_event().await {
-                    Some(AppEvent::LoggedIn(name)) => {
-                        sess.write().address = name;
-                        nav.replace(Route::Home);
-                        break;
-                    }
-                    _ => {}
+                if let Some(AppEvent::LoggedIn(name)) = GATEWAY.next_event().await {
+                    session.write().address = name;
+                    nav.replace(Route::Home);
+                    break;
                 }
             }
         }
     });
 
-    let oninput_key = {
-        let mut key = key.clone();
-        move |e: FormEvent| key.set(e.value())
-    };
+    let oninput_key = { move |e: FormEvent| key.set(e.value()) };
 
     let mut on_submit = move |_| {
         let k = key.read().trim().to_string();
         if k.is_empty() {
             return;
         }
-        sess.write().key = k.clone();
+        session.write().key = k.clone();
         spawn(async move {
             let _ = GATEWAY.send(AppCmd::Login { private_key: k }).await;
         });
@@ -202,13 +200,12 @@ fn Login() -> Element {
 }
 
 fn Home() -> Element {
-    let groups = use_context::<Signal<GroupsState>>();
-    let chat = use_context::<Signal<ChatState>>();
-    let cons = use_context::<Signal<ConsensusState>>();
+    let mut groups = use_context::<Signal<GroupsState>>();
+    let mut chat = use_context::<Signal<ChatState>>();
+    let mut cons = use_context::<Signal<ConsensusState>>();
 
     // Ask backend once
     use_future({
-        let groups = groups.clone();
         move || async move {
             if !groups.read().loaded {
                 let _ = GATEWAY.send(AppCmd::ListGroups).await;
@@ -218,9 +215,6 @@ fn Home() -> Element {
 
     // Local event loop for: Groups, ChatMessage, VoteRequested, VoteClosed
     use_future({
-        let mut groups = groups.clone();
-        let mut chat = chat.clone();
-        let mut cons = cons.clone();
         move || async move {
             loop {
                 match GATEWAY.next_event().await {
@@ -242,6 +236,11 @@ fn Home() -> Element {
                             cons.write().current_epoch_proposals = proposals;
                         }
                     }
+                    Some(AppEvent::GroupMembers { group_id, members }) => {
+                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
+                            chat.write().members = members;
+                        }
+                    }
                     Some(AppEvent::ProposalAdded {
                         group_id,
                         action,
@@ -249,7 +248,15 @@ fn Home() -> Element {
                     }) => {
                         // only update if it is the currently opened group
                         if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
-                            cons.write().current_epoch_proposals.push((action, address));
+                            // Avoid duplicates: do not enqueue if the same (action, address) already exists
+                            let exists = {
+                                cons.read().current_epoch_proposals.iter().any(|(a, addr)| {
+                                    a == &action && addr.eq_ignore_ascii_case(&address)
+                                })
+                            };
+                            if !exists {
+                                cons.write().current_epoch_proposals.push((action, address));
+                            }
                         }
                     }
                     Some(AppEvent::CurrentEpochProposalsCleared { group_id }) => {
@@ -280,7 +287,7 @@ fn Home() -> Element {
                         // store for the opened group (or keep a map per group if you prefer)
                         if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
                             cons.write().latest_results.push((
-                                proposal_id.clone(),
+                                proposal_id,
                                 Outcome::try_from(outcome).unwrap_or(Outcome::Unspecified),
                                 decided_at_ms,
                             ));
@@ -293,6 +300,7 @@ fn Home() -> Element {
                         g.items.retain(|n| n != &name);
                         if chat.read().opened_group.as_deref() == Some(name.as_str()) {
                             chat.write().opened_group = None;
+                            chat.write().members.clear();
                         }
                     }
                     _ => {}
@@ -322,7 +330,7 @@ fn GroupListSection() -> Element {
     let groups_state = use_context::<Signal<GroupsState>>();
     let mut chat = use_context::<Signal<ChatState>>();
     let mut show_modal = use_signal(|| false);
-    let mut new_name = use_signal(|| String::new());
+    let mut new_name = use_signal(String::new);
     let mut create_mode = use_signal(|| true); // true=create, false=join
 
     // Take a snapshot so RSX/closures don't borrow `groups_state` for 'static.
@@ -332,26 +340,32 @@ fn GroupListSection() -> Element {
     let mut open_group = {
         move |name: String| {
             chat.write().opened_group = Some(name.clone());
-            let gname = name.clone();
+            chat.write().members.clear();
+            let group_id = name.clone();
             spawn(async move {
                 let _ = GATEWAY
                     .send(AppCmd::EnterGroup {
-                        group_id: gname.clone(),
+                        group_id: group_id.clone(),
                     })
                     .await;
                 let _ = GATEWAY
                     .send(AppCmd::LoadHistory {
-                        group_id: gname.clone(),
+                        group_id: group_id.clone(),
                     })
                     .await;
                 let _ = GATEWAY
                     .send(AppCmd::QuerySteward {
-                        group_id: gname.clone(),
+                        group_id: group_id.clone(),
                     })
                     .await;
                 let _ = GATEWAY
                     .send(AppCmd::GetCurrentEpochProposals {
-                        group_id: gname.clone(),
+                        group_id: group_id.clone(),
+                    })
+                    .await;
+                let _ = GATEWAY
+                    .send(AppCmd::GetGroupMembers {
+                        group_id: group_id.clone(),
                     })
                     .await;
             });
@@ -359,11 +373,6 @@ fn GroupListSection() -> Element {
     };
 
     let mut modal_submit = {
-        let mut show_modal = show_modal.clone();
-        let mut new_name = new_name.clone();
-        let create_mode = create_mode.clone();
-        let mut open_group = open_group;
-
         move |_| {
             let name = new_name.read().trim().to_string();
             if name.is_empty() {
@@ -454,12 +463,13 @@ fn GroupListSection() -> Element {
 
 fn ChatSection() -> Element {
     let chat = use_context::<Signal<ChatState>>();
-    let sess = use_context::<Signal<SessionState>>();
-    let mut msg_input = use_signal(|| String::new());
+    let session = use_context::<Signal<SessionState>>();
+    let mut msg_input = use_signal(String::new);
+    let mut show_ban_modal = use_signal(|| false);
+    let mut ban_address = use_signal(String::new);
+    let mut ban_error = use_signal(|| Option::<String>::None);
 
     let send_msg = {
-        let mut msg_input = msg_input.clone();
-        let chat = chat.clone();
         move |_| {
             let text = msg_input.read().trim().to_string();
             if text.is_empty() {
@@ -481,6 +491,77 @@ fn ChatSection() -> Element {
         }
     };
 
+    let open_ban_modal = {
+        move |_| {
+            if let Some(gid) = chat.read().opened_group.clone() {
+                spawn(async move {
+                    let _ = GATEWAY
+                        .send(AppCmd::GetGroupMembers {
+                            group_id: gid.clone(),
+                        })
+                        .await;
+                });
+            }
+            ban_error.set(None);
+            show_ban_modal.set(true);
+        }
+    };
+
+    let submit_ban_request = {
+        move |_| {
+            let raw = ban_address.read().to_string();
+            let target = match normalize_wallet_address_str(&raw) {
+                Ok(addr) => addr,
+                Err(err) => {
+                    ban_error.set(Some(err.to_string()));
+                    return;
+                }
+            };
+
+            let opened = chat.read().opened_group.clone();
+            let Some(group_id) = opened else {
+                return;
+            };
+
+            ban_error.set(None);
+            show_ban_modal.set(false);
+            ban_address.set(String::new());
+
+            let addr_to_ban = target.clone();
+            spawn(async move {
+                let _ = GATEWAY
+                    .send(AppCmd::SendBanRequest {
+                        group_id: group_id.clone(),
+                        user_to_ban: addr_to_ban,
+                    })
+                    .await;
+            });
+        }
+    };
+
+    let oninput_ban_address = {
+        move |e: FormEvent| {
+            ban_error.set(None);
+            ban_address.set(e.value())
+        }
+    };
+
+    let close_ban_modal = {
+        move || {
+            ban_address.set(String::new());
+            ban_error.set(None);
+            show_ban_modal.set(false);
+        }
+    };
+
+    let cancel_ban_modal = {
+        move |_| {
+            ban_address.set(String::new());
+            ban_error.set(None);
+            show_ban_modal.set(false);
+        }
+    };
+
     // Only render messages for the opened group
     let msgs_for_group = {
         let opened = chat.read().opened_group.clone();
@@ -493,8 +574,24 @@ fn ChatSection() -> Element {
     };
 
     // Workaround for borrow after move by wrapping my_name in an Arc
-    let my_name = Arc::new(sess.read().address.clone());
+    let my_name = Arc::new(session.read().address.clone());
     let my_name_for_leave = my_name.clone();
+
+    let members_snapshot = chat.read().members.clone();
+    let my_address = (*my_name).clone();
+    let selectable_members: Vec<String> = members_snapshot
+        .into_iter()
+        .filter(|member| !member.eq_ignore_ascii_case(&my_address))
+        .collect();
+
+    let pick_member_handler = {
+        move |member: String| {
+            move |_| {
+                ban_error.set(None);
+                ban_address.set(member.clone());
+            }
+        }
+    };
 
     rsx! {
         div { class: "panel chat",
@@ -514,6 +611,11 @@ fn ChatSection() -> Element {
                             });
                         },
                         "Leave group"
+                    }
+                    button {
+                        class: "ghost mini",
+                        onclick: open_ban_modal,
+                        "Request ban"
                     }
                 }
             }
@@ -550,15 +652,64 @@ fn ChatSection() -> Element {
                 }
             }
         }
+
+        if *show_ban_modal.read() {
+            Modal {
+                title: "Request user ban".to_string(),
+                on_close: close_ban_modal,
+                div { class: "form-row",
+                    label { "User address" }
+                    input {
+                        r#type: "text",
+                        value: "{ban_address}",
+                        oninput: oninput_ban_address,
+                        placeholder: "0x...",
+                    }
+                    if let Some(error) = &*ban_error.read() {
+                        span { class: "input-error", "{error}" }
+                    }
+                }
+                if selectable_members.is_empty() {
+                    div { class: "hint muted", "No members loaded yet." }
+                } else {
+                    div { class: "member-picker",
+                        span { class: "helper", "Or pick a member:" }
+                        div { class: "member-list",
+                            for member in selectable_members.iter() {
+                                div {
+                                    key: "{member}",
+                                    class: "member-item",
+                                    div { class: "member-actions",
+                                        span { class: "member-id mono", "{member}" }
+                                        button {
+                                            class: "member-choose",
+                                            onclick: pick_member_handler(member.clone()),
+                                            "Choose"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                div { class: "actions",
+                    button { class: "primary", onclick: submit_ban_request, "Submit" }
+                    button {
+                        class: "ghost",
+                        onclick: cancel_ban_modal,
+                        "Cancel"
+                    }
+                }
+            }
+        }
     }
 }
 
 fn ConsensusSection() -> Element {
     let chat = use_context::<Signal<ChatState>>();
-    let cons = use_context::<Signal<ConsensusState>>();
+    let mut cons = use_context::<Signal<ConsensusState>>();
 
     let vote_yes = {
-        let mut cons = cons.clone();
         move |_| {
             let pending_proposal = cons.read().pending.clone();
             if let Some(v) = pending_proposal {
@@ -568,7 +719,7 @@ fn ConsensusSection() -> Element {
                     let _ = GATEWAY
                         .send(AppCmd::Vote {
                             group_id: v.group_id.clone(),
-                            proposal_id: v.proposal_id.clone(),
+                            proposal_id: v.proposal_id,
                             choice: true,
                         })
                         .await;
@@ -577,7 +728,6 @@ fn ConsensusSection() -> Element {
         }
     };
     let vote_no = {
-        let mut cons = cons.clone();
         move |_| {
             let pending_proposal = cons.read().pending.clone();
             if let Some(v) = pending_proposal {
@@ -587,7 +737,7 @@ fn ConsensusSection() -> Element {
                     let _ = GATEWAY
                         .send(AppCmd::Vote {
                             group_id: v.group_id.clone(),
-                            proposal_id: v.proposal_id.clone(),
+                            proposal_id: v.proposal_id,
                             choice: false,
                         })
                         .await;
@@ -748,6 +898,10 @@ h1 { margin: 0 0 16px 0; font-size: 22px; }
   background: rgba(255,255,255,0.03); position: sticky; top: 0; z-index: 5;
 }
 .header .brand { font-weight: 700; letter-spacing: .5px; }
+.header .user-hint {
+  color: var(--muted); font-size: 12px; padding: 4px 8px; border: 1px dashed var(--border);
+  border-radius: 8px; max-width: 420px;
+}
 .header .spacer { flex: 1; }
 .header .label { color: var(--muted); }
 .header .level {
@@ -761,6 +915,7 @@ input, select {
   padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
   background: var(--card); color: var(--text); outline: none; font-size: 14px;
 }
+.input-error { color: var(--bad); font-size: 12px; }
 button {
   border: 1px solid var(--border); background: var(--card); color: var(--text);
   padding: 10px 14px; border-radius: 10px; cursor: pointer;
@@ -771,6 +926,33 @@ button.secondary { background: transparent; }
 button.ghost { background: transparent; border-color: var(--border); color: var(--muted); }
 button.icon { width: 32px; height: 32px; border-radius: 8px; }
 button.mini { padding: 4px 8px; border-radius: 8px; font-size: 12px; }
+
+.member-picker { display: flex; flex-direction: column; gap: 10px; }
+.member-picker .helper { color: var(--muted); font-size: 13px; }
+.member-list {
+  display: flex; flex-direction: column; gap: 10px;
+  max-height: 260px; overflow-y: auto; padding-right: 4px;
+}
+.member-item {
+  display: flex; align-items: center; justify-content: flex-start; gap: 10px;
+  background: transparent;
+  box-shadow: none;
+  border: none;
+  width: 100%;
+}
+.member-item .member-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; }
+.member-item .member-id {
+  font-size: 12px; font-weight: 400; letter-spacing: 0.02em; color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  overflow-wrap: anywhere;
+  flex: 1;
+}
+.member-item .member-choose {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: none;
+  padding: 6px 12px; border-radius: 999px; border: none;
+  background: var(--primary); color: white; cursor: pointer;
+  box-shadow: 0 6px 18px rgba(0, 178, 255, 0.35);
+}
+.member-item .member-choose:hover { background: var(--primary-2); box-shadow: 0 6px 18px rgba(0, 122, 217, 0.45); }
 
 /* Home layout */
 .page.home { padding: 12px; }

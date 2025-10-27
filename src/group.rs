@@ -25,7 +25,7 @@ use crate::{
     steward::GroupUpdateRequest,
 };
 use ds::{waku_actor::WakuMessageToSend, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
-use mls_crypto::openmls_provider::MlsProvider;
+use mls_crypto::{identity::normalize_wallet_address_str, openmls_provider::MlsProvider};
 
 /// Represents the action to take after processing a group message or event.
 ///
@@ -337,11 +337,14 @@ impl Group {
         &mut self,
         identity: String,
     ) -> Result<(String, String), GroupError> {
+        let normalized_identity = normalize_wallet_address_str(&identity)?;
         let mut state_machine = self.state_machine.write().await;
         state_machine
-            .add_proposal(GroupUpdateRequest::RemoveMember(identity.clone()))
+            .add_proposal(GroupUpdateRequest::RemoveMember(
+                normalized_identity.clone(),
+            ))
             .await;
-        Ok(("Remove Member".to_string(), identity))
+        Ok(("Remove Member".to_string(), normalized_identity))
     }
 
     /// Process an application message and determine the appropriate action.

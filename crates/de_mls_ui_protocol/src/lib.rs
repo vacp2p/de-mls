@@ -48,6 +48,9 @@ pub mod v1 {
             group_id: String,
             user_to_ban: String,
         },
+        GetGroupMembers {
+            group_id: String,
+        },
     }
 
     #[derive(Debug, Clone)]
@@ -83,6 +86,10 @@ pub mod v1 {
         },
         CurrentEpochProposalsCleared {
             group_id: String,
+        },
+        GroupMembers {
+            group_id: String,
+            members: Vec<String>,
         },
         Error(String),
     }

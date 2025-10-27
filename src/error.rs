@@ -78,6 +78,8 @@ pub enum MessageError {
 pub enum GroupError {
     #[error(transparent)]
     MessageError(#[from] MessageError),
+    #[error(transparent)]
+    IdentityError(#[from] IdentityError),
 
     #[error("Steward not set")]
     StewardNotSet,

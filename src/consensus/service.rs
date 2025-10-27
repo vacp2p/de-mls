@@ -375,6 +375,7 @@ impl ConsensusService {
         }
 
         info!("[consensus::service::process_incoming_proposal]: Proposal stored, waiting for user vote");
+
         Ok(())
     }
 

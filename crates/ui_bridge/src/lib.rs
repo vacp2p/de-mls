@@ -190,6 +190,18 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 }
             }
 
+            AppCmd::GetGroupMembers { group_id } => {
+                match GATEWAY.get_group_members(group_id.clone()).await {
+                    Ok(members) => {
+                        GATEWAY.push_event(AppEvent::GroupMembers { group_id, members });
+                    }
+                    Err(e) => {
+                        tracing::warn!("get_group_members failed: {e:?}");
+                        GATEWAY.push_event(AppEvent::Error("Get group members failed".into()));
+                    }
+                }
+            }
+
             AppCmd::SendBanRequest {
                 group_id,
                 user_to_ban,
@@ -203,7 +215,7 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 } else {
                     // optional local ack
                     GATEWAY.push_event(AppEvent::ChatMessage(ConversationMessage {
-                        message: format!("You requested to leave the group").into_bytes(),
+                        message: "You requested to leave the group".to_string().into_bytes(),
                         sender: "system".to_string(),
                         group_name: group_id.clone(),
                     }));

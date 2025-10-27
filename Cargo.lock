@@ -2307,6 +2307,7 @@ dependencies = [
  "dioxus-desktop",
  "futures",
  "hex",
+ "mls_crypto",
  "once_cell",
  "parking_lot 0.12.5",
  "thiserror 2.0.17",

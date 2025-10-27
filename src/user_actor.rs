@@ -113,6 +113,22 @@ pub struct StartStewardEpochRequest {
     pub group_name: String,
 }
 
+pub struct GetGroupMembersRequest {
+    pub group_name: String,
+}
+
+impl Message<GetGroupMembersRequest> for User {
+    type Reply = Result<Vec<String>, UserError>;
+
+    async fn handle(
+        &mut self,
+        msg: GetGroupMembersRequest,
+        _ctx: Context<'_, Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.get_group_members(&msg.group_name).await
+    }
+}
+
 impl Message<StartStewardEpochRequest> for User {
     type Reply = Result<usize, UserError>; // Returns number of proposals
 
@@ -190,20 +206,39 @@ impl Message<ConsensusEventMessage> for User {
     }
 }
 
-pub struct GetUserStatusRequest {
+pub struct IsStewardStatusRequest {
     pub group_name: String,
 }
 
-impl Message<GetUserStatusRequest> for User {
+impl Message<IsStewardStatusRequest> for User {
     type Reply = Result<bool, UserError>;
 
     async fn handle(
         &mut self,
-        msg: GetUserStatusRequest,
+        msg: IsStewardStatusRequest,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
         let is_steward = self.is_user_steward_for_group(&msg.group_name).await?;
         Ok(is_steward)
+    }
+}
+
+pub struct IsMLSGroupInitializedRequest {
+    pub group_name: String,
+}
+
+impl Message<IsMLSGroupInitializedRequest> for User {
+    type Reply = Result<bool, UserError>;
+
+    async fn handle(
+        &mut self,
+        msg: IsMLSGroupInitializedRequest,
+        _ctx: Context<'_, Self, Self::Reply>,
+    ) -> Self::Reply {
+        let is_initialized = self
+            .is_user_mls_group_initialized_for_group(&msg.group_name)
+            .await?;
+        Ok(is_initialized)
     }
 }
 

@@ -8,36 +8,34 @@
 
 use de_mls::protos::de_mls::messages::v1::app_message;
 use de_mls::user_actor::{
-    CreateGroupRequest, GetCurrentEpochProposalsRequest, GetProposalsForStewardVotingRequest,
-    GetUserStatusRequest, LeaveGroupRequest, SendGroupMessage, StartStewardEpochRequest,
-    StewardMessageRequest, UserVoteRequest,
+    CreateGroupRequest, GetCurrentEpochProposalsRequest, GetGroupMembersRequest,
+    GetProposalsForStewardVotingRequest, IsMLSGroupInitializedRequest, IsStewardStatusRequest,
+    LeaveGroupRequest, SendGroupMessage, StartStewardEpochRequest, StewardMessageRequest,
+    UserVoteRequest,
 };
 use de_mls::user_app_instance::{create_user_instance, STEWARD_EPOCH};
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::StreamExt;
+use kameo::actor::ActorRef;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tracing::info;
 
 use de_mls::protos::consensus::v1::VotePayload;
 use de_mls::protos::de_mls::messages::v1::ConversationMessage;
-use de_mls::user_app_instance::CoreCtx;
-use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
-
-use kameo::actor::ActorRef;
-
-// If you want to store the user actor here
 use de_mls::steward;
-use de_mls::user::{User, UserAction}; // adjust to your actual module path
-use hex;
+use de_mls::user::{User, UserAction};
+use de_mls::user_app_instance::CoreCtx;
+use de_mls_ui_protocol::v1::{AppCmd, AppEvent}; // adjust to your actual module path
 
 pub struct Gateway {
     // UI events (gateway -> UI)
     evt_tx: UnboundedSender<AppEvent>,
-    evt_rx: RwLock<UnboundedReceiver<AppEvent>>,
+    evt_rx: Mutex<UnboundedReceiver<AppEvent>>,
 
     // UI commands (UI -> gateway). ui_bridge registers the sender here.
     cmd_tx: RwLock<Option<UnboundedSender<AppCmd>>>,
@@ -55,7 +53,7 @@ impl Gateway {
         let (evt_tx, evt_rx) = unbounded();
         Self {
             evt_tx,
-            evt_rx: RwLock::new(evt_rx),
+            evt_rx: Mutex::new(evt_rx),
             cmd_tx: RwLock::new(None),
             core: RwLock::new(None),
             user: RwLock::new(None),
@@ -88,7 +86,8 @@ impl Gateway {
 
     /// Await next event on the UI side.
     pub async fn next_event(&self) -> Option<AppEvent> {
-        self.evt_rx.write().next().await
+        let mut rx = self.evt_rx.lock().await;
+        rx.next().await
     }
 
     /// UI convenience: enqueue a command (UI -> gateway).
@@ -194,7 +193,7 @@ impl Gateway {
                                     group_id: vp.group_name.clone(),
                                     group_requests: vp.group_requests.clone(),
                                     timestamp: now_ms() as u64,
-                                    proposal_id: vp.proposal_id.clone(),
+                                    proposal_id: vp.proposal_id,
                                 }))
                                 .map_err(|e| {
                                     anyhow::anyhow!("error sending vote requested event: {e}")
@@ -349,7 +348,7 @@ impl Gateway {
                                         group_id: group_name.clone(),
                                         group_requests: vp.group_requests.clone(),
                                         timestamp: now_ms() as u64,
-                                        proposal_id: vp.proposal_id.clone(),
+                                        proposal_id: vp.proposal_id,
                                     },
                                 ));
 
@@ -462,11 +461,15 @@ impl Gateway {
             UserAction::SendToWaku(msg) => {
                 core.app_state.waku_node.send(msg).await?;
             }
-            UserAction::SendToApp(msg) => {
+            UserAction::SendToApp(app_msg) => {
+                let normalized_address = match app_msg.payload {
+                    Some(app_message::Payload::ProposalAdded(proposal)) => proposal.address,
+                    _ => user_to_ban.clone(),
+                };
                 self.push_event(AppEvent::ProposalAdded {
                     group_id: group_name.clone(),
                     action: "Remove Member".to_string(),
-                    address: user_to_ban.clone(),
+                    address: normalized_address,
                 });
             }
             _ => return Err(anyhow::anyhow!("Invalid user action")),
@@ -510,7 +513,7 @@ impl Gateway {
         let user = self
             .user()
             .ok_or_else(|| anyhow::anyhow!("user not logged in"))?;
-        let is_steward = user.ask(GetUserStatusRequest { group_name }).await?;
+        let is_steward = user.ask(IsStewardStatusRequest { group_name }).await?;
         Ok(is_steward)
     }
 
@@ -542,6 +545,29 @@ impl Gateway {
             })
             .collect();
         Ok(display_proposals)
+    }
+
+    pub async fn get_group_members(&self, group_name: String) -> anyhow::Result<Vec<String>> {
+        let user = self
+            .user()
+            .ok_or_else(|| anyhow::anyhow!("user not logged in"))?;
+
+        let is_initialized = user
+            .ask(IsMLSGroupInitializedRequest {
+                group_name: group_name.clone(),
+            })
+            .await?;
+
+        if is_initialized {
+            let members = user
+                .ask(GetGroupMembersRequest {
+                    group_name: group_name.clone(),
+                })
+                .await?;
+            Ok(members)
+        } else {
+            Ok(Vec::new())
+        }
     }
 }
 
