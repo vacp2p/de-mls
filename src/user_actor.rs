@@ -6,7 +6,7 @@ use ds::waku_actor::WakuMessageToSend;
 use crate::{
     consensus::ConsensusEvent,
     error::UserError,
-    protos::de_mls::messages::v1::BanRequest,
+    protos::de_mls::messages::v1::{BanRequest, ConversationMessage},
     user::{User, UserAction},
 };
 
@@ -86,7 +86,13 @@ impl Message<SendGroupMessage> for User {
         msg: SendGroupMessage,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.build_group_message(msg.message, &msg.group_name).await
+        let app_msg = ConversationMessage {
+            message: msg.message,
+            sender: self.identity_string(),
+            group_name: msg.group_name.clone(),
+        }
+        .into();
+        self.build_group_message(app_msg, &msg.group_name).await
     }
 }
 

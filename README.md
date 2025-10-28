@@ -1,96 +1,120 @@
-# de-mls
+# De-MLS
 
-Decentralized MLS PoC using a smart contract for group coordination
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-> Note: The frontend implementation is based on [chatr](https://github.com/0xLaurens/chatr),
-> a real-time chat application built with Rust and SvelteKit
+Decentralized MLS proof-of-concept that coordinates secure group membership through
+off-chain consensus and a Waku relay.  
+This repository now ships a native desktop client built with Dioxus that drives the MLS core directly.
 
-## Run Test Waku Node
+## What’s Included
 
-This node is used to easially connect different instances of the app between each other.
+- **de-mls** – core library that manages MLS groups, consensus, and Waku integration
+- **crates/de_mls_gateway** – bridges UI commands (`AppCmd`) to the core runtime and streams `AppEvent`s back
+- **crates/ui_bridge** – bootstrap glue that hosts the async command loop for desktop clients
+- **apps/de_mls_desktop_ui** – Dioxus desktop UI with login, chat, stewardship, and voting flows
+- **tests/** – integration tests that exercise the MLS state machine and consensus paths
 
-```bash
-docker run -p 8645:8645 -p 60000:60000 wakuorg/nwaku:v0.33.1 --cluster-id=15 --rest --relay --rln-relay=false --pubsub-topic=/waku/2/rs/15/1
-```
+## Quick Start
 
-## Run User Instance
+### 1. Launch a test Waku relay
 
-Create a `.env` file in the `.env` folder for each client containing the following variables:
-
-```text
-NAME=client1
-BACKEND_PORT=3000
-FRONTEND_PORT=4000
-NODE_PORT=60000
-PEER_ADDRESSES=[/ip4/x.x.x.x/tcp/60000/p2p/xxxx...xxxx]
-```
-
-Run docker compose up for the user instance
+Run a lightweight `nwaku` node that your local clients can connect to:
 
 ```bash
-docker-compose --env-file ./.env/client1.env up --build
+docker run \
+  -p 8645:8645 \
+  -p 60000:60000 \
+  wakuorg/nwaku:v0.33.1 \
+  --cluster-id=15 \
+  --rest \
+  --relay \
+  --rln-relay=false \
+  --pubsub-topic=/waku/2/rs/15/1
 ```
 
-For each client, run the following command to start the frontend on the local host with the port specified in the `.env` file
+Take note of the node multiaddr printed in the logs (looks like `/ip4/127.0.0.1/tcp/60000/p2p/<peer-id>`).
 
-Run from the frontend directory
+### 2. Set the runtime environment
+
+The desktop app reads the same environment variables the MLS core uses:
 
 ```bash
-PUBLIC_API_URL=http://0.0.0.0:3000 PUBLIC_WEBSOCKET_URL=ws://localhost:3000 npm run dev
+export NODE_PORT=60001                # UDP/TCP port the embedded Waku client will bind to             
+export PEER_ADDRESSES=/ip4/127.0.0.1/tcp/60000/p2p/<peer-id>
+export RUST_LOG=info,de_mls_gateway=info                    # optional; controls UI + gateway logging
 ```
 
-Run from the root directory
+Use a unique `NODE_PORT` per local client so the embedded Waku nodes do not collide.
+`PEER_ADDRESSES` accepts a comma-separated list if you want to bootstrap from multiple relays.
+
+### 3. Launch the desktop application
 
 ```bash
-RUST_BACKTRACE=full RUST_LOG=info NODE_PORT=60001 PEER_ADDRESSES=/ip4/x.x.x.x/tcp/60000/p2p/xxxx...xxxx,/ip4/y.y.y.y/tcp/60000/p2p/yyyy...yyyy cargo run --  --nocapture
+cargo run -p de_mls_desktop_ui
 ```
 
-## Steward State Management
+The first run creates `apps/de_mls_desktop_ui/logs/de_mls_ui.log` and starts the event bridge
+and embedded Waku client.
+Repeat steps 2–3 in another terminal with a different `NODE_PORT` to simulate multiple users.
 
-The system implements a robust state machine for managing steward epochs with the following states:
+## Using the Desktop UI
 
-### States
+- **Login screen** – paste an Ethereum-compatible secp256k1 private key (hex, with or without `0x`)
+  and click `Enter`.  
+  On success the app derives your wallet address, stores it in session state,
+  and navigates to the home layout.
 
-- **Working**: Normal operation where all users can send any message type freely
-- **Waiting**: Steward epoch active, only steward can send BATCH_PROPOSALS_MESSAGE
-- **Voting**: Consensus voting phase with only voting-related messages:
-  - Everyone: VOTE, USER_VOTE
-  - Steward only: VOTING_PROPOSAL, PROPOSAL
-  - All other messages blocked during voting
+- **Header bar** – shows the derived address and allows runtime log-level changes (`error`→`trace`).  
+  Log files rotate daily under `apps/de_mls_desktop_ui/logs/`.
 
-### State Transitions
+- **Groups panel** – lists every MLS group returned by the gateway.  
+  Use `Create` or `Join` to open a modal, enter the group name,
+  and the UI automatically refreshes the list and opens the group.
+
+- **Chat panel** – displays live conversation messages for the active group.  
+  Compose text messages at the bottom; the UI also offers:
+  - `Leave group` to request a self-ban (the backend fills in your address)
+  - `Request ban` to request ban for another user
+  Member lists are fetched automatically when a group is opened so you can
+  pick existing members from the ban modal.
+
+- **Consensus panel** – keeps stewards and members aligned:
+  - Shows whether you are a steward for the active group
+  - Lists pending steward requests collected during the current epoch
+  - Surfaces the proposal currently open for voting with `YES`/`NO` buttons
+  - Stores the latest proposal decisions with timestamps for quick auditing
+
+## Steward State Machine
+
+- **Working** – normal mode; all MLS messages are allowed
+- **Waiting** – a steward epoch is active; only the steward may push `BATCH_PROPOSALS_MESSAGE`
+- **Voting** – the consensus phase; everyone may submit `VOTE`/`USER_VOTE`,
+  the steward can still publish proposal metadata
+
+Transitions:
 
 ```text
 Working --start_steward_epoch()--> Waiting (if proposals exist)
-Working --start_steward_epoch()--> Working (if no proposals - no state change)
+Working --start_steward_epoch()--> Working (if no proposals)
 Waiting --start_voting()---------> Voting
-Waiting --no_proposals_found()---> Working (edge case: proposals disappear)
+Waiting --no_proposals_found()---> Working
 Voting --complete_voting(YES)----> Waiting --apply_proposals()--> Working
 Voting --complete_voting(NO)-----> Working
 ```
 
-### Steward Flow Scenarios
+Stewards always return to `Working` after an epoch finishes;
+edge cases such as missing proposals are handled defensively with detailed tracing.
 
-1. **No Proposals**: Steward stays in Working state throughout epoch
-2. **Successful Vote**:
-   - **Steward**: Working → Waiting → Voting → Waiting → Working
-   - **Non-Steward**: Working → Waiting → Voting → Working
-3. **Failed Vote**:
-   - **Steward**: Working → Waiting → Voting → Working  
-   - **Non-Steward**: Working → Waiting → Voting → Working
-4. **Edge Case**: Working → Waiting → Working (if proposals disappear during voting)
+## Development Tips
 
-### Guarantees
+- `cargo test` – runs the Rust unit + integration test suite
+- `cargo fmt --all check` / `cargo clippy` – keep formatting and linting consistent with the codebase
+- `RUST_BACKTRACE=full` – helpful when debugging state-machine transitions during development
 
-- Steward always returns to Working state after epoch completion
-- No infinite loops or stuck states
-- All edge cases properly handled
-- Robust error handling with detailed logging
+Logs for the desktop UI live in `apps/de_mls_desktop_ui/logs/`; core logs are emitted to stdout as well.
 
-### Example of ban user
+## Contributing
 
-In chat message block run ban command, note that user wallet address should be in the format without `0x`
-
-```bash
-/ban f39555ce6ab55579cfffb922665825e726880af6
-```
+Issues and pull requests are welcome. Please include reproduction steps, relevant logs,
+and test coverage where possible.

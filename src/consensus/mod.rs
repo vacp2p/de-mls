@@ -47,7 +47,7 @@ impl Default for ConsensusConfig {
     fn default() -> Self {
         Self {
             consensus_threshold: 0.67, // 67% supermajority
-            consensus_timeout: 20,     // 20 seconds
+            consensus_timeout: 10,     // 10 seconds
             max_rounds: 3,             // Maximum 3 rounds
             liveness_criteria: true,
         }

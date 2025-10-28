@@ -161,7 +161,7 @@ async fn test_proposal_counting() {
         .await
         .expect("Failed to store proposal");
     group
-        .store_remove_proposal("test_user".to_string())
+        .store_remove_proposal("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".to_string())
         .await
         .expect("Failed to put remove proposal");
 

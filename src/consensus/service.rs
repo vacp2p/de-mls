@@ -137,22 +137,7 @@ impl ConsensusService {
             let group_sessions = sessions
                 .entry(group_name.to_string())
                 .or_insert_with(HashMap::new);
-            group_sessions.insert(proposal_id, session);
-
-            // Clean up old sessions if we exceed the limit (within the same lock)
-            if group_sessions.len() > self.max_sessions_per_group {
-                // Sort sessions by creation time and keep the most recent ones
-                let mut session_entries: Vec<_> = group_sessions.drain().collect();
-                session_entries.sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
-
-                // Keep only the most recent sessions
-                for (proposal_id, session) in session_entries
-                    .into_iter()
-                    .take(self.max_sessions_per_group)
-                {
-                    group_sessions.insert(proposal_id, session);
-                }
-            }
+            self.insert_session(group_sessions, proposal_id, session);
         }
 
         // Start automatic timeout handling for this proposal using session config
@@ -325,6 +310,32 @@ impl ConsensusService {
         Ok(())
     }
 
+    fn insert_session(
+        &self,
+        group_sessions: &mut HashMap<u32, ConsensusSession>,
+        proposal_id: u32,
+        session: ConsensusSession,
+    ) {
+        group_sessions.insert(proposal_id, session);
+        self.prune_sessions(group_sessions);
+    }
+
+    fn prune_sessions(&self, group_sessions: &mut HashMap<u32, ConsensusSession>) {
+        if group_sessions.len() <= self.max_sessions_per_group {
+            return;
+        }
+
+        let mut session_entries: Vec<_> = group_sessions.drain().collect();
+        session_entries.sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
+
+        for (proposal_id, session) in session_entries
+            .into_iter()
+            .take(self.max_sessions_per_group)
+        {
+            group_sessions.insert(proposal_id, session);
+        }
+    }
+
     /// Process incoming proposal message
     pub async fn process_incoming_proposal(
         &self,
@@ -357,22 +368,7 @@ impl ConsensusService {
         );
 
         session.add_vote(proposal.votes[0].clone())?;
-        group_sessions.insert(proposal.proposal_id, session);
-
-        // Clean up old sessions if we exceed the limit (within the same lock)
-        if group_sessions.len() > self.max_sessions_per_group {
-            // Sort sessions by creation time and keep the most recent ones
-            let mut session_entries: Vec<_> = group_sessions.drain().collect();
-            session_entries.sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
-
-            // Keep only the most recent sessions
-            for (proposal_id, session) in session_entries
-                .into_iter()
-                .take(self.max_sessions_per_group)
-            {
-                group_sessions.insert(proposal_id, session);
-            }
-        }
+        self.insert_session(group_sessions, proposal.proposal_id, session);
 
         info!("[consensus::service::process_incoming_proposal]: Proposal stored, waiting for user vote");
 

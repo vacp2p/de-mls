@@ -213,9 +213,10 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                     tracing::warn!("send_ban_request failed: {e:?}");
                     GATEWAY.push_event(AppEvent::Error("Send ban request failed".into()));
                 } else {
-                    // optional local ack
                     GATEWAY.push_event(AppEvent::ChatMessage(ConversationMessage {
-                        message: "You requested to leave the group".to_string().into_bytes(),
+                        message: "You requested to leave or ban user from the group"
+                            .to_string()
+                            .into_bytes(),
                         sender: "system".to_string(),
                         group_name: group_id.clone(),
                     }));

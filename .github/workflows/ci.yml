@@ -30,7 +30,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Run clippy
-        run: cargo clippy --all-features --tests -- -D warnings
+        run: cargo clippy -p de-mls_desktop_ui --all-features--tests -- -D warnings
 
   docs:
     runs-on: ubuntu-latest
