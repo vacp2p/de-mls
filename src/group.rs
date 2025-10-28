@@ -64,7 +64,7 @@ impl Display for GroupAction {
 /// - State machine integration for proper workflow enforcement
 /// - Member addition/removal through proposals
 /// - Message validation and permission checking
-#[derive(Clone, Debug, Actor)]
+#[derive(Clone, Debug)]
 pub struct Group {
     group_name: String,
     mls_group: Option<Arc<Mutex<MlsGroup>>>,
