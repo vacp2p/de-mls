@@ -1,5 +1,4 @@
 use alloy::hex;
-use kameo::Actor;
 use openmls::{
     group::{GroupEpoch, GroupId, MlsGroup, MlsGroupCreateConfig},
     prelude::{
