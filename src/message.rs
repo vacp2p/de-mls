@@ -17,23 +17,27 @@
 //!    - [`ConversationMessage`]
 //!    - [`BatchProposalsMessage`]
 //!    - [`BanRequest`]
-//!    - [`VotingProposal`]
+//!    - [`VotePayload`]
 //!    - [`UserVote`]
 //!
+use alloy::hex;
+use mls_crypto::identity::normalize_wallet_address;
+use openmls::prelude::{KeyPackage, MlsMessageOut};
+use std::convert::TryFrom;
 
 use crate::{
-    consensus::v1::{Proposal, Vote},
+    consensus::ConsensusEvent,
     encrypt_message,
-    protos::messages::v1::{app_message, UserKeyPackage, UserVote, VotingProposal},
+    protos::{
+        consensus::v1::{Outcome, Proposal, RequestType, UpdateRequest, Vote, VotePayload},
+        de_mls::messages::v1::{
+            app_message, welcome_message, AppMessage, BanRequest, BatchProposalsMessage,
+            ConversationMessage, GroupAnnouncement, InvitationToJoin, ProposalAdded,
+            UserKeyPackage, UserVote, WelcomeMessage,
+        },
+    },
+    steward::GroupUpdateRequest,
     verify_message, MessageError,
-};
-use openmls::prelude::{KeyPackage, MlsMessageOut};
-use serde::{Deserialize, Serialize};
-use std::fmt::Display;
-
-use crate::protos::messages::v1::{
-    welcome_message, AppMessage, BanRequest, BatchProposalsMessage, ConversationMessage,
-    GroupAnnouncement, InvitationToJoin, WelcomeMessage,
 };
 
 // Message type constants for consistency and type safety
@@ -43,8 +47,9 @@ pub mod message_types {
     pub const BAN_REQUEST: &str = "BanRequest";
     pub const PROPOSAL: &str = "Proposal";
     pub const VOTE: &str = "Vote";
-    pub const VOTING_PROPOSAL: &str = "VotingProposal";
+    pub const VOTE_PAYLOAD: &str = "VotePayload";
     pub const USER_VOTE: &str = "UserVote";
+    pub const PROPOSAL_ADDED: &str = "ProposalAdded";
     pub const UNKNOWN: &str = "Unknown";
 }
 
@@ -62,8 +67,19 @@ impl MessageType for app_message::Payload {
             app_message::Payload::BanRequest(_) => BAN_REQUEST,
             app_message::Payload::Proposal(_) => PROPOSAL,
             app_message::Payload::Vote(_) => VOTE,
-            app_message::Payload::VotingProposal(_) => VOTING_PROPOSAL,
+            app_message::Payload::VotePayload(_) => VOTE_PAYLOAD,
             app_message::Payload::UserVote(_) => USER_VOTE,
+            app_message::Payload::ProposalAdded(_) => PROPOSAL_ADDED,
+        }
+    }
+}
+
+impl MessageType for UpdateRequest {
+    fn message_type(&self) -> &'static str {
+        match RequestType::try_from(self.request_type) {
+            Ok(RequestType::AddMember) => "Add Member",
+            Ok(RequestType::RemoveMember) => "Remove Member",
+            _ => "Unknown",
         }
     }
 }
@@ -121,76 +137,10 @@ impl From<UserKeyPackage> for WelcomeMessage {
     }
 }
 
-// APP MESSAGE SUBTOPIC
-impl Display for AppMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.payload {
-            Some(app_message::Payload::ConversationMessage(conversation_message)) => {
-                write!(
-                    f,
-                    "{}: {}",
-                    conversation_message.sender,
-                    String::from_utf8_lossy(&conversation_message.message)
-                )
-            }
-            Some(app_message::Payload::BatchProposalsMessage(batch_msg)) => {
-                write!(
-                    f,
-                    "BatchProposalsMessage: {} proposals for group {}",
-                    batch_msg.mls_proposals.len(),
-                    String::from_utf8_lossy(&batch_msg.group_name)
-                )
-            }
-            Some(app_message::Payload::BanRequest(ban_request)) => {
-                write!(
-                    f,
-                    "SYSTEM: {} wants to ban {}",
-                    ban_request.requester, ban_request.user_to_ban
-                )
-            }
-            Some(app_message::Payload::Proposal(proposal)) => {
-                write!(
-                    f,
-                    "Proposal: ID {} with {} votes for {} voters",
-                    proposal.proposal_id,
-                    proposal.votes.len(),
-                    proposal.expected_voters_count
-                )
-            }
-            Some(app_message::Payload::Vote(vote)) => {
-                write!(
-                    f,
-                    "Vote: {} for proposal {} ({})",
-                    if vote.vote { "YES" } else { "NO" },
-                    vote.proposal_id,
-                    vote.vote_id
-                )
-            }
-            Some(app_message::Payload::VotingProposal(voting_proposal)) => {
-                write!(
-                    f,
-                    "VotingProposal: ID {} for group {}",
-                    voting_proposal.proposal_id, voting_proposal.group_name
-                )
-            }
-            Some(app_message::Payload::UserVote(user_vote)) => {
-                write!(
-                    f,
-                    "UserVote: {} for proposal {} in group {}",
-                    if user_vote.vote { "YES" } else { "NO" },
-                    user_vote.proposal_id,
-                    user_vote.group_name
-                )
-            }
-            None => write!(f, "Empty message"),
-        }
-    }
-}
-
-impl From<VotingProposal> for AppMessage {
-    fn from(voting_proposal: VotingProposal) -> Self {
+impl From<VotePayload> for AppMessage {
+    fn from(vote_payload: VotePayload) -> Self {
         AppMessage {
-            payload: Some(app_message::Payload::VotingProposal(voting_proposal)),
+            payload: Some(app_message::Payload::VotePayload(vote_payload)),
         }
     }
 }
@@ -246,20 +196,75 @@ impl From<Vote> for AppMessage {
         }
     }
 }
-/// This struct is used to represent the message from the user that we got from web socket
-#[derive(Deserialize, Debug, PartialEq, Serialize)]
-pub struct UserMessage {
-    pub message: Vec<u8>,
-    pub group_id: String,
+
+impl From<ProposalAdded> for AppMessage {
+    fn from(proposal_added: ProposalAdded) -> Self {
+        AppMessage {
+            payload: Some(app_message::Payload::ProposalAdded(proposal_added)),
+        }
+    }
 }
 
-/// This struct is used to represent the connection data that web socket sends to the user
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct ConnectMessage {
-    /// This is the private key of the user that we will use to authenticate the user
-    pub eth_private_key: String,
-    /// This is the id of the group that the user is joining
-    pub group_id: String,
-    /// This is the flag that indicates if the user should create a new group or subscribe to an existing one
-    pub should_create: bool,
+impl From<ConsensusEvent> for Outcome {
+    fn from(consensus_event: ConsensusEvent) -> Self {
+        match consensus_event {
+            ConsensusEvent::ConsensusReached {
+                proposal_id: _,
+                result: true,
+            } => Outcome::Accepted,
+            ConsensusEvent::ConsensusReached {
+                proposal_id: _,
+                result: false,
+            } => Outcome::Rejected,
+            ConsensusEvent::ConsensusFailed {
+                proposal_id: _,
+                reason: _,
+            } => Outcome::Unspecified,
+        }
+    }
+}
+
+impl From<GroupUpdateRequest> for UpdateRequest {
+    fn from(group_update_request: GroupUpdateRequest) -> Self {
+        match group_update_request {
+            GroupUpdateRequest::AddMember(kp) => UpdateRequest {
+                request_type: RequestType::AddMember as i32,
+                wallet_address: kp.leaf_node().credential().serialized_content().to_vec(),
+            },
+            GroupUpdateRequest::RemoveMember(id) => UpdateRequest {
+                request_type: RequestType::RemoveMember as i32,
+                wallet_address: hex::decode(id.strip_prefix("0x").unwrap_or(&id))
+                    .unwrap_or_else(|_| id.into_bytes()),
+            },
+        }
+    }
+}
+
+// Helper function to convert protobuf UpdateRequest to display format
+pub fn convert_group_requests_to_display(
+    group_requests: &[UpdateRequest],
+) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+
+    for req in group_requests {
+        match RequestType::try_from(req.request_type) {
+            Ok(RequestType::AddMember) => {
+                results.push((
+                    "Add Member".to_string(),
+                    normalize_wallet_address(&req.wallet_address),
+                ));
+            }
+            Ok(RequestType::RemoveMember) => {
+                results.push((
+                    "Remove Member".to_string(),
+                    normalize_wallet_address(&req.wallet_address),
+                ));
+            }
+            _ => {
+                results.push(("Unknown".to_string(), "Invalid request".to_string()));
+            }
+        }
+    }
+
+    results
 }

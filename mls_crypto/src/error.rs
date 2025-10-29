@@ -17,4 +17,6 @@ pub enum IdentityError {
     UnableToSaveSignatureKey(#[from] MemoryStorageError),
     #[error("Unable to create credential: {0}")]
     UnableToCreateCredential(#[from] CredentialError),
+    #[error("Invalid wallet address: {0}")]
+    InvalidWalletAddress(String),
 }

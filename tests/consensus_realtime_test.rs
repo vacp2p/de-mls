@@ -1,6 +1,6 @@
 use alloy::signers::local::PrivateKeySigner;
 use de_mls::consensus::{compute_vote_hash, ConsensusEvent, ConsensusService};
-use de_mls::protos::messages::v1::consensus::v1::Vote;
+use de_mls::protos::consensus::v1::Vote;
 use de_mls::LocalSigner;
 use prost::Message;
 use std::time::Duration;
@@ -22,7 +22,7 @@ async fn test_realtime_consensus_waiting() {
         .create_proposal(
             group_name,
             "Test Proposal".to_string(),
-            "Test payload".to_string(),
+            vec![],
             proposal_owner,
             expected_voters_count,
             300,
@@ -163,7 +163,7 @@ async fn test_consensus_timeout() {
         .create_proposal(
             group_name,
             "Test Proposal".to_string(),
-            "Test payload".to_string(),
+            vec![],
             proposal_owner,
             expected_voters_count,
             300,
@@ -247,7 +247,7 @@ async fn test_consensus_with_mixed_votes() {
         .create_proposal(
             group_name,
             "Test Proposal".to_string(),
-            "Test payload".to_string(),
+            vec![],
             proposal_owner,
             expected_voters_count,
             300,
@@ -399,7 +399,7 @@ async fn test_rfc_vote_chain_validation() {
         .create_proposal(
             group_name,
             "Test Proposal".to_string(),
-            "Test payload".to_string(),
+            vec![],
             signer1.address_bytes(),
             expected_voters_count,
             300,
@@ -478,7 +478,7 @@ async fn test_event_driven_timeout() {
         .create_proposal(
             group_name,
             "Test Proposal".to_string(),
-            "Test payload".to_string(),
+            vec![],
             proposal_owner,
             expected_voters_count,
             300,
@@ -554,7 +554,7 @@ async fn test_liveness_criteria_functionality() {
         .create_proposal(
             group_name,
             "Test Proposal False".to_string(),
-            "Test payload".to_string(),
+            vec![],
             proposal_owner.clone(),
             expected_voters_count,
             300,
@@ -573,8 +573,8 @@ async fn test_liveness_criteria_functionality() {
     let proposal_true = consensus_service
         .create_proposal(
             group_name,
-            "Test Proposal True".to_string(),
-            "Test payload".to_string(),
+            "Test Proposal True".to_owned(),
+            vec![],
             proposal_owner,
             expected_voters_count,
             300,

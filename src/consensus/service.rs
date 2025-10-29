@@ -1,22 +1,22 @@
 //! Consensus service for managing consensus sessions and HashGraph integration
+use prost::Message;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::{broadcast, RwLock};
+use tracing::info;
+use uuid::Uuid;
 
 use crate::consensus::{
     compute_vote_hash, create_vote_for_proposal, ConsensusConfig, ConsensusEvent, ConsensusSession,
     ConsensusState, ConsensusStats,
 };
 use crate::error::ConsensusError;
-use crate::protos::messages::v1::consensus::v1::{Proposal, Vote};
+use crate::protos::consensus::v1::{Proposal, ProposalResult, UpdateRequest, Vote};
 use crate::{verify_vote_hash, LocalSigner};
-use log::info;
-use prost::Message;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{broadcast, RwLock};
-use uuid::Uuid;
 
 /// Consensus service that manages multiple consensus sessions for multiple groups
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ConsensusService {
     /// Active consensus sessions organized by group: group_name -> proposal_id -> session
     sessions: Arc<RwLock<HashMap<String, HashMap<u32, ConsensusSession>>>>,
@@ -24,26 +24,32 @@ pub struct ConsensusService {
     max_sessions_per_group: usize,
     /// Event sender for consensus events
     event_sender: broadcast::Sender<(String, ConsensusEvent)>,
+    /// Event sender for consensus results for UI
+    decisions_tx: broadcast::Sender<ProposalResult>,
 }
 
 impl ConsensusService {
     /// Create a new consensus service
     pub fn new() -> Self {
         let (event_sender, _) = broadcast::channel(1000);
+        let (decisions_tx, _) = broadcast::channel(128);
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             max_sessions_per_group: 10,
             event_sender,
+            decisions_tx,
         }
     }
 
     /// Create a new consensus service with custom max sessions per group
     pub fn new_with_max_sessions(max_sessions_per_group: usize) -> Self {
         let (event_sender, _) = broadcast::channel(1000);
+        let (decisions_tx, _) = broadcast::channel(128);
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             max_sessions_per_group,
             event_sender,
+            decisions_tx,
         }
     }
 
@@ -51,6 +57,16 @@ impl ConsensusService {
     pub fn subscribe_to_events(&self) -> broadcast::Receiver<(String, ConsensusEvent)> {
         self.event_sender.subscribe()
     }
+
+    /// Subscribe to consensus decisions
+    pub fn subscribe_decisions(&self) -> broadcast::Receiver<ProposalResult> {
+        self.decisions_tx.subscribe()
+    }
+
+    // /// Send consensus decision to UI
+    // pub fn send_decision(&self, res: ProposalResult) {
+    //     let _ = self.decisions_tx.send(res);
+    // }
 
     pub async fn set_consensus_threshold_for_group_session(
         &mut self,
@@ -76,7 +92,7 @@ impl ConsensusService {
         &self,
         group_name: &str,
         name: String,
-        payload: String,
+        group_requests: Vec<UpdateRequest>,
         proposal_owner: Vec<u8>,
         expected_voters_count: u32,
         expiration_time: u64,
@@ -91,7 +107,7 @@ impl ConsensusService {
         // Create proposal with steward's vote
         let proposal = Proposal {
             name,
-            payload,
+            group_requests,
             proposal_id,
             proposal_owner,
             votes: vec![],
@@ -107,7 +123,8 @@ impl ConsensusService {
         let session = ConsensusSession::new(
             proposal.clone(),
             config.clone(),
-            Some(self.event_sender.clone()),
+            self.event_sender.clone(),
+            self.decisions_tx.clone(),
             group_name,
         );
 
@@ -120,22 +137,7 @@ impl ConsensusService {
             let group_sessions = sessions
                 .entry(group_name.to_string())
                 .or_insert_with(HashMap::new);
-            group_sessions.insert(proposal_id, session);
-
-            // Clean up old sessions if we exceed the limit (within the same lock)
-            if group_sessions.len() > self.max_sessions_per_group {
-                // Sort sessions by creation time and keep the most recent ones
-                let mut session_entries: Vec<_> = group_sessions.drain().collect();
-                session_entries.sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
-
-                // Keep only the most recent sessions
-                for (proposal_id, session) in session_entries
-                    .into_iter()
-                    .take(self.max_sessions_per_group)
-                {
-                    group_sessions.insert(proposal_id, session);
-                }
-            }
+            self.insert_session(group_sessions, proposal_id, session);
         }
 
         // Start automatic timeout handling for this proposal using session config
@@ -151,7 +153,7 @@ impl ConsensusService {
                 .is_some()
             {
                 info!(
-                    "Consensus result already exists for proposal {proposal_id}, skipping timeout"
+                    "[create_proposal]:Consensus result already exists for proposal {proposal_id}, skipping timeout"
                 );
                 return;
             }
@@ -163,7 +165,7 @@ impl ConsensusService {
                 .is_ok()
             {
                 info!(
-                    "Automatic timeout applied for proposal {proposal_id} after {timeout_seconds}s"
+                    "[create_proposal]: Automatic timeout applied for proposal {proposal_id} after {timeout_seconds}s"
                 );
             }
         });
@@ -308,6 +310,32 @@ impl ConsensusService {
         Ok(())
     }
 
+    fn insert_session(
+        &self,
+        group_sessions: &mut HashMap<u32, ConsensusSession>,
+        proposal_id: u32,
+        session: ConsensusSession,
+    ) {
+        group_sessions.insert(proposal_id, session);
+        self.prune_sessions(group_sessions);
+    }
+
+    fn prune_sessions(&self, group_sessions: &mut HashMap<u32, ConsensusSession>) {
+        if group_sessions.len() <= self.max_sessions_per_group {
+            return;
+        }
+
+        let mut session_entries: Vec<_> = group_sessions.drain().collect();
+        session_entries.sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
+
+        for (proposal_id, session) in session_entries
+            .into_iter()
+            .take(self.max_sessions_per_group)
+        {
+            group_sessions.insert(proposal_id, session);
+        }
+    }
+
     /// Process incoming proposal message
     pub async fn process_incoming_proposal(
         &self,
@@ -315,7 +343,7 @@ impl ConsensusService {
         proposal: Proposal,
     ) -> Result<(), ConsensusError> {
         info!(
-            "[consensus::service::process_incoming_proposal]: Processing incoming proposal for group {group_name}"
+            "[service::process_incoming_proposal]: Processing incoming proposal for group {group_name}"
         );
         let mut sessions = self.sessions.write().await;
         let group_sessions = sessions
@@ -334,29 +362,16 @@ impl ConsensusService {
         let mut session = ConsensusSession::new(
             proposal.clone(),
             ConsensusConfig::default(),
-            Some(self.event_sender.clone()),
+            self.event_sender.clone(),
+            self.decisions_tx.clone(),
             group_name,
         );
 
         session.add_vote(proposal.votes[0].clone())?;
-        group_sessions.insert(proposal.proposal_id, session);
+        self.insert_session(group_sessions, proposal.proposal_id, session);
 
-        // Clean up old sessions if we exceed the limit (within the same lock)
-        if group_sessions.len() > self.max_sessions_per_group {
-            // Sort sessions by creation time and keep the most recent ones
-            let mut session_entries: Vec<_> = group_sessions.drain().collect();
-            session_entries.sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
+        info!("[service::process_incoming_proposal]: Proposal stored, waiting for user vote");
 
-            // Keep only the most recent sessions
-            for (proposal_id, session) in session_entries
-                .into_iter()
-                .take(self.max_sessions_per_group)
-            {
-                group_sessions.insert(proposal_id, session);
-            }
-        }
-
-        info!("[consensus::service::process_incoming_proposal]: Proposal stored, waiting for user vote");
         Ok(())
     }
 
@@ -397,9 +412,7 @@ impl ConsensusService {
         group_name: &str,
         vote: Vote,
     ) -> Result<(), ConsensusError> {
-        info!(
-            "[consensus::service::process_incoming_vote]: Processing incoming vote for group {group_name}"
-        );
+        info!("[service::process_incoming_vote]: Processing incoming vote for group {group_name}");
         let mut sessions = self.sessions.write().await;
         let group_sessions = sessions
             .get_mut(group_name)
@@ -600,7 +613,7 @@ impl ConsensusService {
                 // Check if consensus was already reached
                 match session.state {
                     crate::consensus::ConsensusState::ConsensusReached(result) => {
-                        info!("Consensus already reached for proposal {proposal_id}, skipping timeout");
+                        info!("[handle_consensus_timeout]: Consensus already reached for proposal {proposal_id}, skipping timeout");
                         Ok(result)
                     }
                     _ => {
@@ -624,7 +637,7 @@ impl ConsensusService {
 
                         // Apply timeout consensus
                         session.state = crate::consensus::ConsensusState::ConsensusReached(result);
-                        info!("Timeout consensus applied for proposal {proposal_id}: {result} (liveness criteria)");
+                        info!("[handle_consensus_timeout]: Timeout consensus applied for proposal {proposal_id}: {result} (liveness criteria)");
 
                         // Emit consensus event
                         session.emit_consensus_event(
@@ -663,7 +676,7 @@ impl ConsensusService {
     ) -> bool {
         let required_votes = self.calculate_required_votes(expected_voters, consensus_threshold);
         println!(
-            "[consensus::service::check_sufficient_votes]: Total votes: {total_votes}, Expected voters: {expected_voters}, Consensus threshold: {consensus_threshold}, Required votes: {required_votes}"
+            "[service::check_sufficient_votes]: Total votes: {total_votes}, Expected voters: {expected_voters}, Consensus threshold: {consensus_threshold}, Required votes: {required_votes}"
         );
         total_votes >= required_votes
     }

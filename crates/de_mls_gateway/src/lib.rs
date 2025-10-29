@@ -1,0 +1,138 @@
+//! de_mls_gateway: a thin facade between UI (AppCmd/AppEvent) and the core runtime.
+//!
+//! Responsibilities:
+//! - Own a single event pipe UI <- gateway (`AppEvent`)
+//! - Provide a command entrypoint UI -> gateway (`send(AppCmd)`)
+//! - Hold references to the core context (`CoreCtx`) and current user actor
+//! - Offer small helper methods (login_with_private_key, etc.)
+use futures::{
+    channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
+    StreamExt,
+};
+use kameo::actor::ActorRef;
+use once_cell::sync::Lazy;
+use parking_lot::RwLock;
+use std::sync::{atomic::AtomicBool, Arc};
+use tokio::sync::Mutex;
+
+use de_mls::{
+    user::User,
+    user_app_instance::{create_user_instance, CoreCtx},
+};
+use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
+
+mod forwarder;
+mod group;
+// Global, process-wide gateway instance
+pub static GATEWAY: Lazy<Gateway> = Lazy::new(Gateway::new);
+
+/// Helper to set the core context once during startup (called by ui_bridge).
+pub fn init_core(core: Arc<CoreCtx>) {
+    GATEWAY.set_core(core);
+}
+
+pub struct Gateway {
+    // UI events (gateway -> UI)
+    // A channel that sends AppEvents to the UI.
+    evt_tx: UnboundedSender<AppEvent>,
+    // A channel that receives AppEvents from the UI.
+    evt_rx: Mutex<UnboundedReceiver<AppEvent>>,
+
+    // UI commands (UI -> gateway)
+    // A channel that sends AppCommands to the gateway (ui_bridge registers the sender here).
+    // It gives the UI an async door to submit AppCmds back to the gateway (`Gateway::send(AppCmd)`).
+    cmd_tx: RwLock<Option<UnboundedSender<AppCmd>>>,
+
+    // It anchors the shared references to consensus, topics, app_state, etc.
+    core: RwLock<Option<Arc<CoreCtx>>>, // set once during startup
+
+    // Current logged-in user actor
+    user: RwLock<Option<ActorRef<User>>>,
+    // Flag that guards against spawning the Waku forwarder more than once.
+    // It's initialized to false and set to true after the first successful login.
+    started: AtomicBool,
+}
+
+impl Gateway {
+    fn new() -> Self {
+        let (evt_tx, evt_rx) = unbounded();
+        Self {
+            evt_tx,
+            evt_rx: Mutex::new(evt_rx),
+            cmd_tx: RwLock::new(None),
+            core: RwLock::new(None),
+            user: RwLock::new(None),
+            started: AtomicBool::new(false),
+        }
+    }
+
+    /// Called once by the bootstrap (ui_bridge) to provide the core context.
+    pub fn set_core(&self, core: Arc<CoreCtx>) {
+        *self.core.write() = Some(core);
+    }
+
+    pub fn core(&self) -> Arc<CoreCtx> {
+        self.core
+            .read()
+            .as_ref()
+            .expect("Gateway core not initialized")
+            .clone()
+    }
+
+    /// ui_bridge registers its command sender so `send` can work.
+    pub fn register_cmd_sink(&self, tx: UnboundedSender<AppCmd>) {
+        *self.cmd_tx.write() = Some(tx);
+    }
+
+    /// Push an event to the UI.
+    pub fn push_event(&self, evt: AppEvent) {
+        let _ = self.evt_tx.unbounded_send(evt);
+    }
+
+    /// Await next event on the UI side.
+    pub async fn next_event(&self) -> Option<AppEvent> {
+        let mut rx = self.evt_rx.lock().await;
+        rx.next().await
+    }
+
+    /// UI convenience: enqueue a command (UI -> gateway).
+    pub async fn send(&self, cmd: AppCmd) -> anyhow::Result<()> {
+        if let Some(tx) = self.cmd_tx.read().clone() {
+            tx.unbounded_send(cmd)
+                .map_err(|e| anyhow::anyhow!("send cmd failed: {e}"))
+        } else {
+            Err(anyhow::anyhow!("cmd sink not registered"))
+        }
+    }
+
+    // ─────────────────────────── High-level helpers ───────────────────────────
+
+    /// Create the user actor with a private key (no group yet).
+    /// Returns a derived display name (e.g., address string).
+    pub async fn login_with_private_key(&self, private_key: String) -> anyhow::Result<String> {
+        let core = self.core();
+        let consensus_service = core.consensus.as_ref().clone();
+
+        // Create user actor via core helper (you implement this inside your core)
+        let (user_ref, user_address) = create_user_instance(
+            private_key.clone(),
+            core.app_state.clone(),
+            &consensus_service,
+        )
+        .await?;
+
+        *self.user.write() = Some(user_ref.clone());
+
+        self.spawn_waku_forwarder(core.clone(), user_ref.clone());
+        self.spawn_consensus_forwarder(core.clone())?;
+        Ok(user_address)
+    }
+
+    /// Get a copy of the current user ref (if logged in).
+    pub fn user(&self) -> anyhow::Result<ActorRef<User>> {
+        self.user
+            .read()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("user not logged in"))
+    }
+}

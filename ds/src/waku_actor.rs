@@ -1,7 +1,7 @@
-use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::{thread::sleep, time::Duration};
 use tokio::sync::mpsc::{Receiver, Sender};
+use tracing::{debug, error, info};
 use waku_bindings::{
     node::{WakuNodeConfig, WakuNodeHandle},
     waku_new, Initialized, LibwakuResponse, Multiaddr, Running, WakuEvent, WakuMessage,
@@ -24,7 +24,7 @@ impl WakuNode<Initialized> {
             tcp_port: Some(port),
             cluster_id: Some(15),
             shards: vec![1],
-            log_level: Some("INFO"), // Supported: TRACE, DEBUG, INFO, NOTICE, WARN, ERROR or FATAL
+            log_level: Some("FATAL"), // Supported: TRACE, DEBUG, INFO, NOTICE, WARN, ERROR or FATAL
             ..Default::default()
         }))
         .await
@@ -43,16 +43,16 @@ impl WakuNode<Initialized> {
                     serde_json::from_str(v.unwrap().as_str()).expect("Parsing event to succeed");
                 match event {
                     WakuEvent::WakuMessage(evt) => {
-                        info!("WakuMessage event received: {:?}", evt.message_hash);
+                        debug!("WakuMessage event received: {:?}", evt.message_hash);
                         waku_sender
                             .blocking_send(evt.waku_message.clone())
                             .expect("Failed to send message to waku");
                     }
                     WakuEvent::RelayTopicHealthChange(evt) => {
-                        info!("Relay topic change evt: {evt:?}");
+                        debug!("Relay topic change evt: {evt:?}");
                     }
                     WakuEvent::ConnectionChange(evt) => {
-                        info!("Conn change evt: {evt:?}");
+                        debug!("Conn change evt: {evt:?}");
                     }
                     WakuEvent::Unrecognized(e) => panic!("Unrecognized waku event: {e:?}"),
                     _ => panic!("event case not expected"),
@@ -197,9 +197,9 @@ pub async fn run_waku_node(
 
     info!("Waiting for message to send to waku");
     while let Some(msg) = receiver.recv().await {
-        info!("Received message to send to waku");
+        debug!("Received message to send to waku");
         let id = waku_node.send_message(msg).await?;
-        info!("Successfully publish message with id: {id:?}");
+        debug!("Successfully publish message with id: {id:?}");
     }
 
     Ok(())

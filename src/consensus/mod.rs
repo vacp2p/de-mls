@@ -6,25 +6,19 @@
 //! - Proposal management
 //! - Vote collection and validation
 //! - Consensus reached detection
-
-use crate::error::ConsensusError;
-use crate::protos::messages::v1::consensus::v1::{Proposal, Vote};
-use crate::LocalSigner;
-use log::info;
 use prost::Message;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
+use tracing::info;
 use uuid::Uuid;
 
+use crate::error::ConsensusError;
+use crate::protos::consensus::v1::{Outcome, Proposal, ProposalResult, Vote};
+use crate::LocalSigner;
+
 pub mod service;
-
-// Re-export protobuf types for compatibility with generated code
-pub mod v1 {
-    pub use crate::protos::messages::v1::consensus::v1::{Proposal, Vote};
-}
-
 pub use service::ConsensusService;
 
 /// Consensus events emitted when consensus state changes
@@ -81,7 +75,8 @@ pub struct ConsensusSession {
     pub votes: HashMap<Vec<u8>, Vote>, // vote_owner -> Vote
     pub created_at: u64,
     pub config: ConsensusConfig,
-    pub event_sender: Option<broadcast::Sender<(String, ConsensusEvent)>>,
+    pub event_sender: broadcast::Sender<(String, ConsensusEvent)>,
+    pub decisions_tx: broadcast::Sender<ProposalResult>,
     pub group_name: String,
 }
 
@@ -89,7 +84,8 @@ impl ConsensusSession {
     pub fn new(
         proposal: Proposal,
         config: ConsensusConfig,
-        event_sender: Option<broadcast::Sender<(String, ConsensusEvent)>>,
+        event_sender: broadcast::Sender<(String, ConsensusEvent)>,
+        decisions_tx: broadcast::Sender<ProposalResult>,
         group_name: &str,
     ) -> Self {
         let now = SystemTime::now()
@@ -104,6 +100,7 @@ impl ConsensusSession {
             created_at: now,
             config,
             event_sender,
+            decisions_tx,
             group_name: group_name.to_string(),
         }
     }
@@ -131,7 +128,7 @@ impl ConsensusSession {
             }
             ConsensusState::ConsensusReached(_) => {
                 info!(
-                    "[consensus::mod::add_vote]: Consensus already reached for proposal {}, skipping vote",
+                    "[mod::add_vote]: Consensus already reached for proposal {}, skipping vote",
                     self.proposal.proposal_id
                 );
                 Ok(())
@@ -173,7 +170,7 @@ impl ConsensusSession {
             if yes_votes > no_votes {
                 self.state = ConsensusState::ConsensusReached(true);
                 info!(
-                    "[consensus::mod::check_consensus]: Enough votes received {yes_votes}-{no_votes} - consensus reached: YES"
+                    "[mod::check_consensus]: Enough votes received {yes_votes}-{no_votes} - consensus reached: YES"
                 );
                 self.emit_consensus_event(ConsensusEvent::ConsensusReached {
                     proposal_id: self.proposal.proposal_id,
@@ -182,7 +179,7 @@ impl ConsensusSession {
             } else if no_votes > yes_votes {
                 self.state = ConsensusState::ConsensusReached(false);
                 info!(
-                    "[consensus::mod::check_consensus]: Enough votes received {yes_votes}-{no_votes} - consensus reached: NO"
+                    "[mod::check_consensus]: Enough votes received {yes_votes}-{no_votes} - consensus reached: NO"
                 );
                 self.emit_consensus_event(ConsensusEvent::ConsensusReached {
                     proposal_id: self.proposal.proposal_id,
@@ -193,7 +190,7 @@ impl ConsensusSession {
                 if total_votes == expected_voters {
                     self.state = ConsensusState::ConsensusReached(false);
                     info!(
-                        "[consensus::mod::check_consensus]: All votes received and tie - consensus not reached"
+                        "[mod::check_consensus]: All votes received and tie - consensus not reached"
                     );
                     self.emit_consensus_event(ConsensusEvent::ConsensusReached {
                         proposal_id: self.proposal.proposal_id,
@@ -203,7 +200,7 @@ impl ConsensusSession {
                     // Tie - if it's not all votes, we wait for more votes
                     self.state = ConsensusState::Active;
                     info!(
-                        "[consensus::mod::check_consensus]: Not enough votes received - consensus not reached"
+                        "[mod::check_consensus]: Not enough votes received - consensus not reached"
                     );
                 }
             }
@@ -212,13 +209,19 @@ impl ConsensusSession {
 
     /// Emit a consensus event
     fn emit_consensus_event(&self, event: ConsensusEvent) {
-        if let Some(sender) = &self.event_sender {
-            info!(
-                "[consensus::mod::emit_consensus_event]: Emitting consensus event: {event:?} for proposal {}",
-                self.proposal.proposal_id
-            );
-            let _ = sender.send((self.group_name.clone(), event));
-        }
+        info!("[mod::emit_consensus_event]: Emitting consensus event: {event:?}");
+        let _ = self
+            .event_sender
+            .send((self.group_name.clone(), event.clone()));
+        let _ = self.decisions_tx.send(ProposalResult {
+            group_id: self.group_name.clone(),
+            proposal_id: self.proposal.proposal_id,
+            outcome: Outcome::from(event) as i32,
+            decided_at_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("Failed to get current time")
+                .as_secs(),
+        });
     }
 
     /// Check if the session is still active

@@ -6,7 +6,7 @@ use ds::waku_actor::WakuMessageToSend;
 use crate::{
     consensus::ConsensusEvent,
     error::UserError,
-    protos::messages::v1::BanRequest,
+    protos::de_mls::messages::v1::{BanRequest, ConversationMessage},
     user::{User, UserAction},
 };
 
@@ -86,7 +86,13 @@ impl Message<SendGroupMessage> for User {
         msg: SendGroupMessage,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.build_group_message(msg.message, &msg.group_name).await
+        let app_msg = ConversationMessage {
+            message: msg.message,
+            sender: self.identity_string(),
+            group_name: msg.group_name.clone(),
+        }
+        .into();
+        self.build_group_message(app_msg, &msg.group_name).await
     }
 }
 
@@ -96,7 +102,7 @@ pub struct BuildBanMessage {
 }
 
 impl Message<BuildBanMessage> for User {
-    type Reply = Result<WakuMessageToSend, UserError>;
+    type Reply = Result<UserAction, UserError>;
 
     async fn handle(
         &mut self,
@@ -122,6 +128,22 @@ impl Message<StartStewardEpochRequest> for User {
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
         self.start_steward_epoch(&msg.group_name).await
+    }
+}
+
+pub struct GetGroupMembersRequest {
+    pub group_name: String,
+}
+
+impl Message<GetGroupMembersRequest> for User {
+    type Reply = Result<Vec<String>, UserError>;
+
+    async fn handle(
+        &mut self,
+        msg: GetGroupMembersRequest,
+        _ctx: Context<'_, Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.get_group_members(&msg.group_name).await
     }
 }
 
@@ -187,5 +209,39 @@ impl Message<ConsensusEventMessage> for User {
     ) -> Self::Reply {
         self.handle_consensus_event(&msg.group_name, msg.event)
             .await
+    }
+}
+
+pub struct IsStewardStatusRequest {
+    pub group_name: String,
+}
+
+impl Message<IsStewardStatusRequest> for User {
+    type Reply = Result<bool, UserError>;
+
+    async fn handle(
+        &mut self,
+        msg: IsStewardStatusRequest,
+        _ctx: Context<'_, Self, Self::Reply>,
+    ) -> Self::Reply {
+        let is_steward = self.is_user_steward_for_group(&msg.group_name).await?;
+        Ok(is_steward)
+    }
+}
+
+pub struct GetCurrentEpochProposalsRequest {
+    pub group_name: String,
+}
+
+impl Message<GetCurrentEpochProposalsRequest> for User {
+    type Reply = Result<Vec<crate::steward::GroupUpdateRequest>, UserError>;
+
+    async fn handle(
+        &mut self,
+        msg: GetCurrentEpochProposalsRequest,
+        _ctx: Context<'_, Self, Self::Reply>,
+    ) -> Self::Reply {
+        let proposals = self.get_current_epoch_proposals(&msg.group_name).await?;
+        Ok(proposals)
     }
 }

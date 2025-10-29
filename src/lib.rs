@@ -33,7 +33,7 @@
 //!
 //! 1. **Working State**: Normal operation, all users can send any message freely
 //! 2. **Waiting State**: Steward epoch active, only steward can send BATCH_PROPOSALS_MESSAGE
-//! 3. **Voting State**: Consensus voting, restricted message types (VOTE/USER_VOTE for all, VOTING_PROPOSAL/PROPOSAL for steward only)
+//! 3. **Voting State**: Consensus voting, restricted message types (VOTE/USER_VOTE for all, VOTE_PAYLOAD/PROPOSAL for steward only)
 //!
 //! ### Complete State Transitions
 //!
@@ -92,57 +92,42 @@
 //! - **Waku**: Decentralized messaging protocol
 //! - **Alloy**: Ethereum wallet and signing
 
-use alloy::primitives::{Address, PrimitiveSignature};
+use alloy::primitives::{Address, Signature};
 use ecies::{decrypt, encrypt};
 use libsecp256k1::{sign, verify, Message, PublicKey, SecretKey, Signature as libSignature};
 use rand::thread_rng;
 use secp256k1::hashes::{sha256, Hash};
-use std::{
-    collections::HashSet,
-    sync::{Arc, Mutex},
-};
-use tokio::sync::{mpsc::Sender, RwLock};
-use waku_bindings::{WakuContentTopic, WakuMessage};
 
-use ds::waku_actor::WakuMessageToSend;
 use error::{GroupError, MessageError};
 
-pub mod action_handlers;
+pub mod bootstrap;
+pub use bootstrap::{bootstrap_core, bootstrap_core_from_env, Bootstrap, BootstrapConfig};
+
 pub mod consensus;
 pub mod error;
 pub mod group;
+pub mod group_registry;
 pub mod message;
 pub mod state_machine;
 pub mod steward;
 pub mod user;
 pub mod user_actor;
 pub mod user_app_instance;
-pub mod ws_actor;
 
 pub mod protos {
-    pub mod messages {
+    pub mod consensus {
         pub mod v1 {
-            pub mod consensus {
-                pub mod v1 {
-                    include!(concat!(env!("OUT_DIR"), "/consensus.v1.rs"));
-                }
-            }
-            include!(concat!(env!("OUT_DIR"), "/de_mls.messages.v1.rs"));
+            include!(concat!(env!("OUT_DIR"), "/consensus.v1.rs"));
         }
     }
-}
-pub struct AppState {
-    pub waku_node: Sender<WakuMessageToSend>,
-    pub rooms: Mutex<HashSet<String>>,
-    pub content_topics: Arc<RwLock<Vec<WakuContentTopic>>>,
-    pub pubsub: tokio::sync::broadcast::Sender<WakuMessage>,
-}
 
-#[derive(Debug, Clone)]
-pub struct Connection {
-    pub eth_private_key: String,
-    pub group_id: String,
-    pub should_create_group: bool,
+    pub mod de_mls {
+        pub mod messages {
+            pub mod v1 {
+                include!(concat!(env!("OUT_DIR"), "/de_mls.messages.v1.rs"));
+            }
+        }
+    }
 }
 
 pub fn generate_keypair() -> (PublicKey, SecretKey) {
@@ -186,15 +171,6 @@ pub fn decrypt_message(message: &[u8], secret_key: SecretKey) -> Result<Vec<u8>,
     Ok(decrypted)
 }
 
-/// Check if a content topic exists in a list of topics or if the list is empty
-pub async fn match_content_topic(
-    content_topics: &Arc<RwLock<Vec<WakuContentTopic>>>,
-    topic: &WakuContentTopic,
-) -> bool {
-    let locked_topics = content_topics.read().await;
-    locked_topics.is_empty() || locked_topics.iter().any(|t| t == topic)
-}
-
 pub trait LocalSigner {
     fn local_sign_message(
         &self,
@@ -218,7 +194,7 @@ pub fn verify_vote_hash(
                 expect: 65,
                 actual: signature.len(),
             })?;
-    let signature = PrimitiveSignature::from_raw_array(&signature_bytes)?;
+    let signature = Signature::from_raw_array(&signature_bytes)?;
     let address = signature.recover_address_from_msg(message)?;
     let address_bytes = address.as_slice().to_vec();
     Ok(address_bytes == public_key)

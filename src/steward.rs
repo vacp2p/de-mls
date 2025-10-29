@@ -4,7 +4,10 @@ use openmls::prelude::KeyPackage;
 use std::{fmt::Display, str::FromStr, sync::Arc};
 use tokio::sync::Mutex;
 
-use crate::{protos::messages::v1::GroupAnnouncement, *};
+use crate::{
+    decrypt_message, error::MessageError, generate_keypair,
+    protos::de_mls::messages::v1::GroupAnnouncement, sign_message,
+};
 
 #[derive(Clone, Debug)]
 pub struct Steward {
@@ -99,6 +102,11 @@ impl Steward {
     /// Get the count of proposals in the current epoch.
     pub async fn get_voting_epoch_proposals_count(&self) -> usize {
         self.voting_epoch_proposals.lock().await.len()
+    }
+
+    /// Get the current epoch proposals for UI display.
+    pub async fn get_current_epoch_proposals(&self) -> Vec<GroupUpdateRequest> {
+        self.current_epoch_proposals.lock().await.clone()
     }
 
     /// Apply proposals for the current epoch (called after successful voting).
