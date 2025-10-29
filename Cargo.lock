@@ -2344,6 +2344,7 @@ name = "de_mls_ui_protocol"
 version = "0.1.0"
 dependencies = [
  "de_mls",
+ "mls_crypto",
  "serde",
  "serde_json",
  "thiserror 2.0.17",

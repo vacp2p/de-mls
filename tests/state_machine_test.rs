@@ -31,7 +31,7 @@ async fn test_state_machine_transitions() {
     let kp_user = id_steward
         .generate_key_package(&crypto)
         .expect("Failed to generate key package");
-    group
+    let _ = group
         .store_invite_proposal(Box::new(kp_user))
         .await
         .expect("Failed to store proposal");
@@ -118,7 +118,7 @@ async fn test_invalid_state_transitions() {
     let kp_user = id_steward
         .generate_key_package(&crypto)
         .expect("Failed to generate key package");
-    group
+    let _ = group
         .store_invite_proposal(Box::new(kp_user))
         .await
         .expect("Failed to store proposal");
@@ -156,11 +156,11 @@ async fn test_proposal_counting() {
         .generate_key_package(&crypto)
         .expect("Failed to generate key package");
 
-    group
+    let _ = group
         .store_invite_proposal(Box::new(kp_user.clone()))
         .await
         .expect("Failed to store proposal");
-    group
+    let _ = group
         .store_remove_proposal("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".to_string())
         .await
         .expect("Failed to put remove proposal");

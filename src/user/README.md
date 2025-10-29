@@ -84,8 +84,8 @@ keeping the top-level actor (`mod.rs`) lean.
 
 7. **Proposal batches** – `proposals.rs` handles the post-consensus MLS churn:
    - `process_batch_proposals_message` – Applies proposals, deserializes MLS commits,
-    and emits the resulting `UserAction`.
-   - `process_pending_batch_proposals` – Replays stored batches once the group transitions into `Waiting`.
+   and emits the resulting `UserAction`.
+   - `process_stored_batch_proposals` – Replays a deferred batch once the group transitions into `Waiting`.
 
 ## Waku Topics & Message Types
 

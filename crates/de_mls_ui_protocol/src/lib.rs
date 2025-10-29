@@ -1,10 +1,14 @@
 //! UI <-> Gateway protocol (PoC). Keep it dependency-light (serde only).
 // crates/de_mls_ui_protocol/src/lib.rs
 pub mod v1 {
-    use de_mls::protos::{
-        consensus::v1::{ProposalResult, VotePayload},
-        de_mls::messages::v1::ConversationMessage,
+    use de_mls::{
+        message::MessageType,
+        protos::{
+            consensus::v1::{ProposalResult, VotePayload},
+            de_mls::messages::v1::{BanRequest, ConversationMessage, ProposalAdded},
+        },
     };
+    use mls_crypto::identity::normalize_wallet_address;
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,7 +42,7 @@ pub mod v1 {
         LeaveGroup {
             group_id: String,
         },
-        QuerySteward {
+        GetStewardStatus {
             group_id: String,
         },
         GetCurrentEpochProposals {
@@ -92,5 +96,32 @@ pub mod v1 {
             members: Vec<String>,
         },
         Error(String),
+    }
+
+    impl From<ProposalAdded> for AppEvent {
+        fn from(proposal_added: ProposalAdded) -> Self {
+            AppEvent::ProposalAdded {
+                group_id: proposal_added.group_id.clone(),
+                action: proposal_added
+                    .request
+                    .as_ref()
+                    .unwrap()
+                    .message_type()
+                    .to_string(),
+                address: normalize_wallet_address(
+                    &proposal_added.request.as_ref().unwrap().wallet_address,
+                ),
+            }
+        }
+    }
+
+    impl From<BanRequest> for AppEvent {
+        fn from(ban_request: BanRequest) -> Self {
+            AppEvent::ProposalAdded {
+                group_id: ban_request.group_name.clone(),
+                action: "Remove Member".to_string(),
+                address: ban_request.user_to_ban.clone(),
+            }
+        }
     }
 }

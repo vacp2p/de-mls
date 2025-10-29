@@ -6,8 +6,8 @@ use crate::{
     consensus::ConsensusEvent,
     error::UserError,
     protos::{
-        consensus::v1::{Proposal, Vote},
-        de_mls::messages::v1::{AppMessage, VotingProposal},
+        consensus::v1::{Proposal, Vote, VotePayload},
+        de_mls::messages::v1::AppMessage,
     },
     state_machine::GroupState,
     user::{User, UserAction},
@@ -64,7 +64,7 @@ impl User {
         if group.read().await.is_steward().await {
             if vote_result {
                 // Vote YES: Apply proposals and send commit messages
-                info!("[user::complete_voting_for_steward]: Vote YES, sending commit message");
+                info!("[handle_consensus_result]: Vote YES, sending commit message");
 
                 // Apply proposals and complete (state must be ConsensusReached for this)
                 let messages = self.apply_proposals(group_name).await?;
@@ -72,7 +72,9 @@ impl User {
                 Ok(messages)
             } else {
                 // Vote NO: Empty proposal queue without applying, no commit messages
-                info!("[user::complete_voting_for_steward]: Vote NO, emptying proposal queue without applying");
+                info!(
+                    "[handle_consensus_result]: Vote NO, emptying proposal queue without applying"
+                );
 
                 // Empty proposals without state requirement (direct steward call)
                 group.write().await.handle_no_vote().await?;
@@ -80,53 +82,50 @@ impl User {
                 Ok(vec![])
             }
         } else if vote_result {
-            // Vote YES: Transition to ConsensusReached state to await batch proposals
-            group.write().await.start_consensus_reached().await;
-            info!("[user::handle_consensus_result]: Non-steward user transitioning to ConsensusReached state to await batch proposals");
-
-            // Now transition to Waiting state to follow complete state machine flow
-            group.write().await.start_waiting().await;
-            info!("[user::handle_consensus_result]: Non-steward user transitioning to Waiting state to await batch proposals");
+            // Vote YES: Group already moved to ConsensusReached during complete_voting; transition to Waiting
+            {
+                let mut group_guard = group.write().await;
+                group_guard.start_waiting_after_consensus().await?;
+            }
+            info!("[handle_consensus_result]: Non-steward user transitioning to Waiting state to await batch proposals");
 
             // Check if there are pending batch proposals that can now be processed
             if self.pending_batch_proposals.contains(group_name).await {
-                info!("[user::handle_consensus_result]: Non-steward user has pending batch proposals, processing them now");
-                let action = self.process_pending_batch_proposals(group_name).await?;
-                info!("[user::handle_consensus_result]: Successfully processed pending batch proposals");
+                info!("[handle_consensus_result]: Non-steward user has pending batch proposals, processing them now");
+                let action = self.process_stored_batch_proposals(group_name).await?;
+                info!("[handle_consensus_result]: Successfully processed pending batch proposals");
                 if let Some(action) = action {
                     match action {
                         UserAction::SendToWaku(waku_message) => {
-                            info!(
-                                "[user::handle_consensus_result]: Sending waku message to backend"
-                            );
+                            info!("[handle_consensus_result]: Sending waku message to backend");
                             Ok(vec![waku_message])
                         }
                         UserAction::LeaveGroup(group_name) => {
                             self.leave_group(group_name.as_str()).await?;
-                            info!("[user::handle_consensus_result]: Non-steward user left group {group_name}");
+                            info!("[handle_consensus_result]: Non-steward user left group {group_name}");
                             Ok(vec![])
                         }
                         UserAction::DoNothing => {
-                            info!("[user::handle_consensus_result]: No action to process");
+                            info!("[handle_consensus_result]: No action to process");
                             Ok(vec![])
                         }
                         _ => {
-                            error!("[user::handle_consensus_result]: Invalid action to process");
+                            error!("[handle_consensus_result]: Invalid action to process");
                             Err(UserError::InvalidUserAction(action.to_string()))
                         }
                     }
                 } else {
-                    info!("[user::handle_consensus_result]: No action to process");
+                    info!("[handle_consensus_result]: No action to process");
                     Ok(vec![])
                 }
             } else {
-                info!("[user::handle_consensus_result]: No pending batch proposals to process");
+                info!("[handle_consensus_result]: No pending batch proposals to process");
                 Ok(vec![])
             }
         } else {
             // Vote NO: Transition to Working state
             group.write().await.start_working().await;
-            info!("[user::handle_consensus_result]: Non-steward user transitioning to Working state after failed vote");
+            info!("[handle_consensus_result]: Non-steward user transitioning to Working state after failed vote");
             Ok(vec![])
         }
     }
@@ -164,13 +163,16 @@ impl User {
                 result,
             } => {
                 info!(
-                    "[user::handle_consensus_event]: Consensus reached for proposal {proposal_id} in group {group_name}: {result}"
+                    "[handle_consensus_event]: Consensus reached for proposal {proposal_id} in group {group_name}: {result}"
                 );
 
                 let group = self.group_ref(group_name).await?;
 
                 let current_state = group.read().await.get_state().await;
-                info!("[user::handle_consensus_event]: Current state: {:?} for proposal {proposal_id}", current_state);
+                info!(
+                    "[handle_consensus_event]: Current state: {:?} for proposal {proposal_id}",
+                    current_state
+                );
 
                 // Handle the consensus result and return commit messages
                 let messages = self.handle_consensus_result(group_name, result).await?;
@@ -181,14 +183,14 @@ impl User {
                 reason,
             } => {
                 info!(
-                    "[user::handle_consensus_event]: Consensus failed for proposal {proposal_id} in group {group_name}: {reason}"
+                    "[handle_consensus_event]: Consensus failed for proposal {proposal_id} in group {group_name}: {reason}"
                 );
 
                 let group = self.group_ref(group_name).await?;
 
                 let current_state = group.read().await.get_state().await;
 
-                info!("[user::handle_consensus_event]: Handling consensus failure in {:?} state for proposal {proposal_id}", current_state);
+                info!("[handle_consensus_event]: Handling consensus failure in {:?} state for proposal {proposal_id}", current_state);
 
                 // Handle consensus failure based on current state
                 match current_state {
@@ -201,7 +203,7 @@ impl User {
                             .await
                             .unwrap_or(false); // Default to false if proposal not found
 
-                        info!("Applying liveness criteria for failed proposal {proposal_id}: {liveness_result}");
+                        info!("[handle_consensus_result]:Applying liveness criteria for failed proposal {proposal_id}: {liveness_result}");
                         let messages = self
                             .handle_consensus_result(group_name, liveness_result)
                             .await?;
@@ -245,15 +247,18 @@ impl User {
         let group = self.group_ref(group_name).await?;
         group.write().await.start_voting().await?;
         info!(
-            "[user::process_consensus_proposal]: Starting voting for proposal {}",
+            "[process_consensus_proposal]: Starting voting for proposal {}",
             proposal.proposal_id
         );
 
         // Send voting proposal to frontend
-        let voting_proposal: AppMessage = VotingProposal {
+        let voting_proposal: AppMessage = VotePayload {
+            group_id: group_name.to_string(),
             proposal_id: proposal.proposal_id,
             group_requests: proposal.group_requests.clone(),
-            group_name: group_name.to_string(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs(),
         }
         .into();
 
@@ -291,7 +296,7 @@ impl User {
         let group = self.group_ref(group_name).await?;
         let app_message = if group.read().await.is_steward().await {
             info!(
-                "[user::process_user_vote]: Steward voting for proposal {proposal_id} in group {group_name}"
+                "[process_user_vote]: Steward voting for proposal {proposal_id} in group {group_name}"
             );
             let proposal = self
                 .consensus_service
@@ -300,7 +305,7 @@ impl User {
             proposal.into()
         } else {
             info!(
-                "[user::process_user_vote]: User voting for proposal {proposal_id} in group {group_name}"
+                "[process_user_vote]: User voting for proposal {proposal_id} in group {group_name}"
             );
             let vote = self
                 .consensus_service

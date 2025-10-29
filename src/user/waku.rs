@@ -1,17 +1,19 @@
+use openmls::prelude::{DeserializeBytes, MlsMessageBodyIn, MlsMessageIn};
 use prost::Message;
 use tracing::{debug, error, info};
 use waku_bindings::WakuMessage;
 
-use crate::error::UserError;
-use crate::group::GroupAction;
-use crate::protos::de_mls::messages::v1::{app_message, welcome_message};
-use crate::protos::de_mls::messages::v1::{
-    AppMessage, ConversationMessage, UserKeyPackage, WelcomeMessage,
-};
-use crate::user::{User, UserAction};
 use ds::waku_actor::WakuMessageToSend;
 use ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
-use openmls::prelude::{DeserializeBytes, MlsMessageBodyIn, MlsMessageIn};
+
+use crate::error::UserError;
+use crate::group::GroupAction;
+use crate::message::MessageType;
+use crate::protos::de_mls::messages::v1::{
+    app_message, welcome_message, AppMessage, ConversationMessage, ProposalAdded, UserKeyPackage,
+    WelcomeMessage,
+};
+use crate::user::{User, UserAction};
 
 impl User {
     /// Process messages from the welcome subtopic.
@@ -66,7 +68,7 @@ impl User {
                         Ok(UserAction::DoNothing)
                     } else {
                         info!(
-                            "[user::process_welcome_subtopic]: User received group announcement message for group {group_name}"
+                            "[process_welcome_subtopic]: User received group announcement msg for group {group_name}"
                         );
                         if !group_announcement.verify()? {
                             return Err(UserError::MessageVerificationFailed);
@@ -91,7 +93,7 @@ impl User {
                 welcome_message::Payload::UserKeyPackage(user_key_package) => {
                     if is_steward {
                         info!(
-                            "[user::process_welcome_subtopic]: Steward received key package for the group {group_name}"
+                            "[process_welcome_subtopic]: Steward received key package for the group {group_name}"
                         );
                         let key_package = group
                             .write()
@@ -99,20 +101,18 @@ impl User {
                             .decrypt_steward_msg(user_key_package.encrypt_kp.clone())
                             .await?;
 
-                        let (action, address) = group
+                        let request = group
                             .write()
                             .await
                             .store_invite_proposal(Box::new(key_package))
                             .await?;
 
                         // Send notification to UI about the new proposal
-                        let proposal_added_msg: AppMessage =
-                            crate::protos::de_mls::messages::v1::ProposalAdded {
-                                group_id: group_name.to_string(),
-                                action,
-                                address,
-                            }
-                            .into();
+                        let proposal_added_msg: AppMessage = ProposalAdded {
+                            group_id: group_name.to_string(),
+                            request: Some(request),
+                        }
+                        .into();
 
                         Ok(UserAction::SendToApp(proposal_added_msg))
                     } else {
@@ -208,7 +208,7 @@ impl User {
             match app_message.payload {
                 Some(app_message::Payload::BatchProposalsMessage(batch_msg)) => {
                     info!(
-                        "[user::process_app_subtopic]: Processing batch proposals message for group {group_name}"
+                        "[process_app_subtopic]: Processing batch proposals message for group {group_name}"
                     );
                     // Release the lock before calling self methods
                     return self
@@ -217,8 +217,8 @@ impl User {
                 }
                 _ => {
                     error!(
-                        "[user::process_app_subtopic]: Cannot process another app message here: {:?}",
-                        app_message.to_string()
+                        "[process_app_subtopic]: Cannot process another app message here: {:?}",
+                        app_message.payload.unwrap().message_type()
                     );
                     return Err(UserError::InvalidAppMessageType);
                 }
@@ -239,23 +239,23 @@ impl User {
         // Handle the result outside of any lock scope
         match res {
             GroupAction::GroupAppMsg(msg) => {
-                info!("[user::process_app_subtopic]: sending to app");
+                info!("[process_app_subtopic]: sending to app");
                 Ok(UserAction::SendToApp(msg))
             }
             GroupAction::LeaveGroup => {
-                info!("[user::process_app_subtopic]: leaving group");
+                info!("[process_app_subtopic]: leaving group");
                 Ok(UserAction::LeaveGroup(group_name.to_string()))
             }
             GroupAction::DoNothing => {
-                info!("[user::process_app_subtopic]: doing nothing");
+                info!("[process_app_subtopic]: doing nothing");
                 Ok(UserAction::DoNothing)
             }
             GroupAction::GroupProposal(proposal) => {
-                info!("[user::process_app_subtopic]: processing consensus proposal");
+                info!("[process_app_subtopic]: processing consensus proposal");
                 self.process_consensus_proposal(proposal, group_name).await
             }
             GroupAction::GroupVote(vote) => {
-                info!("[user::process_app_subtopic]: processing consensus vote");
+                info!("[process_app_subtopic]: processing consensus vote");
                 self.process_consensus_vote(vote, group_name).await
             }
         }
@@ -290,7 +290,7 @@ impl User {
         let group_name = msg.content_topic.application_name.to_string();
         let group = self.group_ref(&group_name).await?;
         if msg.meta == group.read().await.app_id() {
-            debug!("Message is from the same app, skipping");
+            debug!("[process_waku_message]: Message is from the same app, skipping");
             return Ok(UserAction::DoNothing);
         }
 

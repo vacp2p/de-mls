@@ -88,7 +88,7 @@ impl User {
         let group = self.group_ref(&group_name).await?;
         group.write().await.set_mls_group(mls_group)?;
 
-        info!("[user::join_group]: User joined group {group_name}");
+        info!("[join_group]: User joined group {group_name}");
         Ok(())
     }
 
@@ -134,6 +134,9 @@ impl User {
     /// - `UserError::GroupNotFoundError` if group is missing
     pub async fn get_group_members(&self, group_name: &str) -> Result<Vec<String>, UserError> {
         let group = self.group_ref(group_name).await?;
+        if !group.read().await.is_mls_group_initialized() {
+            return Ok(Vec::new());
+        }
         let members = group.read().await.members_identity().await?;
         Ok(members
             .into_iter()
@@ -172,7 +175,7 @@ impl User {
     /// ## Errors:
     /// - `UserError::GroupNotFoundError` if group doesn't exist
     pub async fn leave_group(&mut self, group_name: &str) -> Result<(), UserError> {
-        info!("[user::leave_group]: Leaving group {group_name}");
+        info!("[leave_group]: Leaving group {group_name}");
         let group = self.group_ref(group_name).await?;
         self.groups.write().await.remove(group_name);
         drop(group);

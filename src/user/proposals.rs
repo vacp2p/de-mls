@@ -64,7 +64,7 @@ impl User {
         let initial_state = group.read().await.get_state().await;
         if initial_state != GroupState::Waiting {
             info!(
-                "[user::process_batch_proposals_message]: Cannot process batch proposals in {initial_state} state, storing for later processing"
+                "[process_batch_proposals_message]: Cannot process batch proposals in {initial_state} state, storing for later processing"
             );
             // Store the batch proposals for later processing
             self.pending_batch_proposals
@@ -107,28 +107,29 @@ impl User {
             GroupAction::GroupVote(vote) => self.process_consensus_vote(vote, group_name).await,
         }
     }
-    /// Process any pending batch proposals that can now be processed.
+
+    /// Try to process a batch proposals message that was deferred earlier.
     ///
     /// ## Parameters:
-    /// - `group_name`: The name of the group to process proposals for
+    /// - `group_name`: The name of the group whose stored batch should be retried
     ///
     /// ## Returns:
-    /// - `Some(UserAction)` if proposals were processed, `None` otherwise
+    /// - `Some(UserAction)` if a stored batch was processed, `None` otherwise
     ///
     /// ## Effects:
-    /// - Processes any stored batch proposals that were waiting for correct state
-    /// - Removes processed proposals from pending queue
+    /// - Checks for a cached `BatchProposalsMessage` and processes it immediately if present
+    /// - Removes the stored batch once processing succeeds
     ///
     /// ## Usage:
-    /// Called when group state changes to allow processing of previously stored proposals
-    pub(crate) async fn process_pending_batch_proposals(
+    /// Call after transitioning into `Waiting` so any deferred steward batch can be replayed.
+    pub(crate) async fn process_stored_batch_proposals(
         &mut self,
         group_name: &str,
     ) -> Result<Option<UserAction>, UserError> {
         if self.pending_batch_proposals.contains(group_name).await {
             if let Some(batch_msg) = self.pending_batch_proposals.take(group_name).await {
                 info!(
-                    "[user::process_pending_batch_proposals]: Processing pending batch proposals for group {}",
+                    "[process_stored_batch_proposals]: Processing stored batch proposals for group {}",
                     group_name
                 );
                 let action = self

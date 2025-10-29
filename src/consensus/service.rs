@@ -12,7 +12,7 @@ use crate::consensus::{
     ConsensusState, ConsensusStats,
 };
 use crate::error::ConsensusError;
-use crate::protos::consensus::v1::{Proposal, ProposalResult, UiUpdateRequest, Vote};
+use crate::protos::consensus::v1::{Proposal, ProposalResult, UpdateRequest, Vote};
 use crate::{verify_vote_hash, LocalSigner};
 
 /// Consensus service that manages multiple consensus sessions for multiple groups
@@ -92,7 +92,7 @@ impl ConsensusService {
         &self,
         group_name: &str,
         name: String,
-        group_requests: Vec<UiUpdateRequest>,
+        group_requests: Vec<UpdateRequest>,
         proposal_owner: Vec<u8>,
         expected_voters_count: u32,
         expiration_time: u64,
@@ -153,7 +153,7 @@ impl ConsensusService {
                 .is_some()
             {
                 info!(
-                    "Consensus result already exists for proposal {proposal_id}, skipping timeout"
+                    "[create_proposal]:Consensus result already exists for proposal {proposal_id}, skipping timeout"
                 );
                 return;
             }
@@ -165,7 +165,7 @@ impl ConsensusService {
                 .is_ok()
             {
                 info!(
-                    "Automatic timeout applied for proposal {proposal_id} after {timeout_seconds}s"
+                    "[create_proposal]: Automatic timeout applied for proposal {proposal_id} after {timeout_seconds}s"
                 );
             }
         });
@@ -343,7 +343,7 @@ impl ConsensusService {
         proposal: Proposal,
     ) -> Result<(), ConsensusError> {
         info!(
-            "[consensus::service::process_incoming_proposal]: Processing incoming proposal for group {group_name}"
+            "[service::process_incoming_proposal]: Processing incoming proposal for group {group_name}"
         );
         let mut sessions = self.sessions.write().await;
         let group_sessions = sessions
@@ -370,7 +370,7 @@ impl ConsensusService {
         session.add_vote(proposal.votes[0].clone())?;
         self.insert_session(group_sessions, proposal.proposal_id, session);
 
-        info!("[consensus::service::process_incoming_proposal]: Proposal stored, waiting for user vote");
+        info!("[service::process_incoming_proposal]: Proposal stored, waiting for user vote");
 
         Ok(())
     }
@@ -412,9 +412,7 @@ impl ConsensusService {
         group_name: &str,
         vote: Vote,
     ) -> Result<(), ConsensusError> {
-        info!(
-            "[consensus::service::process_incoming_vote]: Processing incoming vote for group {group_name}"
-        );
+        info!("[service::process_incoming_vote]: Processing incoming vote for group {group_name}");
         let mut sessions = self.sessions.write().await;
         let group_sessions = sessions
             .get_mut(group_name)
@@ -615,7 +613,7 @@ impl ConsensusService {
                 // Check if consensus was already reached
                 match session.state {
                     crate::consensus::ConsensusState::ConsensusReached(result) => {
-                        info!("Consensus already reached for proposal {proposal_id}, skipping timeout");
+                        info!("[handle_consensus_timeout]: Consensus already reached for proposal {proposal_id}, skipping timeout");
                         Ok(result)
                     }
                     _ => {
@@ -639,7 +637,7 @@ impl ConsensusService {
 
                         // Apply timeout consensus
                         session.state = crate::consensus::ConsensusState::ConsensusReached(result);
-                        info!("Timeout consensus applied for proposal {proposal_id}: {result} (liveness criteria)");
+                        info!("[handle_consensus_timeout]: Timeout consensus applied for proposal {proposal_id}: {result} (liveness criteria)");
 
                         // Emit consensus event
                         session.emit_consensus_event(
@@ -678,7 +676,7 @@ impl ConsensusService {
     ) -> bool {
         let required_votes = self.calculate_required_votes(expected_voters, consensus_threshold);
         println!(
-            "[consensus::service::check_sufficient_votes]: Total votes: {total_votes}, Expected voters: {expected_voters}, Consensus threshold: {consensus_threshold}, Required votes: {required_votes}"
+            "[service::check_sufficient_votes]: Total votes: {total_votes}, Expected voters: {expected_voters}, Consensus threshold: {consensus_threshold}, Required votes: {required_votes}"
         );
         total_votes >= required_votes
     }

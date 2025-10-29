@@ -13,10 +13,9 @@ message AppMessage {
     BanRequest ban_request = 3;
     consensus.v1.Proposal proposal = 4;
     consensus.v1.Vote vote = 5;
-    VotingProposal voting_proposal = 6;
+    consensus.v1.VotePayload vote_payload = 6;
     UserVote user_vote = 7;
     ProposalAdded proposal_added = 8;
-    ClearCurrentEpochProposals clear_current_epoch_proposals = 9;
   }
 }
 
@@ -38,25 +37,15 @@ message BatchProposalsMessage {
   bytes commit_message = 3;          // MLS commit message
 }
 
-// New message types for voting
-message VotingProposal {
-  uint32 proposal_id = 1;
-  string group_name = 2;
-  repeated consensus.v1.UiUpdateRequest group_requests = 3;  // Structured group update requests
-}
-
+// Yes/No vote for a given proposal. Based on the result, the `consensus.v1.Vote` will be created.
 message UserVote {
   uint32 proposal_id = 1;
   bool vote = 2;
   string group_name = 3;
 }
 
+// Proposal added message is sent to the UI when a new proposal is added to the group.
 message ProposalAdded {
   string group_id = 1;
-  string action = 2;
-  string address = 3;
-}
-
-message ClearCurrentEpochProposals {
-  string group_id = 1;
+  consensus.v1.UpdateRequest request = 2;
 }

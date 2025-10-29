@@ -300,8 +300,8 @@ async fn user_vote_on_proposal(
     assert_eq!(user_state, GroupState::Voting);
 
     let proposal_id = match msg.payload {
-        Some(app_message::Payload::VotingProposal(proposal)) => proposal.proposal_id,
-        _ => panic!("User got an unexpected message: {msg:?}"),
+        Some(app_message::Payload::VotePayload(vote_payload)) => vote_payload.proposal_id,
+        _ => panic!("User got an unexpected message: {msg:?}",),
     };
 
     // after getting voting proposal, user actually should send it into app and get vote result

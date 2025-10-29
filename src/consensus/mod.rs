@@ -128,7 +128,7 @@ impl ConsensusSession {
             }
             ConsensusState::ConsensusReached(_) => {
                 info!(
-                    "[consensus::mod::add_vote]: Consensus already reached for proposal {}, skipping vote",
+                    "[mod::add_vote]: Consensus already reached for proposal {}, skipping vote",
                     self.proposal.proposal_id
                 );
                 Ok(())
@@ -170,7 +170,7 @@ impl ConsensusSession {
             if yes_votes > no_votes {
                 self.state = ConsensusState::ConsensusReached(true);
                 info!(
-                    "[consensus::mod::check_consensus]: Enough votes received {yes_votes}-{no_votes} - consensus reached: YES"
+                    "[mod::check_consensus]: Enough votes received {yes_votes}-{no_votes} - consensus reached: YES"
                 );
                 self.emit_consensus_event(ConsensusEvent::ConsensusReached {
                     proposal_id: self.proposal.proposal_id,
@@ -179,7 +179,7 @@ impl ConsensusSession {
             } else if no_votes > yes_votes {
                 self.state = ConsensusState::ConsensusReached(false);
                 info!(
-                    "[consensus::mod::check_consensus]: Enough votes received {yes_votes}-{no_votes} - consensus reached: NO"
+                    "[mod::check_consensus]: Enough votes received {yes_votes}-{no_votes} - consensus reached: NO"
                 );
                 self.emit_consensus_event(ConsensusEvent::ConsensusReached {
                     proposal_id: self.proposal.proposal_id,
@@ -190,7 +190,7 @@ impl ConsensusSession {
                 if total_votes == expected_voters {
                     self.state = ConsensusState::ConsensusReached(false);
                     info!(
-                        "[consensus::mod::check_consensus]: All votes received and tie - consensus not reached"
+                        "[mod::check_consensus]: All votes received and tie - consensus not reached"
                     );
                     self.emit_consensus_event(ConsensusEvent::ConsensusReached {
                         proposal_id: self.proposal.proposal_id,
@@ -200,7 +200,7 @@ impl ConsensusSession {
                     // Tie - if it's not all votes, we wait for more votes
                     self.state = ConsensusState::Active;
                     info!(
-                        "[consensus::mod::check_consensus]: Not enough votes received - consensus not reached"
+                        "[mod::check_consensus]: Not enough votes received - consensus not reached"
                     );
                 }
             }
@@ -209,10 +209,7 @@ impl ConsensusSession {
 
     /// Emit a consensus event
     fn emit_consensus_event(&self, event: ConsensusEvent) {
-        info!(
-            "[consensus::mod::emit_consensus_event]: Emitting consensus event: {event:?} for proposal {}",
-            self.proposal.proposal_id
-        );
+        info!("[mod::emit_consensus_event]: Emitting consensus event: {event:?}");
         let _ = self
             .event_sender
             .send((self.group_name.clone(), event.clone()));

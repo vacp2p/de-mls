@@ -2,10 +2,16 @@ syntax = "proto3";
 
 package consensus.v1;
 
+enum RequestType {
+  REQUEST_TYPE_UNSPECIFIED = 0;
+  REQUEST_TYPE_ADD_MEMBER = 1;
+  REQUEST_TYPE_REMOVE_MEMBER = 2;
+}
+
 // Proposal represents a consensus proposal that needs voting
 message Proposal {
   string name = 10;                 // Proposal name
-  repeated UiUpdateRequest group_requests = 11;  // Structured group update requests
+  repeated UpdateRequest group_requests = 11;  // Structured group update requests
   uint32 proposal_id = 12;           // Unique identifier of the proposal
   bytes proposal_owner = 13;        // Public key of the creator 
   repeated Vote votes = 14;         // Vote list in the proposal
@@ -45,21 +51,11 @@ message ProposalResult {
 message VotePayload {
   string group_id = 41;
   uint32 proposal_id = 42;
-  repeated UiUpdateRequest group_requests = 43;  // Structured group update requests
+  repeated UpdateRequest group_requests = 43;  // Structured group update requests
   uint64 timestamp = 44;
 } 
 
-message UiUpdateRequest {
-  oneof request {
-    UiAddMemberRequest add_member = 51;
-    UiRemoveMemberRequest remove_member = 52;
-  }
-}
-
-message UiAddMemberRequest {
-  bytes wallet_address = 61; 
-}
-
-message UiRemoveMemberRequest {
-  bytes wallet_address = 71;  
+message UpdateRequest {
+  RequestType request_type = 51;
+  bytes wallet_address = 52;
 }

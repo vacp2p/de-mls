@@ -2,17 +2,28 @@
 #![allow(non_snake_case)]
 use dioxus::prelude::*;
 use dioxus_desktop::{launch::launch as desktop_launch, Config, LogicalSize, WindowBuilder};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
-use de_mls::message::convert_group_requests_to_display;
-use de_mls::protos::consensus::v1::{Outcome, VotePayload};
-use de_mls::protos::de_mls::messages::v1::ConversationMessage;
-use de_mls::{bootstrap::bootstrap_core_from_env, protos::consensus::v1::ProposalResult};
+use de_mls::{
+    bootstrap_core_from_env,
+    message::convert_group_requests_to_display,
+    protos::{
+        consensus::v1::{Outcome, ProposalResult, VotePayload},
+        de_mls::messages::v1::ConversationMessage,
+    },
+};
 use de_mls_gateway::GATEWAY;
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 use mls_crypto::normalize_wallet_address_str;
 
 mod logging;
+
+static CSS: Asset = asset!("/assets/main.css");
+static NEXT_ALERT_ID: AtomicU64 = AtomicU64::new(1);
+const MAX_VISIBLE_ALERTS: usize = 5;
 
 // Helper function to format timestamps
 fn format_timestamp(timestamp_ms: u64) -> String {
@@ -53,6 +64,54 @@ struct ConsensusState {
     latest_results: Vec<(u32, Outcome, u64)>, // (vote_id, result, timestamp_ms)
     // Store current epoch proposals for stewards
     current_epoch_proposals: Vec<(String, String)>, // (action, address) pairs
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Alert {
+    id: u64,
+    message: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct AlertsState {
+    errors: Vec<Alert>,
+}
+
+fn record_error(alerts: &mut Signal<AlertsState>, message: impl Into<String>) {
+    let raw = message.into();
+    let summary = summarize_error(&raw);
+    tracing::error!("ui error: {}", raw);
+    let id = NEXT_ALERT_ID.fetch_add(1, Ordering::Relaxed);
+    let mut state = alerts.write();
+    state.errors.push(Alert {
+        id,
+        message: summary,
+    });
+    if state.errors.len() > MAX_VISIBLE_ALERTS {
+        state.errors.remove(0);
+    }
+}
+
+fn dismiss_error(alerts: &mut Signal<AlertsState>, alert_id: u64) {
+    alerts.write().errors.retain(|alert| alert.id != alert_id);
+}
+
+fn summarize_error(raw: &str) -> String {
+    let mut summary = raw
+        .lines()
+        .next()
+        .map(|line| line.trim().to_string())
+        .unwrap_or_else(|| raw.trim().to_string());
+    const MAX_LEN: usize = 160;
+    if summary.len() > MAX_LEN {
+        summary.truncate(MAX_LEN.saturating_sub(1));
+        summary.push('…');
+    }
+    if summary.is_empty() {
+        "Unexpected error".to_string()
+    } else {
+        summary
+    }
 }
 
 // ─────────────────────────── Routing ───────────────────────────
@@ -98,14 +157,16 @@ fn main() {
 }
 
 fn App() -> Element {
+    use_context_provider(|| Signal::new(AlertsState::default()));
     use_context_provider(|| Signal::new(SessionState::default()));
     use_context_provider(|| Signal::new(GroupsState::default()));
     use_context_provider(|| Signal::new(ChatState::default()));
     use_context_provider(|| Signal::new(ConsensusState::default()));
 
     rsx! {
-        style { {CSS} }
+        document::Stylesheet { href: CSS }
         HeaderBar {}
+        AlertsCenter {}
         Router::<Route> {}
     }
 }
@@ -155,15 +216,25 @@ fn Login() -> Element {
     let nav = use_navigator();
     let mut session = use_context::<Signal<SessionState>>();
     let mut key = use_signal(String::new);
+    let mut alerts = use_context::<Signal<AlertsState>>();
 
     // Local single-consumer loop: only Login() steals LoggedIn events
     use_future({
         move || async move {
             loop {
-                if let Some(AppEvent::LoggedIn(name)) = GATEWAY.next_event().await {
-                    session.write().address = name;
-                    nav.replace(Route::Home);
-                    break;
+                match GATEWAY.next_event().await {
+                    Some(AppEvent::LoggedIn(name)) => {
+                        session.write().address = name;
+                        nav.replace(Route::Home);
+                        break;
+                    }
+                    Some(AppEvent::Error(error)) => {
+                        record_error(&mut alerts, error);
+                    }
+                    Some(other) => {
+                        tracing::debug!("login view ignored event: {:?}", other);
+                    }
+                    None => break,
                 }
             }
         }
@@ -203,8 +274,8 @@ fn Home() -> Element {
     let mut groups = use_context::<Signal<GroupsState>>();
     let mut chat = use_context::<Signal<ChatState>>();
     let mut cons = use_context::<Signal<ConsensusState>>();
+    let mut alerts = use_context::<Signal<AlertsState>>();
 
-    // Ask backend once
     use_future({
         move || async move {
             if !groups.read().loaded {
@@ -213,7 +284,7 @@ fn Home() -> Element {
         }
     });
 
-    // Local event loop for: Groups, ChatMessage, VoteRequested, VoteClosed
+    // Local event loop for handling events from the gateway
     use_future({
         move || async move {
             loop {
@@ -284,7 +355,6 @@ fn Home() -> Element {
                         outcome,
                         decided_at_ms,
                     })) => {
-                        // store for the opened group (or keep a map per group if you prefer)
                         if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
                             cons.write().latest_results.push((
                                 proposal_id,
@@ -295,7 +365,6 @@ fn Home() -> Element {
                         cons.write().pending = None;
                     }
                     Some(AppEvent::GroupRemoved(name)) => {
-                        // keep in sync if backend asks us to remove
                         let mut g = groups.write();
                         g.items.retain(|n| n != &name);
                         if chat.read().opened_group.as_deref() == Some(name.as_str()) {
@@ -303,7 +372,11 @@ fn Home() -> Element {
                             chat.write().members.clear();
                         }
                     }
-                    _ => {}
+                    Some(AppEvent::Error(error)) => {
+                        record_error(&mut alerts, error);
+                    }
+                    Some(_) => {}
+                    None => break,
                 }
             }
         }
@@ -311,15 +384,49 @@ fn Home() -> Element {
 
     rsx! {
         div { class: "page home",
-            // 3 columns
             div { class: "layout",
-                // 1) Group list
                 GroupListSection {}
-                // 2) Chat
                 ChatSection {}
-                // 3) Consensus
                 ConsensusSection {}
             }
+        }
+    }
+}
+
+fn AlertsCenter() -> Element {
+    let alerts = use_context::<Signal<AlertsState>>();
+    let items = alerts.read().errors.clone();
+    rsx! {
+        div { class: "alerts",
+            for alert in items.iter() {
+                AlertItem {
+                    key: "{alert.id}",
+                    alert_id: alert.id,
+                    message: alert.message.clone(),
+                }
+            }
+        }
+    }
+}
+
+#[derive(Props, PartialEq, Clone)]
+struct AlertItemProps {
+    alert_id: u64,
+    message: String,
+}
+
+fn AlertItem(props: AlertItemProps) -> Element {
+    let mut alerts = use_context::<Signal<AlertsState>>();
+    let alert_id = props.alert_id;
+    let message = props.message.clone();
+    let dismiss = move |_| {
+        dismiss_error(&mut alerts, alert_id);
+    };
+
+    rsx! {
+        div { class: "alert error",
+            span { class: "message", "{message}" }
+            button { class: "ghost icon", onclick: dismiss, "✕" }
         }
     }
 }
@@ -333,7 +440,6 @@ fn GroupListSection() -> Element {
     let mut new_name = use_signal(String::new);
     let mut create_mode = use_signal(|| true); // true=create, false=join
 
-    // Take a snapshot so RSX/closures don't borrow `groups_state` for 'static.
     let items_snapshot: Vec<String> = groups_state.read().items.clone();
     let loaded = groups_state.read().loaded;
 
@@ -354,7 +460,7 @@ fn GroupListSection() -> Element {
                     })
                     .await;
                 let _ = GATEWAY
-                    .send(AppCmd::QuerySteward {
+                    .send(AppCmd::GetStewardStatus {
                         group_id: group_id.clone(),
                     })
                     .await;
@@ -378,7 +484,6 @@ fn GroupListSection() -> Element {
             if name.is_empty() {
                 return;
             }
-            // clone name for async action so we can still use `name` locally
             let action_name = name.clone();
             if *create_mode.read() {
                 spawn(async move {
@@ -399,7 +504,6 @@ fn GroupListSection() -> Element {
                     let _ = GATEWAY.send(AppCmd::ListGroups).await;
                 });
             }
-            // Immediately open the group in the UI
             open_group(name);
             new_name.set(String::new());
             show_modal.set(false);
@@ -417,7 +521,6 @@ fn GroupListSection() -> Element {
             } else {
                 ul { class: "group-list",
                     for name in items_snapshot.into_iter() {
-                        // let name_for_btn = name.clone();
                         li {
                             key: "{name}",
                             class: "group-row",
@@ -562,7 +665,6 @@ fn ChatSection() -> Element {
         }
     };
 
-    // Only render messages for the opened group
     let msgs_for_group = {
         let opened = chat.read().opened_group.clone();
         chat.read()
@@ -573,7 +675,6 @@ fn ChatSection() -> Element {
             .collect::<Vec<_>>()
     };
 
-    // Workaround for borrow after move by wrapping my_name in an Arc
     let my_name = Arc::new(session.read().address.clone());
     let my_name_for_leave = my_name.clone();
 
@@ -746,7 +847,6 @@ fn ConsensusSection() -> Element {
         }
     };
 
-    // active only when we have an opened group and a pending proposal for it
     let opened = chat.read().opened_group.clone();
     let pending = cons
         .read()
@@ -869,246 +969,3 @@ fn Modal(props: ModalProps) -> Element {
         }
     }
 }
-
-// ─────────────────────────── Minimal CSS ───────────────────────────
-
-const CSS: &str = r#"
-:root {
-  --bg: #0b0d10;
-  --card: #14161c;
-  --text: #e5e7ec;
-  --muted: #9094a2;
-  --primary: #00b2ff;
-  --primary-2: #007ad9;
-  --border: #1c1e25;
-  --good: #00f5a0;
-  --bad: #ff005c;
-}
-
-* { box-sizing: border-box; }
-html, body, #main { height: 100%; width: 100%; margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, Noto Sans, Apple Color Emoji, Segoe UI Emoji; }
-a { color: var(--primary); text-decoration: none; }
-
-.page { max-width: 1400px; margin: 0 auto; }
-h1 { margin: 0 0 16px 0; font-size: 22px; }
-
-.header {
-  display: flex; align-items: center; gap: 12px;
-  padding: 8px 12px; border-bottom: 1px solid var(--border);
-  background: rgba(255,255,255,0.03); position: sticky; top: 0; z-index: 5;
-}
-.header .brand { font-weight: 700; letter-spacing: .5px; }
-.header .user-hint {
-  color: var(--muted); font-size: 12px; padding: 4px 8px; border: 1px dashed var(--border);
-  border-radius: 8px; max-width: 420px;
-}
-.header .spacer { flex: 1; }
-.header .label { color: var(--muted); }
-.header .level {
-  padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border);
-  background: var(--card); color: var(--text); outline: none; font-size: 13px;
-}
-
-.page.login { max-width: 520px; margin-top: 32px; }
-.form-row { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; }
-input, select {
-  padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
-  background: var(--card); color: var(--text); outline: none; font-size: 14px;
-}
-.input-error { color: var(--bad); font-size: 12px; }
-button {
-  border: 1px solid var(--border); background: var(--card); color: var(--text);
-  padding: 10px 14px; border-radius: 10px; cursor: pointer;
-}
-button.primary { background: var(--primary); border-color: var(--primary); color: white; }
-button.primary:hover { background: var(--primary-2); }
-button.secondary { background: transparent; }
-button.ghost { background: transparent; border-color: var(--border); color: var(--muted); }
-button.icon { width: 32px; height: 32px; border-radius: 8px; }
-button.mini { padding: 4px 8px; border-radius: 8px; font-size: 12px; }
-
-.member-picker { display: flex; flex-direction: column; gap: 10px; }
-.member-picker .helper { color: var(--muted); font-size: 13px; }
-.member-list {
-  display: flex; flex-direction: column; gap: 10px;
-  max-height: 260px; overflow-y: auto; padding-right: 4px;
-}
-.member-item {
-  display: flex; align-items: center; justify-content: flex-start; gap: 10px;
-  background: transparent;
-  box-shadow: none;
-  border: none;
-  width: 100%;
-}
-.member-item .member-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; }
-.member-item .member-id {
-  font-size: 12px; font-weight: 400; letter-spacing: 0.02em; color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  overflow-wrap: anywhere;
-  flex: 1;
-}
-.member-item .member-choose {
-  font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: none;
-  padding: 6px 12px; border-radius: 999px; border: none;
-  background: var(--primary); color: white; cursor: pointer;
-  box-shadow: 0 6px 18px rgba(0, 178, 255, 0.35);
-}
-.member-item .member-choose:hover { background: var(--primary-2); box-shadow: 0 6px 18px rgba(0, 122, 217, 0.45); }
-
-/* Home layout */
-.page.home { padding: 12px; }
-.layout {
-  display: grid;
-  grid-template-columns: 280px 1fr 500px;
-  gap: 12px;
-}
-
-.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
-.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-
-.panel {
-  background: var(--card); border: 1px solid var(--border); border-radius: 12px;
-  padding: 12px; display: flex; flex-direction: column; gap: 10px;
-}
-.panel h2 { margin: 0 0 6px 0; font-size: 18px; }
-.hint { color: var(--muted); padding: 8px 0; }
-.hint.small { font-size: 12px; }
-
-.panel.groups .group-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
-/* Group list a bit wider rows to align with long names */
-.group-row { display: flex; align-items: center; justify-content: space-between;
-  padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; }
-.group-row .title { font-weight: 600; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.panel.groups .footer { margin-top: auto; display: flex; justify-content: flex-end; }
-.panel.groups .footer { gap: 8px; }
-.panel.groups .footer .primary { flex: 1; }
-
-/* Chat */
-.panel.chat .messages {
-  min-height: 360px; height: 58vh; overflow-y: auto; border: 1px solid var(--border);
-  border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 10px;
-}
-.panel.chat .chat-header { display: flex; align-items: center; justify-content: space-between; }
-.msg { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
-.msg.me { align-items: flex-end; }
-.msg.me .body { background: rgba(79,140,255,0.15); border: 1px solid rgba(79,140,255,0.35); padding: 8px 10px; border-radius: 10px; }
-.msg.system { opacity: 0.9; }
-.msg.system .body { font-style: italic; color: var(--muted); background: transparent; border: none; padding: 0; }
-.msg .from { color: var(--muted); font-size: 16px; }
-.msg .body { color: var(--text); background: rgba(255,255,255,0.05); border: 1px solid var(--border); padding: 8px 10px; border-radius: 10px; }
-.composer { display: flex; gap: 8px; align-items: center; }
-.composer input { flex: 1; min-width: 0; }
-.composer button { flex: 0 0 auto; }
-
-/* Consensus panel */
-.panel.consensus .status { display: flex; align-items: center; gap: 8px; }
-.panel.consensus .status .good { color: var(--good); font-weight: 600; }
-.panel.consensus .status .bad  { color: var(--bad);  font-weight: 600; }
-
-.panel.consensus .proposal-item {
-  display: grid;
-  grid-template-columns: minmax(6rem, max-content) 1fr;
-  align-items: start;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: rgba(255,255,255,0.03);
-  border: 1px solid var(--border);
-}
-.panel.consensus .proposal-item .action {
-  color: var(--primary);
-  font-size: 12px;
-  font-weight: 600;
-}
-.panel.consensus .proposal-item .value {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  color: var(--text);
-  font-size: 12px;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-.panel.consensus .proposal-item.proposal-id {
-  background: rgba(0, 178, 255, 0.08);
-  border-color: rgba(0, 178, 255, 0.45);
-  box-shadow: inset 0 0 0 1px rgba(0, 178, 255, 0.15);
-}
-.panel.consensus .proposal-item.proposal-id .action {
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-.panel.consensus .proposal-item.proposal-id .value {
-  font-weight: 700;
-  font-size: 13px;
-  letter-spacing: 0.03em;
-}
-
-/* Consensus sections */
-.panel.consensus {
-  display: flex; flex-direction: column; gap: 12px;
-}
-.panel.consensus .status {
-  flex-shrink: 0; margin-bottom: 16px;
-}
-.panel.consensus .consensus-section {
-  margin: 8px 0; padding: 12px; border-radius: 10px;
-  background: rgba(255,255,255,0.02); border: 1px solid var(--border);
-  display: flex; flex-direction: column;
-}
-.panel.consensus .consensus-section h3 {
-  margin: 0 0 12px 0; font-size: 14px; color: var(--primary);
-  border-bottom: 1px solid var(--border); padding-bottom: 8px;
-}
-.panel.consensus .no-data {
-  color: var(--muted); font-style: italic; text-align: center;
-  padding: 20px; font-size: 13px;
-}
-.panel.consensus .proposals-window {
-  overflow-y: auto;
-  display: flex; flex-direction: column; gap: 6px;
-}
-.panel.consensus .vote-actions {
-  display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px;
-}
-
-/* Consensus results window */
-.panel.consensus .results-window {
-  overflow-y: auto; border: 1px solid var(--border);
-  border-radius: 8px; padding: 8px; background: rgba(255,255,255,0.02);
-  max-height: 200px; display: flex; flex-direction: column; gap: 6px;
-}
-.panel.consensus .result-item {
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 6px 8px; border-radius: 6px; background: rgba(255,255,255,0.03);
-  border: 1px solid var(--border); font-size: 13px;
-}
-.panel.consensus .result-item .proposal-id {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  color: var(--muted); font-weight: 600;
-}
-.panel.consensus .result-item .outcome {
-  font-weight: 600; padding: 2px 6px; border-radius: 4px;
-}
-.panel.consensus .result-item .outcome.accepted { color: var(--good); background: rgba(23,201,100,0.1); }
-.panel.consensus .result-item .outcome.rejected { color: var(--bad); background: rgba(243,18,96,0.1); }
-.panel.consensus .result-item .outcome.unspecified { color: var(--muted); background: rgba(163,167,179,0.1); }
-.panel.consensus .result-item .timestamp {
-  color: var(--muted); font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-}
-
-/* Modal */
-.modal-backdrop {
-  position: fixed; inset: 0; background: rgba(0,0,0,.45);
-  display: flex; align-items: center; justify-content: center;
-}
-.modal {
-  width: 520px; max-width: calc(100vw - 32px);
-  background: var(--card); border: 1px solid var(--border); border-radius: 14px;
-  box-shadow: 0 0 6px var(--primary);
-}
-.modal-head {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 12px 14px; border-bottom: 1px solid var(--border);
-}
-.modal-body { padding: 14px; display: flex; flex-direction: column; gap: 10px; }
-.actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
-"#;

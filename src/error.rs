@@ -170,4 +170,6 @@ pub enum UserError {
     MlsMessageInDeserializeError(#[from] openmls::prelude::Error),
     #[error("Failed to try into protocol message: {0}")]
     TryIntoProtocolMessageError(#[from] openmls::framing::errors::ProtocolMessageError),
+    #[error("Failed to get current time")]
+    FailedToGetCurrentTime(#[from] std::time::SystemTimeError),
 }

@@ -8,7 +8,7 @@
 //!
 //! - **Working**: Normal operation state where users can send any message freely
 //! - **Waiting**: Steward epoch state where only steward can send BATCH_PROPOSALS_MESSAGE (if proposals exist)
-//! - **Voting**: Voting state where everyone can send VOTE/USER_VOTE, only steward can send VOTING_PROPOSAL/PROPOSAL
+//! - **Voting**: Voting state where everyone can send VOTE/USER_VOTE, only steward can send VOTE_PAYLOAD/PROPOSAL
 //! - **ConsensusReached**: Consensus achieved, waiting for steward to send batch proposals
 //! - **ConsensusFailed**: Consensus failed due to timeout or other reasons
 //!
@@ -36,7 +36,7 @@
 //!
 //! ## Voting State
 //! - **All users**: Can send VOTE and USER_VOTE
-//! - **Steward only**: Can send VOTING_PROPOSAL and PROPOSAL
+//! - **Steward only**: Can send VOTE_PAYLOAD and PROPOSAL
 //! - **All users**: All other message types blocked
 //!
 //! ## ConsensusReached State
@@ -109,12 +109,10 @@ pub enum GroupState {
     Working,
     /// Waiting state during steward epoch - only steward can send BATCH_PROPOSALS_MESSAGE
     Waiting,
-    /// Voting state - everyone can send VOTE/USER_VOTE, only steward can send VOTING_PROPOSAL/PROPOSAL
+    /// Voting state - everyone can send VOTE/USER_VOTE, only steward can send VOTE_PAYLOAD/PROPOSAL
     Voting,
     /// Consensus reached state - consensus achieved, waiting for steward to send batch proposals
     ConsensusReached,
-    /// Consensus failed state - consensus failed due to timeout or other reasons
-    ConsensusFailed,
 }
 
 impl Display for GroupState {
@@ -124,7 +122,6 @@ impl Display for GroupState {
             GroupState::Waiting => "Waiting",
             GroupState::Voting => "Voting",
             GroupState::ConsensusReached => "ConsensusReached",
-            GroupState::ConsensusFailed => "ConsensusFailed",
         };
         write!(f, "{state}")
     }
@@ -192,10 +189,10 @@ impl GroupStateMachine {
             GroupState::Voting => {
                 // In voting state, only voting-related messages allowed
                 match message_type {
-                    message_types::VOTE => true,                  // Everyone can send votes
-                    message_types::USER_VOTE => true,             // Everyone can send user votes
-                    message_types::VOTING_PROPOSAL => is_steward, // Only steward can send voting proposals
-                    message_types::PROPOSAL => is_steward,        // Only steward can send proposals
+                    message_types::VOTE => true,               // Everyone can send votes
+                    message_types::USER_VOTE => true,          // Everyone can send user votes
+                    message_types::VOTE_PAYLOAD => is_steward, // Only steward can send voting proposals
+                    message_types::PROPOSAL => is_steward,     // Only steward can send proposals
                     _ => false, // All other messages blocked during voting
                 }
             }
@@ -205,10 +202,6 @@ impl GroupStateMachine {
                     message_types::BATCH_PROPOSALS_MESSAGE => is_steward && has_proposals,
                     _ => false, // All other messages blocked during ConsensusReached
                 }
-            }
-            GroupState::ConsensusFailed => {
-                // In ConsensusFailed state, no messages are allowed
-                false
             }
         }
     }
@@ -277,33 +270,6 @@ impl GroupStateMachine {
     pub fn start_consensus_reached(&mut self) {
         self.state = GroupState::ConsensusReached;
         info!("[start_consensus_reached] Transitioning to ConsensusReached state");
-    }
-
-    /// Start consensus failed state (for peers after consensus failure).
-    ///
-    /// ## State Transition:
-    /// Any State → ConsensusFailed
-    ///
-    /// ## Usage:
-    /// Called when consensus fails due to timeout or other reasons.
-    /// This state blocks all message types until recovery is initiated.
-    pub fn start_consensus_failed(&mut self) {
-        self.state = GroupState::ConsensusFailed;
-        info!("[start_consensus_failed] Transitioning to ConsensusFailed state");
-    }
-
-    /// Recover from consensus failure by transitioning back to Working state
-    pub fn recover_from_consensus_failure(&mut self) -> Result<(), GroupError> {
-        if self.state != GroupState::ConsensusFailed {
-            return Err(GroupError::InvalidStateTransition {
-                from: self.state.to_string(),
-                to: "Working".to_string(),
-            });
-        }
-
-        self.state = GroupState::Working;
-        info!("[recover_from_consensus_failure] Recovering from consensus failure, transitioning to Working state");
-        Ok(())
     }
 
     /// Start working state (for non-steward peers after consensus or edge case recovery).
@@ -684,7 +650,7 @@ mod tests {
         ));
         assert!(!state_machine.can_send_message_type(false, false, message_types::VOTE));
         assert!(!state_machine.can_send_message_type(false, false, message_types::USER_VOTE));
-        assert!(!state_machine.can_send_message_type(false, false, message_types::VOTING_PROPOSAL));
+        assert!(!state_machine.can_send_message_type(false, false, message_types::VOTE_PAYLOAD));
         assert!(!state_machine.can_send_message_type(false, false, message_types::PROPOSAL));
 
         // BatchProposalsMessage should only be allowed from steward with proposals
@@ -715,8 +681,8 @@ mod tests {
         assert!(state_machine.can_send_message_type(false, false, message_types::USER_VOTE));
 
         // Only steward can send voting proposals and proposals
-        assert!(!state_machine.can_send_message_type(false, false, message_types::VOTING_PROPOSAL));
-        assert!(state_machine.can_send_message_type(true, false, message_types::VOTING_PROPOSAL));
+        assert!(!state_machine.can_send_message_type(false, false, message_types::VOTE_PAYLOAD));
+        assert!(state_machine.can_send_message_type(true, false, message_types::VOTE_PAYLOAD));
         assert!(!state_machine.can_send_message_type(false, false, message_types::PROPOSAL));
         assert!(state_machine.can_send_message_type(true, false, message_types::PROPOSAL));
 

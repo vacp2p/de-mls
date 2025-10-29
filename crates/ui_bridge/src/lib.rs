@@ -20,39 +20,15 @@ pub fn start_ui_bridge(core: Arc<CoreCtx>) {
     // 1) Give the gateway access to the core context.
     init_core(core);
 
-    // 1.5) Ensure gateway background (pubsub forwarder) is started
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.spawn(async {
-            if let Err(e) = de_mls_gateway::GATEWAY.start().await {
-                tracing::error!("gateway start failed: {e:?}");
-            }
-        });
-    } else {
-        std::thread::Builder::new()
-            .name("ui-bridge-start".into())
-            .spawn(|| {
-                let rt = tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .expect("tokio runtime");
-                rt.block_on(async {
-                    if let Err(e) = de_mls_gateway::GATEWAY.start().await {
-                        eprintln!("gateway start failed: {e:?}");
-                    }
-                });
-            })
-            .expect("spawn ui-bridge-start");
-    }
-
     // 2) Create a command channel UI -> gateway and register the sender.
     let (cmd_tx, cmd_rx) = unbounded::<AppCmd>();
     GATEWAY.register_cmd_sink(cmd_tx);
 
-    // 3) Drive the dispatcher loop on a Tokio runtime (unchanged)
+    // 3) Drive the dispatcher loop on a Tokio runtime
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.spawn(async move {
             if let Err(e) = ui_loop(cmd_rx).await {
-                tracing::error!("ui_loop crashed: {e:?}");
+                tracing::error!("ui_loop crashed: {e}");
             }
         });
     } else {
@@ -80,29 +56,27 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
             AppCmd::Login { private_key } => {
                 match GATEWAY.login_with_private_key(private_key).await {
                     Ok(derived_name) => GATEWAY.push_event(AppEvent::LoggedIn(derived_name)),
-                    Err(e) => {
-                        // Consider adding AppEvent::Error to protocol
-                        tracing::error!("login failed: {e:?}");
-                    }
+                    Err(e) => GATEWAY.push_event(AppEvent::Error(format!("Login failed: {e}"))),
                 }
             }
 
             // ───────────── Groups ─────────────
             AppCmd::ListGroups => {
-                let groups = GATEWAY.group_list().await?;
+                let groups = GATEWAY.group_list().await;
                 GATEWAY.push_event(AppEvent::Groups(groups));
             }
 
             AppCmd::CreateGroup { name } => {
                 GATEWAY.create_group(name.clone()).await?;
 
-                let groups = GATEWAY.group_list().await?;
+                let groups = GATEWAY.group_list().await;
                 GATEWAY.push_event(AppEvent::Groups(groups));
             }
 
             AppCmd::JoinGroup { name } => {
                 GATEWAY.join_group(name.clone()).await?;
-                let groups = GATEWAY.group_list().await?;
+
+                let groups = GATEWAY.group_list().await;
                 GATEWAY.push_event(AppEvent::Groups(groups));
             }
 
@@ -110,13 +84,40 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 GATEWAY.push_event(AppEvent::EnteredGroup { group_id });
             }
 
-            AppCmd::LoadHistory { group_id } => {
-                // TODO: load from storage; stub:
-                GATEWAY.push_event(AppEvent::ChatMessage(ConversationMessage {
-                    message: "History loaded (stub)".as_bytes().to_vec(),
-                    sender: "system".to_string(),
-                    group_name: group_id.clone(),
-                }));
+            AppCmd::LeaveGroup { group_id } => {
+                GATEWAY.push_event(AppEvent::LeaveGroup { group_id });
+            }
+
+            AppCmd::GetGroupMembers { group_id } => {
+                match GATEWAY.get_group_members(group_id.clone()).await {
+                    Ok(members) => {
+                        GATEWAY.push_event(AppEvent::GroupMembers { group_id, members });
+                    }
+                    Err(e) => {
+                        GATEWAY
+                            .push_event(AppEvent::Error(format!("Get group members failed: {e}")));
+                    }
+                }
+            }
+
+            AppCmd::SendBanRequest {
+                group_id,
+                user_to_ban,
+            } => {
+                if let Err(e) = GATEWAY
+                    .send_ban_request(group_id.clone(), user_to_ban.clone())
+                    .await
+                {
+                    GATEWAY.push_event(AppEvent::Error(format!("Send ban request failed: {e}")));
+                } else {
+                    GATEWAY.push_event(AppEvent::ChatMessage(ConversationMessage {
+                        message: "You requested to leave or ban user from the group"
+                            .to_string()
+                            .into_bytes(),
+                        sender: "system".to_string(),
+                        group_name: group_id.clone(),
+                    }));
+                }
             }
 
             // ───────────── Chat ─────────────
@@ -130,7 +131,16 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 GATEWAY.send_message(group_id, body).await?;
             }
 
-            // ───────────── Votes ─────────────
+            AppCmd::LoadHistory { group_id } => {
+                // TODO: load from storage; stub:
+                GATEWAY.push_event(AppEvent::ChatMessage(ConversationMessage {
+                    message: "History loaded (stub)".as_bytes().to_vec(),
+                    sender: "system".to_string(),
+                    group_name: group_id.clone(),
+                }));
+            }
+
+            // ───────────── Consensus ─────────────
             AppCmd::Vote {
                 group_id,
                 proposal_id,
@@ -154,24 +164,6 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                     group_name: group_id.clone(),
                 }));
             }
-            AppCmd::LeaveGroup { group_id } => {
-                GATEWAY.push_event(AppEvent::LeaveGroup { group_id });
-            }
-
-            AppCmd::QuerySteward { group_id } => {
-                match GATEWAY.query_steward(group_id.clone()).await {
-                    Ok(is_steward) => {
-                        GATEWAY.push_event(AppEvent::StewardStatus {
-                            group_id,
-                            is_steward,
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!("query_steward failed: {e:?}");
-                        GATEWAY.push_event(AppEvent::Error("Query steward failed".into()));
-                    }
-                }
-            }
 
             AppCmd::GetCurrentEpochProposals { group_id } => {
                 match GATEWAY.get_current_epoch_proposals(group_id.clone()).await {
@@ -181,45 +173,22 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                             proposals,
                         });
                     }
-                    Err(e) => {
-                        tracing::warn!("get_current_epoch_proposals failed: {e:?}");
-                        GATEWAY.push_event(AppEvent::Error(
-                            "Get current epoch proposals failed".into(),
-                        ));
-                    }
+                    Err(e) => GATEWAY.push_event(AppEvent::Error(format!(
+                        "Get current epoch proposals failed: {e}"
+                    ))),
                 }
             }
 
-            AppCmd::GetGroupMembers { group_id } => {
-                match GATEWAY.get_group_members(group_id.clone()).await {
-                    Ok(members) => {
-                        GATEWAY.push_event(AppEvent::GroupMembers { group_id, members });
+            AppCmd::GetStewardStatus { group_id } => {
+                match GATEWAY.get_steward_status(group_id.clone()).await {
+                    Ok(is_steward) => {
+                        GATEWAY.push_event(AppEvent::StewardStatus {
+                            group_id,
+                            is_steward,
+                        });
                     }
-                    Err(e) => {
-                        tracing::warn!("get_group_members failed: {e:?}");
-                        GATEWAY.push_event(AppEvent::Error("Get group members failed".into()));
-                    }
-                }
-            }
-
-            AppCmd::SendBanRequest {
-                group_id,
-                user_to_ban,
-            } => {
-                if let Err(e) = GATEWAY
-                    .send_ban_request(group_id.clone(), user_to_ban.clone())
-                    .await
-                {
-                    tracing::warn!("send_ban_request failed: {e:?}");
-                    GATEWAY.push_event(AppEvent::Error("Send ban request failed".into()));
-                } else {
-                    GATEWAY.push_event(AppEvent::ChatMessage(ConversationMessage {
-                        message: "You requested to leave or ban user from the group"
-                            .to_string()
-                            .into_bytes(),
-                        sender: "system".to_string(),
-                        group_name: group_id.clone(),
-                    }));
+                    Err(e) => GATEWAY
+                        .push_event(AppEvent::Error(format!("Get steward status failed: {e}"))),
                 }
             }
 

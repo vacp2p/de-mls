@@ -12,3 +12,4 @@ uuid = { version = "1.18.1", features = ["v4", "serde"] }
 thiserror = "2.0.17"
 
 de_mls = { path = "../../" }
+mls_crypto = { path = "../../mls_crypto" }

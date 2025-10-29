@@ -33,7 +33,7 @@
 //!
 //! 1. **Working State**: Normal operation, all users can send any message freely
 //! 2. **Waiting State**: Steward epoch active, only steward can send BATCH_PROPOSALS_MESSAGE
-//! 3. **Voting State**: Consensus voting, restricted message types (VOTE/USER_VOTE for all, VOTING_PROPOSAL/PROPOSAL for steward only)
+//! 3. **Voting State**: Consensus voting, restricted message types (VOTE/USER_VOTE for all, VOTE_PAYLOAD/PROPOSAL for steward only)
 //!
 //! ### Complete State Transitions
 //!

@@ -6,7 +6,7 @@ use tracing::info;
 
 use crate::{
     error::UserError,
-    protos::de_mls::messages::v1::{AppMessage, BanRequest},
+    protos::de_mls::messages::v1::{AppMessage, BanRequest, ProposalAdded},
     user::{User, UserAction},
     LocalSigner,
 };
@@ -82,26 +82,25 @@ impl User {
         group_name: &str,
     ) -> Result<UserAction, UserError> {
         let normalized_user_to_ban = normalize_wallet_address_str(&ban_request.user_to_ban)?;
-        info!("[user::process_ban_request]: Processing ban request for user {normalized_user_to_ban} in group {group_name}");
+        info!("[process_ban_request]: Processing ban request for user {normalized_user_to_ban} in group {group_name}");
 
         let group = self.group_ref(group_name).await?;
         let is_steward = group.read().await.is_steward().await;
         if is_steward {
             // Steward: add the remove proposal to the queue
             info!(
-                "[user::process_ban_request]: Steward adding remove proposal for user {normalized_user_to_ban}"
+                "[process_ban_request]: Steward adding remove proposal for user {normalized_user_to_ban}"
             );
-            self.add_remove_proposal(group_name, normalized_user_to_ban.clone())
+            let request = self
+                .add_remove_proposal(group_name, normalized_user_to_ban.clone())
                 .await?;
 
             // Send notification to UI about the new proposal
-            let proposal_added_msg: AppMessage =
-                crate::protos::de_mls::messages::v1::ProposalAdded {
-                    group_id: group_name.to_string(),
-                    action: "Remove Member".to_string(),
-                    address: normalized_user_to_ban,
-                }
-                .into();
+            let proposal_added_msg: AppMessage = ProposalAdded {
+                group_id: group_name.to_string(),
+                request: request.into(),
+            }
+            .into();
 
             Ok(UserAction::SendToApp(proposal_added_msg))
         } else {

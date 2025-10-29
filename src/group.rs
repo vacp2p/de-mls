@@ -17,7 +17,7 @@ use crate::{
     error::GroupError,
     message::{message_types, MessageType},
     protos::{
-        consensus::v1::{Proposal, UiUpdateRequest, Vote},
+        consensus::v1::{Proposal, RequestType, UpdateRequest, Vote},
         de_mls::messages::v1::{app_message, AppMessage, BatchProposalsMessage, WelcomeMessage},
     },
     state_machine::{GroupState, GroupStateMachine},
@@ -305,22 +305,26 @@ impl Group {
     /// ## Effects:
     /// - Adds an AddMember proposal to the current epoch
     /// - Proposal will be processed in the next steward epoch
-    /// - Returns the proposal details for UI notification
+    /// - Returns a serialized `UiUpdateRequest` for UI notification
     pub async fn store_invite_proposal(
         &mut self,
         key_package: Box<KeyPackage>,
-    ) -> Result<(String, String), GroupError> {
+    ) -> Result<UpdateRequest, GroupError> {
         let mut state_machine = self.state_machine.write().await;
         state_machine
             .add_proposal(GroupUpdateRequest::AddMember(key_package.clone()))
             .await;
 
-        // Extract wallet address for UI display
-        let address = format!(
-            "0x{}",
-            hex::encode(key_package.leaf_node().credential().serialized_content())
-        );
-        Ok(("Add Member".to_string(), address))
+        let wallet_bytes = key_package
+            .leaf_node()
+            .credential()
+            .serialized_content()
+            .to_vec();
+
+        Ok(UpdateRequest {
+            request_type: RequestType::AddMember as i32,
+            wallet_address: wallet_bytes,
+        })
     }
 
     /// Store a remove proposal in the steward queue for the current epoch.
@@ -328,14 +332,13 @@ impl Group {
     /// ## Parameters:
     /// - `identity`: The identity string of the member to remove
     ///
-    /// ## Effects:
-    /// - Adds a RemoveMember proposal to the current epoch
-    /// - Proposal will be processed in the next steward epoch
-    /// - Returns the proposal details for UI notification
+    /// ## Returns:
+    /// - Returns a serialized `UiUpdateRequest` for UI notification
+    /// - `GroupError::InvalidIdentity` if the identity is invalid
     pub async fn store_remove_proposal(
         &mut self,
         identity: String,
-    ) -> Result<(String, String), GroupError> {
+    ) -> Result<UpdateRequest, GroupError> {
         let normalized_identity = normalize_wallet_address_str(&identity)?;
         let mut state_machine = self.state_machine.write().await;
         state_machine
@@ -343,7 +346,17 @@ impl Group {
                 normalized_identity.clone(),
             ))
             .await;
-        Ok(("Remove Member".to_string(), normalized_identity))
+
+        let wallet_bytes = hex::decode(
+            normalized_identity
+                .strip_prefix("0x")
+                .unwrap_or(&normalized_identity),
+        )?;
+
+        Ok(UpdateRequest {
+            request_type: RequestType::RemoveMember as i32,
+            wallet_address: wallet_bytes,
+        })
     }
 
     /// Process an application message and determine the appropriate action.
@@ -370,30 +383,31 @@ impl Group {
         let app_msg = AppMessage::decode(message.into_bytes().as_slice())?;
         match app_msg.payload {
             Some(app_message::Payload::ConversationMessage(conversation_message)) => {
-                info!("[group::process_application_message]: Processing conversation message");
+                info!("[process_application_message]: Processing conversation message");
                 Ok(GroupAction::GroupAppMsg(conversation_message.into()))
             }
             Some(app_message::Payload::Proposal(proposal)) => {
-                info!("[group::process_application_message]: Processing proposal message");
+                info!("[process_application_message]: Processing proposal message");
                 Ok(GroupAction::GroupProposal(proposal))
             }
             Some(app_message::Payload::Vote(vote)) => {
-                info!("[group::process_application_message]: Processing vote message");
+                info!("[process_application_message]: Processing vote message");
                 Ok(GroupAction::GroupVote(vote))
             }
             Some(app_message::Payload::BanRequest(ban_request)) => {
-                info!("[group::process_application_message]: Processing ban request message");
+                info!("[process_application_message]: Processing ban request message");
 
                 if self.is_steward().await {
                     info!(
-                        "[group::process_application_message]: Steward adding remove proposal for user {}",
+                        "[process_application_message]: Steward adding remove proposal for user {}",
                         ban_request.user_to_ban.clone()
                     );
-                    self.store_remove_proposal(ban_request.user_to_ban.clone())
+                    let _ = self
+                        .store_remove_proposal(ban_request.user_to_ban.clone())
                         .await?;
                 } else {
                     info!(
-                        "[group::process_application_message]: Non-steward received ban request message"
+                        "[process_application_message]: Non-steward received ban request message"
                     );
                 }
 
@@ -576,9 +590,7 @@ impl Group {
             .await
     }
 
-    pub async fn get_proposals_for_voting_epoch_as_ui_update_requests(
-        &self,
-    ) -> Vec<UiUpdateRequest> {
+    pub async fn get_proposals_for_voting_epoch_as_ui_update_requests(&self) -> Vec<UpdateRequest> {
         self.get_proposals_for_voting_epoch()
             .await
             .iter()
@@ -607,14 +619,6 @@ impl Group {
     /// Start consensus reached state (for non-steward peers after consensus)
     pub async fn start_consensus_reached(&mut self) {
         self.state_machine.write().await.start_consensus_reached();
-    }
-
-    /// Recover from consensus failure by transitioning back to Working state
-    pub async fn recover_from_consensus_failure(&mut self) -> Result<(), GroupError> {
-        self.state_machine
-            .write()
-            .await
-            .recover_from_consensus_failure()
     }
 
     /// Start waiting state (for non-steward peers after consensus or edge case recovery)
