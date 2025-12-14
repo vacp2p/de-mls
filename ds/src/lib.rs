@@ -1,6 +1,6 @@
 pub mod error;
-pub mod transport;
 pub mod topic_filter;
+pub mod transport;
 pub mod waku;
 
 pub use error::DeliveryServiceError;

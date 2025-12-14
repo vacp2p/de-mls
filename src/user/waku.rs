@@ -4,8 +4,7 @@ use tracing::{debug, error, info};
 
 use ds::{
     transport::{InboundPacket, OutboundPacket},
-    APP_MSG_SUBTOPIC,
-    WELCOME_SUBTOPIC,
+    APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC,
 };
 
 use crate::{

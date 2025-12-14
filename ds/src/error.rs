@@ -14,4 +14,3 @@ pub enum DeliveryServiceError {
     #[error("An unknown error occurred: {0}")]
     Other(anyhow::Error),
 }
-

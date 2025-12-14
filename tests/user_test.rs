@@ -360,7 +360,8 @@ async fn process_and_handle_trigger_event_message(
         msgs_to_send.extend(wmts);
     }
 
-    let waku_msgs_to_send: Vec<InboundPacket> = msgs_to_send.into_iter().map(outbound_to_inbound).collect();
+    let waku_msgs_to_send: Vec<InboundPacket> =
+        msgs_to_send.into_iter().map(outbound_to_inbound).collect();
 
     let user_state = user
         .get_group_state(GROUP_NAME)
