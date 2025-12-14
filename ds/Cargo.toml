@@ -10,7 +10,6 @@ waku-bindings = { git = "https://github.com/waku-org/waku-rust-bindings.git", br
 waku-sys = { git = "https://github.com/waku-org/waku-rust-bindings.git", branch = "rln-fix-deps" }
 
 tokio = { version = "1.43.0", features = ["full"] }
-async-trait = "0.1.86"
 kameo = "0.13.0"
 bounded-vec-deque = "0.1.1"
 
