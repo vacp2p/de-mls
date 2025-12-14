@@ -1,3 +1,4 @@
+use ds::DeliveryService;
 use std::time::Duration;
 use tracing::info;
 
@@ -16,7 +17,7 @@ use de_mls_ui_protocol::v1::AppEvent;
 
 use crate::Gateway;
 
-impl Gateway {
+impl<DS: DeliveryService> Gateway<DS> {
     pub async fn create_group(&self, group_name: String) -> anyhow::Result<()> {
         let core = self.core();
         let user = self.user()?;

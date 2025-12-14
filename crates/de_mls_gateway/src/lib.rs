@@ -5,6 +5,7 @@
 //! - Provide a command entrypoint UI -> gateway (`send(AppCmd)`)
 //! - Hold references to the core context (`CoreCtx`) and current user actor
 //! - Offer small helper methods (login_with_private_key, etc.)
+use ds::{waku::WakuDeliveryService, DeliveryService};
 use futures::{
     channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
     StreamExt,
@@ -24,14 +25,14 @@ use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 mod forwarder;
 mod group;
 // Global, process-wide gateway instance
-pub static GATEWAY: Lazy<Gateway> = Lazy::new(Gateway::new);
+pub static GATEWAY: Lazy<Gateway<WakuDeliveryService>> = Lazy::new(Gateway::new);
 
 /// Helper to set the core context once during startup (called by ui_bridge).
-pub fn init_core(core: Arc<CoreCtx>) {
+pub fn init_core(core: Arc<CoreCtx<WakuDeliveryService>>) {
     GATEWAY.set_core(core);
 }
 
-pub struct Gateway {
+pub struct Gateway<DS: DeliveryService> {
     // UI events (gateway -> UI)
     // A channel that sends AppEvents to the UI.
     evt_tx: UnboundedSender<AppEvent>,
@@ -44,16 +45,16 @@ pub struct Gateway {
     cmd_tx: RwLock<Option<UnboundedSender<AppCmd>>>,
 
     // It anchors the shared references to consensus, topics, app_state, etc.
-    core: RwLock<Option<Arc<CoreCtx>>>, // set once during startup
+    core: RwLock<Option<Arc<CoreCtx<DS>>>>, // set once during startup
 
     // Current logged-in user actor
     user: RwLock<Option<ActorRef<User>>>,
-    // Flag that guards against spawning the Waku forwarder more than once.
+    // Flag that guards against spawning delivery service forwarder more than once.
     // It's initialized to false and set to true after the first successful login.
     started: AtomicBool,
 }
 
-impl Gateway {
+impl<DS: DeliveryService> Gateway<DS> {
     fn new() -> Self {
         let (evt_tx, evt_rx) = unbounded();
         Self {
@@ -67,11 +68,11 @@ impl Gateway {
     }
 
     /// Called once by the bootstrap (ui_bridge) to provide the core context.
-    pub fn set_core(&self, core: Arc<CoreCtx>) {
+    pub fn set_core(&self, core: Arc<CoreCtx<DS>>) {
         *self.core.write() = Some(core);
     }
 
-    pub fn core(&self) -> Arc<CoreCtx> {
+    pub fn core(&self) -> Arc<CoreCtx<DS>> {
         self.core
             .read()
             .as_ref()
@@ -113,7 +114,6 @@ impl Gateway {
         let core = self.core();
         let consensus_service = core.consensus.as_ref().clone();
 
-        // Create user actor via core helper (you implement this inside your core)
         let (user_ref, user_address) = create_user_instance(
             private_key.clone(),
             core.app_state.clone(),

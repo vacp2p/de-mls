@@ -9,6 +9,8 @@ use openmls::{
     },
 };
 use openmls_rust_crypto::MemoryStorageError;
+use std::env::VarError;
+use std::num::ParseIntError;
 use std::string::FromUtf8Error;
 
 use ds::DeliveryServiceError;
@@ -172,4 +174,16 @@ pub enum UserError {
     TryIntoProtocolMessageError(#[from] openmls::framing::errors::ProtocolMessageError),
     #[error("Failed to get current time")]
     FailedToGetCurrentTime(#[from] std::time::SystemTimeError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BootstrapError {
+    #[error("Failed to read env var {0}: {1}")]
+    EnvVar(&'static str, #[source] VarError),
+
+    #[error("Failed to parse int: {0}")]
+    ParseInt(#[from] ParseIntError),
+
+    #[error(transparent)]
+    DeliveryServiceError(#[from] DeliveryServiceError),
 }

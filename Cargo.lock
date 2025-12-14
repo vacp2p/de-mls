@@ -8379,6 +8379,7 @@ dependencies = [
  "de_mls",
  "de_mls_gateway",
  "de_mls_ui_protocol",
+ "ds",
  "futures",
  "tokio",
  "tracing",

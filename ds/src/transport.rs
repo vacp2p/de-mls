@@ -1,5 +1,6 @@
 //! Transport-agnostic envelopes + delivery service interface.
 
+use std::future::Future;
 use tokio::sync::broadcast;
 
 use crate::DeliveryServiceError;
@@ -54,15 +55,13 @@ impl InboundPacket {
     }
 }
 
-/// Public trait the application depends on.
-///
-/// Implementations can be backed by Waku, libp2p, HTTP, etc.
-#[async_trait::async_trait]
 pub trait DeliveryService: Send + Sync + 'static {
     /// Send a packet to the network and return a transport message id (if available).
-    async fn send(&self, pkt: OutboundPacket) -> Result<String, DeliveryServiceError>;
+    fn send(
+        &self,
+        pkt: OutboundPacket,
+    ) -> impl Future<Output = Result<String, DeliveryServiceError>> + Send;
 
     /// Subscribe to inbound packets.
     fn subscribe(&self) -> broadcast::Receiver<InboundPacket>;
 }
-

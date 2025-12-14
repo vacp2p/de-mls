@@ -1,3 +1,4 @@
+use ds::DeliveryService;
 use kameo::actor::ActorRef;
 
 use std::sync::{atomic::Ordering, Arc};
@@ -14,8 +15,8 @@ use de_mls_ui_protocol::v1::AppEvent;
 
 use crate::Gateway;
 
-impl Gateway {
-    pub(crate) fn spawn_consensus_forwarder(&self, core: Arc<CoreCtx>) -> anyhow::Result<()> {
+impl<DS: DeliveryService> Gateway<DS> {
+    pub(crate) fn spawn_consensus_forwarder(&self, core: Arc<CoreCtx<DS>>) -> anyhow::Result<()> {
         let evt_tx = self.evt_tx.clone();
         let mut rx = core.consensus.subscribe_decisions();
 
@@ -30,7 +31,7 @@ impl Gateway {
     }
 
     /// Spawn the pubsub forwarder once, after first successful login.
-    pub(crate) fn spawn_waku_forwarder(&self, core: Arc<CoreCtx>, user: ActorRef<User>) {
+    pub(crate) fn spawn_waku_forwarder(&self, core: Arc<CoreCtx<DS>>, user: ActorRef<User>) {
         if self.started.swap(true, Ordering::SeqCst) {
             return;
         }

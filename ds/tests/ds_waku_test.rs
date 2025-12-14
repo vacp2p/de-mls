@@ -1,9 +1,7 @@
 use ds::{
     transport::{InboundPacket, OutboundPacket},
-    waku::waku_message_to_inbound,
     waku::WakuNode,
-    DeliveryServiceError,
-    APP_MSG_SUBTOPIC,
+    DeliveryServiceError, APP_MSG_SUBTOPIC,
 };
 use kameo::{
     actor::pubsub::PubSub,
@@ -90,8 +88,7 @@ async fn test_waku_client() {
     tokio::spawn(async move {
         while let Some(msg) = receiver_alice.recv().await {
             info!("msg received from receiver_alice: {:?}", msg.timestamp);
-            let pkt = waku_message_to_inbound(&msg);
-            pubsub.publish(pkt).await;
+            pubsub.publish(msg.into()).await;
         }
         info!("receiver handle is finished");
     });

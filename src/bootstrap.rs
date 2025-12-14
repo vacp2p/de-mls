@@ -9,7 +9,10 @@ use ds::{
     waku::{WakuConfig, WakuDeliveryService},
 };
 
-use crate::user_app_instance::{AppState, CoreCtx};
+use crate::{
+    error::BootstrapError,
+    user_app_instance::{AppState, CoreCtx},
+};
 
 #[derive(Clone, Debug)]
 pub struct BootstrapConfig {
@@ -19,28 +22,29 @@ pub struct BootstrapConfig {
     pub peers: Vec<String>,
 }
 
-pub struct Bootstrap {
-    pub core: Arc<CoreCtx>,
+pub struct Bootstrap<DS: DeliveryService> {
+    pub core: Arc<CoreCtx<DS>>,
     /// Cancels the Waku→broadcast forwarder task
     pub cancel: CancellationToken,
 }
 
-/// Same wiring you previously did in `main.rs`, now reusable for server & desktop.
-pub async fn bootstrap_core(cfg: BootstrapConfig) -> anyhow::Result<Bootstrap> {
-    // Start delivery service (Waku-backed for now)
-    let delivery = Arc::new(
-        WakuDeliveryService::start(WakuConfig {
-            node_port: cfg.node_port,
-            peers: cfg.peers,
-        })
-        .await?,
-    );
+pub async fn bootstrap_core(
+    cfg: BootstrapConfig,
+) -> Result<Bootstrap<WakuDeliveryService>, BootstrapError> {
+    let delivery = WakuDeliveryService::start(WakuConfig {
+        node_port: cfg.node_port,
+        peers: cfg.peers,
+    })
+    .await?;
 
     // Broadcast inbound packets inside the app
     let (pubsub_tx, _) = broadcast::channel::<InboundPacket>(100);
 
+    // Subscribe before moving delivery into AppState.
+    let mut rx = delivery.subscribe();
+
     let app_state = Arc::new(AppState {
-        delivery: delivery.clone(),
+        delivery,
         pubsub: pubsub_tx.clone(),
     });
 
@@ -50,7 +54,6 @@ pub async fn bootstrap_core(cfg: BootstrapConfig) -> anyhow::Result<Bootstrap> {
     let forward_cancel = CancellationToken::new();
     {
         let forward_cancel = forward_cancel.clone();
-        let mut rx = delivery.subscribe();
         tokio::spawn(async move {
             info!("Forwarding delivery → broadcast started");
             loop {
@@ -75,18 +78,13 @@ pub async fn bootstrap_core(cfg: BootstrapConfig) -> anyhow::Result<Bootstrap> {
     })
 }
 
-/// Helper that exactly mirrors your current env usage:
-/// - requires NODE_PORT
-/// - requires PEER_ADDRESSES (comma-separated multiaddrs)
-pub async fn bootstrap_core_from_env() -> anyhow::Result<Bootstrap> {
-    use anyhow::Context;
-
+pub async fn bootstrap_core_from_env() -> Result<Bootstrap<WakuDeliveryService>, BootstrapError> {
     let node_port = std::env::var("NODE_PORT")
-        .context("NODE_PORT is not set")?
-        .parse::<u16>()
-        .context("Failed to parse NODE_PORT")?;
+        .map_err(|e| BootstrapError::EnvVar("NODE_PORT", e))?
+        .parse::<u16>()?;
 
-    let peer_addresses = std::env::var("PEER_ADDRESSES").context("PEER_ADDRESSES is not set")?;
+    let peer_addresses =
+        std::env::var("PEER_ADDRESSES").map_err(|e| BootstrapError::EnvVar("PEER_ADDRESSES", e))?;
     let peers = peer_addresses
         .split(',')
         .map(|s| s.trim().to_string())

@@ -14,9 +14,10 @@ use de_mls::protos::de_mls::messages::v1::ConversationMessage;
 use de_mls::user_app_instance::CoreCtx;
 use de_mls_gateway::{init_core, GATEWAY};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
+use ds::waku::WakuDeliveryService;
 
 /// Call once during process startup (before launching the Dioxus UI).
-pub fn start_ui_bridge(core: Arc<CoreCtx>) {
+pub fn start_ui_bridge(core: Arc<CoreCtx<WakuDeliveryService>>) {
     // 1) Give the gateway access to the core context.
     init_core(core);
 

@@ -1,8 +1,6 @@
 //! Waku transport implementation and Waku-backed `DeliveryService`.
 
-use std::borrow::Cow;
-use std::{thread::sleep, time::Duration};
-
+use std::{borrow::Cow, thread::sleep, time::Duration};
 use tokio::sync::{
     broadcast,
     mpsc::{self, Receiver, Sender},
@@ -12,16 +10,14 @@ use tracing::{debug, error, info};
 use waku_bindings::{
     node::PubsubTopic,
     node::{WakuNodeConfig, WakuNodeHandle},
-    waku_new, Initialized, LibwakuResponse, Multiaddr, Running, WakuEvent, WakuMessage,
-    Encoding, WakuContentTopic,
+    waku_new, Encoding, Initialized, LibwakuResponse, Multiaddr, Running, WakuContentTopic,
+    WakuEvent, WakuMessage,
 };
 
 use crate::{
     transport::{DeliveryService, InboundPacket, OutboundPacket},
     DeliveryServiceError,
 };
-
-// ─────────────────────────── Topic scheme (currently de-mls-specific) ───────────────────────────
 
 pub const GROUP_VERSION: &str = "1";
 pub const APP_MSG_SUBTOPIC: &str = "app_msg";
@@ -56,14 +52,15 @@ pub fn build_content_topic(
     }
 }
 
-/// Centralized conversion used by app + tests.
-pub fn waku_message_to_inbound(msg: &WakuMessage) -> InboundPacket {
-    InboundPacket {
-        payload: msg.payload().to_vec(),
-        subtopic: msg.content_topic.content_topic_name.to_string(),
-        group_id: msg.content_topic.application_name.to_string(),
-        app_id: msg.meta.clone(),
-        timestamp: Some(msg.timestamp as i64),
+impl From<WakuMessage> for InboundPacket {
+    fn from(msg: WakuMessage) -> Self {
+        InboundPacket {
+            payload: msg.payload().to_vec(),
+            subtopic: msg.content_topic.content_topic_name.to_string(),
+            group_id: msg.content_topic.application_name.to_string(),
+            app_id: msg.meta.clone(),
+            timestamp: Some(msg.timestamp as i64),
+        }
     }
 }
 
@@ -296,8 +293,7 @@ impl WakuDeliveryService {
                         let inbound_tx_cb = inbound_tx_thread.clone();
                         let waku_node = waku_node_init
                             .start_with_handler(move |waku_msg| {
-                                let pkt = waku_message_to_inbound(&waku_msg);
-                                let _ = inbound_tx_cb.send(pkt);
+                                let _ = inbound_tx_cb.send(waku_msg.into());
                             })
                             .await?;
                         info!("Waku node started");
@@ -344,12 +340,14 @@ impl WakuDeliveryService {
     }
 }
 
-#[async_trait::async_trait]
 impl DeliveryService for WakuDeliveryService {
     async fn send(&self, pkt: OutboundPacket) -> Result<String, DeliveryServiceError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.outbound
-            .send(OutboundCommand { pkt, reply: reply_tx })
+            .send(OutboundCommand {
+                pkt,
+                reply: reply_tx,
+            })
             .await
             .map_err(|e| DeliveryServiceError::Other(anyhow::anyhow!(e)))?;
 
@@ -362,4 +360,3 @@ impl DeliveryService for WakuDeliveryService {
         self.inbound.subscribe()
     }
 }
-

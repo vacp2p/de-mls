@@ -2,11 +2,12 @@
 use alloy::signers::local::PrivateKeySigner;
 use kameo::actor::ActorRef;
 use std::{str::FromStr, sync::Arc};
+use tokio::sync::broadcast::Sender;
 use tracing::{error, info};
 
 use ds::{
-    transport::{DeliveryService, InboundPacket},
     topic_filter::TopicFilter,
+    transport::{DeliveryService, InboundPacket},
 };
 
 use crate::{
@@ -16,22 +17,21 @@ use crate::{
 
 pub const STEWARD_EPOCH: u64 = 15;
 
-#[derive(Clone)]
-pub struct AppState {
-    pub delivery: Arc<dyn DeliveryService>,
-    pub pubsub: tokio::sync::broadcast::Sender<InboundPacket>,
+pub struct AppState<DS: DeliveryService> {
+    pub delivery: DS,
+    pub pubsub: Sender<InboundPacket>,
 }
 
 #[derive(Clone)]
-pub struct CoreCtx {
-    pub app_state: Arc<AppState>,
+pub struct CoreCtx<DS: DeliveryService> {
+    pub app_state: Arc<AppState<DS>>,
     pub groups: Arc<GroupRegistry>,
     pub topics: Arc<TopicFilter>,
     pub consensus: Arc<ConsensusService>,
 }
 
-impl CoreCtx {
-    pub fn new(app_state: Arc<AppState>) -> Self {
+impl<DS: DeliveryService> CoreCtx<DS> {
+    pub fn new(app_state: Arc<AppState<DS>>) -> Self {
         Self {
             app_state,
             groups: Arc::new(GroupRegistry::new()),
@@ -41,9 +41,9 @@ impl CoreCtx {
     }
 }
 
-pub async fn create_user_instance(
+pub async fn create_user_instance<DS: DeliveryService>(
     eth_private_key: String,
-    app_state: Arc<AppState>,
+    app_state: Arc<AppState<DS>>,
     consensus_service: &ConsensusService,
 ) -> Result<(ActorRef<User>, String), UserError> {
     let signer = PrivateKeySigner::from_str(&eth_private_key)?;
