@@ -4,8 +4,7 @@ use de_mls::{
     state_machine::GroupState,
     user::{User, UserAction},
 };
-use ds::net::OutboundPacket;
-use waku_bindings::WakuMessage;
+use ds::transport::{InboundPacket, OutboundPacket};
 
 const EXPECTED_EPOCH_1: u64 = 1;
 const EXPECTED_EPOCH_2: u64 = 2;
@@ -23,6 +22,16 @@ const CAROL_PRIVATE_KEY: &str =
 // const CAROL_WALLET_ADDRESS: &str = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
 
 const GROUP_NAME: &str = "new_group";
+
+fn outbound_to_inbound(pkt: OutboundPacket) -> InboundPacket {
+    InboundPacket {
+        payload: pkt.payload,
+        subtopic: pkt.subtopic,
+        group_id: pkt.group_id,
+        app_id: pkt.app_id,
+        timestamp: None,
+    }
+}
 
 async fn create_two_test_user_with_group(group_name: &str) -> (User, User) {
     let consensus_service = ConsensusService::new();
@@ -69,33 +78,33 @@ async fn create_three_test_user_with_group(group_name: &str) -> (User, User, Use
     (alice, bob, carol)
 }
 
-async fn get_group_announcement_message(steward: &mut User, group_name: &str) -> WakuMessage {
-    steward
+async fn get_group_announcement_message(steward: &mut User, group_name: &str) -> InboundPacket {
+    let pkt = steward
         .prepare_steward_msg(group_name)
         .await
-        .expect("Failed to prepare steward message")
-        .into()
+        .expect("Failed to prepare steward message");
+    outbound_to_inbound(pkt)
 }
 
 async fn share_group_announcement_for_one_user(
     steward: &mut User,
     invite_user: &mut User,
-    group_announcement_message: WakuMessage,
+    group_announcement_message: InboundPacket,
 ) {
     // Newcomer parse GA message and share his KP to Steward
     let invite_user_kp_message = match invite_user
-        .process_waku_message(group_announcement_message.clone())
+        .process_inbound_packet(group_announcement_message.clone())
         .await
         .expect("Failed to process waku message with group announcement")
     {
         UserAction::Outbound(msg) => msg,
         _ => panic!("User action is not SendToWaku"),
     };
-    let invite_user_kp_waku_message = invite_user_kp_message.into();
+    let invite_user_kp_inbound = outbound_to_inbound(invite_user_kp_message);
 
     // Steward parse invite user's KP and add it to the queue of income key packages
     let _steward_action = steward
-        .process_waku_message(invite_user_kp_waku_message)
+        .process_inbound_packet(invite_user_kp_inbound)
         .await
         .expect("Failed to process waku message with invite user's KP");
 }
@@ -106,7 +115,7 @@ async fn share_group_announcement_for_one_user(
 async fn steward_epoch_without_user_in_group(
     steward: &mut User,
     group_name: &str,
-) -> Vec<WakuMessage> {
+) -> Vec<InboundPacket> {
     // Set up consensus event subscription before voting
     let mut consensus_events = steward.subscribe_to_consensus_events();
 
@@ -165,13 +174,7 @@ async fn steward_epoch_without_user_in_group(
     println!("Debug: Steward state after voting: {steward_state:?}");
     assert_eq!(steward_state, GroupState::Working);
 
-    let mut res_msgs_to_send: Vec<WakuMessage> = vec![];
-    for msg in msgs_to_send {
-        let waku_message = msg.into();
-        res_msgs_to_send.push(waku_message);
-    }
-
-    res_msgs_to_send
+    msgs_to_send.into_iter().map(outbound_to_inbound).collect()
 }
 
 // In this function, we are starting steward epoch with users in the group
@@ -180,7 +183,7 @@ async fn steward_epoch_without_user_in_group(
 async fn steward_epoch_with_user_in_group(
     steward: &mut User,
     group_name: &str,
-) -> (Vec<WakuMessage>, u32) {
+) -> (Vec<InboundPacket>, u32) {
     // Set up consensus event subscription before voting
     let mut consensus_events = steward.subscribe_to_consensus_events();
 
@@ -239,20 +242,20 @@ async fn steward_epoch_with_user_in_group(
     println!("Debug: Steward state after voting: {steward_state:?}");
     assert_eq!(steward_state, GroupState::Voting);
 
-    let steward_voting_proposal_waku_message = match steward_action {
+    let steward_voting_proposal_outbound = match steward_action {
         UserAction::Outbound(msg) => msg,
         _ => panic!("User action is not SendToWaku"),
     };
 
     // Build the voting proposal message for other users
-    let voting_proposal_waku_message = steward_voting_proposal_waku_message.into();
+    let voting_proposal_inbound = outbound_to_inbound(steward_voting_proposal_outbound);
 
-    (vec![voting_proposal_waku_message], proposal_id)
+    (vec![voting_proposal_inbound], proposal_id)
 }
 
-async fn user_join_group(user: &mut User, welcome_message: WakuMessage) {
+async fn user_join_group(user: &mut User, welcome_message: InboundPacket) {
     let user_res_action = user
-        .process_waku_message(welcome_message)
+        .process_inbound_packet(welcome_message)
         .await
         .expect("Failed to process waku message for user to join the group");
 
@@ -266,14 +269,14 @@ async fn user_join_group(user: &mut User, welcome_message: WakuMessage) {
 
 async fn user_vote_on_proposal(
     user: &mut User,
-    waku_proposal_message: WakuMessage,
+    proposal_message: InboundPacket,
     vote: bool,
     group_name: &str,
-) -> WakuMessage {
-    println!("Debug: user vote on proposal: {waku_proposal_message:?}");
+) -> InboundPacket {
+    println!("Debug: user vote on proposal: {proposal_message:?}");
     let mut consensus_events = user.subscribe_to_consensus_events();
     let user_action = user
-        .process_waku_message(waku_proposal_message)
+        .process_inbound_packet(proposal_message)
         .await
         .expect("Failed to process waku message for user to vote on proposal");
 
@@ -329,17 +332,17 @@ async fn user_vote_on_proposal(
         _ => panic!("User action is not SendToWaku: {user_action:?}"),
     };
 
-    msg.into()
+    outbound_to_inbound(msg)
 }
 
 async fn process_and_handle_trigger_event_message(
     user: &mut User,
-    waku_message: WakuMessage,
+    inbound_message: InboundPacket,
     expected_group_state: GroupState,
-) -> Vec<WakuMessage> {
+) -> Vec<InboundPacket> {
     let mut consensus_events = user.subscribe_to_consensus_events();
 
-    user.process_waku_message(waku_message)
+    user.process_inbound_packet(inbound_message)
         .await
         .expect("Failed to process waku message");
 
@@ -357,11 +360,7 @@ async fn process_and_handle_trigger_event_message(
         msgs_to_send.extend(wmts);
     }
 
-    let mut waku_msgs_to_send: Vec<WakuMessage> = vec![];
-    for msg in msgs_to_send {
-        let waku_msg = msg.into();
-        waku_msgs_to_send.push(waku_msg);
-    }
+    let waku_msgs_to_send: Vec<InboundPacket> = msgs_to_send.into_iter().map(outbound_to_inbound).collect();
 
     let user_state = user
         .get_group_state(GROUP_NAME)
@@ -566,7 +565,7 @@ async fn test_invite_users_to_group_different_epoch_flow() {
     )
     .await;
 
-    bob.process_waku_message(waku_msgs_to_send[0].clone())
+    bob.process_inbound_packet(waku_msgs_to_send[0].clone())
         .await
         .expect("Failed to process waku message");
 

@@ -66,7 +66,7 @@ impl Gateway {
                         continue;
                     }
                 };
-                if let Err(e) = core.app_state.waku_node.send(msg).await {
+                if let Err(e) = core.app_state.delivery.send(msg).await {
                     tracing::warn!("failed to send steward message for group {group_name:?}: {e}");
                     continue;
                 }
@@ -163,7 +163,7 @@ impl Gateway {
                 group_name: group_name.clone(),
             })
             .await?;
-        core.app_state.waku_node.send(pmt).await?;
+        core.app_state.delivery.send(pmt).await?;
         Ok(())
     }
 
@@ -189,7 +189,7 @@ impl Gateway {
             .await?;
         match msg {
             UserAction::Outbound(msg) => {
-                core.app_state.waku_node.send(msg.into()).await?;
+                core.app_state.delivery.send(msg).await?;
             }
             UserAction::SendToApp(app_msg) => {
                 let event = match app_msg.payload {
@@ -225,7 +225,7 @@ impl Gateway {
             })
             .await?;
         if let Some(waku_msg) = user_vote_result {
-            self.core().app_state.waku_node.send(waku_msg).await?;
+            self.core().app_state.delivery.send(waku_msg).await?;
         }
         Ok(())
     }

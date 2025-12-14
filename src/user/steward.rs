@@ -8,7 +8,7 @@ use crate::{
     },
     user::{User, UserAction},
 };
-use ds::net::OutboundPacket;
+use ds::transport::OutboundPacket;
 
 impl User {
     /// Check if the user is a steward for the given group.

@@ -10,7 +10,7 @@ use kameo::Actor;
 use std::{collections::HashMap, fmt::Display, str::FromStr, sync::Arc};
 use tokio::sync::{broadcast, RwLock};
 
-use ds::net::OutboundPacket;
+use ds::transport::OutboundPacket;
 use mls_crypto::{
     identity::Identity,
     openmls_provider::{MlsProvider, CIPHERSUITE},

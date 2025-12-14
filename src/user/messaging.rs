@@ -10,7 +10,7 @@ use crate::{
     user::{User, UserAction},
     LocalSigner,
 };
-use ds::net::OutboundPacket;
+use ds::transport::OutboundPacket;
 use mls_crypto::normalize_wallet_address_str;
 
 impl User {

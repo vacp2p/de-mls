@@ -41,16 +41,14 @@ impl Gateway {
             let mut rx = core.app_state.pubsub.subscribe();
             tracing::info!("gateway: pubsub forwarder started");
 
-            while let Ok(wmsg) = rx.recv().await {
-                let content_topic = wmsg.content_topic.clone();
-
+            while let Ok(pkt) = rx.recv().await {
                 // fast-topic filter
-                if !core.topics.contains(&content_topic).await {
+                if !core.topics.contains(&pkt.group_id, &pkt.subtopic).await {
                     continue;
                 }
 
                 // hand over to user actor to decide action
-                let action = match user.ask(wmsg).await {
+                let action = match user.ask(pkt).await {
                     Ok(a) => a,
                     Err(e) => {
                         tracing::warn!("user.ask failed: {e}");
@@ -62,10 +60,11 @@ impl Gateway {
                 let res = match action {
                     UserAction::Outbound(msg) => core
                         .app_state
-                        .waku_node
-                        .send(msg.into())
+                        .delivery
+                        .send(msg)
                         .await
-                        .map_err(|e| anyhow::anyhow!("error sending waku message: {e}")),
+                        .map(|_| ())
+                        .map_err(|e| anyhow::anyhow!("error sending outbound message: {e}")),
 
                     UserAction::SendToApp(app_msg) => {
                         // voting

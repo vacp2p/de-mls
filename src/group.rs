@@ -23,7 +23,7 @@ use crate::{
     state_machine::{GroupState, GroupStateMachine},
     steward::GroupUpdateRequest,
 };
-use ds::{net::OutboundPacket, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
+use ds::{transport::OutboundPacket, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 use mls_crypto::{identity::normalize_wallet_address_str, openmls_provider::MlsProvider};
 
 /// Represents the action to take after processing a group message or event.

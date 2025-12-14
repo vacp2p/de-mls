@@ -10,7 +10,7 @@ use crate::{
     state_machine::GroupState,
     user::{User, UserAction},
 };
-use ds::net::OutboundPacket;
+use ds::transport::OutboundPacket;
 
 impl User {
     pub async fn set_up_consensus_threshold_for_group(

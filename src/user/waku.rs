@@ -1,9 +1,12 @@
 use openmls::prelude::{DeserializeBytes, MlsMessageBodyIn, MlsMessageIn};
 use prost::Message;
 use tracing::{debug, error, info};
-use waku_bindings::WakuMessage;
 
-use ds::{net::OutboundPacket, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
+use ds::{
+    transport::{InboundPacket, OutboundPacket},
+    APP_MSG_SUBTOPIC,
+    WELCOME_SUBTOPIC,
+};
 
 use crate::{
     error::UserError,
@@ -42,7 +45,7 @@ impl User {
     /// - Various MLS and encryption errors
     pub async fn process_welcome_subtopic(
         &mut self,
-        msg: WakuMessage,
+        msg: InboundPacket,
         group_name: &str,
     ) -> Result<UserAction, UserError> {
         // Get the group lock first
@@ -61,7 +64,7 @@ impl User {
             group.is_mls_group_initialized()
         };
 
-        let received_msg = WelcomeMessage::decode(msg.payload())?;
+        let received_msg = WelcomeMessage::decode(msg.payload.as_slice())?;
         if let Some(payload) = &received_msg.payload {
             match payload {
                 welcome_message::Payload::GroupAnnouncement(group_announcement) => {
@@ -194,7 +197,7 @@ impl User {
     /// - Various MLS processing errors
     pub async fn process_app_subtopic(
         &mut self,
-        msg: WakuMessage,
+        msg: InboundPacket,
         group_name: &str,
     ) -> Result<UserAction, UserError> {
         let group = self.group_ref(group_name).await?;
@@ -206,7 +209,7 @@ impl User {
         // Try to parse as AppMessage first
         // This one required for commit messages as they are sent as AppMessage
         // without group encryption
-        if let Ok(app_message) = AppMessage::decode(msg.payload()) {
+        if let Ok(app_message) = AppMessage::decode(msg.payload.as_slice()) {
             match app_message.payload {
                 Some(app_message::Payload::BatchProposalsMessage(batch_msg)) => {
                     info!(
@@ -228,7 +231,7 @@ impl User {
         }
 
         // Fall back to MLS protocol message
-        let (mls_message_in, _) = MlsMessageIn::tls_deserialize_bytes(msg.payload())?;
+        let (mls_message_in, _) = MlsMessageIn::tls_deserialize_bytes(msg.payload.as_slice())?;
         let mls_message = mls_message_in.try_into_protocol_message()?;
 
         let group = self.group_ref(group_name).await?;
@@ -285,18 +288,18 @@ impl User {
     /// - `UserError::GroupNotFoundError` if group doesn't exist
     /// - `UserError::UnknownContentTopicType` for unsupported topics
     /// - Various processing errors from subtopic handlers
-    pub async fn process_waku_message(
+    pub async fn process_inbound_packet(
         &mut self,
-        msg: WakuMessage,
+        msg: InboundPacket,
     ) -> Result<UserAction, UserError> {
-        let group_name = msg.content_topic.application_name.to_string();
+        let group_name = msg.group_id.clone();
         let group = self.group_ref(&group_name).await?;
-        if msg.meta == group.read().await.app_id() {
+        if msg.app_id == group.read().await.app_id() {
             debug!("[process_waku_message]: Message is from the same app, skipping");
             return Ok(UserAction::DoNothing);
         }
 
-        let ct_name = msg.content_topic.content_topic_name.to_string();
+        let ct_name = msg.subtopic.clone();
         match ct_name.as_str() {
             WELCOME_SUBTOPIC => self.process_welcome_subtopic(msg, &group_name).await,
             APP_MSG_SUBTOPIC => self.process_app_subtopic(msg, &group_name).await,

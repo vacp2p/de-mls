@@ -1,7 +1,6 @@
 use kameo::message::{Context, Message};
-use waku_bindings::WakuMessage;
 
-use ds::net::OutboundPacket;
+use ds::transport::{InboundPacket, OutboundPacket};
 
 use crate::{
     consensus::ConsensusEvent,
@@ -10,15 +9,15 @@ use crate::{
     user::{User, UserAction},
 };
 
-impl Message<WakuMessage> for User {
+impl Message<InboundPacket> for User {
     type Reply = Result<UserAction, UserError>;
 
     async fn handle(
         &mut self,
-        msg: WakuMessage,
+        msg: InboundPacket,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
-        self.process_waku_message(msg).await
+        self.process_inbound_packet(msg).await
     }
 }
 

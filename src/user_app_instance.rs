@@ -2,11 +2,12 @@
 use alloy::signers::local::PrivateKeySigner;
 use kameo::actor::ActorRef;
 use std::{str::FromStr, sync::Arc};
-use tokio::sync::mpsc::Sender;
 use tracing::{error, info};
-use waku_bindings::WakuMessage;
 
-use ds::{net::OutboundPacket, topic_filter::TopicFilter};
+use ds::{
+    transport::{DeliveryService, InboundPacket},
+    topic_filter::TopicFilter,
+};
 
 use crate::{
     consensus::ConsensusService, error::UserError, group_registry::GroupRegistry, user::User,
@@ -15,13 +16,13 @@ use crate::{
 
 pub const STEWARD_EPOCH: u64 = 15;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppState {
-    pub waku_node: Sender<OutboundPacket>,
-    pub pubsub: tokio::sync::broadcast::Sender<WakuMessage>,
+    pub delivery: Arc<dyn DeliveryService>,
+    pub pubsub: tokio::sync::broadcast::Sender<InboundPacket>,
 }
 
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct CoreCtx {
     pub app_state: Arc<AppState>,
     pub groups: Arc<GroupRegistry>,
@@ -76,8 +77,8 @@ pub async fn create_user_instance(
                             group_name
                         );
                         for msg in commit_messages {
-                            if let Err(e) = app_state_consensus.waku_node.send(msg.into()).await {
-                                error!("Error sending commit message to Waku: {e}");
+                            if let Err(e) = app_state_consensus.delivery.send(msg).await {
+                                error!("Error sending commit message to delivery service: {e}");
                             }
                         }
                     }

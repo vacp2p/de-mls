@@ -1,14 +1,28 @@
-//! This module contains the topic filter for the Waku node
+//! Transport-agnostic topic filter used by the app as a fast allowlist.
 use tokio::sync::RwLock;
-use waku_bindings::WakuContentTopic;
 
-use crate::build_content_topics;
+use crate::SUBTOPICS;
 
-/// Fast allowlist for content topics without requiring Hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopicKey {
+    pub group_id: String,
+    pub subtopic: String,
+}
+
+impl TopicKey {
+    pub fn new(group_id: &str, subtopic: &str) -> Self {
+        Self {
+            group_id: group_id.to_string(),
+            subtopic: subtopic.to_string(),
+        }
+    }
+}
+
+/// Fast allowlist for inbound routing.
 /// Internally uses a Vec and dedupes on insert.
 #[derive(Default, Debug)]
 pub struct TopicFilter {
-    list: RwLock<Vec<WakuContentTopic>>,
+    list: RwLock<Vec<TopicKey>>,
 }
 
 impl TopicFilter {
@@ -16,37 +30,36 @@ impl TopicFilter {
         Self::default()
     }
 
-    /// Build and add topics if not already present.
+    /// Add all subtopics for a group.
     pub async fn add_many(&self, group_name: &str) {
-        let topics = build_content_topics(group_name);
-        self.list.write().await.extend(topics);
+        let mut w = self.list.write().await;
+        for sub in SUBTOPICS {
+            let k = TopicKey::new(group_name, sub);
+            if !w.iter().any(|x| x == &k) {
+                w.push(k);
+            }
+        }
     }
 
-    /// Remove any matching topics.
+    /// Remove all subtopics for a group.
     pub async fn remove_many(&self, group_name: &str) {
-        let topics = build_content_topics(group_name);
         self.list
             .write()
             .await
-            .retain(|x| !topics.iter().any(|t| t == x));
+            .retain(|x| x.group_id != group_name);
     }
 
     /// Membership test (first-stage filter).
     #[inline]
-    pub async fn contains(&self, t: &WakuContentTopic) -> bool {
-        self.list.read().await.iter().any(|x| x == t)
-    }
-
-    pub async fn snapshot(&self) -> Vec<WakuContentTopic> {
-        self.list.read().await.clone()
-    }
-
-    pub async fn get_group_name(&self, t: &WakuContentTopic) -> Option<String> {
+    pub async fn contains(&self, group_id: &str, subtopic: &str) -> bool {
         self.list
             .read()
             .await
             .iter()
-            .find(|x| x == &t)
-            .map(|x| x.application_name.clone().to_string())
+            .any(|x| x.group_id == group_id && x.subtopic == subtopic)
+    }
+
+    pub async fn snapshot(&self) -> Vec<TopicKey> {
+        self.list.read().await.clone()
     }
 }

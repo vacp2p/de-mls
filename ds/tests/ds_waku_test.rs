@@ -1,4 +1,10 @@
-use ds::{net::OutboundPacket, waku_actor::WakuNode, DeliveryServiceError, APP_MSG_SUBTOPIC};
+use ds::{
+    transport::{InboundPacket, OutboundPacket},
+    waku::waku_message_to_inbound,
+    waku::WakuNode,
+    DeliveryServiceError,
+    APP_MSG_SUBTOPIC,
+};
 use kameo::{
     actor::pubsub::PubSub,
     message::{Context, Message},
@@ -26,12 +32,12 @@ impl Default for Application {
     }
 }
 
-impl Message<WakuMessage> for Application {
-    type Reply = Result<WakuMessage, DeliveryServiceError>;
+impl Message<InboundPacket> for Application {
+    type Reply = Result<InboundPacket, DeliveryServiceError>;
 
     async fn handle(
         &mut self,
-        msg: WakuMessage,
+        msg: InboundPacket,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
         info!("Application received message: {:?}", msg.timestamp);
@@ -43,7 +49,7 @@ impl Message<WakuMessage> for Application {
 async fn test_waku_client() {
     tracing_subscriber::fmt::init();
     let group_name = "new_group";
-    let mut pubsub = PubSub::<WakuMessage>::new();
+    let mut pubsub = PubSub::<InboundPacket>::new();
 
     let (sender, _) = channel::<WakuMessage>(100);
     let waku_node_default = WakuNode::new(60002)
@@ -84,7 +90,8 @@ async fn test_waku_client() {
     tokio::spawn(async move {
         while let Some(msg) = receiver_alice.recv().await {
             info!("msg received from receiver_alice: {:?}", msg.timestamp);
-            pubsub.publish(msg).await;
+            let pkt = waku_message_to_inbound(&msg);
+            pubsub.publish(pkt).await;
         }
         info!("receiver handle is finished");
     });
