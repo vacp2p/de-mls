@@ -1,7 +1,5 @@
 use tracing::{error, info};
 
-use ds::waku_actor::WakuMessageToSend;
-
 use crate::{
     consensus::ConsensusEvent,
     error::UserError,
@@ -12,6 +10,7 @@ use crate::{
     state_machine::GroupState,
     user::{User, UserAction},
 };
+use ds::net::OutboundPacket;
 
 impl User {
     pub async fn set_up_consensus_threshold_for_group(
@@ -56,7 +55,7 @@ impl User {
         &mut self,
         group_name: &str,
         vote_result: bool,
-    ) -> Result<Vec<WakuMessageToSend>, UserError> {
+    ) -> Result<Vec<OutboundPacket>, UserError> {
         let group = self.group_ref(group_name).await?;
         group.write().await.complete_voting(vote_result).await?;
 
@@ -96,9 +95,9 @@ impl User {
                 info!("[handle_consensus_result]: Successfully processed pending batch proposals");
                 if let Some(action) = action {
                     match action {
-                        UserAction::SendToWaku(waku_message) => {
+                        UserAction::Outbound(outbound_packet) => {
                             info!("[handle_consensus_result]: Sending waku message to backend");
-                            Ok(vec![waku_message])
+                            Ok(vec![outbound_packet])
                         }
                         UserAction::LeaveGroup(group_name) => {
                             self.leave_group(group_name.as_str()).await?;
@@ -156,7 +155,7 @@ impl User {
         &mut self,
         group_name: &str,
         event: ConsensusEvent,
-    ) -> Result<Vec<WakuMessageToSend>, UserError> {
+    ) -> Result<Vec<OutboundPacket>, UserError> {
         match event {
             ConsensusEvent::ConsensusReached {
                 proposal_id,
@@ -314,9 +313,9 @@ impl User {
             vote.into()
         };
 
-        let waku_msg = self.build_group_message(app_message, group_name).await?;
-
-        Ok(UserAction::SendToWaku(waku_msg))
+        self.build_group_message(app_message, group_name)
+            .await
+            .map(UserAction::Outbound)
     }
 
     /// Process incoming consensus vote and handle immediate state transitions.

@@ -10,7 +10,7 @@ use crate::{
     user::{User, UserAction},
     LocalSigner,
 };
-use ds::waku_actor::WakuMessageToSend;
+use ds::net::OutboundPacket;
 use mls_crypto::normalize_wallet_address_str;
 
 impl User {
@@ -41,7 +41,7 @@ impl User {
         &mut self,
         app_message: AppMessage,
         group_name: &str,
-    ) -> Result<WakuMessageToSend, UserError> {
+    ) -> Result<OutboundPacket, UserError> {
         let group = self.group_ref(group_name).await?;
         if !group.read().await.is_mls_group_initialized() {
             return Err(UserError::MlsGroupNotInitialized);
@@ -113,7 +113,7 @@ impl User {
             let msg = self
                 .build_group_message(updated_ban_request.into(), group_name)
                 .await?;
-            Ok(UserAction::SendToWaku(msg))
+            Ok(UserAction::Outbound(msg))
         }
     }
 }

@@ -1,4 +1,4 @@
-//! UI <-> Gateway protocol (PoC). Keep it dependency-light (serde only).
+//! UI <-> Gateway protocol (PoC)
 // crates/de_mls_ui_protocol/src/lib.rs
 pub mod v1 {
     use de_mls::{

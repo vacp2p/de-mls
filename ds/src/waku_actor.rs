@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use std::{thread::sleep, time::Duration};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, error, info};
@@ -7,7 +6,21 @@ use waku_bindings::{
     waku_new, Initialized, LibwakuResponse, Multiaddr, Running, WakuEvent, WakuMessage,
 };
 
-use crate::{build_content_topic, pubsub_topic, DeliveryServiceError, GROUP_VERSION};
+use crate::{
+    build_content_topic, net::OutboundPacket, pubsub_topic, DeliveryServiceError, GROUP_VERSION,
+};
+
+impl From<OutboundPacket> for WakuMessage {
+    fn from(value: OutboundPacket) -> Self {
+        WakuMessage::new(
+            value.payload,
+            build_content_topic(&value.group_id, GROUP_VERSION, &value.subtopic),
+            2,
+            value.app_id,
+            true,
+        )
+    }
+}
 
 pub struct WakuNode<State> {
     node: WakuNodeHandle<State>,
@@ -84,11 +97,8 @@ impl WakuNode<Initialized> {
 }
 
 impl WakuNode<Running> {
-    pub async fn send_message(
-        &self,
-        msg: WakuMessageToSend,
-    ) -> Result<String, DeliveryServiceError> {
-        let waku_message = msg.build_waku_message()?;
+    pub async fn send_message(&self, msg: OutboundPacket) -> Result<String, DeliveryServiceError> {
+        let waku_message = msg.into();
         let msg_id = self
             .node
             .relay_publish_message(&waku_message, &pubsub_topic(), None)
@@ -126,59 +136,11 @@ impl WakuNode<Running> {
     }
 }
 
-/// Message to send to the Waku Node
-/// This message is used to send a message to the Waku Node
-/// Input:
-/// - msg: The message to send
-/// - subtopic: The subtopic to send the message to
-/// - group_id: The group to send the message to
-/// - app_id: The app is unique identifier for the application that is sending the message for filtering own messages
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct WakuMessageToSend {
-    msg: Vec<u8>,
-    subtopic: String,
-    group_id: String,
-    app_id: Vec<u8>,
-}
-
-impl WakuMessageToSend {
-    /// Create a new WakuMessageToSend
-    /// Input:
-    /// - msg: The message to send
-    /// - subtopic: The subtopic to send the message to
-    /// - group_id: The group to send the message to
-    /// - app_id: The app is unique identifier for the application that is sending the message for filtering own messages
-    pub fn new(msg: Vec<u8>, subtopic: &str, group_id: &str, app_id: &[u8]) -> Self {
-        Self {
-            msg,
-            subtopic: subtopic.to_string(),
-            group_id: group_id.to_string(),
-            app_id: app_id.to_vec(),
-        }
-    }
-    /// Build a WakuMessage from the message to send
-    /// Input:
-    /// - msg: The message to send
-    ///
-    /// Returns:
-    /// - WakuMessage: The WakuMessage to send
-    pub fn build_waku_message(&self) -> Result<WakuMessage, DeliveryServiceError> {
-        let content_topic = build_content_topic(&self.group_id, GROUP_VERSION, &self.subtopic);
-        Ok(WakuMessage::new(
-            self.msg.clone(),
-            content_topic,
-            2,
-            self.app_id.clone(),
-            true,
-        ))
-    }
-}
-
 pub async fn run_waku_node(
     node_port: String,
     peer_addresses: Option<Vec<Multiaddr>>,
     waku_sender: Sender<WakuMessage>,
-    receiver: &mut Receiver<WakuMessageToSend>,
+    receiver: &mut Receiver<OutboundPacket>,
 ) -> Result<(), DeliveryServiceError> {
     info!("Initializing waku node");
     let waku_node_init = WakuNode::new(

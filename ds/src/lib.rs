@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use waku_bindings::{node::PubsubTopic, Encoding, WakuContentTopic};
 
+pub mod net;
 pub mod topic_filter;
 pub mod waku_actor;
 

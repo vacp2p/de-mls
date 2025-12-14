@@ -188,8 +188,8 @@ impl Gateway {
             })
             .await?;
         match msg {
-            UserAction::SendToWaku(msg) => {
-                core.app_state.waku_node.send(msg).await?;
+            UserAction::Outbound(msg) => {
+                core.app_state.waku_node.send(msg.into()).await?;
             }
             UserAction::SendToApp(app_msg) => {
                 let event = match app_msg.payload {

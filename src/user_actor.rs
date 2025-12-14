@@ -1,7 +1,7 @@
 use kameo::message::{Context, Message};
 use waku_bindings::WakuMessage;
 
-use ds::waku_actor::WakuMessageToSend;
+use ds::net::OutboundPacket;
 
 use crate::{
     consensus::ConsensusEvent,
@@ -45,7 +45,7 @@ pub struct StewardMessageRequest {
 }
 
 impl Message<StewardMessageRequest> for User {
-    type Reply = Result<WakuMessageToSend, UserError>;
+    type Reply = Result<OutboundPacket, UserError>;
 
     async fn handle(
         &mut self,
@@ -79,7 +79,7 @@ pub struct SendGroupMessage {
 }
 
 impl Message<SendGroupMessage> for User {
-    type Reply = Result<WakuMessageToSend, UserError>;
+    type Reply = Result<OutboundPacket, UserError>;
 
     async fn handle(
         &mut self,
@@ -173,7 +173,7 @@ pub struct UserVoteRequest {
 }
 
 impl Message<UserVoteRequest> for User {
-    type Reply = Result<Option<WakuMessageToSend>, UserError>;
+    type Reply = Result<Option<OutboundPacket>, UserError>;
 
     async fn handle(
         &mut self,
@@ -184,7 +184,7 @@ impl Message<UserVoteRequest> for User {
             .process_user_vote(msg.proposal_id, msg.vote, &msg.group_name)
             .await?;
         match action {
-            UserAction::SendToWaku(waku_msg) => Ok(Some(waku_msg)),
+            UserAction::Outbound(outbound_packet) => Ok(Some(outbound_packet)),
             UserAction::DoNothing => Ok(None),
             _ => Err(UserError::InvalidUserAction(
                 "Vote action must result in Waku message".to_string(),
@@ -200,7 +200,7 @@ pub struct ConsensusEventMessage {
 }
 
 impl Message<ConsensusEventMessage> for User {
-    type Reply = Result<Vec<WakuMessageToSend>, UserError>;
+    type Reply = Result<Vec<OutboundPacket>, UserError>;
 
     async fn handle(
         &mut self,

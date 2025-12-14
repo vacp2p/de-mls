@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use waku_bindings::{Multiaddr, WakuMessage};
 
-use ds::waku_actor::{run_waku_node, WakuMessageToSend};
+use ds::{net::OutboundPacket, waku_actor::run_waku_node};
 
 use crate::user_app_instance::{AppState, CoreCtx};
 
@@ -29,7 +29,7 @@ pub struct Bootstrap {
 pub async fn bootstrap_core(cfg: BootstrapConfig) -> anyhow::Result<Bootstrap> {
     // Channels used by AppState and Waku runtime
     let (waku_in_tx, mut waku_in_rx) = mpsc::channel::<WakuMessage>(100);
-    let (to_waku_tx, mut to_waku_rx) = mpsc::channel::<WakuMessageToSend>(100);
+    let (to_waku_tx, mut to_waku_rx) = mpsc::channel::<OutboundPacket>(100);
     let (pubsub_tx, _) = broadcast::channel::<WakuMessage>(100);
 
     let app_state = Arc::new(AppState {

@@ -3,17 +3,18 @@ use prost::Message;
 use tracing::{debug, error, info};
 use waku_bindings::WakuMessage;
 
-use ds::waku_actor::WakuMessageToSend;
-use ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
+use ds::{net::OutboundPacket, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 
-use crate::error::UserError;
-use crate::group::GroupAction;
-use crate::message::MessageType;
-use crate::protos::de_mls::messages::v1::{
-    app_message, welcome_message, AppMessage, ConversationMessage, ProposalAdded, UserKeyPackage,
-    WelcomeMessage,
+use crate::{
+    error::UserError,
+    group::GroupAction,
+    message::MessageType,
+    protos::de_mls::messages::v1::{
+        app_message, welcome_message, AppMessage, ConversationMessage, ProposalAdded,
+        UserKeyPackage, WelcomeMessage,
+    },
+    user::{User, UserAction},
 };
-use crate::user::{User, UserAction};
 
 impl User {
     /// Process messages from the welcome subtopic.
@@ -82,12 +83,13 @@ impl User {
                             encrypt_kp: encrypted_key_package,
                         }
                         .into();
-                        Ok(UserAction::SendToWaku(WakuMessageToSend::new(
+                        let packet = OutboundPacket::new(
                             welcome_msg.encode_to_vec(),
                             WELCOME_SUBTOPIC,
                             group_name,
                             group.read().await.app_id(),
-                        )))
+                        );
+                        Ok(UserAction::Outbound(packet))
                     }
                 }
                 welcome_message::Payload::UserKeyPackage(user_key_package) => {
@@ -153,7 +155,7 @@ impl User {
                             }
                             .into();
                             let msg = self.build_group_message(app_msg, group_name).await?;
-                            Ok(UserAction::SendToWaku(msg))
+                            Ok(UserAction::Outbound(msg))
                         } else {
                             Ok(UserAction::DoNothing)
                         }

@@ -60,10 +60,10 @@ impl Gateway {
 
                 // route the action
                 let res = match action {
-                    UserAction::SendToWaku(msg) => core
+                    UserAction::Outbound(msg) => core
                         .app_state
                         .waku_node
-                        .send(msg)
+                        .send(msg.into())
                         .await
                         .map_err(|e| anyhow::anyhow!("error sending waku message: {e}")),
 

@@ -1,7 +1,4 @@
-use ds::{
-    waku_actor::{WakuMessageToSend, WakuNode},
-    DeliveryServiceError, APP_MSG_SUBTOPIC,
-};
+use ds::{net::OutboundPacket, waku_actor::WakuNode, DeliveryServiceError, APP_MSG_SUBTOPIC};
 use kameo::{
     actor::pubsub::PubSub,
     message::{Context, Message},
@@ -95,7 +92,7 @@ async fn test_waku_client() {
     tokio::task::block_in_place(move || {
         tokio::runtime::Handle::current().block_on(async move {
             let res = waku_node
-                .send_message(WakuMessageToSend::new(
+                .send_message(OutboundPacket::new(
                     "test_message_1".as_bytes().to_vec(),
                     APP_MSG_SUBTOPIC,
                     group_name,

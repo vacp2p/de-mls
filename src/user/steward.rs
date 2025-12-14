@@ -8,7 +8,7 @@ use crate::{
     },
     user::{User, UserAction},
 };
-use ds::waku_actor::WakuMessageToSend;
+use ds::net::OutboundPacket;
 
 impl User {
     /// Check if the user is a steward for the given group.
@@ -87,7 +87,7 @@ impl User {
     pub async fn prepare_steward_msg(
         &mut self,
         group_name: &str,
-    ) -> Result<WakuMessageToSend, UserError> {
+    ) -> Result<OutboundPacket, UserError> {
         let group = self.group_ref(group_name).await?;
         let msg_to_send = group.write().await.generate_steward_message().await?;
         Ok(msg_to_send)
@@ -261,7 +261,7 @@ impl User {
     pub async fn apply_proposals(
         &mut self,
         group_name: &str,
-    ) -> Result<Vec<WakuMessageToSend>, UserError> {
+    ) -> Result<Vec<OutboundPacket>, UserError> {
         let group = self.group_ref(group_name).await?;
 
         if !group.read().await.is_mls_group_initialized() {

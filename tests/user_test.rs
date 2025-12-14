@@ -4,7 +4,7 @@ use de_mls::{
     state_machine::GroupState,
     user::{User, UserAction},
 };
-use ds::waku_actor::WakuMessageToSend;
+use ds::net::OutboundPacket;
 use waku_bindings::WakuMessage;
 
 const EXPECTED_EPOCH_1: u64 = 1;
@@ -74,8 +74,7 @@ async fn get_group_announcement_message(steward: &mut User, group_name: &str) ->
         .prepare_steward_msg(group_name)
         .await
         .expect("Failed to prepare steward message")
-        .build_waku_message()
-        .expect("Failed to build waku message with group announcement")
+        .into()
 }
 
 async fn share_group_announcement_for_one_user(
@@ -89,12 +88,10 @@ async fn share_group_announcement_for_one_user(
         .await
         .expect("Failed to process waku message with group announcement")
     {
-        UserAction::SendToWaku(msg) => msg,
+        UserAction::Outbound(msg) => msg,
         _ => panic!("User action is not SendToWaku"),
     };
-    let invite_user_kp_waku_message = invite_user_kp_message
-        .build_waku_message()
-        .expect("Failed to build waku message with invite user's KP");
+    let invite_user_kp_waku_message = invite_user_kp_message.into();
 
     // Steward parse invite user's KP and add it to the queue of income key packages
     let _steward_action = steward
@@ -147,7 +144,7 @@ async fn steward_epoch_without_user_in_group(
         .await
         .expect("Failed to process steward vote on proposal");
 
-    let mut msgs_to_send: Vec<WakuMessageToSend> = vec![];
+    let mut msgs_to_send: Vec<OutboundPacket> = vec![];
     // Process any consensus events that were emitted during voting
     while let Ok((group_name, ev)) = consensus_events.try_recv() {
         println!(
@@ -170,9 +167,7 @@ async fn steward_epoch_without_user_in_group(
 
     let mut res_msgs_to_send: Vec<WakuMessage> = vec![];
     for msg in msgs_to_send {
-        let waku_message = msg
-            .build_waku_message()
-            .expect("Failed to build waku message");
+        let waku_message = msg.into();
         res_msgs_to_send.push(waku_message);
     }
 
@@ -223,7 +218,7 @@ async fn steward_epoch_with_user_in_group(
         .await
         .expect("Failed to process steward vote on proposal");
 
-    let mut msgs_to_send: Vec<WakuMessageToSend> = vec![];
+    let mut msgs_to_send: Vec<OutboundPacket> = vec![];
     // Process any consensus events that were emitted during voting
     while let Ok((group_name, ev)) = consensus_events.try_recv() {
         println!(
@@ -245,14 +240,12 @@ async fn steward_epoch_with_user_in_group(
     assert_eq!(steward_state, GroupState::Voting);
 
     let steward_voting_proposal_waku_message = match steward_action {
-        UserAction::SendToWaku(msg) => msg,
+        UserAction::Outbound(msg) => msg,
         _ => panic!("User action is not SendToWaku"),
     };
 
     // Build the voting proposal message for other users
-    let voting_proposal_waku_message = steward_voting_proposal_waku_message
-        .build_waku_message()
-        .expect("Failed to build waku message with steward voting proposal");
+    let voting_proposal_waku_message = steward_voting_proposal_waku_message.into();
 
     (vec![voting_proposal_waku_message], proposal_id)
 }
@@ -264,7 +257,7 @@ async fn user_join_group(user: &mut User, welcome_message: WakuMessage) {
         .expect("Failed to process waku message for user to join the group");
 
     match user_res_action {
-        UserAction::SendToWaku(_) => {
+        UserAction::Outbound(_) => {
             println!("Debug: user join group");
         }
         _ => panic!("User action is not SendToWaku: {user_res_action:?}"),
@@ -311,7 +304,7 @@ async fn user_vote_on_proposal(
         .await
         .expect("Failed to process steward vote on proposal");
 
-    let mut msgs_to_send: Vec<WakuMessageToSend> = vec![];
+    let mut msgs_to_send: Vec<OutboundPacket> = vec![];
     while let Ok((group_name, ev)) = consensus_events.try_recv() {
         println!(
             "Debug: Processing consensus event in user_vote_on_proposal: {ev:?} for group {group_name}"
@@ -332,12 +325,11 @@ async fn user_vote_on_proposal(
     assert_eq!(user_state, GroupState::Waiting);
 
     let msg = match user_action {
-        UserAction::SendToWaku(msg) => msg,
+        UserAction::Outbound(msg) => msg,
         _ => panic!("User action is not SendToWaku: {user_action:?}"),
     };
 
-    msg.build_waku_message()
-        .expect("Failed to build waku message")
+    msg.into()
 }
 
 async fn process_and_handle_trigger_event_message(
@@ -351,7 +343,7 @@ async fn process_and_handle_trigger_event_message(
         .await
         .expect("Failed to process waku message");
 
-    let mut msgs_to_send: Vec<WakuMessageToSend> = vec![];
+    let mut msgs_to_send: Vec<OutboundPacket> = vec![];
     // Process any consensus events that were emitted during voting
     while let Ok((group_name, ev)) = consensus_events.try_recv() {
         println!(
@@ -367,9 +359,7 @@ async fn process_and_handle_trigger_event_message(
 
     let mut waku_msgs_to_send: Vec<WakuMessage> = vec![];
     for msg in msgs_to_send {
-        let waku_msg = msg
-            .build_waku_message()
-            .expect("Failed to build waku message");
+        let waku_msg = msg.into();
         waku_msgs_to_send.push(waku_msg);
     }
 

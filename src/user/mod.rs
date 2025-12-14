@@ -10,7 +10,7 @@ use kameo::Actor;
 use std::{collections::HashMap, fmt::Display, str::FromStr, sync::Arc};
 use tokio::sync::{broadcast, RwLock};
 
-use ds::waku_actor::WakuMessageToSend;
+use ds::net::OutboundPacket;
 use mls_crypto::{
     identity::Identity,
     openmls_provider::{MlsProvider, CIPHERSUITE},
@@ -31,7 +31,7 @@ use crate::{
 /// group management, and network communication.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UserAction {
-    SendToWaku(WakuMessageToSend),
+    Outbound(OutboundPacket),
     SendToApp(AppMessage),
     LeaveGroup(String),
     DoNothing,
@@ -40,7 +40,7 @@ pub enum UserAction {
 impl Display for UserAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            UserAction::SendToWaku(_) => write!(f, "SendToWaku"),
+            UserAction::Outbound(_) => write!(f, "Outbound"),
             UserAction::SendToApp(_) => write!(f, "SendToApp"),
             UserAction::LeaveGroup(group_name) => write!(f, "LeaveGroup({group_name})"),
             UserAction::DoNothing => write!(f, "DoNothing"),

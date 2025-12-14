@@ -23,7 +23,7 @@ use crate::{
     state_machine::{GroupState, GroupStateMachine},
     steward::GroupUpdateRequest,
 };
-use ds::{waku_actor::WakuMessageToSend, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
+use ds::{net::OutboundPacket, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 use mls_crypto::{identity::normalize_wallet_address_str, openmls_provider::MlsProvider};
 
 /// Represents the action to take after processing a group message or event.
@@ -257,7 +257,7 @@ impl Group {
     /// ## Effects:
     /// - Refreshes the steward's key pair
     /// - Creates a new group announcement
-    pub async fn generate_steward_message(&mut self) -> Result<WakuMessageToSend, GroupError> {
+    pub async fn generate_steward_message(&mut self) -> Result<OutboundPacket, GroupError> {
         let mut state_machine = self.state_machine.write().await;
         let steward = state_machine
             .get_steward_mut()
@@ -265,7 +265,7 @@ impl Group {
         steward.refresh_key_pair().await;
 
         let welcome_msg: WelcomeMessage = steward.create_announcement().await.into();
-        let msg_to_send = WakuMessageToSend::new(
+        let msg_to_send = OutboundPacket::new(
             welcome_msg.encode_to_vec(),
             WELCOME_SUBTOPIC,
             &self.group_name,
@@ -511,7 +511,7 @@ impl Group {
         provider: &MlsProvider,
         signer: &SignatureKeyPair,
         msg: &AppMessage,
-    ) -> Result<WakuMessageToSend, GroupError> {
+    ) -> Result<OutboundPacket, GroupError> {
         let is_steward = self.is_steward().await;
         let has_proposals = self.get_pending_proposals_count().await > 0;
 
@@ -538,7 +538,7 @@ impl Group {
             .await
             .create_message(provider, signer, &msg.encode_to_vec())?
             .to_bytes()?;
-        Ok(WakuMessageToSend::new(
+        Ok(OutboundPacket::new(
             message_out,
             APP_MSG_SUBTOPIC,
             &self.group_name,
@@ -684,7 +684,7 @@ impl Group {
         &mut self,
         provider: &MlsProvider,
         signer: &SignatureKeyPair,
-    ) -> Result<Vec<WakuMessageToSend>, GroupError> {
+    ) -> Result<Vec<OutboundPacket>, GroupError> {
         if !self.is_steward().await {
             return Err(GroupError::StewardNotSet);
         }
@@ -761,7 +761,7 @@ impl Group {
         }
         .into();
 
-        let batch_waku_msg = WakuMessageToSend::new(
+        let batch_waku_msg = OutboundPacket::new(
             batch_msg.encode_to_vec(),
             APP_MSG_SUBTOPIC,
             &self.group_name,
@@ -773,7 +773,7 @@ impl Group {
         // Create separate welcome message if there are new members
         if let Some(welcome) = welcome {
             let welcome_msg: WelcomeMessage = welcome.try_into()?;
-            let welcome_waku_msg = WakuMessageToSend::new(
+            let welcome_waku_msg = OutboundPacket::new(
                 welcome_msg.encode_to_vec(),
                 WELCOME_SUBTOPIC,
                 &self.group_name,

@@ -6,21 +6,18 @@ use tokio::sync::mpsc::Sender;
 use tracing::{error, info};
 use waku_bindings::WakuMessage;
 
-use ds::topic_filter::TopicFilter;
-use ds::waku_actor::WakuMessageToSend;
+use ds::{net::OutboundPacket, topic_filter::TopicFilter};
 
-use crate::consensus::ConsensusService;
-use crate::error::UserError;
-use crate::group_registry::GroupRegistry;
-use crate::user::User;
-use crate::user_actor::ConsensusEventMessage;
-use crate::LocalSigner;
+use crate::{
+    consensus::ConsensusService, error::UserError, group_registry::GroupRegistry, user::User,
+    user_actor::ConsensusEventMessage, LocalSigner,
+};
 
 pub const STEWARD_EPOCH: u64 = 15;
 
 #[derive(Debug, Clone)]
 pub struct AppState {
-    pub waku_node: Sender<WakuMessageToSend>,
+    pub waku_node: Sender<OutboundPacket>,
     pub pubsub: tokio::sync::broadcast::Sender<WakuMessage>,
 }
 
@@ -79,7 +76,7 @@ pub async fn create_user_instance(
                             group_name
                         );
                         for msg in commit_messages {
-                            if let Err(e) = app_state_consensus.waku_node.send(msg).await {
+                            if let Err(e) = app_state_consensus.waku_node.send(msg.into()).await {
                                 error!("Error sending commit message to Waku: {e}");
                             }
                         }
