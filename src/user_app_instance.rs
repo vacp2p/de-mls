@@ -1,21 +1,21 @@
 // src/user_app_instance.rs
 use alloy::signers::local::PrivateKeySigner;
+use hashgraph_like_consensus::service::DefaultConsensusService;
 use kameo::actor::ActorRef;
 use std::{str::FromStr, sync::Arc};
 use tokio::sync::broadcast::Sender;
 use tracing::{error, info};
 
+use crate::{
+    error::UserError, group_registry::GroupRegistry, user::User, user_actor::ConsensusEventMessage,
+    LocalSigner,
+};
 use ds::{
     topic_filter::TopicFilter,
     transport::{DeliveryService, InboundPacket},
 };
 
-use crate::{
-    consensus::ConsensusService, error::UserError, group_registry::GroupRegistry, user::User,
-    user_actor::ConsensusEventMessage, LocalSigner,
-};
-
-pub const STEWARD_EPOCH: u64 = 15;
+pub const STEWARD_EPOCH: u64 = 20;
 
 pub struct AppState<DS: DeliveryService> {
     pub delivery: DS,
@@ -27,7 +27,7 @@ pub struct CoreCtx<DS: DeliveryService> {
     pub app_state: Arc<AppState<DS>>,
     pub groups: Arc<GroupRegistry>,
     pub topics: Arc<TopicFilter>,
-    pub consensus: Arc<ConsensusService>,
+    pub consensus: DefaultConsensusService,
 }
 
 impl<DS: DeliveryService> CoreCtx<DS> {
@@ -36,7 +36,7 @@ impl<DS: DeliveryService> CoreCtx<DS> {
             app_state,
             groups: Arc::new(GroupRegistry::new()),
             topics: Arc::new(TopicFilter::new()),
-            consensus: Arc::new(ConsensusService::new()),
+            consensus: DefaultConsensusService::new_with_max_sessions(10),
         }
     }
 }
@@ -44,12 +44,12 @@ impl<DS: DeliveryService> CoreCtx<DS> {
 pub async fn create_user_instance<DS: DeliveryService>(
     eth_private_key: String,
     app_state: Arc<AppState<DS>>,
-    consensus_service: &ConsensusService,
+    consensus_service: &DefaultConsensusService,
 ) -> Result<(ActorRef<User>, String), UserError> {
     let signer = PrivateKeySigner::from_str(&eth_private_key)?;
     let user_address = signer.address_string();
     // Create user
-    let user = User::new(&eth_private_key, consensus_service)?;
+    let user = User::new(&eth_private_key, Arc::new(consensus_service.clone()))?;
 
     // Set up consensus event forwarding before spawning the actor
     let consensus_events = user.subscribe_to_consensus_events();

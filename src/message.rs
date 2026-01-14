@@ -21,20 +21,20 @@
 //!    - [`UserVote`]
 //!
 use alloy::hex;
+use hashgraph_like_consensus::{
+    protos::consensus::v1::{Proposal, Vote},
+    types::ConsensusEvent,
+};
 use mls_crypto::identity::normalize_wallet_address;
 use openmls::prelude::{KeyPackage, MlsMessageOut};
 use std::convert::TryFrom;
 
 use crate::{
-    consensus::ConsensusEvent,
     encrypt_message,
-    protos::{
-        consensus::v1::{Outcome, Proposal, RequestType, UpdateRequest, Vote, VotePayload},
-        de_mls::messages::v1::{
-            app_message, welcome_message, AppMessage, BanRequest, BatchProposalsMessage,
-            ConversationMessage, GroupAnnouncement, InvitationToJoin, ProposalAdded,
-            UserKeyPackage, UserVote, WelcomeMessage,
-        },
+    protos::de_mls::messages::v1::{
+        app_message, welcome_message, AppMessage, BanRequest, BatchProposalsMessage,
+        ConversationMessage, GroupAnnouncement, InvitationToJoin, Outcome, ProposalAdded,
+        RequestType, UpdateRequest, UserKeyPackage, UserVote, VotePayload, WelcomeMessage,
     },
     steward::GroupUpdateRequest,
     verify_message, MessageError,
@@ -211,14 +211,16 @@ impl From<ConsensusEvent> for Outcome {
             ConsensusEvent::ConsensusReached {
                 proposal_id: _,
                 result: true,
+                timestamp: _,
             } => Outcome::Accepted,
             ConsensusEvent::ConsensusReached {
                 proposal_id: _,
                 result: false,
+                timestamp: _,
             } => Outcome::Rejected,
             ConsensusEvent::ConsensusFailed {
                 proposal_id: _,
-                reason: _,
+                timestamp: _,
             } => Outcome::Unspecified,
         }
     }

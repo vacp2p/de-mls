@@ -2,6 +2,7 @@
 #![allow(non_snake_case)]
 use dioxus::prelude::*;
 use dioxus_desktop::{launch::launch as desktop_launch, Config, LogicalSize, WindowBuilder};
+use hashgraph_like_consensus::types::ConsensusEvent;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -10,10 +11,7 @@ use std::sync::{
 use de_mls::{
     bootstrap_core_from_env,
     message::convert_group_requests_to_display,
-    protos::{
-        consensus::v1::{Outcome, ProposalResult, VotePayload},
-        de_mls::messages::v1::ConversationMessage,
-    },
+    protos::de_mls::messages::v1::{ConversationMessage, Outcome, VotePayload},
 };
 use de_mls_gateway::GATEWAY;
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
@@ -24,15 +22,56 @@ mod logging;
 static CSS: Asset = asset!("/assets/main.css");
 static NEXT_ALERT_ID: AtomicU64 = AtomicU64::new(1);
 const MAX_VISIBLE_ALERTS: usize = 5;
+const MAX_VISIBLE_CONSENSUS_RESULTS: usize = 50;
 
-// Helper function to format timestamps
-fn format_timestamp(timestamp_ms: u64) -> String {
+// Helper function to format unix timestamps (seconds since epoch)
+fn format_timestamp(timestamp_s: u64) -> String {
     use std::time::UNIX_EPOCH;
 
     // Convert to SystemTime and format
-    let timestamp = UNIX_EPOCH + std::time::Duration::from_secs(timestamp_ms);
+    let timestamp = UNIX_EPOCH + std::time::Duration::from_secs(timestamp_s);
     let datetime: chrono::DateTime<chrono::Utc> = timestamp.into();
     datetime.format("%H:%M:%S").to_string()
+}
+
+fn render_latest_decision(ev: &ConsensusEvent) -> Element {
+    let (vid, res, timestamp_s, label): (u32, Outcome, u64, &'static str) = match ev {
+        ConsensusEvent::ConsensusReached {
+            proposal_id,
+            result,
+            timestamp,
+        } => (
+            *proposal_id,
+            if *result {
+                Outcome::Accepted
+            } else {
+                Outcome::Rejected
+            },
+            *timestamp,
+            if *result { "Accepted" } else { "Rejected" },
+        ),
+        ConsensusEvent::ConsensusFailed {
+            proposal_id,
+            timestamp,
+        } => (*proposal_id, Outcome::Unspecified, *timestamp, "Failed"),
+    };
+
+    rsx! {
+        div { class: "result-item",
+            span { class: "proposal-id", "{vid}" }
+            span {
+                class: match res {
+                    Outcome::Accepted => "outcome accepted",
+                    Outcome::Rejected => "outcome rejected",
+                    Outcome::Unspecified => "outcome unspecified",
+                },
+                "{label}"
+            }
+            span { class: "timestamp",
+                "{format_timestamp(timestamp_s)}"
+            }
+        }
+    }
 }
 
 // ─────────────────────────── App state ───────────────────────────
@@ -61,7 +100,7 @@ struct ConsensusState {
     is_steward: bool,
     pending: Option<VotePayload>, // active/pending proposal for opened group
     // Store results with timestamps for better display
-    latest_results: Vec<(u32, Outcome, u64)>, // (vote_id, result, timestamp_ms)
+    latest_results: Vec<ConsensusEvent>,
     // Store current epoch proposals for stewards
     current_epoch_proposals: Vec<(String, String)>, // (action, address) pairs
 }
@@ -349,18 +388,18 @@ fn Home() -> Element {
                             cons.write().pending = Some(vp);
                         }
                     }
-                    Some(AppEvent::ProposalDecided(ProposalResult {
-                        group_id,
-                        proposal_id,
-                        outcome,
-                        decided_at_ms,
-                    })) => {
+                    Some(AppEvent::ProposalDecided(group_id, consensus_event)) => {
                         if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
-                            cons.write().latest_results.push((
-                                proposal_id,
-                                Outcome::try_from(outcome).unwrap_or(Outcome::Unspecified),
-                                decided_at_ms,
-                            ));
+                            {
+                                let mut c = cons.write();
+                                c.latest_results.push(consensus_event);
+                                if c.latest_results.len() > MAX_VISIBLE_CONSENSUS_RESULTS {
+                                    // Drop oldest entries first
+                                    let overflow =
+                                        c.latest_results.len() - MAX_VISIBLE_CONSENSUS_RESULTS;
+                                    c.latest_results.drain(0..overflow);
+                                }
+                            }
                         }
                         cons.write().pending = None;
                     }
@@ -918,25 +957,8 @@ fn ConsensusSection() -> Element {
                         div { class: "no-data", "No latest decisions" }
                     } else {
                         div { class: "results-window",
-                            for (vid, res, timestamp_ms) in cons.read().latest_results.iter().rev() {
-                                div { class: "result-item",
-                                    span { class: "proposal-id", "{vid}" }
-                                    span {
-                                        class: match res {
-                                            Outcome::Accepted => "outcome accepted",
-                                            Outcome::Rejected => "outcome rejected",
-                                            Outcome::Unspecified => "outcome unspecified",
-                                        },
-                                        match res {
-                                            Outcome::Accepted => "Accepted",
-                                            Outcome::Rejected => "Rejected",
-                                            Outcome::Unspecified => "Unspecified",
-                                        }
-                                    }
-                                    span { class: "timestamp",
-                                        "{format_timestamp(*timestamp_ms)}"
-                                    }
-                                }
+                            for ev in cons.read().latest_results.iter().rev() {
+                                {render_latest_decision(ev)}
                             }
                         }
                     }

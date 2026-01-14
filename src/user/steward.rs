@@ -1,11 +1,11 @@
+use hashgraph_like_consensus::{session::ConsensusConfig, types::CreateProposalRequest};
+use prost::Message;
+use std::time::Duration;
 use tracing::{error, info};
 
 use crate::{
     error::UserError,
-    protos::{
-        consensus::v1::{UpdateRequest, VotePayload},
-        de_mls::messages::v1::AppMessage,
-    },
+    protos::de_mls::messages::v1::{AppMessage, UpdateRequest, UpdateRequestList, VotePayload},
     user::{User, UserAction},
 };
 use ds::transport::OutboundPacket;
@@ -178,17 +178,25 @@ impl User {
                 let participant_ids: Vec<Vec<u8>> = members.into_iter().collect();
                 let expected_voters_count = participant_ids.len() as u32;
 
+                let payload = UpdateRequestList {
+                    update_requests: proposals.clone(),
+                }
+                .encode_to_vec();
+                let request = CreateProposalRequest::new(
+                    uuid::Uuid::new_v4().to_string(),
+                    payload,
+                    self.identity.identity_string().into(),
+                    expected_voters_count,
+                    3600, // 1 hour expiration
+                    true, // liveness criteria
+                )?;
                 // Create consensus proposal
                 let proposal = self
                     .consensus_service
-                    .create_proposal(
-                        group_name,
-                        uuid::Uuid::new_v4().to_string(),
-                        proposals.clone(),
-                        self.identity.identity_string().into(),
-                        expected_voters_count,
-                        3600, // 1 hour expiration
-                        true, // liveness criteria
+                    .create_proposal_with_config(
+                        &group_name.to_string(),
+                        request,
+                        Some(ConsensusConfig::gossipsub().with_timeout(Duration::from_secs(15))?),
                     )
                     .await?;
 
@@ -201,7 +209,7 @@ impl User {
                 let voting_proposal: AppMessage = VotePayload {
                     group_id: group_name.to_string(),
                     proposal_id: proposal.proposal_id,
-                    group_requests: proposal.group_requests.clone(),
+                    group_requests: proposals,
                     timestamp: proposal.timestamp,
                 }
                 .into();

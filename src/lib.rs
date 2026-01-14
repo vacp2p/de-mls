@@ -103,7 +103,6 @@ use error::{GroupError, MessageError};
 pub mod bootstrap;
 pub use bootstrap::{bootstrap_core, bootstrap_core_from_env, Bootstrap, BootstrapConfig};
 
-pub mod consensus;
 pub mod error;
 pub mod group;
 pub mod group_registry;
@@ -115,9 +114,9 @@ pub mod user_actor;
 pub mod user_app_instance;
 
 pub mod protos {
-    pub mod consensus {
+    pub mod hashgraph_like_consensus {
         pub mod v1 {
-            include!(concat!(env!("OUT_DIR"), "/consensus.v1.rs"));
+            pub use ::hashgraph_like_consensus::protos::consensus::v1::*;
         }
     }
 

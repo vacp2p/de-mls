@@ -1,4 +1,5 @@
 use alloy::hex;
+use hashgraph_like_consensus::protos::consensus::v1::{Proposal, Vote};
 use openmls::{
     group::{GroupEpoch, GroupId, MlsGroup, MlsGroupCreateConfig},
     prelude::{
@@ -16,9 +17,8 @@ use uuid;
 use crate::{
     error::GroupError,
     message::{message_types, MessageType},
-    protos::{
-        consensus::v1::{Proposal, RequestType, UpdateRequest, Vote},
-        de_mls::messages::v1::{app_message, AppMessage, BatchProposalsMessage, WelcomeMessage},
+    protos::de_mls::messages::v1::{
+        app_message, AppMessage, BatchProposalsMessage, RequestType, UpdateRequest, WelcomeMessage,
     },
     state_machine::{GroupState, GroupStateMachine},
     steward::GroupUpdateRequest,

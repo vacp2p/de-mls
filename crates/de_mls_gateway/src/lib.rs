@@ -108,11 +108,11 @@ impl<DS: DeliveryService> Gateway<DS> {
 
     // ─────────────────────────── High-level helpers ───────────────────────────
 
-    /// Create the user actor with a private key (no group yet).
+    /// Create the user actor with a private key.
     /// Returns a derived display name (e.g., address string).
     pub async fn login_with_private_key(&self, private_key: String) -> anyhow::Result<String> {
         let core = self.core();
-        let consensus_service = core.consensus.as_ref().clone();
+        let consensus_service = core.consensus.clone();
 
         let (user_ref, user_address) = create_user_instance(
             private_key.clone(),

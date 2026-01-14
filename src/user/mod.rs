@@ -6,6 +6,7 @@ pub mod steward;
 pub mod waku;
 
 use alloy::signers::local::PrivateKeySigner;
+use hashgraph_like_consensus::{service::DefaultConsensusService, types::ConsensusEvent};
 use kameo::Actor;
 use std::{collections::HashMap, fmt::Display, str::FromStr, sync::Arc};
 use tokio::sync::{broadcast, RwLock};
@@ -17,10 +18,7 @@ use mls_crypto::{
 };
 
 use crate::{
-    consensus::{ConsensusEvent, ConsensusService},
-    error::UserError,
-    group::Group,
-    protos::de_mls::messages::v1::AppMessage,
+    error::UserError, group::Group, protos::de_mls::messages::v1::AppMessage,
     user::proposals::PendingBatches,
 };
 
@@ -66,7 +64,7 @@ pub struct User {
     // Each group has its own lock for better concurrency
     groups: Arc<RwLock<HashMap<String, Arc<RwLock<Group>>>>>,
     provider: MlsProvider,
-    consensus_service: ConsensusService,
+    consensus_service: Arc<DefaultConsensusService>,
     eth_signer: PrivateKeySigner,
     // Queue for batch proposals that arrive before consensus is reached
     pending_batch_proposals: PendingBatches,
@@ -85,7 +83,7 @@ impl User {
     /// - `UserError` if private key parsing or identity creation fails
     pub fn new(
         user_eth_priv_key: &str,
-        consensus_service: &ConsensusService,
+        consensus_service: Arc<DefaultConsensusService>,
     ) -> Result<Self, UserError> {
         let signer = PrivateKeySigner::from_str(user_eth_priv_key)?;
         let user_address = signer.address();
@@ -98,7 +96,7 @@ impl User {
             identity: id,
             eth_signer: signer,
             provider: crypto,
-            consensus_service: consensus_service.clone(),
+            consensus_service,
             pending_batch_proposals: PendingBatches::default(),
         };
         Ok(user)

@@ -1,13 +1,12 @@
+use hashgraph_like_consensus::types::ConsensusEvent;
 use kameo::message::{Context, Message};
 
-use ds::transport::{InboundPacket, OutboundPacket};
-
 use crate::{
-    consensus::ConsensusEvent,
     error::UserError,
     protos::de_mls::messages::v1::{BanRequest, ConversationMessage},
     user::{User, UserAction},
 };
+use ds::transport::{InboundPacket, OutboundPacket};
 
 impl Message<InboundPacket> for User {
     type Reply = Result<UserAction, UserError>;

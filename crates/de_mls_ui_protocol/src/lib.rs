@@ -1,15 +1,15 @@
 //! UI <-> Gateway protocol (PoC)
-// crates/de_mls_ui_protocol/src/lib.rs
 pub mod v1 {
+    use hashgraph_like_consensus::types::ConsensusEvent;
+    use serde::{Deserialize, Serialize};
+
     use de_mls::{
         message::MessageType,
-        protos::{
-            consensus::v1::{ProposalResult, VotePayload},
-            de_mls::messages::v1::{BanRequest, ConversationMessage, ProposalAdded},
+        protos::de_mls::messages::v1::{
+            BanRequest, ConversationMessage, ProposalAdded, VotePayload,
         },
     };
     use mls_crypto::identity::normalize_wallet_address;
-    use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[non_exhaustive]
@@ -78,7 +78,7 @@ pub mod v1 {
         },
 
         VoteRequested(VotePayload),
-        ProposalDecided(ProposalResult),
+        ProposalDecided(String, ConsensusEvent),
         CurrentEpochProposals {
             group_id: String,
             proposals: Vec<(String, String)>,

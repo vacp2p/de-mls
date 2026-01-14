@@ -1,5 +1,7 @@
+use hashgraph_like_consensus::service::DefaultConsensusService;
+use std::sync::Arc;
+
 use de_mls::{
-    consensus::ConsensusService,
     protos::de_mls::messages::v1::app_message,
     state_machine::GroupState,
     user::{User, UserAction},
@@ -34,17 +36,17 @@ fn outbound_to_inbound(pkt: OutboundPacket) -> InboundPacket {
 }
 
 async fn create_two_test_user_with_group(group_name: &str) -> (User, User) {
-    let consensus_service = ConsensusService::new();
-    let mut alice =
-        User::new(ALICE_PRIVATE_KEY, &consensus_service).expect("Failed to create user for Alice");
+    let consensus_service_alice = Arc::new(DefaultConsensusService::new_with_max_sessions(10));
+    let mut alice = User::new(ALICE_PRIVATE_KEY, consensus_service_alice)
+        .expect("Failed to create user for Alice");
     alice
         .create_group(group_name, true)
         .await
         .expect("Failed to create group for Alice");
 
-    let consensus_service = ConsensusService::new();
+    let consensus_service_bob = Arc::new(DefaultConsensusService::new_with_max_sessions(10));
     let mut bob =
-        User::new(BOB_PRIVATE_KEY, &consensus_service).expect("Failed to create user for Bob");
+        User::new(BOB_PRIVATE_KEY, consensus_service_bob).expect("Failed to create user for Bob");
     bob.create_group(group_name, false)
         .await
         .expect("Failed to create group for Bob");
@@ -53,23 +55,23 @@ async fn create_two_test_user_with_group(group_name: &str) -> (User, User) {
 }
 
 async fn create_three_test_user_with_group(group_name: &str) -> (User, User, User) {
-    let consensus_service = ConsensusService::new();
+    let consensus_service_alice = Arc::new(DefaultConsensusService::new_with_max_sessions(10));
     let mut alice =
-        User::new(ALICE_PRIVATE_KEY, &consensus_service).expect("Failed to create user");
+        User::new(ALICE_PRIVATE_KEY, consensus_service_alice).expect("Failed to create user");
     alice
         .create_group(group_name, true)
         .await
         .expect("Failed to create group for Alice");
 
-    let consensus_service = ConsensusService::new();
-    let mut bob = User::new(BOB_PRIVATE_KEY, &consensus_service).expect("Failed to create user");
+    let consensus_service_bob = Arc::new(DefaultConsensusService::new_with_max_sessions(10));
+    let mut bob = User::new(BOB_PRIVATE_KEY, consensus_service_bob).expect("Failed to create user");
     bob.create_group(group_name, false)
         .await
         .expect("Failed to create group for Bob");
 
-    let consensus_service = ConsensusService::new();
+    let consensus_service_carol = Arc::new(DefaultConsensusService::new_with_max_sessions(10));
     let mut carol =
-        User::new(CAROL_PRIVATE_KEY, &consensus_service).expect("Failed to create user");
+        User::new(CAROL_PRIVATE_KEY, consensus_service_carol).expect("Failed to create user");
     carol
         .create_group(group_name, false)
         .await
@@ -161,7 +163,7 @@ async fn steward_epoch_without_user_in_group(
         );
 
         let wmts = steward
-            .handle_consensus_event(&group_name, ev)
+            .handle_consensus_event(group_name.as_str(), ev)
             .await
             .expect("Failed to handle consensus event");
         msgs_to_send.extend(wmts);

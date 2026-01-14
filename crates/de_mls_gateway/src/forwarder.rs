@@ -18,12 +18,12 @@ use crate::Gateway;
 impl<DS: DeliveryService> Gateway<DS> {
     pub(crate) fn spawn_consensus_forwarder(&self, core: Arc<CoreCtx<DS>>) -> anyhow::Result<()> {
         let evt_tx = self.evt_tx.clone();
-        let mut rx = core.consensus.subscribe_decisions();
+        let mut rx = core.consensus.subscribe_to_events();
 
         tokio::spawn(async move {
             tracing::info!("gateway: consensus forwarder started");
             while let Ok(res) = rx.recv().await {
-                let _ = evt_tx.unbounded_send(AppEvent::ProposalDecided(res));
+                let _ = evt_tx.unbounded_send(AppEvent::ProposalDecided(res.0, res.1));
             }
             tracing::info!("gateway: consensus forwarder ended");
         });

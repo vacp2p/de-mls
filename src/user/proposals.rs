@@ -1,3 +1,5 @@
+use hashgraph_like_consensus::protos::consensus::v1::Proposal;
+use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -8,7 +10,9 @@ use tracing::info;
 use crate::{
     error::UserError,
     group::GroupAction,
-    protos::de_mls::messages::v1::BatchProposalsMessage,
+    protos::de_mls::messages::v1::{
+        AppMessage, BatchProposalsMessage, UpdateRequestList, VotePayload,
+    },
     state_machine::GroupState,
     user::{User, UserAction},
 };
@@ -102,9 +106,14 @@ impl User {
             GroupAction::LeaveGroup => Ok(UserAction::LeaveGroup(group_name.to_string())),
             GroupAction::DoNothing => Ok(UserAction::DoNothing),
             GroupAction::GroupProposal(proposal) => {
-                self.process_consensus_proposal(proposal, group_name).await
+                self.process_incoming_proposal(group_name, proposal).await
             }
-            GroupAction::GroupVote(vote) => self.process_consensus_vote(vote, group_name).await,
+            GroupAction::GroupVote(vote) => {
+                self.consensus_service
+                    .process_incoming_vote(&group_name.to_string(), vote)
+                    .await?;
+                Ok(UserAction::DoNothing)
+            }
         }
     }
 
@@ -142,5 +151,54 @@ impl User {
         } else {
             Ok(None)
         }
+    }
+
+    /// Process an incoming consensus proposal.
+    ///
+    /// ## Parameters:
+    /// - `group_name`: The name of the group the proposal is for
+    /// - `proposal`: The consensus proposal to process
+    ///
+    /// ## Returns:
+    /// - `UserAction` indicating what action should be taken
+    ///
+    /// ## Effects:
+    /// - Processes the proposal using the consensus service
+    /// - Starts voting for the proposal
+    /// - Sends the voting proposal to the frontend
+    ///
+    /// ## Errors:
+    /// - `UserError::GroupNotFoundError` if group doesn't exist
+    /// - `UserError::ConsensusError` if the proposal processing fails
+    pub(crate) async fn process_incoming_proposal(
+        &self,
+        group_name: &str,
+        proposal: Proposal,
+    ) -> Result<UserAction, UserError> {
+        self.consensus_service
+            .process_incoming_proposal(&group_name.to_string(), proposal.clone())
+            .await?;
+
+        let group = self.group_ref(group_name).await?;
+        group.write().await.start_voting().await?;
+        info!(
+            "[process_incoming_proposal]: Starting voting for proposal {}",
+            proposal.proposal_id
+        );
+
+        let update_request_list = UpdateRequestList::decode(proposal.payload.as_slice())?;
+
+        // Send voting proposal to frontend
+        let voting_proposal: AppMessage = VotePayload {
+            group_id: group_name.to_string(),
+            proposal_id: proposal.proposal_id,
+            group_requests: update_request_list.update_requests,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs(),
+        }
+        .into();
+
+        Ok(UserAction::SendToApp(voting_proposal))
     }
 }

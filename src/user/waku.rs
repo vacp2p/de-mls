@@ -256,11 +256,14 @@ impl User {
             }
             GroupAction::GroupProposal(proposal) => {
                 info!("[process_app_subtopic]: processing consensus proposal");
-                self.process_consensus_proposal(proposal, group_name).await
+                self.process_incoming_proposal(group_name, proposal).await
             }
             GroupAction::GroupVote(vote) => {
                 info!("[process_app_subtopic]: processing consensus vote");
-                self.process_consensus_vote(vote, group_name).await
+                self.consensus_service
+                    .process_incoming_vote(&group_name.to_string(), vote)
+                    .await?;
+                Ok(UserAction::DoNothing)
             }
         }
     }

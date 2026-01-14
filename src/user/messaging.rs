@@ -98,7 +98,7 @@ impl User {
             // Send notification to UI about the new proposal
             let proposal_added_msg: AppMessage = ProposalAdded {
                 group_id: group_name.to_string(),
-                request: request.into(),
+                request: Some(request),
             }
             .into();
 

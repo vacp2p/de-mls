@@ -4,7 +4,7 @@ syntax = "proto3";
 
 package de_mls.messages.v1;
 
-import "messages/v1/consensus.proto";
+import "hashgraph-like-consensus/v1/consensus.proto";
 
 message AppMessage {
   oneof payload {
@@ -13,7 +13,7 @@ message AppMessage {
     BanRequest ban_request = 3;
     consensus.v1.Proposal proposal = 4;
     consensus.v1.Vote vote = 5;
-    consensus.v1.VotePayload vote_payload = 6;
+    VotePayload vote_payload = 6;
     UserVote user_vote = 7;
     ProposalAdded proposal_added = 8;
   }
@@ -37,7 +37,7 @@ message BatchProposalsMessage {
   bytes commit_message = 3;          // MLS commit message
 }
 
-// Yes/No vote for a given proposal. Based on the result, the `consensus.v1.Vote` will be created.
+// Yes/No vote for a given proposal. Based on the result, the `Vote` will be created.
 message UserVote {
   uint32 proposal_id = 1;
   bool vote = 2;
@@ -47,5 +47,40 @@ message UserVote {
 // Proposal added message is sent to the UI when a new proposal is added to the group.
 message ProposalAdded {
   string group_id = 1;
-  consensus.v1.UpdateRequest request = 2;
+  UpdateRequest request = 2;
+}
+
+enum RequestType {
+  REQUEST_TYPE_UNSPECIFIED = 0;
+  REQUEST_TYPE_ADD_MEMBER = 1;
+  REQUEST_TYPE_REMOVE_MEMBER = 2;
+}
+
+enum Outcome {
+  OUTCOME_UNSPECIFIED = 0;
+  OUTCOME_ACCEPTED = 1;
+  OUTCOME_REJECTED = 2;
+}
+
+message ProposalResult {
+  string group_id     = 31;
+  uint32 proposal_id  = 32;
+  Outcome outcome     = 33;
+  uint64 decided_at_ms = 34;
+}
+
+message VotePayload {
+  string group_id = 41;
+  uint32 proposal_id = 42;
+  repeated UpdateRequest group_requests = 43;  // Structured group update requests
+  uint64 timestamp = 44;
+} 
+
+message UpdateRequest {
+  RequestType request_type = 51;
+  bytes wallet_address = 52;
+}
+
+message UpdateRequestList {
+  repeated UpdateRequest update_requests = 53;
 }
