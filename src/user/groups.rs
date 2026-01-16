@@ -1,13 +1,9 @@
-use openmls::{
-    group::MlsGroupJoinConfig,
-    prelude::{StagedWelcome, Welcome},
-};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::{error::UserError, group::Group, state_machine::GroupState, user::User};
-use mls_crypto::identity::normalize_wallet_address;
+use mls_crypto::{identity::normalize_wallet_address, MlsGroupService};
 
 impl User {
     /// Fetch the shared reference to a group by name.
@@ -47,22 +43,20 @@ impl User {
             Group::new(
                 group_name,
                 true,
-                Some(&self.provider),
-                Some(self.identity.signer()),
-                Some(&self.identity.credential_with_key()),
+                Some(&self.identity_service as &dyn mls_crypto::MlsGroupService),
             )?
         } else {
-            Group::new(group_name, false, None, None, None)?
+            Group::new(group_name, false, None)?
         };
 
         groups.insert(group_name.to_string(), Arc::new(RwLock::new(group)));
         Ok(())
     }
 
-    /// Join a group after receiving a welcome message.
+    /// Join a group after receiving an invitation message.
     ///
     /// ## Parameters:
-    /// - `welcome`: The MLS welcome message containing group information
+    /// - `invite_bytes`: Serialized MLS invitation message bytes
     ///
     /// ## Effects:
     /// - Creates new MLS group from welcome message
@@ -76,13 +70,10 @@ impl User {
     /// ## Errors:
     /// - `UserError::GroupNotFoundError` if group doesn't exist
     /// - Various MLS group creation errors
-    pub(crate) async fn join_group(&mut self, welcome: Welcome) -> Result<(), UserError> {
-        let group_config = MlsGroupJoinConfig::builder().build();
-        let mls_group =
-            StagedWelcome::new_from_welcome(&self.provider, &group_config, welcome, None)?
-                .into_group(&self.provider)?;
-
-        let group_id = mls_group.group_id().to_vec();
+    pub(crate) async fn join_group(&mut self, invite_bytes: Vec<u8>) -> Result<(), UserError> {
+        let (mls_group, group_id) = self
+            .identity_service
+            .join_group_from_invite(invite_bytes.as_slice())?;
         let group_name = String::from_utf8(group_id)?;
 
         let group = self.group_ref(&group_name).await?;
@@ -118,7 +109,11 @@ impl User {
     /// - `UserError::GroupNotFoundError` if group doesn't exist
     pub async fn get_group_number_of_members(&self, group_name: &str) -> Result<usize, UserError> {
         let group = self.group_ref(group_name).await?;
-        let members = group.read().await.members_identity().await?;
+        let members = group
+            .read()
+            .await
+            .members_identity(&self.identity_service)
+            .await?;
         Ok(members.len())
     }
 
@@ -137,7 +132,11 @@ impl User {
         if !group.read().await.is_mls_group_initialized() {
             return Ok(Vec::new());
         }
-        let members = group.read().await.members_identity().await?;
+        let members = group
+            .read()
+            .await
+            .members_identity(&self.identity_service)
+            .await?;
         Ok(members
             .into_iter()
             .map(|raw| normalize_wallet_address(raw.as_slice()).to_string())
@@ -156,8 +155,8 @@ impl User {
     /// - `UserError::GroupNotFoundError` if group doesn't exist
     pub async fn get_group_mls_epoch(&self, group_name: &str) -> Result<u64, UserError> {
         let group = self.group_ref(group_name).await?;
-        let epoch = group.read().await.epoch().await?;
-        Ok(epoch.as_u64())
+        let epoch = group.read().await.epoch(&self.identity_service).await?;
+        Ok(epoch)
     }
 
     /// Leave a group and clean up associated resources.

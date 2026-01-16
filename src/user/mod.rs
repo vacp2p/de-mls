@@ -12,10 +12,7 @@ use std::{collections::HashMap, fmt::Display, str::FromStr, sync::Arc};
 use tokio::sync::{broadcast, RwLock};
 
 use ds::transport::OutboundPacket;
-use mls_crypto::{
-    identity::Identity,
-    openmls_provider::{MlsProvider, CIPHERSUITE},
-};
+use mls_crypto::{IdentityService, OpenMlsIdentityService};
 
 use crate::{
     error::UserError, group::Group, protos::de_mls::messages::v1::AppMessage,
@@ -60,10 +57,9 @@ impl Display for UserAction {
 /// - Member management through proposals
 #[derive(Actor)]
 pub struct User {
-    identity: Identity,
+    identity_service: OpenMlsIdentityService,
     // Each group has its own lock for better concurrency
     groups: Arc<RwLock<HashMap<String, Arc<RwLock<Group>>>>>,
-    provider: MlsProvider,
     consensus_service: Arc<DefaultConsensusService>,
     eth_signer: PrivateKeySigner,
     // Queue for batch proposals that arrive before consensus is reached
@@ -87,15 +83,11 @@ impl User {
     ) -> Result<Self, UserError> {
         let signer = PrivateKeySigner::from_str(user_eth_priv_key)?;
         let user_address = signer.address();
-
-        let crypto = MlsProvider::default();
-        let id = Identity::new(CIPHERSUITE, &crypto, user_address.as_slice())?;
-
+        let identity_service = OpenMlsIdentityService::new(user_address.as_slice())?;
         let user = User {
             groups: Arc::new(RwLock::new(HashMap::new())),
-            identity: id,
+            identity_service,
             eth_signer: signer,
-            provider: crypto,
             consensus_service,
             pending_batch_proposals: PendingBatches::default(),
         };
@@ -115,6 +107,6 @@ impl User {
     /// ## Usage:
     /// Primarily used for debugging, logging, and user identification
     pub fn identity_string(&self) -> String {
-        self.identity.identity_string()
+        self.identity_service.identity_string()
     }
 }

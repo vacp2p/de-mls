@@ -1,20 +1,21 @@
+use alloy::signers::local::PrivateKeySigner;
 use de_mls::{error::GroupError, group::Group, state_machine::GroupState};
-use mls_crypto::identity::random_identity;
-use mls_crypto::openmls_provider::MlsProvider;
+use mls_crypto::{IdentityService, OpenMlsIdentityService};
+
+pub fn random_identity_service() -> Result<OpenMlsIdentityService, anyhow::Error> {
+    let signer = PrivateKeySigner::random();
+    let user_address = signer.address();
+    let identity_service = OpenMlsIdentityService::new(user_address.as_slice())?;
+    Ok(identity_service)
+}
 
 #[tokio::test]
 async fn test_state_machine_transitions() {
-    let crypto = MlsProvider::default();
-    let mut id_steward = random_identity().expect("Failed to create identity");
+    let mut identity_service =
+        random_identity_service().expect("Failed to create identity service");
 
-    let mut group = Group::new(
-        "test_group",
-        true,
-        Some(&crypto),
-        Some(id_steward.signer()),
-        Some(&id_steward.credential_with_key()),
-    )
-    .expect("Failed to create group");
+    let mut group =
+        Group::new("test_group", true, Some(&identity_service)).expect("Failed to create group");
 
     // Initial state should be Working
     assert_eq!(group.get_state().await, GroupState::Working);
@@ -28,11 +29,11 @@ async fn test_state_machine_transitions() {
     assert_eq!(group.get_state().await, GroupState::Working); // Should stay in Working
 
     // Add some proposals
-    let kp_user = id_steward
-        .generate_key_package(&crypto)
+    let kp_user = identity_service
+        .generate_key_package()
         .expect("Failed to generate key package");
     let _ = group
-        .store_invite_proposal(Box::new(kp_user))
+        .store_invite_proposal(kp_user)
         .await
         .expect("Failed to store proposal");
 
@@ -73,17 +74,11 @@ async fn test_state_machine_transitions() {
 
 #[tokio::test]
 async fn test_invalid_state_transitions() {
-    let crypto = MlsProvider::default();
-    let mut id_steward = random_identity().expect("Failed to create identity");
+    let mut identity_service =
+        random_identity_service().expect("Failed to create identity service");
 
-    let mut group = Group::new(
-        "test_group",
-        true,
-        Some(&crypto),
-        Some(id_steward.signer()),
-        Some(&id_steward.credential_with_key()),
-    )
-    .expect("Failed to create group");
+    let mut group =
+        Group::new("test_group", true, Some(&identity_service)).expect("Failed to create group");
 
     // Cannot complete voting from Working state
     let result = group.complete_voting(true).await;
@@ -115,11 +110,11 @@ async fn test_invalid_state_transitions() {
     ));
 
     // Add a proposal to actually transition to Waiting state
-    let kp_user = id_steward
-        .generate_key_package(&crypto)
+    let kp_user = identity_service
+        .generate_key_package()
         .expect("Failed to generate key package");
     let _ = group
-        .store_invite_proposal(Box::new(kp_user))
+        .store_invite_proposal(kp_user)
         .await
         .expect("Failed to store proposal");
 
@@ -138,26 +133,22 @@ async fn test_invalid_state_transitions() {
 
 #[tokio::test]
 async fn test_proposal_counting() {
-    let crypto = MlsProvider::default();
-    let id_steward = random_identity().expect("Failed to create identity");
-    let mut id_user = random_identity().expect("Failed to create identity");
+    let identity_service_steward =
+        random_identity_service().expect("Failed to create identity service");
 
-    let mut group = Group::new(
-        "test_group",
-        true,
-        Some(&crypto),
-        Some(id_steward.signer()),
-        Some(&id_steward.credential_with_key()),
-    )
-    .expect("Failed to create group");
+    let mut identity_service_user =
+        random_identity_service().expect("Failed to create identity service");
+
+    let mut group = Group::new("test_group", true, Some(&identity_service_steward))
+        .expect("Failed to create group");
 
     // Add some proposals
-    let kp_user = id_user
-        .generate_key_package(&crypto)
+    let kp_user = identity_service_user
+        .generate_key_package()
         .expect("Failed to generate key package");
 
     let _ = group
-        .store_invite_proposal(Box::new(kp_user.clone()))
+        .store_invite_proposal(kp_user.clone())
         .await
         .expect("Failed to store proposal");
     let _ = group
@@ -192,18 +183,7 @@ async fn test_proposal_counting() {
 
 #[tokio::test]
 async fn test_steward_validation() {
-    let _crypto = MlsProvider::default();
-    let _id_steward = random_identity().expect("Failed to create identity");
-
-    // Create group without steward
-    let mut group = Group::new(
-        "test_group",
-        false, // No steward
-        None,
-        None,
-        None,
-    )
-    .expect("Failed to create group");
+    let mut group = Group::new("test_group", false, None).expect("Failed to create group");
 
     // Should fail to start steward epoch without steward
     let result = group.start_steward_epoch_with_validation().await;
@@ -212,17 +192,10 @@ async fn test_steward_validation() {
 
 #[tokio::test]
 async fn test_consensus_result_handling() {
-    let crypto = MlsProvider::default();
-    let id_steward = random_identity().expect("Failed to create identity");
+    let identity_service = random_identity_service().expect("Failed to create identity service");
 
-    let mut group = Group::new(
-        "test_group",
-        true,
-        Some(&crypto),
-        Some(id_steward.signer()),
-        Some(&id_steward.credential_with_key()),
-    )
-    .expect("Failed to create group");
+    let mut group =
+        Group::new("test_group", true, Some(&identity_service)).expect("Failed to create group");
 
     // Start steward epoch and voting
     group
@@ -246,17 +219,10 @@ async fn test_consensus_result_handling() {
 
 #[tokio::test]
 async fn test_voting_validation_edge_cases() {
-    let _crypto = MlsProvider::default();
-    let _id_steward = random_identity().expect("Failed to create identity");
+    let identity_service = random_identity_service().expect("Failed to create identity service");
 
-    let mut group = Group::new(
-        "test_group",
-        true,
-        Some(&_crypto),
-        Some(_id_steward.signer()),
-        Some(&_id_steward.credential_with_key()),
-    )
-    .expect("Failed to create group");
+    let mut group =
+        Group::new("test_group", true, Some(&identity_service)).expect("Failed to create group");
 
     // Test starting voting from Working state (should transition to Waiting first)
     group.start_voting().await.expect("Failed to start voting");

@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use openmls::prelude::{DeserializeBytes, MlsMessageIn};
 use tracing::info;
 
 use crate::{
@@ -79,24 +78,18 @@ impl User {
 
         // Process all proposals before the commit
         for proposal_bytes in batch_msg.mls_proposals {
-            let (mls_message_in, _) = MlsMessageIn::tls_deserialize_bytes(&proposal_bytes)?;
-            let protocol_message = mls_message_in.try_into_protocol_message()?;
-
             let _res = group
                 .write()
                 .await
-                .process_protocol_msg(protocol_message, &self.provider)
+                .process_protocol_msg(&proposal_bytes, &self.identity_service)
                 .await?;
         }
 
         // Then process the commit message
-        let (mls_message_in, _) = MlsMessageIn::tls_deserialize_bytes(&batch_msg.commit_message)?;
-        let protocol_message = mls_message_in.try_into_protocol_message()?;
-
         let res = group
             .write()
             .await
-            .process_protocol_msg(protocol_message, &self.provider)
+            .process_protocol_msg(&batch_msg.commit_message, &self.identity_service)
             .await?;
 
         group.write().await.start_working().await;

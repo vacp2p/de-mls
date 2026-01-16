@@ -1,6 +1,5 @@
 use alloy::primitives::Address;
 use libsecp256k1::{PublicKey, SecretKey};
-use openmls::prelude::KeyPackage;
 use std::{fmt::Display, str::FromStr, sync::Arc};
 use tokio::sync::Mutex;
 
@@ -8,6 +7,7 @@ use crate::{
     decrypt_message, error::MessageError, generate_keypair,
     protos::de_mls::messages::v1::GroupAnnouncement, sign_message,
 };
+use mls_crypto::{key_package_bytes_from_json, KeyPackageBytes};
 
 #[derive(Clone, Debug)]
 pub struct Steward {
@@ -19,7 +19,7 @@ pub struct Steward {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum GroupUpdateRequest {
-    AddMember(Box<KeyPackage>),
+    AddMember(KeyPackageBytes),
     RemoveMember(String),
 }
 
@@ -27,7 +27,7 @@ impl Display for GroupUpdateRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GroupUpdateRequest::AddMember(kp) => {
-                let id = Address::from_slice(kp.leaf_node().credential().serialized_content());
+                let id = Address::from_slice(kp.identity_bytes());
                 writeln!(f, "Add Member: {id:#?}")
             }
             GroupUpdateRequest::RemoveMember(id) => {
@@ -68,10 +68,10 @@ impl Steward {
         GroupAnnouncement::new(pub_key.serialize_compressed().to_vec(), signature)
     }
 
-    pub async fn decrypt_message(&self, message: Vec<u8>) -> Result<KeyPackage, MessageError> {
+    pub async fn decrypt_message(&self, message: Vec<u8>) -> Result<KeyPackageBytes, MessageError> {
         let sec_key = self.eth_secr.lock().await;
         let msg: Vec<u8> = decrypt_message(&message, *sec_key)?;
-        let key_package: KeyPackage = serde_json::from_slice(&msg)?;
+        let key_package = key_package_bytes_from_json(msg).map_err(MessageError::InvalidJson)?;
         Ok(key_package)
     }
 
@@ -125,9 +125,7 @@ mod tests {
     use std::str::FromStr;
 
     use alloy::signers::local::PrivateKeySigner;
-    use mls_crypto::openmls_provider::{MlsProvider, CIPHERSUITE};
-    use openmls::prelude::{BasicCredential, CredentialWithKey, KeyPackage};
-    use openmls_basic_credential::SignatureKeyPair;
+    use mls_crypto::{IdentityService, OpenMlsIdentityService};
 
     use crate::steward::GroupUpdateRequest;
     #[tokio::test]
@@ -138,22 +136,13 @@ mod tests {
             PrivateKeySigner::from_str(user_eth_priv_key).expect("Failed to create signer");
         let user_address = signer.address();
 
-        let ciphersuite = CIPHERSUITE;
-        let provider = MlsProvider::default();
+        let mut identity_service = OpenMlsIdentityService::new(user_address.as_slice())
+            .expect("Failed to create identity service");
+        let key_package_bytes = identity_service
+            .generate_key_package()
+            .expect("generate key package");
 
-        let credential = BasicCredential::new(user_address.as_slice().to_vec());
-        let signer = SignatureKeyPair::new(ciphersuite.signature_algorithm())
-            .expect("Error generating a signature key pair.");
-        let credential_with_key = CredentialWithKey {
-            credential: credential.into(),
-            signature_key: signer.public().into(),
-        };
-        let key_package_bundle = KeyPackage::builder()
-            .build(ciphersuite, &provider, &signer, credential_with_key)
-            .expect("Error building key package bundle.");
-        let key_package = key_package_bundle.key_package();
-
-        let proposal_add_member = GroupUpdateRequest::AddMember(Box::new(key_package.clone()));
+        let proposal_add_member = GroupUpdateRequest::AddMember(key_package_bytes);
         assert_eq!(
             proposal_add_member.to_string(),
             "Add Member: 0x70997970c51812dc3a010c7d01b50e0d17dc79c8\n"

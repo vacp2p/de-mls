@@ -1,20 +1,10 @@
 use alloy::signers::local::LocalSignerError;
-use openmls::group::WelcomeError;
-use openmls::{
-    framing::errors::MlsMessageError,
-    group::ProposeRemoveMemberError,
-    prelude::{
-        CommitToPendingProposalsError, CreateMessageError, MergeCommitError,
-        MergePendingCommitError, NewGroupError, ProcessMessageError, ProposeAddMemberError,
-    },
-};
-use openmls_rust_crypto::MemoryStorageError;
 use std::env::VarError;
 use std::num::ParseIntError;
 use std::string::FromUtf8Error;
 
 use ds::DeliveryServiceError;
-use mls_crypto::error::IdentityError;
+use mls_crypto::error::{IdentityError, MlsServiceError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum MessageError {
@@ -22,8 +12,6 @@ pub enum MessageError {
     InvalidSignature(#[from] libsecp256k1::Error),
     #[error("JSON processing error: {0}")]
     InvalidJson(#[from] serde_json::Error),
-    #[error("Failed to serialize or deserialize MLS message: {0}")]
-    InvalidMlsMessage(#[from] MlsMessageError),
     #[error("Invalid alloy signature: {0}")]
     InvalidAlloySignature(#[from] alloy::primitives::SignatureError),
     #[error("Mismatched length: expected {expect}, got {actual}")]
@@ -41,8 +29,8 @@ pub enum GroupError {
     StewardNotSet,
     #[error("MLS group not initialized")]
     MlsGroupNotSet,
-    #[error("Group still active")]
-    GroupStillActive,
+    #[error(transparent)]
+    MlsServiceError(#[from] MlsServiceError),
     #[error("Invalid state transition from {from} to {to}")]
     InvalidStateTransition { from: String, to: String },
     #[error("Empty proposals for current epoch")]
@@ -52,28 +40,6 @@ pub enum GroupError {
 
     #[error("Failed to decode hex address: {0}")]
     HexDecodeError(#[from] alloy::hex::FromHexError),
-    #[error("Unable to create MLS group: {0}")]
-    UnableToCreateGroup(#[from] NewGroupError<MemoryStorageError>),
-    #[error("Unable to merge pending commit in MLS group: {0}")]
-    UnableToMergePendingCommit(#[from] MergePendingCommitError<MemoryStorageError>),
-    #[error("Unable to merge staged commit in MLS group: {0}")]
-    UnableToMergeStagedCommit(#[from] MergeCommitError<MemoryStorageError>),
-    #[error("Unable to process message: {0}")]
-    InvalidProcessMessage(#[from] ProcessMessageError),
-    #[error("Unable to encrypt MLS message: {0}")]
-    UnableToEncryptMlsMessage(#[from] CreateMessageError),
-    #[error("Unable to create proposal to add members: {0}")]
-    UnableToCreateProposal(#[from] ProposeAddMemberError<MemoryStorageError>),
-    #[error("Unable to create proposal to remove members: {0}")]
-    UnableToCreateProposalToRemoveMembers(#[from] ProposeRemoveMemberError<MemoryStorageError>),
-    #[error("Unable to revert commit to pending proposals: {0}")]
-    UnableToRevertCommitToPendingProposals(
-        #[from] CommitToPendingProposalsError<MemoryStorageError>,
-    ),
-    #[error("Unable to store pending proposal: {0}")]
-    UnableToStorePendingProposal(#[from] MemoryStorageError),
-    #[error("Failed to serialize mls message: {0}")]
-    MlsMessageError(#[from] MlsMessageError),
     #[error("Failed to decode app message: {0}")]
     AppMessageDecodeError(#[from] prost::DecodeError),
 }
@@ -89,6 +55,8 @@ pub enum UserError {
     #[error(transparent)]
     MessageError(#[from] MessageError),
     #[error(transparent)]
+    MlsServiceError(#[from] MlsServiceError),
+    #[error(transparent)]
     ConsensusServiceError(#[from] hashgraph_like_consensus::error::ConsensusError),
 
     #[error("Group already exists")]
@@ -99,8 +67,6 @@ pub enum UserError {
     MlsGroupNotInitialized,
     #[error("Welcome message cannot be empty.")]
     EmptyWelcomeMessageError,
-    #[error("Failed to extract welcome message")]
-    FailedToExtractWelcomeMessage,
     #[error("Message verification failed")]
     MessageVerificationFailed,
     #[error("Invalid user action: {0}")]
@@ -114,18 +80,12 @@ pub enum UserError {
     #[error("Invalid app message type")]
     InvalidAppMessageType,
 
-    #[error("Failed to create staged join: {0}")]
-    MlsWelcomeError(#[from] WelcomeError<MemoryStorageError>),
     #[error("UTF-8 parsing error: {0}")]
     Utf8ParsingError(#[from] FromUtf8Error),
     #[error("Failed to parse signer: {0}")]
     SignerParsingError(#[from] LocalSignerError),
     #[error("Failed to decode welcome message: {0}")]
     WelcomeMessageDecodeError(#[from] prost::DecodeError),
-    #[error("Failed to deserialize mls message in: {0}")]
-    MlsMessageInDeserializeError(#[from] openmls::prelude::Error),
-    #[error("Failed to try into protocol message: {0}")]
-    TryIntoProtocolMessageError(#[from] openmls::framing::errors::ProtocolMessageError),
     #[error("Failed to get current time")]
     FailedToGetCurrentTime(#[from] std::time::SystemTimeError),
 }

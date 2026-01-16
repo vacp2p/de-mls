@@ -3,15 +3,12 @@ name = "mls_crypto"
 version = "1.0.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
-openmls = { version = "0.6.0"}
-openmls_basic_credential = "0.3.0"
-openmls_rust_crypto = "0.3.0"
-openmls_traits = "0.3.0"
+openmls = "0.7.1"
+openmls_basic_credential = "0.4.1"
+openmls_rust_crypto = "0.4.1"
+openmls_traits = "0.4.1"
 
-anyhow = "1.0.81"
 thiserror = "1.0.39"
 
 alloy = { version = "1.0.37", features = [
@@ -22,3 +19,4 @@ alloy = { version = "1.0.37", features = [
     "k256",
     "signer-local",
 ] }
+serde_json = "1.0.149"

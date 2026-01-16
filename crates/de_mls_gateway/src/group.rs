@@ -256,10 +256,7 @@ impl<DS: DeliveryService> Gateway<DS> {
             .iter()
             .map(|proposal| match proposal {
                 steward::GroupUpdateRequest::AddMember(kp) => {
-                    let address = format!(
-                        "0x{}",
-                        hex::encode(kp.leaf_node().credential().serialized_content())
-                    );
+                    let address = kp.address_hex();
                     ("Add Member".to_string(), address)
                 }
                 steward::GroupUpdateRequest::RemoveMember(id) => {

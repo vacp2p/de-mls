@@ -25,8 +25,7 @@ use hashgraph_like_consensus::{
     protos::consensus::v1::{Proposal, Vote},
     types::ConsensusEvent,
 };
-use mls_crypto::identity::normalize_wallet_address;
-use openmls::prelude::{KeyPackage, MlsMessageOut};
+use mls_crypto::{identity::normalize_wallet_address, KeyPackageBytes};
 use std::convert::TryFrom;
 
 use crate::{
@@ -98,9 +97,8 @@ impl GroupAnnouncement {
         Ok(verified)
     }
 
-    pub fn encrypt(&self, kp: KeyPackage) -> Result<Vec<u8>, MessageError> {
-        let key_package = serde_json::to_vec(&kp)?;
-        let encrypted = encrypt_message(&key_package, &self.eth_pub_key)?;
+    pub fn encrypt(&self, kp: KeyPackageBytes) -> Result<Vec<u8>, MessageError> {
+        let encrypted = encrypt_message(kp.as_bytes(), &self.eth_pub_key)?;
         Ok(encrypted)
     }
 }
@@ -115,17 +113,13 @@ impl From<GroupAnnouncement> for WelcomeMessage {
     }
 }
 
-impl TryFrom<MlsMessageOut> for WelcomeMessage {
-    type Error = MessageError;
-    fn try_from(mls_message: MlsMessageOut) -> Result<Self, MessageError> {
-        let mls_bytes = mls_message.to_bytes()?;
-        let invitation = InvitationToJoin {
-            mls_message_out_bytes: mls_bytes,
-        };
+pub fn invitation_from_bytes(mls_bytes: Vec<u8>) -> WelcomeMessage {
+    let invitation = InvitationToJoin {
+        mls_message_out_bytes: mls_bytes,
+    };
 
-        Ok(WelcomeMessage {
-            payload: Some(welcome_message::Payload::InvitationToJoin(invitation)),
-        })
+    WelcomeMessage {
+        payload: Some(welcome_message::Payload::InvitationToJoin(invitation)),
     }
 }
 
@@ -231,7 +225,7 @@ impl From<GroupUpdateRequest> for UpdateRequest {
         match group_update_request {
             GroupUpdateRequest::AddMember(kp) => UpdateRequest {
                 request_type: RequestType::AddMember as i32,
-                wallet_address: kp.leaf_node().credential().serialized_content().to_vec(),
+                wallet_address: kp.identity_bytes().to_vec(),
             },
             GroupUpdateRequest::RemoveMember(id) => UpdateRequest {
                 request_type: RequestType::RemoveMember as i32,

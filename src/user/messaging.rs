@@ -50,7 +50,7 @@ impl User {
         let msg_to_send = group
             .write()
             .await
-            .build_message(&self.provider, self.identity.signer(), &app_message)
+            .build_message(&self.identity_service, &app_message)
             .await?;
 
         Ok(msg_to_send)

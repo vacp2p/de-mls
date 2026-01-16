@@ -1,4 +1,5 @@
 use hashgraph_like_consensus::{session::ConsensusConfig, types::CreateProposalRequest};
+use mls_crypto::IdentityService;
 use prost::Message;
 use std::time::Duration;
 use tracing::{error, info};
@@ -174,7 +175,11 @@ impl User {
                 group.write().await.start_voting().await?;
 
                 // Get group members for expected voters count
-                let members = group.read().await.members_identity().await?;
+                let members = group
+                    .read()
+                    .await
+                    .members_identity(&self.identity_service)
+                    .await?;
                 let participant_ids: Vec<Vec<u8>> = members.into_iter().collect();
                 let expected_voters_count = participant_ids.len() as u32;
 
@@ -185,7 +190,7 @@ impl User {
                 let request = CreateProposalRequest::new(
                     uuid::Uuid::new_v4().to_string(),
                     payload,
-                    self.identity.identity_string().into(),
+                    self.identity_service.identity_string().into(),
                     expected_voters_count,
                     3600, // 1 hour expiration
                     true, // liveness criteria
@@ -279,7 +284,7 @@ impl User {
         let messages = group
             .write()
             .await
-            .create_batch_proposals_message(&self.provider, self.identity.signer())
+            .create_batch_proposals_message(&self.identity_service)
             .await?;
         info!("[apply_proposals]: Applied proposals for group {group_name}");
         Ok(messages)

@@ -1,4 +1,4 @@
-use openmls::prelude::{DeserializeBytes, MlsMessageBodyIn, MlsMessageIn};
+use mls_crypto::{IdentityService, MlsGroupService};
 use prost::Message;
 use tracing::{debug, error, info};
 
@@ -77,7 +77,7 @@ impl User {
                             return Err(UserError::MessageVerificationFailed);
                         }
 
-                        let new_kp = self.identity.generate_key_package(&self.provider)?;
+                        let new_kp = self.identity_service.generate_key_package()?;
                         let encrypted_key_package = group_announcement.encrypt(new_kp)?;
                         group.write().await.set_kp_shared(true);
 
@@ -108,7 +108,7 @@ impl User {
                         let request = group
                             .write()
                             .await
-                            .store_invite_proposal(Box::new(key_package))
+                            .store_invite_proposal(key_package)
                             .await?;
 
                         // Send notification to UI about the new proposal
@@ -130,25 +130,19 @@ impl User {
                         // Release the lock before calling join_group
                         drop(group);
 
-                        // Parse the MLS message to get the welcome
-                        let (mls_in, _) = MlsMessageIn::tls_deserialize_bytes(
-                            &invitation_to_join.mls_message_out_bytes,
+                        let hash_refs = self.identity_service.invite_new_member_hash_refs(
+                            invitation_to_join.mls_message_out_bytes.as_slice(),
                         )?;
-
-                        let welcome = match mls_in.extract() {
-                            MlsMessageBodyIn::Welcome(welcome) => welcome,
-                            _ => return Err(UserError::FailedToExtractWelcomeMessage),
-                        };
-
-                        if welcome.secrets().iter().any(|egs| {
-                            let hash_ref = egs.new_member().as_slice().to_vec();
-                            self.identity.is_key_package_exists(&hash_ref)
-                        }) {
-                            self.join_group(welcome).await?;
+                        if hash_refs
+                            .iter()
+                            .any(|hash_ref| self.identity_service.is_key_package_exists(hash_ref))
+                        {
+                            self.join_group(invitation_to_join.mls_message_out_bytes.clone())
+                                .await?;
                             let app_msg = ConversationMessage {
                                 message: format!(
                                     "User {} joined to the group",
-                                    self.identity.identity_string()
+                                    self.identity_service.identity_string()
                                 )
                                 .as_bytes()
                                 .to_vec(),
@@ -230,14 +224,11 @@ impl User {
         }
 
         // Fall back to MLS protocol message
-        let (mls_message_in, _) = MlsMessageIn::tls_deserialize_bytes(msg.payload.as_slice())?;
-        let mls_message = mls_message_in.try_into_protocol_message()?;
-
         let group = self.group_ref(group_name).await?;
         let res = group
             .write()
             .await
-            .process_protocol_msg(mls_message, &self.provider)
+            .process_protocol_msg(msg.payload.as_slice(), &self.identity_service)
             .await?;
 
         // Handle the result outside of any lock scope

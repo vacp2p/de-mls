@@ -1,4 +1,4 @@
-use alloy::{hex, primitives::Address, signers::local::PrivateKeySigner};
+use alloy::{hex, primitives::Address};
 use openmls::{credentials::CredentialWithKey, key_packages::KeyPackage, prelude::BasicCredential};
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_traits::{types::Ciphersuite, OpenMlsProvider};
@@ -14,7 +14,7 @@ pub struct Identity {
 }
 
 impl Identity {
-    pub fn new(
+    pub(crate) fn new(
         ciphersuite: Ciphersuite,
         provider: &MlsProvider,
         user_wallet_address: &[u8],
@@ -45,45 +45,19 @@ impl Identity {
         })
     }
 
-    /// Create an additional key package using the credential_with_key/signer bound to this identity
-    pub fn generate_key_package(
-        &mut self,
-        crypto: &MlsProvider,
-    ) -> Result<KeyPackage, IdentityError> {
-        let key_package_bundle = KeyPackage::builder().build(
-            CIPHERSUITE,
-            crypto,
-            &self.signer,
-            self.credential_with_key.clone(),
-        )?;
-        let key_package = key_package_bundle.key_package();
-        let kp = key_package.hash_ref(crypto.crypto())?;
-        self.kp.insert(kp.as_slice().to_vec(), key_package.clone());
-        Ok(key_package.clone())
-    }
-
-    /// Get the plain identity as byte vector.
-    pub fn identity(&self) -> &[u8] {
-        self.credential_with_key.credential.serialized_content()
-    }
-
-    pub fn identity_string(&self) -> String {
+    pub(crate) fn identity_string(&self) -> String {
         Address::from_slice(self.credential_with_key.credential.serialized_content()).to_string()
     }
 
-    pub fn signer(&self) -> &SignatureKeyPair {
+    pub(crate) fn signer(&self) -> &SignatureKeyPair {
         &self.signer
     }
 
-    pub fn credential_with_key(&self) -> CredentialWithKey {
+    pub(crate) fn credential_with_key(&self) -> CredentialWithKey {
         self.credential_with_key.clone()
     }
 
-    pub fn signature_key(&self) -> Vec<u8> {
-        self.credential_with_key.signature_key.as_slice().to_vec()
-    }
-
-    pub fn is_key_package_exists(&self, kp_hash_ref: &[u8]) -> bool {
+    pub(crate) fn is_key_package_exists(&self, kp_hash_ref: &[u8]) -> bool {
         self.kp.contains_key(kp_hash_ref)
     }
 }
@@ -92,15 +66,6 @@ impl Display for Identity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.identity_string())
     }
-}
-
-pub fn random_identity() -> Result<Identity, IdentityError> {
-    let signer = PrivateKeySigner::random();
-    let user_address = signer.address();
-
-    let crypto = MlsProvider::default();
-    let id = Identity::new(CIPHERSUITE, &crypto, user_address.as_slice())?;
-    Ok(id)
 }
 
 /// Validates and normalizes Ethereum-style wallet addresses.
