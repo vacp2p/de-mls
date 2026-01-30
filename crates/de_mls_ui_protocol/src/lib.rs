@@ -4,7 +4,7 @@ pub mod v1 {
     use serde::{Deserialize, Serialize};
 
     use de_mls::{
-        message::MessageType,
+        core::MessageType,
         protos::de_mls::messages::v1::{
             BanRequest, ConversationMessage, ProposalAdded, VotePayload,
         },

@@ -59,7 +59,7 @@ impl From<WakuMessage> for InboundPacket {
             subtopic: msg.content_topic.content_topic_name.to_string(),
             group_id: msg.content_topic.application_name.to_string(),
             app_id: msg.meta.clone(),
-            timestamp: Some(msg.timestamp as i64),
+            timestamp: msg.timestamp as i64,
         }
     }
 }

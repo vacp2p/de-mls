@@ -9,8 +9,8 @@ use std::sync::{
 };
 
 use de_mls::{
-    bootstrap_core_from_env,
-    message::convert_group_requests_to_display,
+    app::bootstrap_core_from_env,
+    core::convert_group_requests_to_display,
     protos::de_mls::messages::v1::{ConversationMessage, Outcome, VotePayload},
 };
 use de_mls_gateway::GATEWAY;

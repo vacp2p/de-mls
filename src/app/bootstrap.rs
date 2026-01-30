@@ -1,18 +1,64 @@
 // de_mls/src/bootstrap.rs
-use std::sync::Arc;
-use tokio::sync::broadcast;
-use tokio_util::sync::CancellationToken;
-use tracing::info;
-
+use crate::{
+    app::{group_registry::GroupRegistry, User, UserError},
+    core::DefaultProvider,
+};
+use ds::{topic_filter::TopicFilter, DeliveryServiceError};
 use ds::{
     transport::{DeliveryService, InboundPacket},
     waku::{WakuConfig, WakuDeliveryService},
 };
+use hashgraph_like_consensus::service::DefaultConsensusService;
+use std::env::VarError;
+use std::num::ParseIntError;
+use std::sync::Arc;
+use tokio::sync::broadcast;
+use tokio::sync::{broadcast::Sender, RwLock};
+use tokio_util::sync::CancellationToken;
+use tracing::info;
 
-use crate::{
-    error::BootstrapError,
-    user_app_instance::{AppState, CoreCtx},
-};
+pub struct AppState<DS: DeliveryService> {
+    pub delivery: DS,
+    pub pubsub: Sender<InboundPacket>,
+}
+
+#[derive(Clone)]
+pub struct CoreCtx<DS: DeliveryService> {
+    pub app_state: Arc<AppState<DS>>,
+    pub groups: Arc<GroupRegistry>,
+    pub topics: Arc<TopicFilter>,
+    pub consensus: DefaultConsensusService,
+}
+
+impl<DS: DeliveryService> CoreCtx<DS> {
+    pub fn new(app_state: Arc<AppState<DS>>) -> Self {
+        Self {
+            app_state,
+            groups: Arc::new(GroupRegistry::new()),
+            topics: Arc::new(TopicFilter::new()),
+            consensus: DefaultConsensusService::new_with_max_sessions(10),
+        }
+    }
+}
+
+/// Create a new user instance using the default provider.
+///
+/// Returns an `Arc<RwLock<User<DefaultProvider>>>` ready for use with the gateway.
+///
+/// Note: Consensus event forwarding is NOT set up here — the caller (gateway)
+/// is responsible for subscribing to consensus events and calling
+/// `user.handle_consensus_event()`, since it needs access to the delivery
+/// service to send outbound packets.
+pub async fn create_user_instance(
+    eth_private_key: String,
+    consensus_service: &DefaultConsensusService,
+) -> Result<Arc<RwLock<User<DefaultProvider>>>, UserError> {
+    let user = User::with_private_key(
+        eth_private_key.as_str(),
+        Arc::new(consensus_service.clone()),
+    )?;
+    Ok(Arc::new(RwLock::new(user)))
+}
 
 #[derive(Clone, Debug)]
 pub struct BootstrapConfig {
@@ -92,4 +138,16 @@ pub async fn bootstrap_core_from_env() -> Result<Bootstrap<WakuDeliveryService>,
         .collect::<Vec<_>>();
 
     bootstrap_core(BootstrapConfig { node_port, peers }).await
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BootstrapError {
+    #[error("Failed to read env var {0}: {1}")]
+    EnvVar(&'static str, #[source] VarError),
+
+    #[error("Failed to parse int: {0}")]
+    ParseInt(#[from] ParseIntError),
+
+    #[error(transparent)]
+    DeliveryServiceError(#[from] DeliveryServiceError),
 }

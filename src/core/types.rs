@@ -1,42 +1,17 @@
-//! This module contains the messages that are used to communicate between inside the application
-//! The high level message is a [`WakuMessage`](waku_bindings::WakuMessage)
-//! Inside the [`WakuMessage`](waku_bindings::WakuMessage) we have a [`ContentTopic`](waku_bindings::WakuContentTopic) and a payload
-//! The [`ContentTopic`](waku_bindings::WakuContentTopic) is used to identify the type of message and the payload is the actual message
-//! Based on the [`ContentTopic`](waku_bindings::WakuContentTopic) we distinguish between:
-//!  - [`WelcomeMessage`] which includes next message types:
-//!    - [`GroupAnnouncement`]
-//!         - `GroupAnnouncement {
-//!             eth_pub_key: Vec<u8>,
-//!             signature: Vec<u8>,
-//!           }`
-//!    - [`UserKeyPackage`]
-//!         - `Encrypted KeyPackage: Vec<u8>`
-//!    - [`InvitationToJoin`]
-//!         - `Serialized MlsMessageOut: Vec<u8>`
-//!  - [`AppMessage`]
-//!    - [`ConversationMessage`]
-//!    - [`BatchProposalsMessage`]
-//!    - [`BanRequest`]
-//!    - [`VotePayload`]
-//!    - [`UserVote`]
-//!
-use alloy::hex;
+//! Core types for group operations.
+
+use alloy::primitives::Address;
 use hashgraph_like_consensus::{
     protos::consensus::v1::{Proposal, Vote},
     types::ConsensusEvent,
 };
 use mls_crypto::{identity::normalize_wallet_address, KeyPackageBytes};
-use std::convert::TryFrom;
+use std::{fmt::Display, str::FromStr};
 
-use crate::{
-    encrypt_message,
-    protos::de_mls::messages::v1::{
-        app_message, welcome_message, AppMessage, BanRequest, BatchProposalsMessage,
-        ConversationMessage, GroupAnnouncement, InvitationToJoin, Outcome, ProposalAdded,
-        RequestType, UpdateRequest, UserKeyPackage, UserVote, VotePayload, WelcomeMessage,
-    },
-    steward::GroupUpdateRequest,
-    verify_message, MessageError,
+use crate::protos::de_mls::messages::v1::{
+    app_message, welcome_message, AppMessage, BanRequest, BatchProposalsMessage,
+    ConversationMessage, InvitationToJoin, Outcome, ProposalAdded, RequestType, UpdateRequest,
+    UserKeyPackage, UserVote, VotePayload, WelcomeMessage,
 };
 
 // Message type constants for consistency and type safety
@@ -83,35 +58,70 @@ impl MessageType for UpdateRequest {
     }
 }
 
+/// Represents a group update request (add or remove member).
+#[derive(Clone, Debug, PartialEq)]
+pub enum GroupUpdateRequest {
+    /// Add a member using their key package.
+    AddMember(KeyPackageBytes),
+    /// Remove a member by their identity (wallet address).
+    RemoveMember(String),
+}
+
+impl Display for GroupUpdateRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GroupUpdateRequest::AddMember(kp) => {
+                let id = Address::from_slice(kp.identity_bytes());
+                write!(f, "Add Member: {id:#?}")
+            }
+            GroupUpdateRequest::RemoveMember(id) => {
+                let id = Address::from_str(id).unwrap_or_default();
+                write!(f, "Remove Member: {id:#?}")
+            }
+        }
+    }
+}
+
+impl From<GroupUpdateRequest> for UpdateRequest {
+    fn from(request: GroupUpdateRequest) -> Self {
+        match request {
+            GroupUpdateRequest::AddMember(kp) => UpdateRequest {
+                request_type: RequestType::AddMember as i32,
+                wallet_address: kp.identity_bytes().to_vec(),
+            },
+            GroupUpdateRequest::RemoveMember(identity) => {
+                let wallet_bytes =
+                    alloy::hex::decode(identity.strip_prefix("0x").unwrap_or(&identity))
+                        .unwrap_or_default();
+                UpdateRequest {
+                    request_type: RequestType::RemoveMember as i32,
+                    wallet_address: wallet_bytes,
+                }
+            }
+        }
+    }
+}
+
+/// Result of processing an inbound packet.
+#[derive(Debug, Clone)]
+pub enum ProcessResult {
+    /// An application message was received.
+    AppMessage(AppMessage),
+    /// A consensus proposal was received.
+    Proposal(hashgraph_like_consensus::protos::consensus::v1::Proposal),
+    /// A consensus vote was received.
+    Vote(hashgraph_like_consensus::protos::consensus::v1::Vote),
+    /// The user should leave the group.
+    LeaveGroup,
+    /// A member proposal was added (for stewards receiving key packages).
+    MemberProposalAdded(UpdateRequest),
+    /// The user joined the group successfully.
+    JoinedGroup(String),
+    /// No action needed.
+    Noop,
+}
+
 // WELCOME MESSAGE SUBTOPIC
-impl GroupAnnouncement {
-    pub fn new(pub_key: Vec<u8>, signature: Vec<u8>) -> Self {
-        GroupAnnouncement {
-            eth_pub_key: pub_key,
-            signature,
-        }
-    }
-
-    pub fn verify(&self) -> Result<bool, MessageError> {
-        let verified = verify_message(&self.eth_pub_key, &self.signature, &self.eth_pub_key)?;
-        Ok(verified)
-    }
-
-    pub fn encrypt(&self, kp: KeyPackageBytes) -> Result<Vec<u8>, MessageError> {
-        let encrypted = encrypt_message(kp.as_bytes(), &self.eth_pub_key)?;
-        Ok(encrypted)
-    }
-}
-
-impl From<GroupAnnouncement> for WelcomeMessage {
-    fn from(group_announcement: GroupAnnouncement) -> Self {
-        WelcomeMessage {
-            payload: Some(welcome_message::Payload::GroupAnnouncement(
-                group_announcement,
-            )),
-        }
-    }
-}
 
 pub fn invitation_from_bytes(mls_bytes: Vec<u8>) -> WelcomeMessage {
     let invitation = InvitationToJoin {
@@ -216,22 +226,6 @@ impl From<ConsensusEvent> for Outcome {
                 proposal_id: _,
                 timestamp: _,
             } => Outcome::Unspecified,
-        }
-    }
-}
-
-impl From<GroupUpdateRequest> for UpdateRequest {
-    fn from(group_update_request: GroupUpdateRequest) -> Self {
-        match group_update_request {
-            GroupUpdateRequest::AddMember(kp) => UpdateRequest {
-                request_type: RequestType::AddMember as i32,
-                wallet_address: kp.identity_bytes().to_vec(),
-            },
-            GroupUpdateRequest::RemoveMember(id) => UpdateRequest {
-                request_type: RequestType::RemoveMember as i32,
-                wallet_address: hex::decode(id.strip_prefix("0x").unwrap_or(&id))
-                    .unwrap_or_else(|_| id.into_bytes()),
-            },
         }
     }
 }

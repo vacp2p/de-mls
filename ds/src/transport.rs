@@ -33,8 +33,7 @@ pub struct InboundPacket {
     pub group_id: String,
     /// Transport-provided app instance id / metadata (used for self-message filtering).
     pub app_id: Vec<u8>,
-    /// Optional transport timestamp (for logging/diagnostics).
-    pub timestamp: Option<i64>,
+    pub timestamp: i64,
 }
 
 impl InboundPacket {
@@ -43,7 +42,7 @@ impl InboundPacket {
         subtopic: &str,
         group_id: &str,
         app_id: Vec<u8>,
-        timestamp: Option<i64>,
+        timestamp: i64,
     ) -> Self {
         Self {
             payload,

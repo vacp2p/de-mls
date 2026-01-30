@@ -10,8 +10,8 @@ use futures::channel::mpsc::{unbounded, UnboundedReceiver};
 use futures::StreamExt;
 use std::sync::Arc;
 
+use de_mls::app::CoreCtx;
 use de_mls::protos::de_mls::messages::v1::ConversationMessage;
-use de_mls::user_app_instance::CoreCtx;
 use de_mls_gateway::{init_core, GATEWAY};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 use ds::waku::WakuDeliveryService;

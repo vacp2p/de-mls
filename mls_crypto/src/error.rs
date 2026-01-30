@@ -11,6 +11,8 @@ use openmls_traits::types::CryptoError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum IdentityError {
+    #[error("Identity not found")]
+    IdentityNotFound,
     #[error(transparent)]
     UnableToCreateKeyPackage(#[from] KeyPackageNewError),
     #[error("Invalid hash reference: {0}")]

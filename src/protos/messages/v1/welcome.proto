@@ -8,19 +8,13 @@ package de_mls.messages.v1;
 // message types in its `payload` field.
 message WelcomeMessage {
   oneof payload {
-    GroupAnnouncement group_announcement = 1;
-    UserKeyPackage user_key_package = 2;
-    InvitationToJoin invitation_to_join = 3;
+    UserKeyPackage user_key_package = 1;
+    InvitationToJoin invitation_to_join = 2;
   }
 }
 
-message GroupAnnouncement {
-  bytes eth_pub_key = 1;
-  bytes signature = 2;
-}
-
 message UserKeyPackage {
-  bytes encrypt_kp = 1;
+  bytes key_package_bytes = 1;
 }
 
 message InvitationToJoin {

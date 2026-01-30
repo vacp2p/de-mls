@@ -3,27 +3,30 @@
 //! Responsibilities:
 //! - Own a single event pipe UI <- gateway (`AppEvent`)
 //! - Provide a command entrypoint UI -> gateway (`send(AppCmd)`)
-//! - Hold references to the core context (`CoreCtx`) and current user actor
+//! - Hold references to the core context (`CoreCtx`) and current user
 //! - Offer small helper methods (login_with_private_key, etc.)
 use ds::{waku::WakuDeliveryService, DeliveryService};
 use futures::{
     channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
     StreamExt,
 };
-use kameo::actor::ActorRef;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::sync::{atomic::AtomicBool, Arc};
 use tokio::sync::Mutex;
 
 use de_mls::{
-    user::User,
-    user_app_instance::{create_user_instance, CoreCtx},
+    app::{create_user_instance, CoreCtx, User},
+    core::DefaultProvider,
 };
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 
 mod forwarder;
 mod group;
+
+/// Type alias for the user reference stored in the gateway.
+type UserRef = Arc<tokio::sync::RwLock<User<DefaultProvider>>>;
+
 // Global, process-wide gateway instance
 pub static GATEWAY: Lazy<Gateway<WakuDeliveryService>> = Lazy::new(Gateway::new);
 
@@ -34,23 +37,19 @@ pub fn init_core(core: Arc<CoreCtx<WakuDeliveryService>>) {
 
 pub struct Gateway<DS: DeliveryService> {
     // UI events (gateway -> UI)
-    // A channel that sends AppEvents to the UI.
     evt_tx: UnboundedSender<AppEvent>,
-    // A channel that receives AppEvents from the UI.
     evt_rx: Mutex<UnboundedReceiver<AppEvent>>,
 
     // UI commands (UI -> gateway)
-    // A channel that sends AppCommands to the gateway (ui_bridge registers the sender here).
-    // It gives the UI an async door to submit AppCmds back to the gateway (`Gateway::send(AppCmd)`).
     cmd_tx: RwLock<Option<UnboundedSender<AppCmd>>>,
 
-    // It anchors the shared references to consensus, topics, app_state, etc.
-    core: RwLock<Option<Arc<CoreCtx<DS>>>>, // set once during startup
+    // Core context (set once during startup)
+    core: RwLock<Option<Arc<CoreCtx<DS>>>>,
 
-    // Current logged-in user actor
-    user: RwLock<Option<ActorRef<User>>>,
-    // Flag that guards against spawning delivery service forwarder more than once.
-    // It's initialized to false and set to true after the first successful login.
+    // Current logged-in user
+    user: RwLock<Option<UserRef>>,
+
+    // Guards against spawning forwarders more than once
     started: AtomicBool,
 }
 
@@ -108,28 +107,25 @@ impl<DS: DeliveryService> Gateway<DS> {
 
     // ─────────────────────────── High-level helpers ───────────────────────────
 
-    /// Create the user actor with a private key.
+    /// Create the user engine with a private key.
     /// Returns a derived display name (e.g., address string).
     pub async fn login_with_private_key(&self, private_key: String) -> anyhow::Result<String> {
         let core = self.core();
         let consensus_service = core.consensus.clone();
 
-        let (user_ref, user_address) = create_user_instance(
-            private_key.clone(),
-            core.app_state.clone(),
-            &consensus_service,
-        )
-        .await?;
+        let user_ref = create_user_instance(private_key.clone(), &consensus_service).await?;
+
+        let user_address = user_ref.read().await.identity_string();
 
         *self.user.write() = Some(user_ref.clone());
 
-        self.spawn_waku_forwarder(core.clone(), user_ref.clone());
-        self.spawn_consensus_forwarder(core.clone())?;
+        self.spawn_delivery_service_forwarder(core.clone(), user_ref.clone());
+        self.spawn_consensus_forwarder(core.clone(), user_ref.clone());
         Ok(user_address)
     }
 
     /// Get a copy of the current user ref (if logged in).
-    pub fn user(&self) -> anyhow::Result<ActorRef<User>> {
+    pub fn user(&self) -> anyhow::Result<UserRef> {
         self.user
             .read()
             .clone()
