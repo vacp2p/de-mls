@@ -21,8 +21,7 @@ message AppMessage {
 
 message BanRequest {
   string user_to_ban = 1;
-  string requester = 2;
-  string group_name = 3;
+  string group_name = 2;
 }
 
 message ConversationMessage {
@@ -47,13 +46,23 @@ message UserVote {
 // Proposal added message is sent to the UI when a new proposal is added to the group.
 message ProposalAdded {
   string group_id = 1;
-  UpdateRequest request = 2;
+  GroupUpdateRequest request = 2;
 }
 
-enum RequestType {
-  REQUEST_TYPE_UNSPECIFIED = 0;
-  REQUEST_TYPE_ADD_MEMBER = 1;
-  REQUEST_TYPE_REMOVE_MEMBER = 2;
+message GroupUpdateRequest {
+  oneof payload {
+    InviteMember invite_member = 1;
+    RemoveMember remove_member = 2;
+  }
+}
+
+message InviteMember {
+  bytes key_package_bytes = 1;
+  bytes identity = 2;
+}
+
+message RemoveMember {
+  bytes identity = 1;
 }
 
 enum Outcome {
@@ -62,25 +71,9 @@ enum Outcome {
   OUTCOME_REJECTED = 2;
 }
 
-message ProposalResult {
-  string group_id     = 31;
-  uint32 proposal_id  = 32;
-  Outcome outcome     = 33;
-  uint64 decided_at_ms = 34;
-}
-
 message VotePayload {
   string group_id = 41;
   uint32 proposal_id = 42;
-  repeated UpdateRequest group_requests = 43;  // Structured group update requests
+  bytes payload = 43; 
   uint64 timestamp = 44;
 } 
-
-message UpdateRequest {
-  RequestType request_type = 51;
-  bytes wallet_address = 52;
-}
-
-message UpdateRequestList {
-  repeated UpdateRequest update_requests = 53;
-}

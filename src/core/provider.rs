@@ -1,8 +1,7 @@
 //! Service provider trait for DE-MLS.
 //!
 //! The [`DeMlsProvider`] trait bundles all configurable services needed
-//! by the DE-MLS system into a single type parameter. This avoids threading
-//! five separate generic parameters throughout the codebase.
+//! by the DE-MLS system into a single type parameter.
 //!
 //! # Example
 //!

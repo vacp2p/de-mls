@@ -10,7 +10,7 @@ use std::sync::{
 
 use de_mls::{
     app::bootstrap_core_from_env,
-    core::convert_group_requests_to_display,
+    core::convert_group_request_to_display,
     protos::de_mls::messages::v1::{ConversationMessage, Outcome, VotePayload},
 };
 use de_mls_gateway::GATEWAY;
@@ -893,6 +893,11 @@ fn ConsensusSection() -> Element {
         .clone()
         .filter(|p| Some(p.group_id.as_str()) == opened.as_deref());
 
+    let pending_display = pending.as_ref().map(|v| {
+        let (action, id) = convert_group_request_to_display(v.payload.clone());
+        (v.proposal_id, action, id)
+    });
+
     rsx! {
         div { class: "panel consensus",
             h2 { "Consensus" }
@@ -928,17 +933,15 @@ fn ConsensusSection() -> Element {
                 // Proposal for Vote section
                 div { class: "consensus-section",
                     h3 { "Proposal for Vote" }
-                    if let Some(v) = pending {
+                    if let Some((proposal_id, action, id)) = pending_display {
                         div { class: "proposals-window",
                             div { class: "proposal-item proposal-id",
                                 span { class: "action", "Proposal ID:" }
-                                span { class: "value", "{v.proposal_id}" }
+                                span { class: "value", "{proposal_id}" }
                             }
-                            for (action, id) in convert_group_requests_to_display(&v.group_requests) {
-                                div { class: "proposal-item",
-                                    span { class: "action", "{action}:" }
-                                    span { class: "value", "{id}" }
-                                }
+                            div { class: "proposal-item",
+                                span { class: "action", "{action}:" }
+                                span { class: "value", "{id}" }
                             }
                         }
                         div { class: "vote-actions",

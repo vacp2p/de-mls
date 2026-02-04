@@ -1,13 +1,12 @@
 //! GroupHandle - per-group state container.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::protos::de_mls::messages::v1::{RequestType, UpdateRequest};
-use mls_crypto::{normalize_wallet_address_str, MlsGroupHandle};
-
-use super::steward::Steward;
-use super::types::GroupUpdateRequest;
+use crate::core::group_update_handle::{CurrentEpochProposals, ProposalId};
+use crate::protos::de_mls::messages::v1::GroupUpdateRequest;
+use mls_crypto::MlsGroupHandle;
 
 /// Handle for a single MLS group.
 ///
@@ -30,7 +29,9 @@ pub struct GroupHandle {
     /// Unique application instance ID for message deduplication.
     app_id: Vec<u8>,
     /// Optional steward for this group (per-group, can change dynamically).
-    steward: Option<Steward>,
+    steward: bool,
+    /// Proposal for current steward epoch
+    proposals: CurrentEpochProposals,
 }
 
 impl GroupHandle {
@@ -43,7 +44,8 @@ impl GroupHandle {
             group_name: group_name.to_string(),
             mls_handle: None,
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
-            steward: None,
+            steward: false,
+            proposals: CurrentEpochProposals::new(),
         }
     }
 
@@ -57,7 +59,8 @@ impl GroupHandle {
             group_name: group_name.to_string(),
             mls_handle: Some(Arc::new(Mutex::new(mls_handle))),
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
-            steward: Some(Steward::new()),
+            steward: true,
+            proposals: CurrentEpochProposals::new(),
         }
     }
 
@@ -78,7 +81,7 @@ impl GroupHandle {
 
     /// Check if this group has a steward.
     pub fn is_steward(&self) -> bool {
-        self.steward.is_some()
+        self.steward
     }
 
     /// Check if the MLS group is initialized.
@@ -98,120 +101,51 @@ impl GroupHandle {
 
     /// Become the steward of this group.
     pub fn become_steward(&mut self) {
-        if self.steward.is_none() {
-            self.steward = Some(Steward::new());
-        }
+        self.steward = true;
     }
 
     /// Resign as steward of this group.
     pub fn resign_steward(&mut self) {
-        self.steward = None;
+        self.steward = false;
     }
 
-    /// Get a reference to the steward (if any).
-    pub fn steward(&self) -> Option<&Steward> {
-        self.steward.as_ref()
-    }
+    // ─────────────────────────── Proposal Handle Operations ───────────────────────────
 
-    /// Get a mutable reference to the steward (if any).
-    pub fn steward_mut(&mut self) -> Option<&mut Steward> {
-        self.steward.as_mut()
-    }
-
-    // ─────────────────────────── Steward Operations ───────────────────────────
-
-    /// Store an add member proposal (steward only).
-    ///
-    /// # Arguments
-    /// * `key_package` - The key package of the member to add
-    ///
-    /// # Returns
-    /// The update request if steward, None otherwise.
-    pub fn store_add_proposal(
-        &mut self,
-        key_package: mls_crypto::KeyPackageBytes,
-    ) -> Option<UpdateRequest> {
-        if let Some(steward) = &mut self.steward {
-            let wallet_bytes = key_package.identity_bytes().to_vec();
-            steward.add_proposal(GroupUpdateRequest::AddMember(key_package));
-            Some(UpdateRequest {
-                request_type: RequestType::AddMember as i32,
-                wallet_address: wallet_bytes,
-            })
-        } else {
-            None
-        }
-    }
-
-    /// Store a remove member proposal (steward only).
-    ///
-    /// # Arguments
-    /// * `identity` - The wallet address of the member to remove
-    ///
-    /// # Returns
-    /// The update request if steward, None otherwise.
-    pub fn store_remove_proposal(&mut self, identity: String) -> Option<UpdateRequest> {
-        if let Some(steward) = &mut self.steward {
-            let normalized =
-                normalize_wallet_address_str(&identity).unwrap_or_else(|_| identity.clone());
-            let wallet_bytes =
-                alloy::hex::decode(normalized.strip_prefix("0x").unwrap_or(&normalized))
-                    .unwrap_or_default();
-
-            steward.add_proposal(GroupUpdateRequest::RemoveMember(normalized));
-            Some(UpdateRequest {
-                request_type: RequestType::RemoveMember as i32,
-                wallet_address: wallet_bytes,
-            })
-        } else {
-            None
-        }
+    pub fn is_owner_of_proposal(&self, proposal_id: ProposalId) -> bool {
+        self.proposals.is_owner_of_proposal(proposal_id)
     }
 
     /// Get the count of approved proposals.
     pub fn approved_proposals_count(&self) -> usize {
-        self.steward
-            .as_ref()
-            .map(|s| s.approved_proposals_count())
-            .unwrap_or(0)
+        self.proposals.approved_proposals_count()
     }
 
     /// Get the approved proposals.
-    pub fn approved_proposals(&self) -> Vec<GroupUpdateRequest> {
-        self.steward
-            .as_ref()
-            .map(|s| s.approved_proposals())
-            .unwrap_or_default()
+    pub fn approved_proposals(&self) -> HashMap<ProposalId, GroupUpdateRequest> {
+        self.proposals.approved_proposals()
     }
 
-    /// Start a new voting epoch.
-    ///
-    /// # Returns
-    /// The number of proposals moved to voting, or None if not steward.
-    pub fn start_voting_epoch(&mut self) -> Option<usize> {
-        self.steward.as_mut().map(|s| s.start_voting_epoch())
+    pub fn mark_proposal_as_approved(&mut self, proposal_id: ProposalId) {
+        self.proposals.move_proposal_to_approved(proposal_id);
     }
 
-    /// Get the count of voting proposals.
-    pub fn voting_proposals_count(&self) -> usize {
-        self.steward
-            .as_ref()
-            .map(|s| s.voting_proposals_count())
-            .unwrap_or(0)
+    pub fn mark_proposal_as_rejected(&mut self, proposal_id: ProposalId) {
+        self.proposals.remove_voting_proposal(proposal_id);
     }
 
-    /// Get the voting proposals.
-    pub fn voting_proposals(&self) -> Vec<GroupUpdateRequest> {
-        self.steward
-            .as_ref()
-            .map(|s| s.voting_proposals())
-            .unwrap_or_default()
+    pub fn store_voting_proposal(&mut self, proposal_id: ProposalId, proposal: GroupUpdateRequest) {
+        self.proposals.add_voting_proposal(proposal_id, proposal);
     }
 
-    /// Complete voting and clear voting proposals.
-    pub fn complete_voting(&mut self) {
-        if let Some(steward) = &mut self.steward {
-            steward.complete_voting();
-        }
+    pub fn insert_approved_proposal(
+        &mut self,
+        proposal_id: ProposalId,
+        proposal: GroupUpdateRequest,
+    ) {
+        self.proposals.add_proposal(proposal_id, proposal);
+    }
+
+    pub fn clear_approved_proposals(&mut self) {
+        self.proposals.clear_approved_proposals();
     }
 }

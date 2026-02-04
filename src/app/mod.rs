@@ -22,18 +22,15 @@
 //! ```
 
 mod bootstrap;
-mod consensus_handler;
 mod group_registry;
-mod pending_batches;
+mod scheduler;
 mod state_machine;
 mod user;
 
 pub use bootstrap::{
-    bootstrap_core, bootstrap_core_from_env, create_user_instance, AppState, Bootstrap,
-    BootstrapConfig, CoreCtx,
+    bootstrap_core, bootstrap_core_from_env, AppState, Bootstrap, BootstrapConfig, CoreCtx,
 };
-pub use consensus_handler::ConsensusHandler;
 pub use group_registry::GroupRegistry;
-pub use pending_batches::PendingBatches;
+pub use scheduler::{IntervalScheduler, StewardScheduler, StewardSchedulerConfig};
 pub use state_machine::{GroupState, GroupStateMachine};
-pub use user::{User, UserAction, UserError};
+pub use user::{User, UserError};

@@ -4,8 +4,8 @@
 //! All functions operate on a `GroupHandle` and use traits for
 //! MLS operations and event handling.
 
-use alloy::hex;
 use prost::Message;
+use std::collections::HashMap;
 use tracing::info;
 
 use ds::{transport::OutboundPacket, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
@@ -16,11 +16,12 @@ use mls_crypto::{
 
 use super::error::CoreError;
 use super::group_handle::GroupHandle;
-use super::types::{GroupUpdateRequest, ProcessResult};
+use super::types::ProcessResult;
 use crate::core::types::invitation_from_bytes;
+use crate::core::ProposalId;
 use crate::protos::de_mls::messages::v1::{
-    app_message, welcome_message, AppMessage, BatchProposalsMessage, UpdateRequest, UserKeyPackage,
-    WelcomeMessage,
+    app_message, group_update_request, welcome_message, AppMessage, BatchProposalsMessage,
+    GroupUpdateRequest, InviteMember, UserKeyPackage, WelcomeMessage,
 };
 
 // ─────────────────────────── Group Lifecycle ───────────────────────────
@@ -180,7 +181,7 @@ where
     match subtopic {
         WELCOME_SUBTOPIC => process_welcome_subtopic(handle, payload, mls, identity).await,
         APP_MSG_SUBTOPIC => process_app_subtopic(handle, payload, mls).await,
-        _ => Ok(ProcessResult::Noop),
+        _ => Err(CoreError::InvalidSubtopic(subtopic.to_string())),
     }
 }
 
@@ -199,15 +200,20 @@ where
         Some(welcome_message::Payload::UserKeyPackage(user_kp)) => {
             if handle.is_steward() {
                 info!(
-                    "[process_welcome_subtopic]: Steward received key package for group {}",
+                    "Steward received key package for group {}",
                     handle.group_name()
                 );
-                let key_package =
+                let (key_package_bytes, identity) =
                     mls_crypto::key_package_bytes_from_json(user_kp.key_package_bytes)?;
 
-                if let Some(request) = handle.store_add_proposal(key_package) {
-                    return Ok(ProcessResult::MemberProposalAdded(request));
-                }
+                let gur = GroupUpdateRequest {
+                    payload: Some(group_update_request::Payload::InviteMember(InviteMember {
+                        key_package_bytes,
+                        identity,
+                    })),
+                };
+
+                return Ok(ProcessResult::GetUpdateRequest(gur));
             }
             Ok(ProcessResult::Noop)
         }
@@ -267,37 +273,10 @@ async fn process_app_subtopic(
 
     match res {
         MlsProcessResult::Application(app_bytes) => {
-            process_application_message(handle, &app_bytes).await
+            AppMessage::decode(app_bytes.as_ref())?.try_into()
         }
         MlsProcessResult::LeaveGroup => Ok(ProcessResult::LeaveGroup),
         MlsProcessResult::Noop => Ok(ProcessResult::Noop),
-    }
-}
-
-async fn process_application_message(
-    handle: &mut GroupHandle,
-    message_bytes: &[u8],
-) -> Result<ProcessResult, CoreError> {
-    let app_msg = AppMessage::decode(message_bytes)?;
-
-    match &app_msg.payload {
-        Some(app_message::Payload::ConversationMessage(_)) => {
-            Ok(ProcessResult::AppMessage(app_msg))
-        }
-        Some(app_message::Payload::Proposal(proposal)) => {
-            Ok(ProcessResult::Proposal(proposal.clone()))
-        }
-        Some(app_message::Payload::Vote(vote)) => Ok(ProcessResult::Vote(vote.clone())),
-        Some(app_message::Payload::BanRequest(ban_request)) => {
-            // If steward, auto-add remove proposal
-            if handle.is_steward() {
-                let remove_request = handle.store_remove_proposal(ban_request.user_to_ban.clone());
-                Ok(ProcessResult::MemberProposalAdded(remove_request.unwrap()))
-            } else {
-                Ok(ProcessResult::Noop)
-            }
-        }
-        _ => Ok(ProcessResult::Noop),
     }
 }
 
@@ -324,41 +303,11 @@ async fn process_batch_proposals(
 
     match res {
         MlsProcessResult::Application(app_bytes) => {
-            process_application_message(handle, &app_bytes).await
+            AppMessage::decode(app_bytes.as_ref())?.try_into()
         }
         MlsProcessResult::LeaveGroup => Ok(ProcessResult::LeaveGroup),
-        MlsProcessResult::Noop => Ok(ProcessResult::Noop),
+        MlsProcessResult::Noop => Ok(ProcessResult::GroupUpdated),
     }
-}
-
-// ─────────────────────────── Steward Operations ───────────────────────────
-
-/// Store an add member proposal.
-///
-/// # Arguments
-/// * `handle` - The group handle (must be steward)
-/// * `key_package` - The key package of the member to add
-pub fn store_add_proposal(
-    handle: &mut GroupHandle,
-    key_package: KeyPackageBytes,
-) -> Result<UpdateRequest, CoreError> {
-    handle
-        .store_add_proposal(key_package)
-        .ok_or(CoreError::StewardNotSet)
-}
-
-/// Store a remove member proposal.
-///
-/// # Arguments
-/// * `handle` - The group handle (must be steward)
-/// * `identity` - The wallet address of the member to remove
-pub fn store_remove_proposal(
-    handle: &mut GroupHandle,
-    identity: String,
-) -> Result<UpdateRequest, CoreError> {
-    handle
-        .store_remove_proposal(identity)
-        .ok_or(CoreError::StewardNotSet)
 }
 
 /// Get the count of approved proposals.
@@ -367,19 +316,11 @@ pub fn approved_proposals_count(handle: &GroupHandle) -> usize {
 }
 
 /// Get the approved proposals.
-pub fn approved_proposals(handle: &GroupHandle) -> Vec<GroupUpdateRequest> {
+pub fn approved_proposals(handle: &GroupHandle) -> HashMap<ProposalId, GroupUpdateRequest> {
     handle.approved_proposals()
 }
 
-/// Start a voting epoch and return the number of proposals.
-pub fn start_voting_epoch(handle: &mut GroupHandle) -> Result<usize, CoreError> {
-    handle.start_voting_epoch().ok_or(CoreError::StewardNotSet)
-}
-
-/// Get the voting proposals.
-pub fn voting_proposals(handle: &GroupHandle) -> Vec<GroupUpdateRequest> {
-    handle.voting_proposals()
-}
+// ─────────────────────────── Steward Operations ───────────────────────────
 
 /// Create batch proposals message for the voting epoch.
 ///
@@ -397,29 +338,29 @@ pub async fn create_batch_proposals(
         return Err(CoreError::StewardNotSet);
     }
 
-    let proposals = handle.voting_proposals();
+    let proposals = handle.approved_proposals();
     if proposals.is_empty() {
         return Err(CoreError::NoProposals);
     }
+    handle.clear_approved_proposals();
 
     let mls_handle = handle
         .mls_handle()
         .ok_or(CoreError::MlsGroupNotInitialized)?;
 
     let mut updates = Vec::with_capacity(proposals.len());
-    for proposal in proposals {
-        match proposal {
-            GroupUpdateRequest::AddMember(key_package_bytes) => {
-                updates.push(MlsGroupUpdate::AddMember(key_package_bytes));
+    for (_, proposal) in proposals {
+        match proposal.payload {
+            Some(group_update_request::Payload::InviteMember(im)) => {
+                updates.push(MlsGroupUpdate::AddMember(KeyPackageBytes::new(
+                    im.key_package_bytes,
+                    im.identity,
+                )));
             }
-            GroupUpdateRequest::RemoveMember(identity) => {
-                let identity_bytes = if let Some(hex_string) = identity.strip_prefix("0x") {
-                    hex::decode(hex_string)?
-                } else {
-                    hex::decode(&identity)?
-                };
-                updates.push(MlsGroupUpdate::RemoveMember(identity_bytes));
+            Some(group_update_request::Payload::RemoveMember(identity)) => {
+                updates.push(MlsGroupUpdate::RemoveMember(identity.identity));
             }
+            None => return Err(CoreError::InvalidGroupUpdateRequest),
         }
     }
 
@@ -464,11 +405,6 @@ pub async fn create_batch_proposals(
     Ok(messages)
 }
 
-/// Complete voting and clear proposals.
-pub fn complete_voting(handle: &mut GroupHandle, _accepted: bool) {
-    handle.complete_voting();
-}
-
 // ─────────────────────────── Queries ───────────────────────────
 
 /// Get the members of a group.
@@ -483,18 +419,4 @@ pub async fn group_members(
     let mls_group = mls_handle.lock().await;
     let members = mls.group_members(&mls_group)?;
     Ok(members)
-}
-
-/// Get the current epoch of a group.
-pub async fn group_epoch(
-    handle: &GroupHandle,
-    mls: &dyn MlsGroupService,
-) -> Result<u64, CoreError> {
-    let mls_handle = handle
-        .mls_handle()
-        .ok_or(CoreError::MlsGroupNotInitialized)?;
-
-    let mls_group = mls_handle.lock().await;
-    let epoch = mls.group_epoch(&mls_group)?;
-    Ok(epoch)
 }

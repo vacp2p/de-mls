@@ -9,49 +9,27 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use alloy::signers::local::{LocalSignerError, PrivateKeySigner};
-use ds::transport::{InboundPacket, OutboundPacket};
+use ds::transport::InboundPacket;
 use hashgraph_like_consensus::api::ConsensusServiceAPI;
 use hashgraph_like_consensus::protos::consensus::v1::Proposal;
 use hashgraph_like_consensus::service::DefaultConsensusService;
 use hashgraph_like_consensus::session::ConsensusConfig;
 use hashgraph_like_consensus::types::{ConsensusEvent, CreateProposalRequest};
+use mls_crypto::identity::normalize_wallet_address_bytes;
 use mls_crypto::{IdentityService, OpenMlsIdentityService};
 use prost::Message;
 use tokio::sync::RwLock;
 use tracing::{error, info};
 
-use super::consensus_handler::ConsensusHandler;
-use super::pending_batches::PendingBatches;
 use super::state_machine::{GroupState, GroupStateMachine};
-use crate::core::{self, CoreError, DeMlsProvider, DefaultProvider, GroupHandle, ProcessResult};
-use crate::protos::de_mls::messages::v1::{
-    AppMessage, BanRequest, ConversationMessage, ProposalAdded, UpdateRequest, UpdateRequestList,
-    VotePayload,
+use crate::core::{
+    self, create_batch_proposals, CoreError, DeMlsProvider, DefaultProvider, GroupEventHandler,
+    GroupHandle, ProcessResult,
 };
-
-/// Represents the action to take after processing a user message or event.
-#[derive(Debug, Clone)]
-pub enum UserAction {
-    /// Send an outbound packet.
-    Outbound(OutboundPacket),
-    /// Send an application message to the UI.
-    SendToApp(AppMessage),
-    /// Leave a group.
-    LeaveGroup(String),
-    /// No action needed.
-    DoNothing,
-}
-
-impl std::fmt::Display for UserAction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            UserAction::Outbound(_) => write!(f, "Outbound"),
-            UserAction::SendToApp(_) => write!(f, "SendToApp"),
-            UserAction::LeaveGroup(name) => write!(f, "LeaveGroup({name})"),
-            UserAction::DoNothing => write!(f, "DoNothing"),
-        }
-    }
-}
+use crate::protos::de_mls::messages::v1::{
+    group_update_request, AppMessage, BanRequest, ConversationMessage, GroupUpdateRequest,
+    RemoveMember, VotePayload,
+};
 
 /// Internal state for a group managed by User.
 struct GroupEntry {
@@ -66,32 +44,37 @@ struct GroupEntry {
 ///
 /// The type parameter `P` determines which service implementations are used
 /// (identity, MLS, consensus). Use [`DefaultProvider`] for standard configuration.
-pub struct User<P: DeMlsProvider> {
+///
+/// The type parameter `H` is the handler that receives output events
+/// (outbound packets, app messages, leave/join notifications).
+pub struct User<P: DeMlsProvider, H: GroupEventHandler> {
     identity_service: P::Identity,
     groups: Arc<RwLock<HashMap<String, GroupEntry>>>,
     consensus_service: Arc<P::Consensus>,
     eth_signer: PrivateKeySigner,
-    pending_batch_proposals: PendingBatches,
+    handler: Arc<H>,
 }
 
-impl<P: DeMlsProvider> User<P> {
+impl<P: DeMlsProvider, H: GroupEventHandler + 'static> User<P, H> {
     /// Create a new User instance with pre-built services.
     ///
     /// # Arguments
     /// * `identity_service` - Identity and MLS service
     /// * `consensus_service` - Consensus service
     /// * `eth_signer` - Ethereum signer for voting
-    pub fn new(
+    /// * `handler` - Event handler for output events
+    fn new(
         identity_service: P::Identity,
         consensus_service: Arc<P::Consensus>,
         eth_signer: PrivateKeySigner,
+        handler: Arc<H>,
     ) -> Self {
         Self {
             identity_service,
             groups: Arc::new(RwLock::new(HashMap::new())),
             consensus_service,
             eth_signer,
-            pending_batch_proposals: PendingBatches::new(),
+            handler,
         }
     }
 
@@ -123,7 +106,7 @@ impl<P: DeMlsProvider> User<P> {
             (handle, state_machine)
         } else {
             let handle = core::prepare_to_join(group_name);
-            let state_machine = GroupStateMachine::new();
+            let state_machine = GroupStateMachine::new_as_member();
             (handle, state_machine)
         };
 
@@ -175,47 +158,46 @@ impl<P: DeMlsProvider> User<P> {
     }
 
     /// Get current epoch proposals for a group.
-    pub async fn get_current_epoch_proposals(
+    pub async fn get_approved_proposal_for_current_epoch(
         &self,
         group_name: &str,
-    ) -> Result<Vec<crate::core::GroupUpdateRequest>, UserError> {
+    ) -> Result<Vec<GroupUpdateRequest>, UserError> {
         let groups = self.groups.read().await;
         let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-        Ok(core::approved_proposals(&entry.handle))
+        let approved_proposals = core::approved_proposals(&entry.handle);
+        let display_proposals: Vec<GroupUpdateRequest> = approved_proposals.into_values().collect();
+        Ok(display_proposals)
     }
 
     // ─────────────────────────── Messaging ───────────────────────────
 
     /// Build and return a message for a group.
-    pub async fn build_group_message(
+    async fn build_group_message(
         &self,
         group_name: &str,
         app_msg: AppMessage,
-    ) -> Result<OutboundPacket, UserError> {
+    ) -> Result<ds::transport::OutboundPacket, UserError> {
         let groups = self.groups.read().await;
         let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
         let packet = core::build_message(&entry.handle, &self.identity_service, &app_msg).await?;
         Ok(packet)
     }
 
-    /// Build and return a key package message for a group.
-    pub async fn build_key_package_message(
-        &mut self,
-        group_name: &str,
-    ) -> Result<OutboundPacket, UserError> {
+    /// Build and send a key package message for a group via the handler.
+    pub async fn send_kp_message(&mut self, group_name: &str) -> Result<(), UserError> {
         let groups = self.groups.read().await;
         let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
         let packet = core::build_key_package_message(&entry.handle, &mut self.identity_service)?;
-        Ok(packet)
+        self.handler.on_outbound(group_name, packet).await?;
+        Ok(())
     }
 
     /// Send a conversation message to a group.
-    pub async fn send_message(
+    pub async fn send_app_message(
         &self,
         group_name: &str,
         message: Vec<u8>,
-    ) -> Result<OutboundPacket, UserError> {
-        tracing::info!("sending message to group: {:?}", &group_name);
+    ) -> Result<(), UserError> {
         let app_msg: AppMessage = ConversationMessage {
             message,
             sender: self.identity_string(),
@@ -223,8 +205,9 @@ impl<P: DeMlsProvider> User<P> {
         }
         .into();
 
-        tracing::info!("built app message: {:?}", &app_msg);
-        self.build_group_message(group_name, app_msg).await
+        let packet = self.build_group_message(group_name, app_msg).await?;
+        self.handler.on_outbound(group_name, packet).await?;
+        Ok(())
     }
 
     /// Process a ban request.
@@ -232,131 +215,129 @@ impl<P: DeMlsProvider> User<P> {
         &mut self,
         ban_request: BanRequest,
         group_name: &str,
-    ) -> Result<UserAction, UserError> {
-        let mut groups = self.groups.write().await;
-        let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
+    ) -> Result<(), UserError> {
+        self.start_voting_on_request_background(
+            group_name.to_string(),
+            GroupUpdateRequest {
+                payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
+                    identity: normalize_wallet_address_bytes(ban_request.user_to_ban.as_str())?,
+                })),
+            },
+        )
+        .await?;
 
-        let normalized = mls_crypto::normalize_wallet_address_str(&ban_request.user_to_ban)?;
-        info!("[process_ban_request]: Processing ban request for user {normalized}");
-
-        if entry.state_machine.is_steward() {
-            info!("[process_ban_request]: Steward adding remove proposal");
-            if let Some(request) = entry.handle.store_remove_proposal(normalized.clone()) {
-                let msg: AppMessage = ProposalAdded {
-                    group_id: group_name.to_string(),
-                    request: Some(request),
-                }
-                .into();
-                return Ok(UserAction::SendToApp(msg));
-            }
-        }
-
-        // Non-steward: forward to group
-        let updated_request = BanRequest {
-            user_to_ban: normalized,
-            requester: self.identity_string(),
-            group_name: ban_request.group_name,
-        };
-        drop(groups);
-        let packet = self
-            .build_group_message(group_name, updated_request.into())
-            .await?;
-        Ok(UserAction::Outbound(packet))
+        Ok(())
     }
 
     // ─────────────────────────── Steward Operations ───────────────────────────
 
     /// Start a steward epoch.
-    ///
-    /// Returns the number of proposals (0 if no proposals).
-    pub async fn start_steward_epoch(&mut self, group_name: &str) -> Result<usize, UserError> {
+    pub async fn start_steward_epoch(&mut self, group_name: &str) -> Result<(), UserError> {
         let mut groups = self.groups.write().await;
         let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
 
         let proposal_count = core::approved_proposals_count(&entry.handle);
-        let count = entry.state_machine.start_steward_epoch(proposal_count)?;
-
-        if count > 0 {
-            entry.handle.start_voting_epoch();
-            info!("[start_steward_epoch]: Started with {count} proposals");
-        } else {
-            info!("[start_steward_epoch]: No proposals, staying in Working");
+        if proposal_count > 0 {
+            entry.state_machine.start_steward_epoch()?;
+            let messages =
+                create_batch_proposals(&mut entry.handle, &self.identity_service).await?;
+            for message in messages {
+                self.handler.on_outbound(group_name, message).await?;
+            }
+            entry.handle.clear_approved_proposals();
+            entry.state_machine.start_working();
         }
 
-        Ok(count)
+        Ok(())
     }
 
-    /// Get proposals for steward voting and start voting.
-    ///
-    /// Returns (proposal_id, UserAction).
-    pub async fn get_proposals_for_steward_voting(
-        &mut self,
-        group_name: &str,
-    ) -> Result<(u32, UserAction), UserError> {
-        let mut groups = self.groups.write().await;
-        let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
-
-        if !entry.state_machine.is_steward() {
-            info!("[get_proposals_for_steward_voting]: Not steward");
-            return Ok((0, UserAction::DoNothing));
-        }
-
-        let proposals: Vec<UpdateRequest> = entry
-            .handle
-            .voting_proposals()
-            .into_iter()
-            .map(|p| p.into())
-            .collect();
-
-        if proposals.is_empty() {
-            error!("[get_proposals_for_steward_voting]: No proposals found");
-            return Err(UserError::NoProposals);
-        }
-
-        entry.state_machine.start_voting()?;
-
-        // Get member count for expected voters
-        let members = core::group_members(&entry.handle, &self.identity_service).await?;
+    pub async fn start_voting_on_request_background(
+        &self,
+        group_name: String,
+        upd_request: GroupUpdateRequest,
+    ) -> Result<(), UserError> {
+        let handle = {
+            let groups = self.groups.read().await;
+            let entry = groups.get(&group_name).ok_or(UserError::GroupNotFound)?;
+            entry.handle.clone()
+        };
+        let members = core::group_members(&handle, &self.identity_service).await?;
         let expected_voters = members.len() as u32;
+        let payload = upd_request.encode_to_vec();
+        let identity = self.identity_service.identity_string();
 
-        let payload = UpdateRequestList {
-            update_requests: proposals.clone(),
-        }
-        .encode_to_vec();
+        let consensus = Arc::clone(&self.consensus_service);
+        let groups = Arc::clone(&self.groups);
+        let handler = Arc::clone(&self.handler);
 
-        let request = CreateProposalRequest::new(
-            uuid::Uuid::new_v4().to_string(),
-            payload,
-            self.identity_service.identity_string().into(),
-            expected_voters,
-            3600,
-            true,
-        )?;
+        tokio::spawn(async move {
+            let result: Result<(), UserError> = async {
+                info!("[start_voting_on_request]: Expected voters: {expected_voters}");
 
-        let scope = P::Scope::from(group_name.to_string());
-        let proposal = self
-            .consensus_service
-            .create_proposal_with_config(
-                &scope,
-                request,
-                Some(ConsensusConfig::gossipsub().with_timeout(Duration::from_secs(15))?),
-            )
-            .await?;
+                let request = CreateProposalRequest::new(
+                    uuid::Uuid::new_v4().to_string(),
+                    payload.clone(),
+                    identity.into(),
+                    expected_voters,
+                    3600,
+                    true,
+                )?;
 
-        info!(
-            "[get_proposals_for_steward_voting]: Created proposal {} with {} expected voters",
-            proposal.proposal_id, expected_voters
-        );
 
-        let vote_payload: AppMessage = VotePayload {
-            group_id: group_name.to_string(),
-            proposal_id: proposal.proposal_id,
-            group_requests: proposals,
-            timestamp: proposal.timestamp,
-        }
-        .into();
+                let scope = P::Scope::from(group_name.clone());
+                let proposal = consensus
+                    .create_proposal_with_config(
+                        &scope,
+                        request,
+                        Some(ConsensusConfig::gossipsub().with_timeout(Duration::from_secs(15))?),
+                    )
+                    .await?;
 
-        Ok((proposal.proposal_id, UserAction::SendToApp(vote_payload)))
+                info!(
+                    "[get_proposals_for_steward_voting]: Created proposal {} with {} expected voters",
+                    proposal.proposal_id, expected_voters
+                );
+
+                let vote_payload: AppMessage = VotePayload {
+                    group_id: group_name.clone(),
+                    proposal_id: proposal.proposal_id,
+                    payload,
+                    timestamp: proposal.timestamp,
+                }
+                .into();
+
+                handler
+                    .on_app_message(&group_name, vote_payload)
+                    .await?;
+
+                {
+                    let mut groups = groups.write().await;
+                    if let Some(entry) = groups.get_mut(&group_name) {
+                        entry
+                            .handle
+                            .store_voting_proposal(proposal.proposal_id, upd_request);
+                    } else {
+                        error!(
+                            "[start_voting_on_request]: Group {group_name} missing during proposal store"
+                        );
+                    }
+                }
+
+                info!(
+                    "[start_voting_on_request]: Stored voting proposal: {}",
+                    proposal.proposal_id
+                );
+
+                Ok(())
+            }
+            .await;
+
+            if let Err(err) = result {
+                error!("[start_voting_on_request]: background task failed: {err}");
+            }
+        });
+
+        Ok(())
     }
 
     // ─────────────────────────── Voting ───────────────────────────
@@ -367,15 +348,15 @@ impl<P: DeMlsProvider> User<P> {
         group_name: &str,
         proposal_id: u32,
         vote: bool,
-    ) -> Result<UserAction, UserError> {
+    ) -> Result<(), UserError> {
         let groups = self.groups.read().await;
         let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-        let is_steward = entry.state_machine.is_steward();
+        let is_owner = entry.handle.is_owner_of_proposal(proposal_id);
         drop(groups);
 
         let scope = P::Scope::from(group_name.to_string());
-        let app_message: AppMessage = if is_steward {
-            info!("[process_user_vote]: Steward voting on proposal {proposal_id}");
+        let app_message: AppMessage = if is_owner {
+            info!("[process_user_vote]: Owner voting on proposal {proposal_id}");
             let proposal = self
                 .consensus_service
                 .cast_vote_and_get_proposal(&scope, proposal_id, vote, self.eth_signer.clone())
@@ -391,16 +372,14 @@ impl<P: DeMlsProvider> User<P> {
         };
 
         let packet = self.build_group_message(group_name, app_message).await?;
-        Ok(UserAction::Outbound(packet))
+        self.handler.on_outbound(group_name, packet).await?;
+        Ok(())
     }
 
     // ─────────────────────────── Inbound Processing ───────────────────────────
 
     /// Process an inbound packet.
-    pub async fn process_inbound_packet(
-        &mut self,
-        packet: InboundPacket,
-    ) -> Result<UserAction, UserError> {
+    pub async fn process_inbound_packet(&self, packet: InboundPacket) -> Result<(), UserError> {
         let group_name = packet.group_id.clone();
 
         // Check if message is from same app instance
@@ -408,7 +387,7 @@ impl<P: DeMlsProvider> User<P> {
             let groups = self.groups.read().await;
             if let Some(entry) = groups.get(&group_name) {
                 if packet.app_id == entry.handle.app_id() {
-                    return Ok(UserAction::DoNothing);
+                    return Ok(());
                 }
             } else {
                 return Err(UserError::GroupNotFound);
@@ -416,151 +395,158 @@ impl<P: DeMlsProvider> User<P> {
         }
 
         // Process the packet
-        let mut groups = self.groups.write().await;
-        let entry = groups
-            .get_mut(&group_name)
-            .ok_or(UserError::GroupNotFound)?;
+        let (result, joined_handle) = {
+            let mut groups = self.groups.write().await;
+            let entry = groups
+                .get_mut(&group_name)
+                .ok_or(UserError::GroupNotFound)?;
 
-        let result = core::process_inbound(
-            &mut entry.handle,
-            &packet.payload,
-            &packet.subtopic,
-            &self.identity_service,
-            &self.identity_service,
-        )
-        .await?;
+            let result = core::process_inbound(
+                &mut entry.handle,
+                &packet.payload,
+                &packet.subtopic,
+                &self.identity_service,
+                &self.identity_service,
+            )
+            .await?;
 
-        self.handle_process_result(&group_name, result, entry).await
-    }
+            let joined_handle = match &result {
+                ProcessResult::JoinedGroup(_) => Some(entry.handle.clone()),
+                _ => None,
+            };
 
-    async fn handle_process_result(
-        &self,
-        group_name: &str,
-        result: ProcessResult,
-        entry: &mut GroupEntry,
-    ) -> Result<UserAction, UserError> {
+            (result, joined_handle)
+        };
+
         match result {
-            ProcessResult::AppMessage(msg) => Ok(UserAction::SendToApp(msg)),
-            ProcessResult::LeaveGroup => Ok(UserAction::LeaveGroup(group_name.to_string())),
+            ProcessResult::AppMessage(msg) => {
+                self.handler
+                    .on_app_message(group_name.as_str(), msg)
+                    .await?;
+            }
+            ProcessResult::LeaveGroup => {
+                self.handler.on_leave_group(group_name.as_str()).await?;
+            }
             ProcessResult::Proposal(proposal) => {
-                self.process_incoming_proposal(group_name, proposal, entry)
-                    .await
+                self.process_incoming_proposal(group_name.as_str(), proposal)
+                    .await?;
             }
             ProcessResult::Vote(vote) => {
                 let scope = P::Scope::from(group_name.to_string());
                 self.consensus_service
                     .process_incoming_vote(&scope, vote)
                     .await?;
-                Ok(UserAction::DoNothing)
             }
-            ProcessResult::MemberProposalAdded(request) => {
-                let msg: AppMessage = ProposalAdded {
-                    group_id: group_name.to_string(),
-                    request: Some(request),
-                }
-                .into();
-                Ok(UserAction::SendToApp(msg))
+            ProcessResult::GetUpdateRequest(request) => {
+                self.start_voting_on_request_background(group_name.to_string(), request)
+                    .await?;
             }
             ProcessResult::JoinedGroup(name) => {
+                let handle = joined_handle.ok_or(UserError::GroupNotFound)?;
                 let msg: AppMessage = ConversationMessage {
                     message: format!("User {} joined the group", self.identity_string())
                         .into_bytes(),
                     sender: "SYSTEM".to_string(),
-                    group_name: name,
+                    group_name: name.clone(),
                 }
                 .into();
 
-                let packet =
-                    core::build_message(&entry.handle, &self.identity_service, &msg).await?;
-                Ok(UserAction::Outbound(packet))
+                let packet = core::build_message(&handle, &self.identity_service, &msg).await?;
+                self.handler.on_outbound(&name, packet).await?;
+                self.handler.on_joined_group(&name).await?;
             }
-            ProcessResult::Noop => Ok(UserAction::DoNothing),
+            ProcessResult::GroupUpdated => {
+                let mut groups = self.groups.write().await;
+                if let Some(entry) = groups.get_mut(&group_name) {
+                    entry.state_machine.start_working();
+                }
+            }
+            ProcessResult::Noop => {}
         }
+        Ok(())
     }
 
     async fn process_incoming_proposal(
         &self,
         group_name: &str,
         proposal: Proposal,
-        entry: &mut GroupEntry,
-    ) -> Result<UserAction, UserError> {
+    ) -> Result<(), UserError> {
         let scope = P::Scope::from(group_name.to_string());
         self.consensus_service
             .process_incoming_proposal(&scope, proposal.clone())
             .await?;
 
-        entry.state_machine.start_voting()?;
         info!(
             "[process_incoming_proposal]: Starting voting for proposal {}",
             proposal.proposal_id
         );
 
-        let update_request_list = UpdateRequestList::decode(proposal.payload.as_slice())?;
-
         let vote_payload: AppMessage = VotePayload {
             group_id: group_name.to_string(),
             proposal_id: proposal.proposal_id,
-            group_requests: update_request_list.update_requests,
+            payload: proposal.payload.clone(),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_secs(),
         }
         .into();
 
-        Ok(UserAction::SendToApp(vote_payload))
+        self.handler
+            .on_app_message(group_name, vote_payload)
+            .await?;
+        Ok(())
     }
 
     // ─────────────────────────── Consensus Events ───────────────────────────
 
     /// Handle a consensus event.
-    ///
-    /// Returns outbound packets that need to be sent via the delivery service.
     pub async fn handle_consensus_event(
         &mut self,
         group_name: &str,
         event: ConsensusEvent,
-    ) -> Result<Vec<OutboundPacket>, UserError> {
+    ) -> Result<(), UserError> {
         let mut groups = self.groups.write().await;
         let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
 
-        let messages = ConsensusHandler::handle_event(
-            &mut entry.handle,
-            &mut entry.state_machine,
-            event,
-            &self.identity_service,
-        )
-        .await?;
-
-        // Check for pending batch proposals after consensus
-        if entry.state_machine.current_state() == GroupState::Waiting
-            && self.pending_batch_proposals.contains(group_name).await
-        {
-            if let Some(batch) = self.pending_batch_proposals.take(group_name).await {
-                info!("[handle_consensus_event]: Processing stored batch proposals");
-                let result = crate::core::process_inbound(
-                    &mut entry.handle,
-                    &batch.commit_message,
-                    ds::APP_MSG_SUBTOPIC,
-                    &self.identity_service,
-                    &self.identity_service,
-                )
-                .await?;
-
-                entry.state_machine.start_working();
-
-                if let ProcessResult::LeaveGroup = result {
-                    // Will need to handle this at a higher level
+        match event {
+            ConsensusEvent::ConsensusReached {
+                proposal_id,
+                result,
+                timestamp: _,
+            } => {
+                info!("Consensus reached for proposal {proposal_id}: result={result}");
+                let is_owner = entry.handle.is_owner_of_proposal(proposal_id);
+                if result && is_owner {
+                    entry.handle.mark_proposal_as_approved(proposal_id);
+                } else if !result && is_owner {
+                    entry.handle.mark_proposal_as_rejected(proposal_id);
+                } else if result && !is_owner {
+                    let payload = self
+                        .consensus_service
+                        .get_proposal_payload(&P::Scope::from(group_name.to_string()), proposal_id)
+                        .await?;
+                    let update_request = GroupUpdateRequest::decode(payload.as_slice())?;
+                    entry
+                        .handle
+                        .insert_approved_proposal(proposal_id, update_request);
                 }
+            }
+            ConsensusEvent::ConsensusFailed {
+                proposal_id,
+                timestamp: _,
+            } => {
+                info!("Consensus failed for proposal {proposal_id}");
+                entry.handle.mark_proposal_as_rejected(proposal_id);
             }
         }
 
-        Ok(messages)
+        Ok(())
     }
 }
 
 // ─────────────────────────── DefaultProvider Convenience ───────────────────────────
 
-impl User<DefaultProvider> {
+impl<H: GroupEventHandler + 'static> User<DefaultProvider, H> {
     /// Convenience constructor for the default provider.
     ///
     /// Creates a User with OpenMLS identity and the given consensus service.
@@ -568,14 +554,21 @@ impl User<DefaultProvider> {
     /// # Arguments
     /// * `private_key` - Ethereum private key as hex string
     /// * `consensus_service` - The default consensus service
+    /// * `handler` - Event handler for output events
     pub fn with_private_key(
         private_key: &str,
         consensus_service: Arc<DefaultConsensusService>,
+        handler: Arc<H>,
     ) -> Result<Self, UserError> {
         let signer = PrivateKeySigner::from_str(private_key)?;
         let user_address = signer.address();
         let identity_service = OpenMlsIdentityService::new(user_address.as_slice())?;
-        Ok(Self::new(identity_service, consensus_service, signer))
+        Ok(Self::new(
+            identity_service,
+            consensus_service,
+            signer,
+            handler,
+        ))
     }
 }
 
@@ -590,20 +583,11 @@ pub enum UserError {
     #[error("Group not found")]
     GroupNotFound,
 
-    #[error("No proposals found")]
-    NoProposals,
-
     #[error("Core error: {0}")]
     Core(#[from] CoreError),
 
     #[error("State machine error: {0}")]
     StateMachine(#[from] super::state_machine::StateMachineError),
-
-    #[error("Consensus handler error: {0}")]
-    ConsensusHandler(#[from] super::consensus_handler::ConsensusHandlerError),
-
-    #[error("MLS error: {0}")]
-    Mls(#[from] mls_crypto::MlsServiceError),
 
     #[error("Consensus error: {0}")]
     Consensus(#[from] hashgraph_like_consensus::error::ConsensusError),
@@ -619,7 +603,4 @@ pub enum UserError {
 
     #[error("Identity error: {0}")]
     Identity(#[from] mls_crypto::error::IdentityError),
-
-    #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
 }

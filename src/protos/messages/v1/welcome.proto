@@ -4,8 +4,6 @@ syntax = "proto3";
 
 package de_mls.messages.v1;
 
-// The main message container. It can only contain ONE of the following
-// message types in its `payload` field.
 message WelcomeMessage {
   oneof payload {
     UserKeyPackage user_key_package = 1;

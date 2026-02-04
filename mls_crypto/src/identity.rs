@@ -133,6 +133,13 @@ pub fn normalize_wallet_address(raw: &[u8]) -> String {
     }
 }
 
+pub fn normalize_wallet_address_bytes(raw: &str) -> Result<Vec<u8>, IdentityError> {
+    let normalized = normalize_wallet_address_str(raw)?;
+    let wallet_bytes = alloy::hex::decode(normalized.strip_prefix("0x").unwrap_or(&normalized))
+        .unwrap_or_default();
+    Ok(wallet_bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{is_prefixed_hex, normalize_wallet_address};

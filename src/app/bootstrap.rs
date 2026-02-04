@@ -1,8 +1,4 @@
-// de_mls/src/bootstrap.rs
-use crate::{
-    app::{group_registry::GroupRegistry, User, UserError},
-    core::DefaultProvider,
-};
+use crate::app::group_registry::GroupRegistry;
 use ds::{topic_filter::TopicFilter, DeliveryServiceError};
 use ds::{
     transport::{DeliveryService, InboundPacket},
@@ -13,7 +9,7 @@ use std::env::VarError;
 use std::num::ParseIntError;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tokio::sync::{broadcast::Sender, RwLock};
+use tokio::sync::broadcast::Sender;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -39,25 +35,6 @@ impl<DS: DeliveryService> CoreCtx<DS> {
             consensus: DefaultConsensusService::new_with_max_sessions(10),
         }
     }
-}
-
-/// Create a new user instance using the default provider.
-///
-/// Returns an `Arc<RwLock<User<DefaultProvider>>>` ready for use with the gateway.
-///
-/// Note: Consensus event forwarding is NOT set up here — the caller (gateway)
-/// is responsible for subscribing to consensus events and calling
-/// `user.handle_consensus_event()`, since it needs access to the delivery
-/// service to send outbound packets.
-pub async fn create_user_instance(
-    eth_private_key: String,
-    consensus_service: &DefaultConsensusService,
-) -> Result<Arc<RwLock<User<DefaultProvider>>>, UserError> {
-    let user = User::with_private_key(
-        eth_private_key.as_str(),
-        Arc::new(consensus_service.clone()),
-    )?;
-    Ok(Arc::new(RwLock::new(user)))
 }
 
 #[derive(Clone, Debug)]

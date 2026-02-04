@@ -1,17 +1,19 @@
 //! Core types for group operations.
 
-use alloy::primitives::Address;
 use hashgraph_like_consensus::{
     protos::consensus::v1::{Proposal, Vote},
     types::ConsensusEvent,
 };
-use mls_crypto::{identity::normalize_wallet_address, KeyPackageBytes};
-use std::{fmt::Display, str::FromStr};
+use mls_crypto::identity::{normalize_wallet_address, normalize_wallet_address_bytes};
+use prost::Message;
 
-use crate::protos::de_mls::messages::v1::{
-    app_message, welcome_message, AppMessage, BanRequest, BatchProposalsMessage,
-    ConversationMessage, InvitationToJoin, Outcome, ProposalAdded, RequestType, UpdateRequest,
-    UserKeyPackage, UserVote, VotePayload, WelcomeMessage,
+use crate::{
+    core::CoreError,
+    protos::de_mls::messages::v1::{
+        app_message, group_update_request, welcome_message, AppMessage, BanRequest,
+        BatchProposalsMessage, ConversationMessage, GroupUpdateRequest, InvitationToJoin, Outcome,
+        ProposalAdded, RemoveMember, UserKeyPackage, UserVote, VotePayload, WelcomeMessage,
+    },
 };
 
 // Message type constants for consistency and type safety
@@ -48,56 +50,12 @@ impl MessageType for app_message::Payload {
     }
 }
 
-impl MessageType for UpdateRequest {
+impl MessageType for GroupUpdateRequest {
     fn message_type(&self) -> &'static str {
-        match RequestType::try_from(self.request_type) {
-            Ok(RequestType::AddMember) => "Add Member",
-            Ok(RequestType::RemoveMember) => "Remove Member",
+        match self.payload {
+            Some(group_update_request::Payload::InviteMember(_)) => "Add Member",
+            Some(group_update_request::Payload::RemoveMember(_)) => "Remove Member",
             _ => "Unknown",
-        }
-    }
-}
-
-/// Represents a group update request (add or remove member).
-#[derive(Clone, Debug, PartialEq)]
-pub enum GroupUpdateRequest {
-    /// Add a member using their key package.
-    AddMember(KeyPackageBytes),
-    /// Remove a member by their identity (wallet address).
-    RemoveMember(String),
-}
-
-impl Display for GroupUpdateRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            GroupUpdateRequest::AddMember(kp) => {
-                let id = Address::from_slice(kp.identity_bytes());
-                write!(f, "Add Member: {id:#?}")
-            }
-            GroupUpdateRequest::RemoveMember(id) => {
-                let id = Address::from_str(id).unwrap_or_default();
-                write!(f, "Remove Member: {id:#?}")
-            }
-        }
-    }
-}
-
-impl From<GroupUpdateRequest> for UpdateRequest {
-    fn from(request: GroupUpdateRequest) -> Self {
-        match request {
-            GroupUpdateRequest::AddMember(kp) => UpdateRequest {
-                request_type: RequestType::AddMember as i32,
-                wallet_address: kp.identity_bytes().to_vec(),
-            },
-            GroupUpdateRequest::RemoveMember(identity) => {
-                let wallet_bytes =
-                    alloy::hex::decode(identity.strip_prefix("0x").unwrap_or(&identity))
-                        .unwrap_or_default();
-                UpdateRequest {
-                    request_type: RequestType::RemoveMember as i32,
-                    wallet_address: wallet_bytes,
-                }
-            }
         }
     }
 }
@@ -108,15 +66,17 @@ pub enum ProcessResult {
     /// An application message was received.
     AppMessage(AppMessage),
     /// A consensus proposal was received.
-    Proposal(hashgraph_like_consensus::protos::consensus::v1::Proposal),
+    Proposal(Proposal),
     /// A consensus vote was received.
-    Vote(hashgraph_like_consensus::protos::consensus::v1::Vote),
+    Vote(Vote),
     /// The user should leave the group.
     LeaveGroup,
     /// A member proposal was added (for stewards receiving key packages).
-    MemberProposalAdded(UpdateRequest),
+    GetUpdateRequest(GroupUpdateRequest),
     /// The user joined the group successfully.
     JoinedGroup(String),
+    /// Update group state
+    GroupUpdated,
     /// No action needed.
     Noop,
 }
@@ -230,31 +190,53 @@ impl From<ConsensusEvent> for Outcome {
     }
 }
 
-// Helper function to convert protobuf UpdateRequest to display format
-pub fn convert_group_requests_to_display(
-    group_requests: &[UpdateRequest],
-) -> Vec<(String, String)> {
-    let mut results = Vec::new();
-
-    for req in group_requests {
-        match RequestType::try_from(req.request_type) {
-            Ok(RequestType::AddMember) => {
-                results.push((
-                    "Add Member".to_string(),
-                    normalize_wallet_address(&req.wallet_address),
-                ));
+impl TryFrom<AppMessage> for ProcessResult {
+    type Error = CoreError;
+    fn try_from(value: AppMessage) -> Result<Self, Self::Error> {
+        match &value.payload {
+            Some(app_message::Payload::ConversationMessage(_)) => {
+                Ok(ProcessResult::AppMessage(value))
             }
-            Ok(RequestType::RemoveMember) => {
-                results.push((
-                    "Remove Member".to_string(),
-                    normalize_wallet_address(&req.wallet_address),
-                ));
+            Some(app_message::Payload::Proposal(proposal)) => {
+                Ok(ProcessResult::Proposal(proposal.clone()))
             }
-            _ => {
-                results.push(("Unknown".to_string(), "Invalid request".to_string()));
+            Some(app_message::Payload::Vote(vote)) => Ok(ProcessResult::Vote(vote.clone())),
+            Some(app_message::Payload::BanRequest(ban_request)) => {
+                Ok(ProcessResult::GetUpdateRequest(GroupUpdateRequest {
+                    payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
+                        identity: normalize_wallet_address_bytes(ban_request.user_to_ban.as_str())?,
+                    })),
+                }))
             }
+            _ => Ok(ProcessResult::Noop),
         }
     }
+}
 
-    results
+// Helper function to convert protobuf GroupUpdateRequest to display format
+pub fn convert_group_request_to_display(request: Vec<u8>) -> (String, String) {
+    let request = GroupUpdateRequest::decode(request.as_slice()).unwrap_or_default();
+    match request.payload {
+        Some(group_update_request::Payload::InviteMember(im)) => (
+            "Add Member".to_string(),
+            normalize_wallet_address(&im.identity),
+        ),
+        Some(group_update_request::Payload::RemoveMember(rm)) => (
+            "Remove Member".to_string(),
+            normalize_wallet_address(&rm.identity),
+        ),
+        _ => ("Unknown".to_string(), "Invalid request".to_string()),
+    }
+}
+
+pub fn get_identity_from_group_update_request(req: GroupUpdateRequest) -> String {
+    match req.payload {
+        Some(group_update_request::Payload::InviteMember(im)) => {
+            normalize_wallet_address(&im.identity)
+        }
+        Some(group_update_request::Payload::RemoveMember(rm)) => {
+            normalize_wallet_address(&rm.identity)
+        }
+        _ => "unknown".to_string(),
+    }
 }

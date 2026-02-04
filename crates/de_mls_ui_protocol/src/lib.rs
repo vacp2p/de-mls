@@ -4,12 +4,11 @@ pub mod v1 {
     use serde::{Deserialize, Serialize};
 
     use de_mls::{
-        core::MessageType,
+        core::{get_identity_from_group_update_request, MessageType},
         protos::de_mls::messages::v1::{
             BanRequest, ConversationMessage, ProposalAdded, VotePayload,
         },
     };
-    use mls_crypto::identity::normalize_wallet_address;
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[non_exhaustive]
@@ -100,17 +99,12 @@ pub mod v1 {
 
     impl From<ProposalAdded> for AppEvent {
         fn from(proposal_added: ProposalAdded) -> Self {
+            let request = proposal_added.request.unwrap();
+            let address = get_identity_from_group_update_request(request.clone());
             AppEvent::ProposalAdded {
                 group_id: proposal_added.group_id.clone(),
-                action: proposal_added
-                    .request
-                    .as_ref()
-                    .unwrap()
-                    .message_type()
-                    .to_string(),
-                address: normalize_wallet_address(
-                    &proposal_added.request.as_ref().unwrap().wallet_address,
-                ),
+                action: request.message_type().to_string(),
+                address,
             }
         }
     }

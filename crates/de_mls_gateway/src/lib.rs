@@ -16,16 +16,20 @@ use std::sync::{atomic::AtomicBool, Arc};
 use tokio::sync::Mutex;
 
 use de_mls::{
-    app::{create_user_instance, CoreCtx, User},
+    app::{CoreCtx, User},
     core::DefaultProvider,
 };
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 
 mod forwarder;
 mod group;
+pub mod handler;
+
+use handler::GatewayEventHandler;
 
 /// Type alias for the user reference stored in the gateway.
-type UserRef = Arc<tokio::sync::RwLock<User<DefaultProvider>>>;
+type UserRef =
+    Arc<tokio::sync::RwLock<User<DefaultProvider, GatewayEventHandler<WakuDeliveryService>>>>;
 
 // Global, process-wide gateway instance
 pub static GATEWAY: Lazy<Gateway<WakuDeliveryService>> = Lazy::new(Gateway::new);
@@ -107,28 +111,42 @@ impl<DS: DeliveryService> Gateway<DS> {
 
     // ─────────────────────────── High-level helpers ───────────────────────────
 
-    /// Create the user engine with a private key.
-    /// Returns a derived display name (e.g., address string).
-    pub async fn login_with_private_key(&self, private_key: String) -> anyhow::Result<String> {
-        let core = self.core();
-        let consensus_service = core.consensus.clone();
-
-        let user_ref = create_user_instance(private_key.clone(), &consensus_service).await?;
-
-        let user_address = user_ref.read().await.identity_string();
-
-        *self.user.write() = Some(user_ref.clone());
-
-        self.spawn_delivery_service_forwarder(core.clone(), user_ref.clone());
-        self.spawn_consensus_forwarder(core.clone(), user_ref.clone());
-        Ok(user_address)
-    }
-
     /// Get a copy of the current user ref (if logged in).
     pub fn user(&self) -> anyhow::Result<UserRef> {
         self.user
             .read()
             .clone()
             .ok_or_else(|| anyhow::anyhow!("user not logged in"))
+    }
+}
+
+// Login and forwarder setup is specific to the WakuDeliveryService gateway
+impl Gateway<WakuDeliveryService> {
+    /// Create the user engine with a private key.
+    /// Returns a derived display name (e.g., address string).
+    pub async fn login_with_private_key(&self, private_key: String) -> anyhow::Result<String> {
+        let core = self.core();
+        let consensus_service = core.consensus.clone();
+
+        let handler = GatewayEventHandler {
+            delivery: Arc::new(core.app_state.delivery.clone()),
+            evt_tx: self.evt_tx.clone(),
+            topics: core.topics.clone(),
+        };
+
+        let user = User::with_private_key(
+            private_key.as_str(),
+            Arc::new(consensus_service),
+            Arc::new(handler),
+        )?;
+
+        let user_address = user.identity_string();
+        let user_ref: UserRef = Arc::new(tokio::sync::RwLock::new(user));
+
+        *self.user.write() = Some(user_ref.clone());
+
+        self.spawn_delivery_service_forwarder(core.clone(), user_ref.clone());
+        self.spawn_consensus_forwarder(core.clone(), user_ref.clone());
+        Ok(user_address)
     }
 }

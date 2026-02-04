@@ -37,14 +37,16 @@ pub(crate) fn key_package_from_json(bytes: &[u8]) -> Result<KeyPackage, serde_js
     serde_json::from_slice(bytes)
 }
 
-pub fn key_package_bytes_from_json(bytes: Vec<u8>) -> Result<KeyPackageBytes, serde_json::Error> {
+pub fn key_package_bytes_from_json(
+    bytes: Vec<u8>,
+) -> Result<(Vec<u8>, Vec<u8>), serde_json::Error> {
     let key_package: KeyPackage = serde_json::from_slice(&bytes)?;
     let identity = key_package
         .leaf_node()
         .credential()
         .serialized_content()
         .to_vec();
-    Ok(KeyPackageBytes::new(bytes, identity))
+    Ok((bytes, identity))
 }
 
 #[derive(Debug)]
