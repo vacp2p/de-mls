@@ -520,61 +520,79 @@ button.mini {
     margin-top: 12px;
 }
 
-/* Consensus results window */
-.panel.consensus .results-window {
+/* History window */
+.panel.consensus .history-window {
     overflow-y: auto;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 8px;
-    background: rgba(255, 255, 255, 0.02);
-    max-height: 200px;
+    max-height: 300px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.panel.consensus .history-group {
     display: flex;
     flex-direction: column;
     gap: 6px;
 }
 
-.panel.consensus .result-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 6px 8px;
+.panel.consensus .history-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+}
+
+.panel.consensus .history-label.rejected-label {
+    color: var(--muted);
+}
+
+.panel.consensus .history-entry {
+    display: grid;
+    grid-template-columns: minmax(6rem, max-content) 1fr;
+    align-items: start;
+    gap: 8px;
+    padding: 5px 8px;
     border-radius: 6px;
     background: rgba(255, 255, 255, 0.03);
     border: 1px solid var(--border);
-    font-size: 13px;
+    font-size: 12px;
 }
 
-.panel.consensus .result-item .proposal-id {
+.panel.consensus .history-entry .action {
+    color: var(--primary);
+    font-weight: 600;
+}
+
+.panel.consensus .history-entry .value {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-    color: var(--muted);
-    font-weight: 600;
+    color: var(--text);
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
-.panel.consensus .result-item .outcome {
-    font-weight: 600;
-    padding: 2px 6px;
-    border-radius: 4px;
+.panel.consensus .history-entry.rejected {
+    border-color: rgba(255, 0, 92, 0.25);
+    background: rgba(255, 0, 92, 0.05);
 }
 
-.panel.consensus .result-item .outcome.accepted {
-    color: var(--good);
-    background: rgba(23, 201, 100, 0.1);
-}
-
-.panel.consensus .result-item .outcome.rejected {
+.panel.consensus .history-entry.rejected .action {
     color: var(--bad);
-    background: rgba(243, 18, 96, 0.1);
 }
 
-.panel.consensus .result-item .outcome.unspecified {
-    color: var(--muted);
-    background: rgba(163, 167, 179, 0.1);
+.panel.consensus .epoch-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
 }
 
-.panel.consensus .result-item .timestamp {
-    color: var(--muted);
-    font-size: 11px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+.panel.consensus .epoch-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--primary);
+    padding: 2px 0;
 }
 
 /* Modal */

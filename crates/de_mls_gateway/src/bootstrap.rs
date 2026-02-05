@@ -1,4 +1,4 @@
-use crate::app::group_registry::GroupRegistry;
+use crate::group_registry::GroupRegistry;
 use ds::{topic_filter::TopicFilter, DeliveryServiceError};
 use ds::{
     transport::{DeliveryService, InboundPacket},

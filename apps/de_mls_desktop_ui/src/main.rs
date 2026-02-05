@@ -1,18 +1,18 @@
-// apps/de_mls_desktop_ui/src/main.rs
 #![allow(non_snake_case)]
 use dioxus::prelude::*;
 use dioxus_desktop::{launch::launch as desktop_launch, Config, LogicalSize, WindowBuilder};
 use hashgraph_like_consensus::types::ConsensusEvent;
+use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
 
 use de_mls::{
-    app::bootstrap_core_from_env,
     core::convert_group_request_to_display,
-    protos::de_mls::messages::v1::{ConversationMessage, Outcome, VotePayload},
+    protos::de_mls::messages::v1::{ConversationMessage, VotePayload},
 };
+use de_mls_gateway::bootstrap_core_from_env;
 use de_mls_gateway::GATEWAY;
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 use mls_crypto::normalize_wallet_address_str;
@@ -22,57 +22,7 @@ mod logging;
 static CSS: Asset = asset!("/assets/main.css");
 static NEXT_ALERT_ID: AtomicU64 = AtomicU64::new(1);
 const MAX_VISIBLE_ALERTS: usize = 5;
-const MAX_VISIBLE_CONSENSUS_RESULTS: usize = 50;
-
-// Helper function to format unix timestamps (seconds since epoch)
-fn format_timestamp(timestamp_s: u64) -> String {
-    use std::time::UNIX_EPOCH;
-
-    // Convert to SystemTime and format
-    let timestamp = UNIX_EPOCH + std::time::Duration::from_secs(timestamp_s);
-    let datetime: chrono::DateTime<chrono::Utc> = timestamp.into();
-    datetime.format("%H:%M:%S").to_string()
-}
-
-fn render_latest_decision(ev: &ConsensusEvent) -> Element {
-    let (vid, res, timestamp_s, label): (u32, Outcome, u64, &'static str) = match ev {
-        ConsensusEvent::ConsensusReached {
-            proposal_id,
-            result,
-            timestamp,
-        } => (
-            *proposal_id,
-            if *result {
-                Outcome::Accepted
-            } else {
-                Outcome::Rejected
-            },
-            *timestamp,
-            if *result { "Accepted" } else { "Rejected" },
-        ),
-        ConsensusEvent::ConsensusFailed {
-            proposal_id,
-            timestamp,
-        } => (*proposal_id, Outcome::Unspecified, *timestamp, "Failed"),
-    };
-
-    rsx! {
-        div { class: "result-item",
-            span { class: "proposal-id", "{vid}" }
-            span {
-                class: match res {
-                    Outcome::Accepted => "outcome accepted",
-                    Outcome::Rejected => "outcome rejected",
-                    Outcome::Unspecified => "outcome unspecified",
-                },
-                "{label}"
-            }
-            span { class: "timestamp",
-                "{format_timestamp(timestamp_s)}"
-            }
-        }
-    }
-}
+const MAX_VISIBLE_REJECTED: usize = 20;
 
 // ─────────────────────────── App state ───────────────────────────
 
@@ -95,14 +45,21 @@ struct ChatState {
     members: Vec<String>,               // cached member addresses for opened group
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct RejectedProposal {
+    action: String,
+    address: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 struct ConsensusState {
     is_steward: bool,
-    pending: Option<VotePayload>, // active/pending proposal for opened group
-    // Store results with timestamps for better display
-    latest_results: Vec<ConsensusEvent>,
-    // Store current epoch proposals for stewards
-    current_epoch_proposals: Vec<(String, String)>, // (action, address) pairs
+    pending: Option<VotePayload>,
+    approved_queue: Vec<(String, String)>,
+    rejected: Vec<RejectedProposal>,
+    epoch_history: Vec<Vec<(String, String)>>,
+    /// Caches proposal content so we can correlate with ProposalDecided events.
+    proposal_cache: HashMap<u32, (String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -341,9 +298,8 @@ fn Home() -> Element {
                         group_id,
                         proposals,
                     }) => {
-                        // only update if it is the currently opened group
                         if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
-                            cons.write().current_epoch_proposals = proposals;
+                            cons.write().approved_queue = proposals;
                         }
                     }
                     Some(AppEvent::GroupMembers { group_id, members }) => {
@@ -351,28 +307,37 @@ fn Home() -> Element {
                             chat.write().members = members;
                         }
                     }
+                    Some(AppEvent::EpochHistory { group_id, epochs }) => {
+                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
+                            cons.write().epoch_history = epochs;
+                        }
+                    }
                     Some(AppEvent::ProposalAdded {
                         group_id,
                         action,
                         address,
                     }) => {
-                        // only update if it is the currently opened group
                         if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
-                            // Avoid duplicates: do not enqueue if the same (action, address) already exists
                             let exists = {
-                                cons.read().current_epoch_proposals.iter().any(|(a, addr)| {
+                                cons.read().approved_queue.iter().any(|(a, addr)| {
                                     a == &action && addr.eq_ignore_ascii_case(&address)
                                 })
                             };
                             if !exists {
-                                cons.write().current_epoch_proposals.push((action, address));
+                                cons.write().approved_queue.push((action, address));
                             }
                         }
                     }
                     Some(AppEvent::CurrentEpochProposalsCleared { group_id }) => {
-                        // only update if it is the currently opened group
                         if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
-                            cons.write().current_epoch_proposals.clear();
+                            cons.write().approved_queue.clear();
+                            // Batch was committed — re-fetch epoch history
+                            let gid = group_id.clone();
+                            spawn(async move {
+                                let _ = GATEWAY
+                                    .send(AppCmd::GetEpochHistory { group_id: gid })
+                                    .await;
+                            });
                         }
                     }
                     Some(AppEvent::Groups(names)) => {
@@ -385,23 +350,58 @@ fn Home() -> Element {
                     Some(AppEvent::VoteRequested(vp)) => {
                         let opened = chat.read().opened_group.clone();
                         if opened.as_deref() == Some(vp.group_id.as_str()) {
-                            cons.write().pending = Some(vp);
+                            let (action, address) =
+                                convert_group_request_to_display(vp.payload.clone());
+                            let mut c = cons.write();
+                            c.proposal_cache.insert(vp.proposal_id, (action, address));
+                            c.pending = Some(vp);
                         }
                     }
                     Some(AppEvent::ProposalDecided(group_id, consensus_event)) => {
-                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
-                            {
-                                let mut c = cons.write();
-                                c.latest_results.push(consensus_event);
-                                if c.latest_results.len() > MAX_VISIBLE_CONSENSUS_RESULTS {
-                                    // Drop oldest entries first
-                                    let overflow =
-                                        c.latest_results.len() - MAX_VISIBLE_CONSENSUS_RESULTS;
-                                    c.latest_results.drain(0..overflow);
+                        let is_current =
+                            chat.read().opened_group.as_deref() == Some(group_id.as_str());
+                        let mut c = cons.write();
+                        if is_current {
+                            match &consensus_event {
+                                ConsensusEvent::ConsensusReached {
+                                    proposal_id,
+                                    result,
+                                    ..
+                                } => {
+                                    if !result {
+                                        if let Some((action, address)) =
+                                            c.proposal_cache.remove(proposal_id)
+                                        {
+                                            c.rejected.push(RejectedProposal {
+                                                action,
+                                                address,
+                                            });
+                                            if c.rejected.len() > MAX_VISIBLE_REJECTED {
+                                                c.rejected.remove(0);
+                                            }
+                                        }
+                                    } else {
+                                        c.proposal_cache.remove(proposal_id);
+                                    }
+                                }
+                                ConsensusEvent::ConsensusFailed {
+                                    proposal_id, ..
+                                } => {
+                                    if let Some((action, address)) =
+                                        c.proposal_cache.remove(proposal_id)
+                                    {
+                                        c.rejected.push(RejectedProposal {
+                                            action,
+                                            address,
+                                        });
+                                        if c.rejected.len() > MAX_VISIBLE_REJECTED {
+                                            c.rejected.remove(0);
+                                        }
+                                    }
                                 }
                             }
                         }
-                        cons.write().pending = None;
+                        c.pending = None;
                     }
                     Some(AppEvent::GroupRemoved(name)) => {
                         let mut g = groups.write();
@@ -510,6 +510,11 @@ fn GroupListSection() -> Element {
                     .await;
                 let _ = GATEWAY
                     .send(AppCmd::GetGroupMembers {
+                        group_id: group_id.clone(),
+                    })
+                    .await;
+                let _ = GATEWAY
+                    .send(AppCmd::GetEpochHistory {
                         group_id: group_id.clone(),
                     })
                     .await;
@@ -853,7 +858,6 @@ fn ConsensusSection() -> Element {
         move |_| {
             let pending_proposal = cons.read().pending.clone();
             if let Some(v) = pending_proposal {
-                // Clear the pending proposal immediately to close the vote window
                 cons.write().pending = None;
                 spawn(async move {
                     let _ = GATEWAY
@@ -871,7 +875,6 @@ fn ConsensusSection() -> Element {
         move |_| {
             let pending_proposal = cons.read().pending.clone();
             if let Some(v) = pending_proposal {
-                // Clear the pending proposal immediately to close the vote window
                 cons.write().pending = None;
                 spawn(async move {
                     let _ = GATEWAY
@@ -898,6 +901,12 @@ fn ConsensusSection() -> Element {
         (v.proposal_id, action, id)
     });
 
+    let approved_snapshot = cons.read().approved_queue.clone();
+    let rejected_snapshot = cons.read().rejected.clone();
+    let epoch_snapshot = cons.read().epoch_history.clone();
+    let epoch_count = epoch_snapshot.len();
+    let has_history = !rejected_snapshot.is_empty() || !epoch_snapshot.is_empty();
+
     rsx! {
         div { class: "panel consensus",
             h2 { "Consensus" }
@@ -913,24 +922,7 @@ fn ConsensusSection() -> Element {
                     }
                 }
 
-                // Pending Requests section
-                div { class: "consensus-section",
-                    h3 { "Pending Requests" }
-                    if cons.read().is_steward && !cons.read().current_epoch_proposals.is_empty() {
-                        div { class: "proposals-window",
-                            for (action, address) in &cons.read().current_epoch_proposals {
-                                div { class: "proposal-item",
-                                    span { class: "action", "{action}:" }
-                                    span { class: "value", "{address}" }
-                                }
-                            }
-                        }
-                    } else {
-                        div { class: "no-data", "No pending requests" }
-                    }
-                }
-
-                // Proposal for Vote section
+                // 1. Proposal for Vote
                 div { class: "consensus-section",
                     h3 { "Proposal for Vote" }
                     if let Some((proposal_id, action, id)) = pending_display {
@@ -953,17 +945,63 @@ fn ConsensusSection() -> Element {
                     }
                 }
 
-                // Latest Decisions section
+                // 2. Approved Queue
                 div { class: "consensus-section",
-                    h3 { "Latest Decisions" }
-                    if cons.read().latest_results.is_empty() {
-                        div { class: "no-data", "No latest decisions" }
-                    } else {
-                        div { class: "results-window",
-                            for ev in cons.read().latest_results.iter().rev() {
-                                {render_latest_decision(ev)}
+                    h3 { "Approved Queue" }
+                    if !approved_snapshot.is_empty() {
+                        div { class: "proposals-window",
+                            for (action, address) in approved_snapshot.iter() {
+                                div { class: "proposal-item",
+                                    span { class: "action", "{action}:" }
+                                    span { class: "value", "{address}" }
+                                }
                             }
                         }
+                    } else {
+                        div { class: "no-data", "No approved proposals waiting" }
+                    }
+                }
+
+                // 3. History (rejected + epoch history)
+                div { class: "consensus-section",
+                    h3 { "History" }
+                    if has_history {
+                        div { class: "history-window",
+                            // Rejected proposals
+                            if !rejected_snapshot.is_empty() {
+                                div { class: "history-group",
+                                    span { class: "history-label rejected-label", "Rejected" }
+                                    for rp in rejected_snapshot.iter().rev() {
+                                        div { class: "history-entry rejected",
+                                            span { class: "action", "{rp.action}:" }
+                                            span { class: "value", "{rp.address}" }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Past epochs
+                            if !epoch_snapshot.is_empty() {
+                                div { class: "history-group",
+                                    span { class: "history-label", "Past Epochs" }
+                                    for (i, batch) in epoch_snapshot.iter().rev().enumerate() {
+                                        div { class: "epoch-group",
+                                            span { class: "epoch-label",
+                                                "Epoch {epoch_count - i}"
+                                            }
+                                            for (action, address) in batch.iter() {
+                                                div { class: "history-entry",
+                                                    span { class: "action", "{action}:" }
+                                                    span { class: "value", "{address}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        div { class: "no-data", "No history yet" }
                     }
                 }
             } else {

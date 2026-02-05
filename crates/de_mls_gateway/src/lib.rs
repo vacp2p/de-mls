@@ -15,15 +15,16 @@ use parking_lot::RwLock;
 use std::sync::{atomic::AtomicBool, Arc};
 use tokio::sync::Mutex;
 
-use de_mls::{
-    app::{CoreCtx, User},
-    core::DefaultProvider,
-};
+use de_mls::{app::User, core::DefaultProvider};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 
-mod forwarder;
+mod bootstrap;
+pub(crate) mod forwarder;
 mod group;
+mod group_registry;
 pub mod handler;
+
+pub use bootstrap::*;
 
 use handler::GatewayEventHandler;
 

@@ -2,6 +2,7 @@ use ds::waku::WakuDeliveryService;
 use hex::ToHex;
 use tracing::info;
 
+use crate::forwarder::push_consensus_state;
 use crate::Gateway;
 use de_mls::{
     app::{IntervalScheduler, StewardScheduler, StewardSchedulerConfig},
@@ -22,6 +23,7 @@ impl Gateway<WakuDeliveryService> {
         info!("User start sending steward message for group {group_name:?}");
 
         let user_clone = user_ref.clone();
+        let evt_tx = self.evt_tx.clone();
         let group_name_clone = group_name.clone();
         tokio::spawn(async move {
             let mut scheduler = IntervalScheduler::new(StewardSchedulerConfig::default());
@@ -38,6 +40,7 @@ impl Gateway<WakuDeliveryService> {
                     );
                     continue;
                 }
+                push_consensus_state(&user_clone, &evt_tx, &group_name).await;
             }
         });
         tracing::debug!("User started sending steward message for group {group_name_clone:?}");
@@ -56,6 +59,28 @@ impl Gateway<WakuDeliveryService> {
         core.groups.insert(group_name.clone()).await;
         user_ref.write().await.send_kp_message(&group_name).await?;
         tracing::debug!("User sent key package message for group {group_name}");
+
+        // Spawn member epoch timer (same interval as steward)
+        // When the timer fires, check if we have approved proposals and enter Waiting state.
+        let user_clone = user_ref.clone();
+        let group_name_clone = group_name.clone();
+        tokio::spawn(async move {
+            let mut scheduler = IntervalScheduler::new(StewardSchedulerConfig::default());
+            loop {
+                scheduler.next_tick().await;
+                if let Err(e) = user_clone
+                    .read()
+                    .await
+                    .start_member_epoch(&group_name_clone)
+                    .await
+                {
+                    tracing::warn!(
+                        "start member epoch check failed for group {group_name_clone:?}: {e}"
+                    );
+                }
+            }
+        });
+
         Ok(())
     }
 
@@ -157,5 +182,35 @@ impl Gateway<WakuDeliveryService> {
         let user_ref = self.user()?;
         let members = user_ref.read().await.get_group_members(&group_name).await?;
         Ok(members)
+    }
+
+    /// Get epoch history for a group (past batches of approved proposals).
+    ///
+    /// Returns up to the last 10 epochs, each as a list of `(action, identity)` pairs.
+    pub async fn get_epoch_history(
+        &self,
+        group_name: String,
+    ) -> anyhow::Result<Vec<Vec<(String, String)>>> {
+        let user_ref = self.user()?;
+        let history = user_ref.read().await.get_epoch_history(&group_name).await?;
+
+        let mut result = Vec::with_capacity(history.len());
+        for batch in history {
+            let mut display_batch = Vec::with_capacity(batch.len());
+            for proposal in batch {
+                match proposal.payload {
+                    Some(group_update_request::Payload::InviteMember(kp)) => {
+                        let address = kp.identity.encode_hex();
+                        display_batch.push(("Add Member".to_string(), address));
+                    }
+                    Some(group_update_request::Payload::RemoveMember(id)) => {
+                        display_batch.push(("Remove Member".to_string(), id.identity.encode_hex()));
+                    }
+                    None => {}
+                }
+            }
+            result.push(display_batch);
+        }
+        Ok(result)
     }
 }

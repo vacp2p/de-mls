@@ -5,7 +5,7 @@
 //! MLS operations and event handling.
 
 use prost::Message;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use tracing::info;
 
 use ds::{transport::OutboundPacket, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
@@ -285,6 +285,16 @@ async fn process_batch_proposals(
     batch_msg: BatchProposalsMessage,
     mls: &dyn MlsGroupService,
 ) -> Result<ProcessResult, CoreError> {
+    // Verify that we have approved proposals before applying the batch.
+    // Members should only accept batches that match their consensus-approved list.
+    if handle.approved_proposals_count() == 0 {
+        tracing::warn!(
+            "Rejecting batch proposals for group {}: no approved proposals to match",
+            handle.group_name()
+        );
+        return Ok(ProcessResult::Noop);
+    }
+
     let mls_handle = handle
         .mls_handle()
         .ok_or(CoreError::MlsGroupNotInitialized)?;
@@ -300,6 +310,9 @@ async fn process_batch_proposals(
         let mut mls_group = mls_handle.lock().await;
         mls.process_inbound(&mut mls_group, &batch_msg.commit_message)?
     };
+
+    // Clear approved proposals after successful batch application (archives to history)
+    handle.clear_approved_proposals();
 
     match res {
         MlsProcessResult::Application(app_bytes) => {
@@ -318,6 +331,11 @@ pub fn approved_proposals_count(handle: &GroupHandle) -> usize {
 /// Get the approved proposals.
 pub fn approved_proposals(handle: &GroupHandle) -> HashMap<ProposalId, GroupUpdateRequest> {
     handle.approved_proposals()
+}
+
+/// Get the epoch history (past batches of approved proposals, most recent last).
+pub fn epoch_history(handle: &GroupHandle) -> &VecDeque<HashMap<ProposalId, GroupUpdateRequest>> {
+    handle.epoch_history()
 }
 
 // ─────────────────────────── Steward Operations ───────────────────────────

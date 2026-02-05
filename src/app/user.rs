@@ -169,6 +169,22 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static> User<P, H> {
         Ok(display_proposals)
     }
 
+    /// Get epoch history for a group (past batches of approved proposals, most recent last).
+    ///
+    /// Returns up to the last 10 epoch batches for UI display.
+    pub async fn get_epoch_history(
+        &self,
+        group_name: &str,
+    ) -> Result<Vec<Vec<GroupUpdateRequest>>, UserError> {
+        let groups = self.groups.read().await;
+        let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+        let history = core::epoch_history(&entry.handle);
+        Ok(history
+            .iter()
+            .map(|batch| batch.values().cloned().collect())
+            .collect())
+    }
+
     // ─────────────────────────── Messaging ───────────────────────────
 
     /// Build and return a message for a group.
@@ -231,6 +247,31 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static> User<P, H> {
 
     // ─────────────────────────── Steward Operations ───────────────────────────
 
+    /// Start a member epoch check.
+    ///
+    /// Non-steward members call this on the same interval as the steward epoch.
+    /// If they have approved proposals, they transition to Waiting state,
+    /// expecting to receive a batch proposal from the steward.
+    pub async fn start_member_epoch(&self, group_name: &str) -> Result<(), UserError> {
+        let mut groups = self.groups.write().await;
+        let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
+
+        if entry.state_machine.is_steward() {
+            return Ok(());
+        }
+
+        let proposal_count = core::approved_proposals_count(&entry.handle);
+        if proposal_count > 0 && entry.state_machine.current_state() == GroupState::Working {
+            entry.state_machine.start_waiting();
+            info!(
+                "[start_member_epoch]: Member entering Waiting state for group {group_name:?} \
+                 ({proposal_count} approved proposals pending)"
+            );
+        }
+
+        Ok(())
+    }
+
     /// Start a steward epoch.
     pub async fn start_steward_epoch(&mut self, group_name: &str) -> Result<(), UserError> {
         let mut groups = self.groups.write().await;
@@ -239,12 +280,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static> User<P, H> {
         let proposal_count = core::approved_proposals_count(&entry.handle);
         if proposal_count > 0 {
             entry.state_machine.start_steward_epoch()?;
+            // create_batch_proposals clears approved proposals internally (archiving to history)
             let messages =
                 create_batch_proposals(&mut entry.handle, &self.identity_service).await?;
             for message in messages {
                 self.handler.on_outbound(group_name, message).await?;
             }
-            entry.handle.clear_approved_proposals();
             entry.state_machine.start_working();
         }
 

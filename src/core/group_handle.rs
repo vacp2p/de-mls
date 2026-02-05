@@ -1,6 +1,6 @@
 //! GroupHandle - per-group state container.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -147,5 +147,10 @@ impl GroupHandle {
 
     pub fn clear_approved_proposals(&mut self) {
         self.proposals.clear_approved_proposals();
+    }
+
+    /// Get the epoch history (past batches of approved proposals).
+    pub fn epoch_history(&self) -> &VecDeque<HashMap<ProposalId, GroupUpdateRequest>> {
+        self.proposals.epoch_history()
     }
 }

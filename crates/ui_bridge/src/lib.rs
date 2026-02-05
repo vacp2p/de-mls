@@ -10,9 +10,8 @@ use futures::channel::mpsc::{unbounded, UnboundedReceiver};
 use futures::StreamExt;
 use std::sync::Arc;
 
-use de_mls::app::CoreCtx;
 use de_mls::protos::de_mls::messages::v1::ConversationMessage;
-use de_mls_gateway::{init_core, GATEWAY};
+use de_mls_gateway::{init_core, CoreCtx, GATEWAY};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 use ds::waku::WakuDeliveryService;
 
@@ -190,6 +189,18 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                     }
                     Err(e) => GATEWAY
                         .push_event(AppEvent::Error(format!("Get steward status failed: {e}"))),
+                }
+            }
+
+            AppCmd::GetEpochHistory { group_id } => {
+                match GATEWAY.get_epoch_history(group_id.clone()).await {
+                    Ok(epochs) => {
+                        GATEWAY.push_event(AppEvent::EpochHistory { group_id, epochs });
+                    }
+                    Err(e) => {
+                        GATEWAY
+                            .push_event(AppEvent::Error(format!("Get epoch history failed: {e}")));
+                    }
                 }
             }
 

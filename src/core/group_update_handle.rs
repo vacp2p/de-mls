@@ -1,8 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::protos::de_mls::messages::v1::GroupUpdateRequest;
 
 pub type ProposalId = u32;
+
+/// Maximum number of past epoch batches to retain for UI display.
+const MAX_EPOCH_HISTORY: usize = 10;
 
 #[derive(Clone, Debug, Default)]
 pub struct CurrentEpochProposals {
@@ -11,6 +14,9 @@ pub struct CurrentEpochProposals {
 
     /// Proposals that have been voted on and are waiting for the next voting epoch.
     voting_proposals: HashMap<ProposalId, GroupUpdateRequest>,
+
+    /// History of approved proposal batches from past epochs (most recent last).
+    epoch_history: VecDeque<HashMap<ProposalId, GroupUpdateRequest>>,
 }
 
 impl CurrentEpochProposals {
@@ -19,6 +25,7 @@ impl CurrentEpochProposals {
         Self {
             approved_proposals: HashMap::new(),
             voting_proposals: HashMap::new(),
+            epoch_history: VecDeque::new(),
         }
     }
 
@@ -64,9 +71,20 @@ impl CurrentEpochProposals {
         self.voting_proposals.clear();
     }
 
-    /// Clear the approved proposals after voting completes.
+    /// Clear the approved proposals, archiving them to epoch history.
     pub fn clear_approved_proposals(&mut self) {
-        self.approved_proposals.clear();
+        if !self.approved_proposals.is_empty() {
+            let snapshot = std::mem::take(&mut self.approved_proposals);
+            if self.epoch_history.len() >= MAX_EPOCH_HISTORY {
+                self.epoch_history.pop_front();
+            }
+            self.epoch_history.push_back(snapshot);
+        }
+    }
+
+    /// Get the epoch history (past batches of approved proposals, most recent last).
+    pub fn epoch_history(&self) -> &VecDeque<HashMap<ProposalId, GroupUpdateRequest>> {
+        &self.epoch_history
     }
 
     pub fn move_proposal_to_approved(&mut self, proposal_id: ProposalId) {

@@ -54,6 +54,9 @@ pub mod v1 {
         GetGroupMembers {
             group_id: String,
         },
+        GetEpochHistory {
+            group_id: String,
+        },
     }
 
     #[derive(Debug, Clone)]
@@ -93,6 +96,10 @@ pub mod v1 {
         GroupMembers {
             group_id: String,
             members: Vec<String>,
+        },
+        EpochHistory {
+            group_id: String,
+            epochs: Vec<Vec<(String, String)>>,
         },
         Error(String),
     }

@@ -21,16 +21,10 @@
 //! user.send_message("my-group", message).await?;
 //! ```
 
-mod bootstrap;
-mod group_registry;
 mod scheduler;
 mod state_machine;
 mod user;
 
-pub use bootstrap::{
-    bootstrap_core, bootstrap_core_from_env, AppState, Bootstrap, BootstrapConfig, CoreCtx,
-};
-pub use group_registry::GroupRegistry;
 pub use scheduler::{IntervalScheduler, StewardScheduler, StewardSchedulerConfig};
 pub use state_machine::{GroupState, GroupStateMachine};
 pub use user::{User, UserError};
