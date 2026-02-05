@@ -1,6 +1,5 @@
 use ds::waku::WakuDeliveryService;
 use hex::ToHex;
-use tracing::info;
 
 use crate::forwarder::push_consensus_state;
 use crate::Gateway;
@@ -20,30 +19,30 @@ impl Gateway<WakuDeliveryService> {
             .await?;
         core.topics.add_many(&group_name).await;
         core.groups.insert(group_name.clone()).await;
-        info!("User start sending steward message for group {group_name:?}");
 
         let user_clone = user_ref.clone();
         let evt_tx = self.evt_tx.clone();
-        let group_name_clone = group_name.clone();
         tokio::spawn(async move {
             let mut scheduler = IntervalScheduler::new(StewardSchedulerConfig::default());
             loop {
                 scheduler.next_tick().await;
-                if let Err(e) = user_clone
+                match user_clone
                     .write()
                     .await
                     .start_steward_epoch(&group_name)
                     .await
                 {
-                    tracing::warn!(
-                        "start steward epoch request failed for group {group_name:?}: {e}"
-                    );
-                    continue;
+                    Ok(()) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            "start steward epoch request failed for group {group_name:?}: {e}"
+                        );
+                        break;
+                    }
                 }
                 push_consensus_state(&user_clone, &evt_tx, &group_name).await;
             }
         });
-        tracing::debug!("User started sending steward message for group {group_name_clone:?}");
         Ok(())
     }
 
@@ -60,23 +59,65 @@ impl Gateway<WakuDeliveryService> {
         user_ref.write().await.send_kp_message(&group_name).await?;
         tracing::debug!("User sent key package message for group {group_name}");
 
-        // Spawn member epoch timer (same interval as steward)
-        // When the timer fires, check if we have approved proposals and enter Waiting state.
+        // Phase 1 (PendingJoin): Poll every 5s until joined or timed out
+        // Phase 2 (Working): Wait until epoch boundaries and check for Waiting transition
         let user_clone = user_ref.clone();
         let group_name_clone = group_name.clone();
         tokio::spawn(async move {
-            let mut scheduler = IntervalScheduler::new(StewardSchedulerConfig::default());
+            // Phase 1: Wait for join
             loop {
-                scheduler.next_tick().await;
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if !user_clone
+                    .read()
+                    .await
+                    .check_pending_join(&group_name_clone)
+                    .await
+                {
+                    break;
+                }
+            }
+
+            // Check if we actually joined
+            let joined = user_clone
+                .read()
+                .await
+                .get_group_state(&group_name_clone)
+                .await
+                .map(|s| s == de_mls::app::GroupState::Working)
+                .unwrap_or(false);
+
+            if !joined {
+                tracing::debug!("Join failed for group {group_name_clone:?}");
+                return;
+            }
+
+            tracing::info!("Member joined group {group_name_clone:?}");
+
+            // Phase 2: Epoch boundary loop
+            loop {
+                let wait_time = user_clone
+                    .read()
+                    .await
+                    .time_until_next_epoch(&group_name_clone)
+                    .await;
+
+                match wait_time {
+                    Some(d) if d > std::time::Duration::ZERO => tokio::time::sleep(d).await,
+                    Some(_) => {} // Already at boundary
+                    None => {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        continue;
+                    }
+                }
+
                 if let Err(e) = user_clone
                     .read()
                     .await
                     .start_member_epoch(&group_name_clone)
                     .await
                 {
-                    tracing::warn!(
-                        "start member epoch check failed for group {group_name_clone:?}: {e}"
-                    );
+                    tracing::warn!("Member epoch failed for {group_name_clone:?}: {e}");
+                    break;
                 }
             }
         });
@@ -134,6 +175,12 @@ impl Gateway<WakuDeliveryService> {
         Ok(())
     }
 
+    pub async fn leave_group(&self, group_name: String) -> anyhow::Result<()> {
+        let user_ref = self.user()?;
+        user_ref.write().await.leave_group(&group_name).await?;
+        Ok(())
+    }
+
     pub async fn group_list(&self) -> Vec<String> {
         let core = self.core();
         core.groups.all().await
@@ -147,6 +194,12 @@ impl Gateway<WakuDeliveryService> {
             .is_steward_for_group(&group_name)
             .await?;
         Ok(is_steward)
+    }
+
+    pub async fn get_group_state(&self, group_name: String) -> anyhow::Result<String> {
+        let user_ref = self.user()?;
+        let state = user_ref.read().await.get_group_state(&group_name).await?;
+        Ok(state.to_string())
     }
 
     /// Get current epoch proposals for the given group

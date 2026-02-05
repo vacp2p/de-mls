@@ -18,10 +18,10 @@ pub mod v1 {
         },
         ListGroups,
         CreateGroup {
-            name: String,
+            group_id: String,
         },
         JoinGroup {
-            name: String,
+            group_id: String,
         },
         EnterGroup {
             group_id: String,
@@ -42,6 +42,9 @@ pub mod v1 {
             group_id: String,
         },
         GetStewardStatus {
+            group_id: String,
+        },
+        GetGroupState {
             group_id: String,
         },
         GetCurrentEpochProposals {
@@ -77,6 +80,11 @@ pub mod v1 {
         StewardStatus {
             group_id: String,
             is_steward: bool,
+        },
+
+        GroupStateChanged {
+            group_id: String,
+            state: String,
         },
 
         VoteRequested(VotePayload),

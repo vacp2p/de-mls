@@ -10,6 +10,7 @@
 //!
 
 mod api;
+mod consensus;
 mod error;
 mod events;
 mod group_handle;
@@ -18,6 +19,7 @@ mod provider;
 mod types;
 
 pub use api::*;
+pub use consensus::*;
 pub use error::CoreError;
 pub use events::GroupEventHandler;
 pub use group_handle::GroupHandle;

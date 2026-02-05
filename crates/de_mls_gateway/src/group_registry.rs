@@ -24,6 +24,10 @@ impl GroupRegistry {
         true
     }
 
+    pub async fn remove(&self, name: &str) {
+        self.names.write().await.remove(name);
+    }
+
     pub async fn all(&self) -> Vec<String> {
         self.names.read().await.iter().cloned().collect()
     }

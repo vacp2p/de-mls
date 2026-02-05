@@ -7,6 +7,7 @@
     --primary-2: #007ad9;
     --border: #1c1e25;
     --good: #00f5a0;
+    --warn: #ffb800;
     --bad: #ff005c;
 }
 
@@ -410,6 +411,12 @@ button.mini {
 }
 
 /* Consensus panel */
+.panel.consensus .status-row {
+    display: flex;
+    gap: 24px;
+    margin-bottom: 12px;
+}
+
 .panel.consensus .status {
     display: flex;
     align-items: center;
@@ -421,9 +428,18 @@ button.mini {
     font-weight: 600;
 }
 
+.panel.consensus .status .warn {
+    color: var(--warn);
+    font-weight: 600;
+}
+
 .panel.consensus .status .bad {
     color: var(--bad);
     font-weight: 600;
+}
+
+.panel.consensus .status .muted {
+    color: var(--muted);
 }
 
 .panel.consensus .proposal-item {
@@ -477,7 +493,6 @@ button.mini {
 
 .panel.consensus .status {
     flex-shrink: 0;
-    margin-bottom: 16px;
 }
 
 .panel.consensus .consensus-section {

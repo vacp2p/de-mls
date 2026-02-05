@@ -6,6 +6,9 @@
 use async_trait::async_trait;
 use std::time::Duration;
 
+/// Default epoch duration (30 seconds).
+pub const DEFAULT_EPOCH_DURATION: Duration = Duration::from_secs(30);
+
 /// Configuration for steward epoch scheduling.
 pub struct StewardSchedulerConfig {
     /// Interval between steward epochs.
@@ -15,7 +18,7 @@ pub struct StewardSchedulerConfig {
 impl Default for StewardSchedulerConfig {
     fn default() -> Self {
         Self {
-            epoch_interval: Duration::from_secs(20),
+            epoch_interval: DEFAULT_EPOCH_DURATION,
         }
     }
 }

@@ -29,8 +29,15 @@ pub use bootstrap::*;
 use handler::GatewayEventHandler;
 
 /// Type alias for the user reference stored in the gateway.
-type UserRef =
-    Arc<tokio::sync::RwLock<User<DefaultProvider, GatewayEventHandler<WakuDeliveryService>>>>;
+type UserRef = Arc<
+    tokio::sync::RwLock<
+        User<
+            DefaultProvider,
+            GatewayEventHandler<WakuDeliveryService>,
+            GatewayEventHandler<WakuDeliveryService>,
+        >,
+    >,
+>;
 
 // Global, process-wide gateway instance
 pub static GATEWAY: Lazy<Gateway<WakuDeliveryService>> = Lazy::new(Gateway::new);
@@ -129,16 +136,19 @@ impl Gateway<WakuDeliveryService> {
         let core = self.core();
         let consensus_service = core.consensus.clone();
 
-        let handler = GatewayEventHandler {
+        // Create handler that implements both GroupEventHandler and StateChangeHandler
+        let handler = Arc::new(GatewayEventHandler {
             delivery: Arc::new(core.app_state.delivery.clone()),
             evt_tx: self.evt_tx.clone(),
             topics: core.topics.clone(),
-        };
+            groups: core.groups.clone(),
+        });
 
         let user = User::with_private_key(
             private_key.as_str(),
             Arc::new(consensus_service),
-            Arc::new(handler),
+            handler.clone(),
+            handler, // Same handler implements StateChangeHandler
         )?;
 
         let user_address = user.identity_string();

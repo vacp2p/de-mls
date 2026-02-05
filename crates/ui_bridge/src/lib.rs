@@ -66,26 +66,48 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 GATEWAY.push_event(AppEvent::Groups(groups));
             }
 
-            AppCmd::CreateGroup { name } => {
+            AppCmd::CreateGroup { group_id: name } => {
                 GATEWAY.create_group(name.clone()).await?;
 
                 let groups = GATEWAY.group_list().await;
                 GATEWAY.push_event(AppEvent::Groups(groups));
+
+                // Push initial state (Working for steward)
+                if let Ok(state) = GATEWAY.get_group_state(name.clone()).await {
+                    GATEWAY.push_event(AppEvent::GroupStateChanged {
+                        group_id: name,
+                        state,
+                    });
+                }
             }
 
-            AppCmd::JoinGroup { name } => {
-                GATEWAY.join_group(name.clone()).await?;
+            AppCmd::JoinGroup { group_id } => {
+                GATEWAY.join_group(group_id.clone()).await?;
 
                 let groups = GATEWAY.group_list().await;
                 GATEWAY.push_event(AppEvent::Groups(groups));
+
+                // Push initial state (PendingJoin for joining member)
+                if let Ok(state) = GATEWAY.get_group_state(group_id.clone()).await {
+                    GATEWAY.push_event(AppEvent::GroupStateChanged { group_id, state });
+                }
             }
 
             AppCmd::EnterGroup { group_id } => {
-                GATEWAY.push_event(AppEvent::EnteredGroup { group_id });
+                GATEWAY.push_event(AppEvent::EnteredGroup {
+                    group_id: group_id.clone(),
+                });
+
+                // Push current state when entering group
+                if let Ok(state) = GATEWAY.get_group_state(group_id.clone()).await {
+                    GATEWAY.push_event(AppEvent::GroupStateChanged { group_id, state });
+                }
             }
 
             AppCmd::LeaveGroup { group_id } => {
-                GATEWAY.push_event(AppEvent::LeaveGroup { group_id });
+                if let Err(e) = GATEWAY.leave_group(group_id.clone()).await {
+                    GATEWAY.push_event(AppEvent::Error(format!("Leave group failed: {e}")));
+                }
             }
 
             AppCmd::GetGroupMembers { group_id } => {
@@ -189,6 +211,17 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                     }
                     Err(e) => GATEWAY
                         .push_event(AppEvent::Error(format!("Get steward status failed: {e}"))),
+                }
+            }
+
+            AppCmd::GetGroupState { group_id } => {
+                match GATEWAY.get_group_state(group_id.clone()).await {
+                    Ok(state) => {
+                        GATEWAY.push_event(AppEvent::GroupStateChanged { group_id, state });
+                    }
+                    Err(e) => {
+                        GATEWAY.push_event(AppEvent::Error(format!("Get group state failed: {e}")));
+                    }
                 }
             }
 

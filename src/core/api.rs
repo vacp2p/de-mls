@@ -218,7 +218,7 @@ where
             Ok(ProcessResult::Noop)
         }
         Some(welcome_message::Payload::InvitationToJoin(invitation)) => {
-            // Only non-stewards who haven't joined yet process invitations
+            // Stewards and already-joined members ignore invitations
             if handle.is_steward() || handle.is_mls_initialized() {
                 return Ok(ProcessResult::Noop);
             }

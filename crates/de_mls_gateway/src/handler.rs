@@ -14,6 +14,8 @@ use de_mls::core::{message_types, CoreError, GroupEventHandler, MessageType};
 use de_mls::protos::de_mls::messages::v1::{app_message, AppMessage, ConversationMessage};
 use de_mls_ui_protocol::v1::AppEvent;
 
+use crate::group_registry::GroupRegistry;
+
 /// Event handler for the gateway layer.
 ///
 /// Sends outbound packets via the delivery service and forwards
@@ -22,6 +24,7 @@ pub struct GatewayEventHandler<DS: DeliveryService> {
     pub delivery: Arc<DS>,
     pub evt_tx: UnboundedSender<AppEvent>,
     pub topics: Arc<TopicFilter>,
+    pub groups: Arc<GroupRegistry>,
 }
 
 #[async_trait]
@@ -48,6 +51,7 @@ impl<DS: DeliveryService> GroupEventHandler for GatewayEventHandler<DS> {
 
     async fn on_leave_group(&self, group_name: &str) -> Result<(), CoreError> {
         self.topics.remove_many(group_name).await;
+        self.groups.remove(group_name).await;
 
         let _ = self
             .evt_tx
@@ -65,8 +69,20 @@ impl<DS: DeliveryService> GroupEventHandler for GatewayEventHandler<DS> {
     }
 
     async fn on_joined_group(&self, _group_name: &str) -> Result<(), CoreError> {
-        // TODO: Implement error behavior on join group
         Ok(())
+    }
+}
+
+// Implement StateChangeHandler for app-layer state notifications
+use de_mls::app::StateChangeHandler;
+
+#[async_trait]
+impl<DS: DeliveryService> StateChangeHandler for GatewayEventHandler<DS> {
+    async fn on_state_changed(&self, group_name: &str, state: &str) {
+        let _ = self.evt_tx.unbounded_send(AppEvent::GroupStateChanged {
+            group_id: group_name.to_string(),
+            state: state.to_string(),
+        });
     }
 }
 

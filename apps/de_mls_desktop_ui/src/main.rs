@@ -54,6 +54,7 @@ struct RejectedProposal {
 #[derive(Clone, Debug, Default, PartialEq)]
 struct ConsensusState {
     is_steward: bool,
+    group_state: String,
     pending: Option<VotePayload>,
     approved_queue: Vec<(String, String)>,
     rejected: Vec<RejectedProposal>,
@@ -294,6 +295,11 @@ fn Home() -> Element {
                             cons.write().is_steward = is_steward;
                         }
                     }
+                    Some(AppEvent::GroupStateChanged { group_id, state }) => {
+                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
+                            cons.write().group_state = state;
+                        }
+                    }
                     Some(AppEvent::CurrentEpochProposals {
                         group_id,
                         proposals,
@@ -372,10 +378,7 @@ fn Home() -> Element {
                                         if let Some((action, address)) =
                                             c.proposal_cache.remove(proposal_id)
                                         {
-                                            c.rejected.push(RejectedProposal {
-                                                action,
-                                                address,
-                                            });
+                                            c.rejected.push(RejectedProposal { action, address });
                                             if c.rejected.len() > MAX_VISIBLE_REJECTED {
                                                 c.rejected.remove(0);
                                             }
@@ -384,16 +387,11 @@ fn Home() -> Element {
                                         c.proposal_cache.remove(proposal_id);
                                     }
                                 }
-                                ConsensusEvent::ConsensusFailed {
-                                    proposal_id, ..
-                                } => {
+                                ConsensusEvent::ConsensusFailed { proposal_id, .. } => {
                                     if let Some((action, address)) =
                                         c.proposal_cache.remove(proposal_id)
                                     {
-                                        c.rejected.push(RejectedProposal {
-                                            action,
-                                            address,
-                                        });
+                                        c.rejected.push(RejectedProposal { action, address });
                                         if c.rejected.len() > MAX_VISIBLE_REJECTED {
                                             c.rejected.remove(0);
                                         }
@@ -475,6 +473,7 @@ fn AlertItem(props: AlertItemProps) -> Element {
 fn GroupListSection() -> Element {
     let groups_state = use_context::<Signal<GroupsState>>();
     let mut chat = use_context::<Signal<ChatState>>();
+    let mut cons = use_context::<Signal<ConsensusState>>();
     let mut show_modal = use_signal(|| false);
     let mut new_name = use_signal(String::new);
     let mut create_mode = use_signal(|| true); // true=create, false=join
@@ -486,6 +485,7 @@ fn GroupListSection() -> Element {
         move |name: String| {
             chat.write().opened_group = Some(name.clone());
             chat.write().members.clear();
+            cons.write().group_state.clear();
             let group_id = name.clone();
             spawn(async move {
                 let _ = GATEWAY
@@ -500,6 +500,11 @@ fn GroupListSection() -> Element {
                     .await;
                 let _ = GATEWAY
                     .send(AppCmd::GetStewardStatus {
+                        group_id: group_id.clone(),
+                    })
+                    .await;
+                let _ = GATEWAY
+                    .send(AppCmd::GetGroupState {
                         group_id: group_id.clone(),
                     })
                     .await;
@@ -533,7 +538,7 @@ fn GroupListSection() -> Element {
                 spawn(async move {
                     let _ = GATEWAY
                         .send(AppCmd::CreateGroup {
-                            name: action_name.clone(),
+                            group_id: action_name.clone(),
                         })
                         .await;
                     let _ = GATEWAY.send(AppCmd::ListGroups).await;
@@ -542,7 +547,7 @@ fn GroupListSection() -> Element {
                 spawn(async move {
                     let _ = GATEWAY
                         .send(AppCmd::JoinGroup {
-                            name: action_name.clone(),
+                            group_id: action_name.clone(),
                         })
                         .await;
                     let _ = GATEWAY.send(AppCmd::ListGroups).await;
@@ -912,13 +917,30 @@ fn ConsensusSection() -> Element {
             h2 { "Consensus" }
 
             if let Some(_group) = opened {
-                // Steward status
-                div { class: "status",
-                    span { class: "muted", "You are " }
-                    if cons.read().is_steward {
-                        span { class: "good", "a steward" }
-                    } else {
-                        span { class: "bad", "not a steward" }
+                // Steward & State status
+                div { class: "status-row",
+                    div { class: "status",
+                        span { class: "muted", "You are " }
+                        if cons.read().is_steward {
+                            span { class: "good", "a steward" }
+                        } else {
+                            span { class: "bad", "not a steward" }
+                        }
+                    }
+                    div { class: "status",
+                        span { class: "muted", "State: " }
+                        {
+                            let state = cons.read().group_state.clone();
+                            let (class, label) = match state.as_str() {
+                                "Working" => ("good", "Working"),
+                                "Waiting" => ("warn", "Waiting for commit"),
+                                "PendingJoin" => ("warn", "Pending join"),
+                                "Leaving" => ("bad", "Leaving"),
+                                "" => ("muted", "Unknown"),
+                                other => ("muted", other),
+                            };
+                            rsx! { span { class: "{class}", "{label}" } }
+                        }
                     }
                 }
 

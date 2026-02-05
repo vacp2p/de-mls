@@ -5,8 +5,6 @@
 //!
 //! - [`User`] - Manages multiple groups via `HashMap<String, GroupHandle>`
 //! - [`GroupStateMachine`] - State transitions for steward epochs
-//! - [`ConsensusHandler`] - Orchestrates consensus events
-//! - [`PendingBatches`] - Stores batch proposals for non-stewards
 //!
 //! # Usage
 //!
@@ -26,5 +24,5 @@ mod state_machine;
 mod user;
 
 pub use scheduler::{IntervalScheduler, StewardScheduler, StewardSchedulerConfig};
-pub use state_machine::{GroupState, GroupStateMachine};
+pub use state_machine::{GroupState, GroupStateMachine, StateChangeHandler};
 pub use user::{User, UserError};
