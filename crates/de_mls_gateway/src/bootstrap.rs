@@ -1,16 +1,13 @@
-use ds::{topic_filter::TopicFilter, DeliveryServiceError};
-use ds::{
-    transport::{DeliveryService, InboundPacket},
-    waku::{WakuConfig, WakuDeliveryService},
-};
-use hashgraph_like_consensus::service::DefaultConsensusService;
-use std::env::VarError;
-use std::num::ParseIntError;
-use std::sync::Arc;
-use tokio::sync::broadcast;
-use tokio::sync::broadcast::Sender;
+use std::{env::VarError, num::ParseIntError, sync::Arc};
+use tokio::sync::{broadcast, broadcast::Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
+
+use de_mls::ds::{
+    DeliveryService, DeliveryServiceError, InboundPacket, TopicFilter, WakuConfig,
+    WakuDeliveryService,
+};
+use hashgraph_like_consensus::service::DefaultConsensusService;
 
 pub struct AppState<DS: DeliveryService> {
     pub delivery: DS,

@@ -42,23 +42,25 @@
 //! - `LeaveGroup` - User was removed, clean up group state
 //! - `JoinedGroup` - User joined successfully, transition to Working state
 
-use std::time::Duration;
-
 use alloy::signers::Signer;
-use hashgraph_like_consensus::api::ConsensusServiceAPI;
-use hashgraph_like_consensus::protos::consensus::v1::{Proposal, Vote};
-use hashgraph_like_consensus::session::ConsensusConfig;
-use hashgraph_like_consensus::types::{ConsensusEvent, CreateProposalRequest};
-use mls_crypto::IdentityService;
 use prost::Message;
+use std::time::Duration;
 use tracing::info;
 
-use crate::core::{build_message, CoreError, DeMlsProvider, GroupEventHandler, GroupHandle};
+use hashgraph_like_consensus::{
+    api::ConsensusServiceAPI,
+    protos::consensus::v1::{Proposal, Vote},
+    session::ConsensusConfig,
+    types::{ConsensusEvent, CreateProposalRequest},
+};
+
+use crate::core::{
+    build_message, CoreError, DeMlsProvider, GroupEventHandler, GroupHandle, ProcessResult,
+};
+use crate::mls_crypto::IdentityService;
 use crate::protos::de_mls::messages::v1::{
     AppMessage, ConversationMessage, GroupUpdateRequest, VotePayload,
 };
-
-use super::ProcessResult;
 
 /// Action returned by [`dispatch_result`] telling the caller what to do next.
 ///

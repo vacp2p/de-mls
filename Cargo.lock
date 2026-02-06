@@ -2296,11 +2296,13 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
- "ds",
  "futures",
  "hashgraph-like-consensus",
  "http",
- "mls_crypto",
+ "openmls",
+ "openmls_basic_credential",
+ "openmls_rust_crypto",
+ "openmls_traits",
  "prost 0.13.5",
  "prost-build",
  "rand 0.8.5",
@@ -2332,7 +2334,6 @@ dependencies = [
  "futures",
  "hashgraph-like-consensus",
  "hex",
- "mls_crypto",
  "once_cell",
  "parking_lot 0.12.5",
  "thiserror 2.0.18",
@@ -2352,11 +2353,9 @@ dependencies = [
  "async-trait",
  "de_mls",
  "de_mls_ui_protocol",
- "ds",
  "futures",
  "hashgraph-like-consensus",
  "hex",
- "mls_crypto",
  "once_cell",
  "parking_lot 0.12.5",
  "thiserror 2.0.18",
@@ -2373,7 +2372,6 @@ version = "0.1.0"
 dependencies = [
  "de_mls",
  "hashgraph-like-consensus",
- "mls_crypto",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2977,24 +2975,6 @@ name = "dpi"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
-
-[[package]]
-name = "ds"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "chrono",
- "kameo",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber 0.3.22",
- "uuid",
- "waku-bindings",
- "waku-sys",
-]
 
 [[package]]
 name = "dtoa"
@@ -4636,36 +4616,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kameo"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62237a96597618543798a36ec723eb75c5ac301e2690243fd600be1f5eb3dd2d"
-dependencies = [
- "dyn-clone",
- "futures",
- "itertools 0.13.0",
- "kameo_macros",
- "once_cell",
- "serde",
- "tokio",
- "tokio-stream",
- "tracing",
-]
-
-[[package]]
-name = "kameo_macros"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5bbbd8e8d7b02bc67eae0dcbdb82c0a71cc7cc61734059ee3e7439a1ee1e0e85"
-dependencies = [
- "heck 0.5.0",
- "proc-macro2",
- "quote",
- "syn 2.0.114",
- "uuid",
-]
-
-[[package]]
 name = "keccak"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5214,19 +5164,6 @@ dependencies = [
  "libc",
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "mls_crypto"
-version = "1.0.0"
-dependencies = [
- "alloy",
- "openmls",
- "openmls_basic_credential",
- "openmls_rust_crypto",
- "openmls_traits",
- "serde_json",
- "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -8521,7 +8458,6 @@ dependencies = [
  "de_mls",
  "de_mls_gateway",
  "de_mls_ui_protocol",
- "ds",
  "futures",
  "tokio",
  "tracing",
@@ -8631,7 +8567,6 @@ checksum = "ee48d38b119b0cd71fe4141b30f5ba9c7c5d9f4e7a3a8b4a674e4b6ef789976f"
 dependencies = [
  "getrandom 0.3.4",
  "js-sys",
- "rand 0.9.2",
  "serde_core",
  "wasm-bindgen",
 ]

@@ -1,7 +1,7 @@
 //! Transport-agnostic topic filter used by the app as a fast allowlist.
 use tokio::sync::RwLock;
 
-use crate::SUBTOPICS;
+use crate::ds::SUBTOPICS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicKey {

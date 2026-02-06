@@ -16,8 +16,6 @@ futures = "0.3.31"
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 
 de_mls_ui_protocol = { path = "../de_mls_ui_protocol" }
-ds = { path = "../../ds" }
-mls_crypto = { path = "../../mls_crypto" }
 once_cell = "1.21.3"
 parking_lot = "0.12.5"
 de_mls = { path = "../../" }

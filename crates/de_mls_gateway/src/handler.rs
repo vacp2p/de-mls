@@ -4,14 +4,14 @@
 //! (delivery service for outbound, AppEvent for UI notifications).
 
 use async_trait::async_trait;
-use ds::topic_filter::TopicFilter;
-use ds::transport::DeliveryService;
-use ds::transport::OutboundPacket;
 use futures::channel::mpsc::UnboundedSender;
 use std::sync::Arc;
 
-use de_mls::core::{message_types, CoreError, GroupEventHandler, MessageType};
-use de_mls::protos::de_mls::messages::v1::{app_message, AppMessage, ConversationMessage};
+use de_mls::{
+    core::{message_types, CoreError, GroupEventHandler, MessageType},
+    ds::{DeliveryService, OutboundPacket, TopicFilter},
+    protos::de_mls::messages::v1::{app_message, AppMessage, ConversationMessage},
+};
 use de_mls_ui_protocol::v1::AppEvent;
 
 /// Event handler for the gateway layer.

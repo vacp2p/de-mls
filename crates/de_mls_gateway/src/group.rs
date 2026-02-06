@@ -1,12 +1,12 @@
-use ds::waku::WakuDeliveryService;
 use hex::ToHex;
 
-use crate::forwarder::push_consensus_state;
-use crate::Gateway;
 use de_mls::{
     app::{CommitTimeoutStatus, IntervalScheduler, StewardScheduler, StewardSchedulerConfig},
+    ds::WakuDeliveryService,
     protos::de_mls::messages::v1::{group_update_request, BanRequest},
 };
+
+use crate::{forwarder::push_consensus_state, Gateway};
 
 impl Gateway<WakuDeliveryService> {
     pub async fn create_group(&self, group_name: String) -> anyhow::Result<()> {

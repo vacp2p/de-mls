@@ -4,8 +4,10 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_traits::{types::Ciphersuite, OpenMlsProvider};
 use std::{collections::HashMap, fmt::Display, str::FromStr};
 
-use crate::error::IdentityError;
-use crate::openmls_provider::{MlsProvider, CIPHERSUITE};
+use crate::mls_crypto::{
+    openmls_provider::{MlsProvider, CIPHERSUITE},
+    IdentityError,
+};
 
 pub struct Identity {
     pub(crate) kp: HashMap<Vec<u8>, KeyPackage>,

@@ -1,8 +1,9 @@
 //! State machine for steward epoch management and group operations.
-use std::fmt::Display;
-use std::time::{Duration, Instant};
-
 use async_trait::async_trait;
+use std::{
+    fmt::Display,
+    time::{Duration, Instant},
+};
 use tracing::info;
 
 use crate::app::scheduler::DEFAULT_EPOCH_DURATION;

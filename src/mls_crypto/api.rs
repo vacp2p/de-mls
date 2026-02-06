@@ -1,9 +1,10 @@
 use alloy::hex;
-use openmls::group::MlsGroup;
-use openmls::prelude::Ciphersuite;
-use openmls::prelude::KeyPackage;
+use openmls::{
+    group::MlsGroup,
+    prelude::{Ciphersuite, KeyPackage},
+};
 
-use crate::error::{IdentityError, MlsServiceError};
+use crate::mls_crypto::{IdentityError, MlsServiceError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyPackageBytes {

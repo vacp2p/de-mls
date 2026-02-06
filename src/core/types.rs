@@ -6,15 +6,16 @@
 //! - [`MessageType`] - Trait for identifying message types
 //! - Various `From` implementations for protobuf message conversions
 
+use prost::Message;
+
 use hashgraph_like_consensus::{
     protos::consensus::v1::{Proposal, Vote},
     types::ConsensusEvent,
 };
-use mls_crypto::identity::{normalize_wallet_address, normalize_wallet_address_bytes};
-use prost::Message;
 
 use crate::{
     core::CoreError,
+    mls_crypto::{normalize_wallet_address, normalize_wallet_address_bytes},
     protos::de_mls::messages::v1::{
         app_message, group_update_request, welcome_message, AppMessage, BanRequest,
         BatchProposalsMessage, ConversationMessage, GroupUpdateRequest, InvitationToJoin, Outcome,

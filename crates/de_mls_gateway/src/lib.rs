@@ -5,7 +5,6 @@
 //! - Provide a command entrypoint UI -> gateway (`send(AppCmd)`)
 //! - Hold references to the core context (`CoreCtx`) and current user
 //! - Offer small helper methods (login_with_private_key, etc.)
-use ds::{waku::WakuDeliveryService, DeliveryService};
 use futures::{
     channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
     StreamExt,
@@ -15,7 +14,11 @@ use parking_lot::RwLock;
 use std::sync::{atomic::AtomicBool, Arc};
 use tokio::sync::Mutex;
 
-use de_mls::{app::User, core::DefaultProvider};
+use de_mls::{
+    app::User,
+    core::DefaultProvider,
+    ds::{DeliveryService, WakuDeliveryService},
+};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 
 mod bootstrap;

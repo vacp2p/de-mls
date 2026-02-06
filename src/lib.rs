@@ -25,6 +25,9 @@ pub mod core;
 // Example application layer (reference implementation)
 pub mod app;
 
+pub mod ds;
+pub mod mls_crypto;
+
 pub mod protos {
     pub mod hashgraph_like_consensus {
         pub mod v1 {

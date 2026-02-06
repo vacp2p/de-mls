@@ -5,9 +5,9 @@
 //! output events from group operations.
 
 use async_trait::async_trait;
-use ds::transport::OutboundPacket;
 
-use super::error::CoreError;
+use crate::core::error::CoreError;
+use crate::ds::OutboundPacket;
 use crate::protos::de_mls::messages::v1::AppMessage;
 
 /// Trait for handling output events from group operations.

@@ -1,11 +1,7 @@
 //! Waku transport implementation and Waku-backed `DeliveryService`.
 
 use std::{borrow::Cow, thread::sleep, time::Duration};
-use tokio::sync::{
-    broadcast,
-    mpsc::{self, Receiver, Sender},
-    oneshot,
-};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info};
 use waku_bindings::{
     node::PubsubTopic,
@@ -14,7 +10,7 @@ use waku_bindings::{
     WakuEvent, WakuMessage,
 };
 
-use crate::{
+use crate::ds::{
     transport::{DeliveryService, InboundPacket, OutboundPacket},
     DeliveryServiceError,
 };
@@ -147,18 +143,6 @@ impl WakuNode<Initialized> {
 
         Ok(WakuNode { node: waku })
     }
-
-    pub async fn start(
-        self,
-        waku_sender: Sender<WakuMessage>,
-    ) -> Result<WakuNode<Running>, DeliveryServiceError> {
-        self.start_with_handler(move |msg| {
-            waku_sender
-                .blocking_send(msg)
-                .expect("Failed to send message to waku");
-        })
-        .await
-    }
 }
 
 impl WakuNode<Running> {
@@ -190,46 +174,6 @@ impl WakuNode<Running> {
         }
         Ok(())
     }
-
-    pub async fn listen_addresses(&self) -> Result<Vec<Multiaddr>, DeliveryServiceError> {
-        let addresses = self.node.listen_addresses().await.map_err(|e| {
-            debug!("Failed to get the listen addresses: {e:?}");
-            DeliveryServiceError::WakuGetListenAddressesError(e)
-        })?;
-
-        Ok(addresses)
-    }
-}
-
-pub async fn run_waku_node(
-    node_port: String,
-    peer_addresses: Option<Vec<Multiaddr>>,
-    waku_sender: Sender<WakuMessage>,
-    receiver: &mut Receiver<OutboundPacket>,
-) -> Result<(), DeliveryServiceError> {
-    info!("Initializing waku node");
-    let waku_node_init = WakuNode::new(
-        node_port
-            .parse::<usize>()
-            .expect("Failed to parse node port"),
-    )
-    .await?;
-    let waku_node = waku_node_init.start(waku_sender).await?;
-    info!("Waku node started");
-
-    if let Some(peer_addresses) = peer_addresses {
-        waku_node.connect_to_peers(peer_addresses).await?;
-        info!("Connected to all peers");
-    }
-
-    info!("Waiting for message to send to waku");
-    while let Some(msg) = receiver.recv().await {
-        debug!("Received message to send to waku");
-        let id = waku_node.send_message(msg).await?;
-        debug!("Successfully publish message with id: {id:?}");
-    }
-
-    Ok(())
 }
 
 #[derive(Debug)]

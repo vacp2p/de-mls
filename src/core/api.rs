@@ -46,17 +46,15 @@ use prost::Message;
 use std::collections::{HashMap, VecDeque};
 use tracing::info;
 
-use ds::{transport::OutboundPacket, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
-use mls_crypto::{
-    BatchProposalsResult, IdentityService, KeyPackageBytes, MlsGroupService, MlsGroupUpdate,
-    MlsProcessResult,
+use crate::core::{
+    error::CoreError, group_handle::GroupHandle, types::invitation_from_bytes,
+    types::ProcessResult, ProposalId,
 };
-
-use super::error::CoreError;
-use super::group_handle::GroupHandle;
-use super::types::ProcessResult;
-use crate::core::types::invitation_from_bytes;
-use crate::core::ProposalId;
+use crate::ds::{OutboundPacket, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
+use crate::mls_crypto::{
+    key_package_bytes_from_json, BatchProposalsResult, IdentityService, KeyPackageBytes,
+    MlsGroupService, MlsGroupUpdate, MlsProcessResult,
+};
 use crate::protos::de_mls::messages::v1::{
     app_message, group_update_request, welcome_message, AppMessage, BatchProposalsMessage,
     GroupUpdateRequest, InviteMember, UserKeyPackage, WelcomeMessage,
@@ -293,7 +291,7 @@ where
                     handle.group_name()
                 );
                 let (key_package_bytes, identity) =
-                    mls_crypto::key_package_bytes_from_json(user_kp.key_package_bytes)?;
+                    key_package_bytes_from_json(user_kp.key_package_bytes)?;
 
                 let gur = GroupUpdateRequest {
                     payload: Some(group_update_request::Payload::InviteMember(InviteMember {

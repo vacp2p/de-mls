@@ -8,7 +8,7 @@ use openmls::{
 };
 use openmls_traits::OpenMlsProvider;
 
-use crate::{
+use crate::mls_crypto::{
     error::{IdentityError, MlsServiceError},
     identity::Identity,
     key_package_from_json,

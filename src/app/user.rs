@@ -3,25 +3,24 @@
 //! This is the main entry point for the application layer,
 //! managing multiple `GroupHandle`s and coordinating operations.
 
-use std::collections::HashMap;
-use std::str::FromStr;
-use std::sync::Arc;
-
 use alloy::signers::local::{LocalSignerError, PrivateKeySigner};
-use ds::transport::InboundPacket;
-use hashgraph_like_consensus::service::DefaultConsensusService;
-use hashgraph_like_consensus::types::ConsensusEvent;
-use mls_crypto::identity::normalize_wallet_address_bytes;
-use mls_crypto::{IdentityService, OpenMlsIdentityService};
+use std::{collections::HashMap, str::FromStr, sync::Arc};
 use tokio::sync::RwLock;
 use tracing::{error, info};
 
-use super::state_machine::{
+use hashgraph_like_consensus::{service::DefaultConsensusService, types::ConsensusEvent};
+
+use crate::app::state_machine::{
     CommitTimeoutStatus, GroupConfig, GroupState, GroupStateMachine, StateChangeHandler,
 };
 use crate::core::{
     self, create_batch_proposals, CoreError, DeMlsProvider, DefaultProvider, GroupEventHandler,
     GroupHandle,
+};
+use crate::ds::InboundPacket;
+use crate::mls_crypto::{
+    normalize_wallet_address, normalize_wallet_address_bytes, IdentityError, IdentityService,
+    OpenMlsIdentityService,
 };
 use crate::protos::de_mls::messages::v1::{
     group_update_request, AppMessage, BanRequest, ConversationMessage, GroupUpdateRequest,
@@ -237,7 +236,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
         let members = core::group_members(&entry.handle, &self.identity_service).await?;
         Ok(members
             .into_iter()
-            .map(|raw| mls_crypto::identity::normalize_wallet_address(raw.as_slice()).to_string())
+            .map(|raw| normalize_wallet_address(raw.as_slice()).to_string())
             .collect())
     }
 
@@ -862,7 +861,7 @@ pub enum UserError {
     Signer(#[from] LocalSignerError),
 
     #[error("Identity error: {0}")]
-    Identity(#[from] mls_crypto::error::IdentityError),
+    Identity(#[from] IdentityError),
 }
 
 impl UserError {

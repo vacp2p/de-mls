@@ -59,8 +59,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::core::group_update_handle::{CurrentEpochProposals, ProposalId};
+use crate::mls_crypto::MlsGroupHandle;
 use crate::protos::de_mls::messages::v1::GroupUpdateRequest;
-use mls_crypto::MlsGroupHandle;
 
 /// Handle for a single MLS group.
 ///

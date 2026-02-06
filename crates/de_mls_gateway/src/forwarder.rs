@@ -1,14 +1,11 @@
-use ds::waku::WakuDeliveryService;
 use futures::channel::mpsc::UnboundedSender;
 use hex::ToHex;
-
 use std::sync::{atomic::Ordering, Arc};
 
-use crate::CoreCtx;
-use de_mls::protos::de_mls::messages::v1::group_update_request;
+use de_mls::{ds::WakuDeliveryService, protos::de_mls::messages::v1::group_update_request};
 use de_mls_ui_protocol::v1::AppEvent;
 
-use crate::{Gateway, UserRef};
+use crate::{CoreCtx, Gateway, UserRef};
 
 /// Push refreshed approved-queue and epoch-history events to the UI.
 pub(crate) async fn push_consensus_state(

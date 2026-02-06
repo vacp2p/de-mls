@@ -3,7 +3,7 @@
 use std::future::Future;
 use tokio::sync::broadcast;
 
-use crate::DeliveryServiceError;
+use crate::ds::DeliveryServiceError;
 
 /// A transport-agnostic packet that should be sent to the network.
 #[derive(Debug, Clone, PartialEq, Eq)]

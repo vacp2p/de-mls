@@ -62,7 +62,8 @@ use hashgraph_like_consensus::{
     service::DefaultConsensusService,
     storage::{ConsensusStorage, InMemoryConsensusStorage},
 };
-use mls_crypto::{IdentityService, MlsGroupService, OpenMlsIdentityService};
+
+use crate::mls_crypto::{IdentityService, MlsGroupService, OpenMlsIdentityService};
 
 /// Bundles all configurable services for a DE-MLS deployment.
 ///

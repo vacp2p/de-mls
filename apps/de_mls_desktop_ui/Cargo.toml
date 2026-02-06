@@ -9,7 +9,6 @@ de_mls_ui_protocol = { path = "../../crates/de_mls_ui_protocol" }
 de_mls_gateway = { path = "../../crates/de_mls_gateway" }
 ui_bridge = { path = "../../crates/ui_bridge" }
 de_mls = { path = "../../" }
-mls_crypto = { path = "../../mls_crypto" }
 
 dioxus = { version = "0.6.2", features = ["signals", "router", "desktop"] }
 dioxus-desktop = "0.6.3"

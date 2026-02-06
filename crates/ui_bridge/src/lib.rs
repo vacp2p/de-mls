@@ -6,14 +6,15 @@
 //! It ensures there is a Tokio runtime (desktop app may not have one yet).
 
 // crates/ui_bridge/src/lib.rs
-use futures::channel::mpsc::{unbounded, UnboundedReceiver};
-use futures::StreamExt;
+use futures::{
+    channel::mpsc::{unbounded, UnboundedReceiver},
+    StreamExt,
+};
 use std::sync::Arc;
 
-use de_mls::protos::de_mls::messages::v1::ConversationMessage;
+use de_mls::{ds::WakuDeliveryService, protos::de_mls::messages::v1::ConversationMessage};
 use de_mls_gateway::{init_core, CoreCtx, GATEWAY};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
-use ds::waku::WakuDeliveryService;
 
 /// Call once during process startup (before launching the Dioxus UI).
 pub fn start_ui_bridge(core: Arc<CoreCtx<WakuDeliveryService>>) {

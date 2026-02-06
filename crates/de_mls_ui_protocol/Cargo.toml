@@ -13,4 +13,3 @@ thiserror = "2.0.17"
 hashgraph-like-consensus = { git = "https://github.com/vacp2p/hashgraph-like-consensus.git", branch = "feat/service_api" }
 
 de_mls = { path = "../../" }
-mls_crypto = { path = "../../mls_crypto" }

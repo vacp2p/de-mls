@@ -1,7 +1,6 @@
 #![allow(non_snake_case)]
 use dioxus::prelude::*;
 use dioxus_desktop::{launch::launch as desktop_launch, Config, LogicalSize, WindowBuilder};
-use hashgraph_like_consensus::types::ConsensusEvent;
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -10,12 +9,12 @@ use std::sync::{
 
 use de_mls::{
     core::convert_group_request_to_display,
+    mls_crypto::normalize_wallet_address_str,
     protos::de_mls::messages::v1::{ConversationMessage, VotePayload},
 };
-use de_mls_gateway::bootstrap_core_from_env;
-use de_mls_gateway::GATEWAY;
+use de_mls_gateway::{bootstrap_core_from_env, GATEWAY};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
-use mls_crypto::normalize_wallet_address_str;
+use hashgraph_like_consensus::types::ConsensusEvent;
 
 mod logging;
 
