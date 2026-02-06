@@ -1,4 +1,58 @@
-//! GroupHandle - per-group state container.
+//! Per-group state container for MLS operations.
+//!
+//! This module provides [`GroupHandle`], which holds all state needed for
+//! a single group: MLS cryptographic state, proposal tracking, and steward status.
+//!
+//! # Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │                        GroupHandle                          │
+//! ├─────────────────────────────────────────────────────────────┤
+//! │  group_name      │  Human-readable group identifier         │
+//! │  mls_handle      │  OpenMLS group state (encryption keys)   │
+//! │  app_id          │  UUID for message deduplication          │
+//! │  steward         │  Whether this user batches commits       │
+//! │  proposals       │  Voting + approved proposal queues       │
+//! └─────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # Lifecycle
+//!
+//! **Creating a group (as steward):**
+//! ```ignore
+//! let mls_handle = identity.create_group(group_name)?;
+//! let handle = GroupHandle::new_as_creator(group_name, mls_handle);
+//! // handle.is_steward() == true
+//! // handle.is_mls_initialized() == true
+//! ```
+//!
+//! **Joining a group (as member):**
+//! ```ignore
+//! let handle = GroupHandle::new_for_join(group_name);
+//! // handle.is_steward() == false
+//! // handle.is_mls_initialized() == false
+//!
+//! // Later, when welcome is received:
+//! let mls_handle = identity.join_group(&welcome)?;
+//! handle.set_mls_handle(mls_handle);
+//! // handle.is_mls_initialized() == true
+//! ```
+//!
+//! # Proposal Flow
+//!
+//! The handle tracks proposals through their lifecycle:
+//!
+//! ```text
+//! 1. store_voting_proposal()   →  Proposal created, waiting for votes
+//! 2. mark_proposal_as_approved()  →  Consensus reached, ready for commit
+//!    OR mark_proposal_as_rejected()  →  Consensus rejected, discard
+//! 3. approved_proposals()      →  Steward reads approved proposals
+//! 4. clear_approved_proposals()  →  After commit, archive to history
+//! ```
+//!
+//! Non-owners (members who didn't create the proposal) use:
+//! - `insert_approved_proposal()` - Add proposal directly to approved queue
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -10,16 +64,23 @@ use mls_crypto::MlsGroupHandle;
 
 /// Handle for a single MLS group.
 ///
-/// The `GroupHandle` contains all state needed for group operations:
-/// - MLS group handle for cryptographic operations
-/// - Application ID for message routing
-/// - Optional steward for proposal management
-/// - Key package sharing status
+/// Contains all state needed for group operations:
+/// - MLS group handle for cryptographic operations (encryption/decryption)
+/// - Application ID for message deduplication across instances
+/// - Steward flag indicating whether this user batches commits
+/// - Proposal queues for tracking voting and approved proposals
 ///
 /// # Thread Safety
 ///
-/// The `GroupHandle` is designed to be used with external synchronization.
-/// The MLS group handle is wrapped in an `Arc<Mutex>` for safe concurrent access.
+/// The MLS group handle is wrapped in `Arc<Mutex>` for safe concurrent access.
+/// The `GroupHandle` itself should be wrapped in `RwLock` or similar by the
+/// application layer (see `User.groups` in the app module).
+///
+/// # Steward vs Member
+///
+/// - **Steward**: Creates proposals, collects votes, batches approved proposals
+///   into MLS commits. Created via `new_as_creator()`.
+/// - **Member**: Votes on proposals, receives commits. Created via `new_for_join()`.
 #[derive(Clone, Debug)]
 pub struct GroupHandle {
     /// The name of the group.
@@ -111,32 +172,58 @@ impl GroupHandle {
 
     // ─────────────────────────── Proposal Handle Operations ───────────────────────────
 
+    /// Check if this user owns (created) the given proposal.
+    ///
+    /// Owners are responsible for broadcasting the proposal to peers and
+    /// must include the full `Proposal` when casting their vote.
     pub fn is_owner_of_proposal(&self, proposal_id: ProposalId) -> bool {
         self.proposals.is_owner_of_proposal(proposal_id)
     }
 
-    /// Get the count of approved proposals.
+    /// Get the count of approved proposals waiting to be committed.
+    ///
+    /// The steward checks this to determine when to create a batch commit.
     pub fn approved_proposals_count(&self) -> usize {
         self.proposals.approved_proposals_count()
     }
 
-    /// Get the approved proposals.
+    /// Get a copy of all approved proposals.
+    ///
+    /// Called by the steward when creating a batch commit. The proposals
+    /// are sorted by SHA256 hash for deterministic ordering.
     pub fn approved_proposals(&self) -> HashMap<ProposalId, GroupUpdateRequest> {
         self.proposals.approved_proposals()
     }
 
+    /// Move a proposal from voting to approved queue.
+    ///
+    /// Called when consensus is reached with `result = true` and this user
+    /// is the proposal owner.
     pub fn mark_proposal_as_approved(&mut self, proposal_id: ProposalId) {
         self.proposals.move_proposal_to_approved(proposal_id);
     }
 
+    /// Remove a proposal from the voting queue (rejected or failed).
+    ///
+    /// Called when consensus is reached with `result = false` or when
+    /// consensus fails (timeout, insufficient votes).
     pub fn mark_proposal_as_rejected(&mut self, proposal_id: ProposalId) {
         self.proposals.remove_voting_proposal(proposal_id);
     }
 
+    /// Store a newly created proposal in the voting queue.
+    ///
+    /// Called after `start_voting()` successfully creates a proposal.
+    /// The proposal remains here until consensus completes.
     pub fn store_voting_proposal(&mut self, proposal_id: ProposalId, proposal: GroupUpdateRequest) {
         self.proposals.add_voting_proposal(proposal_id, proposal);
     }
 
+    /// Insert a proposal directly into the approved queue.
+    ///
+    /// Called by non-owners when they receive a consensus result for a
+    /// proposal they didn't create. They fetch the payload from the
+    /// consensus service and insert it directly as approved.
     pub fn insert_approved_proposal(
         &mut self,
         proposal_id: ProposalId,
@@ -145,11 +232,18 @@ impl GroupHandle {
         self.proposals.add_proposal(proposal_id, proposal);
     }
 
+    /// Clear approved proposals after a commit, archiving to history.
+    ///
+    /// Called after a batch commit is successfully applied. The proposals
+    /// are moved to `epoch_history` for UI display (up to 10 epochs retained).
     pub fn clear_approved_proposals(&mut self) {
         self.proposals.clear_approved_proposals();
     }
 
     /// Get the epoch history (past batches of approved proposals).
+    ///
+    /// Returns up to 10 past epochs, most recent last. Useful for UI
+    /// to show recent membership changes.
     pub fn epoch_history(&self) -> &VecDeque<HashMap<ProposalId, GroupUpdateRequest>> {
         self.proposals.epoch_history()
     }

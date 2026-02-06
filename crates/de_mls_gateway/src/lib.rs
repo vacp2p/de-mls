@@ -21,7 +21,6 @@ use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 mod bootstrap;
 pub(crate) mod forwarder;
 mod group;
-mod group_registry;
 pub mod handler;
 
 pub use bootstrap::*;
@@ -141,7 +140,6 @@ impl Gateway<WakuDeliveryService> {
             delivery: Arc::new(core.app_state.delivery.clone()),
             evt_tx: self.evt_tx.clone(),
             topics: core.topics.clone(),
-            groups: core.groups.clone(),
         });
 
         let user = User::with_private_key(

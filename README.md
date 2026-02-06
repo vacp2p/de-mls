@@ -85,26 +85,6 @@ Repeat steps 2–3 in another terminal with a different `NODE_PORT` to simulate 
   - Surfaces the proposal currently open for voting with `YES`/`NO` buttons
   - Stores the latest proposal decisions with timestamps for quick auditing
 
-## Steward State Machine
-
-- **Working** – normal mode; all MLS messages are allowed
-- **Waiting** – a steward epoch is active; only the steward may push `BATCH_PROPOSALS_MESSAGE`
-- **Voting** – the consensus phase; everyone may submit `VOTE`/`USER_VOTE`,
-  the steward can still publish proposal metadata
-
-Transitions:
-
-```text
-Working --start_steward_epoch()--> Waiting (if proposals exist)
-Working --start_steward_epoch()--> Working (if no proposals)
-Waiting --start_voting()---------> Voting
-Waiting --no_proposals_found()---> Working
-Voting --complete_voting(YES)----> Waiting --apply_proposals()--> Working
-Voting --complete_voting(NO)-----> Working
-```
-
-Stewards always return to `Working` after an epoch finishes;
-edge cases such as missing proposals are handled defensively with detailed tracing.
 
 ## Development Tips
 

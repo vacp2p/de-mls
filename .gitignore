@@ -22,4 +22,5 @@ apps/de_mls_desktop_ui/logs
 lcov.info
 yarn.lock
 
-.certora_internal
+.claude
+docs/

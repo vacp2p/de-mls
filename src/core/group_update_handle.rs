@@ -52,23 +52,8 @@ impl CurrentEpochProposals {
         self.voting_proposals.insert(proposal_id, proposal);
     }
 
-    /// Get the count of voting proposals.
-    pub fn voting_proposals_count(&self) -> usize {
-        self.voting_proposals.len()
-    }
-
-    /// Get a copy of the voting proposals.
-    pub fn voting_proposals(&self) -> HashMap<ProposalId, GroupUpdateRequest> {
-        self.voting_proposals.clone()
-    }
-
     pub fn remove_voting_proposal(&mut self, proposal_id: ProposalId) {
         self.voting_proposals.remove(&proposal_id);
-    }
-
-    /// Clear the voting proposals after voting completes.
-    pub fn clear_voting_proposals(&mut self) {
-        self.voting_proposals.clear();
     }
 
     /// Clear the approved proposals, archiving them to epoch history.

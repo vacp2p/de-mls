@@ -16,7 +16,9 @@ use mls_crypto::{IdentityService, OpenMlsIdentityService};
 use tokio::sync::RwLock;
 use tracing::{error, info};
 
-use super::state_machine::{GroupState, GroupStateMachine, StateChangeHandler};
+use super::state_machine::{
+    CommitTimeoutStatus, GroupConfig, GroupState, GroupStateMachine, StateChangeHandler,
+};
 use crate::core::{
     self, create_batch_proposals, CoreError, DeMlsProvider, DefaultProvider, GroupEventHandler,
     GroupHandle,
@@ -52,12 +54,14 @@ pub struct User<P: DeMlsProvider, H: GroupEventHandler, S: StateChangeHandler> {
     eth_signer: PrivateKeySigner,
     handler: Arc<H>,
     state_handler: Arc<S>,
+    /// Default config for new groups (can be overridden per-group).
+    default_group_config: GroupConfig,
 }
 
 impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + 'static>
     User<P, H, S>
 {
-    /// Create a new User instance with pre-built services.
+    /// Create a new User instance with pre-built services and custom default group config.
     ///
     /// # Arguments
     /// * `identity_service` - Identity and MLS service
@@ -65,12 +69,14 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
     /// * `eth_signer` - Ethereum signer for voting
     /// * `handler` - Event handler for output events
     /// * `state_handler` - Handler for state machine state changes
-    fn new(
+    /// * `default_group_config` - Default config applied to new groups
+    fn new_with_config(
         identity_service: P::Identity,
         consensus_service: Arc<P::Consensus>,
         eth_signer: PrivateKeySigner,
         handler: Arc<H>,
         state_handler: Arc<S>,
+        default_group_config: GroupConfig,
     ) -> Self {
         Self {
             identity_service,
@@ -79,6 +85,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
             eth_signer,
             handler,
             state_handler,
+            default_group_config,
         }
     }
 
@@ -89,7 +96,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
 
     // ─────────────────────────── Group Management ───────────────────────────
 
-    /// Create or join a group.
+    /// Create or join a group with the user's default config.
     ///
     /// # Arguments
     /// * `group_name` - The name of the group
@@ -99,6 +106,22 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
         group_name: &str,
         is_creation: bool,
     ) -> Result<(), UserError> {
+        self.create_group_with_config(group_name, is_creation, self.default_group_config.clone())
+            .await
+    }
+
+    /// Create or join a group with custom config.
+    ///
+    /// # Arguments
+    /// * `group_name` - The name of the group
+    /// * `is_creation` - `true` to create a new group as steward, `false` to prepare to join
+    /// * `config` - Group-specific configuration
+    pub async fn create_group_with_config(
+        &mut self,
+        group_name: &str,
+        is_creation: bool,
+        config: GroupConfig,
+    ) -> Result<(), UserError> {
         let mut groups = self.groups.write().await;
         if groups.contains_key(group_name) {
             return Err(UserError::GroupAlreadyExists);
@@ -106,11 +129,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
 
         let (handle, state_machine) = if is_creation {
             let handle = core::create_group(group_name, &self.identity_service)?;
-            let state_machine = GroupStateMachine::new_as_steward();
+            let state_machine = GroupStateMachine::new_as_steward_with_config(config);
             (handle, state_machine)
         } else {
             let handle = core::prepare_to_join(group_name);
-            let state_machine = GroupStateMachine::new_as_pending_join();
+            let state_machine = GroupStateMachine::new_as_pending_join_with_config(config);
             (handle, state_machine)
         };
 
@@ -125,7 +148,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
         drop(groups);
 
         self.state_handler
-            .on_state_changed(group_name, &initial_state.to_string())
+            .on_state_changed(group_name, initial_state)
             .await;
 
         Ok(())
@@ -163,18 +186,20 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
 
         // Notify UI of state change
         self.state_handler
-            .on_state_changed(group_name, &new_state.to_string())
+            .on_state_changed(group_name, new_state.clone())
             .await;
 
         info!("[leave_group]: Transitioning from {old_state} to Leaving, sending self-removal for group {group_name}");
 
-        // Send self-removal via ban request flow
-        self.process_ban_request(
-            BanRequest {
-                user_to_ban: self.identity_string(),
-                group_name: group_name.to_string(),
+        // Send self-removal directly (bypass process_ban_request's Working-state guard,
+        // since we intentionally set Leaving before submitting the removal request).
+        self.start_voting_on_request_background(
+            group_name.to_string(),
+            GroupUpdateRequest {
+                payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
+                    identity: normalize_wallet_address_bytes(&self.identity_string())?,
+                })),
             },
-            group_name,
         )
         .await?;
         Ok(())
@@ -185,6 +210,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
         let groups = self.groups.read().await;
         let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
         Ok(entry.state_machine.current_state())
+    }
+
+    /// List all group names.
+    pub async fn list_groups(&self) -> Vec<String> {
+        let groups = self.groups.read().await;
+        groups.keys().cloned().collect()
     }
 
     /// Check if the user is steward for a group.
@@ -251,7 +282,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
 
     /// Send a conversation message to a group.
     ///
-    /// Returns an error if the group is blocked (PendingJoin, Waiting, or Leaving state).
+    /// Allowed in `Working` and `Leaving` states (user is still a group member).
+    /// Blocked in `PendingJoin` (no MLS state) and `Waiting` (epoch freeze).
     pub async fn send_app_message(
         &self,
         group_name: &str,
@@ -262,7 +294,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
 
         // Check if group is in a state where sending is allowed
         let state = entry.state_machine.current_state();
-        if state != GroupState::Working {
+        if state == GroupState::PendingJoin || state == GroupState::Waiting {
             return Err(UserError::GroupBlocked(state.to_string()));
         }
 
@@ -361,25 +393,85 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
         entry.state_machine.time_until_next_boundary()
     }
 
+    /// Check if the commit has timed out while in Waiting state.
+    ///
+    /// Returns a [`CommitTimeoutStatus`] indicating:
+    /// - `NotWaiting` — not in Waiting state (nothing to check)
+    /// - `StillWaiting` — in Waiting but timeout not reached yet
+    /// - `TimedOut { has_proposals }` — timeout reached, state reverted to Working
+    ///
+    /// When timed out, checks if approved proposals still exist:
+    /// - If proposals exist: steward failed to commit (steward fault)
+    /// - If no proposals: false alarm (proposals cleared by other means)
+    ///
+    /// In both cases the member is unblocked (reverted to Working) and the
+    /// epoch boundary is re-synced to now.
+    pub async fn check_commit_timeout(&self, group_name: &str) -> CommitTimeoutStatus {
+        let has_proposals = {
+            let mut groups = self.groups.write().await;
+            let entry = match groups.get_mut(group_name) {
+                Some(e) => e,
+                None => return CommitTimeoutStatus::NotWaiting,
+            };
+
+            if entry.state_machine.current_state() != GroupState::Waiting {
+                return CommitTimeoutStatus::NotWaiting;
+            }
+            if !entry.state_machine.is_commit_timed_out() {
+                return CommitTimeoutStatus::StillWaiting;
+            }
+
+            let has_proposals = core::approved_proposals_count(&entry.handle) > 0;
+
+            if has_proposals {
+                // Steward fault: failed to commit pending proposals.
+                // Request re-election (clears proposals to break the timeout loop).
+                if let Err(e) = core::request_steward_reelection::<P>(
+                    &mut entry.handle,
+                    group_name,
+                    &*self.consensus_service,
+                    &*self.handler,
+                )
+                .await
+                {
+                    error!("[check_commit_timeout] Failed to request steward re-election: {e}");
+                }
+            }
+
+            entry.state_machine.sync_epoch_boundary();
+            entry.state_machine.start_working();
+            has_proposals
+        };
+
+        self.state_handler
+            .on_state_changed(group_name, GroupState::Working)
+            .await;
+
+        CommitTimeoutStatus::TimedOut { has_proposals }
+    }
+
     /// Start a member epoch check.
     ///
     /// Non-steward members call this at the epoch boundary (not before).
     /// If they have approved proposals, they transition to Waiting state expecting a commit.
     ///
-    /// This method does nothing for stewards or members in PendingJoin state.
-    pub async fn start_member_epoch(&self, group_name: &str) -> Result<(), UserError> {
+    /// Returns `true` if entered Waiting state (caller should poll for commit timeout),
+    /// `false` otherwise (no polling needed).
+    ///
+    /// This method does nothing for stewards or members in PendingJoin/Leaving state.
+    pub async fn start_member_epoch(&self, group_name: &str) -> Result<bool, UserError> {
         let mut groups = self.groups.write().await;
         let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
 
         // Stewards manage their own epoch
         if entry.state_machine.is_steward() {
-            return Ok(());
+            return Ok(false);
         }
 
         // Skip if not yet joined or leaving
         let state = entry.state_machine.current_state();
         if state == GroupState::PendingJoin || state == GroupState::Leaving {
-            return Ok(());
+            return Ok(false);
         }
 
         // Check if we've reached the epoch boundary
@@ -394,11 +486,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
             );
             drop(groups);
             self.state_handler
-                .on_state_changed(group_name, &new_state.to_string())
+                .on_state_changed(group_name, new_state.clone())
                 .await;
         }
 
-        Ok(())
+        Ok(entered_waiting)
     }
 
     /// Start a steward epoch.
@@ -421,7 +513,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
             entry.state_machine.start_steward_epoch()?;
         }
         self.state_handler
-            .on_state_changed(group_name, &GroupState::Waiting.to_string())
+            .on_state_changed(group_name, GroupState::Waiting)
             .await;
 
         // Create and send batch proposals (group is blocked during this)
@@ -443,7 +535,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
             }
         }
         self.state_handler
-            .on_state_changed(group_name, &GroupState::Working.to_string())
+            .on_state_changed(group_name, GroupState::Working)
             .await;
 
         Ok(())
@@ -465,6 +557,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
         let consensus = Arc::clone(&self.consensus_service);
         let groups = Arc::clone(&self.groups);
         let handler = Arc::clone(&self.handler);
+        let group_name_clone = group_name.clone();
 
         tokio::spawn(async move {
             let result: Result<(), CoreError> = async {
@@ -501,6 +594,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
 
             if let Err(err) = result {
                 error!("[start_voting_on_request]: background task failed: {err}");
+                handler
+                    .on_error(&group_name_clone, "Start voting", &err.to_string())
+                    .await;
             }
         });
 
@@ -510,6 +606,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
     // ─────────────────────────── Voting ───────────────────────────
 
     /// Process a user vote.
+    ///
+    /// Allowed in `Working`, `Leaving`, and `PendingJoin` states.
+    /// Blocked in `Waiting` state (epoch freeze — vote is sent as MLS message).
     pub async fn process_user_vote(
         &mut self,
         group_name: &str,
@@ -518,6 +617,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
     ) -> Result<(), UserError> {
         let groups = self.groups.read().await;
         let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+
+        // Block voting during Waiting state (epoch freeze)
+        let state = entry.state_machine.current_state();
+        if state == GroupState::Waiting {
+            return Err(UserError::GroupBlocked(state.to_string()));
+        }
+
         let handle = entry.handle.clone();
         drop(groups);
 
@@ -588,45 +694,28 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
                     .await?;
             }
             core::DispatchAction::GroupUpdated => {
-                // Batch commit received - this is an epoch boundary
-                // If we were in Working (didn't anticipate the commit), briefly enter Waiting
-                // If we were in Waiting (correctly anticipated), just transition to Working
-                let old_state = {
-                    let groups = self.groups.read().await;
-                    groups
-                        .get(&group_name)
-                        .map(|e| e.state_machine.current_state())
+                // Batch commit received — sync epoch boundary and transition to Working.
+                // Skip if in PendingJoin or Leaving (those states have their own flows).
+                let transitioned = {
+                    let mut groups = self.groups.write().await;
+                    if let Some(entry) = groups.get_mut(&group_name) {
+                        let state = entry.state_machine.current_state();
+                        if state == GroupState::Working || state == GroupState::Waiting {
+                            entry.state_machine.sync_epoch_boundary();
+                            entry.state_machine.start_working();
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
                 };
 
-                if let Some(old) = old_state {
-                    // Only process if in Working or Waiting (skip PendingJoin, Leaving)
-                    if old == GroupState::Working || old == GroupState::Waiting {
-                        // If we were in Working (didn't anticipate), enter Waiting first
-                        if old == GroupState::Working {
-                            {
-                                let mut groups = self.groups.write().await;
-                                if let Some(entry) = groups.get_mut(&group_name) {
-                                    entry.state_machine.start_waiting();
-                                }
-                            }
-                            self.state_handler
-                                .on_state_changed(&group_name, &GroupState::Waiting.to_string())
-                                .await;
-                        }
-
-                        // Now sync boundary and transition to Working
-                        {
-                            let mut groups = self.groups.write().await;
-                            if let Some(entry) = groups.get_mut(&group_name) {
-                                entry.state_machine.sync_epoch_boundary();
-                                entry.state_machine.start_working();
-                            }
-                        }
-
-                        self.state_handler
-                            .on_state_changed(&group_name, &GroupState::Working.to_string())
-                            .await;
-                    }
+                if transitioned {
+                    self.state_handler
+                        .on_state_changed(&group_name, GroupState::Working)
+                        .await;
                 }
             }
             core::DispatchAction::LeaveGroup => {
@@ -647,7 +736,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
                 };
                 if let Some(state) = state {
                     self.state_handler
-                        .on_state_changed(&group_name, &state.to_string())
+                        .on_state_changed(&group_name, state)
                         .await;
                 }
             }
@@ -682,7 +771,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
 // ─────────────────────────── DefaultProvider Convenience ───────────────────────────
 
 impl<H: GroupEventHandler + 'static, S: StateChangeHandler + 'static> User<DefaultProvider, H, S> {
-    /// Convenience constructor for the default provider.
+    /// Convenience constructor for the default provider with default group config.
     ///
     /// Creates a User with OpenMLS identity and the given consensus service.
     ///
@@ -697,15 +786,42 @@ impl<H: GroupEventHandler + 'static, S: StateChangeHandler + 'static> User<Defau
         handler: Arc<H>,
         state_handler: Arc<S>,
     ) -> Result<Self, UserError> {
+        Self::with_private_key_and_config(
+            private_key,
+            consensus_service,
+            handler,
+            state_handler,
+            GroupConfig::default(),
+        )
+    }
+
+    /// Convenience constructor for the default provider with custom group config.
+    ///
+    /// Creates a User with OpenMLS identity and the given consensus service.
+    ///
+    /// # Arguments
+    /// * `private_key` - Ethereum private key as hex string
+    /// * `consensus_service` - The default consensus service
+    /// * `handler` - Event handler for output events
+    /// * `state_handler` - Handler for state machine state changes
+    /// * `default_group_config` - Default config applied to new groups
+    pub fn with_private_key_and_config(
+        private_key: &str,
+        consensus_service: Arc<DefaultConsensusService>,
+        handler: Arc<H>,
+        state_handler: Arc<S>,
+        default_group_config: GroupConfig,
+    ) -> Result<Self, UserError> {
         let signer = PrivateKeySigner::from_str(private_key)?;
         let user_address = signer.address();
         let identity_service = OpenMlsIdentityService::new(user_address.as_slice())?;
-        Ok(Self::new(
+        Ok(Self::new_with_config(
             identity_service,
             consensus_service,
             signer,
             handler,
             state_handler,
+            default_group_config,
         ))
     }
 }
@@ -747,4 +863,14 @@ pub enum UserError {
 
     #[error("Identity error: {0}")]
     Identity(#[from] mls_crypto::error::IdentityError),
+}
+
+impl UserError {
+    /// Returns `true` if this error is fatal and the operation should not be retried.
+    ///
+    /// Fatal errors indicate the group no longer exists or is in an unrecoverable state.
+    /// Non-fatal errors (network issues, temporary failures) can be retried.
+    pub fn is_fatal(&self) -> bool {
+        matches!(self, UserError::GroupNotFound | UserError::AlreadyLeaving)
+    }
 }

@@ -1,8 +1,46 @@
 //! Consensus integration for DE-MLS group operations.
 //!
-//! This module provides free functions that wire MLS group operations
-//! to the consensus voting layer. External developers can use these
-//! directly without depending on the `app` layer.
+//! This module bridges MLS group operations with the consensus voting layer.
+//! It provides functions for creating proposals, casting votes, and handling
+//! consensus outcomes.
+//!
+//! # Overview
+//!
+//! When a membership change is requested (join/remove), it goes through consensus:
+//!
+//! ```text
+//! 1. Steward receives key package → ProcessResult::GetUpdateRequest
+//! 2. dispatch_result() returns DispatchAction::StartVoting(request)
+//! 3. App calls start_voting() → creates proposal, notifies UI
+//! 4. Users vote via cast_vote() → votes sent as MLS messages
+//! 5. Consensus service emits ConsensusEvent
+//! 6. App calls handle_consensus_event() → updates proposal state
+//! 7. Steward calls create_batch_proposals() → applies approved changes
+//! ```
+//!
+//! # Key Functions
+//!
+//! ## Voting Workflow
+//! - [`start_voting`] - Create a proposal and start voting
+//! - [`cast_vote`] - Cast a vote on a proposal
+//! - [`handle_consensus_event`] - Process consensus outcomes
+//!
+//! ## Message Forwarding
+//! - [`forward_incoming_proposal`] - Forward received proposals to consensus
+//! - [`forward_incoming_vote`] - Forward received votes to consensus
+//!
+//! ## Result Dispatching
+//! - [`dispatch_result`] - Route [`ProcessResult`] to appropriate handlers
+//!
+//! # DispatchAction
+//!
+//! After calling [`dispatch_result`], handle the returned [`DispatchAction`]:
+//!
+//! - `Done` - Nothing more needed
+//! - `StartVoting(request)` - Spawn a background task to run voting
+//! - `GroupUpdated` - MLS state changed, update your state machine
+//! - `LeaveGroup` - User was removed, clean up group state
+//! - `JoinedGroup` - User joined successfully, transition to Working state
 
 use std::time::Duration;
 
@@ -23,30 +61,67 @@ use crate::protos::de_mls::messages::v1::{
 use super::ProcessResult;
 
 /// Action returned by [`dispatch_result`] telling the caller what to do next.
+///
+/// This enum represents the application-level actions needed after processing
+/// an inbound message. The core library handles protocol-level concerns;
+/// these actions represent what your application layer needs to do.
 #[derive(Debug)]
 pub enum DispatchAction {
     /// Core handled the result fully; nothing more to do.
+    ///
+    /// The message was processed and any necessary callbacks were made.
     Done,
-    /// A group update request needs consensus voting (app should spawn background task).
+
+    /// A group update request needs consensus voting.
+    ///
+    /// The application should spawn a background task to:
+    /// 1. Call [`start_voting`] with the request
+    /// 2. Store the proposal ID via `GroupHandle::store_voting_proposal`
     StartVoting(GroupUpdateRequest),
-    /// Group MLS state was updated (batch applied — app state machine should advance).
+
+    /// Group MLS state was updated (batch commit applied).
+    ///
+    /// The application should:
+    /// - Transition state machine from Waiting → Working
+    /// - Refresh UI with new group state
     GroupUpdated,
-    /// The user was removed from the group (app should clean up).
+
+    /// The user was removed from the group.
+    ///
+    /// The application should:
+    /// - Remove the group from its registry
+    /// - Clean up any associated state
+    /// - Notify the UI
     LeaveGroup,
+
     /// The user successfully joined a group.
+    ///
+    /// The application should:
+    /// - Transition state machine from PendingJoin → Working
+    /// - Start epoch timing synchronization
     JoinedGroup,
 }
 
 /// Create a consensus proposal for a group update request and start voting.
 ///
-/// Creates a `CreateProposalRequest`, submits it to the consensus service,
-/// and emits a `VotePayload` via the handler. Returns the proposal ID so
-/// the caller can store the voting proposal in the handle (via
-/// [`GroupHandle::store_voting_proposal`]).
+/// This function:
+/// 1. Creates a `CreateProposalRequest` with the encoded group update
+/// 2. Submits it to the consensus service
+/// 3. Emits a `VotePayload` via the handler for UI display
 ///
-/// Callers should obtain `expected_voters` via `group_members` and `identity_string`
-/// via [`IdentityService::identity_string`] before calling this function. This design
-/// allows the function to be used from spawned tasks without requiring the identity service.
+/// # Arguments
+/// * `group_name` - The name of the group
+/// * `request` - The group update request (add/remove member)
+/// * `expected_voters` - Number of group members (for quorum calculation)
+/// * `identity_string` - The proposer's identity (from `IdentityService::identity_string`)
+/// * `consensus` - The consensus service
+/// * `handler` - Event handler for UI notifications
+///
+/// # Returns
+/// The proposal ID, which should be stored via `GroupHandle::store_voting_proposal`.
+///
+/// # Errors
+/// - [`CoreError::ConsensusError`] if proposal creation fails
 pub async fn start_voting<P: DeMlsProvider>(
     group_name: &str,
     request: &GroupUpdateRequest,
@@ -94,8 +169,15 @@ pub async fn start_voting<P: DeMlsProvider>(
 
 /// Forward a proposal received from another peer to the consensus service.
 ///
-/// After forwarding, emits a `VotePayload` to the handler so the UI
-/// can display the pending vote.
+/// When a peer broadcasts their proposal, other members receive it as an
+/// MLS application message. This function forwards it to the local consensus
+/// service and emits a `VotePayload` so the UI can display the pending vote.
+///
+/// # Arguments
+/// * `group_name` - The name of the group
+/// * `proposal` - The received consensus proposal
+/// * `consensus` - The consensus service
+/// * `handler` - Event handler for UI notifications
 pub async fn forward_incoming_proposal<P: DeMlsProvider>(
     group_name: &str,
     proposal: Proposal,
@@ -122,6 +204,14 @@ pub async fn forward_incoming_proposal<P: DeMlsProvider>(
 }
 
 /// Forward a vote received from another peer to the consensus service.
+///
+/// When a peer casts their vote, it's broadcast as an MLS application message.
+/// This function forwards it to the local consensus service for tallying.
+///
+/// # Arguments
+/// * `group_name` - The name of the group
+/// * `vote` - The received vote
+/// * `consensus` - The consensus service
 pub async fn forward_incoming_vote<P: DeMlsProvider>(
     group_name: &str,
     vote: Vote,
@@ -132,11 +222,26 @@ pub async fn forward_incoming_vote<P: DeMlsProvider>(
     Ok(())
 }
 
-/// Cast a vote on a proposal and send the result as an outbound MLS message.
+/// Cast a vote on a proposal and broadcast it to the group.
 ///
-/// If the caller is the proposal owner, calls `cast_vote_and_get_proposal`
-/// and sends the full `Proposal` as an outbound MLS message.
-/// Otherwise, calls `cast_vote` and sends the `Vote`.
+/// This function handles two cases:
+/// - **Proposal owner**: Calls `cast_vote_and_get_proposal` and broadcasts
+///   the full `Proposal` (so others can process it)
+/// - **Non-owner**: Calls `cast_vote` and broadcasts just the `Vote`
+///
+/// # Arguments
+/// * `handle` - The group handle (for proposal ownership check)
+/// * `group_name` - The name of the group
+/// * `proposal_id` - The proposal to vote on
+/// * `vote` - true = approve, false = reject
+/// * `consensus` - The consensus service
+/// * `signer` - Ethereum signer for vote authentication
+/// * `identity` - Identity service for message building
+/// * `handler` - Event handler for sending the outbound message
+///
+/// # Errors
+/// - [`CoreError::ConsensusError`] if voting fails
+/// - [`CoreError::MlsError`] if message encryption fails
 #[allow(clippy::too_many_arguments)]
 pub async fn cast_vote<P: DeMlsProvider, SN: Signer + Send + Sync>(
     handle: &GroupHandle,
@@ -172,9 +277,19 @@ pub async fn cast_vote<P: DeMlsProvider, SN: Signer + Send + Sync>(
 
 /// Update handle state based on a consensus outcome event.
 ///
+/// Called when the consensus service emits a [`ConsensusEvent`]. Updates
+/// the group handle's proposal state based on the outcome:
+///
 /// - `ConsensusReached { result: true }` as owner → mark proposal as approved
-/// - `ConsensusReached { result: true }` as non-owner → fetch payload and insert approved proposal
-/// - `ConsensusReached { result: false }` or `ConsensusFailed` → mark proposal as rejected
+/// - `ConsensusReached { result: true }` as non-owner → fetch and insert approved proposal
+/// - `ConsensusReached { result: false }` → mark proposal as rejected
+/// - `ConsensusFailed` → mark proposal as rejected
+///
+/// # Arguments
+/// * `handle` - The group handle (will be mutated)
+/// * `group_name` - The name of the group
+/// * `event` - The consensus event to process
+/// * `consensus` - The consensus service (for fetching proposal payloads)
 pub async fn handle_consensus_event<P: DeMlsProvider>(
     handle: &mut GroupHandle,
     group_name: &str,
@@ -198,6 +313,10 @@ pub async fn handle_consensus_event<P: DeMlsProvider>(
                 let payload = consensus.get_proposal_payload(&scope, proposal_id).await?;
                 let update_request = GroupUpdateRequest::decode(payload.as_slice())?;
                 handle.insert_approved_proposal(proposal_id, update_request);
+            } else {
+                // !result && !is_owner: proposal rejected, we weren't the owner
+                // Nothing to do — non-owners don't store voting proposals
+                info!("Proposal {proposal_id} rejected (not owner, no local state to update)");
             }
         }
         ConsensusEvent::ConsensusFailed {
@@ -212,12 +331,86 @@ pub async fn handle_consensus_event<P: DeMlsProvider>(
     Ok(())
 }
 
-/// Dispatch a [`ProcessResult`] using the consensus functions above.
+/// Request steward re-election due to steward fault.
 ///
-/// Returns a [`DispatchAction`] telling the caller what further action is needed:
-/// - `Done` — core handled everything
-/// - `StartVoting(request)` — app should spawn a background voting task
-/// - `GroupUpdated` — app state machine should advance
+/// Called when the current steward fails to commit pending proposals
+/// within the expected timeout. This should initiate a consensus vote
+/// to elect a new steward.
+///
+/// # Current Implementation
+/// This is a placeholder that clears approved proposals to prevent
+/// infinite timeout loops. Full re-election is not yet implemented.
+///
+/// # TODO
+/// - Define re-election proposal type in protos
+/// - Implement voting logic for steward election
+/// - Handle steward handoff (pending proposals transfer)
+pub async fn request_steward_reelection<P: DeMlsProvider>(
+    handle: &mut GroupHandle,
+    group_name: &str,
+    _consensus: &P::Consensus,
+    _handler: &dyn GroupEventHandler,
+) -> Result<(), CoreError> {
+    tracing::warn!(
+        "[request_steward_reelection] Steward fault detected for group {group_name}, \
+         re-election not yet implemented"
+    );
+
+    // Clear approved proposals to prevent infinite timeout loop.
+    // TODO: In real implementation, these should be preserved for new steward
+    handle.clear_approved_proposals();
+
+    Ok(())
+}
+
+/// Dispatch a [`ProcessResult`] to the appropriate handlers.
+///
+/// This is the main routing function that connects [`process_inbound`](super::process_inbound)
+/// results to consensus and event handlers. It returns a [`DispatchAction`]
+/// telling your application what to do next.
+///
+/// # Arguments
+/// * `handle` - The group handle
+/// * `group_name` - The name of the group
+/// * `result` - The result from `process_inbound`
+/// * `consensus` - The consensus service
+/// * `handler` - Event handler for callbacks
+/// * `identity` - Identity service for message building
+///
+/// # Returns
+/// A [`DispatchAction`] indicating what the application should do:
+/// - `Done` - Nothing more needed
+/// - `StartVoting(request)` - Spawn voting task
+/// - `GroupUpdated` - Update state machine
+/// - `LeaveGroup` - Clean up group
+/// - `JoinedGroup` - Transition to Working state
+///
+/// # Example
+/// ```ignore
+/// let result = process_inbound(&mut handle, &payload, subtopic, &mls, &identity).await?;
+/// let action = dispatch_result::<DefaultProvider>(&handle, "my-group", result, &consensus, &handler, &identity).await?;
+///
+/// match action {
+///     DispatchAction::Done => {}
+///     DispatchAction::StartVoting(request) => {
+///         tokio::spawn(async move {
+///             let proposal_id = start_voting::<DefaultProvider>(...).await?;
+///             handle.store_voting_proposal(proposal_id, request);
+///         });
+///     }
+///     DispatchAction::GroupUpdated => {
+///         state_machine.start_working();
+///     }
+///     DispatchAction::LeaveGroup => {
+///         groups.remove(&group_name);
+///         handler.on_leave_group(&group_name).await?;
+///     }
+///     DispatchAction::JoinedGroup => {
+///         state_machine.start_working();
+///         state_machine.sync_epoch_boundary();
+///     }
+/// }
+/// ```
 pub async fn dispatch_result<P: DeMlsProvider>(
     handle: &GroupHandle,
     group_name: &str,

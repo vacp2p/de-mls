@@ -4,7 +4,7 @@ use hex::ToHex;
 use crate::forwarder::push_consensus_state;
 use crate::Gateway;
 use de_mls::{
-    app::{IntervalScheduler, StewardScheduler, StewardSchedulerConfig},
+    app::{CommitTimeoutStatus, IntervalScheduler, StewardScheduler, StewardSchedulerConfig},
     protos::de_mls::messages::v1::{group_update_request, BanRequest},
 };
 
@@ -18,7 +18,6 @@ impl Gateway<WakuDeliveryService> {
             .create_group(&group_name, true)
             .await?;
         core.topics.add_many(&group_name).await;
-        core.groups.insert(group_name.clone()).await;
 
         let user_clone = user_ref.clone();
         let evt_tx = self.evt_tx.clone();
@@ -34,10 +33,15 @@ impl Gateway<WakuDeliveryService> {
                 {
                     Ok(()) => {}
                     Err(e) => {
+                        if e.is_fatal() {
+                            tracing::warn!(
+                                "Steward epoch loop exiting for group {group_name:?}: {e}"
+                            );
+                            break;
+                        }
                         tracing::warn!(
-                            "start steward epoch request failed for group {group_name:?}: {e}"
+                            "Steward epoch failed for group {group_name:?} (will retry): {e}"
                         );
-                        break;
                     }
                 }
                 push_consensus_state(&user_clone, &evt_tx, &group_name).await;
@@ -55,7 +59,6 @@ impl Gateway<WakuDeliveryService> {
             .create_group(&group_name, false)
             .await?;
         core.topics.add_many(&group_name).await;
-        core.groups.insert(group_name.clone()).await;
         user_ref.write().await.send_kp_message(&group_name).await?;
         tracing::debug!("User sent key package message for group {group_name}");
 
@@ -63,6 +66,7 @@ impl Gateway<WakuDeliveryService> {
         // Phase 2 (Working): Wait until epoch boundaries and check for Waiting transition
         let user_clone = user_ref.clone();
         let group_name_clone = group_name.clone();
+        let evt_tx = self.evt_tx.clone();
         tokio::spawn(async move {
             // Phase 1: Wait for join
             loop {
@@ -110,14 +114,55 @@ impl Gateway<WakuDeliveryService> {
                     }
                 }
 
-                if let Err(e) = user_clone
+                let entered_waiting = match user_clone
                     .read()
                     .await
                     .start_member_epoch(&group_name_clone)
                     .await
                 {
-                    tracing::warn!("Member epoch failed for {group_name_clone:?}: {e}");
-                    break;
+                    Ok(entered) => entered,
+                    Err(e) => {
+                        if e.is_fatal() {
+                            tracing::warn!(
+                                "Member epoch loop exiting for group {group_name_clone:?}: {e}"
+                            );
+                            break;
+                        }
+                        tracing::warn!(
+                            "Member epoch failed for group {group_name_clone:?} (will retry): {e}"
+                        );
+                        false
+                    }
+                };
+
+                // Poll for commit timeout only if we entered Waiting state
+                if entered_waiting {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        match user_clone
+                            .read()
+                            .await
+                            .check_commit_timeout(&group_name_clone)
+                            .await
+                        {
+                            CommitTimeoutStatus::NotWaiting => break,
+                            CommitTimeoutStatus::StillWaiting => continue,
+                            CommitTimeoutStatus::TimedOut { has_proposals } => {
+                                if has_proposals {
+                                    tracing::warn!(
+                                        "Steward commit timeout for group {group_name_clone:?} \
+                                         with pending proposals (steward fault)"
+                                    );
+                                    let _ = evt_tx.unbounded_send(
+                                        de_mls_ui_protocol::v1::AppEvent::Error(format!(
+                                            "Steward failed to commit for group {group_name_clone}"
+                                        )),
+                                    );
+                                }
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -182,8 +227,10 @@ impl Gateway<WakuDeliveryService> {
     }
 
     pub async fn group_list(&self) -> Vec<String> {
-        let core = self.core();
-        core.groups.all().await
+        match self.user() {
+            Ok(user_ref) => user_ref.read().await.list_groups().await,
+            Err(_) => Vec::new(),
+        }
     }
 
     pub async fn get_steward_status(&self, group_name: String) -> anyhow::Result<bool> {

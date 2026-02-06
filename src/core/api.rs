@@ -1,8 +1,46 @@
-//! Free function API for group operations.
+//! Core API for MLS group operations.
 //!
-//! This module provides the main API for working with MLS groups.
-//! All functions operate on a `GroupHandle` and use traits for
-//! MLS operations and event handling.
+//! This module provides the fundamental building blocks for MLS group management.
+//! All functions are free-standing and operate on [`GroupHandle`] instances.
+//!
+//! # Overview
+//!
+//! The API is organized into four categories:
+//!
+//! ## Group Lifecycle
+//! - [`create_group`] - Create a new group as steward
+//! - [`prepare_to_join`] - Prepare a handle for joining
+//! - [`join_group_from_invite`] - Complete join with welcome message
+//! - [`become_steward`] / [`resign_steward`] - Steward role management
+//!
+//! ## Message Operations
+//! - [`build_message`] - Encrypt an application message for the group
+//! - [`build_key_package_message`] - Create key package for joining
+//!
+//! ## Inbound Processing
+//! - [`process_inbound`] - Process received packets, returns [`ProcessResult`]
+//!
+//! ## Steward Operations
+//! - [`create_batch_proposals`] - Batch approved proposals into MLS commit
+//!
+//! # Typical Flow
+//!
+//! ```text
+//! Steward creates group:
+//!   create_group() → GroupHandle (steward=true, MLS initialized)
+//!
+//! Member joins:
+//!   prepare_to_join() → GroupHandle (steward=false, MLS=None)
+//!   build_key_package_message() → send to network
+//!   ... wait for welcome ...
+//!   process_inbound(welcome) → ProcessResult::JoinedGroup
+//!
+//! Sending messages:
+//!   build_message(app_msg) → OutboundPacket → send to network
+//!
+//! Receiving messages:
+//!   process_inbound(payload) → ProcessResult → dispatch_result() → DispatchAction
+//! ```
 
 use prost::Message;
 use std::collections::{HashMap, VecDeque};
@@ -26,39 +64,59 @@ use crate::protos::de_mls::messages::v1::{
 
 // ─────────────────────────── Group Lifecycle ───────────────────────────
 
-/// Create a new MLS group.
+/// Create a new MLS group as the steward.
+///
+/// The creator automatically becomes the steward (the member responsible for
+/// batching proposals and sending commits).
 ///
 /// # Arguments
-/// * `name` - The name of the group
-/// * `mls` - The MLS service for group creation
+/// * `name` - The name/identifier of the group
+/// * `mls` - The MLS service for cryptographic operations
 ///
 /// # Returns
-/// A new `GroupHandle` for the created group (as steward).
+/// A [`GroupHandle`] with MLS state initialized and steward=true.
+///
+/// # Errors
+/// Returns [`CoreError::MlsError`] if group creation fails.
 pub fn create_group(name: &str, mls: &dyn MlsGroupService) -> Result<GroupHandle, CoreError> {
     let mls_handle = mls.create_group(name)?;
     Ok(GroupHandle::new_as_creator(name, mls_handle))
 }
 
-/// Prepare to join a group (creates handle without MLS group).
+/// Prepare a handle for joining an existing group.
+///
+/// Creates a [`GroupHandle`] without MLS state. The MLS state will be
+/// initialized when a welcome message is received and processed.
 ///
 /// # Arguments
 /// * `name` - The name of the group to join
 ///
 /// # Returns
-/// A new `GroupHandle` ready for joining.
+/// A [`GroupHandle`] ready for joining (steward=false, MLS=None).
+///
+/// # Next Steps
+/// 1. Call [`build_key_package_message`] to create a join request
+/// 2. Send the key package to the network
+/// 3. Wait for [`ProcessResult::JoinedGroup`] from [`process_inbound`]
 pub fn prepare_to_join(name: &str) -> GroupHandle {
     GroupHandle::new_for_join(name)
 }
 
-/// Join a group using a welcome message.
+/// Complete joining a group using a welcome message.
+///
+/// This is typically called internally by [`process_inbound`] when a welcome
+/// is received. You can also call it directly if you have the raw welcome bytes.
 ///
 /// # Arguments
-/// * `handle` - The group handle (must be prepared with `prepare_to_join`)
+/// * `handle` - The group handle (must be prepared with [`prepare_to_join`])
 /// * `welcome_bytes` - The serialized MLS welcome message
 /// * `mls` - The MLS service for processing the welcome
 ///
 /// # Returns
 /// The group name extracted from the welcome message.
+///
+/// # Errors
+/// Returns [`CoreError::MlsError`] if welcome processing fails.
 pub fn join_group_from_invite(
     handle: &mut GroupHandle,
     welcome_bytes: &[u8],
@@ -73,39 +131,44 @@ pub fn join_group_from_invite(
 
 /// Become the steward of a group.
 ///
-/// # Arguments
-/// * `handle` - The group handle
+/// The steward is responsible for:
+/// - Receiving key packages from joining members
+/// - Batching approved proposals into MLS commits
+/// - Sending welcome messages to new members
+///
+/// # Note
+/// Only one member should be steward at a time. Steward election/handoff
+/// is managed at the application layer.
 pub fn become_steward(handle: &mut GroupHandle) {
     handle.become_steward();
 }
 
 /// Resign as steward of a group.
 ///
-/// # Arguments
-/// * `handle` - The group handle
+/// After resigning, another member should become steward to continue
+/// processing membership changes.
 pub fn resign_steward(handle: &mut GroupHandle) {
     handle.resign_steward();
 }
 
-/// Check if the handle is the steward.
-///
-/// # Arguments
-/// * `handle` - The group handle
-pub fn is_steward(handle: &GroupHandle) -> bool {
-    handle.is_steward()
-}
-
 // ─────────────────────────── Message Building ───────────────────────────
 
-/// Build an MLS-encrypted application message for the group.
+/// Build an MLS-encrypted application message.
+///
+/// Encrypts the given [`AppMessage`] using MLS and wraps it in an
+/// [`OutboundPacket`] ready for network transmission.
 ///
 /// # Arguments
-/// * `handle` - The group handle
-/// * `mls` - The MLS service for message encryption
-/// * `app_msg` - The application message to send
+/// * `handle` - The group handle (must have MLS initialized)
+/// * `mls` - The MLS service for encryption
+/// * `app_msg` - The application message to encrypt
 ///
 /// # Returns
-/// An outbound packet ready to be sent via the delivery service.
+/// An [`OutboundPacket`] containing the encrypted message.
+///
+/// # Errors
+/// - [`CoreError::MlsGroupNotInitialized`] if MLS state is not initialized
+/// - [`CoreError::MlsError`] if encryption fails
 pub async fn build_message(
     handle: &GroupHandle,
     mls: &dyn MlsGroupService,
@@ -130,12 +193,18 @@ pub async fn build_message(
 
 /// Build a key package message for joining a group.
 ///
+/// Generates a new MLS key package and wraps it in a [`WelcomeMessage`]
+/// for transmission to the group's steward.
+///
 /// # Arguments
-/// * `handle` - The group handle (for metadata)
+/// * `handle` - The group handle (for routing metadata)
 /// * `identity` - The identity service for key package generation
 ///
 /// # Returns
-/// An outbound packet containing the key package for the welcome topic.
+/// An [`OutboundPacket`] containing the key package on the welcome subtopic.
+///
+/// # Errors
+/// Returns [`CoreError::IdentityError`] if key package generation fails.
 pub fn build_key_package_message<I: IdentityService>(
     handle: &GroupHandle,
     identity: &mut I,
@@ -156,17 +225,37 @@ pub fn build_key_package_message<I: IdentityService>(
 
 // ─────────────────────────── Inbound Processing ───────────────────────────
 
-/// Process an inbound packet and return the result.
+/// Process an inbound packet and determine what action is needed.
+///
+/// This is the main entry point for handling received messages. It routes
+/// packets based on subtopic and returns a [`ProcessResult`] indicating
+/// what happened.
 ///
 /// # Arguments
-/// * `handle` - The group handle
+/// * `handle` - The group handle (may be mutated if joining)
 /// * `payload` - The raw packet payload
 /// * `subtopic` - The subtopic the packet was received on
-/// * `mls` - The MLS service for message processing
-/// * `identity` - The identity service for key package operations
+/// * `mls` - The MLS service for decryption
+/// * `identity` - The identity service for key package verification
 ///
 /// # Returns
-/// A `ProcessResult` indicating what happened.
+/// A [`ProcessResult`] indicating what happened:
+/// - `AppMessage` - A chat message was received
+/// - `Proposal` / `Vote` - Consensus message received
+/// - `GetUpdateRequest` - Steward received a join/remove request
+/// - `JoinedGroup` - Successfully joined via welcome
+/// - `GroupUpdated` - MLS state was updated (batch commit applied)
+/// - `LeaveGroup` - User was removed from the group
+/// - `Noop` - Nothing to do (message not for us, etc.)
+///
+/// # Errors
+/// - [`CoreError::InvalidSubtopic`] if subtopic is unknown
+/// - [`CoreError::MlsError`] if decryption fails
+/// - [`CoreError::MessageError`] if message parsing fails
+///
+/// # Next Steps
+/// Pass the result to [`dispatch_result`](super::dispatch_result) to handle
+/// consensus routing and get a [`DispatchAction`](super::DispatchAction).
 pub async fn process_inbound<M, I>(
     handle: &mut GroupHandle,
     payload: &[u8],
@@ -323,31 +412,54 @@ async fn process_batch_proposals(
     }
 }
 
-/// Get the count of approved proposals.
+// ─────────────────────────── Proposal Queries ───────────────────────────
+
+/// Get the count of approved proposals waiting to be committed.
+///
+/// Non-zero count indicates the steward should call [`create_batch_proposals`].
 pub fn approved_proposals_count(handle: &GroupHandle) -> usize {
     handle.approved_proposals_count()
 }
 
-/// Get the approved proposals.
+/// Get all approved proposals waiting to be committed.
+///
+/// Returns a map of proposal ID → [`GroupUpdateRequest`].
 pub fn approved_proposals(handle: &GroupHandle) -> HashMap<ProposalId, GroupUpdateRequest> {
     handle.approved_proposals()
 }
 
-/// Get the epoch history (past batches of approved proposals, most recent last).
+/// Get the epoch history (past batches of approved proposals).
+///
+/// Returns up to 10 most recent epochs, most recent last.
+/// Useful for UI display of membership change history.
 pub fn epoch_history(handle: &GroupHandle) -> &VecDeque<HashMap<ProposalId, GroupUpdateRequest>> {
     handle.epoch_history()
 }
 
 // ─────────────────────────── Steward Operations ───────────────────────────
 
-/// Create batch proposals message for the voting epoch.
+/// Create and send batch proposals for the current epoch.
+///
+/// This is the steward's main responsibility: taking all approved proposals
+/// and creating an MLS commit that applies them atomically.
 ///
 /// # Arguments
-/// * `handle` - The group handle (must be steward with voting proposals)
-/// * `mls` - The MLS service for proposal creation
+/// * `handle` - The group handle (must be steward with approved proposals)
+/// * `mls` - The MLS service for creating proposals and commit
 ///
 /// # Returns
-/// A vector of outbound packets (batch proposals and optional welcome).
+/// A vector of [`OutboundPacket`]s to send:
+/// - Always includes the batch proposals message (proposals + commit)
+/// - Includes a welcome message if new members are being added
+///
+/// # Errors
+/// - [`CoreError::StewardNotSet`] if not the steward
+/// - [`CoreError::NoProposals`] if no approved proposals
+/// - [`CoreError::MlsGroupNotInitialized`] if MLS state is not initialized
+/// - [`CoreError::MlsError`] if MLS operations fail
+///
+/// # Side Effects
+/// Clears approved proposals and archives them to epoch history.
 pub async fn create_batch_proposals(
     handle: &mut GroupHandle,
     mls: &dyn MlsGroupService,
@@ -423,9 +535,15 @@ pub async fn create_batch_proposals(
     Ok(messages)
 }
 
-// ─────────────────────────── Queries ───────────────────────────
+// ─────────────────────────── Member Queries ───────────────────────────
 
-/// Get the members of a group.
+/// Get the current members of a group.
+///
+/// Returns the identity bytes for each member.
+///
+/// # Errors
+/// - [`CoreError::MlsGroupNotInitialized`] if MLS state is not initialized
+/// - [`CoreError::MlsError`] if member retrieval fails
 pub async fn group_members(
     handle: &GroupHandle,
     mls: &dyn MlsGroupService,

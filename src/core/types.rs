@@ -1,4 +1,10 @@
 //! Core types for group operations.
+//!
+//! This module defines the key data types used throughout the DE-MLS core:
+//!
+//! - [`ProcessResult`] - Outcome of processing an inbound message
+//! - [`MessageType`] - Trait for identifying message types
+//! - Various `From` implementations for protobuf message conversions
 
 use hashgraph_like_consensus::{
     protos::consensus::v1::{Proposal, Vote},
@@ -61,23 +67,63 @@ impl MessageType for GroupUpdateRequest {
 }
 
 /// Result of processing an inbound packet.
+///
+/// This enum represents all possible outcomes from [`process_inbound`](super::process_inbound).
+/// Pass it to [`dispatch_result`](super::dispatch_result) to handle consensus routing
+/// and get a [`DispatchAction`](super::DispatchAction) for your application.
+///
+/// # Variants
+///
+/// - `AppMessage` - A chat message or other application-level message
+/// - `Proposal` / `Vote` - Consensus messages that need forwarding
+/// - `GetUpdateRequest` - Steward received a membership change request
+/// - `JoinedGroup` - Successfully joined via welcome message
+/// - `GroupUpdated` - MLS state changed (batch commit applied)
+/// - `LeaveGroup` - User was removed from the group
+/// - `Noop` - Nothing to do (message not for us, already processed, etc.)
 #[derive(Debug, Clone)]
 pub enum ProcessResult {
-    /// An application message was received.
+    /// An application message was received (chat message, etc.).
+    ///
+    /// The message has been decrypted and is ready for display.
     AppMessage(AppMessage),
-    /// A consensus proposal was received.
+
+    /// A consensus proposal was received from another peer.
+    ///
+    /// Should be forwarded to the consensus service via
+    /// [`forward_incoming_proposal`](super::forward_incoming_proposal).
     Proposal(Proposal),
-    /// A consensus vote was received.
+
+    /// A consensus vote was received from another peer.
+    ///
+    /// Should be forwarded to the consensus service via
+    /// [`forward_incoming_vote`](super::forward_incoming_vote).
     Vote(Vote),
-    /// The user should leave the group.
+
+    /// The user was removed from the group.
+    ///
+    /// Application should clean up group state and notify the UI.
     LeaveGroup,
-    /// A member proposal was added (for stewards receiving key packages).
+
+    /// Steward received a membership change request (key package or ban).
+    ///
+    /// Application should start a consensus vote for this request.
     GetUpdateRequest(GroupUpdateRequest),
-    /// The user joined the group successfully.
+
+    /// The user successfully joined a group via welcome message.
+    ///
+    /// Contains the group name. Application should transition state
+    /// from PendingJoin to Working.
     JoinedGroup(String),
-    /// Update group state
+
+    /// Group MLS state was updated (batch commit applied).
+    ///
+    /// Application should transition state from Waiting to Working.
     GroupUpdated,
+
     /// No action needed.
+    ///
+    /// The message was not for us, was a duplicate, or required no action.
     Noop,
 }
 
@@ -100,6 +146,8 @@ impl From<UserKeyPackage> for WelcomeMessage {
         }
     }
 }
+
+// APPLICATION MESSAGE SUBTOPIC
 
 impl From<VotePayload> for AppMessage {
     fn from(vote_payload: VotePayload) -> Self {

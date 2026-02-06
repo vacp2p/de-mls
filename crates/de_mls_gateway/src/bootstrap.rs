@@ -1,4 +1,3 @@
-use crate::group_registry::GroupRegistry;
 use ds::{topic_filter::TopicFilter, DeliveryServiceError};
 use ds::{
     transport::{DeliveryService, InboundPacket},
@@ -21,7 +20,6 @@ pub struct AppState<DS: DeliveryService> {
 #[derive(Clone)]
 pub struct CoreCtx<DS: DeliveryService> {
     pub app_state: Arc<AppState<DS>>,
-    pub groups: Arc<GroupRegistry>,
     pub topics: Arc<TopicFilter>,
     pub consensus: DefaultConsensusService,
 }
@@ -30,7 +28,6 @@ impl<DS: DeliveryService> CoreCtx<DS> {
     pub fn new(app_state: Arc<AppState<DS>>) -> Self {
         Self {
             app_state,
-            groups: Arc::new(GroupRegistry::new()),
             topics: Arc::new(TopicFilter::new()),
             consensus: DefaultConsensusService::new_with_max_sessions(10),
         }
