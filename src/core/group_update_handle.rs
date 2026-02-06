@@ -1,21 +1,52 @@
+//! Proposal lifecycle management for group membership changes.
+//!
+//! This module tracks proposals through their lifecycle:
+//!
+//! ```text
+//! ┌─────────────┐    vote     ┌─────────────┐   commit   ┌─────────────┐
+//! │   Voting    │ ──────────► │  Approved   │ ─────────► │  Archived   │
+//! │  Proposals  │  (consensus)│  Proposals  │  (steward) │  (history)  │
+//! └─────────────┘             └─────────────┘            └─────────────┘
+//!        │
+//!        │ (rejected)
+//!        ▼
+//!   ┌─────────┐
+//!   │ Removed │
+//!   └─────────┘
+//! ```
+//!
+//! # Proposal Flow
+//!
+//! 1. **Voting**: Proposal created via `add_voting_proposal()`, waiting for votes
+//! 2. **Approved**: Consensus reached, moved via `move_proposal_to_approved()`
+//! 3. **Committed**: Steward batches proposals, clears via `clear_approved_proposals()`
+//! 4. **Archived**: Past batches stored in `epoch_history` for UI display
+
 use std::collections::{HashMap, VecDeque};
 
 use crate::protos::de_mls::messages::v1::GroupUpdateRequest;
 
+/// Consensus proposal identifier (assigned by the consensus service).
 pub type ProposalId = u32;
 
 /// Maximum number of past epoch batches to retain for UI display.
 const MAX_EPOCH_HISTORY: usize = 10;
 
+/// Tracks proposals through voting, approval, and commit lifecycle.
+///
+/// This is the internal state container for proposal management.
+/// Use [`GroupHandle`](crate::core::GroupHandle) methods for access.
 #[derive(Clone, Debug, Default)]
 pub struct CurrentEpochProposals {
-    /// Proposals that have been approved and are waiting for the next voting epoch.
+    /// Proposals waiting for consensus voting.
+    /// Key: proposal_id from consensus service
     approved_proposals: HashMap<ProposalId, GroupUpdateRequest>,
 
-    /// Proposals that have been voted on and are waiting for the next voting epoch.
+    /// Proposals that passed consensus, waiting for steward to commit.
     voting_proposals: HashMap<ProposalId, GroupUpdateRequest>,
 
-    /// History of approved proposal batches from past epochs (most recent last).
+    /// History of committed proposal batches (most recent last).
+    /// Limited to `MAX_EPOCH_HISTORY` entries for memory efficiency.
     epoch_history: VecDeque<HashMap<ProposalId, GroupUpdateRequest>>,
 }
 

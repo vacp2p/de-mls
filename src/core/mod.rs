@@ -38,7 +38,7 @@
 //!
 //! To build a chat application, you need to implement:
 //!
-//! 1. **[`GroupEventHandler`]** - Required trait for handling output events:
+//! 1. **`GroupEventHandler`** - Required trait for handling output events:
 //!    - `on_outbound()` - Send encrypted packets to the network
 //!    - `on_app_message()` - Deliver messages to your UI
 //!    - `on_leave_group()` / `on_joined_group()` - Update your state
@@ -53,13 +53,13 @@
 //! - **MLS Operations** - Group creation, joining, message encryption via OpenMLS
 //! - **Consensus Voting** - Proposal creation, vote casting, result handling
 //! - **Message Types** - Protobuf definitions for all protocol messages
-//! - **Default Services** - [`DefaultProvider`] bundles standard implementations
+//! - **Default Services** - `DefaultProvider` bundles standard implementations
 //!
 //! # Core Concepts
 //!
 //! ## GroupHandle
 //!
-//! [`GroupHandle`] is the per-group state container. It holds:
+//! `GroupHandle` is the per-group state container. It holds:
 //! - MLS cryptographic state (encrypted, thread-safe via `Arc<Mutex>`)
 //! - Steward status (who can commit membership changes)
 //! - Pending and approved proposals for the current epoch
@@ -74,8 +74,8 @@
 //! ## ProcessResult & DispatchAction
 //!
 //! When processing inbound messages:
-//! 1. Call [`process_inbound()`] → returns [`ProcessResult`]
-//! 2. Call [`dispatch_result()`] → returns [`DispatchAction`]
+//! 1. Call `process_inbound()` → returns `ProcessResult`
+//! 2. Call `dispatch_result()` → returns `DispatchAction`
 //! 3. Handle the action in your application layer
 //!
 //! # Quick Start
@@ -126,9 +126,9 @@
 //!
 //! - `api` - Core group operations (create, join, send, process)
 //! - `consensus` - Voting workflow and dispatch
-//! - `events` - [`GroupEventHandler`] trait
-//! - `provider` - [`DeMlsProvider`] trait and [`DefaultProvider`]
-//! - `types` - [`ProcessResult`], message conversions
+//! - `events` - `GroupEventHandler` trait
+//! - `provider` - `DeMlsProvider` trait and `DefaultProvider`
+//! - `types` - `ProcessResult`, message conversions
 
 mod api;
 mod consensus;

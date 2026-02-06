@@ -7,9 +7,9 @@
 //! # Overview
 //!
 //! The app layer adds:
-//! - **[`User`]** - Multi-group manager with consensus integration
-//! - **[`GroupStateMachine`]** - State transitions (PendingJoin → Working ⇄ Waiting → Leaving)
-//! - **[`StateChangeHandler`]** - Callbacks for UI state updates
+//! - **`User`** - Multi-group manager with consensus integration
+//! - **`GroupStateMachine`** - State transitions (PendingJoin → Working ⇄ Waiting → Leaving)
+//! - **`StateChangeHandler`** - Callbacks for UI state updates
 //! - **Epoch scheduling** - Configurable steward epoch timing
 //!
 //! # When to Use This Layer
