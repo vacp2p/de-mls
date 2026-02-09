@@ -1,15 +1,14 @@
-//! UI <-> Gateway protocol (PoC). Keep it dependency-light (serde only).
-// crates/de_mls_ui_protocol/src/lib.rs
+//! UI <-> Gateway protocol (PoC)
 pub mod v1 {
+    use hashgraph_like_consensus::types::ConsensusEvent;
+    use serde::{Deserialize, Serialize};
+
     use de_mls::{
-        message::MessageType,
-        protos::{
-            consensus::v1::{ProposalResult, VotePayload},
-            de_mls::messages::v1::{BanRequest, ConversationMessage, ProposalAdded},
+        core::{get_identity_from_group_update_request, MessageType},
+        protos::de_mls::messages::v1::{
+            BanRequest, ConversationMessage, ProposalAdded, VotePayload,
         },
     };
-    use mls_crypto::identity::normalize_wallet_address;
-    use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[non_exhaustive]
@@ -19,10 +18,10 @@ pub mod v1 {
         },
         ListGroups,
         CreateGroup {
-            name: String,
+            group_id: String,
         },
         JoinGroup {
-            name: String,
+            group_id: String,
         },
         EnterGroup {
             group_id: String,
@@ -45,6 +44,9 @@ pub mod v1 {
         GetStewardStatus {
             group_id: String,
         },
+        GetGroupState {
+            group_id: String,
+        },
         GetCurrentEpochProposals {
             group_id: String,
         },
@@ -53,6 +55,9 @@ pub mod v1 {
             user_to_ban: String,
         },
         GetGroupMembers {
+            group_id: String,
+        },
+        GetEpochHistory {
             group_id: String,
         },
     }
@@ -77,8 +82,13 @@ pub mod v1 {
             is_steward: bool,
         },
 
+        GroupStateChanged {
+            group_id: String,
+            state: String,
+        },
+
         VoteRequested(VotePayload),
-        ProposalDecided(ProposalResult),
+        ProposalDecided(String, ConsensusEvent),
         CurrentEpochProposals {
             group_id: String,
             proposals: Vec<(String, String)>,
@@ -95,22 +105,21 @@ pub mod v1 {
             group_id: String,
             members: Vec<String>,
         },
+        EpochHistory {
+            group_id: String,
+            epochs: Vec<Vec<(String, String)>>,
+        },
         Error(String),
     }
 
     impl From<ProposalAdded> for AppEvent {
         fn from(proposal_added: ProposalAdded) -> Self {
+            let request = proposal_added.request.unwrap();
+            let address = get_identity_from_group_update_request(request.clone());
             AppEvent::ProposalAdded {
                 group_id: proposal_added.group_id.clone(),
-                action: proposal_added
-                    .request
-                    .as_ref()
-                    .unwrap()
-                    .message_type()
-                    .to_string(),
-                address: normalize_wallet_address(
-                    &proposal_added.request.as_ref().unwrap().wallet_address,
-                ),
+                action: request.message_type().to_string(),
+                address,
             }
         }
     }

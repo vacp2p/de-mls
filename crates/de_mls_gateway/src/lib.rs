@@ -3,57 +3,71 @@
 //! Responsibilities:
 //! - Own a single event pipe UI <- gateway (`AppEvent`)
 //! - Provide a command entrypoint UI -> gateway (`send(AppCmd)`)
-//! - Hold references to the core context (`CoreCtx`) and current user actor
+//! - Hold references to the core context (`CoreCtx`) and current user
 //! - Offer small helper methods (login_with_private_key, etc.)
 use futures::{
     channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
     StreamExt,
 };
-use kameo::actor::ActorRef;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::sync::{atomic::AtomicBool, Arc};
 use tokio::sync::Mutex;
 
 use de_mls::{
-    user::User,
-    user_app_instance::{create_user_instance, CoreCtx},
+    app::User,
+    core::DefaultProvider,
+    ds::{DeliveryService, WakuDeliveryService},
 };
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 
-mod forwarder;
+mod bootstrap;
+pub(crate) mod forwarder;
 mod group;
+pub mod handler;
+
+pub use bootstrap::*;
+
+use handler::GatewayEventHandler;
+
+/// Type alias for the user reference stored in the gateway.
+type UserRef = Arc<
+    tokio::sync::RwLock<
+        User<
+            DefaultProvider,
+            GatewayEventHandler<WakuDeliveryService>,
+            GatewayEventHandler<WakuDeliveryService>,
+        >,
+    >,
+>;
+
 // Global, process-wide gateway instance
-pub static GATEWAY: Lazy<Gateway> = Lazy::new(Gateway::new);
+pub static GATEWAY: Lazy<Gateway<WakuDeliveryService>> = Lazy::new(Gateway::new);
 
 /// Helper to set the core context once during startup (called by ui_bridge).
-pub fn init_core(core: Arc<CoreCtx>) {
+pub fn init_core(core: Arc<CoreCtx<WakuDeliveryService>>) {
     GATEWAY.set_core(core);
 }
 
-pub struct Gateway {
+pub struct Gateway<DS: DeliveryService> {
     // UI events (gateway -> UI)
-    // A channel that sends AppEvents to the UI.
     evt_tx: UnboundedSender<AppEvent>,
-    // A channel that receives AppEvents from the UI.
     evt_rx: Mutex<UnboundedReceiver<AppEvent>>,
 
     // UI commands (UI -> gateway)
-    // A channel that sends AppCommands to the gateway (ui_bridge registers the sender here).
-    // It gives the UI an async door to submit AppCmds back to the gateway (`Gateway::send(AppCmd)`).
     cmd_tx: RwLock<Option<UnboundedSender<AppCmd>>>,
 
-    // It anchors the shared references to consensus, topics, app_state, etc.
-    core: RwLock<Option<Arc<CoreCtx>>>, // set once during startup
+    // Core context (set once during startup)
+    core: RwLock<Option<Arc<CoreCtx<DS>>>>,
 
-    // Current logged-in user actor
-    user: RwLock<Option<ActorRef<User>>>,
-    // Flag that guards against spawning the Waku forwarder more than once.
-    // It's initialized to false and set to true after the first successful login.
+    // Current logged-in user
+    user: RwLock<Option<UserRef>>,
+
+    // Guards against spawning forwarders more than once
     started: AtomicBool,
 }
 
-impl Gateway {
+impl<DS: DeliveryService> Gateway<DS> {
     fn new() -> Self {
         let (evt_tx, evt_rx) = unbounded();
         Self {
@@ -67,11 +81,11 @@ impl Gateway {
     }
 
     /// Called once by the bootstrap (ui_bridge) to provide the core context.
-    pub fn set_core(&self, core: Arc<CoreCtx>) {
+    pub fn set_core(&self, core: Arc<CoreCtx<DS>>) {
         *self.core.write() = Some(core);
     }
 
-    pub fn core(&self) -> Arc<CoreCtx> {
+    pub fn core(&self) -> Arc<CoreCtx<DS>> {
         self.core
             .read()
             .as_ref()
@@ -107,32 +121,44 @@ impl Gateway {
 
     // ─────────────────────────── High-level helpers ───────────────────────────
 
-    /// Create the user actor with a private key (no group yet).
-    /// Returns a derived display name (e.g., address string).
-    pub async fn login_with_private_key(&self, private_key: String) -> anyhow::Result<String> {
-        let core = self.core();
-        let consensus_service = core.consensus.as_ref().clone();
-
-        // Create user actor via core helper (you implement this inside your core)
-        let (user_ref, user_address) = create_user_instance(
-            private_key.clone(),
-            core.app_state.clone(),
-            &consensus_service,
-        )
-        .await?;
-
-        *self.user.write() = Some(user_ref.clone());
-
-        self.spawn_waku_forwarder(core.clone(), user_ref.clone());
-        self.spawn_consensus_forwarder(core.clone())?;
-        Ok(user_address)
-    }
-
     /// Get a copy of the current user ref (if logged in).
-    pub fn user(&self) -> anyhow::Result<ActorRef<User>> {
+    pub fn user(&self) -> anyhow::Result<UserRef> {
         self.user
             .read()
             .clone()
             .ok_or_else(|| anyhow::anyhow!("user not logged in"))
+    }
+}
+
+// Login and forwarder setup is specific to the WakuDeliveryService gateway
+impl Gateway<WakuDeliveryService> {
+    /// Create the user engine with a private key.
+    /// Returns a derived display name (e.g., address string).
+    pub async fn login_with_private_key(&self, private_key: String) -> anyhow::Result<String> {
+        let core = self.core();
+        let consensus_service = core.consensus.clone();
+
+        // Create handler that implements both GroupEventHandler and StateChangeHandler
+        let handler = Arc::new(GatewayEventHandler {
+            delivery: Arc::new(core.app_state.delivery.clone()),
+            evt_tx: self.evt_tx.clone(),
+            topics: core.topics.clone(),
+        });
+
+        let user = User::with_private_key(
+            private_key.as_str(),
+            Arc::new(consensus_service),
+            handler.clone(),
+            handler, // Same handler implements StateChangeHandler
+        )?;
+
+        let user_address = user.identity_string();
+        let user_ref: UserRef = Arc::new(tokio::sync::RwLock::new(user));
+
+        *self.user.write() = Some(user_ref.clone());
+
+        self.spawn_delivery_service_forwarder(core.clone(), user_ref.clone());
+        self.spawn_consensus_forwarder(core.clone(), user_ref.clone());
+        Ok(user_address)
     }
 }

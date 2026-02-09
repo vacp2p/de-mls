@@ -1,169 +1,183 @@
-use std::time::Duration;
-use tracing::info;
+use hex::ToHex;
 
 use de_mls::{
-    protos::de_mls::messages::v1::{app_message, BanRequest},
-    steward,
-    user::UserAction,
-    user_actor::{
-        CreateGroupRequest, GetCurrentEpochProposalsRequest, GetGroupMembersRequest,
-        GetProposalsForStewardVotingRequest, IsStewardStatusRequest, SendGroupMessage,
-        StartStewardEpochRequest, StewardMessageRequest, UserVoteRequest,
-    },
-    user_app_instance::STEWARD_EPOCH,
+    app::{CommitTimeoutStatus, IntervalScheduler, StewardScheduler, StewardSchedulerConfig},
+    ds::WakuDeliveryService,
+    protos::de_mls::messages::v1::{group_update_request, BanRequest},
 };
-use de_mls_ui_protocol::v1::AppEvent;
 
-use crate::Gateway;
+use crate::{forwarder::push_consensus_state, Gateway};
 
-impl Gateway {
+impl Gateway<WakuDeliveryService> {
     pub async fn create_group(&self, group_name: String) -> anyhow::Result<()> {
         let core = self.core();
-        let user = self.user()?;
-        user.ask(CreateGroupRequest {
-            group_name: group_name.clone(),
-            is_creation: true,
-        })
-        .await?;
+        let user_ref = self.user()?;
+        user_ref
+            .write()
+            .await
+            .create_group(&group_name, true)
+            .await?;
         core.topics.add_many(&group_name).await;
-        core.groups.insert(group_name.clone()).await;
-        info!("User start sending steward message for group {group_name:?}");
-        let user_clone = user.clone();
-        let group_name_clone = group_name.clone();
-        let evt_tx_clone = self.evt_tx.clone();
+
+        let user_clone = user_ref.clone();
+        let evt_tx = self.evt_tx.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(STEWARD_EPOCH));
+            let mut scheduler = IntervalScheduler::new(StewardSchedulerConfig::default());
             loop {
-                interval.tick().await;
-                // Step 1: Start steward epoch - check for proposals and start epoch if needed
-                let proposals_count = match user_clone
-                    .ask(StartStewardEpochRequest {
-                        group_name: group_name.clone(),
-                    })
+                scheduler.next_tick().await;
+                match user_clone
+                    .write()
+                    .await
+                    .start_steward_epoch(&group_name)
                     .await
                 {
-                    Ok(count) => count,
+                    Ok(()) => {}
                     Err(e) => {
-                        tracing::warn!(
-                            "start steward epoch request failed for group {group_name:?}: {e}"
-                        );
-                        continue;
-                    }
-                };
-
-                // Step 2: Send new steward key to the waku node for new epoch
-                let msg = match user_clone
-                    .ask(StewardMessageRequest {
-                        group_name: group_name.clone(),
-                    })
-                    .await
-                {
-                    Ok(msg) => msg,
-                    Err(e) => {
-                        tracing::warn!(
-                            "steward message request failed for group {group_name:?}: {e}"
-                        );
-                        continue;
-                    }
-                };
-                if let Err(e) = core.app_state.waku_node.send(msg).await {
-                    tracing::warn!("failed to send steward message for group {group_name:?}: {e}");
-                    continue;
-                }
-
-                if proposals_count == 0 {
-                    info!("No proposals to vote on for group: {group_name}, completing epoch without voting");
-                } else {
-                    info!("Found {proposals_count} proposals to vote on for group: {group_name}");
-
-                    // Step 3: Start voting process - steward gets proposals for voting
-                    let action = match user_clone
-                        .ask(GetProposalsForStewardVotingRequest {
-                            group_name: group_name.clone(),
-                        })
-                        .await
-                    {
-                        Ok(action) => action,
-                        Err(e) => {
+                        if e.is_fatal() {
                             tracing::warn!(
-                                "get proposals for steward voting failed for group {group_name:?}: {e}"
+                                "Steward epoch loop exiting for group {group_name:?}: {e}"
                             );
-                            continue;
+                            break;
                         }
-                    };
-
-                    // Step 4: Send proposals to ws to steward to vote or do nothing if no proposals
-                    // After voting, steward sends vote and proposal to waku node and start consensus process
-                    match action {
-                        UserAction::SendToApp(app_msg) => {
-                            if let Some(app_message::Payload::VotePayload(vp)) = &app_msg.payload {
-                                if let Err(e) =
-                                    evt_tx_clone.unbounded_send(AppEvent::VoteRequested(vp.clone()))
-                                {
-                                    tracing::warn!("failed to send vote requested event: {e}");
-                                }
-
-                                // Also clear current epoch proposals when voting starts
-                                if let Err(e) = evt_tx_clone.unbounded_send(
-                                    AppEvent::CurrentEpochProposalsCleared {
-                                        group_id: group_name.clone(),
-                                    },
-                                ) {
-                                    tracing::warn!("failed to send proposals cleared event: {e}");
-                                }
-                            }
-                            if let Some(app_message::Payload::ProposalAdded(pa)) = &app_msg.payload
-                            {
-                                if let Err(e) =
-                                    evt_tx_clone.unbounded_send(AppEvent::from(pa.clone()))
-                                {
-                                    tracing::warn!("failed to send proposal added event: {e}");
-                                }
-                            }
-                        }
-                        UserAction::DoNothing => {
-                            info!("No action to take for group: {group_name}");
-                            return Ok(());
-                        }
-                        _ => {
-                            return Err(anyhow::anyhow!("Invalid user action: {action}"));
-                        }
+                        tracing::warn!(
+                            "Steward epoch failed for group {group_name:?} (will retry): {e}"
+                        );
                     }
                 }
+                push_consensus_state(&user_clone, &evt_tx, &group_name).await;
             }
         });
-        tracing::debug!("User started sending steward message for group {group_name_clone:?}");
         Ok(())
     }
 
     pub async fn join_group(&self, group_name: String) -> anyhow::Result<()> {
         let core = self.core();
-        let user = self.user()?;
-        user.ask(CreateGroupRequest {
-            group_name: group_name.clone(),
-            is_creation: false,
-        })
-        .await?;
+        let user_ref = self.user()?;
+        user_ref
+            .write()
+            .await
+            .create_group(&group_name, false)
+            .await?;
         core.topics.add_many(&group_name).await;
-        core.groups.insert(group_name.clone()).await;
-        tracing::debug!("User joined group {group_name}");
-        tracing::debug!(
-            "User have topic for group {:?}",
-            core.topics.snapshot().await
-        );
+        user_ref.write().await.send_kp_message(&group_name).await?;
+        tracing::debug!("User sent key package message for group {group_name}");
+
+        // Phase 1 (PendingJoin): Poll every 5s until joined or timed out
+        // Phase 2 (Working): Wait until epoch boundaries and check for Waiting transition
+        let user_clone = user_ref.clone();
+        let group_name_clone = group_name.clone();
+        let evt_tx = self.evt_tx.clone();
+        tokio::spawn(async move {
+            // Phase 1: Wait for join
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if !user_clone
+                    .read()
+                    .await
+                    .check_pending_join(&group_name_clone)
+                    .await
+                {
+                    break;
+                }
+            }
+
+            // Check if we actually joined
+            let joined = user_clone
+                .read()
+                .await
+                .get_group_state(&group_name_clone)
+                .await
+                .map(|s| s == de_mls::app::GroupState::Working)
+                .unwrap_or(false);
+
+            if !joined {
+                tracing::debug!("Join failed for group {group_name_clone:?}");
+                return;
+            }
+
+            tracing::info!("Member joined group {group_name_clone:?}");
+
+            // Phase 2: Epoch boundary loop
+            loop {
+                let wait_time = user_clone
+                    .read()
+                    .await
+                    .time_until_next_epoch(&group_name_clone)
+                    .await;
+
+                match wait_time {
+                    Some(d) if d > std::time::Duration::ZERO => tokio::time::sleep(d).await,
+                    Some(_) => {} // Already at boundary
+                    None => {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        continue;
+                    }
+                }
+
+                let entered_waiting = match user_clone
+                    .read()
+                    .await
+                    .start_member_epoch(&group_name_clone)
+                    .await
+                {
+                    Ok(entered) => entered,
+                    Err(e) => {
+                        if e.is_fatal() {
+                            tracing::warn!(
+                                "Member epoch loop exiting for group {group_name_clone:?}: {e}"
+                            );
+                            break;
+                        }
+                        tracing::warn!(
+                            "Member epoch failed for group {group_name_clone:?} (will retry): {e}"
+                        );
+                        false
+                    }
+                };
+
+                // Poll for commit timeout only if we entered Waiting state
+                if entered_waiting {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        match user_clone
+                            .read()
+                            .await
+                            .check_commit_timeout(&group_name_clone)
+                            .await
+                        {
+                            CommitTimeoutStatus::NotWaiting => break,
+                            CommitTimeoutStatus::StillWaiting => continue,
+                            CommitTimeoutStatus::TimedOut { has_proposals } => {
+                                if has_proposals {
+                                    tracing::warn!(
+                                        "Steward commit timeout for group {group_name_clone:?} \
+                                         with pending proposals (steward fault)"
+                                    );
+                                    let _ = evt_tx.unbounded_send(
+                                        de_mls_ui_protocol::v1::AppEvent::Error(format!(
+                                            "Steward failed to commit for group {group_name_clone}"
+                                        )),
+                                    );
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
         Ok(())
     }
 
     pub async fn send_message(&self, group_name: String, message: String) -> anyhow::Result<()> {
-        let core = self.core();
-        let user = self.user()?;
-        let pmt = user
-            .ask(SendGroupMessage {
-                message: message.clone().into_bytes(),
-                group_name: group_name.clone(),
-            })
+        let user_ref = self.user()?;
+        user_ref
+            .read()
+            .await
+            .send_app_message(&group_name, message.into_bytes())
             .await?;
-        core.app_state.waku_node.send(pmt).await?;
+        tracing::debug!("sent message to the group: {:?}", &group_name);
         Ok(())
     }
 
@@ -172,39 +186,18 @@ impl Gateway {
         group_name: String,
         user_to_ban: String,
     ) -> anyhow::Result<()> {
-        let core = self.core();
-        let user = self.user()?;
+        let user_ref = self.user()?;
 
         let ban_request = BanRequest {
             user_to_ban: user_to_ban.clone(),
-            requester: String::new(),
             group_name: group_name.clone(),
         };
 
-        let msg = user
-            .ask(de_mls::user_actor::BuildBanMessage {
-                ban_request,
-                group_name: group_name.clone(),
-            })
+        user_ref
+            .write()
+            .await
+            .process_ban_request(ban_request, &group_name)
             .await?;
-        match msg {
-            UserAction::SendToWaku(msg) => {
-                core.app_state.waku_node.send(msg).await?;
-            }
-            UserAction::SendToApp(app_msg) => {
-                let event = match app_msg.payload {
-                    Some(app_message::Payload::ProposalAdded(ref proposal)) => {
-                        AppEvent::from(proposal.clone())
-                    }
-                    Some(app_message::Payload::BanRequest(ref ban_request)) => {
-                        AppEvent::from(ban_request.clone())
-                    }
-                    _ => return Err(anyhow::anyhow!("Invalid user action")),
-                };
-                self.push_event(event);
-            }
-            _ => return Err(anyhow::anyhow!("Invalid user action")),
-        }
 
         Ok(())
     }
@@ -215,30 +208,45 @@ impl Gateway {
         proposal_id: u32,
         vote: bool,
     ) -> anyhow::Result<()> {
-        let user = self.user()?;
+        let user_ref = self.user()?;
 
-        let user_vote_result = user
-            .ask(UserVoteRequest {
-                group_name: group_name.clone(),
-                proposal_id,
-                vote,
-            })
+        // process_user_vote now sends via handler internally
+        user_ref
+            .write()
+            .await
+            .process_user_vote(&group_name, proposal_id, vote)
             .await?;
-        if let Some(waku_msg) = user_vote_result {
-            self.core().app_state.waku_node.send(waku_msg).await?;
-        }
+
+        Ok(())
+    }
+
+    pub async fn leave_group(&self, group_name: String) -> anyhow::Result<()> {
+        let user_ref = self.user()?;
+        user_ref.write().await.leave_group(&group_name).await?;
         Ok(())
     }
 
     pub async fn group_list(&self) -> Vec<String> {
-        let core = self.core();
-        core.groups.all().await
+        match self.user() {
+            Ok(user_ref) => user_ref.read().await.list_groups().await,
+            Err(_) => Vec::new(),
+        }
     }
 
     pub async fn get_steward_status(&self, group_name: String) -> anyhow::Result<bool> {
-        let user = self.user()?;
-        let is_steward = user.ask(IsStewardStatusRequest { group_name }).await?;
+        let user_ref = self.user()?;
+        let is_steward = user_ref
+            .read()
+            .await
+            .is_steward_for_group(&group_name)
+            .await?;
         Ok(is_steward)
+    }
+
+    pub async fn get_group_state(&self, group_name: String) -> anyhow::Result<String> {
+        let user_ref = self.user()?;
+        let state = user_ref.read().await.get_group_state(&group_name).await?;
+        Ok(state.to_string())
     }
 
     /// Get current epoch proposals for the given group
@@ -246,36 +254,63 @@ impl Gateway {
         &self,
         group_name: String,
     ) -> anyhow::Result<Vec<(String, String)>> {
-        let user = self.user()?;
-
-        let proposals = user
-            .ask(GetCurrentEpochProposalsRequest { group_name })
+        let user_ref = self.user()?;
+        let proposals = user_ref
+            .read()
+            .await
+            .get_approved_proposal_for_current_epoch(&group_name)
             .await?;
-        let display_proposals: Vec<(String, String)> = proposals
-            .iter()
-            .map(|proposal| match proposal {
-                steward::GroupUpdateRequest::AddMember(kp) => {
-                    let address = format!(
-                        "0x{}",
-                        hex::encode(kp.leaf_node().credential().serialized_content())
-                    );
-                    ("Add Member".to_string(), address)
+
+        let mut display_proposals: Vec<(String, String)> = Vec::with_capacity(proposals.len());
+
+        for proposal in proposals {
+            match proposal.payload {
+                Some(group_update_request::Payload::InviteMember(kp)) => {
+                    let address = kp.identity.encode_hex();
+                    display_proposals.push(("Add Member".to_string(), address))
                 }
-                steward::GroupUpdateRequest::RemoveMember(id) => {
-                    ("Remove Member".to_string(), id.clone())
+                Some(group_update_request::Payload::RemoveMember(id)) => {
+                    display_proposals.push(("Remove Member".to_string(), id.identity.encode_hex()))
                 }
-            })
-            .collect();
+                None => return Err(anyhow::anyhow!("message")),
+            }
+        }
         Ok(display_proposals)
     }
 
     pub async fn get_group_members(&self, group_name: String) -> anyhow::Result<Vec<String>> {
-        let user = self.user()?;
-        let members = user
-            .ask(GetGroupMembersRequest {
-                group_name: group_name.clone(),
-            })
-            .await?;
+        let user_ref = self.user()?;
+        let members = user_ref.read().await.get_group_members(&group_name).await?;
         Ok(members)
+    }
+
+    /// Get epoch history for a group (past batches of approved proposals).
+    ///
+    /// Returns up to the last 10 epochs, each as a list of `(action, identity)` pairs.
+    pub async fn get_epoch_history(
+        &self,
+        group_name: String,
+    ) -> anyhow::Result<Vec<Vec<(String, String)>>> {
+        let user_ref = self.user()?;
+        let history = user_ref.read().await.get_epoch_history(&group_name).await?;
+
+        let mut result = Vec::with_capacity(history.len());
+        for batch in history {
+            let mut display_batch = Vec::with_capacity(batch.len());
+            for proposal in batch {
+                match proposal.payload {
+                    Some(group_update_request::Payload::InviteMember(kp)) => {
+                        let address = kp.identity.encode_hex();
+                        display_batch.push(("Add Member".to_string(), address));
+                    }
+                    Some(group_update_request::Payload::RemoveMember(id)) => {
+                        display_batch.push(("Remove Member".to_string(), id.identity.encode_hex()));
+                    }
+                    None => {}
+                }
+            }
+            result.push(display_batch);
+        }
+        Ok(result)
     }
 }

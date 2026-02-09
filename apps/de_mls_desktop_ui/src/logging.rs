@@ -1,6 +1,5 @@
 use once_cell::sync::OnceCell;
 use std::sync::Mutex;
-
 use tracing_appender::rolling;
 use tracing_subscriber::{
     fmt,
