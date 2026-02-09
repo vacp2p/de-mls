@@ -1,14 +1,20 @@
 //! Core library errors.
 
+use crate::mls_crypto;
+
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
     /// Identity error.
     #[error("Identity error: {0}")]
-    IdentityError(#[from] crate::mls_crypto::IdentityError),
+    IdentityError(#[from] mls_crypto::IdentityError),
 
     /// MLS service error.
     #[error("MLS error: {0}")]
-    MlsError(#[from] crate::mls_crypto::MlsServiceError),
+    MlsServiceError(#[from] mls_crypto::MlsServiceError),
+
+    /// Storage error.
+    #[error("Storage error: {0}")]
+    StorageError(#[from] mls_crypto::StorageError),
 
     #[error("Consensus error: {0}")]
     ConsensusError(#[from] hashgraph_like_consensus::error::ConsensusError),
@@ -49,4 +55,14 @@ pub enum CoreError {
 
     #[error("Invalid subtopic: {0}")]
     InvalidSubtopic(String),
+}
+
+impl From<mls_crypto::MlsError> for CoreError {
+    fn from(e: mls_crypto::MlsError) -> Self {
+        match e {
+            mls_crypto::MlsError::Identity(e) => CoreError::IdentityError(e),
+            mls_crypto::MlsError::Service(e) => CoreError::MlsServiceError(e),
+            mls_crypto::MlsError::Storage(e) => CoreError::StorageError(e),
+        }
+    }
 }

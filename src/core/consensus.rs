@@ -43,6 +43,7 @@
 //! - `JoinedGroup` - User joined successfully, transition to Working state
 
 use alloy::signers::Signer;
+use openmls_rust_crypto::MemoryStorage;
 use prost::Message;
 use std::time::Duration;
 use tracing::info;
@@ -57,7 +58,7 @@ use hashgraph_like_consensus::{
 use crate::core::{
     build_message, CoreError, DeMlsProvider, GroupEventHandler, GroupHandle, ProcessResult,
 };
-use crate::mls_crypto::IdentityService;
+use crate::mls_crypto::{DeMlsStorage, MlsService};
 use crate::protos::de_mls::messages::v1::{
     AppMessage, ConversationMessage, GroupUpdateRequest, VotePayload,
 };
@@ -115,7 +116,7 @@ pub enum DispatchAction {
 /// * `group_name` - The name of the group
 /// * `request` - The group update request (add/remove member)
 /// * `expected_voters` - Number of group members (for quorum calculation)
-/// * `identity_string` - The proposer's identity (from `IdentityService::identity_string`)
+/// * `identity_string` - The proposer's identity
 /// * `consensus` - The consensus service
 /// * `handler` - Event handler for UI notifications
 ///
@@ -238,23 +239,28 @@ pub async fn forward_incoming_vote<P: DeMlsProvider>(
 /// * `vote` - true = approve, false = reject
 /// * `consensus` - The consensus service
 /// * `signer` - Ethereum signer for vote authentication
-/// * `identity` - Identity service for message building
+/// * `mls` - MLS service for message encryption
 /// * `handler` - Event handler for sending the outbound message
 ///
 /// # Errors
 /// - [`CoreError::ConsensusError`] if voting fails
 /// - [`CoreError::MlsError`] if message encryption fails
 #[allow(clippy::too_many_arguments)]
-pub async fn cast_vote<P: DeMlsProvider, SN: Signer + Send + Sync>(
+pub async fn cast_vote<P, SN, S>(
     handle: &GroupHandle,
     group_name: &str,
     proposal_id: u32,
     vote: bool,
     consensus: &P::Consensus,
     signer: SN,
-    identity: &P::Identity,
+    mls: &MlsService<S>,
     handler: &dyn GroupEventHandler,
-) -> Result<(), CoreError> {
+) -> Result<(), CoreError>
+where
+    P: DeMlsProvider,
+    SN: Signer + Send + Sync,
+    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+{
     let is_owner = handle.is_owner_of_proposal(proposal_id);
     let scope = P::Scope::from(group_name.to_string());
 
@@ -272,7 +278,7 @@ pub async fn cast_vote<P: DeMlsProvider, SN: Signer + Send + Sync>(
         vote_msg.into()
     };
 
-    let packet = build_message(handle, identity, &app_message).await?;
+    let packet = build_message(handle, mls, &app_message)?;
     handler.on_outbound(group_name, packet).await?;
     Ok(())
 }
@@ -317,7 +323,8 @@ pub async fn handle_consensus_event<P: DeMlsProvider>(
                 handle.insert_approved_proposal(proposal_id, update_request);
             } else {
                 // !result && !is_owner: proposal rejected, we weren't the owner
-                // Nothing to do — non-owners don't store voting proposals
+                // TODO: Emit a rejection event to the UI so pending votes can be cleared.
+                // Currently non-owners see VotePayload but get no notification when rejected.
                 info!("Proposal {proposal_id} rejected (not owner, no local state to update)");
             }
         }
@@ -377,7 +384,7 @@ pub async fn request_steward_reelection<P: DeMlsProvider>(
 /// * `result` - The result from `process_inbound`
 /// * `consensus` - The consensus service
 /// * `handler` - Event handler for callbacks
-/// * `identity` - Identity service for message building
+/// * `mls` - MLS service for message building
 ///
 /// # Returns
 /// A [`DispatchAction`] indicating what the application should do:
@@ -386,41 +393,18 @@ pub async fn request_steward_reelection<P: DeMlsProvider>(
 /// - `GroupUpdated` - Update state machine
 /// - `LeaveGroup` - Clean up group
 /// - `JoinedGroup` - Transition to Working state
-///
-/// # Example
-/// ```ignore
-/// let result = process_inbound(&mut handle, &payload, subtopic, &mls, &identity).await?;
-/// let action = dispatch_result::<DefaultProvider>(&handle, "my-group", result, &consensus, &handler, &identity).await?;
-///
-/// match action {
-///     DispatchAction::Done => {}
-///     DispatchAction::StartVoting(request) => {
-///         tokio::spawn(async move {
-///             let proposal_id = start_voting::<DefaultProvider>(...).await?;
-///             handle.store_voting_proposal(proposal_id, request);
-///         });
-///     }
-///     DispatchAction::GroupUpdated => {
-///         state_machine.start_working();
-///     }
-///     DispatchAction::LeaveGroup => {
-///         groups.remove(&group_name);
-///         handler.on_leave_group(&group_name).await?;
-///     }
-///     DispatchAction::JoinedGroup => {
-///         state_machine.start_working();
-///         state_machine.sync_epoch_boundary();
-///     }
-/// }
-/// ```
-pub async fn dispatch_result<P: DeMlsProvider>(
+pub async fn dispatch_result<P, S>(
     handle: &GroupHandle,
     group_name: &str,
     result: ProcessResult,
     consensus: &P::Consensus,
     handler: &dyn GroupEventHandler,
-    identity: &P::Identity,
-) -> Result<DispatchAction, CoreError> {
+    mls: &MlsService<S>,
+) -> Result<DispatchAction, CoreError>
+where
+    P: DeMlsProvider,
+    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+{
     match result {
         ProcessResult::AppMessage(msg) => {
             handler.on_app_message(group_name, msg).await?;
@@ -438,14 +422,13 @@ pub async fn dispatch_result<P: DeMlsProvider>(
         ProcessResult::GetUpdateRequest(request) => Ok(DispatchAction::StartVoting(request)),
         ProcessResult::JoinedGroup(name) => {
             let msg: AppMessage = ConversationMessage {
-                message: format!("User {} joined the group", identity.identity_string())
-                    .into_bytes(),
+                message: format!("User {} joined the group", mls.wallet_hex()).into_bytes(),
                 sender: "SYSTEM".to_string(),
                 group_name: name.clone(),
             }
             .into();
 
-            let packet = build_message(handle, identity, &msg).await?;
+            let packet = build_message(handle, mls, &msg)?;
             handler.on_outbound(&name, packet).await?;
             handler.on_joined_group(&name).await?;
             Ok(DispatchAction::JoinedGroup)

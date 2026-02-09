@@ -1,7 +1,10 @@
-//! Per-group state container for MLS operations.
+//! Per-group state container for app-level operations.
 //!
-//! This module provides [`GroupHandle`], which holds all state needed for
-//! a single group: MLS cryptographic state, proposal tracking, and steward status.
+//! This module provides [`GroupHandle`], which holds app-level state for
+//! a single group: proposal tracking, steward status, and deduplication ID.
+//!
+//! **Note**: MLS cryptographic state is managed by `MlsService` internally.
+//! This handle only tracks application-layer concerns.
 //!
 //! # Architecture
 //!
@@ -10,10 +13,10 @@
 //! │                        GroupHandle                          │
 //! ├─────────────────────────────────────────────────────────────┤
 //! │  group_name      │  Human-readable group identifier         │
-//! │  mls_handle      │  OpenMLS group state (encryption keys)   │
 //! │  app_id          │  UUID for message deduplication          │
 //! │  steward         │  Whether this user batches commits       │
 //! │  proposals       │  Voting + approved proposal queues       │
+//! │  mls_initialized │  Whether MLS state exists in MlsService  │
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -21,22 +24,19 @@
 //!
 //! **Creating a group (as steward):**
 //! ```ignore
-//! let mls_handle = identity.create_group(group_name)?;
-//! let handle = GroupHandle::new_as_creator(group_name, mls_handle);
+//! mls_service.create_group(group_name)?;
+//! let handle = GroupHandle::new_as_creator(group_name);
 //! // handle.is_steward() == true
-//! // handle.is_mls_initialized() == true
 //! ```
 //!
 //! **Joining a group (as member):**
 //! ```ignore
 //! let handle = GroupHandle::new_for_join(group_name);
 //! // handle.is_steward() == false
-//! // handle.is_mls_initialized() == false
 //!
 //! // Later, when welcome is received:
-//! let mls_handle = identity.join_group(&welcome)?;
-//! handle.set_mls_handle(mls_handle);
-//! // handle.is_mls_initialized() == true
+//! mls_service.join_group(&welcome)?;
+//! handle.set_mls_initialized();
 //! ```
 //!
 //! # Proposal Flow
@@ -55,25 +55,24 @@
 //! - `insert_approved_proposal()` - Add proposal directly to approved queue
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use crate::core::group_update_handle::{CurrentEpochProposals, ProposalId};
-use crate::mls_crypto::MlsGroupHandle;
 use crate::protos::de_mls::messages::v1::GroupUpdateRequest;
 
-/// Handle for a single MLS group.
+/// Handle for a single MLS group's app-level state.
 ///
-/// Contains all state needed for group operations:
-/// - MLS group handle for cryptographic operations (encryption/decryption)
+/// Contains state needed for group operations:
 /// - Application ID for message deduplication across instances
 /// - Steward flag indicating whether this user batches commits
 /// - Proposal queues for tracking voting and approved proposals
 ///
+/// **Note**: MLS cryptographic state (encryption keys, group members) is
+/// managed by `MlsService`. Use `mls_service.encrypt()`, `mls_service.decrypt()`,
+/// etc. for MLS operations.
+///
 /// # Thread Safety
 ///
-/// The MLS group handle is wrapped in `Arc<Mutex>` for safe concurrent access.
-/// The `GroupHandle` itself should be wrapped in `RwLock` or similar by the
+/// The `GroupHandle` should be wrapped in `RwLock` or similar by the
 /// application layer (see `User.groups` in the app module).
 ///
 /// # Steward vs Member
@@ -85,13 +84,13 @@ use crate::protos::de_mls::messages::v1::GroupUpdateRequest;
 pub struct GroupHandle {
     /// The name of the group.
     group_name: String,
-    /// The MLS group handle (None until group is joined/created).
-    mls_handle: Option<Arc<Mutex<MlsGroupHandle>>>,
     /// Unique application instance ID for message deduplication.
     app_id: Vec<u8>,
-    /// Optional steward for this group (per-group, can change dynamically).
+    /// Whether this user is the steward for this group.
     steward: bool,
-    /// Proposal for current steward epoch
+    /// Whether MLS state is initialized in MlsService.
+    mls_initialized: bool,
+    /// Proposal for current steward epoch.
     proposals: CurrentEpochProposals,
 }
 
@@ -103,24 +102,25 @@ impl GroupHandle {
     pub fn new_for_join(group_name: &str) -> Self {
         Self {
             group_name: group_name.to_string(),
-            mls_handle: None,
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
             steward: false,
+            mls_initialized: false,
             proposals: CurrentEpochProposals::new(),
         }
     }
 
     /// Create a new group handle for creating a new group (as steward).
     ///
+    /// The MLS group should be created via `mls_service.create_group()` first.
+    ///
     /// # Arguments
     /// * `group_name` - The name of the group
-    /// * `mls_handle` - The MLS group handle
-    pub fn new_as_creator(group_name: &str, mls_handle: MlsGroupHandle) -> Self {
+    pub fn new_as_creator(group_name: &str) -> Self {
         Self {
             group_name: group_name.to_string(),
-            mls_handle: Some(Arc::new(Mutex::new(mls_handle))),
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
             steward: true,
+            mls_initialized: true,
             proposals: CurrentEpochProposals::new(),
         }
     }
@@ -140,24 +140,19 @@ impl GroupHandle {
         &self.app_id
     }
 
-    /// Check if this group has a steward.
+    /// Check if this user is the steward.
     pub fn is_steward(&self) -> bool {
         self.steward
     }
 
     /// Check if the MLS group is initialized.
     pub fn is_mls_initialized(&self) -> bool {
-        self.mls_handle.is_some()
+        self.mls_initialized
     }
 
-    /// Get a reference to the MLS handle.
-    pub fn mls_handle(&self) -> Option<&Arc<Mutex<MlsGroupHandle>>> {
-        self.mls_handle.as_ref()
-    }
-
-    /// Set the MLS group handle (used when joining a group).
-    pub fn set_mls_handle(&mut self, handle: MlsGroupHandle) {
-        self.mls_handle = Some(Arc::new(Mutex::new(handle)));
+    /// Mark MLS as initialized (called after joining via welcome).
+    pub fn set_mls_initialized(&mut self) {
+        self.mls_initialized = true;
     }
 
     /// Become the steward of this group.

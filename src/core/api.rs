@@ -1,7 +1,8 @@
 //! Core API for MLS group operations.
 //!
 //! This module provides the fundamental building blocks for MLS group management.
-//! All functions are free-standing and operate on [`GroupHandle`] instances.
+//! All functions operate on [`GroupHandle`] instances for app-level state and
+//! [`MlsService`] for MLS cryptographic operations.
 //!
 //! # Overview
 //!
@@ -27,10 +28,11 @@
 //!
 //! ```text
 //! Steward creates group:
-//!   create_group() → GroupHandle (steward=true, MLS initialized)
+//!   mls.create_group(name) → mls state initialized
+//!   create_group(name) → GroupHandle (steward=true)
 //!
 //! Member joins:
-//!   prepare_to_join() → GroupHandle (steward=false, MLS=None)
+//!   prepare_to_join() → GroupHandle (steward=false)
 //!   build_key_package_message() → send to network
 //!   ... wait for welcome ...
 //!   process_inbound(welcome) → ProcessResult::JoinedGroup
@@ -42,6 +44,7 @@
 //!   process_inbound(payload) → ProcessResult → dispatch_result() → DispatchAction
 //! ```
 
+use openmls_rust_crypto::MemoryStorage;
 use prost::Message;
 use std::collections::{HashMap, VecDeque};
 use tracing::info;
@@ -52,8 +55,8 @@ use crate::core::{
 };
 use crate::ds::{OutboundPacket, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 use crate::mls_crypto::{
-    key_package_bytes_from_json, BatchProposalsResult, IdentityService, KeyPackageBytes,
-    MlsGroupService, MlsGroupUpdate, MlsProcessResult,
+    key_package_bytes_from_json, CommitResult, DeMlsStorage, DecryptResult, GroupUpdate,
+    KeyPackageBytes, MlsService,
 };
 use crate::protos::de_mls::messages::v1::{
     app_message, group_update_request, welcome_message, AppMessage, BatchProposalsMessage,
@@ -72,13 +75,16 @@ use crate::protos::de_mls::messages::v1::{
 /// * `mls` - The MLS service for cryptographic operations
 ///
 /// # Returns
-/// A [`GroupHandle`] with MLS state initialized and steward=true.
+/// A [`GroupHandle`] with steward=true.
 ///
 /// # Errors
 /// Returns [`CoreError::MlsError`] if group creation fails.
-pub fn create_group(name: &str, mls: &dyn MlsGroupService) -> Result<GroupHandle, CoreError> {
-    let mls_handle = mls.create_group(name)?;
-    Ok(GroupHandle::new_as_creator(name, mls_handle))
+pub fn create_group<S>(name: &str, mls: &MlsService<S>) -> Result<GroupHandle, CoreError>
+where
+    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+{
+    mls.create_group(name)?;
+    Ok(GroupHandle::new_as_creator(name))
 }
 
 /// Prepare a handle for joining an existing group.
@@ -90,7 +96,7 @@ pub fn create_group(name: &str, mls: &dyn MlsGroupService) -> Result<GroupHandle
 /// * `name` - The name of the group to join
 ///
 /// # Returns
-/// A [`GroupHandle`] ready for joining (steward=false, MLS=None).
+/// A [`GroupHandle`] ready for joining (steward=false, MLS not initialized).
 ///
 /// # Next Steps
 /// 1. Call [`build_key_package_message`] to create a join request
@@ -115,15 +121,16 @@ pub fn prepare_to_join(name: &str) -> GroupHandle {
 ///
 /// # Errors
 /// Returns [`CoreError::MlsError`] if welcome processing fails.
-pub fn join_group_from_invite(
+pub fn join_group_from_invite<S>(
     handle: &mut GroupHandle,
     welcome_bytes: &[u8],
-    mls: &dyn MlsGroupService,
-) -> Result<String, CoreError> {
-    let (mls_handle, group_id) = mls.join_group_from_invite(welcome_bytes)?;
-    let group_name =
-        String::from_utf8(group_id).unwrap_or_else(|_| handle.group_name().to_string());
-    handle.set_mls_handle(mls_handle);
+    mls: &MlsService<S>,
+) -> Result<String, CoreError>
+where
+    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+{
+    let group_name = mls.join_group(welcome_bytes)?;
+    handle.set_mls_initialized();
     Ok(group_name)
 }
 
@@ -157,7 +164,7 @@ pub fn resign_steward(handle: &mut GroupHandle) {
 /// [`OutboundPacket`] ready for network transmission.
 ///
 /// # Arguments
-/// * `handle` - The group handle (must have MLS initialized)
+/// * `handle` - The group handle (for routing metadata)
 /// * `mls` - The MLS service for encryption
 /// * `app_msg` - The application message to encrypt
 ///
@@ -167,19 +174,19 @@ pub fn resign_steward(handle: &mut GroupHandle) {
 /// # Errors
 /// - [`CoreError::MlsGroupNotInitialized`] if MLS state is not initialized
 /// - [`CoreError::MlsError`] if encryption fails
-pub async fn build_message(
+pub fn build_message<S>(
     handle: &GroupHandle,
-    mls: &dyn MlsGroupService,
+    mls: &MlsService<S>,
     app_msg: &AppMessage,
-) -> Result<OutboundPacket, CoreError> {
-    let mls_handle = handle
-        .mls_handle()
-        .ok_or(CoreError::MlsGroupNotInitialized)?;
+) -> Result<OutboundPacket, CoreError>
+where
+    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+{
+    if !handle.is_mls_initialized() {
+        return Err(CoreError::MlsGroupNotInitialized);
+    }
 
-    let message_out = {
-        let mut mls_group = mls_handle.lock().await;
-        mls.build_message(&mut mls_group, &app_msg.encode_to_vec())?
-    };
+    let message_out = mls.encrypt(handle.group_name(), &app_msg.encode_to_vec())?;
 
     Ok(OutboundPacket::new(
         message_out,
@@ -196,18 +203,21 @@ pub async fn build_message(
 ///
 /// # Arguments
 /// * `handle` - The group handle (for routing metadata)
-/// * `identity` - The identity service for key package generation
+/// * `mls` - The MLS service for key package generation
 ///
 /// # Returns
 /// An [`OutboundPacket`] containing the key package on the welcome subtopic.
 ///
 /// # Errors
-/// Returns [`CoreError::IdentityError`] if key package generation fails.
-pub fn build_key_package_message<I: IdentityService>(
+/// Returns [`CoreError::MlsError`] if key package generation fails.
+pub fn build_key_package_message<S>(
     handle: &GroupHandle,
-    identity: &mut I,
-) -> Result<OutboundPacket, CoreError> {
-    let key_package = identity.generate_key_package()?;
+    mls: &MlsService<S>,
+) -> Result<OutboundPacket, CoreError>
+where
+    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+{
+    let key_package = mls.generate_key_package()?;
     let welcome_msg: WelcomeMessage = UserKeyPackage {
         key_package_bytes: key_package.as_bytes().to_vec(),
     }
@@ -233,8 +243,7 @@ pub fn build_key_package_message<I: IdentityService>(
 /// * `handle` - The group handle (may be mutated if joining)
 /// * `payload` - The raw packet payload
 /// * `subtopic` - The subtopic the packet was received on
-/// * `mls` - The MLS service for decryption
-/// * `identity` - The identity service for key package verification
+/// * `mls` - The MLS service for decryption and welcome processing
 ///
 /// # Returns
 /// A [`ProcessResult`] indicating what happened:
@@ -254,33 +263,29 @@ pub fn build_key_package_message<I: IdentityService>(
 /// # Next Steps
 /// Pass the result to [`dispatch_result`](super::dispatch_result) to handle
 /// consensus routing and get a [`DispatchAction`](super::DispatchAction).
-pub async fn process_inbound<M, I>(
+pub fn process_inbound<S>(
     handle: &mut GroupHandle,
     payload: &[u8],
     subtopic: &str,
-    mls: &M,
-    identity: &I,
+    mls: &MlsService<S>,
 ) -> Result<ProcessResult, CoreError>
 where
-    M: MlsGroupService,
-    I: IdentityService,
+    S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
     match subtopic {
-        WELCOME_SUBTOPIC => process_welcome_subtopic(handle, payload, mls, identity).await,
-        APP_MSG_SUBTOPIC => process_app_subtopic(handle, payload, mls).await,
+        WELCOME_SUBTOPIC => process_welcome_subtopic(handle, payload, mls),
+        APP_MSG_SUBTOPIC => process_app_subtopic(handle, payload, mls),
         _ => Err(CoreError::InvalidSubtopic(subtopic.to_string())),
     }
 }
 
-async fn process_welcome_subtopic<M, I>(
+fn process_welcome_subtopic<S>(
     handle: &mut GroupHandle,
     payload: &[u8],
-    mls: &M,
-    identity: &I,
+    mls: &MlsService<S>,
 ) -> Result<ProcessResult, CoreError>
 where
-    M: MlsGroupService,
-    I: IdentityService,
+    S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
     let welcome_msg = WelcomeMessage::decode(payload)?;
     match welcome_msg.payload {
@@ -311,20 +316,14 @@ where
             }
 
             // Check if this invitation is for us
-            let hash_refs =
-                mls.invite_new_member_hash_refs(invitation.mls_message_out_bytes.as_slice())?;
-            if hash_refs
-                .iter()
-                .any(|hash_ref| identity.is_key_package_exists(hash_ref))
-            {
-                let (mls_handle, _) =
-                    mls.join_group_from_invite(invitation.mls_message_out_bytes.as_slice())?;
-                handle.set_mls_handle(mls_handle);
+            if mls.is_welcome_for_us(&invitation.mls_message_out_bytes)? {
+                let group_name = mls.join_group(&invitation.mls_message_out_bytes)?;
+                handle.set_mls_initialized();
                 info!(
                     "[process_welcome_subtopic]: Joined group {}",
                     handle.group_name()
                 );
-                return Ok(ProcessResult::JoinedGroup(handle.group_name().to_string()));
+                return Ok(ProcessResult::JoinedGroup(group_name));
             }
             Ok(ProcessResult::Noop)
         }
@@ -332,11 +331,14 @@ where
     }
 }
 
-async fn process_app_subtopic(
+fn process_app_subtopic<S>(
     handle: &mut GroupHandle,
     payload: &[u8],
-    mls: &dyn MlsGroupService,
-) -> Result<ProcessResult, CoreError> {
+    mls: &MlsService<S>,
+) -> Result<ProcessResult, CoreError>
+where
+    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+{
     if !handle.is_mls_initialized() {
         return Ok(ProcessResult::Noop);
     }
@@ -344,34 +346,30 @@ async fn process_app_subtopic(
     // Try to parse as AppMessage first (for batch proposals)
     if let Ok(app_message) = AppMessage::decode(payload) {
         if let Some(app_message::Payload::BatchProposalsMessage(batch_msg)) = app_message.payload {
-            return process_batch_proposals(handle, batch_msg, mls).await;
+            return process_batch_proposals(handle, batch_msg, mls);
         }
     }
 
     // Fall back to MLS protocol message
-    let mls_handle = handle
-        .mls_handle()
-        .ok_or(CoreError::MlsGroupNotInitialized)?;
-
-    let res = {
-        let mut mls_group = mls_handle.lock().await;
-        mls.process_inbound(&mut mls_group, payload)?
-    };
+    let res = mls.decrypt(handle.group_name(), payload)?;
 
     match res {
-        MlsProcessResult::Application(app_bytes) => {
-            AppMessage::decode(app_bytes.as_ref())?.try_into()
+        DecryptResult::Application(app_bytes) => AppMessage::decode(app_bytes.as_ref())?.try_into(),
+        DecryptResult::Removed => Ok(ProcessResult::LeaveGroup),
+        DecryptResult::ProposalStored | DecryptResult::CommitProcessed | DecryptResult::Ignored => {
+            Ok(ProcessResult::Noop)
         }
-        MlsProcessResult::LeaveGroup => Ok(ProcessResult::LeaveGroup),
-        MlsProcessResult::Noop => Ok(ProcessResult::Noop),
     }
 }
 
-async fn process_batch_proposals(
+fn process_batch_proposals<S>(
     handle: &mut GroupHandle,
     batch_msg: BatchProposalsMessage,
-    mls: &dyn MlsGroupService,
-) -> Result<ProcessResult, CoreError> {
+    mls: &MlsService<S>,
+) -> Result<ProcessResult, CoreError>
+where
+    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+{
     // Verify that we have approved proposals before applying the batch.
     // Members should only accept batches that match their consensus-approved list.
     if handle.approved_proposals_count() == 0 {
@@ -382,31 +380,25 @@ async fn process_batch_proposals(
         return Ok(ProcessResult::Noop);
     }
 
-    let mls_handle = handle
-        .mls_handle()
-        .ok_or(CoreError::MlsGroupNotInitialized)?;
+    let group_name = handle.group_name();
 
     // Process all proposals
     for proposal_bytes in &batch_msg.mls_proposals {
-        let mut mls_group = mls_handle.lock().await;
-        let _ = mls.process_inbound(&mut mls_group, proposal_bytes)?;
+        let _ = mls.decrypt(group_name, proposal_bytes)?;
     }
 
     // Process the commit
-    let res = {
-        let mut mls_group = mls_handle.lock().await;
-        mls.process_inbound(&mut mls_group, &batch_msg.commit_message)?
-    };
+    let res = mls.decrypt(group_name, &batch_msg.commit_message)?;
 
     // Clear approved proposals after successful batch application (archives to history)
     handle.clear_approved_proposals();
 
     match res {
-        MlsProcessResult::Application(app_bytes) => {
-            AppMessage::decode(app_bytes.as_ref())?.try_into()
+        DecryptResult::Application(app_bytes) => AppMessage::decode(app_bytes.as_ref())?.try_into(),
+        DecryptResult::Removed => Ok(ProcessResult::LeaveGroup),
+        DecryptResult::ProposalStored | DecryptResult::CommitProcessed | DecryptResult::Ignored => {
+            Ok(ProcessResult::GroupUpdated)
         }
-        MlsProcessResult::LeaveGroup => Ok(ProcessResult::LeaveGroup),
-        MlsProcessResult::Noop => Ok(ProcessResult::GroupUpdated),
     }
 }
 
@@ -458,10 +450,13 @@ pub fn epoch_history(handle: &GroupHandle) -> &VecDeque<HashMap<ProposalId, Grou
 ///
 /// # Side Effects
 /// Clears approved proposals and archives them to epoch history.
-pub async fn create_batch_proposals(
+pub fn create_batch_proposals<S>(
     handle: &mut GroupHandle,
-    mls: &dyn MlsGroupService,
-) -> Result<Vec<OutboundPacket>, CoreError> {
+    mls: &MlsService<S>,
+) -> Result<Vec<OutboundPacket>, CoreError>
+where
+    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+{
     if !handle.is_steward() {
         return Err(CoreError::StewardNotSet);
     }
@@ -472,34 +467,31 @@ pub async fn create_batch_proposals(
     }
     handle.clear_approved_proposals();
 
-    let mls_handle = handle
-        .mls_handle()
-        .ok_or(CoreError::MlsGroupNotInitialized)?;
+    if !handle.is_mls_initialized() {
+        return Err(CoreError::MlsGroupNotInitialized);
+    }
 
     let mut updates = Vec::with_capacity(proposals.len());
     for (_, proposal) in proposals {
         match proposal.payload {
             Some(group_update_request::Payload::InviteMember(im)) => {
-                updates.push(MlsGroupUpdate::AddMember(KeyPackageBytes::new(
+                updates.push(GroupUpdate::Add(KeyPackageBytes::new(
                     im.key_package_bytes,
                     im.identity,
                 )));
             }
             Some(group_update_request::Payload::RemoveMember(identity)) => {
-                updates.push(MlsGroupUpdate::RemoveMember(identity.identity));
+                updates.push(GroupUpdate::Remove(identity.identity));
             }
             None => return Err(CoreError::InvalidGroupUpdateRequest),
         }
     }
 
-    let BatchProposalsResult {
+    let CommitResult {
         proposals: mls_proposals,
         commit,
         welcome,
-    } = {
-        let mut mls_group = mls_handle.lock().await;
-        mls.create_batch_proposals(&mut mls_group, &updates)?
-    };
+    } = mls.commit(handle.group_name(), &updates)?;
 
     // Create batch proposals message
     let batch_msg: AppMessage = BatchProposalsMessage {
@@ -542,15 +534,17 @@ pub async fn create_batch_proposals(
 /// # Errors
 /// - [`CoreError::MlsGroupNotInitialized`] if MLS state is not initialized
 /// - [`CoreError::MlsError`] if member retrieval fails
-pub async fn group_members(
+pub fn group_members<S>(
     handle: &GroupHandle,
-    mls: &dyn MlsGroupService,
-) -> Result<Vec<Vec<u8>>, CoreError> {
-    let mls_handle = handle
-        .mls_handle()
-        .ok_or(CoreError::MlsGroupNotInitialized)?;
+    mls: &MlsService<S>,
+) -> Result<Vec<Vec<u8>>, CoreError>
+where
+    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+{
+    if !handle.is_mls_initialized() {
+        return Err(CoreError::MlsGroupNotInitialized);
+    }
 
-    let mls_group = mls_handle.lock().await;
-    let members = mls.group_members(&mls_group)?;
+    let members = mls.members(handle.group_name())?;
     Ok(members)
 }

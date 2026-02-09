@@ -1,90 +1,48 @@
-//! MLS cryptographic operations and identity management.
+//! MLS cryptographic operations for DE-MLS.
 //!
-//! This module wraps OpenMLS to provide a simplified API for MLS group operations.
-//! It handles key management, group creation/joining, message encryption/decryption,
-//! and batch proposal commits.
+//! This module provides `MlsService`, a unified API for all MLS operations:
 //!
-//! # Architecture
+//! - Identity management (wallet-based)
+//! - Key package generation
+//! - Group creation and joining
+//! - Message encryption and decryption
+//! - Proposal and commit handling
 //!
-//! ```text
-//! ┌─────────────────────────────────────────────────────────────┐
-//! │                    IdentityService                          │
-//! ├─────────────────────────────────────────────────────────────┤
-//! │  create_identity()     │  Initialize from wallet address    │
-//! │  generate_key_package()│  Create key package for joining    │
-//! │  identity_string()     │  Get wallet address (0x...)        │
-//! └─────────────────────────────────────────────────────────────┘
-//!                              │
-//!                              ▼
-//! ┌─────────────────────────────────────────────────────────────┐
-//! │                    MlsGroupService                          │
-//! ├─────────────────────────────────────────────────────────────┤
-//! │  create_group()        │  Create new MLS group (as steward) │
-//! │  join_group_from_invite│  Process welcome message           │
-//! │  build_message()       │  Encrypt application message       │
-//! │  process_inbound()     │  Decrypt incoming message          │
-//! │  create_batch_proposals│  Commit add/remove proposals       │
-//! └─────────────────────────────────────────────────────────────┘
-//! ```
-//!
-//! # Key Types
-//!
-//! - `IdentityService` - Trait for wallet identity + key package generation
-//! - `MlsGroupService` - Trait for MLS group operations
-//! - `OpenMlsIdentityService` - Default implementation using OpenMLS
-//! - `MlsGroupHandle` - Wrapper around OpenMLS group state
-//! - `KeyPackageBytes` - Serialized key package with identity
-//! - `MlsProcessResult` - Result of processing an inbound MLS message
-//!
-//! # Wallet Address Utilities
-//!
-//! The module provides utilities for Ethereum wallet address handling:
-//! - `normalize_wallet_address` - Normalize raw bytes to `0x`-prefixed hex
-//! - `normalize_wallet_address_str` - Validate and normalize string addresses
-//! - `parse_wallet_address` - Parse string to `alloy::Address`
-//!
-//! # Example
+//! # Quick Start
 //!
 //! ```ignore
-//! use de_mls::mls_crypto::{OpenMlsIdentityService, IdentityService, MlsGroupService};
+//! use de_mls::mls_crypto::{MlsService, MemoryDeMlsStorage, parse_wallet_address};
 //!
-//! // Create identity from wallet address
-//! let wallet = hex::decode("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266")?;
-//! let identity = OpenMlsIdentityService::new(&wallet)?;
+//! // Create service with in-memory storage
+//! let storage = MemoryDeMlsStorage::new();
+//! let mls = MlsService::new(storage);
 //!
-//! // Create a group (as steward)
-//! let group = identity.create_group("my-group")?;
+//! // Initialize identity
+//! let wallet = parse_wallet_address("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")?;
+//! mls.init(wallet)?;
 //!
-//! // Generate key package for joining
-//! let key_package = identity.generate_key_package()?;
-//! println!("Key package for: {}", key_package.address_hex());
+//! // Create a group
+//! mls.create_group("my-chat")?;
+//!
+//! // Encrypt a message
+//! let ciphertext = mls.encrypt("my-chat", b"Hello!")?;
 //! ```
 //!
-//! # MLS Message Flow
+//! # Storage
 //!
-//! ```text
-//! Sender                                              Receiver
-//! ───────                                             ────────
-//! build_message(plaintext)                              │
-//!        │                                              │
-//!        └──── MLS-encrypted ciphertext ───────────────►│
-//!                                                       │
-//!                                           process_inbound()
-//!                                                       │
-//!                                           MlsProcessResult::Application
-//!                                                  (plaintext)
-//! ```
+//! The service requires a storage backend implementing `DeMlsStorage`.
+//! Use `MemoryDeMlsStorage` for development or implement your own for persistence.
 
-mod api;
 mod error;
 mod identity;
-mod openmls_identity_service;
-mod openmls_provider;
+mod service;
+pub mod storage;
+mod types;
 
-pub use api::*;
-pub use error::{IdentityError, MlsServiceError};
-pub use identity::{
-    normalize_wallet_address, normalize_wallet_address_bytes, normalize_wallet_address_str,
-    parse_wallet_address,
+pub use error::{IdentityError, MlsError, MlsServiceError, Result, StorageError};
+pub use identity::{format_wallet_address, parse_wallet_address, parse_wallet_to_bytes};
+pub use service::{MlsService, CIPHERSUITE};
+pub use storage::{DeMlsStorage, MemoryDeMlsStorage};
+pub use types::{
+    key_package_bytes_from_json, CommitResult, DecryptResult, GroupUpdate, KeyPackageBytes,
 };
-pub use openmls_identity_service::*;

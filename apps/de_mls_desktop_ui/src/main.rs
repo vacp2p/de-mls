@@ -9,7 +9,7 @@ use std::sync::{
 
 use de_mls::{
     core::convert_group_request_to_display,
-    mls_crypto::normalize_wallet_address_str,
+    mls_crypto::parse_wallet_address,
     protos::de_mls::messages::v1::{ConversationMessage, VotePayload},
 };
 use de_mls_gateway::{bootstrap_core_from_env, GATEWAY};
@@ -661,8 +661,8 @@ fn ChatSection() -> Element {
     let submit_ban_request = {
         move |_| {
             let raw = ban_address.read().to_string();
-            let target = match normalize_wallet_address_str(&raw) {
-                Ok(addr) => addr,
+            let target = match parse_wallet_address(&raw) {
+                Ok(addr) => addr.to_string(),
                 Err(err) => {
                     ban_error.set(Some(err.to_string()));
                     return;

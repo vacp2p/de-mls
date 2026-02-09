@@ -10,9 +10,9 @@
 //! ┌─────────────────────────────────────────────────────────────┐
 //! │                      DeMlsProvider                          │
 //! ├─────────────────────────────────────────────────────────────┤
-//! │  Identity   │  Wallet signing + MLS key management          │
+//! │  Storage    │  MLS + DE-MLS state persistence               │
 //! │  Scope      │  Group identifier type (usually String)       │
-//! │  Storage    │  Consensus proposal/vote persistence          │
+//! │  CStorage   │  Consensus proposal/vote persistence          │
 //! │  EventBus   │  Consensus event distribution                 │
 //! │  Consensus  │  Voting service (hashgraph-like)              │
 //! └─────────────────────────────────────────────────────────────┘
@@ -21,15 +21,14 @@
 //! # Default vs Custom Providers
 //!
 //! Use [`DefaultProvider`] for production deployments:
-//! - `OpenMlsIdentityService` for Ethereum wallet + MLS
+//! - `MemoryDeMlsStorage` for MLS state storage
 //! - `InMemoryConsensusStorage` for proposal/vote storage
 //! - `BroadcastEventBus` for consensus event distribution
 //! - `DefaultConsensusService` for hashgraph-like voting
 //!
 //! Create custom providers for:
 //! - **Testing**: Mock services that don't require network
-//! - **Persistence**: Database-backed consensus storage
-//! - **Custom identity**: Different signing schemes
+//! - **Persistence**: Database-backed storage
 //!
 //! # Example
 //!
@@ -43,16 +42,6 @@
 //!     consensus,
 //!     handler,
 //! )?;
-//!
-//! // Testing: use a custom provider with mocks
-//! struct TestProvider;
-//! impl DeMlsProvider for TestProvider {
-//!     type Identity = MockIdentityService;
-//!     type Scope = String;
-//!     type Storage = InMemoryConsensusStorage<String>;
-//!     type EventBus = BroadcastEventBus<String>;
-//!     type Consensus = MockConsensusService;
-//! }
 //! ```
 
 use hashgraph_like_consensus::{
@@ -63,7 +52,9 @@ use hashgraph_like_consensus::{
     storage::{ConsensusStorage, InMemoryConsensusStorage},
 };
 
-use crate::mls_crypto::{IdentityService, MlsGroupService, OpenMlsIdentityService};
+use openmls_rust_crypto::MemoryStorage;
+
+use crate::mls_crypto::{DeMlsStorage, MemoryDeMlsStorage};
 
 /// Bundles all configurable services for a DE-MLS deployment.
 ///
@@ -76,14 +67,14 @@ use crate::mls_crypto::{IdentityService, MlsGroupService, OpenMlsIdentityService
 /// struct MyProvider;
 ///
 /// impl DeMlsProvider for MyProvider {
-///     // Your wallet/signing service
-///     type Identity = MyIdentityService;
+///     // Storage backend for MLS state
+///     type Storage = SqliteDeMlsStorage;
 ///
 ///     // Group identifier (String works for most cases)
 ///     type Scope = String;
 ///
 ///     // Where to store proposals and votes
-///     type Storage = PostgresConsensusStorage<String>;
+///     type ConsensusStorage = PostgresConsensusStorage<String>;
 ///
 ///     // How to distribute consensus events
 ///     type EventBus = BroadcastEventBus<String>;
@@ -93,14 +84,13 @@ use crate::mls_crypto::{IdentityService, MlsGroupService, OpenMlsIdentityService
 /// }
 /// ```
 pub trait DeMlsProvider: 'static {
-    /// Identity and MLS service for key management and signing.
+    /// Storage backend for MLS operations.
     ///
-    /// Must implement:
-    /// - `IdentityService`: Wallet address, signing, key packages
-    /// - `MlsGroupService`: Group creation, joining, message encryption
+    /// Must implement `DeMlsStorage` for key package tracking and OpenMLS delegation.
+    /// Currently constrained to `MemoryStorage` for MLS storage backend.
     ///
-    /// Default: `OpenMlsIdentityService` (Ethereum wallet + OpenMLS)
-    type Identity: IdentityService + MlsGroupService + Send + Sync + 'static;
+    /// Default: `MemoryDeMlsStorage`
+    type Storage: DeMlsStorage<MlsStorage = MemoryStorage> + Send + Sync + 'static;
 
     /// Consensus scope type for grouping proposals.
     ///
@@ -116,7 +106,7 @@ pub trait DeMlsProvider: 'static {
     /// Can be in-memory for testing or database-backed for production.
     ///
     /// Default: `InMemoryConsensusStorage<String>`
-    type Storage: ConsensusStorage<Self::Scope> + Send + Sync + 'static;
+    type ConsensusStorage: ConsensusStorage<Self::Scope> + Send + Sync + 'static;
 
     /// Event bus for distributing consensus outcomes.
     ///
@@ -132,7 +122,7 @@ pub trait DeMlsProvider: 'static {
     /// Uses hashgraph-like consensus for Byzantine fault tolerance.
     ///
     /// Default: `DefaultConsensusService`
-    type Consensus: ConsensusServiceAPI<Self::Scope, Self::Storage, Self::EventBus>
+    type Consensus: ConsensusServiceAPI<Self::Scope, Self::ConsensusStorage, Self::EventBus>
         + Send
         + Sync
         + 'static;
@@ -141,7 +131,7 @@ pub trait DeMlsProvider: 'static {
 /// Default provider for production deployments.
 ///
 /// Uses:
-/// - `OpenMlsIdentityService`: Ethereum wallet signing + OpenMLS key management
+/// - `MemoryDeMlsStorage`: In-memory MLS state storage
 /// - `String` scope: Group names as consensus scopes
 /// - `InMemoryConsensusStorage`: Fast in-memory proposal/vote storage
 /// - `BroadcastEventBus`: Tokio broadcast channels for events
@@ -162,9 +152,9 @@ pub trait DeMlsProvider: 'static {
 pub struct DefaultProvider;
 
 impl DeMlsProvider for DefaultProvider {
-    type Identity = OpenMlsIdentityService;
+    type Storage = MemoryDeMlsStorage;
     type Scope = String;
-    type Storage = InMemoryConsensusStorage<String>;
+    type ConsensusStorage = InMemoryConsensusStorage<String>;
     type EventBus = BroadcastEventBus<String>;
     type Consensus = DefaultConsensusService;
 }

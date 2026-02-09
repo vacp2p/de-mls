@@ -1,86 +1,37 @@
+//! Ethereum wallet-based identity for DE-MLS.
+
 use alloy::{hex, primitives::Address};
-use openmls::{credentials::CredentialWithKey, key_packages::KeyPackage, prelude::BasicCredential};
+use openmls::credentials::CredentialWithKey;
 use openmls_basic_credential::SignatureKeyPair;
-use openmls_traits::{types::Ciphersuite, OpenMlsProvider};
-use std::{collections::HashMap, fmt::Display, str::FromStr};
+use std::str::FromStr;
 
-use crate::mls_crypto::{
-    openmls_provider::{MlsProvider, CIPHERSUITE},
-    IdentityError,
-};
+use crate::mls_crypto::IdentityError;
 
-pub struct Identity {
-    pub(crate) kp: HashMap<Vec<u8>, KeyPackage>,
-    pub(crate) credential_with_key: CredentialWithKey,
-    pub(crate) signer: SignatureKeyPair,
+/// Identity data held in memory (internal).
+#[derive(Debug)]
+pub(crate) struct IdentityData {
+    /// Ethereum wallet address (20 bytes).
+    pub wallet: Address,
+    /// MLS credential with public signature key.
+    pub credential: CredentialWithKey,
+    /// MLS signature key pair (includes private key).
+    pub signer: SignatureKeyPair,
 }
 
-impl Identity {
-    pub(crate) fn new(
-        ciphersuite: Ciphersuite,
-        provider: &MlsProvider,
-        user_wallet_address: &[u8],
-    ) -> Result<Identity, IdentityError> {
-        let credential = BasicCredential::new(user_wallet_address.to_vec());
-        let signer = SignatureKeyPair::new(ciphersuite.signature_algorithm())?;
-        let credential_with_key = CredentialWithKey {
-            credential: credential.into(),
-            signature_key: signer.to_public_vec().into(),
-        };
-        signer.store(provider.storage())?;
+// ═══════════════════════════════════════════════════════════════
+// Wallet Address Utilities
+// ═══════════════════════════════════════════════════════════════
 
-        let mut kps = HashMap::new();
-        let key_package_bundle = KeyPackage::builder().build(
-            CIPHERSUITE,
-            provider,
-            &signer,
-            credential_with_key.clone(),
-        )?;
-        let key_package = key_package_bundle.key_package();
-        let kp = key_package.hash_ref(provider.crypto())?;
-        kps.insert(kp.as_slice().to_vec(), key_package.clone());
-
-        Ok(Identity {
-            kp: kps,
-            credential_with_key,
-            signer,
-        })
-    }
-
-    pub(crate) fn identity_string(&self) -> String {
-        Address::from_slice(self.credential_with_key.credential.serialized_content()).to_string()
-    }
-
-    pub(crate) fn signer(&self) -> &SignatureKeyPair {
-        &self.signer
-    }
-
-    pub(crate) fn credential_with_key(&self) -> CredentialWithKey {
-        self.credential_with_key.clone()
-    }
-
-    pub(crate) fn is_key_package_exists(&self, kp_hash_ref: &[u8]) -> bool {
-        self.kp.contains_key(kp_hash_ref)
-    }
-}
-
-impl Display for Identity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.identity_string())
-    }
-}
-
-/// Validates and normalizes Ethereum-style wallet addresses.
+/// Parse an Ethereum wallet address string into an `Address`.
 ///
-/// Accepts either `0x`-prefixed or raw 40-character hex strings, returning a lowercase,
-/// `0x`-prefixed representation on success.
-pub fn normalize_wallet_address_str(address: &str) -> Result<String, IdentityError> {
-    parse_wallet_address(address).map(|addr| addr.to_string())
-}
-
-/// Parses an Ethereum wallet address into an [`Address`] after validation.
+/// Accepts `0x`-prefixed or raw 40-character hex strings.
+/// Validates that the address is exactly 20 bytes (40 hex chars).
 ///
-/// This ensures the address is 20 bytes / 40 hex chars and contains only hexadecimal digits.
+/// # Examples
+/// ```ignore
+/// let addr = parse_wallet_address("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")?;
+/// let addr = parse_wallet_address("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266")?;
+/// ```
 pub fn parse_wallet_address(address: &str) -> Result<Address, IdentityError> {
     let trimmed = address.trim();
     if trimmed.is_empty() {
@@ -101,33 +52,18 @@ pub fn parse_wallet_address(address: &str) -> Result<Address, IdentityError> {
         .map_err(|_| IdentityError::InvalidWalletAddress(trimmed.to_string()))
 }
 
-fn is_prefixed_hex(input: &str) -> bool {
-    let rest = input
-        .strip_prefix("0x")
-        .or_else(|| input.strip_prefix("0X"));
-    match rest {
-        Some(hex_part) if !hex_part.is_empty() => hex_part.chars().all(|c| c.is_ascii_hexdigit()),
-        _ => false,
-    }
-}
-
-fn is_raw_hex(input: &str) -> bool {
-    !input.is_empty() && input.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-pub fn normalize_wallet_address(raw: &[u8]) -> String {
-    let as_utf8 = std::str::from_utf8(raw)
-        .map(|s| s.trim())
-        .unwrap_or_default();
-
-    if is_prefixed_hex(as_utf8) {
-        return as_utf8.to_string();
-    }
-
-    if is_raw_hex(as_utf8) {
-        return format!("0x{}", as_utf8);
-    }
-
+/// Format raw wallet bytes (20 bytes) as a hex string.
+///
+/// This is the inverse of `parse_wallet_address`. MLS credentials
+/// store wallet addresses as raw 20-byte arrays; this formats them
+/// for display.
+///
+/// # Examples
+/// ```ignore
+/// let bytes = [0x11, 0x22, ...]; // 20 bytes
+/// let hex = format_wallet_address(&bytes); // "0x1122..."
+/// ```
+pub fn format_wallet_address(raw: &[u8]) -> String {
     if raw.is_empty() {
         String::new()
     } else {
@@ -135,46 +71,74 @@ pub fn normalize_wallet_address(raw: &[u8]) -> String {
     }
 }
 
-pub fn normalize_wallet_address_bytes(raw: &str) -> Result<Vec<u8>, IdentityError> {
-    let normalized = normalize_wallet_address_str(raw)?;
-    let wallet_bytes = alloy::hex::decode(normalized.strip_prefix("0x").unwrap_or(&normalized))
-        .unwrap_or_default();
-    Ok(wallet_bytes)
+/// Parse a wallet address string and return as raw bytes.
+///
+/// Combines `parse_wallet_address` with byte extraction.
+/// Useful for creating removal requests from user input.
+pub fn parse_wallet_to_bytes(address: &str) -> Result<Vec<u8>, IdentityError> {
+    let addr = parse_wallet_address(address)?;
+    Ok(addr.as_slice().to_vec())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_prefixed_hex, normalize_wallet_address};
+    use super::*;
 
     #[test]
-    fn keeps_prefixed_hex() {
-        let addr = normalize_wallet_address(b"0xAbCd1234");
-        assert_eq!(addr, "0xAbCd1234");
+    fn parse_prefixed_address() {
+        let addr = parse_wallet_address("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266").unwrap();
+        assert_eq!(
+            addr.to_string().to_lowercase(),
+            "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+        );
     }
 
     #[test]
-    fn prefixes_raw_hex() {
-        let addr = normalize_wallet_address(b"ABCD1234");
-        assert_eq!(addr, "0xABCD1234");
+    fn parse_unprefixed_address() {
+        let addr = parse_wallet_address("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266").unwrap();
+        assert_eq!(
+            addr.to_string().to_lowercase(),
+            "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+        );
     }
 
     #[test]
-    fn encodes_binary_bytes() {
-        let addr = normalize_wallet_address(&[0x11, 0x22, 0x33]);
-        assert_eq!(addr, "0x112233");
+    fn parse_with_whitespace() {
+        let addr = parse_wallet_address("  0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266  ").unwrap();
+        assert_eq!(
+            addr.to_string().to_lowercase(),
+            "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+        );
     }
 
     #[test]
-    fn trims_ascii_input() {
-        let addr = normalize_wallet_address(b"  0x1F  ");
-        assert_eq!(addr, "0x1F");
+    fn reject_invalid_length() {
+        assert!(parse_wallet_address("0x1234").is_err());
+        assert!(parse_wallet_address("0x").is_err());
+        assert!(parse_wallet_address("").is_err());
     }
 
     #[test]
-    fn prefixed_hex_helper() {
-        assert!(is_prefixed_hex("0xabc"));
-        assert!(is_prefixed_hex("0XABC"));
-        assert!(!is_prefixed_hex("abc"));
-        assert!(!is_prefixed_hex("0x"));
+    fn reject_invalid_chars() {
+        assert!(parse_wallet_address("0xGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG").is_err());
+    }
+
+    #[test]
+    fn format_bytes_to_hex() {
+        let bytes = [0x11, 0x22, 0x33];
+        assert_eq!(format_wallet_address(&bytes), "0x112233");
+    }
+
+    #[test]
+    fn format_empty_bytes() {
+        assert_eq!(format_wallet_address(&[]), "");
+    }
+
+    #[test]
+    fn roundtrip() {
+        let original = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+        let addr = parse_wallet_address(original).unwrap();
+        let formatted = format_wallet_address(addr.as_slice());
+        assert_eq!(formatted.to_lowercase(), original.to_lowercase());
     }
 }

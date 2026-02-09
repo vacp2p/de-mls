@@ -19,8 +19,7 @@ use crate::core::{
 };
 use crate::ds::InboundPacket;
 use crate::mls_crypto::{
-    normalize_wallet_address, normalize_wallet_address_bytes, IdentityError, IdentityService,
-    OpenMlsIdentityService,
+    format_wallet_address, parse_wallet_to_bytes, IdentityError, MemoryDeMlsStorage, MlsService,
 };
 use crate::protos::de_mls::messages::v1::{
     group_update_request, AppMessage, BanRequest, ConversationMessage, GroupUpdateRequest,
@@ -39,46 +38,46 @@ struct GroupEntry {
 /// working with MLS groups, handling consensus, and processing messages.
 ///
 /// The type parameter `P` determines which service implementations are used
-/// (identity, MLS, consensus). Use [`DefaultProvider`] for standard configuration.
+/// (storage, consensus). Use [`DefaultProvider`] for standard configuration.
 ///
 /// The type parameter `H` is the handler that receives output events
 /// (outbound packets, app messages, leave/join notifications).
 ///
-/// The type parameter `S` is the handler for state machine state changes
+/// The type parameter `SCH` is the handler for state machine state changes
 /// (an app-layer concern, separate from the core `GroupEventHandler`).
-pub struct User<P: DeMlsProvider, H: GroupEventHandler, S: StateChangeHandler> {
-    identity_service: P::Identity,
+pub struct User<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler> {
+    mls_service: MlsService<P::Storage>,
     groups: Arc<RwLock<HashMap<String, GroupEntry>>>,
     consensus_service: Arc<P::Consensus>,
     eth_signer: PrivateKeySigner,
     handler: Arc<H>,
-    state_handler: Arc<S>,
+    state_handler: Arc<SCH>,
     /// Default config for new groups (can be overridden per-group).
     default_group_config: GroupConfig,
 }
 
-impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + 'static>
-    User<P, H, S>
+impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
+    User<P, H, SCH>
 {
     /// Create a new User instance with pre-built services and custom default group config.
     ///
     /// # Arguments
-    /// * `identity_service` - Identity and MLS service
+    /// * `mls_service` - MLS service for cryptographic operations
     /// * `consensus_service` - Consensus service
     /// * `eth_signer` - Ethereum signer for voting
     /// * `handler` - Event handler for output events
     /// * `state_handler` - Handler for state machine state changes
     /// * `default_group_config` - Default config applied to new groups
     fn new_with_config(
-        identity_service: P::Identity,
+        mls_service: MlsService<P::Storage>,
         consensus_service: Arc<P::Consensus>,
         eth_signer: PrivateKeySigner,
         handler: Arc<H>,
-        state_handler: Arc<S>,
+        state_handler: Arc<SCH>,
         default_group_config: GroupConfig,
     ) -> Self {
         Self {
-            identity_service,
+            mls_service,
             groups: Arc::new(RwLock::new(HashMap::new())),
             consensus_service,
             eth_signer,
@@ -88,9 +87,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
         }
     }
 
-    /// Get the user's identity string.
+    /// Get the user's identity string (wallet address as checksummed hex).
     pub fn identity_string(&self) -> String {
-        self.identity_service.identity_string()
+        self.mls_service.wallet_hex()
     }
 
     // ─────────────────────────── Group Management ───────────────────────────
@@ -127,7 +126,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
         }
 
         let (handle, state_machine) = if is_creation {
-            let handle = core::create_group(group_name, &self.identity_service)?;
+            let handle = core::create_group(group_name, &self.mls_service)?;
             let state_machine = GroupStateMachine::new_as_steward_with_config(config);
             (handle, state_machine)
         } else {
@@ -196,7 +195,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
             group_name.to_string(),
             GroupUpdateRequest {
                 payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
-                    identity: normalize_wallet_address_bytes(&self.identity_string())?,
+                    identity: parse_wallet_to_bytes(&self.identity_string())?,
                 })),
             },
         )
@@ -233,10 +232,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
             return Ok(Vec::new());
         }
 
-        let members = core::group_members(&entry.handle, &self.identity_service).await?;
+        let members = core::group_members(&entry.handle, &self.mls_service)?;
         Ok(members
             .into_iter()
-            .map(|raw| normalize_wallet_address(raw.as_slice()).to_string())
+            .map(|raw| format_wallet_address(raw.as_slice()).to_string())
             .collect())
     }
 
@@ -271,10 +270,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
     // ─────────────────────────── Messaging ───────────────────────────
 
     /// Build and send a key package message for a group via the handler.
-    pub async fn send_kp_message(&mut self, group_name: &str) -> Result<(), UserError> {
+    pub async fn send_kp_message(&self, group_name: &str) -> Result<(), UserError> {
         let groups = self.groups.read().await;
         let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-        let packet = core::build_key_package_message(&entry.handle, &mut self.identity_service)?;
+        let packet = core::build_key_package_message(&entry.handle, &self.mls_service)?;
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
     }
@@ -304,7 +303,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
         }
         .into();
 
-        let packet = core::build_message(&entry.handle, &self.identity_service, &app_msg).await?;
+        let packet = core::build_message(&entry.handle, &self.mls_service, &app_msg)?;
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
     }
@@ -331,7 +330,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
             group_name.to_string(),
             GroupUpdateRequest {
                 payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
-                    identity: normalize_wallet_address_bytes(ban_request.user_to_ban.as_str())?,
+                    identity: parse_wallet_to_bytes(ban_request.user_to_ban.as_str())?,
                 })),
             },
         )
@@ -519,7 +518,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
         let messages = {
             let mut groups = self.groups.write().await;
             let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
-            create_batch_proposals(&mut entry.handle, &self.identity_service).await?
+            create_batch_proposals(&mut entry.handle, &self.mls_service)?
         };
 
         for message in messages {
@@ -548,10 +547,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
         let expected_voters = {
             let groups = self.groups.read().await;
             let entry = groups.get(&group_name).ok_or(UserError::GroupNotFound)?;
-            let members = core::group_members(&entry.handle, &self.identity_service).await?;
+            let members = core::group_members(&entry.handle, &self.mls_service)?;
             members.len() as u32
         };
-        let identity_string = self.identity_service.identity_string();
+        let identity_string = self.mls_service.wallet_hex();
 
         let consensus = Arc::clone(&self.consensus_service);
         let groups = Arc::clone(&self.groups);
@@ -626,14 +625,14 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
         let handle = entry.handle.clone();
         drop(groups);
 
-        core::cast_vote::<P, _>(
+        core::cast_vote::<P, _, _>(
             &handle,
             group_name,
             proposal_id,
             vote,
             &*self.consensus_service,
             self.eth_signer.clone(),
-            &self.identity_service,
+            &self.mls_service,
             &*self.handler,
         )
         .await?;
@@ -669,21 +668,19 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
                 &mut entry.handle,
                 &packet.payload,
                 &packet.subtopic,
-                &self.identity_service,
-                &self.identity_service,
-            )
-            .await?;
+                &self.mls_service,
+            )?;
 
             (result, entry.handle.clone())
         };
 
-        let action = core::dispatch_result::<P>(
+        let action = core::dispatch_result::<P, _>(
             &handle,
             &group_name,
             result,
             &*self.consensus_service,
             &*self.handler,
-            &self.identity_service,
+            &self.mls_service,
         )
         .await?;
 
@@ -769,10 +766,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, S: StateChangeHandler + '
 
 // ─────────────────────────── DefaultProvider Convenience ───────────────────────────
 
-impl<H: GroupEventHandler + 'static, S: StateChangeHandler + 'static> User<DefaultProvider, H, S> {
+impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
+    User<DefaultProvider, H, SCH>
+{
     /// Convenience constructor for the default provider with default group config.
     ///
-    /// Creates a User with OpenMLS identity and the given consensus service.
+    /// Creates a User with MLS service and the given consensus service.
     ///
     /// # Arguments
     /// * `private_key` - Ethereum private key as hex string
@@ -783,7 +782,7 @@ impl<H: GroupEventHandler + 'static, S: StateChangeHandler + 'static> User<Defau
         private_key: &str,
         consensus_service: Arc<DefaultConsensusService>,
         handler: Arc<H>,
-        state_handler: Arc<S>,
+        state_handler: Arc<SCH>,
     ) -> Result<Self, UserError> {
         Self::with_private_key_and_config(
             private_key,
@@ -796,7 +795,7 @@ impl<H: GroupEventHandler + 'static, S: StateChangeHandler + 'static> User<Defau
 
     /// Convenience constructor for the default provider with custom group config.
     ///
-    /// Creates a User with OpenMLS identity and the given consensus service.
+    /// Creates a User with MLS service and the given consensus service.
     ///
     /// # Arguments
     /// * `private_key` - Ethereum private key as hex string
@@ -808,14 +807,19 @@ impl<H: GroupEventHandler + 'static, S: StateChangeHandler + 'static> User<Defau
         private_key: &str,
         consensus_service: Arc<DefaultConsensusService>,
         handler: Arc<H>,
-        state_handler: Arc<S>,
+        state_handler: Arc<SCH>,
         default_group_config: GroupConfig,
     ) -> Result<Self, UserError> {
         let signer = PrivateKeySigner::from_str(private_key)?;
         let user_address = signer.address();
-        let identity_service = OpenMlsIdentityService::new(user_address.as_slice())?;
+
+        let mls_service = MlsService::new(MemoryDeMlsStorage::new());
+        mls_service
+            .init(user_address)
+            .map_err(|e| UserError::Core(e.into()))?;
+
         Ok(Self::new_with_config(
-            identity_service,
+            mls_service,
             consensus_service,
             signer,
             handler,

@@ -15,7 +15,7 @@ use hashgraph_like_consensus::{
 
 use crate::{
     core::CoreError,
-    mls_crypto::{normalize_wallet_address, normalize_wallet_address_bytes},
+    mls_crypto::{format_wallet_address, parse_wallet_to_bytes},
     protos::de_mls::messages::v1::{
         app_message, group_update_request, welcome_message, AppMessage, BanRequest,
         BatchProposalsMessage, ConversationMessage, GroupUpdateRequest, InvitationToJoin, Outcome,
@@ -253,7 +253,7 @@ impl TryFrom<AppMessage> for ProcessResult {
             Some(app_message::Payload::BanRequest(ban_request)) => {
                 Ok(ProcessResult::GetUpdateRequest(GroupUpdateRequest {
                     payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
-                        identity: normalize_wallet_address_bytes(ban_request.user_to_ban.as_str())?,
+                        identity: parse_wallet_to_bytes(ban_request.user_to_ban.as_str())?,
                     })),
                 }))
             }
@@ -268,11 +268,11 @@ pub fn convert_group_request_to_display(request: Vec<u8>) -> (String, String) {
     match request.payload {
         Some(group_update_request::Payload::InviteMember(im)) => (
             "Add Member".to_string(),
-            normalize_wallet_address(&im.identity),
+            format_wallet_address(&im.identity),
         ),
         Some(group_update_request::Payload::RemoveMember(rm)) => (
             "Remove Member".to_string(),
-            normalize_wallet_address(&rm.identity),
+            format_wallet_address(&rm.identity),
         ),
         _ => ("Unknown".to_string(), "Invalid request".to_string()),
     }
@@ -281,10 +281,10 @@ pub fn convert_group_request_to_display(request: Vec<u8>) -> (String, String) {
 pub fn get_identity_from_group_update_request(req: GroupUpdateRequest) -> String {
     match req.payload {
         Some(group_update_request::Payload::InviteMember(im)) => {
-            normalize_wallet_address(&im.identity)
+            format_wallet_address(&im.identity)
         }
         Some(group_update_request::Payload::RemoveMember(rm)) => {
-            normalize_wallet_address(&rm.identity)
+            format_wallet_address(&rm.identity)
         }
         _ => "unknown".to_string(),
     }
