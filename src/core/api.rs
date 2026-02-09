@@ -46,7 +46,8 @@
 
 use openmls_rust_crypto::MemoryStorage;
 use prost::Message;
-use std::collections::{HashMap, VecDeque};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use tracing::info;
 
 use crate::core::{
@@ -78,7 +79,7 @@ use crate::protos::de_mls::messages::v1::{
 /// A [`GroupHandle`] with steward=true.
 ///
 /// # Errors
-/// Returns [`CoreError::MlsError`] if group creation fails.
+/// Returns [`CoreError::MlsServiceError`] if group creation fails.
 pub fn create_group<S>(name: &str, mls: &MlsService<S>) -> Result<GroupHandle, CoreError>
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
@@ -120,7 +121,7 @@ pub fn prepare_to_join(name: &str) -> GroupHandle {
 /// The group name extracted from the welcome message.
 ///
 /// # Errors
-/// Returns [`CoreError::MlsError`] if welcome processing fails.
+/// Returns [`CoreError::MlsServiceError`] if welcome processing fails.
 pub fn join_group_from_invite<S>(
     handle: &mut GroupHandle,
     welcome_bytes: &[u8],
@@ -173,7 +174,7 @@ pub fn resign_steward(handle: &mut GroupHandle) {
 ///
 /// # Errors
 /// - [`CoreError::MlsGroupNotInitialized`] if MLS state is not initialized
-/// - [`CoreError::MlsError`] if encryption fails
+/// - [`CoreError::MlsServiceError`] if encryption fails
 pub fn build_message<S>(
     handle: &GroupHandle,
     mls: &MlsService<S>,
@@ -209,7 +210,7 @@ where
 /// An [`OutboundPacket`] containing the key package on the welcome subtopic.
 ///
 /// # Errors
-/// Returns [`CoreError::MlsError`] if key package generation fails.
+/// Returns [`CoreError::MlsServiceError`] if key package generation fails.
 pub fn build_key_package_message<S>(
     handle: &GroupHandle,
     mls: &MlsService<S>,
@@ -257,7 +258,7 @@ where
 ///
 /// # Errors
 /// - [`CoreError::InvalidSubtopic`] if subtopic is unknown
-/// - [`CoreError::MlsError`] if decryption fails
+/// - [`CoreError::MlsServiceError`] if decryption fails
 /// - [`CoreError::MessageError`] if message parsing fails
 ///
 /// # Next Steps
@@ -362,6 +363,23 @@ where
     }
 }
 
+/// Compute a canonical SHA-256 digest over a set of approved proposals.
+///
+/// Proposals are sorted by ID to ensure deterministic ordering, then each
+/// `(id, serialized_payload)` pair is fed into the hash. Both the steward
+/// (when building the batch) and receivers (when validating) call this with
+/// the same `HashMap`, so the digest must match if and only if the proposal
+/// content is identical.
+fn compute_proposals_digest(proposals: &HashMap<ProposalId, GroupUpdateRequest>) -> Vec<u8> {
+    let sorted: BTreeMap<_, _> = proposals.iter().collect();
+    let mut hasher = Sha256::new();
+    for (&id, req) in &sorted {
+        hasher.update(id.to_le_bytes());
+        hasher.update(req.encode_to_vec());
+    }
+    hasher.finalize().to_vec()
+}
+
 fn process_batch_proposals<S>(
     handle: &mut GroupHandle,
     batch_msg: BatchProposalsMessage,
@@ -370,34 +388,96 @@ fn process_batch_proposals<S>(
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
-    // Verify that we have approved proposals before applying the batch.
-    // Members should only accept batches that match their consensus-approved list.
-    if handle.approved_proposals_count() == 0 {
+    let group_name = handle.group_name().to_owned();
+    let local_proposals = handle.approved_proposals();
+
+    // ── 1. Verify proposal-set IDs match (fast reject) ─────────
+    let local_ids: BTreeSet<ProposalId> = local_proposals.keys().copied().collect();
+    let batch_ids: BTreeSet<ProposalId> = batch_msg.proposal_ids.iter().copied().collect();
+
+    if local_ids != batch_ids {
         tracing::warn!(
-            "Rejecting batch proposals for group {}: no approved proposals to match",
-            handle.group_name()
+            "Rejecting batch for group {}: proposal ID set mismatch \
+             (local={:?}, batch={:?})",
+            group_name,
+            local_ids,
+            batch_ids,
         );
         return Ok(ProcessResult::Noop);
     }
 
-    let group_name = handle.group_name();
-
-    // Process all proposals
-    for proposal_bytes in &batch_msg.mls_proposals {
-        let _ = mls.decrypt(group_name, proposal_bytes)?;
+    if local_ids.is_empty() {
+        tracing::warn!(
+            "Rejecting batch for group {}: no approved proposals",
+            group_name,
+        );
+        return Ok(ProcessResult::Noop);
     }
 
-    // Process the commit
-    let res = mls.decrypt(group_name, &batch_msg.commit_message)?;
+    // ── 2. Verify content digest (cryptographic binding) ───────
+    let local_digest = compute_proposals_digest(&local_proposals);
+    if batch_msg.proposals_digest != local_digest {
+        tracing::warn!(
+            "Rejecting batch for group {}: proposals digest mismatch",
+            group_name,
+        );
+        return Ok(ProcessResult::Noop);
+    }
 
-    // Clear approved proposals after successful batch application (archives to history)
-    handle.clear_approved_proposals();
+    // ── 3. Proposal count must match MLS payloads ──────────────
+    if batch_msg.mls_proposals.len() != local_ids.len() {
+        tracing::warn!(
+            "Rejecting batch for group {}: proposal count ({}) \
+             does not match MLS payload count ({})",
+            group_name,
+            local_ids.len(),
+            batch_msg.mls_proposals.len(),
+        );
+        return Ok(ProcessResult::Noop);
+    }
 
+    // ── 4. Decrypt each proposal, enforce ProposalStored ───────
+    for (i, proposal_bytes) in batch_msg.mls_proposals.iter().enumerate() {
+        match mls.decrypt(&group_name, proposal_bytes)? {
+            DecryptResult::ProposalStored => {}
+            other => {
+                tracing::warn!(
+                    "Rejecting batch for group {}: proposal {} \
+                     returned {:?}, expected ProposalStored",
+                    group_name,
+                    i,
+                    other,
+                );
+                return Ok(ProcessResult::Noop);
+            }
+        }
+    }
+
+    // ── 5. Process commit ──────────────────────────────────────
+    let res = mls.decrypt(&group_name, &batch_msg.commit_message)?;
+
+    // ── 6. Clear only on successful commit outcomes ────────────
     match res {
-        DecryptResult::Application(app_bytes) => AppMessage::decode(app_bytes.as_ref())?.try_into(),
-        DecryptResult::Removed => Ok(ProcessResult::LeaveGroup),
-        DecryptResult::ProposalStored | DecryptResult::CommitProcessed | DecryptResult::Ignored => {
+        DecryptResult::CommitProcessed => {
+            handle.clear_approved_proposals();
             Ok(ProcessResult::GroupUpdated)
+        }
+        DecryptResult::Removed => {
+            handle.clear_approved_proposals();
+            Ok(ProcessResult::LeaveGroup)
+        }
+        DecryptResult::Application(app_bytes) => {
+            handle.clear_approved_proposals();
+            AppMessage::decode(app_bytes.as_ref())?.try_into()
+        }
+        other => {
+            tracing::warn!(
+                "Unexpected commit result for group {}: {:?}, \
+                 keeping approved proposals",
+                group_name,
+                other,
+            );
+            Ok(ProcessResult::Noop)
         }
     }
 }
@@ -446,7 +526,7 @@ pub fn epoch_history(handle: &GroupHandle) -> &VecDeque<HashMap<ProposalId, Grou
 /// - [`CoreError::StewardNotSet`] if not the steward
 /// - [`CoreError::NoProposals`] if no approved proposals
 /// - [`CoreError::MlsGroupNotInitialized`] if MLS state is not initialized
-/// - [`CoreError::MlsError`] if MLS operations fail
+/// - [`CoreError::MlsServiceError`] if MLS operations fail
 ///
 /// # Side Effects
 /// Clears approved proposals and archives them to epoch history.
@@ -465,12 +545,13 @@ where
     if proposals.is_empty() {
         return Err(CoreError::NoProposals);
     }
-    handle.clear_approved_proposals();
 
     if !handle.is_mls_initialized() {
         return Err(CoreError::MlsGroupNotInitialized);
     }
 
+    let proposal_ids: Vec<u32> = proposals.keys().copied().collect();
+    let proposals_digest = compute_proposals_digest(&proposals);
     let mut updates = Vec::with_capacity(proposals.len());
     for (_, proposal) in proposals {
         match proposal.payload {
@@ -498,6 +579,8 @@ where
         group_name: handle.group_name_bytes().to_vec(),
         mls_proposals,
         commit_message: commit,
+        proposal_ids,
+        proposals_digest,
     }
     .into();
 
@@ -522,6 +605,8 @@ where
         messages.push(welcome_packet);
     }
 
+    handle.clear_approved_proposals();
+
     Ok(messages)
 }
 
@@ -533,7 +618,7 @@ where
 ///
 /// # Errors
 /// - [`CoreError::MlsGroupNotInitialized`] if MLS state is not initialized
-/// - [`CoreError::MlsError`] if member retrieval fails
+/// - [`CoreError::MlsServiceError`] if member retrieval fails
 pub fn group_members<S>(
     handle: &GroupHandle,
     mls: &MlsService<S>,

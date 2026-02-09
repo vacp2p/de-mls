@@ -521,6 +521,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             create_batch_proposals(&mut entry.handle, &self.mls_service)?
         };
 
+        // TODO: here can be a deadlock if the handler return error, because steward stay in the waiting state
         for message in messages {
             self.handler.on_outbound(group_name, message).await?;
         }

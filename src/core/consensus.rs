@@ -244,7 +244,7 @@ pub async fn forward_incoming_vote<P: DeMlsProvider>(
 ///
 /// # Errors
 /// - [`CoreError::ConsensusError`] if voting fails
-/// - [`CoreError::MlsError`] if message encryption fails
+/// - [`CoreError::MlsServiceError`] if message encryption fails
 #[allow(clippy::too_many_arguments)]
 pub async fn cast_vote<P, SN, S>(
     handle: &GroupHandle,
