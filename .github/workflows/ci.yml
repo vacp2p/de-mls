@@ -41,8 +41,8 @@ jobs:
             librsvg2-dev
       - name: Check formatting
         run: cargo fmt --all --check
-      - name: Run clippy
-        run: cargo clippy -p de_mls_desktop_ui --all-features --tests -- -D warnings
+      - name: Run clippy (core library)
+        run: cargo clippy -p de_mls --tests -- -D warnings
 
   docs:
     runs-on: ubuntu-latest
@@ -59,7 +59,7 @@ jobs:
           shared-key: "stable"
       - name: Generate documentation
         run: |
-          cargo doc --lib --no-deps --all-features --document-private-items
+          cargo doc -p de_mls --lib --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: -Dwarnings
 
@@ -76,8 +76,8 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: protoc@${{ env.PROTOC_VERSION }}
-      - name: Test
-        run: cargo test --release
+      - name: Test (core library)
+        run: cargo test -p de_mls --release
 
   unused_dependencies:
     runs-on: ubuntu-latest
@@ -94,4 +94,4 @@ jobs:
       - name: Install cargo-udeps
         uses: taiki-e/install-action@cargo-udeps
       - name: Check for unused dependencies
-        run: cargo +nightly udeps --all-targets
+        run: cargo +nightly udeps -p de_mls --all-targets

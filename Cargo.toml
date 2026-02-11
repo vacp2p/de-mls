@@ -13,6 +13,10 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = []
+waku = ["base64", "libc"]
+
 [dependencies]
 openmls = "0.7.1"
 openmls_basic_credential = "0.4.1"
@@ -32,7 +36,7 @@ alloy = { version = "1.0.37", features = [
     "signer-local",
 ] }
 
-base64 = "0.22"
+base64 = { version = "0.22", optional = true }
 
 rand = "0.8.5"
 serde_json = "1.0"
@@ -46,7 +50,7 @@ async-trait = "0.1.88"
 
 tracing = "0.1.41"
 
-libc = "0.2"
+libc = { version = "0.2", optional = true }
 prost = "0.13.5"
 bytes = "1.10.1"
 tower-layer = "0.3.3"

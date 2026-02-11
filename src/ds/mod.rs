@@ -2,7 +2,8 @@
 //!
 //! This module defines the `DeliveryService` trait and its supporting types
 //! (`OutboundPacket`, `InboundPacket`, `DeliveryServiceError`), plus a concrete
-//! implementation backed by the Waku relay protocol.
+//! implementation backed by the Waku relay protocol (requires the **`waku`**
+//! cargo feature).
 //!
 //! # Architecture
 //!
@@ -17,7 +18,7 @@
 //!     └── wrapper.rs    Safe synchronous WakuNodeCtx wrapper
 //! ```
 //!
-//! # Usage
+//! # Usage (requires `waku` feature)
 //!
 //! ```rust,ignore
 //! use de_mls::ds::{WakuDeliveryService, WakuConfig, DeliveryService, OutboundPacket};
@@ -68,12 +69,25 @@
 mod error;
 mod topic_filter;
 mod transport;
+
+#[cfg(feature = "waku")]
 mod waku;
+
+/// Protocol version embedded in content topics.
+pub const GROUP_VERSION: &str = "1";
+/// Subtopic identifier for application messages.
+pub const APP_MSG_SUBTOPIC: &str = "app_msg";
+/// Subtopic identifier for MLS welcome messages.
+pub const WELCOME_SUBTOPIC: &str = "welcome";
+/// All subtopics that each group subscribes to.
+pub const SUBTOPICS: [&str; 2] = [APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC];
 
 pub use error::DeliveryServiceError;
 pub use topic_filter::TopicFilter;
 pub use transport::{DeliveryService, InboundPacket, OutboundPacket};
+
+#[cfg(feature = "waku")]
 pub use waku::{
     build_content_topic, build_content_topics, pubsub_topic, WakuConfig, WakuDeliveryService,
-    WakuStartResult, APP_MSG_SUBTOPIC, GROUP_VERSION, SUBTOPICS, WELCOME_SUBTOPIC,
+    WakuStartResult,
 };

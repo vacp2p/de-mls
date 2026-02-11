@@ -69,7 +69,8 @@ pub mod core;
 /// Reference application layer: multi-group management and state machine.
 pub mod app;
 
-/// Delivery service: transport-agnostic messaging (Waku implementation).
+/// Delivery service: transport-agnostic messaging.
+/// Enable the **`waku`** feature for the Waku relay implementation.
 pub mod ds;
 
 /// MLS cryptographic operations: OpenMLS wrapper for encryption/decryption.

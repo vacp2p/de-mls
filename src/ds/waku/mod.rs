@@ -16,10 +16,7 @@ use crate::ds::{
 };
 use wrapper::WakuNodeCtx;
 
-pub const GROUP_VERSION: &str = "1";
-pub const APP_MSG_SUBTOPIC: &str = "app_msg";
-pub const WELCOME_SUBTOPIC: &str = "welcome";
-pub const SUBTOPICS: [&str; 2] = [APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC];
+use super::{GROUP_VERSION, SUBTOPICS};
 
 /// The pubsub topic for the Waku Node.
 pub fn pubsub_topic() -> String {

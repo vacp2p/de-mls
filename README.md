@@ -32,6 +32,24 @@ make          # clones, builds, and copies libwaku.dylib into ./libs/
 
 `build.rs` links against `libs/libwaku.dylib` (or `libwaku.so` on Linux) and embeds an rpath automatically.
 
+## Feature Flags
+
+| Feature | Default | Description |
+| ------- | ------- | ----------- |
+| `waku`  | off     | Enables the Waku relay transport (`WakuDeliveryService`) and links to `libwaku` |
+
+The core library (`de_mls`) compiles and tests **without** `libwaku` present.
+The `waku` feature is required only when you need the concrete `WakuDeliveryService`
+implementation — the gateway and desktop crates enable it automatically.
+
+```toml
+# Use the transport-agnostic types only (no libwaku needed):
+de_mls = { path = "..." }
+
+# Enable the Waku transport (requires libwaku):
+de_mls = { path = "...", features = ["waku"] }
+```
+
 ## Delivery Service (`src/ds/`)
 
 The delivery service (DS) is the transport layer that sits between the MLS core
@@ -54,15 +72,15 @@ src/ds/
 
 ### Key types
 
-| Type                  | Description                                                              |
-| --------------------- | ------------------------------------------------------------------------ |
-| `DeliveryService`     | Trait — `send()` and `subscribe()`, both synchronous                     |
-| `OutboundPacket`      | Payload + group id + subtopic + app id (self-message filter)             |
-| `InboundPacket`       | Payload + group id + subtopic + app id + timestamp                       |
-| `WakuDeliveryService` | Concrete impl — runs an embedded Waku node on a background `std::thread` |
-| `WakuConfig`          | Node port, static peers, discv5 settings                                 |
-| `WakuStartResult`     | Returned by `start()` — contains the service + optional local ENR        |
-| `TopicFilter`         | Async allowlist used by the gateway to filter inbound packets by group   |
+| Type                  | Feature  | Description                                                              |
+| --------------------- | -------- | ------------------------------------------------------------------------ |
+| `DeliveryService`     | —        | Trait — `send()` and `subscribe()`, both synchronous                     |
+| `OutboundPacket`      | —        | Payload + group id + subtopic + app id (self-message filter)             |
+| `InboundPacket`       | —        | Payload + group id + subtopic + app id + timestamp                       |
+| `TopicFilter`         | —        | Async allowlist used by the gateway to filter inbound packets by group   |
+| `WakuDeliveryService` | `waku`   | Concrete impl — runs an embedded Waku node on a background `std::thread` |
+| `WakuConfig`          | `waku`   | Node port, discv5 settings                                               |
+| `WakuStartResult`     | `waku`   | Returned by `start()` — contains the service + optional local ENR        |
 
 ### Basic usage
 
@@ -188,8 +206,9 @@ All nodes discover each other via the DHT and form a gossipsub relay mesh automa
 
 ## Development Tips
 
-- `cargo test` – runs the Rust unit + integration test suite
-- `cargo fmt --all check` / `cargo clippy` – keep formatting and linting consistent with the codebase
+- `cargo test -p de_mls` – runs core tests (no libwaku required)
+- `cargo test -p de_mls --features waku` – includes Waku transport tests (needs libwaku in `libs/`)
+- `cargo fmt --all --check` / `cargo clippy` – keep formatting and linting consistent with the codebase
 - `RUST_BACKTRACE=full` – helpful when debugging state-machine transitions during development
 
 Logs for the desktop UI live in `apps/de_mls_desktop_ui/logs/`; core logs are emitted to stdout as well.
