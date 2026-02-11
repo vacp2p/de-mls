@@ -1,4 +1,25 @@
 fn main() -> Result<(), std::io::Error> {
+    // Link to our local libwaku
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let libs_dir = std::path::Path::new(&manifest_dir).join("libs");
+    println!("cargo:rustc-link-search=native={}", libs_dir.display());
+
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    match target_os.as_str() {
+        "macos" => {
+            println!("cargo:rustc-link-lib=dylib=waku");
+            // Embed rpath so the dylib is found at runtime without DYLD_LIBRARY_PATH.
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", libs_dir.display());
+        }
+        "linux" => {
+            println!("cargo:rustc-link-lib=dylib=waku");
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", libs_dir.display());
+        }
+        other => {
+            panic!("Unsupported target OS: {other}. Only macOS and Linux are supported.");
+        }
+    }
+
     let mut config = prost_build::Config::new();
 
     config.extern_path(

@@ -1,62 +1,69 @@
-//! Delivery service abstraction for transport-agnostic messaging.
+//! Delivery Service — transport-agnostic messaging layer.
 //!
-//! This module provides a transport-agnostic interface for sending and receiving
-//! MLS-encrypted messages. The default implementation uses Waku, but the traits
-//! can be implemented for any pub/sub transport (libp2p, WebSocket, etc.).
+//! This module defines the [`DeliveryService`] trait and its supporting types
+//! ([`OutboundPacket`], [`InboundPacket`], [`DeliveryServiceError`]), plus a
+//! concrete implementation backed by the Waku relay protocol.
 //!
 //! # Architecture
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────────────────┐
-//! │                     DeliveryService                         │
-//! ├─────────────────────────────────────────────────────────────┤
-//! │  send()       │  Encrypt + broadcast OutboundPacket         │
-//! │  subscribe()  │  Receive InboundPacket stream               │
-//! └─────────────────────────────────────────────────────────────┘
-//!                              │
-//!                              ▼
-//! ┌─────────────────────────────────────────────────────────────┐
-//! │                    WakuDeliveryService                      │
-//! │         (default implementation using Waku relay)           │
-//! └─────────────────────────────────────────────────────────────┘
+//! src/ds/
+//! ├── transport.rs      DeliveryService trait, OutboundPacket, InboundPacket
+//! ├── error.rs          DeliveryServiceError
+//! ├── topic_filter.rs   TopicFilter (HashSet-based async allowlist)
+//! └── waku/             Waku relay implementation
+//!     ├── mod.rs        WakuDeliveryService, WakuConfig, content-topic helpers
+//!     ├── sys.rs        Raw FFI bindings to libwaku (C trampoline pattern)
+//!     └── wrapper.rs    Safe synchronous WakuNodeCtx wrapper
 //! ```
 //!
-//! # Key Types
+//! # Usage
 //!
-//! - `OutboundPacket` - Message to send (payload + routing metadata)
-//! - `InboundPacket` - Message received (payload + sender metadata)
-//! - `DeliveryService` - Trait for transport implementations
-//! - `TopicFilter` - Fast allowlist for filtering incoming messages
+//! ```rust,ignore
+//! use de_mls::ds::{WakuDeliveryService, WakuConfig, DeliveryService, OutboundPacket};
 //!
-//! # Topic Structure
+//! // Start the node — blocks until the embedded Waku node is ready.
+//! let result = WakuDeliveryService::start(WakuConfig {
+//!     node_port: 60000,
+//!     discv5: true,
+//!     discv5_udp_port: 61000,
+//!     ..Default::default()
+//! })?;
 //!
-//! Each group uses two content topics (subtopics):
-//! - `welcome` - Key packages and welcome messages (joining flow)
-//! - `app` - Application messages (chat, proposals, votes, commits)
+//! // The local ENR can be passed to other nodes for bootstrapping.
+//! if let Some(enr) = &result.enr {
+//!     println!("Share this ENR with peers: {enr}");
+//! }
 //!
-//! The `TopicFilter` allows efficient filtering of messages by group membership.
+//! let ds = result.service;
 //!
-//! # Example
-//!
-//! ```ignore
-//! use de_mls::ds::{WakuDeliveryService, WakuConfig, DeliveryService};
-//!
-//! // Create Waku delivery service
-//! let config = WakuConfig::new(60001, vec![peer_multiaddr]);
-//! let waku = WakuDeliveryService::new(config).await?;
-//!
-//! // Subscribe to incoming messages
-//! let mut rx = waku.subscribe();
-//! tokio::spawn(async move {
-//!     while let Ok(packet) = rx.recv().await {
-//!         println!("Received message for group: {}", packet.group_id);
+//! // Subscribe to inbound messages (multiple subscribers allowed).
+//! let rx = ds.subscribe();
+//! std::thread::spawn(move || {
+//!     while let Ok(pkt) = rx.recv() {
+//!         println!("got {} bytes for group {}", pkt.payload.len(), pkt.group_id);
 //!     }
 //! });
 //!
-//! // Send a message
-//! let packet = OutboundPacket::new(payload, "app", "my-group", &app_id);
-//! waku.send(packet).await?;
+//! // Send a message.
+//! ds.send(OutboundPacket::new(
+//!     b"hello".to_vec(),
+//!     "app_msg",
+//!     "my-group",
+//!     b"app-instance-id",
+//! ))?;
+//!
+//! // Explicit shutdown (or just drop all clones).
+//! ds.shutdown();
+//! # Ok::<(), de_mls::ds::DeliveryServiceError>(())
 //! ```
+//!
+//! # Threading model
+//!
+//! The entire DS layer is **synchronous** — no tokio dependency. The Waku
+//! implementation runs an embedded node on a dedicated `std::thread`. Callers
+//! in an async context should wrap [`DeliveryService::send`] in
+//! `tokio::task::spawn_blocking`.
 
 mod error;
 mod topic_filter;
@@ -68,5 +75,5 @@ pub use topic_filter::TopicFilter;
 pub use transport::{DeliveryService, InboundPacket, OutboundPacket};
 pub use waku::{
     build_content_topic, build_content_topics, pubsub_topic, WakuConfig, WakuDeliveryService,
-    APP_MSG_SUBTOPIC, GROUP_VERSION, SUBTOPICS, WELCOME_SUBTOPIC,
+    WakuStartResult, APP_MSG_SUBTOPIC, GROUP_VERSION, SUBTOPICS, WELCOME_SUBTOPIC,
 };

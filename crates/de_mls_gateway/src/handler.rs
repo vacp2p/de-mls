@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use futures::channel::mpsc::UnboundedSender;
 use std::sync::Arc;
+use tokio::task::spawn_blocking;
 
 use de_mls::{
     core::{message_types, CoreError, GroupEventHandler, MessageType},
@@ -31,10 +32,14 @@ impl<DS: DeliveryService> GroupEventHandler for GatewayEventHandler<DS> {
         _group_name: &str,
         packet: OutboundPacket,
     ) -> Result<String, CoreError> {
-        self.delivery
-            .send(packet)
-            .await
-            .map_err(|e| CoreError::DeliveryError(e.to_string()))
+        let delivery = self.delivery.clone();
+        spawn_blocking(move || {
+            delivery
+                .send(packet)
+                .map_err(|e| CoreError::DeliveryError(e.to_string()))
+        })
+        .await
+        .map_err(|e| CoreError::DeliveryError(e.to_string()))?
     }
 
     async fn on_app_message(
