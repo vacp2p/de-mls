@@ -24,3 +24,5 @@ yarn.lock
 
 .claude
 docs/
+logs/
+logos-messaging-nim/

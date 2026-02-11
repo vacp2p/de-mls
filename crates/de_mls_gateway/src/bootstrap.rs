@@ -5,7 +5,7 @@ use tracing::info;
 
 use de_mls::ds::{
     DeliveryService, DeliveryServiceError, InboundPacket, TopicFilter, WakuConfig,
-    WakuDeliveryService,
+    WakuDeliveryService, WakuStartResult,
 };
 use hashgraph_like_consensus::service::DefaultConsensusService;
 
@@ -35,8 +35,12 @@ impl<DS: DeliveryService> CoreCtx<DS> {
 pub struct BootstrapConfig {
     /// TCP/UDP port for the embedded Waku node
     pub node_port: u16,
-    /// Peer multiaddrs as strings (parsed by the transport impl).
-    pub peers: Vec<String>,
+    /// Enable discv5 peer discovery.
+    pub discv5: bool,
+    /// UDP port for discv5 (default 9000).
+    pub discv5_udp_port: u16,
+    /// Bootstrap ENR strings for discv5.
+    pub discv5_bootstrap_enrs: Vec<String>,
 }
 
 pub struct Bootstrap<DS: DeliveryService> {
@@ -48,17 +52,21 @@ pub struct Bootstrap<DS: DeliveryService> {
 pub async fn bootstrap_core(
     cfg: BootstrapConfig,
 ) -> Result<Bootstrap<WakuDeliveryService>, BootstrapError> {
-    let delivery = WakuDeliveryService::start(WakuConfig {
+    let WakuStartResult {
+        service: delivery,
+        enr: _local_enr,
+    } = WakuDeliveryService::start(WakuConfig {
         node_port: cfg.node_port,
-        peers: cfg.peers,
-    })
-    .await?;
+        discv5: cfg.discv5,
+        discv5_udp_port: cfg.discv5_udp_port,
+        discv5_bootstrap_enrs: cfg.discv5_bootstrap_enrs,
+    })?;
 
     // Broadcast inbound packets inside the app
     let (pubsub_tx, _) = broadcast::channel::<InboundPacket>(100);
 
     // Subscribe before moving delivery into AppState.
-    let mut rx = delivery.subscribe();
+    let rx = delivery.subscribe();
 
     let app_state = Arc::new(AppState {
         delivery,
@@ -67,26 +75,34 @@ pub async fn bootstrap_core(
 
     let core = Arc::new(CoreCtx::new(app_state.clone()));
 
-    // Forward delivery-service packets into broadcast
+    // Forward delivery-service packets into broadcast via a dedicated thread
     let forward_cancel = CancellationToken::new();
     {
         let forward_cancel = forward_cancel.clone();
-        tokio::spawn(async move {
-            info!("Forwarding delivery → broadcast started");
-            loop {
-                tokio::select! {
-                    _ = forward_cancel.cancelled() => break,
-                    res = rx.recv() => {
-                        match res {
-                            Ok(pkt) => { let _ = pubsub_tx.send(pkt); }
-                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(broadcast::error::RecvError::Closed) => break,
+        std::thread::Builder::new()
+            .name("ds-forwarder".into())
+            .spawn(move || {
+                use std::time::Duration;
+                info!("Forwarding delivery → broadcast started");
+                loop {
+                    if forward_cancel.is_cancelled() {
+                        break;
+                    }
+                    match rx.recv_timeout(Duration::from_millis(500)) {
+                        Ok(pkt) => {
+                            let _ = pubsub_tx.send(pkt);
                         }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 }
-            }
-            info!("Forwarding delivery → broadcast stopped");
-        });
+                info!("Forwarding delivery → broadcast stopped");
+            })
+            .map_err(|e| {
+                BootstrapError::DeliveryServiceError(DeliveryServiceError::Other(anyhow::anyhow!(
+                    e
+                )))
+            })?;
     }
 
     Ok(Bootstrap {
@@ -100,15 +116,20 @@ pub async fn bootstrap_core_from_env() -> Result<Bootstrap<WakuDeliveryService>,
         .map_err(|e| BootstrapError::EnvVar("NODE_PORT", e))?
         .parse::<u16>()?;
 
-    let peer_addresses =
-        std::env::var("PEER_ADDRESSES").map_err(|e| BootstrapError::EnvVar("PEER_ADDRESSES", e))?;
-    let peers = peer_addresses
+    let discv5_bootstrap_enrs = std::env::var("DISCV5_BOOTSTRAP_ENRS")
+        .unwrap_or_default()
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>();
 
-    bootstrap_core(BootstrapConfig { node_port, peers }).await
+    bootstrap_core(BootstrapConfig {
+        node_port,
+        discv5: true,
+        discv5_udp_port: node_port.saturating_add(1000),
+        discv5_bootstrap_enrs,
+    })
+    .await
 }
 
 #[derive(Debug, thiserror::Error)]

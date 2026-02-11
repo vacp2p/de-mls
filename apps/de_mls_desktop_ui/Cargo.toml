@@ -8,7 +8,7 @@ publish = false
 de_mls_ui_protocol = { path = "../../crates/de_mls_ui_protocol" }
 de_mls_gateway = { path = "../../crates/de_mls_gateway" }
 ui_bridge = { path = "../../crates/ui_bridge" }
-de_mls = { path = "../../" }
+de_mls = { path = "../../", features = ["waku"] }
 
 dioxus = { version = "0.6.2", features = ["signals", "router", "desktop"] }
 dioxus-desktop = "0.6.3"
@@ -27,6 +27,5 @@ parking_lot = "0.12.5"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2.3"
-chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 hashgraph-like-consensus = "0.1.1"
