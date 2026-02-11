@@ -1,8 +1,8 @@
 //! Delivery Service — transport-agnostic messaging layer.
 //!
-//! This module defines the [`DeliveryService`] trait and its supporting types
-//! ([`OutboundPacket`], [`InboundPacket`], [`DeliveryServiceError`]), plus a
-//! concrete implementation backed by the Waku relay protocol.
+//! This module defines the `DeliveryService` trait and its supporting types
+//! (`OutboundPacket`, `InboundPacket`, `DeliveryServiceError`), plus a concrete
+//! implementation backed by the Waku relay protocol.
 //!
 //! # Architecture
 //!
@@ -62,7 +62,7 @@
 //!
 //! The entire DS layer is **synchronous** — no tokio dependency. The Waku
 //! implementation runs an embedded node on a dedicated `std::thread`. Callers
-//! in an async context should wrap [`DeliveryService::send`] in
+//! in an async context should wrap `DeliveryService::send` in
 //! `tokio::task::spawn_blocking`.
 
 mod error;

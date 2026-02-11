@@ -47,29 +47,14 @@ extern "C" {
         timeout_ms: c_uint,
     ) -> c_int;
 
-    pub fn waku_get_my_peerid(
-        ctx: *mut c_void,
-        cb: FFICallBack,
-        user_data: *const c_void,
-    ) -> c_int;
+    pub fn waku_get_my_peerid(ctx: *mut c_void, cb: FFICallBack, user_data: *const c_void)
+        -> c_int;
 
-    pub fn waku_start_discv5(
-        ctx: *mut c_void,
-        cb: FFICallBack,
-        user_data: *const c_void,
-    ) -> c_int;
+    pub fn waku_start_discv5(ctx: *mut c_void, cb: FFICallBack, user_data: *const c_void) -> c_int;
 
-    pub fn waku_stop_discv5(
-        ctx: *mut c_void,
-        cb: FFICallBack,
-        user_data: *const c_void,
-    ) -> c_int;
+    pub fn waku_stop_discv5(ctx: *mut c_void, cb: FFICallBack, user_data: *const c_void) -> c_int;
 
-    pub fn waku_get_my_enr(
-        ctx: *mut c_void,
-        cb: FFICallBack,
-        user_data: *const c_void,
-    ) -> c_int;
+    pub fn waku_get_my_enr(ctx: *mut c_void, cb: FFICallBack, user_data: *const c_void) -> c_int;
 
     pub fn waku_discv5_update_bootnodes(
         ctx: *mut c_void,

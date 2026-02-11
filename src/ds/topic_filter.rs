@@ -41,10 +41,7 @@ impl TopicFilter {
 
     /// Remove all subtopics for a group.
     pub async fn remove_many(&self, group_name: &str) {
-        self.set
-            .write()
-            .await
-            .retain(|x| x.group_id != group_name);
+        self.set.write().await.retain(|x| x.group_id != group_name);
     }
 
     /// Membership test (first-stage filter).
