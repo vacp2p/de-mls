@@ -6,12 +6,12 @@
 //! - Hold references to the core context (`CoreCtx`) and current user
 //! - Offer small helper methods (login_with_private_key, etc.)
 use futures::{
-    channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
     StreamExt,
+    channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded},
 };
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Arc, atomic::AtomicBool};
 use tokio::sync::Mutex;
 
 use de_mls::{

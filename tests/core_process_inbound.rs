@@ -6,14 +6,14 @@ use async_trait::async_trait;
 use prost::Message;
 
 use de_mls::core::{
+    CoreError, DefaultProvider, DispatchAction, GroupEventHandler, GroupHandle, ProcessResult,
     build_key_package_message, build_message, create_batch_proposals, create_group,
-    dispatch_result, prepare_to_join, process_inbound, CoreError, DefaultProvider, DispatchAction,
-    GroupEventHandler, GroupHandle, ProcessResult,
+    dispatch_result, prepare_to_join, process_inbound,
 };
-use de_mls::ds::{OutboundPacket, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
-use de_mls::mls_crypto::{parse_wallet_address, MemoryDeMlsStorage, MlsService};
+use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
+use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService, parse_wallet_address};
 use de_mls::protos::de_mls::messages::v1::{
-    app_message, AppMessage, BatchProposalsMessage, ConversationMessage, GroupUpdateRequest,
+    AppMessage, BatchProposalsMessage, ConversationMessage, GroupUpdateRequest, app_message,
 };
 
 // ─────────────────────────── Mock Handler ───────────────────────────

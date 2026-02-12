@@ -56,7 +56,7 @@ use hashgraph_like_consensus::{
 };
 
 use crate::core::{
-    build_message, CoreError, DeMlsProvider, GroupEventHandler, GroupHandle, ProcessResult,
+    CoreError, DeMlsProvider, GroupEventHandler, GroupHandle, ProcessResult, build_message,
 };
 use crate::mls_crypto::{DeMlsStorage, MlsService};
 use crate::protos::de_mls::messages::v1::{

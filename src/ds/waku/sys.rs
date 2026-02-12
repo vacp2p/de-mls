@@ -8,7 +8,7 @@ use std::slice;
 
 pub type FFICallBack = unsafe extern "C" fn(c_int, *const c_char, usize, *const c_void);
 
-extern "C" {
+unsafe extern "C" {
     pub fn waku_new(
         config_json: *const c_char,
         cb: FFICallBack,
@@ -48,7 +48,7 @@ extern "C" {
     ) -> c_int;
 
     pub fn waku_get_my_peerid(ctx: *mut c_void, cb: FFICallBack, user_data: *const c_void)
-        -> c_int;
+    -> c_int;
 
     pub fn waku_start_discv5(ctx: *mut c_void, cb: FFICallBack, user_data: *const c_void) -> c_int;
 
@@ -77,12 +77,12 @@ pub unsafe extern "C" fn trampoline<C>(
     if data.is_null() {
         return;
     }
-    let closure = &mut *(data as *mut C);
+    let closure = unsafe { &mut *(data as *mut C) };
     if buffer.is_null() || buffer_len == 0 {
         closure(return_val, "");
         return;
     }
-    let bytes = slice::from_raw_parts(buffer as *const u8, buffer_len);
+    let bytes = unsafe { slice::from_raw_parts(buffer as *const u8, buffer_len) };
     let buffer_str = String::from_utf8_lossy(bytes);
     closure(return_val, &buffer_str);
 }

@@ -1,6 +1,6 @@
 use futures::channel::mpsc::UnboundedSender;
 use hex::ToHex;
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::{Arc, atomic::Ordering};
 
 use de_mls::{ds::WakuDeliveryService, protos::de_mls::messages::v1::group_update_request};
 use de_mls_ui_protocol::v1::AppEvent;

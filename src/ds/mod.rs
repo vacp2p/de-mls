@@ -88,6 +88,6 @@ pub use transport::{DeliveryService, InboundPacket, OutboundPacket};
 
 #[cfg(feature = "waku")]
 pub use waku::{
-    build_content_topic, build_content_topics, pubsub_topic, WakuConfig, WakuDeliveryService,
-    WakuStartResult,
+    WakuConfig, WakuDeliveryService, WakuStartResult, build_content_topic, build_content_topics,
+    pubsub_topic,
 };

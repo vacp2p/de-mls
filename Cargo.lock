@@ -1975,7 +1975,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
-name = "de_mls"
+name = "de-mls"
 version = "2.1.0"
 dependencies = [
  "alloy",
@@ -2007,13 +2007,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "de_mls_desktop_ui"
+name = "de-mls-desktop-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "de_mls",
- "de_mls_gateway",
- "de_mls_ui_protocol",
+ "de-mls",
+ "de-mls-gateway",
+ "de-mls-ui-protocol",
  "dioxus",
  "dioxus-desktop",
  "futures",
@@ -2026,18 +2026,18 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
- "ui_bridge",
+ "ui-bridge",
  "uuid",
 ]
 
 [[package]]
-name = "de_mls_gateway"
+name = "de-mls-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "de_mls",
- "de_mls_ui_protocol",
+ "de-mls",
+ "de-mls-ui-protocol",
  "futures",
  "hashgraph-like-consensus",
  "hex",
@@ -2051,10 +2051,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "de_mls_ui_protocol"
+name = "de-mls-ui-protocol"
 version = "0.1.0"
 dependencies = [
- "de_mls",
+ "de-mls",
  "hashgraph-like-consensus",
  "serde",
  "serde_json",
@@ -7664,13 +7664,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "ui_bridge"
+name = "ui-bridge"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "de_mls",
- "de_mls_gateway",
- "de_mls_ui_protocol",
+ "de-mls",
+ "de-mls-gateway",
+ "de-mls-ui-protocol",
  "futures",
  "tokio",
  "tracing",

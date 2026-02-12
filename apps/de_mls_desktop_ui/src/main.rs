@@ -1,10 +1,10 @@
 #![allow(non_snake_case)]
 use dioxus::prelude::*;
-use dioxus_desktop::{launch::launch as desktop_launch, Config, LogicalSize, WindowBuilder};
+use dioxus_desktop::{Config, LogicalSize, WindowBuilder, launch::launch as desktop_launch};
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicU64, Ordering},
 };
 
 use de_mls::{
@@ -12,7 +12,7 @@ use de_mls::{
     mls_crypto::parse_wallet_address,
     protos::de_mls::messages::v1::{ConversationMessage, VotePayload},
 };
-use de_mls_gateway::{bootstrap_core_from_env, GATEWAY};
+use de_mls_gateway::{GATEWAY, bootstrap_core_from_env};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 use hashgraph_like_consensus::types::ConsensusEvent;
 

@@ -3,16 +3,16 @@
 pub(crate) mod sys;
 pub(crate) mod wrapper;
 
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use tracing::{debug, error, info};
 
 use crate::ds::{
-    transport::{DeliveryService, InboundPacket, OutboundPacket},
     DeliveryServiceError,
+    transport::{DeliveryService, InboundPacket, OutboundPacket},
 };
 use wrapper::WakuNodeCtx;
 

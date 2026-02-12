@@ -9,9 +9,9 @@ use std::sync::Arc;
 use tokio::task::spawn_blocking;
 
 use de_mls::{
-    core::{message_types, CoreError, GroupEventHandler, MessageType},
+    core::{CoreError, GroupEventHandler, MessageType, message_types},
     ds::{DeliveryService, OutboundPacket, TopicFilter},
-    protos::de_mls::messages::v1::{app_message, AppMessage, ConversationMessage},
+    protos::de_mls::messages::v1::{AppMessage, ConversationMessage, app_message},
 };
 use de_mls_ui_protocol::v1::AppEvent;
 
