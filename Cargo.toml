@@ -10,8 +10,16 @@ members = [
 name = "de-mls"
 version = "2.1.0"
 edition = "2024"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+rust-version = "1.85"
+description = "Decentralized MLS — end-to-end encrypted group messaging with consensus-based membership management over gossipsub-like networks"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/vacp2p/de-mls"
+homepage = "https://github.com/vacp2p/de-mls"
+documentation = "https://docs.rs/de-mls"
+readme = "README.md"
+keywords = ["mls", "e2ee", "decentralized", "consensus", "group-messaging"]
+categories = ["cryptography", "network-programming"]
+exclude = ["logos-messaging-nim/", "libs/", "apps/", "examples/", ".github/"]
 
 [features]
 default = []
