@@ -14,16 +14,16 @@ use crate::app::state_machine::{
     CommitTimeoutStatus, GroupConfig, GroupState, GroupStateMachine, StateChangeHandler,
 };
 use crate::core::{
-    self, create_batch_proposals, CoreError, DeMlsProvider, DefaultProvider, GroupEventHandler,
-    GroupHandle,
+    self, CoreError, DeMlsProvider, DefaultProvider, GroupEventHandler, GroupHandle,
+    create_batch_proposals,
 };
 use crate::ds::InboundPacket;
 use crate::mls_crypto::{
-    format_wallet_address, parse_wallet_to_bytes, IdentityError, MemoryDeMlsStorage, MlsService,
+    IdentityError, MemoryDeMlsStorage, MlsService, format_wallet_address, parse_wallet_to_bytes,
 };
 use crate::protos::de_mls::messages::v1::{
-    group_update_request, AppMessage, BanRequest, ConversationMessage, GroupUpdateRequest,
-    RemoveMember,
+    AppMessage, BanRequest, ConversationMessage, GroupUpdateRequest, RemoveMember,
+    group_update_request,
 };
 
 /// Internal state for a group managed by User.
@@ -187,7 +187,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             .on_state_changed(group_name, new_state.clone())
             .await;
 
-        info!("[leave_group]: Transitioning from {old_state} to Leaving, sending self-removal for group {group_name}");
+        info!(
+            "[leave_group]: Transitioning from {old_state} to Leaving, sending self-removal for group {group_name}"
+        );
 
         // Send self-removal directly (bypass process_ban_request's Working-state guard,
         // since we intentionally set Leaving before submitting the removal request).

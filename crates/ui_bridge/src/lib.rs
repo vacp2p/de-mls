@@ -7,13 +7,13 @@
 
 // crates/ui_bridge/src/lib.rs
 use futures::{
-    channel::mpsc::{unbounded, UnboundedReceiver},
     StreamExt,
+    channel::mpsc::{UnboundedReceiver, unbounded},
 };
 use std::sync::Arc;
 
 use de_mls::{ds::WakuDeliveryService, protos::de_mls::messages::v1::ConversationMessage};
-use de_mls_gateway::{init_core, CoreCtx, GATEWAY};
+use de_mls_gateway::{CoreCtx, GATEWAY, init_core};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 
 /// Call once during process startup (before launching the Dioxus UI).

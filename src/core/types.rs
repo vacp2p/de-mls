@@ -17,9 +17,9 @@ use crate::{
     core::CoreError,
     mls_crypto::{format_wallet_address, parse_wallet_to_bytes},
     protos::de_mls::messages::v1::{
-        app_message, group_update_request, welcome_message, AppMessage, BanRequest,
-        BatchProposalsMessage, ConversationMessage, GroupUpdateRequest, InvitationToJoin, Outcome,
-        ProposalAdded, RemoveMember, UserKeyPackage, UserVote, VotePayload, WelcomeMessage,
+        AppMessage, BanRequest, BatchProposalsMessage, ConversationMessage, GroupUpdateRequest,
+        InvitationToJoin, Outcome, ProposalAdded, RemoveMember, UserKeyPackage, UserVote,
+        VotePayload, WelcomeMessage, app_message, group_update_request, welcome_message,
     },
 };
 

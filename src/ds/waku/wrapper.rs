@@ -4,7 +4,7 @@ use std::cell::OnceCell;
 use std::ffi::CString;
 use std::os::raw::c_void;
 
-use super::sys::{self as waku_sys, get_trampoline, RET_OK};
+use super::sys::{self as waku_sys, RET_OK, get_trampoline};
 
 /// Opaque handle to a libwaku node context.
 pub struct WakuNodeCtx {

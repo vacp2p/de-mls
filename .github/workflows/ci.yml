@@ -42,7 +42,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Run clippy (core library)
-        run: cargo clippy -p de_mls --tests -- -D warnings
+        run: cargo clippy -p de-mls --tests -- -D warnings
 
   docs:
     runs-on: ubuntu-latest
@@ -59,7 +59,7 @@ jobs:
           shared-key: "stable"
       - name: Generate documentation
         run: |
-          cargo doc -p de_mls --lib --no-deps --document-private-items
+          cargo doc -p de-mls --lib --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: -Dwarnings
 
@@ -77,7 +77,7 @@ jobs:
         with:
           tool: protoc@${{ env.PROTOC_VERSION }}
       - name: Test (core library)
-        run: cargo test -p de_mls --release
+        run: cargo test -p de-mls --release
 
   unused_dependencies:
     runs-on: ubuntu-latest
@@ -94,4 +94,4 @@ jobs:
       - name: Install cargo-udeps
         uses: taiki-e/install-action@cargo-udeps
       - name: Check for unused dependencies
-        run: cargo +nightly udeps -p de_mls --all-targets
+        run: cargo +nightly udeps -p de-mls --all-targets

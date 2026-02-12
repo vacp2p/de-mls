@@ -41,8 +41,8 @@ mod types;
 
 pub use error::{IdentityError, MlsError, MlsServiceError, Result, StorageError};
 pub use identity::{format_wallet_address, parse_wallet_address, parse_wallet_to_bytes};
-pub use service::{MlsService, CIPHERSUITE};
+pub use service::{CIPHERSUITE, MlsService};
 pub use storage::{DeMlsStorage, MemoryDeMlsStorage};
 pub use types::{
-    key_package_bytes_from_json, CommitResult, DecryptResult, GroupUpdate, KeyPackageBytes,
+    CommitResult, DecryptResult, GroupUpdate, KeyPackageBytes, key_package_bytes_from_json,
 };

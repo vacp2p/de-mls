@@ -3,10 +3,10 @@ use hex::ToHex;
 use de_mls::{
     app::{CommitTimeoutStatus, IntervalScheduler, StewardScheduler, StewardSchedulerConfig},
     ds::WakuDeliveryService,
-    protos::de_mls::messages::v1::{group_update_request, BanRequest},
+    protos::de_mls::messages::v1::{BanRequest, group_update_request},
 };
 
-use crate::{forwarder::push_consensus_state, Gateway};
+use crate::{Gateway, forwarder::push_consensus_state};
 
 impl Gateway<WakuDeliveryService> {
     pub async fn create_group(&self, group_name: String) -> anyhow::Result<()> {

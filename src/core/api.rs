@@ -51,17 +51,17 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use tracing::info;
 
 use crate::core::{
-    error::CoreError, group_handle::GroupHandle, types::invitation_from_bytes,
-    types::ProcessResult, ProposalId,
+    ProposalId, error::CoreError, group_handle::GroupHandle, types::ProcessResult,
+    types::invitation_from_bytes,
 };
-use crate::ds::{OutboundPacket, APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
+use crate::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
 use crate::mls_crypto::{
-    key_package_bytes_from_json, CommitResult, DeMlsStorage, DecryptResult, GroupUpdate,
-    KeyPackageBytes, MlsService,
+    CommitResult, DeMlsStorage, DecryptResult, GroupUpdate, KeyPackageBytes, MlsService,
+    key_package_bytes_from_json,
 };
 use crate::protos::de_mls::messages::v1::{
-    app_message, group_update_request, welcome_message, AppMessage, BatchProposalsMessage,
-    GroupUpdateRequest, InviteMember, UserKeyPackage, WelcomeMessage,
+    AppMessage, BatchProposalsMessage, GroupUpdateRequest, InviteMember, UserKeyPackage,
+    WelcomeMessage, app_message, group_update_request, welcome_message,
 };
 
 // ─────────────────────────── Group Lifecycle ───────────────────────────
@@ -345,10 +345,10 @@ where
     }
 
     // Try to parse as AppMessage first (for batch proposals)
-    if let Ok(app_message) = AppMessage::decode(payload) {
-        if let Some(app_message::Payload::BatchProposalsMessage(batch_msg)) = app_message.payload {
-            return process_batch_proposals(handle, batch_msg, mls);
-        }
+    if let Ok(app_message) = AppMessage::decode(payload)
+        && let Some(app_message::Payload::BatchProposalsMessage(batch_msg)) = app_message.payload
+    {
+        return process_batch_proposals(handle, batch_msg, mls);
     }
 
     // Fall back to MLS protocol message

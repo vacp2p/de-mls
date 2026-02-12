@@ -4,13 +4,6 @@
 //! and trait bounds are publicly accessible from `de_mls::core` without touching `app`.
 
 use de_mls::core::{
-    // Consensus functions
-    cast_vote,
-    dispatch_result,
-    forward_incoming_proposal,
-    forward_incoming_vote,
-    handle_consensus_event,
-    start_voting,
     // Core types
     CoreError,
     DeMlsProvider,
@@ -20,6 +13,13 @@ use de_mls::core::{
     GroupEventHandler,
     GroupHandle,
     ProcessResult,
+    // Consensus functions
+    cast_vote,
+    dispatch_result,
+    forward_incoming_proposal,
+    forward_incoming_vote,
+    handle_consensus_event,
+    start_voting,
 };
 use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService};
 

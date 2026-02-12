@@ -2,11 +2,10 @@ use once_cell::sync::OnceCell;
 use std::sync::Mutex;
 use tracing_appender::rolling;
 use tracing_subscriber::{
-    fmt,
+    EnvFilter, Registry, fmt,
     layer::SubscriberExt,
     reload::{Handle, Layer as ReloadLayer},
     util::SubscriberInitExt,
-    EnvFilter, Registry,
 };
 
 /// Global reload handle so the UI can change the filter at runtime.

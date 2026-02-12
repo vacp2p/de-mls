@@ -145,8 +145,8 @@ pub use api::{
     join_group_from_invite, prepare_to_join, process_inbound, resign_steward,
 };
 pub use consensus::{
-    cast_vote, dispatch_result, forward_incoming_proposal, forward_incoming_vote,
-    handle_consensus_event, request_steward_reelection, start_voting, DispatchAction,
+    DispatchAction, cast_vote, dispatch_result, forward_incoming_proposal, forward_incoming_vote,
+    handle_consensus_event, request_steward_reelection, start_voting,
 };
 pub use error::CoreError;
 pub use events::GroupEventHandler;
@@ -154,6 +154,6 @@ pub use group_handle::GroupHandle;
 pub use group_update_handle::{CurrentEpochProposals, ProposalId};
 pub use provider::{DeMlsProvider, DefaultProvider};
 pub use types::{
-    convert_group_request_to_display, get_identity_from_group_update_request, message_types,
-    MessageType, ProcessResult,
+    MessageType, ProcessResult, convert_group_request_to_display,
+    get_identity_from_group_update_request, message_types,
 };
