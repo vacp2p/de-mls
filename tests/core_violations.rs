@@ -476,10 +476,7 @@ fn test_emergency_in_approved_queue_returns_error() {
         de_mls::core::CoreError::UnexpectedEmergencyProposals { proposal_ids } => {
             assert_eq!(proposal_ids, vec![50]);
         }
-        other => panic!(
-            "Expected UnexpectedEmergencyProposals, got {:?}",
-            other
-        ),
+        other => panic!("Expected UnexpectedEmergencyProposals, got {:?}", other),
     }
 }
 
@@ -718,9 +715,6 @@ fn test_emergency_mixed_with_regular_returns_error() {
         de_mls::core::CoreError::UnexpectedEmergencyProposals { proposal_ids } => {
             assert_eq!(proposal_ids, vec![emergency_id]);
         }
-        other => panic!(
-            "Expected UnexpectedEmergencyProposals, got {:?}",
-            other
-        ),
+        other => panic!("Expected UnexpectedEmergencyProposals, got {:?}", other),
     }
 }

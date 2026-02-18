@@ -1,11 +1,11 @@
 use hex::ToHex;
 
+use de_mls::mls_crypto::format_wallet_address;
 use de_mls::{
     app::{CommitTimeoutStatus, IntervalScheduler, StewardScheduler, StewardSchedulerConfig},
     ds::WakuDeliveryService,
     protos::de_mls::messages::v1::{BanRequest, group_update_request},
 };
-use de_mls::mls_crypto::format_wallet_address;
 
 use crate::{Gateway, forwarder::push_consensus_state};
 

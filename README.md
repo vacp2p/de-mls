@@ -66,7 +66,7 @@ be used from any Rust context.
 
 ### Module layout
 
-```
+``` text
 src/ds/
 ├── mod.rs              Public API re-exports
 ├── transport.rs        DeliveryService trait, OutboundPacket, InboundPacket

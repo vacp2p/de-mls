@@ -445,9 +445,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         // This happens outside the lock since start_voting_on_request_background
         // needs to acquire the groups lock internally.
         if has_proposals {
-            let request =
-                ViolationEvidence::censorship_inactivity(steward_id, violation_epoch)
-                    .into_update_request();
+            let request = ViolationEvidence::censorship_inactivity(steward_id, violation_epoch)
+                .into_update_request();
             if let Err(e) = self
                 .start_voting_on_request_background(group_name.to_string(), request)
                 .await

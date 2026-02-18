@@ -60,8 +60,7 @@ use crate::core::{
 };
 use crate::mls_crypto::{DeMlsStorage, MlsService};
 use crate::protos::de_mls::messages::v1::{
-    AppMessage, ConversationMessage, GroupUpdateRequest, VotePayload,
-    group_update_request,
+    AppMessage, ConversationMessage, GroupUpdateRequest, VotePayload, group_update_request,
 };
 
 /// Action returned by [`dispatch_result`] telling the caller what to do next.
