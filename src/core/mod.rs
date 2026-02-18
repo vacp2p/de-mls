@@ -136,6 +136,7 @@ mod error;
 mod events;
 mod group_handle;
 mod group_update_handle;
+mod proposal_priority;
 mod provider;
 mod types;
 
@@ -146,12 +147,13 @@ pub use api::{
 };
 pub use consensus::{
     DispatchAction, cast_vote, dispatch_result, forward_incoming_proposal, forward_incoming_vote,
-    handle_consensus_event, request_steward_reelection, start_voting,
+    handle_consensus_event, start_voting,
 };
 pub use error::CoreError;
 pub use events::GroupEventHandler;
 pub use group_handle::GroupHandle;
 pub use group_update_handle::{CurrentEpochProposals, ProposalId};
+pub use proposal_priority::ProposalPriority;
 pub use provider::{DeMlsProvider, DefaultProvider};
 pub use types::{
     MessageType, ProcessResult, convert_group_request_to_display,

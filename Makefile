@@ -2,6 +2,7 @@
 REPO_URL = https://github.com/logos-messaging/logos-messaging-nim
 REPO_DIR = logos-messaging-nim
 OUTPUT_DIR = libs
+LIBWAKU_NIM_PARAMS ?= --undef:metrics
 
 # Platform-specific library name
 ifeq ($(shell uname),Darwin)
@@ -41,7 +42,7 @@ build:
 	@# Update vendored deps
 	cd $(REPO_DIR) && $(MAKE) update
 	@# Compile
-	cd $(REPO_DIR) && $(MAKE) libwaku
+	cd $(REPO_DIR) && $(MAKE) libwaku BUILD_COMMAND="libwakuDynamic $(LIBWAKU_NIM_PARAMS)"
 
 # 3. Retrieve: Copy the result
 copy:

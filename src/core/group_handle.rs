@@ -92,6 +92,10 @@ pub struct GroupHandle {
     mls_initialized: bool,
     /// Proposal for current steward epoch.
     proposals: CurrentEpochProposals,
+    /// Current epoch counter (incremented on each commit).
+    current_epoch: u64,
+    /// Identity (wallet bytes) of the current steward.
+    steward_identity: Option<Vec<u8>>,
 }
 
 impl GroupHandle {
@@ -106,6 +110,8 @@ impl GroupHandle {
             steward: false,
             mls_initialized: false,
             proposals: CurrentEpochProposals::new(),
+            current_epoch: 0,
+            steward_identity: None,
         }
     }
 
@@ -115,13 +121,16 @@ impl GroupHandle {
     ///
     /// # Arguments
     /// * `group_name` - The name of the group
-    pub fn new_as_creator(group_name: &str) -> Self {
+    /// * `creator_identity` - The wallet bytes of the creator (who is the initial steward)
+    pub fn new_as_creator(group_name: &str, creator_identity: Vec<u8>) -> Self {
         Self {
             group_name: group_name.to_string(),
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
             steward: true,
             mls_initialized: true,
             proposals: CurrentEpochProposals::new(),
+            current_epoch: 0,
+            steward_identity: Some(creator_identity),
         }
     }
 
@@ -153,6 +162,26 @@ impl GroupHandle {
     /// Mark MLS as initialized (called after joining via welcome).
     pub fn set_mls_initialized(&mut self) {
         self.mls_initialized = true;
+    }
+
+    /// Get the steward's identity bytes, if known.
+    pub fn steward_identity(&self) -> Option<&[u8]> {
+        self.steward_identity.as_deref()
+    }
+
+    /// Set the steward's identity bytes.
+    pub fn set_steward_identity(&mut self, identity: Vec<u8>) {
+        self.steward_identity = Some(identity);
+    }
+
+    /// Get the current epoch number.
+    pub fn current_epoch(&self) -> u64 {
+        self.current_epoch
+    }
+
+    /// Advance to the next epoch (called when a commit is processed).
+    pub fn advance_epoch(&mut self) {
+        self.current_epoch += 1;
     }
 
     /// Become the steward of this group.
@@ -227,12 +256,22 @@ impl GroupHandle {
         self.proposals.add_proposal(proposal_id, proposal);
     }
 
+    /// Remove a single proposal from the approved queue.
+    ///
+    /// Used for proposals that don't produce MLS operations (e.g., emergency criteria
+    /// proposals are consensus-only and should not be included in MLS commits).
+    pub fn remove_approved_proposal(&mut self, proposal_id: ProposalId) {
+        self.proposals.remove_approved_proposal(proposal_id);
+    }
+
     /// Clear approved proposals after a commit, archiving to history.
     ///
     /// Called after a batch commit is successfully applied. The proposals
     /// are moved to `epoch_history` for UI display (up to 10 epochs retained).
+    /// Also advances the epoch counter.
     pub fn clear_approved_proposals(&mut self) {
         self.proposals.clear_approved_proposals();
+        self.current_epoch += 1;
     }
 
     /// Get the epoch history (past batches of approved proposals).

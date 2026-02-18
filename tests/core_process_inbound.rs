@@ -402,6 +402,7 @@ fn test_process_inbound_leave_group() {
             ),
         ),
     };
+    // Shortcut: insert directly as approved, bypassing consensus voting.
     steward_handle.insert_approved_proposal(2, remove_req);
     let packets = create_batch_proposals(&mut steward_handle, &steward_mls).unwrap();
 
@@ -478,9 +479,10 @@ fn test_process_inbound_batch_proposals_proposal_set_mismatch() {
     let result =
         process_inbound(&mut joiner_handle, &payload, APP_MSG_SUBTOPIC, &joiner_mls).unwrap();
 
+    // ID mismatch is malicious behaviour — steward included different proposals
     assert!(
-        matches!(result, ProcessResult::Noop),
-        "Expected Noop for mismatched proposals, got {:?}",
+        matches!(result, ProcessResult::ViolationDetected(_)),
+        "Expected ViolationDetected for mismatched proposals, got {:?}",
         result
     );
 }

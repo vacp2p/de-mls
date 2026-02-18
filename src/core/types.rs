@@ -19,7 +19,8 @@ use crate::{
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, BatchProposalsMessage, ConversationMessage, GroupUpdateRequest,
         InvitationToJoin, Outcome, ProposalAdded, RemoveMember, UserKeyPackage, UserVote,
-        VotePayload, WelcomeMessage, app_message, group_update_request, welcome_message,
+        ViolationEvidence, VotePayload, WelcomeMessage, app_message, group_update_request,
+        welcome_message,
     },
 };
 
@@ -59,9 +60,19 @@ impl MessageType for app_message::Payload {
 
 impl MessageType for GroupUpdateRequest {
     fn message_type(&self) -> &'static str {
-        match self.payload {
+        match &self.payload {
             Some(group_update_request::Payload::InviteMember(_)) => "Add Member",
             Some(group_update_request::Payload::RemoveMember(_)) => "Remove Member",
+            Some(group_update_request::Payload::EmergencyCriteria(ec)) => ec
+                .evidence
+                .as_ref()
+                .map(|e| match ViolationType::try_from(e.violation_type) {
+                    Ok(ViolationType::BrokenCommit) => "Emergency: Broken Commit",
+                    Ok(ViolationType::BrokenMlsProposal) => "Emergency: Broken MLS Proposal",
+                    Ok(ViolationType::CensorshipInactivity) => "Emergency: Censorship/Inactivity",
+                    _ => "Emergency: Unknown Violation",
+                })
+                .unwrap_or("Emergency: Unknown Violation"),
             _ => "Unknown",
         }
     }
@@ -122,10 +133,75 @@ pub enum ProcessResult {
     /// Application should transition state from Waiting to Working.
     GroupUpdated,
 
+    /// A steward violation was detected during commit validation.
+    ///
+    /// Contains evidence of the violation. The application should start
+    /// an emergency criteria proposal vote for this evidence.
+    ViolationDetected(ViolationEvidence),
+
     /// No action needed.
     ///
     /// The message was not for us, was a duplicate, or required no action.
     Noop,
+}
+
+// ── ViolationEvidence constructors ────────────────────────────────
+
+use crate::protos::de_mls::messages::v1::{EmergencyCriteriaProposal, ViolationType};
+
+impl ViolationEvidence {
+    /// Steward included different proposal IDs than what was voted on,
+    /// or IDs match but content digest differs.
+    pub fn broken_commit(target: Vec<u8>, epoch: u64, payload: impl Into<Vec<u8>>) -> Self {
+        Self {
+            violation_type: ViolationType::BrokenCommit as i32,
+            target_member_id: target,
+            evidence_payload: payload.into(),
+            epoch,
+        }
+    }
+
+    /// MLS payload count doesn't match proposal count,
+    /// or an MLS proposal failed to decrypt/store correctly.
+    pub fn broken_mls_proposal(target: Vec<u8>, epoch: u64, payload: impl Into<Vec<u8>>) -> Self {
+        Self {
+            violation_type: ViolationType::BrokenMlsProposal as i32,
+            target_member_id: target,
+            evidence_payload: payload.into(),
+            epoch,
+        }
+    }
+
+    /// Steward didn't commit within the threshold duration.
+    pub fn censorship_inactivity(target: Vec<u8>, epoch: u64) -> Self {
+        Self {
+            violation_type: ViolationType::CensorshipInactivity as i32,
+            target_member_id: target,
+            evidence_payload: Vec::new(),
+            epoch,
+        }
+    }
+
+    /// Human-readable label for the violation type.
+    pub fn violation_type_label(&self) -> &'static str {
+        match ViolationType::try_from(self.violation_type) {
+            Ok(ViolationType::BrokenCommit) => "Broken Commit",
+            Ok(ViolationType::BrokenMlsProposal) => "Broken MLS Proposal",
+            Ok(ViolationType::CensorshipInactivity) => "Censorship/Inactivity",
+            _ => "Unknown Violation",
+        }
+    }
+
+    /// Wrap this evidence into a `GroupUpdateRequest` for consensus voting.
+    pub fn into_update_request(self) -> GroupUpdateRequest {
+        GroupUpdateRequest {
+            payload: Some(group_update_request::Payload::EmergencyCriteria(
+                EmergencyCriteriaProposal {
+                    evidence: Some(self),
+                },
+            )),
+        }
+    }
 }
 
 // WELCOME MESSAGE SUBTOPIC
@@ -274,6 +350,19 @@ pub fn convert_group_request_to_display(request: Vec<u8>) -> (String, String) {
             "Remove Member".to_string(),
             format_wallet_address(&rm.identity),
         ),
+        Some(group_update_request::Payload::EmergencyCriteria(ec)) => {
+            let (label, target) = match ec.evidence.as_ref() {
+                Some(e) => (
+                    format!("Emergency: {}", e.violation_type_label()),
+                    format_wallet_address(&e.target_member_id),
+                ),
+                None => (
+                    "Emergency: Unknown Violation".to_string(),
+                    "unknown".to_string(),
+                ),
+            };
+            (label, target)
+        }
         _ => ("Unknown".to_string(), "Invalid request".to_string()),
     }
 }
@@ -286,6 +375,11 @@ pub fn get_identity_from_group_update_request(req: GroupUpdateRequest) -> String
         Some(group_update_request::Payload::RemoveMember(rm)) => {
             format_wallet_address(&rm.identity)
         }
+        Some(group_update_request::Payload::EmergencyCriteria(ec)) => ec
+            .evidence
+            .as_ref()
+            .map(|e| format_wallet_address(&e.target_member_id))
+            .unwrap_or_else(|| "unknown".to_string()),
         _ => "unknown".to_string(),
     }
 }

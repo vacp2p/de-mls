@@ -103,6 +103,13 @@ impl CurrentEpochProposals {
         &self.epoch_history
     }
 
+    /// Remove a single proposal from the approved queue.
+    ///
+    /// Used for proposals that don't produce MLS operations (e.g., emergency criteria).
+    pub fn remove_approved_proposal(&mut self, proposal_id: ProposalId) {
+        self.approved_proposals.remove(&proposal_id);
+    }
+
     pub fn move_proposal_to_approved(&mut self, proposal_id: ProposalId) {
         if let Some(proposal) = self.voting_proposals.remove(&proposal_id) {
             self.approved_proposals.insert(proposal_id, proposal);

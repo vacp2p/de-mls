@@ -128,6 +128,15 @@ where
             .unwrap_or_default()
     }
 
+    /// Get the wallet address as raw bytes.
+    pub fn wallet_bytes(&self) -> Vec<u8> {
+        self.identity
+            .read()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|id| id.wallet.as_slice().to_vec()))
+            .unwrap_or_default()
+    }
+
     // ══════════════════════════════════════════════════════════
     // Key Packages
     // ══════════════════════════════════════════════════════════

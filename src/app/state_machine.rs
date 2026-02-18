@@ -285,7 +285,7 @@ impl GroupStateMachine {
 
                 if approved_proposals_count > 0 {
                     // We have approved proposals → freeze and wait for commit
-                    self.state = GroupState::Waiting;
+                    self.start_waiting();
                     info!(
                         "[check_epoch_boundary] Entering Waiting state with {} approved proposals",
                         approved_proposals_count

@@ -61,6 +61,7 @@ use crate::core::{
 use crate::mls_crypto::{DeMlsStorage, MlsService};
 use crate::protos::de_mls::messages::v1::{
     AppMessage, ConversationMessage, GroupUpdateRequest, VotePayload,
+    group_update_request,
 };
 
 /// Action returned by [`dispatch_result`] telling the caller what to do next.
@@ -314,17 +315,43 @@ pub async fn handle_consensus_event<P: DeMlsProvider>(
             let is_owner = handle.is_owner_of_proposal(proposal_id);
             if result && is_owner {
                 handle.mark_proposal_as_approved(proposal_id);
+                // Check if the just-approved proposal is an emergency criteria proposal.
+                // Emergency proposals don't produce MLS operations — remove from approved queue.
+                let approved = handle.approved_proposals();
+                if let Some(req) = approved.get(&proposal_id) {
+                    if matches!(
+                        req.payload,
+                        Some(group_update_request::Payload::EmergencyCriteria(_))
+                    ) {
+                        info!(
+                            "Emergency criteria proposal {proposal_id} ACCEPTED (owner). \
+                             TODO (Milestone 2): apply peer score penalty to target."
+                        );
+                        handle.remove_approved_proposal(proposal_id);
+                    }
+                }
             } else if !result && is_owner {
                 handle.mark_proposal_as_rejected(proposal_id);
             } else if result && !is_owner {
                 let scope = P::Scope::from(group_name.to_string());
                 let payload = consensus.get_proposal_payload(&scope, proposal_id).await?;
                 let update_request = GroupUpdateRequest::decode(payload.as_slice())?;
-                handle.insert_approved_proposal(proposal_id, update_request);
+
+                if let Some(group_update_request::Payload::EmergencyCriteria(ref ec)) =
+                    update_request.payload
+                {
+                    info!(
+                        "Emergency criteria proposal {proposal_id} ACCEPTED for group {group_name}: \
+                         violation_type={:?}. TODO (Milestone 2): apply peer score penalty to target.",
+                        ec.evidence.as_ref().map(|e| e.violation_type)
+                    );
+                    // Emergency proposals don't produce MLS operations — don't add to approved.
+                } else {
+                    handle.insert_approved_proposal(proposal_id, update_request);
+                }
             } else {
-                // !result && !is_owner: proposal rejected, we weren't the owner
-                // TODO: Emit a rejection event to the UI so pending votes can be cleared.
-                // Currently non-owners see VotePayload but get no notification when rejected.
+                // !result && !is_owner: proposal rejected
+                // TODO (Milestone 2): If emergency criteria, apply false accusation penalty to creator.
                 info!("Proposal {proposal_id} rejected (not owner, no local state to update)");
             }
         }
@@ -336,38 +363,6 @@ pub async fn handle_consensus_event<P: DeMlsProvider>(
             handle.mark_proposal_as_rejected(proposal_id);
         }
     }
-
-    Ok(())
-}
-
-/// Request steward re-election due to steward fault.
-///
-/// Called when the current steward fails to commit pending proposals
-/// within the expected timeout. This should initiate a consensus vote
-/// to elect a new steward.
-///
-/// # Current Implementation
-/// This is a placeholder that clears approved proposals to prevent
-/// infinite timeout loops. Full re-election is not yet implemented.
-///
-/// # TODO
-/// - Define re-election proposal type in protos
-/// - Implement voting logic for steward election
-/// - Handle steward handoff (pending proposals transfer)
-pub async fn request_steward_reelection<P: DeMlsProvider>(
-    handle: &mut GroupHandle,
-    group_name: &str,
-    _consensus: &P::Consensus,
-    _handler: &dyn GroupEventHandler,
-) -> Result<(), CoreError> {
-    tracing::warn!(
-        "[request_steward_reelection] Steward fault detected for group {group_name}, \
-         re-election not yet implemented"
-    );
-
-    // Clear approved proposals to prevent infinite timeout loop.
-    // TODO: In real implementation, these should be preserved for new steward
-    handle.clear_approved_proposals();
 
     Ok(())
 }
@@ -432,6 +427,13 @@ where
             handler.on_outbound(&name, packet).await?;
             handler.on_joined_group(&name).await?;
             Ok(DispatchAction::JoinedGroup)
+        }
+        ProcessResult::ViolationDetected(evidence) => {
+            info!(
+                "Violation detected: type={}, target={:?}",
+                evidence.violation_type, evidence.target_member_id
+            );
+            Ok(DispatchAction::StartVoting(evidence.into_update_request()))
         }
         ProcessResult::GroupUpdated => Ok(DispatchAction::GroupUpdated),
         ProcessResult::Noop => Ok(DispatchAction::Done),

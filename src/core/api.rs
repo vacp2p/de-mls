@@ -61,7 +61,7 @@ use crate::mls_crypto::{
 };
 use crate::protos::de_mls::messages::v1::{
     AppMessage, BatchProposalsMessage, GroupUpdateRequest, InviteMember, UserKeyPackage,
-    WelcomeMessage, app_message, group_update_request, welcome_message,
+    ViolationEvidence, WelcomeMessage, app_message, group_update_request, welcome_message,
 };
 
 // ─────────────────────────── Group Lifecycle ───────────────────────────
@@ -85,7 +85,7 @@ where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
     mls.create_group(name)?;
-    Ok(GroupHandle::new_as_creator(name))
+    Ok(GroupHandle::new_as_creator(name, mls.wallet_bytes()))
 }
 
 /// Prepare a handle for joining an existing group.
@@ -390,6 +390,8 @@ where
 {
     let group_name = handle.group_name().to_owned();
     let local_proposals = handle.approved_proposals();
+    // The target of any violation is the steward who sent this batch.
+    let steward_id = handle.steward_identity().unwrap_or_default().to_vec();
 
     // ── 1. Verify proposal-set IDs match (fast reject) ─────────
     let local_ids: BTreeSet<ProposalId> = local_proposals.keys().copied().collect();
@@ -397,13 +399,21 @@ where
 
     if local_ids != batch_ids {
         tracing::warn!(
-            "Rejecting batch for group {}: proposal ID set mismatch \
+            "Violation: broken commit for group {} — proposal ID set mismatch \
              (local={:?}, batch={:?})",
             group_name,
             local_ids,
             batch_ids,
         );
-        return Ok(ProcessResult::Noop);
+        // BROKEN_COMMIT: ID mismatch means the steward included different proposals
+        // than what was voted on. This is malicious behaviour.
+        return Ok(ProcessResult::ViolationDetected(
+            ViolationEvidence::broken_commit(
+                steward_id.clone(),
+                handle.current_epoch(),
+                format!("proposal ID mismatch: local={local_ids:?}, batch={batch_ids:?}"),
+            ),
+        ));
     }
 
     if local_ids.is_empty() {
@@ -418,22 +428,41 @@ where
     let local_digest = compute_proposals_digest(&local_proposals);
     if batch_msg.proposals_digest != local_digest {
         tracing::warn!(
-            "Rejecting batch for group {}: proposals digest mismatch",
+            "Violation: broken commit for group {} — IDs match but \
+             digest mismatch (steward altered proposal content)",
             group_name,
         );
-        return Ok(ProcessResult::Noop);
+        // BROKEN_COMMIT: IDs match but digest differs — steward altered proposal content.
+        return Ok(ProcessResult::ViolationDetected(
+            ViolationEvidence::broken_commit(
+                steward_id.clone(),
+                handle.current_epoch(),
+                batch_msg.proposals_digest,
+            ),
+        ));
     }
 
     // ── 3. Proposal count must match MLS payloads ──────────────
     if batch_msg.mls_proposals.len() != local_ids.len() {
         tracing::warn!(
-            "Rejecting batch for group {}: proposal count ({}) \
+            "Violation: broken MLS proposal for group {} — proposal count ({}) \
              does not match MLS payload count ({})",
             group_name,
             local_ids.len(),
             batch_msg.mls_proposals.len(),
         );
-        return Ok(ProcessResult::Noop);
+        // BROKEN_MLS_PROPOSAL: digest matches but MLS payload count is wrong.
+        return Ok(ProcessResult::ViolationDetected(
+            ViolationEvidence::broken_mls_proposal(
+                steward_id.clone(),
+                handle.current_epoch(),
+                format!(
+                    "expected {} MLS proposals, got {}",
+                    local_ids.len(),
+                    batch_msg.mls_proposals.len()
+                ),
+            ),
+        ));
     }
 
     // ── 4. Decrypt each proposal, enforce ProposalStored ───────
@@ -442,13 +471,20 @@ where
             DecryptResult::ProposalStored => {}
             other => {
                 tracing::warn!(
-                    "Rejecting batch for group {}: proposal {} \
+                    "Violation: broken MLS proposal for group {} — proposal {} \
                      returned {:?}, expected ProposalStored",
                     group_name,
                     i,
                     other,
                 );
-                return Ok(ProcessResult::Noop);
+                // BROKEN_MLS_PROPOSAL: IDs and digest match but MLS proposal is invalid.
+                return Ok(ProcessResult::ViolationDetected(
+                    ViolationEvidence::broken_mls_proposal(
+                        steward_id.clone(),
+                        handle.current_epoch(),
+                        format!("proposal {i} returned {other:?}, expected ProposalStored"),
+                    ),
+                ));
             }
         }
     }
@@ -550,6 +586,27 @@ where
         return Err(CoreError::MlsGroupNotInitialized);
     }
 
+    // Emergency criteria proposals are consensus-only — they don't produce MLS operations
+    // and must NOT be in the approved queue at batch creation time.
+    // handle_consensus_event is responsible for removing them immediately after approval.
+    // If any are found here, it indicates a bug in the upstream flow.
+    let emergency_ids: Vec<u32> = proposals
+        .iter()
+        .filter(|(_, req)| {
+            matches!(
+                req.payload,
+                Some(group_update_request::Payload::EmergencyCriteria(_))
+            )
+        })
+        .map(|(&id, _)| id)
+        .collect();
+
+    if !emergency_ids.is_empty() {
+        return Err(CoreError::UnexpectedEmergencyProposals {
+            proposal_ids: emergency_ids,
+        });
+    }
+
     let proposal_ids: Vec<u32> = proposals.keys().copied().collect();
     let proposals_digest = compute_proposals_digest(&proposals);
     let mut updates = Vec::with_capacity(proposals.len());
@@ -563,6 +620,10 @@ where
             }
             Some(group_update_request::Payload::RemoveMember(identity)) => {
                 updates.push(GroupUpdate::Remove(identity.identity));
+            }
+            Some(group_update_request::Payload::EmergencyCriteria(_)) => {
+                // Unreachable: emergency proposals are rejected above.
+                return Err(CoreError::InvalidGroupUpdateRequest);
             }
             None => return Err(CoreError::InvalidGroupUpdateRequest),
         }

@@ -55,7 +55,26 @@ message GroupUpdateRequest {
   oneof payload {
     InviteMember invite_member = 1;
     RemoveMember remove_member = 2;
+    EmergencyCriteriaProposal emergency_criteria = 3;
   }
+}
+
+enum ViolationType {
+  VIOLATION_UNSPECIFIED = 0;
+  BROKEN_COMMIT = 1;        // Commit doesn't match voted proposals
+  BROKEN_MLS_PROPOSAL = 2;  // MLS proposal doesn't match voting proposal
+  CENSORSHIP_INACTIVITY = 3; // Steward didn't commit within threshold_duration
+}
+
+message ViolationEvidence {
+  ViolationType violation_type = 1;
+  bytes target_member_id = 2;       // Malicious steward's identity
+  bytes evidence_payload = 3;       // Proof (mismatched hashes, timestamps, etc.)
+  uint64 epoch = 4;                 // Epoch where violation occurred
+}
+
+message EmergencyCriteriaProposal {
+  ViolationEvidence evidence = 1;
 }
 
 message InviteMember {
