@@ -36,6 +36,7 @@ message BatchProposalsMessage {
   bytes commit_message = 3;          // MLS commit message
   repeated uint32 proposal_ids = 4;  // Consensus proposal IDs included in this batch
   bytes proposals_digest = 5;        // SHA-256 over canonical (id, payload) pairs
+  bytes steward_identity = 6;        // Steward wallet bytes (for violation reporting by non-stewards)
 }
 
 // Yes/No vote for a given proposal. Based on the result, the `Vote` will be created.
@@ -55,7 +56,26 @@ message GroupUpdateRequest {
   oneof payload {
     InviteMember invite_member = 1;
     RemoveMember remove_member = 2;
+    EmergencyCriteriaProposal emergency_criteria = 3;
   }
+}
+
+enum ViolationType {
+  VIOLATION_UNSPECIFIED = 0;
+  BROKEN_COMMIT = 1;        // Commit doesn't match voted proposals
+  BROKEN_MLS_PROPOSAL = 2;  // MLS proposal doesn't match voting proposal
+  CENSORSHIP_INACTIVITY = 3; // Steward didn't commit within threshold_duration
+}
+
+message ViolationEvidence {
+  ViolationType violation_type = 1;
+  bytes target_member_id = 2;       // Malicious steward's identity
+  bytes evidence_payload = 3;       // Proof (mismatched hashes, timestamps, etc.)
+  uint64 epoch = 4;                 // Epoch where violation occurred
+}
+
+message EmergencyCriteriaProposal {
+  ViolationEvidence evidence = 1;
 }
 
 message InviteMember {

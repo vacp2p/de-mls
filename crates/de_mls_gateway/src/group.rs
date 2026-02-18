@@ -1,5 +1,6 @@
 use hex::ToHex;
 
+use de_mls::mls_crypto::format_wallet_address;
 use de_mls::{
     app::{CommitTimeoutStatus, IntervalScheduler, StewardScheduler, StewardSchedulerConfig},
     ds::WakuDeliveryService,
@@ -155,7 +156,7 @@ impl Gateway<WakuDeliveryService> {
                                     );
                                     let _ = evt_tx.unbounded_send(
                                         de_mls_ui_protocol::v1::AppEvent::Error(format!(
-                                            "Steward failed to commit for group {group_name_clone}"
+                                            "Emergency vote started: steward inactivity for group {group_name_clone}"
                                         )),
                                     );
                                 }
@@ -272,6 +273,19 @@ impl Gateway<WakuDeliveryService> {
                 Some(group_update_request::Payload::RemoveMember(id)) => {
                     display_proposals.push(("Remove Member".to_string(), id.identity.encode_hex()))
                 }
+                Some(group_update_request::Payload::EmergencyCriteria(ec)) => {
+                    let (label, target) = match ec.evidence.as_ref() {
+                        Some(e) => (
+                            format!("Emergency: {}", e.violation_type_label()),
+                            format_wallet_address(&e.target_member_id),
+                        ),
+                        None => (
+                            "Emergency: Unknown Violation".to_string(),
+                            "unknown".to_string(),
+                        ),
+                    };
+                    display_proposals.push((label, target));
+                }
                 None => return Err(anyhow::anyhow!("message")),
             }
         }
@@ -305,6 +319,19 @@ impl Gateway<WakuDeliveryService> {
                     }
                     Some(group_update_request::Payload::RemoveMember(id)) => {
                         display_batch.push(("Remove Member".to_string(), id.identity.encode_hex()));
+                    }
+                    Some(group_update_request::Payload::EmergencyCriteria(ec)) => {
+                        let (label, target) = match ec.evidence.as_ref() {
+                            Some(e) => (
+                                format!("Emergency: {}", e.violation_type_label()),
+                                format_wallet_address(&e.target_member_id),
+                            ),
+                            None => (
+                                "Emergency: Unknown Violation".to_string(),
+                                "unknown".to_string(),
+                            ),
+                        };
+                        display_batch.push((label, target));
                     }
                     None => {}
                 }

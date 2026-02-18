@@ -31,12 +31,19 @@ The project uses a local `libwaku.dylib` built from [logos-messaging-nim](https:
 make          # clones, builds, and copies libwaku.dylib into ./libs/
 ```
 
+`make` builds `libwaku` with `--undef:metrics` by default to avoid libwaku
+metrics thread-label errors in embedded-node usage. Override if needed:
+
+```bash
+make LIBWAKU_NIM_PARAMS=""
+```
+
 `build.rs` links against `libs/libwaku.dylib` (or `libwaku.so` on Linux) and embeds an rpath automatically.
 
 ## Feature Flags
 
-| Feature | Default | Description |
-| ------- | ------- | ----------- |
+| Feature | Default | Description                                                                     |
+| ------- | ------- | ------------------------------------------------------------------------------- |
 | `waku`  | off     | Enables the Waku relay transport (`WakuDeliveryService`) and links to `libwaku` |
 
 The core library (`de_mls`) compiles and tests **without** `libwaku` present.
@@ -59,7 +66,7 @@ be used from any Rust context.
 
 ### Module layout
 
-```
+``` text
 src/ds/
 ├── mod.rs              Public API re-exports
 ├── transport.rs        DeliveryService trait, OutboundPacket, InboundPacket
@@ -73,15 +80,15 @@ src/ds/
 
 ### Key types
 
-| Type                  | Feature  | Description                                                              |
-| --------------------- | -------- | ------------------------------------------------------------------------ |
-| `DeliveryService`     | —        | Trait — `send()` and `subscribe()`, both synchronous                     |
-| `OutboundPacket`      | —        | Payload + group id + subtopic + app id (self-message filter)             |
-| `InboundPacket`       | —        | Payload + group id + subtopic + app id + timestamp                       |
-| `TopicFilter`         | —        | Async allowlist used by the gateway to filter inbound packets by group   |
-| `WakuDeliveryService` | `waku`   | Concrete impl — runs an embedded Waku node on a background `std::thread` |
-| `WakuConfig`          | `waku`   | Node port, discv5 settings                                               |
-| `WakuStartResult`     | `waku`   | Returned by `start()` — contains the service + optional local ENR        |
+| Type                  | Feature | Description                                                              |
+| --------------------- | ------- | ------------------------------------------------------------------------ |
+| `DeliveryService`     | —       | Trait — `send()` and `subscribe()`, both synchronous                     |
+| `OutboundPacket`      | —       | Payload + group id + subtopic + app id (self-message filter)             |
+| `InboundPacket`       | —       | Payload + group id + subtopic + app id + timestamp                       |
+| `TopicFilter`         | —       | Async allowlist used by the gateway to filter inbound packets by group   |
+| `WakuDeliveryService` | `waku`  | Concrete impl — runs an embedded Waku node on a background `std::thread` |
+| `WakuConfig`          | `waku`  | Node port, discv5 settings                                               |
+| `WakuStartResult`     | `waku`  | Returned by `start()` — contains the service + optional local ENR        |
 
 ### Basic usage
 
@@ -128,7 +135,7 @@ In async code (e.g. the gateway), wrap `ds.send()` in
 
 Messages are routed by Waku content topics with the format:
 
-```
+``` bash
 /{group_name}/{version}/{subtopic}/proto
 ```
 
@@ -163,7 +170,7 @@ No external relay required — just run multiple local nodes.
 **Node 1** (bootstrap node):
 
 ```bash
-NODE_PORT=60001 cargo run -p de_mls_desktop_ui
+NODE_PORT=60001 cargo run -p de-mls-desktop-ui
 ```
 
 Copy the `Local ENR: enr:-QE...` line from the logs.
@@ -171,9 +178,9 @@ Copy the `Local ENR: enr:-QE...` line from the logs.
 **Nodes 2–4** (bootstrap off node 1):
 
 ```bash
-NODE_PORT=60002 DISCV5_BOOTSTRAP_ENRS="enr:-QE..." cargo run -p de_mls_desktop_ui
-NODE_PORT=60003 DISCV5_BOOTSTRAP_ENRS="enr:-QE..." cargo run -p de_mls_desktop_ui
-NODE_PORT=60004 DISCV5_BOOTSTRAP_ENRS="enr:-QE..." cargo run -p de_mls_desktop_ui
+NODE_PORT=60002 DISCV5_BOOTSTRAP_ENRS="enr:-QE..." cargo run -p de-mls-desktop-ui
+NODE_PORT=60003 DISCV5_BOOTSTRAP_ENRS="enr:-QE..." cargo run -p de-mls-desktop-ui
+NODE_PORT=60004 DISCV5_BOOTSTRAP_ENRS="enr:-QE..." cargo run -p de-mls-desktop-ui
 ```
 
 All nodes discover each other via the DHT and form a gossipsub relay mesh automatically.

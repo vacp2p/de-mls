@@ -23,7 +23,7 @@ use crate::mls_crypto::{
 };
 use crate::protos::de_mls::messages::v1::{
     AppMessage, BanRequest, ConversationMessage, GroupUpdateRequest, RemoveMember,
-    group_update_request,
+    ViolationEvidence, group_update_request,
 };
 
 /// Internal state for a group managed by User.
@@ -407,7 +407,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// In both cases the member is unblocked (reverted to Working) and the
     /// epoch boundary is re-synced to now.
     pub async fn check_commit_timeout(&self, group_name: &str) -> CommitTimeoutStatus {
-        let has_proposals = {
+        let (has_proposals, violation_epoch, steward_id) = {
             let mut groups = self.groups.write().await;
             let entry = match groups.get_mut(group_name) {
                 Some(e) => e,
@@ -422,30 +422,38 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             }
 
             let has_proposals = core::approved_proposals_count(&entry.handle) > 0;
+            let epoch = entry.handle.current_epoch();
+            let steward_id = entry.handle.steward_identity().unwrap_or_default().to_vec();
 
             if has_proposals {
-                // Steward fault: failed to commit pending proposals.
-                // Request re-election (clears proposals to break the timeout loop).
-                if let Err(e) = core::request_steward_reelection::<P>(
-                    &mut entry.handle,
-                    group_name,
-                    &*self.consensus_service,
-                    &*self.handler,
-                )
-                .await
-                {
-                    error!("[check_commit_timeout] Failed to request steward re-election: {e}");
-                }
+                // Steward fault: failed to commit pending proposals within timeout.
+                // Clear proposals to break the timeout loop, then file an emergency
+                // criteria proposal for censorship/inactivity.
+                entry.handle.clear_approved_proposals();
             }
 
             entry.state_machine.sync_epoch_boundary();
             entry.state_machine.start_working();
-            has_proposals
+            (has_proposals, epoch, steward_id)
         };
 
         self.state_handler
             .on_state_changed(group_name, GroupState::Working)
             .await;
+
+        // File an emergency criteria proposal for censorship/inactivity.
+        // This happens outside the lock since start_voting_on_request_background
+        // needs to acquire the groups lock internally.
+        if has_proposals {
+            let request = ViolationEvidence::censorship_inactivity(steward_id, violation_epoch)
+                .into_update_request();
+            if let Err(e) = self
+                .start_voting_on_request_background(group_name.to_string(), request)
+                .await
+            {
+                error!("[check_commit_timeout] Failed to start emergency criteria vote: {e}");
+            }
+        }
 
         CommitTimeoutStatus::TimedOut { has_proposals }
     }

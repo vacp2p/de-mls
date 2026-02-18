@@ -55,6 +55,15 @@ pub enum CoreError {
 
     #[error("Invalid subtopic: {0}")]
     InvalidSubtopic(String),
+
+    /// Emergency criteria proposals found in approved queue during batch creation.
+    /// This indicates a bug: emergency proposals should be removed by
+    /// handle_consensus_event before create_batch_proposals is called.
+    #[error(
+        "Emergency criteria proposals found in approved queue (ids: {proposal_ids:?}). \
+         They should have been removed by handle_consensus_event."
+    )]
+    UnexpectedEmergencyProposals { proposal_ids: Vec<u32> },
 }
 
 impl From<mls_crypto::MlsError> for CoreError {
