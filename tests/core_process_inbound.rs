@@ -472,6 +472,7 @@ fn test_process_inbound_batch_proposals_proposal_set_mismatch() {
         commit_message: vec![],
         proposal_ids: vec![99, 100], // IDs joiner doesn't have
         proposals_digest: vec![],
+        steward_identity: b"steward_wallet_identity_20b".to_vec(),
     };
     let app_msg: AppMessage = batch_msg.into();
     let payload = app_msg.encode_to_vec();

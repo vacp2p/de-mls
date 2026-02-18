@@ -36,6 +36,7 @@ message BatchProposalsMessage {
   bytes commit_message = 3;          // MLS commit message
   repeated uint32 proposal_ids = 4;  // Consensus proposal IDs included in this batch
   bytes proposals_digest = 5;        // SHA-256 over canonical (id, payload) pairs
+  bytes steward_identity = 6;        // Steward wallet bytes (for violation reporting by non-stewards)
 }
 
 // Yes/No vote for a given proposal. Based on the result, the `Vote` will be created.

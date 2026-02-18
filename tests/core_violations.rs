@@ -345,6 +345,7 @@ fn test_broken_mls_proposal_count_mismatch() {
         commit_message: vec![],
         proposal_ids: vec![proposal_id],
         proposals_digest: correct_digest,
+        steward_identity: steward_handle.steward_identity().unwrap().to_vec(),
     };
     let app_msg: AppMessage = batch_msg.into();
     let payload = app_msg.encode_to_vec();
@@ -426,12 +427,14 @@ fn test_proposal_id_mismatch_returns_violation() {
     .unwrap();
 
     // Send a batch with IDs that don't match joiner's local proposals
+    let steward_id = steward_handle.steward_identity().unwrap().to_vec();
     let batch_msg = BatchProposalsMessage {
         group_name: group_name.as_bytes().to_vec(),
         mls_proposals: vec![],
         commit_message: vec![],
         proposal_ids: vec![999], // Joiner has no proposals
         proposals_digest: vec![],
+        steward_identity: steward_id.clone(),
     };
     let app_msg: AppMessage = batch_msg.into();
     let payload = app_msg.encode_to_vec();
@@ -442,6 +445,7 @@ fn test_proposal_id_mismatch_returns_violation() {
     match result {
         ProcessResult::ViolationDetected(evidence) => {
             assert_eq!(evidence.violation_type, ViolationType::BrokenCommit as i32);
+            assert_eq!(evidence.target_member_id, steward_id);
             let msg = String::from_utf8(evidence.evidence_payload).unwrap();
             assert!(msg.contains("proposal ID mismatch"));
         }
@@ -516,22 +520,22 @@ fn test_violation_evidence_carries_steward_id_and_epoch() {
     )
     .unwrap();
 
-    // Set the steward identity on joiner's handle (normally set during protocol flow)
+    // Steward identity is learned from the batch (steward_identity field).
     let steward_wallet_addr = parse_wallet_address(steward_wallet).unwrap();
-    joiner_handle.set_steward_identity(steward_wallet_addr.as_slice().to_vec());
 
     // Advance epoch a few times to verify epoch tracking
     joiner_handle.advance_epoch(); // epoch 1
     joiner_handle.advance_epoch(); // epoch 2
     assert_eq!(joiner_handle.current_epoch(), 2);
 
-    // Send a batch with mismatched IDs to trigger a violation
+    // Send a batch with mismatched IDs to trigger a violation; include steward identity
     let batch_msg = BatchProposalsMessage {
         group_name: group_name.as_bytes().to_vec(),
         mls_proposals: vec![],
         commit_message: vec![],
         proposal_ids: vec![999],
         proposals_digest: vec![],
+        steward_identity: steward_wallet_addr.as_slice().to_vec(),
     };
     let app_msg: AppMessage = batch_msg.into();
     let payload = app_msg.encode_to_vec();

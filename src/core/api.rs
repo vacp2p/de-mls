@@ -388,6 +388,11 @@ fn process_batch_proposals<S>(
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
+    // Non-stewards never have steward_identity set; they learn it from the batch.
+    if !batch_msg.steward_identity.is_empty() {
+        handle.set_steward_identity(batch_msg.steward_identity.clone());
+    }
+
     let group_name = handle.group_name().to_owned();
     let local_proposals = handle.approved_proposals();
     // The target of any violation is the steward who sent this batch.
@@ -642,6 +647,7 @@ where
         commit_message: commit,
         proposal_ids,
         proposals_digest,
+        steward_identity: handle.steward_identity().unwrap_or_default().to_vec(),
     }
     .into();
 
