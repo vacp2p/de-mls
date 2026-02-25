@@ -110,6 +110,10 @@ impl CurrentEpochProposals {
         self.approved_proposals.remove(&proposal_id);
     }
 
+    pub fn has_approved_proposal(&self, proposal_id: ProposalId) -> bool {
+        self.approved_proposals.contains_key(&proposal_id)
+    }
+
     pub fn move_proposal_to_approved(&mut self, proposal_id: ProposalId) {
         if let Some(proposal) = self.voting_proposals.remove(&proposal_id) {
             self.approved_proposals.insert(proposal_id, proposal);

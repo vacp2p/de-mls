@@ -6,8 +6,6 @@
 //! - [`MessageType`] - Trait for identifying message types
 //! - Various `From` implementations for protobuf message conversions
 
-use prost::Message;
-
 use hashgraph_like_consensus::{
     protos::consensus::v1::{Proposal, Vote},
     types::ConsensusEvent,
@@ -15,7 +13,7 @@ use hashgraph_like_consensus::{
 
 use crate::{
     core::CoreError,
-    mls_crypto::{format_wallet_address, parse_wallet_to_bytes},
+    mls_crypto::parse_wallet_to_bytes,
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, BatchProposalsMessage, ConversationMessage, GroupUpdateRequest,
         InvitationToJoin, Outcome, ProposalAdded, RemoveMember, UserKeyPackage, UserVote,
@@ -81,8 +79,7 @@ impl MessageType for GroupUpdateRequest {
 /// Result of processing an inbound packet.
 ///
 /// This enum represents all possible outcomes from [`process_inbound`](super::process_inbound).
-/// Pass it to [`dispatch_result`](super::dispatch_result) to handle consensus routing
-/// and get a [`DispatchAction`](super::DispatchAction) for your application.
+/// Match it directly in your application layer to handle each variant.
 ///
 /// # Variants
 ///
@@ -92,6 +89,8 @@ impl MessageType for GroupUpdateRequest {
 /// - `JoinedGroup` - Successfully joined via welcome message
 /// - `GroupUpdated` - MLS state changed (batch commit applied)
 /// - `LeaveGroup` - User was removed from the group
+/// - `ViolationDetected` - Steward violation detected during commit validation
+/// - `BatchQuarantined` - Batch was quarantined (arrived before local proposals)
 /// - `Noop` - Nothing to do (message not for us, already processed, etc.)
 #[derive(Debug, Clone)]
 pub enum ProcessResult {
@@ -138,6 +137,20 @@ pub enum ProcessResult {
     /// Contains evidence of the violation. The application should start
     /// an emergency criteria proposal vote for this evidence.
     ViolationDetected(ViolationEvidence),
+
+    /// A batch was quarantined because local proposals were not yet available.
+    ///
+    /// The batch will be retried automatically when proposals arrive via
+    /// [`retry_quarantined`](super::retry_quarantined). The application may
+    /// use this signal for logging or UI notification.
+    BatchQuarantined {
+        /// Proposal IDs from the quarantined batch.
+        batch_proposal_ids: Vec<u32>,
+        /// Local proposal IDs at the time of quarantine (usually empty).
+        local_proposal_ids: Vec<u32>,
+        /// The epoch when the batch was quarantined.
+        epoch: u64,
+    },
 
     /// No action needed.
     ///
@@ -335,51 +348,5 @@ impl TryFrom<AppMessage> for ProcessResult {
             }
             _ => Ok(ProcessResult::Noop),
         }
-    }
-}
-
-// Helper function to convert protobuf GroupUpdateRequest to display format
-pub fn convert_group_request_to_display(request: Vec<u8>) -> (String, String) {
-    let request = GroupUpdateRequest::decode(request.as_slice()).unwrap_or_default();
-    match request.payload {
-        Some(group_update_request::Payload::InviteMember(im)) => (
-            "Add Member".to_string(),
-            format_wallet_address(&im.identity),
-        ),
-        Some(group_update_request::Payload::RemoveMember(rm)) => (
-            "Remove Member".to_string(),
-            format_wallet_address(&rm.identity),
-        ),
-        Some(group_update_request::Payload::EmergencyCriteria(ec)) => {
-            let (label, target) = match ec.evidence.as_ref() {
-                Some(e) => (
-                    format!("Emergency: {}", e.violation_type_label()),
-                    format_wallet_address(&e.target_member_id),
-                ),
-                None => (
-                    "Emergency: Unknown Violation".to_string(),
-                    "unknown".to_string(),
-                ),
-            };
-            (label, target)
-        }
-        _ => ("Unknown".to_string(), "Invalid request".to_string()),
-    }
-}
-
-pub fn get_identity_from_group_update_request(req: GroupUpdateRequest) -> String {
-    match req.payload {
-        Some(group_update_request::Payload::InviteMember(im)) => {
-            format_wallet_address(&im.identity)
-        }
-        Some(group_update_request::Payload::RemoveMember(rm)) => {
-            format_wallet_address(&rm.identity)
-        }
-        Some(group_update_request::Payload::EmergencyCriteria(ec)) => ec
-            .evidence
-            .as_ref()
-            .map(|e| format_wallet_address(&e.target_member_id))
-            .unwrap_or_else(|| "unknown".to_string()),
-        _ => "unknown".to_string(),
     }
 }

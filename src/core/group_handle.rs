@@ -54,10 +54,46 @@
 //! Non-owners (members who didn't create the proposal) use:
 //! - `insert_approved_proposal()` - Add proposal directly to approved queue
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use crate::core::group_update_handle::{CurrentEpochProposals, ProposalId};
-use crate::protos::de_mls::messages::v1::GroupUpdateRequest;
+use crate::protos::de_mls::messages::v1::{BatchProposalsMessage, GroupUpdateRequest};
+
+/// Maximum number of committed batch hashes to remember for dedup.
+const MAX_COMMITTED_HASHES: usize = 10;
+
+/// Policy governing quarantine behavior for unsolicited batches.
+///
+/// Lives in core because it governs core protocol behavior (quarantine eviction,
+/// epoch expiry). Integrators can configure it at group creation time.
+#[derive(Clone, Debug)]
+pub struct QuarantinePolicy {
+    /// Maximum number of quarantined batches per group.
+    pub max_items: usize,
+    /// Maximum epoch age before quarantined entries expire.
+    pub max_epoch_age: u64,
+}
+
+impl Default for QuarantinePolicy {
+    fn default() -> Self {
+        Self {
+            max_items: 5,
+            max_epoch_age: 2,
+        }
+    }
+}
+
+/// A batch that arrived before local proposals were ready.
+///
+/// Stored temporarily until consensus delivers matching proposals,
+/// at which point it can be re-processed.
+#[derive(Clone, Debug)]
+pub(crate) struct QuarantinedBatch {
+    pub batch_msg: BatchProposalsMessage,
+    pub commit_hash: Vec<u8>,
+    pub batch_fingerprint: Vec<u8>,
+    pub quarantined_at_epoch: u64,
+}
 
 /// Handle for a single MLS group's app-level state.
 ///
@@ -96,14 +132,22 @@ pub struct GroupHandle {
     current_epoch: u64,
     /// Identity (wallet bytes) of the current steward.
     steward_identity: Option<Vec<u8>>,
+    /// Batches received before local proposals were ready (bounded buffer).
+    quarantine: VecDeque<QuarantinedBatch>,
+    /// Recent (commit_hash, batch_fingerprint) pairs for dedup.
+    committed_batch_hashes: VecDeque<(Vec<u8>, Vec<u8>)>,
+    /// Quarantine policy for this group.
+    quarantine_policy: QuarantinePolicy,
 }
 
 impl GroupHandle {
-    /// Create a new group handle for an existing group (joining).
-    ///
-    /// # Arguments
-    /// * `group_name` - The name of the group
+    /// Create a new group handle for an existing group (joining) with default policy.
     pub fn new_for_join(group_name: &str) -> Self {
+        Self::new_for_join_with_policy(group_name, QuarantinePolicy::default())
+    }
+
+    /// Create a new group handle for an existing group (joining) with custom policy.
+    pub fn new_for_join_with_policy(group_name: &str, policy: QuarantinePolicy) -> Self {
         Self {
             group_name: group_name.to_string(),
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
@@ -112,17 +156,25 @@ impl GroupHandle {
             proposals: CurrentEpochProposals::new(),
             current_epoch: 0,
             steward_identity: None,
+            quarantine: VecDeque::new(),
+            committed_batch_hashes: VecDeque::new(),
+            quarantine_policy: policy,
         }
     }
 
-    /// Create a new group handle for creating a new group (as steward).
+    /// Create a new group handle for creating a new group (as steward) with default policy.
     ///
     /// The MLS group should be created via `mls_service.create_group()` first.
-    ///
-    /// # Arguments
-    /// * `group_name` - The name of the group
-    /// * `creator_identity` - The wallet bytes of the creator (who is the initial steward)
     pub fn new_as_creator(group_name: &str, creator_identity: Vec<u8>) -> Self {
+        Self::new_as_creator_with_policy(group_name, creator_identity, QuarantinePolicy::default())
+    }
+
+    /// Create a new group handle for creating a new group (as steward) with custom policy.
+    pub fn new_as_creator_with_policy(
+        group_name: &str,
+        creator_identity: Vec<u8>,
+        policy: QuarantinePolicy,
+    ) -> Self {
         Self {
             group_name: group_name.to_string(),
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
@@ -131,6 +183,9 @@ impl GroupHandle {
             proposals: CurrentEpochProposals::new(),
             current_epoch: 0,
             steward_identity: Some(creator_identity),
+            quarantine: VecDeque::new(),
+            committed_batch_hashes: VecDeque::new(),
+            quarantine_policy: policy,
         }
     }
 
@@ -197,57 +252,41 @@ impl GroupHandle {
     // ─────────────────────────── Proposal Handle Operations ───────────────────────────
 
     /// Check if this user owns (created) the given proposal.
-    ///
-    /// Owners are responsible for broadcasting the proposal to peers and
-    /// must include the full `Proposal` when casting their vote.
     pub fn is_owner_of_proposal(&self, proposal_id: ProposalId) -> bool {
         self.proposals.is_owner_of_proposal(proposal_id)
     }
 
     /// Get the count of approved proposals waiting to be committed.
-    ///
-    /// The steward checks this to determine when to create a batch commit.
     pub fn approved_proposals_count(&self) -> usize {
         self.proposals.approved_proposals_count()
     }
 
     /// Get a copy of all approved proposals.
-    ///
-    /// Called by the steward when creating a batch commit. The proposals
-    /// are sorted by SHA256 hash for deterministic ordering.
     pub fn approved_proposals(&self) -> HashMap<ProposalId, GroupUpdateRequest> {
         self.proposals.approved_proposals()
     }
 
+    /// Check if the proposal exists in the approved queue.
+    pub(crate) fn has_approved_proposal(&self, proposal_id: ProposalId) -> bool {
+        self.proposals.has_approved_proposal(proposal_id)
+    }
+
     /// Move a proposal from voting to approved queue.
-    ///
-    /// Called when consensus is reached with `result = true` and this user
-    /// is the proposal owner.
     pub fn mark_proposal_as_approved(&mut self, proposal_id: ProposalId) {
         self.proposals.move_proposal_to_approved(proposal_id);
     }
 
     /// Remove a proposal from the voting queue (rejected or failed).
-    ///
-    /// Called when consensus is reached with `result = false` or when
-    /// consensus fails (timeout, insufficient votes).
     pub fn mark_proposal_as_rejected(&mut self, proposal_id: ProposalId) {
         self.proposals.remove_voting_proposal(proposal_id);
     }
 
     /// Store a newly created proposal in the voting queue.
-    ///
-    /// Called after `start_voting()` successfully creates a proposal.
-    /// The proposal remains here until consensus completes.
     pub fn store_voting_proposal(&mut self, proposal_id: ProposalId, proposal: GroupUpdateRequest) {
         self.proposals.add_voting_proposal(proposal_id, proposal);
     }
 
     /// Insert a proposal directly into the approved queue.
-    ///
-    /// Called by non-owners when they receive a consensus result for a
-    /// proposal they didn't create. They fetch the payload from the
-    /// consensus service and insert it directly as approved.
     pub fn insert_approved_proposal(
         &mut self,
         proposal_id: ProposalId,
@@ -257,17 +296,11 @@ impl GroupHandle {
     }
 
     /// Remove a single proposal from the approved queue.
-    ///
-    /// Used for proposals that don't produce MLS operations (e.g., emergency criteria
-    /// proposals are consensus-only and should not be included in MLS commits).
     pub fn remove_approved_proposal(&mut self, proposal_id: ProposalId) {
         self.proposals.remove_approved_proposal(proposal_id);
     }
 
     /// Clear approved proposals after a commit, archiving to history.
-    ///
-    /// Called after a batch commit is successfully applied. The proposals
-    /// are moved to `epoch_history` for UI display (up to 10 epochs retained).
     /// Also advances the epoch counter.
     pub fn clear_approved_proposals(&mut self) {
         self.proposals.clear_approved_proposals();
@@ -275,10 +308,85 @@ impl GroupHandle {
     }
 
     /// Get the epoch history (past batches of approved proposals).
-    ///
-    /// Returns up to 10 past epochs, most recent last. Useful for UI
-    /// to show recent membership changes.
     pub fn epoch_history(&self) -> &VecDeque<HashMap<ProposalId, GroupUpdateRequest>> {
         self.proposals.epoch_history()
+    }
+
+    // ─────────────────────────── Quarantine Operations ───────────────────────────
+
+    /// Add a batch to quarantine. Evicts oldest entry if at capacity.
+    pub(crate) fn quarantine_batch(&mut self, batch: QuarantinedBatch) {
+        if self.quarantine.len() >= self.quarantine_policy.max_items {
+            self.quarantine.pop_front();
+        }
+        self.quarantine.push_back(batch);
+    }
+
+    /// Remove and return the first quarantined batch whose proposal IDs match current
+    /// approved proposals.
+    pub(crate) fn take_matching_quarantine(&mut self) -> Option<QuarantinedBatch> {
+        // Enforce age policy before trying to match entries.
+        self.expire_quarantine();
+
+        let local_ids: BTreeSet<ProposalId> = self
+            .proposals
+            .approved_proposals()
+            .keys()
+            .copied()
+            .collect();
+        if local_ids.is_empty() {
+            return None;
+        }
+
+        let pos = self.quarantine.iter().position(|entry| {
+            let batch_ids: BTreeSet<ProposalId> =
+                entry.batch_msg.proposal_ids.iter().copied().collect();
+            batch_ids == local_ids
+        });
+
+        pos.and_then(|i| self.quarantine.remove(i))
+    }
+
+    /// Drop quarantine entries older than `max_epoch_age` epochs.
+    pub(crate) fn expire_quarantine(&mut self) {
+        let current = self.current_epoch;
+        let max_age = self.quarantine_policy.max_epoch_age;
+        self.quarantine
+            .retain(|entry| current.saturating_sub(entry.quarantined_at_epoch) < max_age);
+    }
+
+    /// Check if a batch with the given hashes is a duplicate (in quarantine or committed history).
+    pub(crate) fn is_duplicate_batch(&self, commit_hash: &[u8], fingerprint: &[u8]) -> bool {
+        // Check committed history
+        if self
+            .committed_batch_hashes
+            .iter()
+            .any(|(ch, fp)| ch == commit_hash && fp == fingerprint)
+        {
+            return true;
+        }
+        // Check quarantine
+        self.quarantine
+            .iter()
+            .any(|entry| entry.commit_hash == commit_hash && entry.batch_fingerprint == fingerprint)
+    }
+
+    /// Record a committed batch's hashes for future dedup.
+    pub(crate) fn record_committed_batch(&mut self, commit_hash: Vec<u8>, fingerprint: Vec<u8>) {
+        if self.committed_batch_hashes.len() >= MAX_COMMITTED_HASHES {
+            self.committed_batch_hashes.pop_front();
+        }
+        self.committed_batch_hashes
+            .push_back((commit_hash, fingerprint));
+    }
+
+    /// Number of quarantined batches.
+    pub fn quarantine_len(&self) -> usize {
+        self.quarantine.len()
+    }
+
+    /// Whether any batches are quarantined.
+    pub fn has_quarantined(&self) -> bool {
+        !self.quarantine.is_empty()
     }
 }

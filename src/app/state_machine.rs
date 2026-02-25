@@ -7,6 +7,7 @@ use std::{
 use tracing::info;
 
 use crate::app::scheduler::DEFAULT_EPOCH_DURATION;
+use crate::core::QuarantinePolicy;
 
 /// Configuration for a group's epoch behavior.
 ///
@@ -15,12 +16,19 @@ use crate::app::scheduler::DEFAULT_EPOCH_DURATION;
 pub struct GroupConfig {
     /// Duration of each epoch.
     pub epoch_duration: Duration,
+    /// How long a non-steward member waits in `Waiting` state before
+    /// declaring the steward timed out. Defaults to `epoch_duration / 2`.
+    pub commit_timeout: Option<Duration>,
+    /// Quarantine policy for unsolicited batches.
+    pub quarantine_policy: QuarantinePolicy,
 }
 
 impl Default for GroupConfig {
     fn default() -> Self {
         Self {
             epoch_duration: DEFAULT_EPOCH_DURATION,
+            commit_timeout: Some(DEFAULT_EPOCH_DURATION / 2),
+            quarantine_policy: QuarantinePolicy::default(),
         }
     }
 }
@@ -28,7 +36,17 @@ impl Default for GroupConfig {
 impl GroupConfig {
     /// Create a new config with custom epoch duration.
     pub fn with_epoch_duration(epoch_duration: Duration) -> Self {
-        Self { epoch_duration }
+        Self {
+            epoch_duration,
+            commit_timeout: None,
+            quarantine_policy: QuarantinePolicy::default(),
+        }
+    }
+
+    /// Effective commit timeout: explicit value or `epoch_duration / 2`.
+    pub fn commit_timeout(&self) -> Duration {
+        self.commit_timeout
+            .unwrap_or_else(|| self.epoch_duration / 2)
     }
 }
 
@@ -99,6 +117,8 @@ pub struct GroupStateMachine {
     last_epoch_boundary: Option<Instant>,
     /// Duration of each epoch.
     epoch_duration: Duration,
+    /// How long to wait in `Waiting` state before declaring steward timeout.
+    commit_timeout: Duration,
 }
 
 impl Default for GroupStateMachine {
@@ -122,6 +142,7 @@ impl GroupStateMachine {
             waiting_started_at: None,
             last_epoch_boundary: None,
             epoch_duration: config.epoch_duration,
+            commit_timeout: config.commit_timeout(),
         }
     }
 
@@ -139,6 +160,7 @@ impl GroupStateMachine {
             waiting_started_at: None,
             last_epoch_boundary: None,
             epoch_duration: config.epoch_duration,
+            commit_timeout: config.commit_timeout(),
         }
     }
 
@@ -156,6 +178,7 @@ impl GroupStateMachine {
             waiting_started_at: None,
             last_epoch_boundary: None,
             epoch_duration: config.epoch_duration,
+            commit_timeout: config.commit_timeout(),
         }
     }
 
@@ -223,15 +246,14 @@ impl GroupStateMachine {
     /// Check if the commit has timed out while in Waiting state.
     ///
     /// Returns `true` if the member has been in Waiting for longer than
-    /// `epoch_duration / 2` without receiving a commit from the steward.
+    /// `commit_timeout` without receiving a commit from the steward.
     pub fn is_commit_timed_out(&self) -> bool {
         if self.state != GroupState::Waiting {
             return false;
         }
 
         if let Some(started_at) = self.waiting_started_at {
-            let timeout = self.epoch_duration / 2;
-            if Instant::now() >= started_at + timeout {
+            if Instant::now() >= started_at + self.commit_timeout {
                 return true;
             }
         }

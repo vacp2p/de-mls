@@ -21,7 +21,7 @@
 //! │  │                    de_mls::core                     │   │
 //! │  │  • Group lifecycle (create, join, leave)            │   │
 //! │  │  • Message encryption/decryption                    │   │
-//! │  │  • Consensus voting integration                     │   │
+//! │  │  • Consensus integration                            │   │
 //! │  │  • Proposal management                              │   │
 //! │  └─────────────────────────────────────────────────────┘   │
 //! │                           │                                │
@@ -51,7 +51,7 @@
 //! # What's Provided
 //!
 //! - **MLS Operations** - Group creation, joining, message encryption via OpenMLS
-//! - **Consensus Voting** - Proposal creation, vote casting, result handling
+//! - **Consensus Integration** - Proposal creation, vote casting, result handling
 //! - **Message Types** - Protobuf definitions for all protocol messages
 //! - **Default Services** - `DefaultProvider` bundles standard implementations
 //!
@@ -71,19 +71,18 @@
 //! - Batches approved proposals into MLS commits
 //! - Sends welcome messages to new members
 //!
-//! ## ProcessResult & DispatchAction
+//! ## ProcessResult
 //!
 //! When processing inbound messages:
 //! 1. Call `process_inbound()` → returns `ProcessResult`
-//! 2. Call `dispatch_result()` → returns `DispatchAction`
-//! 3. Handle the action in your application layer
+//! 2. Match the result directly in your application layer
 //!
 //! # Quick Start
 //!
 //! ```ignore
 //! use de_mls::core::{
-//!     create_group, build_message, process_inbound, dispatch_result,
-//!     GroupEventHandler, GroupHandle, ProcessResult, DispatchAction,
+//!     create_group, build_message, process_inbound,
+//!     GroupEventHandler, GroupHandle, ProcessResult,
 //!     DefaultProvider,
 //! };
 //!
@@ -110,28 +109,33 @@
 //! handler.on_outbound("my-chat", packet).await?;
 //!
 //! // 4. Process inbound messages (in your receive loop)
-//! let result = process_inbound(&mut handle, &payload, subtopic, &mls, &identity).await?;
-//! let action = dispatch_result::<DefaultProvider>(&handle, "my-chat", result, &consensus, &handler, &identity).await?;
-//!
-//! match action {
-//!     DispatchAction::Done => { /* nothing more to do */ }
-//!     DispatchAction::StartVoting(request) => { /* spawn voting task */ }
-//!     DispatchAction::GroupUpdated => { /* refresh UI */ }
-//!     DispatchAction::LeaveGroup => { /* cleanup group state */ }
-//!     DispatchAction::JoinedGroup => { /* update state to Working */ }
+//! let result = process_inbound(&mut handle, &payload, subtopic, &mls).await?;
+//! match result {
+//!     ProcessResult::AppMessage(msg) => { handler.on_app_message("my-chat", msg).await?; }
+//!     ProcessResult::GroupUpdated => { /* refresh UI */ }
+//!     ProcessResult::LeaveGroup => { /* cleanup group state */ }
+//!     ProcessResult::JoinedGroup(name) => { /* update state to Working */ }
+//!     ProcessResult::GetUpdateRequest(req) => { /* start consensus vote */ }
+//!     ProcessResult::Proposal(p) => { /* forward to consensus */ }
+//!     ProcessResult::Vote(v) => { /* forward to consensus */ }
+//!     ProcessResult::ViolationDetected(ev) => { /* start emergency vote */ }
+//!     ProcessResult::BatchQuarantined { .. } => { /* log / notify UI */ }
+//!     ProcessResult::Noop => {}
 //! }
 //! ```
 //!
 //! # Module Organization
 //!
-//! - `api` - Core group operations (create, join, send, process)
-//! - `consensus` - Voting workflow and dispatch
+//! - `api` - Core group operations (create, join, send, process, quarantine)
+//! - `consensus` - Voting workflow and consensus result application
+//! - `display` - Display helpers for protobuf types
 //! - `events` - `GroupEventHandler` trait
 //! - `provider` - `DeMlsProvider` trait and `DefaultProvider`
 //! - `types` - `ProcessResult`, message conversions
 
 mod api;
 mod consensus;
+mod display;
 mod error;
 mod events;
 mod group_handle;
@@ -140,22 +144,41 @@ mod proposal_priority;
 mod provider;
 mod types;
 
+// ── Core group operations ──
 pub use api::{
     approved_proposals, approved_proposals_count, become_steward, build_key_package_message,
-    build_message, create_batch_proposals, create_group, epoch_history, group_members,
-    join_group_from_invite, prepare_to_join, process_inbound, resign_steward,
+    build_message, create_batch_proposals, create_group, create_group_with_policy, epoch_history,
+    group_members, has_quarantined, join_group_from_invite, prepare_to_join,
+    prepare_to_join_with_policy, process_inbound, quarantine_len, resign_steward,
+    retry_quarantined,
 };
+
+// ── Consensus integration ──
 pub use consensus::{
-    DispatchAction, cast_vote, dispatch_result, forward_incoming_proposal, forward_incoming_vote,
-    handle_consensus_event, start_voting,
+    ConsensusOutcome, apply_consensus_result, cast_vote, forward_incoming_proposal,
+    forward_incoming_vote, start_voting,
 };
+
+// ── Display helpers ──
+pub use display::{convert_group_request_to_display, get_identity_from_group_update_request};
+
+// ── Error type ──
 pub use error::CoreError;
+
+// ── Event handler trait ──
 pub use events::GroupEventHandler;
-pub use group_handle::GroupHandle;
+
+// ── Group state ──
+pub use group_handle::{GroupHandle, QuarantinePolicy};
+
+// ── Proposal types ──
 pub use group_update_handle::{CurrentEpochProposals, ProposalId};
+
+// ── Proposal priority ──
 pub use proposal_priority::ProposalPriority;
+
+// ── Provider traits ──
 pub use provider::{DeMlsProvider, DefaultProvider};
-pub use types::{
-    MessageType, ProcessResult, convert_group_request_to_display,
-    get_identity_from_group_update_request, message_types,
-};
+
+// ── Core types ──
+pub use types::{MessageType, ProcessResult, message_types};

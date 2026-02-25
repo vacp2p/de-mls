@@ -48,7 +48,7 @@
 //!                           ▼
 //! ┌─────────────────────────────────────────────────────────┐
 //! │                    de_mls::core                         │
-//! │   GroupHandle, process_inbound, dispatch_result, ...    │
+//! │   GroupHandle, process_inbound, apply_consensus_result  │
 //! └─────────────────────────────────────────────────────────┘
 //! ```
 //!

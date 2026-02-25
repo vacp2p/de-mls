@@ -44,5 +44,6 @@ pub use identity::{format_wallet_address, parse_wallet_address, parse_wallet_to_
 pub use service::{CIPHERSUITE, MlsService};
 pub use storage::{DeMlsStorage, MemoryDeMlsStorage};
 pub use types::{
-    CommitResult, DecryptResult, GroupUpdate, KeyPackageBytes, key_package_bytes_from_json,
+    CommitResult, DecryptResult, GroupUpdate, KeyPackageBytes, MlsProposalAction,
+    StagedCommitResult, key_package_bytes_from_json,
 };

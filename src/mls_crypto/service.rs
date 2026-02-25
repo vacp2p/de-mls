@@ -6,6 +6,7 @@ use std::sync::RwLock;
 use alloy::primitives::Address;
 use openmls::credentials::CredentialWithKey;
 use openmls::group::{GroupId, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig};
+use openmls::group::StagedCommit;
 use openmls::prelude::{
     BasicCredential, Ciphersuite, DeserializeBytes, MlsMessageBodyIn, MlsMessageIn,
     ProcessedMessageContent, ProtocolMessage, StagedWelcome,
@@ -18,7 +19,7 @@ use crate::mls_crypto::{
     error::{IdentityError, MlsError, MlsServiceError, Result, StorageError},
     identity::IdentityData,
     storage::DeMlsStorage,
-    types::{CommitResult, DecryptResult, GroupUpdate, KeyPackageBytes},
+    types::{CommitResult, DecryptResult, GroupUpdate, KeyPackageBytes, MlsProposalAction, StagedCommitResult},
 };
 
 /// The MLS ciphersuite used for all operations.
@@ -61,6 +62,7 @@ pub struct MlsService<S: DeMlsStorage> {
     crypto: RustCrypto,
     identity: RwLock<Option<IdentityData>>,
     groups: RwLock<HashMap<String, MlsGroup>>,
+    pending_staged_commits: RwLock<HashMap<String, StagedCommit>>,
 }
 
 impl<S> MlsService<S>
@@ -74,6 +76,7 @@ where
             crypto: RustCrypto::default(),
             identity: RwLock::new(None),
             groups: RwLock::new(HashMap::new()),
+            pending_staged_commits: RwLock::new(HashMap::new()),
         }
     }
 
@@ -353,14 +356,36 @@ where
         }
 
         let processed = group.process_message(&provider, protocol_message)?;
+        let sender_identity = processed.credential().serialized_content().to_vec();
 
         match processed.into_content() {
-            ProcessedMessageContent::ApplicationMessage(app) => {
-                Ok(DecryptResult::Application(app.into_bytes()))
-            }
+            ProcessedMessageContent::ApplicationMessage(app) => Ok(DecryptResult::Application(
+                app.into_bytes(),
+                sender_identity,
+            )),
             ProcessedMessageContent::ProposalMessage(proposal) => {
+                use openmls::prelude::Proposal;
+                use crate::mls_crypto::types::MlsProposalAction;
+
+                // Extract the action before storing (consuming) the proposal.
+                let action = match proposal.proposal() {
+                    Proposal::Add(add) => {
+                        let id = add.key_package().leaf_node().credential()
+                            .serialized_content().to_vec();
+                        MlsProposalAction::Add(id)
+                    }
+                    Proposal::Remove(remove) => {
+                        let id = group
+                            .member(remove.removed())
+                            .map(|c| c.serialized_content().to_vec())
+                            .unwrap_or_default();
+                        MlsProposalAction::Remove(id)
+                    }
+                    other => MlsProposalAction::Other(format!("{other:?}")),
+                };
+
                 group.store_pending_proposal(provider.storage(), proposal.as_ref().clone())?;
-                Ok(DecryptResult::ProposalStored)
+                Ok(DecryptResult::ProposalStored(sender_identity, action))
             }
             ProcessedMessageContent::StagedCommitMessage(staged) => {
                 let removed = staged.self_removed();
@@ -369,9 +394,9 @@ where
                     if group.is_active() {
                         return Err(MlsError::Service(MlsServiceError::GroupStillActive));
                     }
-                    Ok(DecryptResult::Removed)
+                    Ok(DecryptResult::Removed(sender_identity))
                 } else {
-                    Ok(DecryptResult::CommitProcessed)
+                    Ok(DecryptResult::CommitProcessed(sender_identity))
                 }
             }
             ProcessedMessageContent::ExternalJoinProposalMessage(_) => Ok(DecryptResult::Ignored),
@@ -448,6 +473,165 @@ where
             commit: commit_msg.to_bytes()?,
             welcome: welcome_bytes,
         })
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // Split Commit Processing (inspect → validate → merge/discard)
+    // ══════════════════════════════════════════════════════════
+
+    /// Process an inbound commit without merging it.
+    ///
+    /// Calls `process_message()` to authenticate the commit sender and extract
+    /// the membership changes, then stores the `StagedCommit` internally.
+    /// The caller should validate the batch and then call either
+    /// [`merge_staged_commit`] or [`discard_staged_commit`].
+    pub fn process_commit(&self, group_id: &str, ciphertext: &[u8]) -> Result<StagedCommitResult> {
+        let provider = self.make_provider();
+
+        // Phase 1: Hold only the groups lock. Do all group work (deserialize,
+        // authenticate, extract actions) and produce an owned StagedCommit.
+        let outcome = {
+            let mut groups = self
+                .groups
+                .write()
+                .map_err(|e| StorageError::Lock(e.to_string()))?;
+            let group = groups.get_mut(group_id).ok_or_else(|| {
+                MlsError::Service(MlsServiceError::GroupNotFound(group_id.to_string()))
+            })?;
+
+            let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(ciphertext)?;
+            let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
+
+            if protocol_message.group_id().as_slice() != group.group_id().as_slice() {
+                tracing::debug!(
+                    "process_commit: ignoring commit for wrong group ID (expected {})",
+                    group_id,
+                );
+                return Ok(StagedCommitResult::Ignored);
+            }
+
+            if protocol_message.epoch() < group.epoch() {
+                tracing::debug!(
+                    "process_commit: ignoring stale commit from epoch {} (current: {})",
+                    protocol_message.epoch().as_u64(),
+                    group.epoch().as_u64(),
+                );
+                return Ok(StagedCommitResult::Ignored);
+            }
+
+            let processed = group.process_message(&provider, protocol_message)?;
+            let sender_identity = processed.credential().serialized_content().to_vec();
+
+            match processed.into_content() {
+                ProcessedMessageContent::StagedCommitMessage(staged) => {
+                    let self_removed = staged.self_removed();
+
+                    let mut actions = Vec::new();
+                    for add in staged.add_proposals() {
+                        let id = add
+                            .add_proposal()
+                            .key_package()
+                            .leaf_node()
+                            .credential()
+                            .serialized_content()
+                            .to_vec();
+                        actions.push(MlsProposalAction::Add(id));
+                    }
+                    for remove in staged.remove_proposals() {
+                        let removed_index = remove.remove_proposal().removed();
+                        let id = group
+                            .member(removed_index)
+                            .map(|c| c.serialized_content().to_vec())
+                            .unwrap_or_default();
+                        actions.push(MlsProposalAction::Remove(id));
+                    }
+
+                    Some((sender_identity, self_removed, actions, *staged))
+                }
+                _ => {
+                    tracing::debug!(
+                        "process_commit: ignoring non-commit message for group {}",
+                        group_id,
+                    );
+                    None
+                }
+            }
+        }; // groups lock released
+
+        // Phase 2: Store the staged commit under its own lock.
+        match outcome {
+            Some((sender_identity, self_removed, actions, staged)) => {
+                self.pending_staged_commits
+                    .write()
+                    .map_err(|e| StorageError::Lock(e.to_string()))?
+                    .insert(group_id.to_string(), staged);
+
+                Ok(StagedCommitResult::Staged {
+                    sender_identity,
+                    self_removed,
+                    actions,
+                })
+            }
+            None => Ok(StagedCommitResult::Ignored),
+        }
+    }
+
+    /// Merge a previously staged commit, advancing the MLS epoch.
+    ///
+    /// Call this after validation passes.
+    pub fn merge_staged_commit(&self, group_id: &str) -> Result<()> {
+        let provider = self.make_provider();
+
+        // Phase 1: Take the staged commit out of the pending map.
+        let staged = self
+            .pending_staged_commits
+            .write()
+            .map_err(|e| StorageError::Lock(e.to_string()))?
+            .remove(group_id)
+            .ok_or_else(|| {
+                MlsError::Service(MlsServiceError::NoPendingStagedCommit(
+                    group_id.to_string(),
+                ))
+            })?;
+        // pending_staged_commits lock released — staged is an owned value.
+
+        // Phase 2: Merge into the group under the groups lock.
+        let mut groups = self
+            .groups
+            .write()
+            .map_err(|e| StorageError::Lock(e.to_string()))?;
+        let group = groups.get_mut(group_id).ok_or_else(|| {
+            MlsError::Service(MlsServiceError::GroupNotFound(group_id.to_string()))
+        })?;
+
+        group.merge_staged_commit(&provider, staged)?;
+        Ok(())
+    }
+
+    /// Discard a previously staged commit without merging.
+    ///
+    /// Call this when validation detects a violation or when a pre-authentication
+    /// failure requires cleanup. Also clears pending proposals from MLS storage
+    /// to keep the group state clean.
+    pub fn discard_staged_commit(&self, group_id: &str) -> Result<()> {
+        // Phase 1: Remove the staged commit (drop it).
+        self.pending_staged_commits
+            .write()
+            .map_err(|e| StorageError::Lock(e.to_string()))?
+            .remove(group_id);
+        // pending_staged_commits lock released.
+
+        // Phase 2: Clear pending proposals under the groups lock.
+        let provider = self.make_provider();
+        let mut groups = self
+            .groups
+            .write()
+            .map_err(|e| StorageError::Lock(e.to_string()))?;
+        if let Some(group) = groups.get_mut(group_id) {
+            let _ = group.clear_pending_proposals(provider.storage());
+        }
+
+        Ok(())
     }
 
     // ══════════════════════════════════════════════════════════

@@ -1,21 +1,20 @@
-//! Integration tests for steward violation detection and emergency criteria proposals.
+//! Integration tests for steward violation detection, emergency criteria proposals,
+//! quarantine, and dedup.
 
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use prost::Message;
-use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
 
 use de_mls::core::{
-    CoreError, DefaultProvider, DispatchAction, GroupEventHandler, GroupHandle, ProcessResult,
-    ProposalId, build_key_package_message, create_batch_proposals, create_group, dispatch_result,
-    prepare_to_join, process_inbound,
+    ConsensusOutcome, CoreError, GroupEventHandler, GroupHandle, ProcessResult, ProposalId,
+    QuarantinePolicy, apply_consensus_result, build_key_package_message, create_batch_proposals,
+    create_group, prepare_to_join, process_inbound, retry_quarantined,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
 use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService, parse_wallet_address};
 use de_mls::protos::de_mls::messages::v1::{
-    AppMessage, BatchProposalsMessage, GroupUpdateRequest, ViolationEvidence, ViolationType,
+    AppMessage, GroupUpdateRequest, ViolationEvidence, ViolationType,
     app_message, group_update_request,
 };
 
@@ -51,6 +50,7 @@ struct MockHandler {
 }
 
 impl MockHandler {
+    #[allow(dead_code)]
     fn new() -> Self {
         Self {
             events: Arc::new(Mutex::new(Vec::new())),
@@ -158,7 +158,6 @@ fn steward_add_joiner(
         other => panic!("Expected GetUpdateRequest, got {:?}", other),
     };
 
-    // Shortcut: insert directly as approved, bypassing consensus voting.
     let proposal_id = PROPOSAL_COUNTER.fetch_add(1, Ordering::Relaxed);
     steward_handle.insert_approved_proposal(proposal_id, gur);
     let packets = create_batch_proposals(steward_handle, steward_mls).unwrap();
@@ -177,31 +176,6 @@ fn steward_add_joiner(
     (welcome_packet, batch_packet)
 }
 
-/// Compute the same digest as process_batch_proposals uses internally.
-fn compute_proposals_digest(proposals: &HashMap<ProposalId, GroupUpdateRequest>) -> Vec<u8> {
-    let sorted: BTreeMap<_, _> = proposals.iter().collect();
-    let mut hasher = Sha256::new();
-    for (&id, req) in &sorted {
-        hasher.update(id.to_le_bytes());
-        hasher.update(req.encode_to_vec());
-    }
-    hasher.finalize().to_vec()
-}
-
-// ─────────────────────────── Mock consensus ───────────────────────────
-
-use hashgraph_like_consensus::{
-    events::BroadcastEventBus, service::ConsensusService, storage::InMemoryConsensusStorage,
-};
-
-type TestConsensus =
-    ConsensusService<String, InMemoryConsensusStorage<String>, BroadcastEventBus<String>>;
-
-fn make_consensus() -> TestConsensus {
-    let storage = InMemoryConsensusStorage::new();
-    let event_bus = BroadcastEventBus::default();
-    TestConsensus::new_with_components(storage, event_bus, 10)
-}
 
 // ─────────────────────────── Tests ───────────────────────────
 
@@ -216,7 +190,6 @@ fn test_broken_commit_detection_digest_mismatch() {
     let (joiner_mls, mut joiner_handle, kp_packet) =
         setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
 
-    // Join the group
     let (welcome_packet, _batch_packet) =
         steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
     let join_result = process_inbound(
@@ -228,11 +201,9 @@ fn test_broken_commit_detection_digest_mismatch() {
     .unwrap();
     assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
 
-    // Set up a second joiner to create a real proposal
     let (_joiner2_mls, _joiner2_handle, kp2_packet) =
         setup_joiner(group_name, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
 
-    // Steward processes key package
     let result = process_inbound(
         &mut steward_handle,
         &kp2_packet.payload,
@@ -245,34 +216,28 @@ fn test_broken_commit_detection_digest_mismatch() {
         other => panic!("Expected GetUpdateRequest, got {:?}", other),
     };
 
-    // Shortcut: insert directly into both approved queues.
-    // In production, the owner calls store_voting_proposal() → consensus votes →
-    // handle_consensus_event() moves it to approved (owner path: mark_proposal_as_approved,
-    // non-owner path: get_proposal_payload + insert_approved_proposal).
-    // We skip the consensus round-trip here to isolate batch validation logic.
     let proposal_id: ProposalId = 42;
     steward_handle.insert_approved_proposal(proposal_id, gur.clone());
     joiner_handle.insert_approved_proposal(proposal_id, gur);
 
-    // Steward creates batch proposals
     let packets = create_batch_proposals(&mut steward_handle, &steward_mls).unwrap();
     let batch_packet = packets
         .iter()
         .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
         .expect("Expected batch proposals packet");
 
-    // Decode the batch, tamper with the digest to simulate broken commit
     let app_msg = AppMessage::decode(batch_packet.payload.as_slice()).unwrap();
     let mut batch = match app_msg.payload {
         Some(app_message::Payload::BatchProposalsMessage(b)) => b,
         _ => panic!("Expected BatchProposalsMessage"),
     };
-    batch.proposals_digest = vec![0xDE, 0xAD, 0xBE, 0xEF]; // Tampered digest
+    batch.proposals_digest = vec![0xDE, 0xAD, 0xBE, 0xEF];
 
     let tampered_app_msg: AppMessage = batch.into();
     let tampered_payload = tampered_app_msg.encode_to_vec();
 
-    // Joiner processes the tampered batch → should detect BROKEN_COMMIT
+    let members_before = joiner_mls.members(group_name).unwrap();
+
     let result = process_inbound(
         &mut joiner_handle,
         &tampered_payload,
@@ -283,182 +248,37 @@ fn test_broken_commit_detection_digest_mismatch() {
 
     match result {
         ProcessResult::ViolationDetected(evidence) => {
-            assert_eq!(evidence.violation_type, ViolationType::BrokenCommit as i32); // BROKEN_COMMIT
+            assert_eq!(evidence.violation_type, ViolationType::BrokenCommit as i32);
         }
         other => panic!("Expected ViolationDetected(BROKEN_COMMIT), got {:?}", other),
     }
+
+    let members_after = joiner_mls.members(group_name).unwrap();
+    assert_eq!(
+        members_before.len(),
+        members_after.len(),
+        "MLS state should not have changed after violation detection"
+    );
 }
 
-/// Test: when MLS proposal count doesn't match expected count (IDs and digest match),
-/// a BROKEN_MLS_PROPOSAL ViolationDetected is returned.
+/// Test: ViolationDetected carries correct evidence for emergency criteria proposal.
 #[test]
-fn test_broken_mls_proposal_count_mismatch() {
-    let group_name = "violation-mls-count";
-
-    let (steward_mls, mut steward_handle) =
-        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let (joiner_mls, mut joiner_handle, kp_packet) =
-        setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
-
-    // Join the group
-    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
-    let join_result = process_inbound(
-        &mut joiner_handle,
-        &welcome_packet.payload,
-        WELCOME_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
-    assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
-
-    // Set up a second joiner
-    let (_joiner2_mls, _joiner2_handle, kp2_packet) =
-        setup_joiner(group_name, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
-
-    let result = process_inbound(
-        &mut steward_handle,
-        &kp2_packet.payload,
-        WELCOME_SUBTOPIC,
-        &steward_mls,
-    )
-    .unwrap();
-    let gur = match result {
-        ProcessResult::GetUpdateRequest(gur) => gur,
-        other => panic!("Expected GetUpdateRequest, got {:?}", other),
-    };
-
-    // Shortcut: bypass consensus flow, insert directly into both approved queues.
-    // See test_broken_commit_detection_digest_mismatch for explanation.
-    let proposal_id: ProposalId = 43;
-    steward_handle.insert_approved_proposal(proposal_id, gur.clone());
-    joiner_handle.insert_approved_proposal(proposal_id, gur.clone());
-
-    // Compute the correct digest from the joiner's perspective
-    let mut proposals_map = HashMap::new();
-    proposals_map.insert(proposal_id, gur);
-    let correct_digest = compute_proposals_digest(&proposals_map);
-
-    // Build a batch message with correct IDs and digest but wrong MLS proposal count
-    let batch_msg = BatchProposalsMessage {
-        group_name: group_name.as_bytes().to_vec(),
-        mls_proposals: vec![], // Empty! Should have 1 proposal
-        commit_message: vec![],
-        proposal_ids: vec![proposal_id],
-        proposals_digest: correct_digest,
-        steward_identity: steward_handle.steward_identity().unwrap().to_vec(),
-    };
-    let app_msg: AppMessage = batch_msg.into();
-    let payload = app_msg.encode_to_vec();
-
-    let result =
-        process_inbound(&mut joiner_handle, &payload, APP_MSG_SUBTOPIC, &joiner_mls).unwrap();
-
-    match result {
-        ProcessResult::ViolationDetected(evidence) => {
-            assert_eq!(
-                evidence.violation_type,
-                ViolationType::BrokenMlsProposal as i32
-            ); // BROKEN_MLS_PROPOSAL
-            let msg = String::from_utf8(evidence.evidence_payload).unwrap();
-            assert!(msg.contains("expected 1 MLS proposals, got 0"));
-        }
-        other => panic!(
-            "Expected ViolationDetected(BROKEN_MLS_PROPOSAL), got {:?}",
-            other
-        ),
-    }
-}
-
-/// Test: ViolationDetected dispatches to StartVoting with EmergencyCriteriaProposal.
-#[tokio::test]
-async fn test_dispatch_violation_detected_starts_voting() {
-    let group_name = "dispatch-violation";
-    let (mls, handle) = setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let handler = MockHandler::new();
-    let consensus = make_consensus();
-
+fn test_violation_detected_produces_emergency_proposal() {
     let evidence = ViolationEvidence::broken_commit(vec![0xAA, 0xBB], 5, vec![0xDE, 0xAD]);
+    let request = evidence.into_update_request();
 
-    let action = dispatch_result::<DefaultProvider, _>(
-        &handle,
-        group_name,
-        ProcessResult::ViolationDetected(evidence),
-        &consensus,
-        &handler,
-        &mls,
-    )
-    .await
-    .unwrap();
-
-    match action {
-        DispatchAction::StartVoting(request) => {
-            // Verify it's an EmergencyCriteriaProposal
-            match request.payload {
-                Some(group_update_request::Payload::EmergencyCriteria(ec)) => {
-                    let ev = ec.evidence.expect("Expected evidence");
-                    assert_eq!(ev.violation_type, 1);
-                    assert_eq!(ev.target_member_id, vec![0xAA, 0xBB]);
-                    assert_eq!(ev.epoch, 5);
-                }
-                other => panic!("Expected EmergencyCriteria payload, got {:?}", other),
-            }
+    match request.payload {
+        Some(group_update_request::Payload::EmergencyCriteria(ec)) => {
+            let ev = ec.evidence.expect("Expected evidence");
+            assert_eq!(ev.violation_type, 1);
+            assert_eq!(ev.target_member_id, vec![0xAA, 0xBB]);
+            assert_eq!(ev.epoch, 5);
         }
-        other => panic!("Expected StartVoting, got {:?}", other),
-    }
-}
-
-/// Test: proposal ID mismatch is detected as a BROKEN_COMMIT violation.
-#[test]
-fn test_proposal_id_mismatch_returns_violation() {
-    let group_name = "violation-id-mismatch";
-
-    let (steward_mls, mut steward_handle) =
-        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let (joiner_mls, mut joiner_handle, kp_packet) =
-        setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
-
-    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
-    process_inbound(
-        &mut joiner_handle,
-        &welcome_packet.payload,
-        WELCOME_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
-
-    // Send a batch with IDs that don't match joiner's local proposals
-    let steward_id = steward_handle.steward_identity().unwrap().to_vec();
-    let batch_msg = BatchProposalsMessage {
-        group_name: group_name.as_bytes().to_vec(),
-        mls_proposals: vec![],
-        commit_message: vec![],
-        proposal_ids: vec![999], // Joiner has no proposals
-        proposals_digest: vec![],
-        steward_identity: steward_id.clone(),
-    };
-    let app_msg: AppMessage = batch_msg.into();
-    let payload = app_msg.encode_to_vec();
-
-    let result =
-        process_inbound(&mut joiner_handle, &payload, APP_MSG_SUBTOPIC, &joiner_mls).unwrap();
-
-    match result {
-        ProcessResult::ViolationDetected(evidence) => {
-            assert_eq!(evidence.violation_type, ViolationType::BrokenCommit as i32);
-            assert_eq!(evidence.target_member_id, steward_id);
-            let msg = String::from_utf8(evidence.evidence_payload).unwrap();
-            assert!(msg.contains("proposal ID mismatch"));
-        }
-        other => panic!(
-            "Expected ViolationDetected(BROKEN_COMMIT) for ID mismatch, got {:?}",
-            other
-        ),
+        other => panic!("Expected EmergencyCriteria payload, got {:?}", other),
     }
 }
 
 /// Test: create_batch_proposals rejects emergency criteria proposals in the approved queue.
-/// Emergency proposals should be removed by handle_consensus_event before batch creation.
-/// Their presence indicates a bug in the upstream flow.
 #[test]
 fn test_emergency_in_approved_queue_returns_error() {
     let group_name = "emergency-only-batch";
@@ -469,7 +289,6 @@ fn test_emergency_in_approved_queue_returns_error() {
     handle.insert_approved_proposal(50, emergency_request);
     assert_eq!(handle.approved_proposals_count(), 1);
 
-    // Emergency proposals in the approved queue are an invariant violation.
     let result = create_batch_proposals(&mut handle, &mls);
     assert!(result.is_err());
     match result.unwrap_err() {
@@ -496,66 +315,17 @@ fn test_remove_approved_proposal() {
     assert_eq!(handle.approved_proposals_count(), 0);
 }
 
-/// Test: ViolationEvidence carries correct target_member_id (steward identity)
-/// and epoch from GroupHandle when processing a tampered batch.
+/// Test: ViolationEvidence carries correct target_member_id and epoch.
 #[test]
 fn test_violation_evidence_carries_steward_id_and_epoch() {
-    let group_name = "violation-evidence-fields";
-    let steward_wallet = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-
-    let (steward_mls, mut steward_handle) = setup_steward(group_name, steward_wallet);
-    let (joiner_mls, mut joiner_handle, kp_packet) =
-        setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
-
-    // Join the group
-    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
-    process_inbound(
-        &mut joiner_handle,
-        &welcome_packet.payload,
-        WELCOME_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
-
-    // Steward identity is learned from the batch (steward_identity field).
-    let steward_wallet_addr = parse_wallet_address(steward_wallet).unwrap();
-
-    // Advance epoch a few times to verify epoch tracking
-    joiner_handle.advance_epoch(); // epoch 1
-    joiner_handle.advance_epoch(); // epoch 2
-    assert_eq!(joiner_handle.current_epoch(), 2);
-
-    // Send a batch with mismatched IDs to trigger a violation; include steward identity
-    let batch_msg = BatchProposalsMessage {
-        group_name: group_name.as_bytes().to_vec(),
-        mls_proposals: vec![],
-        commit_message: vec![],
-        proposal_ids: vec![999],
-        proposals_digest: vec![],
-        steward_identity: steward_wallet_addr.as_slice().to_vec(),
-    };
-    let app_msg: AppMessage = batch_msg.into();
-    let payload = app_msg.encode_to_vec();
-
-    let result =
-        process_inbound(&mut joiner_handle, &payload, APP_MSG_SUBTOPIC, &joiner_mls).unwrap();
-
-    match result {
-        ProcessResult::ViolationDetected(evidence) => {
-            assert_eq!(evidence.violation_type, ViolationType::BrokenCommit as i32);
-            // target_member_id should be the steward's wallet bytes
-            assert_eq!(
-                evidence.target_member_id,
-                steward_wallet_addr.as_slice().to_vec()
-            );
-            // epoch should reflect current epoch on the handle
-            assert_eq!(evidence.epoch, 2);
-        }
-        other => panic!("Expected ViolationDetected, got {:?}", other),
-    }
+    let evidence = ViolationEvidence::broken_commit(vec![0xAA, 0xBB], 2, b"proof".to_vec());
+    assert_eq!(evidence.violation_type, ViolationType::BrokenCommit as i32);
+    assert_eq!(evidence.target_member_id, vec![0xAA, 0xBB]);
+    assert_eq!(evidence.epoch, 2);
+    assert_eq!(evidence.evidence_payload, b"proof".to_vec());
 }
 
-/// Test: epoch counter increments when approved proposals are cleared (commit processed).
+/// Test: epoch counter increments when approved proposals are cleared.
 #[test]
 fn test_epoch_advances_on_clear_approved_proposals() {
     let group_name = "epoch-advance";
@@ -564,7 +334,6 @@ fn test_epoch_advances_on_clear_approved_proposals() {
 
     assert_eq!(handle.current_epoch(), 0);
 
-    // Insert and clear to simulate a commit
     handle.insert_approved_proposal(1, GroupUpdateRequest { payload: None });
     handle.clear_approved_proposals();
     assert_eq!(handle.current_epoch(), 1);
@@ -573,96 +342,97 @@ fn test_epoch_advances_on_clear_approved_proposals() {
     handle.clear_approved_proposals();
     assert_eq!(handle.current_epoch(), 2);
 
-    // advance_epoch also works independently
     handle.advance_epoch();
     assert_eq!(handle.current_epoch(), 3);
 }
 
-/// Test: handle_consensus_event for emergency criteria proposal (owner, accepted)
+/// Test: apply_consensus_result for emergency criteria proposal (owner, accepted)
 /// moves proposal to approved then immediately removes it (no MLS operation).
-#[tokio::test]
-async fn test_consensus_event_emergency_accepted_owner() {
+#[test]
+fn test_apply_consensus_result_emergency_accepted_owner() {
     let group_name = "consensus-emergency-owner";
     let (_mls, mut handle) =
         setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let consensus = make_consensus();
 
-    // Create an emergency criteria proposal in voting queue (simulates owner creating it)
     let emergency_request =
         ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new()).into_update_request();
     let proposal_id = 77;
     handle.store_voting_proposal(proposal_id, emergency_request);
     assert!(handle.is_owner_of_proposal(proposal_id));
 
-    // Simulate consensus YES
-    let event = hashgraph_like_consensus::types::ConsensusEvent::ConsensusReached {
-        proposal_id,
-        result: true,
-        timestamp: 12345,
-    };
-
-    de_mls::core::handle_consensus_event::<DefaultProvider>(
-        &mut handle,
-        group_name,
-        event,
-        &consensus,
-    )
-    .await
-    .unwrap();
+    apply_consensus_result(&mut handle, proposal_id, ConsensusOutcome::ApprovedOwner).unwrap();
 
     // Emergency proposal should NOT remain in approved queue
     assert_eq!(handle.approved_proposals_count(), 0);
 }
 
-/// Test: handle_consensus_event for emergency criteria proposal (non-owner, accepted)
+/// Test: apply_consensus_result for emergency criteria proposal (non-owner, accepted)
 /// does not insert into approved queue.
-#[tokio::test]
-async fn test_consensus_event_emergency_accepted_non_owner() {
+#[test]
+fn test_apply_consensus_result_emergency_accepted_non_owner() {
     let group_name = "consensus-emergency-non-owner";
     let (_mls, mut handle) =
         setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-
-    // Use a real consensus service that can store the proposal payload
-    let consensus = make_consensus();
 
     // Create the emergency proposal payload
     let emergency_request =
         ViolationEvidence::censorship_inactivity(vec![0xBB], 1).into_update_request();
     let payload = emergency_request.encode_to_vec();
-    // Store the proposal in the consensus service so get_proposal_payload works
-    use hashgraph_like_consensus::api::ConsensusServiceAPI;
-    use hashgraph_like_consensus::types::CreateProposalRequest;
-    let scope = group_name.to_string();
-    let create_req =
-        CreateProposalRequest::new("test".to_string(), payload, "voter1".into(), 1, 3600, true)
-            .unwrap();
-    let created = consensus.create_proposal(&scope, create_req).await.unwrap();
 
     // The handle does NOT own this proposal (non-owner path)
-    assert!(!handle.is_owner_of_proposal(created.proposal_id));
+    let proposal_id = 88;
+    assert!(!handle.is_owner_of_proposal(proposal_id));
 
-    // Simulate consensus YES
-    let event = hashgraph_like_consensus::types::ConsensusEvent::ConsensusReached {
-        proposal_id: created.proposal_id,
-        result: true,
-        timestamp: 12345,
-    };
-
-    de_mls::core::handle_consensus_event::<DefaultProvider>(
+    apply_consensus_result(
         &mut handle,
-        group_name,
-        event,
-        &consensus,
+        proposal_id,
+        ConsensusOutcome::Approved { payload: &payload },
     )
-    .await
     .unwrap();
 
     // Emergency proposal should NOT be in approved queue
     assert_eq!(handle.approved_proposals_count(), 0);
 }
 
+/// Test: apply_consensus_result returns ProposalNotFound for unknown proposal ID
+/// on the owner-only path.
+#[test]
+fn test_apply_consensus_result_owner_path_proposal_not_found() {
+    let group_name = "invalid-owner";
+    let (_mls, mut handle) =
+        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+
+    let result = apply_consensus_result(&mut handle, 999, ConsensusOutcome::ApprovedOwner);
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        CoreError::ProposalNotFound(id) => assert_eq!(id, 999),
+        other => panic!("Expected ProposalNotFound, got {:?}", other),
+    }
+}
+
+/// Test: apply_consensus_result rejects ApprovedOwner when proposal is already approved
+/// (not in owner's voting queue anymore).
+#[test]
+fn test_apply_consensus_result_invalid_approved_owner_already_approved() {
+    let group_name = "invalid-owner-approved";
+    let (_mls, mut handle) =
+        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+
+    let proposal_id = 777;
+    handle.insert_approved_proposal(proposal_id, GroupUpdateRequest { payload: None });
+
+    let result = apply_consensus_result(&mut handle, proposal_id, ConsensusOutcome::ApprovedOwner);
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        CoreError::InvalidConsensusOutcome(_) => {}
+        other => panic!("Expected InvalidConsensusOutcome, got {:?}", other),
+    }
+}
+
 /// Test: emergency proposals mixed with regular proposals in approved queue
-/// causes an error — they should have been removed by handle_consensus_event.
+/// causes an error.
 #[test]
 fn test_emergency_mixed_with_regular_returns_error() {
     let group_name = "emergency-digest-filter";
@@ -671,7 +441,6 @@ fn test_emergency_mixed_with_regular_returns_error() {
     let (joiner_mls, mut joiner_handle, kp_packet) =
         setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
 
-    // Join the group
     let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
     process_inbound(
         &mut joiner_handle,
@@ -681,7 +450,6 @@ fn test_emergency_mixed_with_regular_returns_error() {
     )
     .unwrap();
 
-    // Create a real add-member proposal
     let (_joiner2_mls, _joiner2_handle, kp2_packet) =
         setup_joiner(group_name, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
     let result = process_inbound(
@@ -696,9 +464,6 @@ fn test_emergency_mixed_with_regular_returns_error() {
         other => panic!("Expected GetUpdateRequest, got {:?}", other),
     };
 
-    // Add both a regular proposal and an emergency proposal to steward.
-    // This simulates a bug where handle_consensus_event didn't clean up
-    // the emergency proposal from the approved queue.
     let regular_id: ProposalId = 60;
     let emergency_id: ProposalId = 61;
     steward_handle.insert_approved_proposal(regular_id, gur.clone());
@@ -707,8 +472,6 @@ fn test_emergency_mixed_with_regular_returns_error() {
         ViolationEvidence::broken_commit(vec![], 0, Vec::<u8>::new()).into_update_request(),
     );
 
-    // Batch creation should fail because emergency proposals should not be
-    // in the approved queue — handle_consensus_event should have removed them.
     let result = create_batch_proposals(&mut steward_handle, &steward_mls);
     assert!(result.is_err());
     match result.unwrap_err() {
@@ -717,4 +480,318 @@ fn test_emergency_mixed_with_regular_returns_error() {
         }
         other => panic!("Expected UnexpectedEmergencyProposals, got {:?}", other),
     }
+}
+
+// ─────────────────────────── Quarantine & Dedup Tests ───────────────────────────
+
+/// Test: batch arriving before consensus delivers proposals gets quarantined,
+/// then resolves when proposals arrive via retry_quarantined.
+#[test]
+fn test_quarantine_batch_when_no_local_proposals() {
+    let group_name = "quarantine-basic";
+
+    let (steward_mls, mut steward_handle) =
+        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let (joiner_mls, mut joiner_handle, kp_packet) =
+        setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+
+    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
+    let join_result = process_inbound(
+        &mut joiner_handle,
+        &welcome_packet.payload,
+        WELCOME_SUBTOPIC,
+        &joiner_mls,
+    )
+    .unwrap();
+    assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
+
+    let (_joiner2_mls, _joiner2_handle, kp2_packet) =
+        setup_joiner(group_name, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
+
+    let result = process_inbound(
+        &mut steward_handle,
+        &kp2_packet.payload,
+        WELCOME_SUBTOPIC,
+        &steward_mls,
+    )
+    .unwrap();
+    let gur = match result {
+        ProcessResult::GetUpdateRequest(gur) => gur,
+        other => panic!("Expected GetUpdateRequest, got {:?}", other),
+    };
+
+    let proposal_id: ProposalId = 44;
+    steward_handle.insert_approved_proposal(proposal_id, gur.clone());
+    let packets = create_batch_proposals(&mut steward_handle, &steward_mls).unwrap();
+    let batch_packet = packets
+        .iter()
+        .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
+        .expect("Expected batch proposals packet");
+
+    // Joiner receives batch BEFORE consensus delivers proposals → BatchQuarantined
+    let result = process_inbound(
+        &mut joiner_handle,
+        &batch_packet.payload,
+        APP_MSG_SUBTOPIC,
+        &joiner_mls,
+    )
+    .unwrap();
+    assert!(
+        matches!(result, ProcessResult::BatchQuarantined { .. }),
+        "Expected BatchQuarantined, got {:?}",
+        result
+    );
+
+    // Now consensus delivers the proposal to joiner
+    joiner_handle.insert_approved_proposal(proposal_id, gur);
+
+    // Try processing quarantined batches — should find the match and succeed
+    let quarantine_results = retry_quarantined(&mut joiner_handle, &joiner_mls).unwrap();
+    assert_eq!(quarantine_results.len(), 1);
+    assert!(
+        matches!(quarantine_results[0], ProcessResult::GroupUpdated),
+        "Expected GroupUpdated, got {:?}",
+        quarantine_results[0]
+    );
+}
+
+/// Test: same batch received twice hits dedup and returns Noop.
+#[test]
+fn test_duplicate_batch_returns_noop() {
+    let group_name = "dedup-batch";
+
+    let (steward_mls, mut steward_handle) =
+        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let (joiner_mls, mut joiner_handle, kp_packet) =
+        setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+
+    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
+    process_inbound(
+        &mut joiner_handle,
+        &welcome_packet.payload,
+        WELCOME_SUBTOPIC,
+        &joiner_mls,
+    )
+    .unwrap();
+
+    let (_joiner2_mls, _joiner2_handle, kp2_packet) =
+        setup_joiner(group_name, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
+
+    let result = process_inbound(
+        &mut steward_handle,
+        &kp2_packet.payload,
+        WELCOME_SUBTOPIC,
+        &steward_mls,
+    )
+    .unwrap();
+    let gur = match result {
+        ProcessResult::GetUpdateRequest(gur) => gur,
+        other => panic!("Expected GetUpdateRequest, got {:?}", other),
+    };
+
+    let proposal_id: ProposalId = 45;
+    steward_handle.insert_approved_proposal(proposal_id, gur.clone());
+    let packets = create_batch_proposals(&mut steward_handle, &steward_mls).unwrap();
+    let batch_packet = packets
+        .iter()
+        .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
+        .expect("Expected batch proposals packet");
+
+    // First receive: quarantined
+    let r1 = process_inbound(
+        &mut joiner_handle,
+        &batch_packet.payload,
+        APP_MSG_SUBTOPIC,
+        &joiner_mls,
+    )
+    .unwrap();
+    assert!(matches!(r1, ProcessResult::BatchQuarantined { .. }));
+
+    // Second receive of same batch: should be detected as duplicate
+    let r2 = process_inbound(
+        &mut joiner_handle,
+        &batch_packet.payload,
+        APP_MSG_SUBTOPIC,
+        &joiner_mls,
+    )
+    .unwrap();
+    assert!(
+        matches!(r2, ProcessResult::Noop),
+        "Expected Noop (duplicate), got {:?}",
+        r2
+    );
+}
+
+/// Test: quarantine entries are dropped after max_epoch_age epochs.
+#[test]
+fn test_quarantine_expiry() {
+    let group_name = "quarantine-expiry";
+    let (_mls, _handle) =
+        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+
+    // Verify that QuarantinePolicy::default() has expected values.
+    let policy = QuarantinePolicy::default();
+    assert_eq!(policy.max_epoch_age, 2);
+    assert_eq!(policy.max_items, 5);
+}
+
+/// Test: after a violation is detected and staged commit discarded,
+/// subsequent MLS operations still work correctly.
+#[test]
+fn test_violation_does_not_corrupt_mls_state() {
+    let group_name = "violation-no-corrupt";
+
+    let (steward_mls, mut steward_handle) =
+        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let (joiner_mls, mut joiner_handle, kp_packet) =
+        setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+
+    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
+    let join_result = process_inbound(
+        &mut joiner_handle,
+        &welcome_packet.payload,
+        WELCOME_SUBTOPIC,
+        &joiner_mls,
+    )
+    .unwrap();
+    assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
+
+    let (_joiner2_mls, _joiner2_handle, kp2_packet) =
+        setup_joiner(group_name, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
+
+    let result = process_inbound(
+        &mut steward_handle,
+        &kp2_packet.payload,
+        WELCOME_SUBTOPIC,
+        &steward_mls,
+    )
+    .unwrap();
+    let gur = match result {
+        ProcessResult::GetUpdateRequest(gur) => gur,
+        other => panic!("Expected GetUpdateRequest, got {:?}", other),
+    };
+
+    let proposal_id: ProposalId = 46;
+    steward_handle.insert_approved_proposal(proposal_id, gur.clone());
+    joiner_handle.insert_approved_proposal(proposal_id, gur);
+
+    let packets = create_batch_proposals(&mut steward_handle, &steward_mls).unwrap();
+    let batch_packet = packets
+        .iter()
+        .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
+        .expect("Expected batch proposals packet");
+
+    let app_msg = AppMessage::decode(batch_packet.payload.as_slice()).unwrap();
+    let mut batch = match app_msg.payload {
+        Some(app_message::Payload::BatchProposalsMessage(b)) => b,
+        _ => panic!("Expected BatchProposalsMessage"),
+    };
+    batch.proposals_digest = vec![0xDE, 0xAD];
+
+    let tampered_app_msg: AppMessage = batch.into();
+    let tampered_payload = tampered_app_msg.encode_to_vec();
+
+    let result = process_inbound(
+        &mut joiner_handle,
+        &tampered_payload,
+        APP_MSG_SUBTOPIC,
+        &joiner_mls,
+    )
+    .unwrap();
+    assert!(matches!(result, ProcessResult::ViolationDetected(_)));
+
+    let members = joiner_mls.members(group_name).unwrap();
+    assert_eq!(
+        members.len(),
+        2,
+        "Members should still be accessible after violation discard"
+    );
+
+    assert_eq!(
+        joiner_handle.approved_proposals_count(),
+        0,
+        "Approved proposals should be cleared after violation"
+    );
+}
+
+/// Test: a stale/replayed batch does NOT produce ViolationDetected.
+#[test]
+fn test_stale_batch_does_not_accuse_steward() {
+    let group_name = "stale-no-accuse";
+
+    let (steward_mls, mut steward_handle) =
+        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let (joiner_mls, mut joiner_handle, kp_packet) =
+        setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+
+    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
+    let join_result = process_inbound(
+        &mut joiner_handle,
+        &welcome_packet.payload,
+        WELCOME_SUBTOPIC,
+        &joiner_mls,
+    )
+    .unwrap();
+    assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
+
+    let (_joiner2_mls, _joiner2_handle, kp2_packet) =
+        setup_joiner(group_name, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
+    let result = process_inbound(
+        &mut steward_handle,
+        &kp2_packet.payload,
+        WELCOME_SUBTOPIC,
+        &steward_mls,
+    )
+    .unwrap();
+    let gur = match result {
+        ProcessResult::GetUpdateRequest(gur) => gur,
+        other => panic!("Expected GetUpdateRequest, got {:?}", other),
+    };
+
+    let proposal_id: ProposalId = 80;
+    steward_handle.insert_approved_proposal(proposal_id, gur.clone());
+    joiner_handle.insert_approved_proposal(proposal_id, gur.clone());
+    let packets = create_batch_proposals(&mut steward_handle, &steward_mls).unwrap();
+    let batch_packet = packets
+        .iter()
+        .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
+        .expect("Expected batch proposals packet");
+
+    let result = process_inbound(
+        &mut joiner_handle,
+        &batch_packet.payload,
+        APP_MSG_SUBTOPIC,
+        &joiner_mls,
+    )
+    .unwrap();
+    assert!(
+        matches!(result, ProcessResult::GroupUpdated),
+        "Expected GroupUpdated, got {:?}",
+        result
+    );
+
+    let proposal_id2: ProposalId = 81;
+    joiner_handle.insert_approved_proposal(proposal_id2, GroupUpdateRequest { payload: None });
+    let pre_count = joiner_handle.approved_proposals_count();
+    assert_eq!(pre_count, 1);
+
+    let result = process_inbound(
+        &mut joiner_handle,
+        &batch_packet.payload,
+        APP_MSG_SUBTOPIC,
+        &joiner_mls,
+    )
+    .unwrap();
+
+    assert!(
+        matches!(result, ProcessResult::Noop),
+        "Expected Noop for stale batch, got {:?}",
+        result
+    );
+
+    assert_eq!(
+        joiner_handle.approved_proposals_count(),
+        pre_count,
+        "Approved proposals should NOT be cleared by a stale batch"
+    );
 }

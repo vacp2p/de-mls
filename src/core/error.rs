@@ -58,12 +58,22 @@ pub enum CoreError {
 
     /// Emergency criteria proposals found in approved queue during batch creation.
     /// This indicates a bug: emergency proposals should be removed by
-    /// handle_consensus_event before create_batch_proposals is called.
+    /// apply_consensus_result before create_batch_proposals is called.
     #[error(
         "Emergency criteria proposals found in approved queue (ids: {proposal_ids:?}). \
-         They should have been removed by handle_consensus_event."
+         They should have been removed by apply_consensus_result."
     )]
     UnexpectedEmergencyProposals { proposal_ids: Vec<u32> },
+
+    /// The consensus outcome does not match the handle's ownership state.
+    /// For example, `ApprovedOwner` was passed but the handle does not own the proposal,
+    /// or `Approved { payload }` was passed but the handle does own it.
+    #[error("Invalid consensus outcome: {0}")]
+    InvalidConsensusOutcome(String),
+
+    /// The proposal ID was not found in the handle's voting or approved proposals.
+    #[error("Proposal not found: {0}")]
+    ProposalNotFound(u32),
 }
 
 impl From<mls_crypto::MlsError> for CoreError {

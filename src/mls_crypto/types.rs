@@ -33,18 +33,58 @@ pub enum GroupUpdate {
     Remove(Vec<u8>),
 }
 
+/// What an MLS proposal actually does (extracted before storing).
+///
+/// Used by the caller to verify that MLS proposals match the voted
+/// `GroupUpdateRequest` proposals (review issue #4: payload equivalence).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MlsProposalAction {
+    /// Add a member — carries the identity from the key package credential.
+    Add(Vec<u8>),
+    /// Remove a member — carries the identity of the removed member.
+    Remove(Vec<u8>),
+    /// Any other proposal type (update, reinit, etc.) — unexpected.
+    Other(String),
+}
+
 /// Result of decrypting an inbound message.
 #[derive(Clone, Debug)]
 pub enum DecryptResult {
     /// Application message decrypted successfully.
-    Application(Vec<u8>),
+    /// Contains `(message_bytes, sender_identity)`.
+    Application(Vec<u8>, Vec<u8>),
     /// We were removed from the group.
-    Removed,
+    /// Contains the authenticated sender identity.
+    Removed(Vec<u8>),
     /// Proposal stored (no action needed).
-    ProposalStored,
+    /// Contains `(sender_identity, action)`.
+    ProposalStored(Vec<u8>, MlsProposalAction),
     /// Commit processed, group updated.
-    CommitProcessed,
+    /// Contains the authenticated sender identity.
+    CommitProcessed(Vec<u8>),
     /// Message ignored (wrong group/epoch).
+    Ignored,
+}
+
+/// Result of inspecting a staged commit (before merging).
+///
+/// Returned by [`MlsService::process_commit`]. The `Staged` variant contains
+/// authenticated information needed to validate the batch. The `Ignored` variant
+/// signals a benign rejection (stale epoch, wrong group, non-commit message)
+/// where no sender was authenticated.
+#[derive(Clone, Debug)]
+pub enum StagedCommitResult {
+    /// Commit staged successfully. The sender identity is MLS-authenticated.
+    Staged {
+        /// Identity (wallet bytes) of the commit sender, authenticated by MLS.
+        sender_identity: Vec<u8>,
+        /// Whether this commit removes us from the group.
+        self_removed: bool,
+        /// The membership changes (Add/Remove) contained in the commit's proposals.
+        actions: Vec<MlsProposalAction>,
+    },
+    /// Message was benign but not processable (stale epoch, wrong group, non-commit).
+    /// No sender was authenticated — the caller must NOT treat this as a violation.
     Ignored,
 }
 
