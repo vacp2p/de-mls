@@ -165,7 +165,7 @@ fn steward_add_joiner(
     steward_handle.insert_approved_proposal(proposal_id, gur);
     let _packets = create_commit_candidate(steward_handle, steward_mls).unwrap();
 
-    let finalize = finalize_freeze_round(steward_handle, steward_mls).unwrap();
+    let finalize = finalize_freeze_round(steward_handle, steward_mls, false).unwrap();
     match finalize {
         FreezeFinalizeResult::Applied { result, outbound } => {
             assert!(
@@ -422,11 +422,14 @@ fn test_process_inbound_leave_group() {
         remove_result
     );
 
-    let finalize = finalize_freeze_round(&mut joiner_handle, &joiner_mls).unwrap();
+    let finalize = finalize_freeze_round(&mut joiner_handle, &joiner_mls, false).unwrap();
     assert!(
         matches!(
             finalize,
-            FreezeFinalizeResult::Applied { result: ProcessResult::LeaveGroup, .. }
+            FreezeFinalizeResult::Applied {
+                result: ProcessResult::LeaveGroup,
+                ..
+            }
         ),
         "Expected LeaveGroup after finalize, got {:?}",
         finalize

@@ -5,36 +5,55 @@
 
 use prost::Message;
 
+use crate::app::message_type::MessageType;
 use crate::mls_crypto::format_wallet_address;
-use crate::protos::de_mls::messages::v1::{GroupUpdateRequest, group_update_request};
+use crate::protos::de_mls::messages::v1::{
+    EmergencyCriteriaProposal, GroupUpdateRequest, ViolationEvidence, ViolationType,
+    group_update_request,
+};
+
+impl ViolationEvidence {
+    /// Human-readable label for the violation type (used in display / UI).
+    pub fn violation_type_label(&self) -> &'static str {
+        match ViolationType::try_from(self.violation_type) {
+            Ok(ViolationType::BrokenCommit) => "Broken Commit",
+            Ok(ViolationType::BrokenMlsProposal) => "Broken MLS Proposal",
+            Ok(ViolationType::CensorshipInactivity) => "Censorship/Inactivity",
+            _ => "Unknown Violation",
+        }
+    }
+
+    /// Wrap this evidence into a `GroupUpdateRequest` for consensus voting.
+    pub fn into_update_request(self) -> GroupUpdateRequest {
+        GroupUpdateRequest {
+            payload: Some(group_update_request::Payload::EmergencyCriteria(
+                EmergencyCriteriaProposal {
+                    evidence: Some(self),
+                },
+            )),
+        }
+    }
+}
 
 /// Convert a serialized `GroupUpdateRequest` to a display-friendly `(action, target)` pair.
 pub fn convert_group_request_to_display(request: Vec<u8>) -> (String, String) {
     let request = GroupUpdateRequest::decode(request.as_slice()).unwrap_or_default();
-    match request.payload {
-        Some(group_update_request::Payload::InviteMember(im)) => (
-            "Add Member".to_string(),
-            format_wallet_address(&im.identity),
-        ),
-        Some(group_update_request::Payload::RemoveMember(rm)) => (
-            "Remove Member".to_string(),
-            format_wallet_address(&rm.identity),
-        ),
-        Some(group_update_request::Payload::EmergencyCriteria(ec)) => {
-            let (label, target) = match ec.evidence.as_ref() {
-                Some(e) => (
-                    format!("Emergency: {}", e.violation_type_label()),
-                    format_wallet_address(&e.target_member_id),
-                ),
-                None => (
-                    "Emergency: Unknown Violation".to_string(),
-                    "unknown".to_string(),
-                ),
-            };
-            (label, target)
+    let action = request.message_type().to_string();
+    let target = match &request.payload {
+        Some(group_update_request::Payload::InviteMember(im)) => {
+            format_wallet_address(&im.identity)
         }
-        _ => ("Unknown".to_string(), "Invalid request".to_string()),
-    }
+        Some(group_update_request::Payload::RemoveMember(rm)) => {
+            format_wallet_address(&rm.identity)
+        }
+        Some(group_update_request::Payload::EmergencyCriteria(ec)) => ec
+            .evidence
+            .as_ref()
+            .map(|e| format_wallet_address(&e.target_member_id))
+            .unwrap_or_else(|| "unknown".to_string()),
+        _ => "Invalid request".to_string(),
+    };
+    (action, target)
 }
 
 /// Extract the identity string from a `GroupUpdateRequest`.

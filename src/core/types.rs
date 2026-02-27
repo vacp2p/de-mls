@@ -3,7 +3,6 @@
 //! This module defines the key data types used throughout the DE-MLS core:
 //!
 //! - [`ProcessResult`] - Outcome of processing an inbound message
-//! - [`MessageType`] - Trait for identifying message types
 //! - Various `From` implementations for protobuf message conversions
 
 use hashgraph_like_consensus::{
@@ -21,60 +20,6 @@ use crate::{
         welcome_message,
     },
 };
-
-// Message type constants for consistency and type safety
-pub mod message_types {
-    pub const CONVERSATION_MESSAGE: &str = "ConversationMessage";
-    pub const BAN_REQUEST: &str = "BanRequest";
-    pub const PROPOSAL: &str = "Proposal";
-    pub const VOTE: &str = "Vote";
-    pub const VOTE_PAYLOAD: &str = "VotePayload";
-    pub const USER_VOTE: &str = "UserVote";
-    pub const PROPOSAL_ADDED: &str = "ProposalAdded";
-    pub const COMMIT_CANDIDATE: &str = "CommitCandidate";
-    pub const UNKNOWN: &str = "Unknown";
-}
-
-/// Trait for getting message type as a string constant
-pub trait MessageType {
-    fn message_type(&self) -> &'static str;
-}
-
-impl MessageType for app_message::Payload {
-    fn message_type(&self) -> &'static str {
-        use message_types::*;
-        match self {
-            app_message::Payload::ConversationMessage(_) => CONVERSATION_MESSAGE,
-            app_message::Payload::BanRequest(_) => BAN_REQUEST,
-            app_message::Payload::Proposal(_) => PROPOSAL,
-            app_message::Payload::Vote(_) => VOTE,
-            app_message::Payload::VotePayload(_) => VOTE_PAYLOAD,
-            app_message::Payload::UserVote(_) => USER_VOTE,
-            app_message::Payload::ProposalAdded(_) => PROPOSAL_ADDED,
-            app_message::Payload::CommitCandidate(_) => COMMIT_CANDIDATE,
-        }
-    }
-}
-
-impl MessageType for GroupUpdateRequest {
-    fn message_type(&self) -> &'static str {
-        match &self.payload {
-            Some(group_update_request::Payload::InviteMember(_)) => "Add Member",
-            Some(group_update_request::Payload::RemoveMember(_)) => "Remove Member",
-            Some(group_update_request::Payload::EmergencyCriteria(ec)) => ec
-                .evidence
-                .as_ref()
-                .map(|e| match ViolationType::try_from(e.violation_type) {
-                    Ok(ViolationType::BrokenCommit) => "Emergency: Broken Commit",
-                    Ok(ViolationType::BrokenMlsProposal) => "Emergency: Broken MLS Proposal",
-                    Ok(ViolationType::CensorshipInactivity) => "Emergency: Censorship/Inactivity",
-                    _ => "Emergency: Unknown Violation",
-                })
-                .unwrap_or("Emergency: Unknown Violation"),
-            _ => "Unknown",
-        }
-    }
-}
 
 /// Result of processing an inbound packet.
 ///
@@ -101,13 +46,13 @@ pub enum ProcessResult {
     /// A consensus proposal was received from another peer.
     ///
     /// Should be forwarded to the consensus service via
-    /// [`forward_incoming_proposal`](super::forward_incoming_proposal).
+    /// `crate::app::forward_incoming_proposal`.
     Proposal(Proposal),
 
     /// A consensus vote was received from another peer.
     ///
     /// Should be forwarded to the consensus service via
-    /// [`forward_incoming_vote`](super::forward_incoming_vote).
+    /// `crate::app::forward_incoming_vote`.
     Vote(Vote),
 
     /// The user was removed from the group.
@@ -137,10 +82,7 @@ pub enum ProcessResult {
     /// an emergency criteria proposal vote for this evidence.
     ViolationDetected(ViolationEvidence),
 
-    /// A remote commit candidate was successfully buffered.
-    ///
-    /// The application layer should transition the member to Freezing state
-    /// (if currently Working) so the freeze timeout can finalize the candidate.
+    /// A remote commit candidate was successfully buffered in the freeze round.
     CandidateBuffered,
 
     /// No action needed.
@@ -151,7 +93,7 @@ pub enum ProcessResult {
 
 // ── ViolationEvidence constructors ────────────────────────────────
 
-use crate::protos::de_mls::messages::v1::{EmergencyCriteriaProposal, ViolationType};
+use crate::protos::de_mls::messages::v1::ViolationType;
 
 impl ViolationEvidence {
     /// Steward included different proposal IDs than what was voted on,
@@ -183,27 +125,6 @@ impl ViolationEvidence {
             target_member_id: target,
             evidence_payload: Vec::new(),
             epoch,
-        }
-    }
-
-    /// Human-readable label for the violation type.
-    pub fn violation_type_label(&self) -> &'static str {
-        match ViolationType::try_from(self.violation_type) {
-            Ok(ViolationType::BrokenCommit) => "Broken Commit",
-            Ok(ViolationType::BrokenMlsProposal) => "Broken MLS Proposal",
-            Ok(ViolationType::CensorshipInactivity) => "Censorship/Inactivity",
-            _ => "Unknown Violation",
-        }
-    }
-
-    /// Wrap this evidence into a `GroupUpdateRequest` for consensus voting.
-    pub fn into_update_request(self) -> GroupUpdateRequest {
-        GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::EmergencyCriteria(
-                EmergencyCriteriaProposal {
-                    evidence: Some(self),
-                },
-            )),
         }
     }
 }

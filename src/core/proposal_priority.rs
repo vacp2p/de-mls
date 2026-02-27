@@ -33,7 +33,9 @@ impl ProposalPriority {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protos::de_mls::messages::v1::{InviteMember, RemoveMember, ViolationEvidence};
+    use crate::protos::de_mls::messages::v1::{
+        EmergencyCriteriaProposal, InviteMember, RemoveMember, ViolationEvidence,
+    };
 
     #[test]
     fn test_invite_member_is_commit_priority() {
@@ -64,8 +66,13 @@ mod tests {
 
     #[test]
     fn test_emergency_criteria_is_emergency_priority() {
-        let request =
-            ViolationEvidence::broken_commit(vec![], 0, Vec::<u8>::new()).into_update_request();
+        let request = GroupUpdateRequest {
+            payload: Some(group_update_request::Payload::EmergencyCriteria(
+                EmergencyCriteriaProposal {
+                    evidence: Some(ViolationEvidence::broken_commit(vec![], 0, vec![])),
+                },
+            )),
+        };
         assert_eq!(
             ProposalPriority::from_request(&request),
             ProposalPriority::Emergency

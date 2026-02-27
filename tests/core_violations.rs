@@ -14,8 +14,7 @@ use de_mls::core::{
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
 use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService, parse_wallet_address};
 use de_mls::protos::de_mls::messages::v1::{
-    AppMessage, GroupUpdateRequest, ViolationEvidence, ViolationType,
-    group_update_request,
+    AppMessage, GroupUpdateRequest, ViolationEvidence, ViolationType, group_update_request,
 };
 
 // ─────────────────────────── Mock Handler ───────────────────────────
@@ -162,7 +161,7 @@ fn steward_add_joiner(
     steward_handle.insert_approved_proposal(proposal_id, gur);
     let packets = create_commit_candidate(steward_handle, steward_mls).unwrap();
 
-    let finalize = finalize_freeze_round(steward_handle, steward_mls).unwrap();
+    let finalize = finalize_freeze_round(steward_handle, steward_mls, false).unwrap();
     let welcome_packet = match finalize {
         FreezeFinalizeResult::Applied { result, outbound } => {
             assert!(
@@ -639,18 +638,23 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     );
 
     // Finalize: MLS commit staging authenticates the sender
-    let finalize = finalize_freeze_round(&mut joiner_handle, &joiner_mls).unwrap();
+    let finalize = finalize_freeze_round(&mut joiner_handle, &joiner_mls, false).unwrap();
     assert!(
         matches!(
             finalize,
-            FreezeFinalizeResult::Applied { result: ProcessResult::GroupUpdated, .. }
+            FreezeFinalizeResult::Applied {
+                result: ProcessResult::GroupUpdated,
+                ..
+            }
         ),
         "Expected GroupUpdated after finalize, got {:?}",
         finalize
     );
 
     // After finalization, steward identity should be set from the MLS-authenticated commit
-    let steward_id = joiner_handle.steward_identity().expect("steward identity should be set");
+    let steward_id = joiner_handle
+        .steward_identity()
+        .expect("steward identity should be set");
     assert!(
         !steward_id.is_empty(),
         "Steward identity should be non-empty after finalization"
@@ -692,7 +696,7 @@ fn test_no_valid_candidate_triggers_no_candidate() {
 
     let mls = setup_mls("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
-    let finalize = finalize_freeze_round(&mut handle, &mls).unwrap();
+    let finalize = finalize_freeze_round(&mut handle, &mls, false).unwrap();
     assert!(
         matches!(finalize, FreezeFinalizeResult::NoCandidate),
         "Expected NoCandidate when no candidates buffered, got {:?}",

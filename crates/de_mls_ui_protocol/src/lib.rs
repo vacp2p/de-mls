@@ -4,8 +4,7 @@ pub mod v1 {
     use serde::{Deserialize, Serialize};
 
     use de_mls::{
-        app::get_identity_from_group_update_request,
-        core::MessageType,
+        app::{MessageType, get_identity_from_group_update_request},
         protos::de_mls::messages::v1::{
             BanRequest, ConversationMessage, ProposalAdded, VotePayload,
         },

@@ -12,6 +12,9 @@ use hashgraph_like_consensus::{
     api::ConsensusServiceAPI, service::DefaultConsensusService, types::ConsensusEvent,
 };
 
+use crate::app::consensus::{
+    cast_vote, forward_incoming_proposal, forward_incoming_vote, start_voting,
+};
 use crate::app::state_machine::{
     FreezeTimeoutStatus, GroupConfig, GroupState, GroupStateMachine, StateChangeHandler,
 };
@@ -91,20 +94,17 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         is_creation: bool,
         config: GroupConfig,
     ) -> Result<(), UserError> {
-        let allow_subset_candidates = config.allow_subset_candidates;
         let mut groups = self.groups.write().await;
         if groups.contains_key(group_name) {
             return Err(UserError::GroupAlreadyExists);
         }
 
         let (handle, state_machine) = if is_creation {
-            let mut handle = core::create_group(group_name, &self.mls_service)?;
-            handle.set_allow_subset_candidates(allow_subset_candidates);
+            let handle = core::create_group(group_name, &self.mls_service)?;
             let state_machine = GroupStateMachine::new_as_steward_with_config(config);
             (handle, state_machine)
         } else {
-            let mut handle = core::prepare_to_join(group_name);
-            handle.set_allow_subset_candidates(allow_subset_candidates);
+            let handle = core::prepare_to_join(group_name);
             let state_machine = GroupStateMachine::new_as_pending_join_with_config(config);
             (handle, state_machine)
         };
@@ -371,7 +371,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 Some(e) => e,
                 None => return FreezeTimeoutStatus::NotFreezing,
             };
-            match core::finalize_freeze_round(&mut entry.handle, &self.mls_service) {
+            match core::finalize_freeze_round(
+                &mut entry.handle,
+                &self.mls_service,
+                entry.state_machine.allow_subset_candidates(),
+            ) {
                 Ok(result) => result,
                 Err(e) => {
                     error!("[check_freeze_timeout] finalize_freeze_round failed: {e}");
@@ -559,16 +563,19 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
         tokio::spawn(async move {
             let result: Result<(), CoreError> = async {
-                let proposal_id = core::start_voting::<P>(
+                // Step 1: submit to consensus (network call, no lock held)
+                let (proposal_id, vote_payload) = start_voting::<P>(
                     &group_name,
                     &upd_request,
                     expected_voters,
                     identity_string,
                     &*consensus,
-                    &*handler,
                 )
                 .await?;
 
+                // Step 2: store ownership before emitting UI notification.
+                // Storing first ensures `handle_consensus_event` will see
+                // `is_owner=true` even if a consensus result arrives immediately.
                 {
                     let mut groups = groups.write().await;
                     if let Some(entry) = groups.get_mut(&group_name) {
@@ -585,6 +592,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 info!(
                     "[start_voting_on_request]: Stored voting proposal: {proposal_id}"
                 );
+
+                // Step 3: notify UI (after ownership is recorded)
+                handler.on_app_message(&group_name, vote_payload).await?;
 
                 Ok(())
             }
@@ -621,7 +631,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let handle = entry.handle.clone();
         drop(groups);
 
-        core::cast_vote::<P, _, _>(
+        cast_vote::<P, _, _>(
             &handle,
             group_name,
             proposal_id,
@@ -649,7 +659,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 self.handler.on_app_message(group_name, msg).await?;
             }
             ProcessResult::Proposal(proposal) => {
-                core::forward_incoming_proposal::<P>(
+                forward_incoming_proposal::<P>(
                     group_name,
                     proposal,
                     &*self.consensus_service,
@@ -658,8 +668,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 .await?;
             }
             ProcessResult::Vote(vote) => {
-                core::forward_incoming_vote::<P>(group_name, vote, &*self.consensus_service)
-                    .await?;
+                forward_incoming_vote::<P>(group_name, vote, &*self.consensus_service).await?;
             }
             ProcessResult::GetUpdateRequest(request) => {
                 self.start_voting_on_request_background(group_name.to_string(), request)
@@ -748,7 +757,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 let transitioned = {
                     let mut groups = self.groups.write().await;
                     if let Some(entry) = groups.get_mut(group_name) {
-                        if entry.state_machine.current_state() == GroupState::Working {
+                        // Stewards manage their own epoch flow via start_steward_epoch;
+                        // only non-steward members need to enter Freezing on candidate receipt.
+                        if !entry.state_machine.is_steward()
+                            && entry.state_machine.current_state() == GroupState::Working
+                        {
                             entry.state_machine.start_freezing();
                             entry.handle.ensure_freeze_round();
                             true

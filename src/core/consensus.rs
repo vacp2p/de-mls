@@ -1,51 +1,19 @@
-//! Consensus integration for DE-MLS group operations.
+//! Pure consensus result application.
 //!
-//! This module bridges MLS group operations with the consensus voting layer.
-//! It provides functions for creating proposals, casting votes, and applying
-//! consensus outcomes.
+//! This module contains only [`apply_consensus_result`], which updates a
+//! [`GroupHandle`]'s proposal state based on a typed [`ConsensusOutcome`].
+//! It has no I/O, no service calls, and no event callbacks — it is a pure,
+//! synchronous state transition.
 //!
-//! # Overview
-//!
-//! When a membership change is requested (join/remove), it goes through consensus:
-//!
-//! ```text
-//! 1. Steward receives key package → ProcessResult::GetUpdateRequest
-//! 2. App matches ProcessResult directly and starts voting
-//! 3. Users vote via cast_vote() → votes sent as MLS messages
-//! 4. Consensus service emits outcome
-//! 5. App calls apply_consensus_result() → updates proposal state
-//! 6. Steward calls create_commit_candidate() → broadcasts commit candidate
-//! ```
-//!
-//! # Key Functions
-//!
-//! ## Voting Workflow
-//! - [`start_voting`] - Create a proposal and start voting
-//! - [`cast_vote`] - Cast a vote on a proposal
-//! - [`apply_consensus_result`] - Apply a consensus outcome to the handle (pure, sync)
-//!
-//! ## Message Forwarding (optional integration helpers)
-//! - [`forward_incoming_proposal`] - Forward received proposals to consensus
-//! - [`forward_incoming_vote`] - Forward received votes to consensus
+//! App-layer helpers that wire consensus events to the UI and transport
+//! (`start_voting`, `cast_vote`, `forward_incoming_proposal`,
+//! `forward_incoming_vote`) live in [`crate::app::consensus`].
 
-use alloy::signers::Signer;
-use openmls_rust_crypto::MemoryStorage;
 use prost::Message;
-use std::time::Duration;
 use tracing::info;
 
-use hashgraph_like_consensus::{
-    api::ConsensusServiceAPI,
-    protos::consensus::v1::{Proposal, Vote},
-    session::ConsensusConfig,
-    types::CreateProposalRequest,
-};
-
-use crate::core::{CoreError, DeMlsProvider, GroupEventHandler, GroupHandle, build_message};
-use crate::mls_crypto::{DeMlsStorage, MlsService};
-use crate::protos::de_mls::messages::v1::{
-    AppMessage, GroupUpdateRequest, VotePayload, group_update_request,
-};
+use crate::core::{CoreError, GroupHandle};
+use crate::protos::de_mls::messages::v1::{GroupUpdateRequest, group_update_request};
 
 /// Typed outcome of a consensus decision.
 ///
@@ -144,148 +112,5 @@ pub fn apply_consensus_result(
         }
     }
 
-    Ok(())
-}
-
-/// Create a consensus proposal for a group update request and start voting.
-///
-/// This is an optional integration helper. Core-only integrators can use their own
-/// consensus implementation and call `apply_consensus_result` directly.
-///
-/// This function:
-/// 1. Creates a `CreateProposalRequest` with the encoded group update
-/// 2. Submits it to the consensus service
-/// 3. Emits a `VotePayload` via the handler for UI display
-///
-/// # Returns
-/// The proposal ID, which should be stored via `GroupHandle::store_voting_proposal`.
-pub async fn start_voting<P: DeMlsProvider>(
-    group_name: &str,
-    request: &GroupUpdateRequest,
-    expected_voters: u32,
-    identity_string: String,
-    consensus: &P::Consensus,
-    handler: &dyn GroupEventHandler,
-) -> Result<u32, CoreError> {
-    let payload = request.encode_to_vec();
-    let create_request = CreateProposalRequest::new(
-        uuid::Uuid::new_v4().to_string(),
-        payload.clone(),
-        identity_string.into(),
-        expected_voters,
-        3600,
-        true,
-    )?;
-
-    let scope = P::Scope::from(group_name.to_string());
-    let proposal = consensus
-        .create_proposal_with_config(
-            &scope,
-            create_request,
-            Some(ConsensusConfig::gossipsub().with_timeout(Duration::from_secs(15))?),
-        )
-        .await?;
-
-    info!(
-        "[start_voting]: Created proposal {} with {} expected voters",
-        proposal.proposal_id, expected_voters
-    );
-
-    let vote_payload: AppMessage = VotePayload {
-        group_id: group_name.to_string(),
-        proposal_id: proposal.proposal_id,
-        payload,
-        timestamp: proposal.timestamp,
-    }
-    .into();
-
-    handler.on_app_message(group_name, vote_payload).await?;
-
-    Ok(proposal.proposal_id)
-}
-
-/// Forward a proposal received from another peer to the consensus service.
-///
-/// Optional integration helper. When a peer broadcasts their proposal, other members
-/// receive it as an MLS application message. This function forwards it to the local
-/// consensus service and emits a `VotePayload` so the UI can display the pending vote.
-pub async fn forward_incoming_proposal<P: DeMlsProvider>(
-    group_name: &str,
-    proposal: Proposal,
-    consensus: &P::Consensus,
-    handler: &dyn GroupEventHandler,
-) -> Result<(), CoreError> {
-    let scope = P::Scope::from(group_name.to_string());
-    consensus
-        .process_incoming_proposal(&scope, proposal.clone())
-        .await?;
-
-    let vote_payload: AppMessage = VotePayload {
-        group_id: group_name.to_string(),
-        proposal_id: proposal.proposal_id,
-        payload: proposal.payload.clone(),
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs(),
-    }
-    .into();
-
-    handler.on_app_message(group_name, vote_payload).await?;
-    Ok(())
-}
-
-/// Forward a vote received from another peer to the consensus service.
-///
-/// Optional integration helper.
-pub async fn forward_incoming_vote<P: DeMlsProvider>(
-    group_name: &str,
-    vote: Vote,
-    consensus: &P::Consensus,
-) -> Result<(), CoreError> {
-    let scope = P::Scope::from(group_name.to_string());
-    consensus.process_incoming_vote(&scope, vote).await?;
-    Ok(())
-}
-
-/// Cast a vote on a proposal and broadcast it to the group.
-///
-/// Optional integration helper. Handles two cases:
-/// - **Proposal owner**: Calls `cast_vote_and_get_proposal` and broadcasts the full `Proposal`
-/// - **Non-owner**: Calls `cast_vote` and broadcasts just the `Vote`
-#[allow(clippy::too_many_arguments)]
-pub async fn cast_vote<P, SN, S>(
-    handle: &GroupHandle,
-    group_name: &str,
-    proposal_id: u32,
-    vote: bool,
-    consensus: &P::Consensus,
-    signer: SN,
-    mls: &MlsService<S>,
-    handler: &dyn GroupEventHandler,
-) -> Result<(), CoreError>
-where
-    P: DeMlsProvider,
-    SN: Signer + Send + Sync,
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
-{
-    let is_owner = handle.is_owner_of_proposal(proposal_id);
-    let scope = P::Scope::from(group_name.to_string());
-
-    let app_message: AppMessage = if is_owner {
-        info!("[cast_vote]: Owner voting on proposal {proposal_id}");
-        let proposal = consensus
-            .cast_vote_and_get_proposal(&scope, proposal_id, vote, signer)
-            .await?;
-        proposal.into()
-    } else {
-        info!("[cast_vote]: User voting on proposal {proposal_id}");
-        let vote_msg = consensus
-            .cast_vote(&scope, proposal_id, vote, signer)
-            .await?;
-        vote_msg.into()
-    };
-
-    let packet = build_message(handle, mls, &app_message)?;
-    handler.on_outbound(group_name, packet).await?;
     Ok(())
 }

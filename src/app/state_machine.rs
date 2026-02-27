@@ -130,6 +130,8 @@ pub struct GroupStateMachine {
     epoch_duration: Duration,
     /// Freeze window duration before selection.
     freeze_duration: Duration,
+    /// Whether subset commit candidates are allowed during deterministic selection.
+    allow_subset_candidates: bool,
 }
 
 impl Default for GroupStateMachine {
@@ -155,6 +157,7 @@ impl GroupStateMachine {
             first_proposal_approved_at: None,
             epoch_duration: config.epoch_duration,
             freeze_duration: config.freeze_duration(),
+            allow_subset_candidates: config.allow_subset_candidates,
         }
     }
 
@@ -174,6 +177,7 @@ impl GroupStateMachine {
             first_proposal_approved_at: None,
             epoch_duration: config.epoch_duration,
             freeze_duration: config.freeze_duration(),
+            allow_subset_candidates: config.allow_subset_candidates,
         }
     }
 
@@ -193,6 +197,7 @@ impl GroupStateMachine {
             first_proposal_approved_at: None,
             epoch_duration: config.epoch_duration,
             freeze_duration: config.freeze_duration(),
+            allow_subset_candidates: config.allow_subset_candidates,
         }
     }
 
@@ -206,9 +211,9 @@ impl GroupStateMachine {
         self.is_steward
     }
 
-    /// Set steward status.
-    pub fn set_steward(&mut self, is_steward: bool) {
-        self.is_steward = is_steward;
+    /// Whether subset commit candidates are allowed during deterministic selection.
+    pub fn allow_subset_candidates(&self) -> bool {
+        self.allow_subset_candidates
     }
 
     /// Start working state.
@@ -292,52 +297,6 @@ impl GroupStateMachine {
     pub fn sync_epoch_boundary(&mut self) {
         self.last_epoch_boundary = Some(Instant::now());
         info!("[sync_epoch_boundary] Epoch boundary synchronized");
-    }
-
-    /// Check if we've reached the expected epoch boundary and should enter Freezing.
-    ///
-    /// Called by the member epoch timer. Returns `true` if entering Freezing state.
-    ///
-    /// # Arguments
-    /// * `approved_proposals_count` - Number of approved proposals waiting for commit
-    ///
-    /// # Returns
-    /// `true` if transitioned to Freezing state, `false` otherwise.
-    pub fn check_epoch_boundary(&mut self, approved_proposals_count: usize) -> bool {
-        // Skip if steward (they manage their own epoch) or not initialized
-        if self.is_steward {
-            return false;
-        }
-
-        // Members only enter Freezing from Working.
-        if self.state != GroupState::Working {
-            return false;
-        }
-
-        // Check if we've reached the expected boundary
-        if let Some(last_boundary) = self.last_epoch_boundary {
-            let expected = last_boundary + self.epoch_duration;
-            if Instant::now() >= expected {
-                // Advance boundary for next epoch
-                self.last_epoch_boundary = Some(expected);
-
-                if approved_proposals_count > 0 {
-                    // We have approved proposals → enter freeze phase.
-                    self.start_freezing();
-                    info!(
-                        "[check_epoch_boundary] Entering Freezing state with {} approved proposals",
-                        approved_proposals_count
-                    );
-                    return true;
-                }
-                // No proposals → stay Working, just advanced the boundary
-                info!("[check_epoch_boundary] No proposals, staying in Working state");
-            }
-        }
-        // No last_epoch_boundary set means we haven't synced yet (first epoch after join)
-        // Just wait for the first commit to sync
-
-        false
     }
 
     /// Get the time until the next expected epoch boundary.
@@ -501,54 +460,6 @@ mod tests {
     }
 
     #[test]
-    fn test_epoch_sync_and_boundary_check() {
-        let mut state_machine = GroupStateMachine::new_as_member();
-
-        // No boundary set initially
-        assert!(state_machine.time_until_next_boundary().is_none());
-
-        // Sync epoch boundary
-        state_machine.sync_epoch_boundary();
-        assert!(state_machine.time_until_next_boundary().is_some());
-
-        // Immediately after sync, boundary not reached
-        assert!(!state_machine.check_epoch_boundary(5));
-        assert_eq!(state_machine.current_state(), GroupState::Working);
-    }
-
-    #[test]
-    fn test_epoch_boundary_with_no_proposals() {
-        let mut state_machine = GroupStateMachine::new_as_member();
-        // Simulate past epoch boundary
-        state_machine.last_epoch_boundary = Some(Instant::now() - Duration::from_secs(60));
-
-        // No proposals → stay Working
-        assert!(!state_machine.check_epoch_boundary(0));
-        assert_eq!(state_machine.current_state(), GroupState::Working);
-    }
-
-    #[test]
-    fn test_epoch_boundary_with_proposals() {
-        let mut state_machine = GroupStateMachine::new_as_member();
-        // Simulate past epoch boundary
-        state_machine.last_epoch_boundary = Some(Instant::now() - Duration::from_secs(60));
-
-        // Has proposals → enter Freezing
-        assert!(state_machine.check_epoch_boundary(3));
-        assert_eq!(state_machine.current_state(), GroupState::Freezing);
-    }
-
-    #[test]
-    fn test_steward_skips_epoch_boundary_check() {
-        let mut state_machine = GroupStateMachine::new_as_steward();
-        state_machine.last_epoch_boundary = Some(Instant::now() - Duration::from_secs(60));
-
-        // Steward should not enter Freezing via check_epoch_boundary
-        assert!(!state_machine.check_epoch_boundary(5));
-        assert_eq!(state_machine.current_state(), GroupState::Working);
-    }
-
-    #[test]
     fn test_freeze_timeout_not_in_freezing() {
         let state_machine = GroupStateMachine::new_as_member();
         // Not in Freezing → not timed out
@@ -581,23 +492,6 @@ mod tests {
         state_machine.start_working();
         assert!(state_machine.phase_started_at.is_none());
         assert!(!state_machine.is_freeze_timed_out());
-    }
-
-    #[test]
-    fn test_check_epoch_boundary_skips_when_already_freezing() {
-        let mut state_machine = GroupStateMachine::new_as_member();
-        state_machine.last_epoch_boundary = Some(Instant::now() - Duration::from_secs(60));
-
-        // First call: enters Freezing
-        assert!(state_machine.check_epoch_boundary(3));
-        assert_eq!(state_machine.current_state(), GroupState::Freezing);
-
-        // Advance boundary past next epoch
-        state_machine.last_epoch_boundary = Some(Instant::now() - Duration::from_secs(60));
-
-        // Second call while still Freezing: should NOT re-enter (returns false)
-        assert!(!state_machine.check_epoch_boundary(3));
-        assert_eq!(state_machine.current_state(), GroupState::Freezing);
     }
 
     // ─────────────────────────── Proposal Timer Tests ───────────────────────────

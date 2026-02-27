@@ -127,7 +127,6 @@
 //!
 //! - `api` - Core group operations (create, join, send, process)
 //! - `consensus` - Voting workflow and consensus result application
-//! - `display` - Display helpers for protobuf types
 //! - `events` - `GroupEventHandler` trait
 //! - `provider` - `DeMlsProvider` trait and `DefaultProvider`
 //! - `types` - `ProcessResult`, message conversions
@@ -144,17 +143,13 @@ mod types;
 
 // ── Core group operations ──
 pub use api::{
-    FreezeFinalizeResult, approved_proposals, approved_proposals_count, become_steward,
-    build_key_package_message, build_message, create_commit_candidate, create_group, epoch_history,
-    finalize_freeze_round, group_members, join_group_from_invite, prepare_to_join, process_inbound,
-    resign_steward,
+    FreezeFinalizeResult, approved_proposals, approved_proposals_count, build_key_package_message,
+    build_message, create_commit_candidate, create_group, epoch_history, finalize_freeze_round,
+    group_members, join_group_from_invite, prepare_to_join, process_inbound,
 };
 
-// ── Consensus integration ──
-pub use consensus::{
-    ConsensusOutcome, apply_consensus_result, cast_vote, forward_incoming_proposal,
-    forward_incoming_vote, start_voting,
-};
+// ── Consensus result application (pure, synchronous) ──
+pub use consensus::{ConsensusOutcome, apply_consensus_result};
 
 // ── Error type ──
 pub use error::CoreError;
@@ -166,7 +161,7 @@ pub use events::GroupEventHandler;
 pub use group_handle::GroupHandle;
 
 // ── Proposal types ──
-pub use group_update_handle::{CurrentEpochProposals, ProposalId};
+pub use group_update_handle::ProposalId;
 
 // ── Proposal priority ──
 pub use proposal_priority::ProposalPriority;
@@ -175,4 +170,4 @@ pub use proposal_priority::ProposalPriority;
 pub use provider::{DeMlsProvider, DefaultProvider};
 
 // ── Core types ──
-pub use types::{MessageType, ProcessResult, message_types};
+pub use types::ProcessResult;

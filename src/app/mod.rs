@@ -134,12 +134,16 @@
 //! user.create_group_with_config("fast-chat", true, GroupConfig::with_epoch_duration(Duration::from_secs(10))).await?;
 //! ```
 
+mod consensus;
 mod display;
+mod message_type;
 mod scheduler;
 mod state_machine;
 mod user;
 
+pub use consensus::{cast_vote, forward_incoming_proposal, forward_incoming_vote, start_voting};
 pub use display::{convert_group_request_to_display, get_identity_from_group_update_request};
+pub use message_type::{MessageType, message_types};
 pub use scheduler::{IntervalScheduler, StewardScheduler, StewardSchedulerConfig};
 pub use state_machine::{
     FreezeTimeoutStatus, GroupConfig, GroupState, GroupStateMachine, StateChangeHandler,

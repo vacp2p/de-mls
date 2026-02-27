@@ -122,8 +122,6 @@ pub struct GroupHandle {
     committed_batch_hashes: VecDeque<Vec<u8>>,
     /// Freeze-round candidate buffer for deterministic selection.
     freeze_round: Option<FreezeRound>,
-    /// Whether subset candidates are allowed during selection.
-    allow_subset_candidates: bool,
 }
 
 impl GroupHandle {
@@ -138,7 +136,6 @@ impl GroupHandle {
             steward_identity: None,
             committed_batch_hashes: VecDeque::new(),
             freeze_round: None,
-            allow_subset_candidates: false,
         }
     }
 
@@ -206,26 +203,6 @@ impl GroupHandle {
     /// Advance to the next epoch (called when a commit is processed).
     pub fn advance_epoch(&mut self) {
         self.current_epoch += 1;
-    }
-
-    /// Become the steward of this group.
-    pub fn become_steward(&mut self) {
-        self.steward = true;
-    }
-
-    /// Resign as steward of this group.
-    pub fn resign_steward(&mut self) {
-        self.steward = false;
-    }
-
-    /// Set whether subset candidates are allowed in freeze selection.
-    pub fn set_allow_subset_candidates(&mut self, allow_subset: bool) {
-        self.allow_subset_candidates = allow_subset;
-    }
-
-    /// Whether subset candidates are allowed in freeze selection.
-    pub fn allow_subset_candidates(&self) -> bool {
-        self.allow_subset_candidates
     }
 
     // ─────────────────────────── Proposal Handle Operations ───────────────────────────
