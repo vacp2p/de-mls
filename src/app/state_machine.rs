@@ -1,10 +1,13 @@
 //! State machine for steward epoch management and group operations.
 use async_trait::async_trait;
 use std::{
+    collections::HashSet,
     fmt::Display,
     time::{Duration, Instant},
 };
 use tracing::info;
+
+use crate::core::ProposalId;
 
 use crate::app::scheduler::DEFAULT_EPOCH_DURATION;
 
@@ -132,6 +135,10 @@ pub struct GroupStateMachine {
     freeze_duration: Duration,
     /// Whether subset commit candidates are allowed during deterministic selection.
     allow_subset_candidates: bool,
+    /// Proposal IDs of emergency criteria proposals that have been observed but not yet
+    /// finalized by consensus. While non-empty, lower-priority proposals MUST be blocked
+    /// (RFC §"Partial Freeze Semantics").
+    active_emergency_proposal_ids: HashSet<ProposalId>,
 }
 
 impl Default for GroupStateMachine {
@@ -158,6 +165,7 @@ impl GroupStateMachine {
             epoch_duration: config.epoch_duration,
             freeze_duration: config.freeze_duration(),
             allow_subset_candidates: config.allow_subset_candidates,
+            active_emergency_proposal_ids: HashSet::new(),
         }
     }
 
@@ -178,6 +186,7 @@ impl GroupStateMachine {
             epoch_duration: config.epoch_duration,
             freeze_duration: config.freeze_duration(),
             allow_subset_candidates: config.allow_subset_candidates,
+            active_emergency_proposal_ids: HashSet::new(),
         }
     }
 
@@ -198,6 +207,7 @@ impl GroupStateMachine {
             epoch_duration: config.epoch_duration,
             freeze_duration: config.freeze_duration(),
             allow_subset_candidates: config.allow_subset_candidates,
+            active_emergency_proposal_ids: HashSet::new(),
         }
     }
 
@@ -214,6 +224,32 @@ impl GroupStateMachine {
     /// Whether subset commit candidates are allowed during deterministic selection.
     pub fn allow_subset_candidates(&self) -> bool {
         self.allow_subset_candidates
+    }
+
+    // ── Partial Freeze Semantics (RFC §"Partial Freeze Semantics") ──
+
+    /// Record an observed emergency criteria proposal that has not yet been finalized.
+    ///
+    /// While any emergency proposal is active, lower-priority proposals (commit,
+    /// steward election) MUST be blocked — see `has_active_emergency_proposal`.
+    pub fn observe_emergency_proposal(&mut self, proposal_id: ProposalId) {
+        self.active_emergency_proposal_ids.insert(proposal_id);
+    }
+
+    /// Mark an emergency criteria proposal as finalized (approved or rejected).
+    ///
+    /// Called from `handle_consensus_event` regardless of outcome, so the set
+    /// never leaks stale IDs from rejected or failed proposals.
+    pub fn resolve_emergency_proposal(&mut self, proposal_id: ProposalId) {
+        self.active_emergency_proposal_ids.remove(&proposal_id);
+    }
+
+    /// Returns `true` if any emergency criteria proposal is currently unresolved.
+    ///
+    /// Used by `start_voting_on_request_background` to enforce the partial freeze:
+    /// lower-priority proposals MUST NOT be created or propagated while this is true.
+    pub fn has_active_emergency_proposal(&self) -> bool {
+        !self.active_emergency_proposal_ids.is_empty()
     }
 
     /// Start working state.

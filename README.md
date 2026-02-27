@@ -145,10 +145,10 @@ Two subtopics are used: `app_msg` (application messages) and `welcome`
 
 ### Self-message filtering
 
-Each group handle generates a random UUID (`app_id`) stored in the Waku message
-`meta` field. On receive, the application compares `packet.app_id` against the
-local handle's id and drops self-originated messages. Waku relay (gossipsub)
-does not filter self-messages natively.
+Each group entry in the app layer generates a random UUID (`app_id`) stored in
+the Waku message `meta` field. On receive, the application compares
+`packet.app_id` against the local entry's id and drops self-originated messages.
+Waku relay (gossipsub) does not filter self-messages natively.
 
 ## Quick Start
 

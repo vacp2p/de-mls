@@ -27,6 +27,7 @@ pub fn epoch_history(handle: &GroupHandle) -> &VecDeque<HashMap<ProposalId, Grou
 pub fn create_commit_candidate<S>(
     handle: &mut GroupHandle,
     mls: &MlsService<S>,
+    app_id: &[u8],
 ) -> Result<Vec<OutboundPacket>, CoreError>
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
@@ -108,7 +109,7 @@ where
         candidate_msg.encode_to_vec(),
         APP_MSG_SUBTOPIC,
         handle.group_name(),
-        handle.app_id(),
+        app_id,
     );
 
     Ok(vec![batch_packet])

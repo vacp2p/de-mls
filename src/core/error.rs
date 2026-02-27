@@ -45,14 +45,6 @@ pub enum CoreError {
     #[error("Invalid group update request")]
     InvalidGroupUpdateRequest,
 
-    /// Generic handler failure.
-    #[error("Handler error: {0}")]
-    HandlerError(String),
-
-    /// Transport/delivery failure.
-    #[error("Delivery error: {0}")]
-    DeliveryError(String),
-
     #[error("Invalid subtopic: {0}")]
     InvalidSubtopic(String),
 

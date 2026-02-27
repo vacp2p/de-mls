@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use prost::Message;
 
 use de_mls::core::{
-    CoreError, FreezeFinalizeResult, GroupEventHandler, GroupHandle, ProcessResult,
+    CallbackError, CoreError, FreezeFinalizeResult, GroupEventHandler, GroupHandle, ProcessResult,
     build_key_package_message, build_message, create_commit_candidate, create_group,
     finalize_freeze_round, prepare_to_join, process_inbound,
 };
@@ -67,7 +67,7 @@ impl GroupEventHandler for MockHandler {
         &self,
         group_name: &str,
         packet: OutboundPacket,
-    ) -> Result<String, CoreError> {
+    ) -> Result<String, CallbackError> {
         self.events.lock().unwrap().push(Event::Outbound {
             group: group_name.to_string(),
             packet,
@@ -75,7 +75,11 @@ impl GroupEventHandler for MockHandler {
         Ok("mock-id".to_string())
     }
 
-    async fn on_app_message(&self, group_name: &str, message: AppMessage) -> Result<(), CoreError> {
+    async fn on_app_message(
+        &self,
+        group_name: &str,
+        message: AppMessage,
+    ) -> Result<(), CallbackError> {
         self.events.lock().unwrap().push(Event::AppMessage {
             group: group_name.to_string(),
             msg: message,
@@ -83,14 +87,14 @@ impl GroupEventHandler for MockHandler {
         Ok(())
     }
 
-    async fn on_leave_group(&self, group_name: &str) -> Result<(), CoreError> {
+    async fn on_leave_group(&self, group_name: &str) -> Result<(), CallbackError> {
         self.events.lock().unwrap().push(Event::LeaveGroup {
             group: group_name.to_string(),
         });
         Ok(())
     }
 
-    async fn on_joined_group(&self, group_name: &str) -> Result<(), CoreError> {
+    async fn on_joined_group(&self, group_name: &str) -> Result<(), CallbackError> {
         self.events.lock().unwrap().push(Event::JoinedGroup {
             group: group_name.to_string(),
         });
@@ -133,7 +137,7 @@ fn setup_joiner(
 ) -> (MlsService<MemoryDeMlsStorage>, GroupHandle, OutboundPacket) {
     let mls = setup_mls(wallet_hex);
     let handle = prepare_to_join(group_name);
-    let kp_packet = build_key_package_message(&handle, &mls).unwrap();
+    let kp_packet = build_key_package_message(&handle, &mls, b"test-app-id").unwrap();
     (mls, handle, kp_packet)
 }
 
@@ -163,9 +167,9 @@ fn steward_add_joiner(
     // 2. Insert as approved (skip voting in tests) and create batch
     let proposal_id = PROPOSAL_COUNTER.fetch_add(1, Ordering::Relaxed);
     steward_handle.insert_approved_proposal(proposal_id, gur);
-    let _packets = create_commit_candidate(steward_handle, steward_mls).unwrap();
+    let _packets = create_commit_candidate(steward_handle, steward_mls, b"test-app-id").unwrap();
 
-    let finalize = finalize_freeze_round(steward_handle, steward_mls, false).unwrap();
+    let finalize = finalize_freeze_round(steward_handle, steward_mls, false, b"test-app-id").unwrap();
     match finalize {
         FreezeFinalizeResult::Applied { result, outbound } => {
             assert!(
@@ -233,7 +237,7 @@ fn test_process_inbound_conversation_message_roundtrip() {
         group_name: group_name.to_string(),
     };
     let app_msg: AppMessage = conv.into();
-    let outbound = build_message(&steward_handle, &steward_mls, &app_msg).unwrap();
+    let outbound = build_message(&steward_handle, &steward_mls, &app_msg, b"test-app-id").unwrap();
 
     let result = process_inbound(
         &mut joiner_handle,
@@ -398,7 +402,7 @@ fn test_process_inbound_leave_group() {
     };
     steward_handle.insert_approved_proposal(2, remove_req.clone());
     joiner_handle.insert_approved_proposal(2, remove_req);
-    let packets = create_commit_candidate(&mut steward_handle, &steward_mls).unwrap();
+    let packets = create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id").unwrap();
 
     let batch_packet = packets
         .iter()
@@ -422,7 +426,7 @@ fn test_process_inbound_leave_group() {
         remove_result
     );
 
-    let finalize = finalize_freeze_round(&mut joiner_handle, &joiner_mls, false).unwrap();
+    let finalize = finalize_freeze_round(&mut joiner_handle, &joiner_mls, false, b"test-app-id").unwrap();
     assert!(
         matches!(
             finalize,
@@ -466,7 +470,7 @@ fn test_process_inbound_raw_commit_payload_is_ignored() {
         ),
     };
     steward_handle.insert_approved_proposal(7, remove_req);
-    let packets = create_commit_candidate(&mut steward_handle, &steward_mls).unwrap();
+    let packets = create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id").unwrap();
 
     let batch_packet = packets
         .iter()

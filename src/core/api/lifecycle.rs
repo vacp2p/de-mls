@@ -37,6 +37,7 @@ pub fn build_message<S>(
     handle: &GroupHandle,
     mls: &MlsService<S>,
     app_msg: &AppMessage,
+    app_id: &[u8],
 ) -> Result<OutboundPacket, CoreError>
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
@@ -51,7 +52,7 @@ where
         message_out,
         APP_MSG_SUBTOPIC,
         handle.group_name(),
-        handle.app_id(),
+        app_id,
     ))
 }
 
@@ -59,6 +60,7 @@ where
 pub fn build_key_package_message<S>(
     handle: &GroupHandle,
     mls: &MlsService<S>,
+    app_id: &[u8],
 ) -> Result<OutboundPacket, CoreError>
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
@@ -73,7 +75,7 @@ where
         welcome_msg.encode_to_vec(),
         WELCOME_SUBTOPIC,
         handle.group_name(),
-        handle.app_id(),
+        app_id,
     ))
 }
 

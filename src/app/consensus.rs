@@ -25,6 +25,7 @@ use hashgraph_like_consensus::{
     types::CreateProposalRequest,
 };
 
+use crate::app::error::UserError;
 use crate::core::{CoreError, DeMlsProvider, GroupEventHandler, GroupHandle, build_message};
 use crate::mls_crypto::{DeMlsStorage, MlsService};
 use crate::protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest, VotePayload};
@@ -93,7 +94,7 @@ pub async fn forward_incoming_proposal<P: DeMlsProvider>(
     proposal: Proposal,
     consensus: &P::Consensus,
     handler: &dyn GroupEventHandler,
-) -> Result<(), CoreError> {
+) -> Result<(), UserError> {
     let scope = P::Scope::from(group_name.to_string());
     consensus
         .process_incoming_proposal(&scope, proposal.clone())
@@ -139,7 +140,8 @@ pub async fn cast_vote<P, SN, S>(
     signer: SN,
     mls: &MlsService<S>,
     handler: &dyn GroupEventHandler,
-) -> Result<(), CoreError>
+    app_id: &[u8],
+) -> Result<(), UserError>
 where
     P: DeMlsProvider,
     SN: Signer + Send + Sync,
@@ -162,7 +164,7 @@ where
         vote_msg.into()
     };
 
-    let packet = build_message(handle, mls, &app_message)?;
+    let packet = build_message(handle, mls, &app_message, app_id)?;
     handler.on_outbound(group_name, packet).await?;
     Ok(())
 }

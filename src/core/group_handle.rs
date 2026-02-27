@@ -1,7 +1,7 @@
 //! Per-group state container for app-level operations.
 //!
 //! This module provides [`GroupHandle`], which holds app-level state for
-//! a single group: proposal tracking, steward status, and deduplication ID.
+//! a single group: proposal tracking, steward status, and freeze-round candidate buffer.
 //!
 //! **Note**: MLS cryptographic state is managed by `MlsService` internally.
 //! This handle only tracks application-layer concerns.
@@ -13,7 +13,6 @@
 //! │                        GroupHandle                          │
 //! ├─────────────────────────────────────────────────────────────┤
 //! │  group_name      │  Human-readable group identifier         │
-//! │  app_id          │  UUID for message deduplication          │
 //! │  steward         │  Whether this user batches commits       │
 //! │  proposals       │  Voting + approved proposal queues       │
 //! │  mls_initialized │  Whether MLS state exists in MlsService  │
@@ -25,7 +24,7 @@
 //! **Creating a group (as steward):**
 //! ```ignore
 //! mls_service.create_group(group_name)?;
-//! let handle = GroupHandle::new_as_creator(group_name);
+//! let handle = GroupHandle::new_as_creator(group_name, mls_service.wallet_bytes());
 //! // handle.is_steward() == true
 //! ```
 //!
@@ -84,7 +83,6 @@ pub(crate) struct FreezeRound {
 /// Handle for a single MLS group's app-level state.
 ///
 /// Contains state needed for group operations:
-/// - Application ID for message deduplication across instances
 /// - Steward flag indicating whether this user batches commits
 /// - Proposal queues for tracking voting and approved proposals
 ///
@@ -106,8 +104,6 @@ pub(crate) struct FreezeRound {
 pub struct GroupHandle {
     /// The name of the group.
     group_name: String,
-    /// Unique application instance ID for message deduplication.
-    app_id: Vec<u8>,
     /// Whether this user is the steward for this group.
     steward: bool,
     /// Whether MLS state is initialized in MlsService.
@@ -128,7 +124,6 @@ impl GroupHandle {
     fn new_base(group_name: &str) -> Self {
         Self {
             group_name: group_name.to_string(),
-            app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
             steward: false,
             mls_initialized: false,
             proposals: CurrentEpochProposals::new(),
@@ -163,11 +158,6 @@ impl GroupHandle {
     /// Get the group name as bytes.
     pub fn group_name_bytes(&self) -> &[u8] {
         self.group_name.as_bytes()
-    }
-
-    /// Get the application ID.
-    pub fn app_id(&self) -> &[u8] {
-        &self.app_id
     }
 
     /// Check if this user is the steward.

@@ -27,7 +27,7 @@ fn setup_joiner(
 ) -> (MlsService<MemoryDeMlsStorage>, GroupHandle, OutboundPacket) {
     let mls = setup_mls(wallet_hex);
     let handle = prepare_to_join(group_name);
-    let kp_packet = build_key_package_message(&handle, &mls).unwrap();
+    let kp_packet = build_key_package_message(&handle, &mls, b"test-app-id").unwrap();
     (mls, handle, kp_packet)
 }
 
@@ -54,9 +54,10 @@ fn steward_add_joiner(
 
     let proposal_id = PROPOSAL_COUNTER.fetch_add(1, Ordering::Relaxed);
     steward_handle.insert_approved_proposal(proposal_id, gur);
-    let packets = create_commit_candidate(steward_handle, steward_mls).unwrap();
+    let app_id = b"test-app-id";
+    let packets = create_commit_candidate(steward_handle, steward_mls, app_id).unwrap();
 
-    let finalize = finalize_freeze_round(steward_handle, steward_mls, false).unwrap();
+    let finalize = finalize_freeze_round(steward_handle, steward_mls, false, app_id).unwrap();
     let welcome_packet = match finalize {
         FreezeFinalizeResult::Applied { result, outbound } => {
             assert!(

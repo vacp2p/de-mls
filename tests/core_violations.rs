@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use prost::Message;
 
 use de_mls::core::{
-    ConsensusOutcome, CoreError, FreezeFinalizeResult, GroupEventHandler, GroupHandle,
-    ProcessResult, ProposalId, apply_consensus_result, build_key_package_message,
+    CallbackError, ConsensusOutcome, CoreError, FreezeFinalizeResult, GroupEventHandler,
+    GroupHandle, ProcessResult, ProposalId, apply_consensus_result, build_key_package_message,
     create_commit_candidate, create_group, finalize_freeze_round, prepare_to_join, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
@@ -68,7 +68,7 @@ impl GroupEventHandler for MockHandler {
         &self,
         group_name: &str,
         packet: OutboundPacket,
-    ) -> Result<String, CoreError> {
+    ) -> Result<String, CallbackError> {
         self.events.lock().unwrap().push(Event::Outbound {
             group: group_name.to_string(),
             packet,
@@ -76,7 +76,11 @@ impl GroupEventHandler for MockHandler {
         Ok("mock-id".to_string())
     }
 
-    async fn on_app_message(&self, group_name: &str, message: AppMessage) -> Result<(), CoreError> {
+    async fn on_app_message(
+        &self,
+        group_name: &str,
+        message: AppMessage,
+    ) -> Result<(), CallbackError> {
         self.events.lock().unwrap().push(Event::AppMessage {
             group: group_name.to_string(),
             msg: message,
@@ -84,14 +88,14 @@ impl GroupEventHandler for MockHandler {
         Ok(())
     }
 
-    async fn on_leave_group(&self, group_name: &str) -> Result<(), CoreError> {
+    async fn on_leave_group(&self, group_name: &str) -> Result<(), CallbackError> {
         self.events.lock().unwrap().push(Event::LeaveGroup {
             group: group_name.to_string(),
         });
         Ok(())
     }
 
-    async fn on_joined_group(&self, group_name: &str) -> Result<(), CoreError> {
+    async fn on_joined_group(&self, group_name: &str) -> Result<(), CallbackError> {
         self.events.lock().unwrap().push(Event::JoinedGroup {
             group: group_name.to_string(),
         });
@@ -132,7 +136,7 @@ fn setup_joiner(
 ) -> (MlsService<MemoryDeMlsStorage>, GroupHandle, OutboundPacket) {
     let mls = setup_mls(wallet_hex);
     let handle = prepare_to_join(group_name);
-    let kp_packet = build_key_package_message(&handle, &mls).unwrap();
+    let kp_packet = build_key_package_message(&handle, &mls, b"test-app-id").unwrap();
     (mls, handle, kp_packet)
 }
 
@@ -159,9 +163,9 @@ fn steward_add_joiner(
 
     let proposal_id = PROPOSAL_COUNTER.fetch_add(1, Ordering::Relaxed);
     steward_handle.insert_approved_proposal(proposal_id, gur);
-    let packets = create_commit_candidate(steward_handle, steward_mls).unwrap();
+    let packets = create_commit_candidate(steward_handle, steward_mls, b"test-app-id").unwrap();
 
-    let finalize = finalize_freeze_round(steward_handle, steward_mls, false).unwrap();
+    let finalize = finalize_freeze_round(steward_handle, steward_mls, false, b"test-app-id").unwrap();
     let welcome_packet = match finalize {
         FreezeFinalizeResult::Applied { result, outbound } => {
             assert!(
@@ -216,7 +220,7 @@ fn test_emergency_in_approved_queue_returns_error() {
     handle.insert_approved_proposal(50, emergency_request);
     assert_eq!(handle.approved_proposals_count(), 1);
 
-    let result = create_commit_candidate(&mut handle, &mls);
+    let result = create_commit_candidate(&mut handle, &mls, b"test-app-id");
     assert!(result.is_err());
     match result.unwrap_err() {
         de_mls::core::CoreError::UnexpectedEmergencyProposals { proposal_ids } => {
@@ -399,7 +403,7 @@ fn test_emergency_mixed_with_regular_returns_error() {
         ViolationEvidence::broken_commit(vec![], 0, Vec::<u8>::new()).into_update_request(),
     );
 
-    let result = create_commit_candidate(&mut steward_handle, &steward_mls);
+    let result = create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id");
     assert!(result.is_err());
     match result.unwrap_err() {
         de_mls::core::CoreError::UnexpectedEmergencyProposals { proposal_ids } => {
@@ -448,7 +452,7 @@ fn test_duplicate_batch_returns_noop() {
     let proposal_id: ProposalId = 45;
     steward_handle.insert_approved_proposal(proposal_id, gur.clone());
     joiner_handle.insert_approved_proposal(proposal_id, gur);
-    let packets = create_commit_candidate(&mut steward_handle, &steward_mls).unwrap();
+    let packets = create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id").unwrap();
     let batch_packet = packets
         .iter()
         .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
@@ -553,7 +557,7 @@ fn test_candidate_ignored_without_freeze_round() {
 
     let proposal_id: ProposalId = 44;
     steward_handle.insert_approved_proposal(proposal_id, gur.clone());
-    let packets = create_commit_candidate(&mut steward_handle, &steward_mls).unwrap();
+    let packets = create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id").unwrap();
     let batch_packet = packets
         .iter()
         .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
@@ -614,7 +618,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     steward_handle.insert_approved_proposal(proposal_id, gur.clone());
     joiner_handle.insert_approved_proposal(proposal_id, gur);
 
-    let packets = create_commit_candidate(&mut steward_handle, &steward_mls).unwrap();
+    let packets = create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id").unwrap();
     let batch_packet = packets
         .iter()
         .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
@@ -638,7 +642,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     );
 
     // Finalize: MLS commit staging authenticates the sender
-    let finalize = finalize_freeze_round(&mut joiner_handle, &joiner_mls, false).unwrap();
+    let finalize = finalize_freeze_round(&mut joiner_handle, &joiner_mls, false, b"test-app-id").unwrap();
     assert!(
         matches!(
             finalize,
@@ -696,7 +700,7 @@ fn test_no_valid_candidate_triggers_no_candidate() {
 
     let mls = setup_mls("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
-    let finalize = finalize_freeze_round(&mut handle, &mls, false).unwrap();
+    let finalize = finalize_freeze_round(&mut handle, &mls, false, b"test-app-id").unwrap();
     assert!(
         matches!(finalize, FreezeFinalizeResult::NoCandidate),
         "Expected NoCandidate when no candidates buffered, got {:?}",

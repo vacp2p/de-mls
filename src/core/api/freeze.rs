@@ -10,6 +10,7 @@ use super::*;
 fn build_deferred_welcome(
     welcome_bytes: Option<Vec<u8>>,
     handle: &GroupHandle,
+    app_id: &[u8],
 ) -> Vec<OutboundPacket> {
     let Some(welcome_bytes) = welcome_bytes else {
         return vec![];
@@ -19,7 +20,7 @@ fn build_deferred_welcome(
         welcome_msg.encode_to_vec(),
         WELCOME_SUBTOPIC,
         handle.group_name(),
-        handle.app_id(),
+        app_id,
     )]
 }
 
@@ -180,6 +181,7 @@ pub fn finalize_freeze_round<S>(
     handle: &mut GroupHandle,
     mls: &MlsService<S>,
     allow_subset_candidates: bool,
+    app_id: &[u8],
 ) -> Result<FreezeFinalizeResult, CoreError>
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
@@ -258,16 +260,26 @@ where
     // Prefer largest action set first, then lowest commit_hash as tiebreak.
     // is_local_candidate is intentionally excluded: it is node-local knowledge
     // and would cause divergence if multiple stewards exist (M3).
+    //
+    // TODO(M3): RFC §"Commit validation service" specifies the tiebreak for equal-length
+    // proposal sets as: epoch steward first, then lexicographically smallest committer ID.
+    // The commit_hash tiebreak here is equivalent for M1 (single steward, one candidate)
+    // but must be replaced with committer-identity comparison for multi-steward.
     pre_validated.sort_by(|a, b| {
         // Larger action set first
         let size_cmp = b.actions_count.cmp(&a.actions_count);
         if size_cmp != std::cmp::Ordering::Equal {
             return size_cmp;
         }
-        // Lowest commit_hash as tiebreak
+        // Lowest commit_hash as tiebreak (see TODO(M3) above)
         a.commit_hash.cmp(&b.commit_hash)
     });
 
+    // TODO(M3): If Phase 3 application fails for the top-sorted candidate, we currently
+    // return NoCandidate without attempting the next pre-validated candidate. A malicious
+    // node could exploit this by broadcasting a syntactically valid but MLS-invalid commit
+    // to DoS the freeze round. For M3, retry through pre_validated in sorted order until
+    // one succeeds or the list is exhausted (RFC §"Commit validation service" §"Fallback").
     let chosen = pre_validated.into_iter().next().unwrap();
 
     // ── Phase 3: Application (MLS processing — chosen candidate only) ──
@@ -290,7 +302,7 @@ where
         handle.clear_approved_proposals();
 
         // Build deferred welcome packets now that commit is merged
-        let outbound = build_deferred_welcome(chosen.welcome_bytes, handle);
+        let outbound = build_deferred_welcome(chosen.welcome_bytes, handle, app_id);
         handle.clear_freeze_round();
 
         return Ok(FreezeFinalizeResult::Applied {
@@ -400,6 +412,26 @@ where
                     commit_sender,
                     handle.current_epoch(),
                     "proposal sender differs from commit sender",
+                )),
+                outbound: vec![],
+            });
+        }
+    }
+
+    // Verify commit sender is the known authorized steward (RFC §"Commit validation service").
+    // Skipped when steward identity is unknown (joining members before first commit is applied).
+    if let Some(known_steward) = handle.steward_identity() {
+        if commit_sender.as_slice() != known_steward {
+            tracing::warn!(
+                "Violation: commit from unauthorized sender for group {}",
+                group_name,
+            );
+            discard_candidate_state(handle, mls, &group_name)?;
+            return Ok(FreezeFinalizeResult::Applied {
+                result: ProcessResult::ViolationDetected(ViolationEvidence::broken_commit(
+                    commit_sender,
+                    handle.current_epoch(),
+                    "commit from unauthorized sender (not the known steward)",
                 )),
                 outbound: vec![],
             });

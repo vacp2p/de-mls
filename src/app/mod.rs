@@ -136,6 +136,7 @@
 
 mod consensus;
 mod display;
+mod error;
 mod message_type;
 mod scheduler;
 mod state_machine;
@@ -148,4 +149,5 @@ pub use scheduler::{IntervalScheduler, StewardScheduler, StewardSchedulerConfig}
 pub use state_machine::{
     FreezeTimeoutStatus, GroupConfig, GroupState, GroupStateMachine, StateChangeHandler,
 };
-pub use user::{User, UserError};
+pub use error::UserError;
+pub use user::User;

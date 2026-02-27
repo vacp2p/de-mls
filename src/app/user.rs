@@ -3,7 +3,7 @@
 //! This is the main entry point for the application layer,
 //! managing multiple `GroupHandle`s and coordinating operations.
 
-use alloy::signers::local::{LocalSignerError, PrivateKeySigner};
+use alloy::signers::local::PrivateKeySigner;
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 use tokio::sync::RwLock;
 use tracing::{error, info};
@@ -15,17 +15,20 @@ use hashgraph_like_consensus::{
 use crate::app::consensus::{
     cast_vote, forward_incoming_proposal, forward_incoming_vote, start_voting,
 };
+use crate::app::error::UserError;
 use crate::app::state_machine::{
     FreezeTimeoutStatus, GroupConfig, GroupState, GroupStateMachine, StateChangeHandler,
 };
 use crate::core::{
-    self, ConsensusOutcome, CoreError, DeMlsProvider, DefaultProvider, FreezeFinalizeResult,
+    self, ConsensusOutcome, DeMlsProvider, DefaultProvider, FreezeFinalizeResult,
     GroupEventHandler, GroupHandle, ProcessResult, create_commit_candidate,
 };
 use crate::ds::InboundPacket;
 use crate::mls_crypto::{
-    IdentityError, MemoryDeMlsStorage, MlsService, format_wallet_address, parse_wallet_to_bytes,
+    MemoryDeMlsStorage, MlsService, format_wallet_address, parse_wallet_to_bytes,
 };
+use prost::Message;
+
 use crate::protos::de_mls::messages::v1::{
     AppMessage, BanRequest, ConversationMessage, GroupUpdateRequest, RemoveMember,
     ViolationEvidence, group_update_request,
@@ -35,6 +38,10 @@ use crate::protos::de_mls::messages::v1::{
 struct GroupEntry {
     handle: GroupHandle,
     state_machine: GroupStateMachine,
+    /// Per-instance UUID embedded in outbound packets for echo-dedup on pub/sub networks.
+    /// Generated once at group creation/join; lives here rather than in `GroupHandle`
+    /// because it is a transport concern, not a protocol concept.
+    app_id: Vec<u8>,
 }
 
 /// User manages multiple MLS groups.
@@ -115,6 +122,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             GroupEntry {
                 handle,
                 state_machine,
+                app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
             },
         );
         drop(groups);
@@ -240,7 +248,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     pub async fn send_kp_message(&self, group_name: &str) -> Result<(), UserError> {
         let groups = self.groups.read().await;
         let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-        let packet = core::build_key_package_message(&entry.handle, &self.mls_service)?;
+        let packet =
+            core::build_key_package_message(&entry.handle, &self.mls_service, &entry.app_id)?;
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
     }
@@ -266,7 +275,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
         .into();
 
-        let packet = core::build_message(&entry.handle, &self.mls_service, &app_msg)?;
+        let packet =
+            core::build_message(&entry.handle, &self.mls_service, &app_msg, &entry.app_id)?;
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
     }
@@ -375,6 +385,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 &mut entry.handle,
                 &self.mls_service,
                 entry.state_machine.allow_subset_candidates(),
+                &entry.app_id,
             ) {
                 Ok(result) => result,
                 Err(e) => {
@@ -517,7 +528,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let messages = {
             let mut groups = self.groups.write().await;
             let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
-            create_commit_candidate(&mut entry.handle, &self.mls_service)?
+            create_commit_candidate(&mut entry.handle, &self.mls_service, &entry.app_id)?
         };
 
         for message in messages {
@@ -532,16 +543,17 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         group_name: String,
         upd_request: GroupUpdateRequest,
     ) -> Result<(), UserError> {
+        let is_emergency = matches!(
+            upd_request.payload,
+            Some(group_update_request::Payload::EmergencyCriteria(_))
+        );
+
         let expected_voters = {
             let groups = self.groups.read().await;
             let entry = groups.get(&group_name).ok_or(UserError::GroupNotFound)?;
             let state = entry.state_machine.current_state();
             match state {
                 GroupState::Reelection => {
-                    let is_emergency = matches!(
-                        upd_request.payload,
-                        Some(group_update_request::Payload::EmergencyCriteria(_))
-                    );
                     if !is_emergency {
                         return Err(UserError::GroupBlocked(state.to_string()));
                     }
@@ -549,7 +561,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 GroupState::Freezing | GroupState::Selection => {
                     return Err(UserError::GroupBlocked(state.to_string()));
                 }
-                _ => {}
+                _ => {
+                    // RFC §"Partial Freeze Semantics": while any emergency criteria proposal
+                    // is unresolved, lower-priority proposals MUST NOT be created.
+                    if !is_emergency && entry.state_machine.has_active_emergency_proposal() {
+                        return Err(UserError::PartialFreeze);
+                    }
+                }
             }
             let members = core::group_members(&entry.handle, &self.mls_service)?;
             members.len() as u32
@@ -562,7 +580,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let group_name_clone = group_name.clone();
 
         tokio::spawn(async move {
-            let result: Result<(), CoreError> = async {
+            let result: Result<(), UserError> = async {
                 // Step 1: submit to consensus (network call, no lock held)
                 let (proposal_id, vote_payload) = start_voting::<P>(
                     &group_name,
@@ -573,15 +591,21 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 )
                 .await?;
 
-                // Step 2: store ownership before emitting UI notification.
-                // Storing first ensures `handle_consensus_event` will see
-                // `is_owner=true` even if a consensus result arrives immediately.
+                // Step 2: store ownership and register active emergency (if applicable)
+                // before emitting UI notification. Storing first ensures
+                // `handle_consensus_event` will see `is_owner=true` even if a
+                // consensus result arrives immediately.
                 {
                     let mut groups = groups.write().await;
                     if let Some(entry) = groups.get_mut(&group_name) {
                         entry
                             .handle
                             .store_voting_proposal(proposal_id, upd_request);
+                        if is_emergency {
+                            entry
+                                .state_machine
+                                .observe_emergency_proposal(proposal_id);
+                        }
                     } else {
                         error!(
                             "[start_voting_on_request]: Group {group_name} missing during proposal store"
@@ -629,6 +653,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
 
         let handle = entry.handle.clone();
+        let app_id = entry.app_id.clone();
         drop(groups);
 
         cast_vote::<P, _, _>(
@@ -640,6 +665,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             self.eth_signer.clone(),
             &self.mls_service,
             &*self.handler,
+            &app_id,
         )
         .await?;
         Ok(())
@@ -659,6 +685,28 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 self.handler.on_app_message(group_name, msg).await?;
             }
             ProcessResult::Proposal(proposal) => {
+                // RFC §"Partial Freeze Semantics": track any incoming emergency proposal
+                // so the partial freeze applies to all peers, not just the creator.
+                if let Ok(req) = GroupUpdateRequest::decode(proposal.payload.as_slice()) {
+                    if matches!(
+                        req.payload,
+                        Some(group_update_request::Payload::EmergencyCriteria(_))
+                    ) {
+                        let mut groups = self.groups.write().await;
+                        if let Some(entry) = groups.get_mut(group_name) {
+                            entry
+                                .state_machine
+                                .observe_emergency_proposal(proposal.proposal_id);
+                        }
+                    }
+                }
+                // TODO(M3c): RFC §"Partial Freeze Semantics" also requires that
+                // lower-priority proposals received from peers are DROPPED when an
+                // emergency is active — not just blocked locally. `forward_incoming_proposal`
+                // feeds the local consensus service and cannot be filtered here without
+                // risk of consensus inconsistency (other nodes may already have accepted
+                // the proposal). Full enforcement requires consensus-service-level
+                // priority gating (see ROADMAP.md M3c §3c.1).
                 forward_incoming_proposal::<P>(
                     group_name,
                     proposal,
@@ -688,7 +736,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 let packet = {
                     let groups = self.groups.read().await;
                     if let Some(entry) = groups.get(&name) {
-                        core::build_message(&entry.handle, &self.mls_service, &msg)?
+                        core::build_message(&entry.handle, &self.mls_service, &msg, &entry.app_id)?
                     } else {
                         return Ok(());
                     }
@@ -792,7 +840,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         {
             let groups = self.groups.read().await;
             if let Some(entry) = groups.get(&group_name) {
-                if packet.app_id == entry.handle.app_id() {
+                if packet.app_id == entry.app_id {
                     return Ok(());
                 }
             } else {
@@ -899,6 +947,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 .state_machine
                 .notify_proposal_approved(approved_before, approved_after);
 
+            // RFC §"Partial Freeze Semantics": lift the freeze once the emergency
+            // proposal is resolved (approved or rejected — either way it's finalized).
+            entry.state_machine.resolve_emergency_proposal(proposal_id);
+
             result
         };
         outcome_result?;
@@ -952,50 +1004,5 @@ impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
             state_handler,
             default_group_config,
         ))
-    }
-}
-
-// ─────────────────────────── Errors ───────────────────────────
-
-/// Errors from User operations.
-#[derive(Debug, thiserror::Error)]
-pub enum UserError {
-    #[error("Group already exists")]
-    GroupAlreadyExists,
-
-    #[error("Group not found")]
-    GroupNotFound,
-
-    #[error("Already leaving this group")]
-    AlreadyLeaving,
-
-    #[error("Cannot send message: group is in {0} state")]
-    GroupBlocked(String),
-
-    #[error("Core error: {0}")]
-    Core(#[from] CoreError),
-
-    #[error("State machine error: {0}")]
-    StateMachine(#[from] super::state_machine::StateMachineError),
-
-    #[error("Consensus error: {0}")]
-    Consensus(#[from] hashgraph_like_consensus::error::ConsensusError),
-
-    #[error("Message error: {0}")]
-    Message(#[from] prost::DecodeError),
-
-    #[error("System time error: {0}")]
-    SystemTime(#[from] std::time::SystemTimeError),
-
-    #[error("Signer error: {0}")]
-    Signer(#[from] LocalSignerError),
-
-    #[error("Identity error: {0}")]
-    Identity(#[from] IdentityError),
-}
-
-impl UserError {
-    pub fn is_fatal(&self) -> bool {
-        matches!(self, UserError::GroupNotFound | UserError::AlreadyLeaving)
     }
 }

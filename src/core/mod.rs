@@ -59,10 +59,13 @@
 //!
 //! ## GroupHandle
 //!
-//! `GroupHandle` is the per-group state container. It holds:
-//! - MLS cryptographic state (encrypted, thread-safe via `Arc<Mutex>`)
+//! `GroupHandle` is the per-group app-level state container. It holds:
 //! - Steward status (who can commit membership changes)
 //! - Pending and approved proposals for the current epoch
+//! - Freeze-round candidate buffer for commit selection
+//!
+//! MLS cryptographic state (key material, epoch secrets) lives in `MlsService`,
+//! keyed by group name. `GroupHandle` and `MlsService` are always used together.
 //!
 //! ## Steward Role
 //!
@@ -91,34 +94,35 @@
 //!
 //! #[async_trait]
 //! impl GroupEventHandler for MyHandler {
-//!     async fn on_outbound(&self, group: &str, packet: OutboundPacket) -> Result<String, CoreError> {
-//!         self.transport.send(packet).await
+//!     async fn on_outbound(&self, group: &str, packet: OutboundPacket) -> Result<String, CallbackError> {
+//!         self.transport.send(packet).map_err(|e| CallbackError(e.to_string()))
 //!     }
-//!     async fn on_app_message(&self, group: &str, msg: AppMessage) -> Result<(), CoreError> {
-//!         self.ui.send(msg).await
+//!     async fn on_app_message(&self, group: &str, msg: AppMessage) -> Result<(), CallbackError> {
+//!         self.ui.send(msg).map_err(|e| CallbackError(e.to_string()))
 //!     }
 //!     // ... other methods
 //! }
 //!
 //! // 2. Create a group (as steward)
-//! let handle = create_group("my-chat", &identity_service)?;
+//! let handle = create_group("my-chat", &mls)?;
 //!
 //! // 3. Send a message
 //! let app_msg = ConversationMessage { message: b"Hello".to_vec(), .. }.into();
-//! let packet = build_message(&handle, &identity_service, &app_msg).await?;
+//! let packet = build_message(&handle, &mls, &app_msg, &app_id)?;
 //! handler.on_outbound("my-chat", packet).await?;
 //!
 //! // 4. Process inbound messages (in your receive loop)
-//! let result = process_inbound(&mut handle, &payload, subtopic, &mls).await?;
+//! let result = process_inbound(&mut handle, &payload, subtopic, &mls)?;
 //! match result {
 //!     ProcessResult::AppMessage(msg) => { handler.on_app_message("my-chat", msg).await?; }
-//!     ProcessResult::GroupUpdated => { /* refresh UI */ }
+//!     ProcessResult::GroupUpdated => { /* state machine: → Working */ }
 //!     ProcessResult::LeaveGroup => { /* cleanup group state */ }
-//!     ProcessResult::JoinedGroup(name) => { /* update state to Working */ }
+//!     ProcessResult::JoinedGroup(name) => { /* state machine: PendingJoin → Working */ }
 //!     ProcessResult::GetUpdateRequest(req) => { /* start consensus vote */ }
 //!     ProcessResult::Proposal(p) => { /* forward to consensus */ }
 //!     ProcessResult::Vote(v) => { /* forward to consensus */ }
 //!     ProcessResult::ViolationDetected(ev) => { /* start emergency vote */ }
+//!     ProcessResult::CandidateBuffered => { /* state machine: Working → Freezing */ }
 //!     ProcessResult::Noop => {}
 //! }
 //! ```
@@ -126,8 +130,8 @@
 //! # Module Organization
 //!
 //! - `api` - Core group operations (create, join, send, process)
-//! - `consensus` - Voting workflow and consensus result application
-//! - `events` - `GroupEventHandler` trait
+//! - `consensus` - Pure consensus result application (`apply_consensus_result`)
+//! - `events` - `GroupEventHandler` I/O interface and `CallbackError`
 //! - `provider` - `DeMlsProvider` trait and `DefaultProvider`
 //! - `types` - `ProcessResult`, message conversions
 
@@ -154,8 +158,8 @@ pub use consensus::{ConsensusOutcome, apply_consensus_result};
 // ── Error type ──
 pub use error::CoreError;
 
-// ── Event handler trait ──
-pub use events::GroupEventHandler;
+// ── Event handler trait and callback error ──
+pub use events::{CallbackError, GroupEventHandler};
 
 // ── Group state ──
 pub use group_handle::GroupHandle;
