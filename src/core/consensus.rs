@@ -7,7 +7,7 @@
 //!
 //! App-layer helpers that wire consensus events to the UI and transport
 //! (`start_voting`, `cast_vote`, `forward_incoming_proposal`,
-//! `forward_incoming_vote`) live in [`crate::app::consensus`].
+//! `forward_incoming_vote`) live in `crate::app::consensus`.
 
 use prost::Message;
 use tracing::info;

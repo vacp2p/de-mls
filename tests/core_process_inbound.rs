@@ -169,7 +169,8 @@ fn steward_add_joiner(
     steward_handle.insert_approved_proposal(proposal_id, gur);
     let _packets = create_commit_candidate(steward_handle, steward_mls, b"test-app-id").unwrap();
 
-    let finalize = finalize_freeze_round(steward_handle, steward_mls, false, b"test-app-id").unwrap();
+    let finalize =
+        finalize_freeze_round(steward_handle, steward_mls, false, b"test-app-id").unwrap();
     match finalize {
         FreezeFinalizeResult::Applied { result, outbound } => {
             assert!(
@@ -402,7 +403,8 @@ fn test_process_inbound_leave_group() {
     };
     steward_handle.insert_approved_proposal(2, remove_req.clone());
     joiner_handle.insert_approved_proposal(2, remove_req);
-    let packets = create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id").unwrap();
+    let packets =
+        create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id").unwrap();
 
     let batch_packet = packets
         .iter()
@@ -426,7 +428,8 @@ fn test_process_inbound_leave_group() {
         remove_result
     );
 
-    let finalize = finalize_freeze_round(&mut joiner_handle, &joiner_mls, false, b"test-app-id").unwrap();
+    let finalize =
+        finalize_freeze_round(&mut joiner_handle, &joiner_mls, false, b"test-app-id").unwrap();
     assert!(
         matches!(
             finalize,
@@ -470,7 +473,8 @@ fn test_process_inbound_raw_commit_payload_is_ignored() {
         ),
     };
     steward_handle.insert_approved_proposal(7, remove_req);
-    let packets = create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id").unwrap();
+    let packets =
+        create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id").unwrap();
 
     let batch_packet = packets
         .iter()

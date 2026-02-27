@@ -21,7 +21,9 @@ pub enum UserError {
     #[error("Cannot send message: group is in {0} state")]
     GroupBlocked(String),
 
-    #[error("Lower-priority proposal blocked: an emergency criteria proposal is active (RFC partial freeze)")]
+    #[error(
+        "Lower-priority proposal blocked: an emergency criteria proposal is active (RFC partial freeze)"
+    )]
     PartialFreeze,
 
     /// Returned when a [`crate::core::GroupEventHandler`] callback fails.

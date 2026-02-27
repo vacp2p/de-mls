@@ -110,6 +110,15 @@ fn summarize_error(raw: &str) -> String {
     }
 }
 
+/// Normalize an address for display — ensures `0x` prefix is present, no truncation.
+fn fmt_addr(addr: &str) -> String {
+    let hex = addr.trim_start_matches("0x").trim_start_matches("0X");
+    if hex.is_empty() {
+        return addr.to_string();
+    }
+    format!("0x{}", hex)
+}
+
 // ─────────────────────────── Routing ───────────────────────────
 
 #[derive(Routable, Clone, PartialEq)]
@@ -296,7 +305,22 @@ fn Home() -> Element {
                     }
                     Some(AppEvent::GroupStateChanged { group_id, state }) => {
                         if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
-                            cons.write().group_state = state;
+                            cons.write().group_state = state.clone();
+                            // Refresh proposals and member count on every transition to Working
+                            // (clears stale approved queue after a commit is applied).
+                            if state == "Working" {
+                                let gid = group_id.clone();
+                                spawn(async move {
+                                    let _ = GATEWAY
+                                        .send(AppCmd::GetCurrentEpochProposals {
+                                            group_id: gid.clone(),
+                                        })
+                                        .await;
+                                    let _ = GATEWAY
+                                        .send(AppCmd::GetGroupMembers { group_id: gid })
+                                        .await;
+                                });
+                            }
                         }
                     }
                     Some(AppEvent::CurrentEpochProposals {
@@ -336,11 +360,16 @@ fn Home() -> Element {
                     Some(AppEvent::CurrentEpochProposalsCleared { group_id }) => {
                         if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
                             cons.write().approved_queue.clear();
-                            // Batch was committed — re-fetch epoch history
+                            // Batch was committed — re-fetch epoch history and member count
                             let gid = group_id.clone();
                             spawn(async move {
                                 let _ = GATEWAY
-                                    .send(AppCmd::GetEpochHistory { group_id: gid })
+                                    .send(AppCmd::GetEpochHistory {
+                                        group_id: gid.clone(),
+                                    })
+                                    .await;
+                                let _ = GATEWAY
+                                    .send(AppCmd::GetGroupMembers { group_id: gid })
                                     .await;
                             });
                         }
@@ -916,7 +945,7 @@ fn ConsensusSection() -> Element {
             h2 { "Consensus" }
 
             if let Some(_group) = opened {
-                // Steward & State status
+                // Steward, Members, State status
                 div { class: "status-row",
                     div { class: "status",
                         span { class: "muted", "You are " }
@@ -927,12 +956,23 @@ fn ConsensusSection() -> Element {
                         }
                     }
                     div { class: "status",
+                        span { class: "muted", "Members: " }
+                        {
+                            let count = chat.read().members.len();
+                            rsx! { span { class: "value", "{count}" } }
+                        }
+                    }
+                }
+                div { class: "status-row",
+                    div { class: "status",
                         span { class: "muted", "State: " }
                         {
                             let state = cons.read().group_state.clone();
                             let (class, label) = match state.as_str() {
                                 "Working" => ("good", "Working"),
-                                "Waiting" => ("warn", "Waiting for commit"),
+                                "Freezing" => ("warn", "Collecting commits"),
+                                "Selection" => ("warn", "Applying commit"),
+                                "Reelection" => ("bad", "Reelection"),
                                 "PendingJoin" => ("warn", "Pending join"),
                                 "Leaving" => ("bad", "Leaving"),
                                 "" => ("muted", "Unknown"),
@@ -943,18 +983,147 @@ fn ConsensusSection() -> Element {
                     }
                 }
 
-                // 1. Proposal for Vote
+                // State context — content depends on state and role
                 div { class: "consensus-section",
-                    h3 { "Proposal for Vote" }
-                    if let Some((proposal_id, action, id)) = pending_display {
-                        div { class: "proposals-window",
-                            div { class: "proposal-item proposal-id",
-                                span { class: "action", "Proposal ID:" }
-                                span { class: "value", "{proposal_id}" }
+                    {
+                        let state = cons.read().group_state.clone();
+                        let is_steward = cons.read().is_steward;
+                        let n = approved_snapshot.len();
+                        match state.as_str() {
+                            "Working" => {
+                                if is_steward {
+                                    rsx! {
+                                        div { class: "state-context",
+                                            span { class: "state-context-header",
+                                                "Approved for next commit ({n}):"
+                                            }
+                                            if n > 0 {
+                                                div { class: "proposals-window",
+                                                    for (action, address) in approved_snapshot.iter() {
+                                                        {
+                                                            let item_class = if action.contains("Emergency") {
+                                                                "proposal-item emergency"
+                                                            } else {
+                                                                "proposal-item"
+                                                            };
+                                                            let short = fmt_addr(address);
+                                                            rsx! {
+                                                                div { class: "{item_class}",
+                                                                    span { class: "action", "{action}:" }
+                                                                    span { class: "value", "{short}" }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                div { class: "no-data", "No proposals pending." }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    let suffix = if n == 1 { "" } else { "s" };
+                                    rsx! {
+                                        div { class: "state-context",
+                                            if n > 0 {
+                                                span { class: "state-context-header",
+                                                    "Waiting for steward to commit {n} proposal{suffix}:"
+                                                }
+                                                div { class: "proposals-window",
+                                                    for (action, address) in approved_snapshot.iter() {
+                                                        {
+                                                            let item_class = if action.contains("Emergency") {
+                                                                "proposal-item emergency"
+                                                            } else {
+                                                                "proposal-item"
+                                                            };
+                                                            let short = fmt_addr(address);
+                                                            rsx! {
+                                                                div { class: "{item_class}",
+                                                                    span { class: "action", "{action}:" }
+                                                                    span { class: "value", "{short}" }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                span { class: "muted", "No pending proposals." }
+                                            }
+                                        }
+                                    }
+                                }
                             }
-                            div { class: "proposal-item",
-                                span { class: "action", "{action}:" }
-                                span { class: "value", "{id}" }
+                            "Freezing" => rsx! {
+                                div { class: "state-context warn",
+                                    span { "⏳ Collecting commit candidates..." }
+                                }
+                            },
+                            "Selection" => rsx! {
+                                div { class: "state-context warn",
+                                    span { "⚙ Applying selected commit to the group." }
+                                }
+                            },
+                            "Reelection" => rsx! {
+                                div { class: "state-context bad",
+                                    span { "⚠ Steward fault detected. Regular proposals are blocked until the emergency vote resolves." }
+                                }
+                            },
+                            "PendingJoin" => rsx! {
+                                div { class: "state-context warn",
+                                    span { "⌛ Waiting for welcome message..." }
+                                }
+                            },
+                            "Leaving" => rsx! {
+                                div { class: "state-context warn",
+                                    span { "⌛ Waiting for removal commit..." }
+                                }
+                            },
+                            _ => rsx! {},
+                        }
+                    }
+                }
+
+                // Active Vote
+                div { class: "consensus-section",
+                    h3 { "Active Vote" }
+                    if let Some((proposal_id, action, id)) = pending_display {
+                        {
+                            let is_emergency = action.starts_with("Emergency: ");
+                            let violation_type = if is_emergency {
+                                action.strip_prefix("Emergency: ").unwrap_or("").to_string()
+                            } else {
+                                String::new()
+                            };
+                            let short_id = fmt_addr(&id);
+                            if is_emergency {
+                                rsx! {
+                                    div { class: "proposals-window emergency",
+                                        div { class: "emergency-header",
+                                            span { class: "bad", "⚠ Emergency Proposal #{proposal_id}" }
+                                        }
+                                        div { class: "proposal-item",
+                                            span { class: "action", "Violation:" }
+                                            span { class: "value bad", "{violation_type}" }
+                                        }
+                                        div { class: "proposal-item",
+                                            span { class: "action", "Accused steward:" }
+                                            span { class: "value", "{short_id}" }
+                                        }
+                                    }
+                                }
+                            } else {
+                                rsx! {
+                                    div { class: "proposals-window",
+                                        div { class: "proposal-item proposal-id",
+                                            span { class: "action", "Proposal #{proposal_id}" }
+                                        }
+                                        div { class: "proposal-item",
+                                            span { class: "action", "{action}:" }
+                                            span { class: "value", "{short_id}" }
+                                        }
+                                    }
+                                }
                             }
                         }
                         div { class: "vote-actions",
@@ -962,30 +1131,13 @@ fn ConsensusSection() -> Element {
                             button { class: "ghost",   onclick: vote_no,  "NO"  }
                         }
                     } else {
-                        div { class: "no-data", "No proposal for vote" }
+                        div { class: "no-data", "No active vote" }
                     }
                 }
 
-                // 2. Approved Queue
+                // Epoch History
                 div { class: "consensus-section",
-                    h3 { "Approved Queue" }
-                    if !approved_snapshot.is_empty() {
-                        div { class: "proposals-window",
-                            for (action, address) in approved_snapshot.iter() {
-                                div { class: "proposal-item",
-                                    span { class: "action", "{action}:" }
-                                    span { class: "value", "{address}" }
-                                }
-                            }
-                        }
-                    } else {
-                        div { class: "no-data", "No approved proposals waiting" }
-                    }
-                }
-
-                // 3. History (rejected + epoch history)
-                div { class: "consensus-section",
-                    h3 { "History" }
+                    h3 { "Epoch History" }
                     if has_history {
                         div { class: "history-window",
                             // Rejected proposals
@@ -993,9 +1145,14 @@ fn ConsensusSection() -> Element {
                                 div { class: "history-group",
                                     span { class: "history-label rejected-label", "Rejected" }
                                     for rp in rejected_snapshot.iter().rev() {
-                                        div { class: "history-entry rejected",
-                                            span { class: "action", "{rp.action}:" }
-                                            span { class: "value", "{rp.address}" }
+                                        {
+                                            let short = fmt_addr(&rp.address);
+                                            rsx! {
+                                                div { class: "history-entry rejected",
+                                                    span { class: "action", "{rp.action}:" }
+                                                    span { class: "value", "{short}" }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1011,9 +1168,25 @@ fn ConsensusSection() -> Element {
                                                 "Epoch {epoch_count - i}"
                                             }
                                             for (action, address) in batch.iter() {
-                                                div { class: "history-entry",
-                                                    span { class: "action", "{action}:" }
-                                                    span { class: "value", "{address}" }
+                                                {
+                                                    let is_emerg = action.contains("Emergency");
+                                                    let display_action = if is_emerg {
+                                                        format!("⚠ {}", action)
+                                                    } else {
+                                                        action.clone()
+                                                    };
+                                                    let entry_class = if is_emerg {
+                                                        "history-entry emergency"
+                                                    } else {
+                                                        "history-entry"
+                                                    };
+                                                    let short = fmt_addr(address);
+                                                    rsx! {
+                                                        div { class: "{entry_class}",
+                                                            span { class: "action", "{display_action}:" }
+                                                            span { class: "value", "{short}" }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }

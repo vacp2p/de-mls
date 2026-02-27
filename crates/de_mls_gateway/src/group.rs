@@ -90,7 +90,6 @@ impl Gateway<WakuDeliveryService> {
         // Phase 2 (Working): Wait until epoch boundaries and check for Waiting transition
         let user_clone = user_ref.clone();
         let group_name_clone = group_name.clone();
-        let evt_tx = self.evt_tx.clone();
         tokio::spawn(async move {
             // Phase 1: Wait for join
             loop {
@@ -160,12 +159,7 @@ impl Gateway<WakuDeliveryService> {
                         if has_proposals {
                             tracing::warn!(
                                 "Steward commit timeout for group {group_name_clone:?} \
-                                 with pending proposals (steward fault)"
-                            );
-                            let _ = evt_tx.unbounded_send(
-                                de_mls_ui_protocol::v1::AppEvent::Error(format!(
-                                    "Emergency vote started: steward inactivity for group {group_name_clone}"
-                                )),
+                                 with pending proposals — emergency vote initiated"
                             );
                         }
                     }

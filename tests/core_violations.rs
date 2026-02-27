@@ -165,7 +165,8 @@ fn steward_add_joiner(
     steward_handle.insert_approved_proposal(proposal_id, gur);
     let packets = create_commit_candidate(steward_handle, steward_mls, b"test-app-id").unwrap();
 
-    let finalize = finalize_freeze_round(steward_handle, steward_mls, false, b"test-app-id").unwrap();
+    let finalize =
+        finalize_freeze_round(steward_handle, steward_mls, false, b"test-app-id").unwrap();
     let welcome_packet = match finalize {
         FreezeFinalizeResult::Applied { result, outbound } => {
             assert!(
@@ -452,7 +453,8 @@ fn test_duplicate_batch_returns_noop() {
     let proposal_id: ProposalId = 45;
     steward_handle.insert_approved_proposal(proposal_id, gur.clone());
     joiner_handle.insert_approved_proposal(proposal_id, gur);
-    let packets = create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id").unwrap();
+    let packets =
+        create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id").unwrap();
     let batch_packet = packets
         .iter()
         .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
@@ -557,7 +559,8 @@ fn test_candidate_ignored_without_freeze_round() {
 
     let proposal_id: ProposalId = 44;
     steward_handle.insert_approved_proposal(proposal_id, gur.clone());
-    let packets = create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id").unwrap();
+    let packets =
+        create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id").unwrap();
     let batch_packet = packets
         .iter()
         .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
@@ -618,7 +621,8 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     steward_handle.insert_approved_proposal(proposal_id, gur.clone());
     joiner_handle.insert_approved_proposal(proposal_id, gur);
 
-    let packets = create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id").unwrap();
+    let packets =
+        create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id").unwrap();
     let batch_packet = packets
         .iter()
         .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
@@ -642,7 +646,8 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     );
 
     // Finalize: MLS commit staging authenticates the sender
-    let finalize = finalize_freeze_round(&mut joiner_handle, &joiner_mls, false, b"test-app-id").unwrap();
+    let finalize =
+        finalize_freeze_round(&mut joiner_handle, &joiner_mls, false, b"test-app-id").unwrap();
     assert!(
         matches!(
             finalize,

@@ -36,7 +36,7 @@ where
 
     /// Decrypt an inbound MLS message, accepting only application messages.
     ///
-    /// Unlike [`decrypt`], this method does NOT store proposals in the MLS
+    /// Unlike `decrypt`, this method does NOT store proposals in the MLS
     /// pending queue. If a proposal or commit is encountered on the app
     /// subtopic, it is ignored — preventing MLS state pollution from rogue
     /// messages on the wrong channel.
@@ -140,7 +140,7 @@ where
     /// Handles application messages and proposals.
     ///
     /// Commit messages are intentionally rejected in this path and must be
-    /// processed via [`process_commit`] + explicit merge/discard.
+    /// processed via `process_commit` + explicit merge/discard.
     pub fn decrypt(&self, group_id: &str, ciphertext: &[u8]) -> Result<DecryptResult> {
         let provider = self.make_provider();
 

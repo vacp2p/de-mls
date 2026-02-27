@@ -128,7 +128,11 @@ pub trait GroupEventHandler: Send + Sync {
     /// - Dispatch based on `message.payload` variant
     /// - `VotePayload` should trigger UI for user to approve/reject
     /// - `ConversationMessage` should be displayed in chat
-    async fn on_app_message(&self, group_name: &str, message: AppMessage) -> Result<(), CallbackError>;
+    async fn on_app_message(
+        &self,
+        group_name: &str,
+        message: AppMessage,
+    ) -> Result<(), CallbackError>;
 
     /// Called when the user has been removed from a group.
     ///

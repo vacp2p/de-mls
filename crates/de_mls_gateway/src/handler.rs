@@ -48,8 +48,7 @@ impl<DS: DeliveryService> GroupEventHandler for GatewayEventHandler<DS> {
         _group_name: &str,
         message: AppMessage,
     ) -> Result<(), CallbackError> {
-        forward_app_message(&self.evt_tx, message)
-            .map_err(|e| CallbackError(e.to_string()))
+        forward_app_message(&self.evt_tx, message).map_err(|e| CallbackError(e.to_string()))
     }
 
     async fn on_leave_group(&self, group_name: &str) -> Result<(), CallbackError> {

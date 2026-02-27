@@ -144,10 +144,10 @@ mod user;
 
 pub use consensus::{cast_vote, forward_incoming_proposal, forward_incoming_vote, start_voting};
 pub use display::{convert_group_request_to_display, get_identity_from_group_update_request};
+pub use error::UserError;
 pub use message_type::{MessageType, message_types};
 pub use scheduler::{IntervalScheduler, StewardScheduler, StewardSchedulerConfig};
 pub use state_machine::{
     FreezeTimeoutStatus, GroupConfig, GroupState, GroupStateMachine, StateChangeHandler,
 };
-pub use error::UserError;
 pub use user::User;

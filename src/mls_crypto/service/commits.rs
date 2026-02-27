@@ -123,7 +123,7 @@ where
     /// Calls `process_message()` to authenticate the commit sender and extract
     /// the membership changes, then stores the `StagedCommit` internally.
     /// The caller should validate the batch and then call either
-    /// [`merge_staged_commit`] or [`discard_staged_commit`].
+    /// `merge_staged_commit` or `discard_staged_commit`.
     pub fn process_commit(&self, group_id: &str, ciphertext: &[u8]) -> Result<StagedCommitResult> {
         let provider = self.make_provider();
 
