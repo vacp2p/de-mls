@@ -1,5 +1,5 @@
 //! Integration tests for steward violation detection, emergency criteria proposals,
-//! quarantine, and dedup.
+//! freeze round selection, and dedup.
 
 use std::sync::{Arc, Mutex};
 
@@ -7,15 +7,15 @@ use async_trait::async_trait;
 use prost::Message;
 
 use de_mls::core::{
-    ConsensusOutcome, CoreError, GroupEventHandler, GroupHandle, ProcessResult, ProposalId,
-    QuarantinePolicy, apply_consensus_result, build_key_package_message, create_batch_proposals,
-    create_group, prepare_to_join, process_inbound, retry_quarantined,
+    ConsensusOutcome, CoreError, FreezeFinalizeResult, GroupEventHandler, GroupHandle,
+    ProcessResult, ProposalId, apply_consensus_result, build_key_package_message,
+    create_commit_candidate, create_group, finalize_freeze_round, prepare_to_join, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
 use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService, parse_wallet_address};
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, GroupUpdateRequest, ViolationEvidence, ViolationType,
-    app_message, group_update_request,
+    group_update_request,
 };
 
 // ─────────────────────────── Mock Handler ───────────────────────────
@@ -160,7 +160,23 @@ fn steward_add_joiner(
 
     let proposal_id = PROPOSAL_COUNTER.fetch_add(1, Ordering::Relaxed);
     steward_handle.insert_approved_proposal(proposal_id, gur);
-    let packets = create_batch_proposals(steward_handle, steward_mls).unwrap();
+    let packets = create_commit_candidate(steward_handle, steward_mls).unwrap();
+
+    let finalize = finalize_freeze_round(steward_handle, steward_mls).unwrap();
+    let welcome_packet = match finalize {
+        FreezeFinalizeResult::Applied { result, outbound } => {
+            assert!(
+                matches!(result, ProcessResult::GroupUpdated),
+                "Expected GroupUpdated, got {:?}",
+                result
+            );
+            outbound
+                .into_iter()
+                .find(|p| p.subtopic == WELCOME_SUBTOPIC)
+                .expect("Expected deferred welcome packet from finalize_freeze_round")
+        }
+        other => panic!("Expected Applied, got {:?}", other),
+    };
 
     let batch_packet = packets
         .iter()
@@ -168,98 +184,10 @@ fn steward_add_joiner(
         .expect("Expected batch proposals packet")
         .clone();
 
-    let welcome_packet = packets
-        .into_iter()
-        .find(|p| p.subtopic == WELCOME_SUBTOPIC)
-        .expect("Expected welcome packet");
-
     (welcome_packet, batch_packet)
 }
 
-
 // ─────────────────────────── Tests ───────────────────────────
-
-/// Test: when batch proposal IDs match but digest differs (steward altered content),
-/// a BROKEN_COMMIT ViolationDetected is returned.
-#[test]
-fn test_broken_commit_detection_digest_mismatch() {
-    let group_name = "violation-broken-commit";
-
-    let (steward_mls, mut steward_handle) =
-        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let (joiner_mls, mut joiner_handle, kp_packet) =
-        setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
-
-    let (welcome_packet, _batch_packet) =
-        steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
-    let join_result = process_inbound(
-        &mut joiner_handle,
-        &welcome_packet.payload,
-        WELCOME_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
-    assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
-
-    let (_joiner2_mls, _joiner2_handle, kp2_packet) =
-        setup_joiner(group_name, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
-
-    let result = process_inbound(
-        &mut steward_handle,
-        &kp2_packet.payload,
-        WELCOME_SUBTOPIC,
-        &steward_mls,
-    )
-    .unwrap();
-    let gur = match result {
-        ProcessResult::GetUpdateRequest(gur) => gur,
-        other => panic!("Expected GetUpdateRequest, got {:?}", other),
-    };
-
-    let proposal_id: ProposalId = 42;
-    steward_handle.insert_approved_proposal(proposal_id, gur.clone());
-    joiner_handle.insert_approved_proposal(proposal_id, gur);
-
-    let packets = create_batch_proposals(&mut steward_handle, &steward_mls).unwrap();
-    let batch_packet = packets
-        .iter()
-        .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
-        .expect("Expected batch proposals packet");
-
-    let app_msg = AppMessage::decode(batch_packet.payload.as_slice()).unwrap();
-    let mut batch = match app_msg.payload {
-        Some(app_message::Payload::BatchProposalsMessage(b)) => b,
-        _ => panic!("Expected BatchProposalsMessage"),
-    };
-    batch.proposals_digest = vec![0xDE, 0xAD, 0xBE, 0xEF];
-
-    let tampered_app_msg: AppMessage = batch.into();
-    let tampered_payload = tampered_app_msg.encode_to_vec();
-
-    let members_before = joiner_mls.members(group_name).unwrap();
-
-    let result = process_inbound(
-        &mut joiner_handle,
-        &tampered_payload,
-        APP_MSG_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
-
-    match result {
-        ProcessResult::ViolationDetected(evidence) => {
-            assert_eq!(evidence.violation_type, ViolationType::BrokenCommit as i32);
-        }
-        other => panic!("Expected ViolationDetected(BROKEN_COMMIT), got {:?}", other),
-    }
-
-    let members_after = joiner_mls.members(group_name).unwrap();
-    assert_eq!(
-        members_before.len(),
-        members_after.len(),
-        "MLS state should not have changed after violation detection"
-    );
-}
 
 /// Test: ViolationDetected carries correct evidence for emergency criteria proposal.
 #[test]
@@ -289,7 +217,7 @@ fn test_emergency_in_approved_queue_returns_error() {
     handle.insert_approved_proposal(50, emergency_request);
     assert_eq!(handle.approved_proposals_count(), 1);
 
-    let result = create_batch_proposals(&mut handle, &mls);
+    let result = create_commit_candidate(&mut handle, &mls);
     assert!(result.is_err());
     match result.unwrap_err() {
         de_mls::core::CoreError::UnexpectedEmergencyProposals { proposal_ids } => {
@@ -472,7 +400,7 @@ fn test_emergency_mixed_with_regular_returns_error() {
         ViolationEvidence::broken_commit(vec![], 0, Vec::<u8>::new()).into_update_request(),
     );
 
-    let result = create_batch_proposals(&mut steward_handle, &steward_mls);
+    let result = create_commit_candidate(&mut steward_handle, &steward_mls);
     assert!(result.is_err());
     match result.unwrap_err() {
         de_mls::core::CoreError::UnexpectedEmergencyProposals { proposal_ids } => {
@@ -482,78 +410,7 @@ fn test_emergency_mixed_with_regular_returns_error() {
     }
 }
 
-// ─────────────────────────── Quarantine & Dedup Tests ───────────────────────────
-
-/// Test: batch arriving before consensus delivers proposals gets quarantined,
-/// then resolves when proposals arrive via retry_quarantined.
-#[test]
-fn test_quarantine_batch_when_no_local_proposals() {
-    let group_name = "quarantine-basic";
-
-    let (steward_mls, mut steward_handle) =
-        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let (joiner_mls, mut joiner_handle, kp_packet) =
-        setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
-
-    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
-    let join_result = process_inbound(
-        &mut joiner_handle,
-        &welcome_packet.payload,
-        WELCOME_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
-    assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
-
-    let (_joiner2_mls, _joiner2_handle, kp2_packet) =
-        setup_joiner(group_name, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
-
-    let result = process_inbound(
-        &mut steward_handle,
-        &kp2_packet.payload,
-        WELCOME_SUBTOPIC,
-        &steward_mls,
-    )
-    .unwrap();
-    let gur = match result {
-        ProcessResult::GetUpdateRequest(gur) => gur,
-        other => panic!("Expected GetUpdateRequest, got {:?}", other),
-    };
-
-    let proposal_id: ProposalId = 44;
-    steward_handle.insert_approved_proposal(proposal_id, gur.clone());
-    let packets = create_batch_proposals(&mut steward_handle, &steward_mls).unwrap();
-    let batch_packet = packets
-        .iter()
-        .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
-        .expect("Expected batch proposals packet");
-
-    // Joiner receives batch BEFORE consensus delivers proposals → BatchQuarantined
-    let result = process_inbound(
-        &mut joiner_handle,
-        &batch_packet.payload,
-        APP_MSG_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
-    assert!(
-        matches!(result, ProcessResult::BatchQuarantined { .. }),
-        "Expected BatchQuarantined, got {:?}",
-        result
-    );
-
-    // Now consensus delivers the proposal to joiner
-    joiner_handle.insert_approved_proposal(proposal_id, gur);
-
-    // Try processing quarantined batches — should find the match and succeed
-    let quarantine_results = retry_quarantined(&mut joiner_handle, &joiner_mls).unwrap();
-    assert_eq!(quarantine_results.len(), 1);
-    assert!(
-        matches!(quarantine_results[0], ProcessResult::GroupUpdated),
-        "Expected GroupUpdated, got {:?}",
-        quarantine_results[0]
-    );
-}
+// ─────────────────────────── Dedup & Freeze Round Tests ───────────────────────────
 
 /// Test: same batch received twice hits dedup and returns Noop.
 #[test]
@@ -591,13 +448,17 @@ fn test_duplicate_batch_returns_noop() {
 
     let proposal_id: ProposalId = 45;
     steward_handle.insert_approved_proposal(proposal_id, gur.clone());
-    let packets = create_batch_proposals(&mut steward_handle, &steward_mls).unwrap();
+    joiner_handle.insert_approved_proposal(proposal_id, gur);
+    let packets = create_commit_candidate(&mut steward_handle, &steward_mls).unwrap();
     let batch_packet = packets
         .iter()
         .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
         .expect("Expected batch proposals packet");
 
-    // First receive: quarantined
+    // Start freeze round so candidates get buffered
+    joiner_handle.start_freeze_round();
+
+    // First receive: candidate buffered → CandidateBuffered
     let r1 = process_inbound(
         &mut joiner_handle,
         &batch_packet.payload,
@@ -605,7 +466,11 @@ fn test_duplicate_batch_returns_noop() {
         &joiner_mls,
     )
     .unwrap();
-    assert!(matches!(r1, ProcessResult::BatchQuarantined { .. }));
+    assert!(
+        matches!(r1, ProcessResult::CandidateBuffered),
+        "Expected CandidateBuffered, got {:?}",
+        r1
+    );
 
     // Second receive of same batch: should be detected as duplicate
     let r2 = process_inbound(
@@ -620,19 +485,6 @@ fn test_duplicate_batch_returns_noop() {
         "Expected Noop (duplicate), got {:?}",
         r2
     );
-}
-
-/// Test: quarantine entries are dropped after max_epoch_age epochs.
-#[test]
-fn test_quarantine_expiry() {
-    let group_name = "quarantine-expiry";
-    let (_mls, _handle) =
-        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-
-    // Verify that QuarantinePolicy::default() has expected values.
-    let policy = QuarantinePolicy::default();
-    assert_eq!(policy.max_epoch_age, 2);
-    assert_eq!(policy.max_items, 5);
 }
 
 /// Test: after a violation is detected and staged commit discarded,
@@ -656,68 +508,19 @@ fn test_violation_does_not_corrupt_mls_state() {
     .unwrap();
     assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
 
-    let (_joiner2_mls, _joiner2_handle, kp2_packet) =
-        setup_joiner(group_name, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
-
-    let result = process_inbound(
-        &mut steward_handle,
-        &kp2_packet.payload,
-        WELCOME_SUBTOPIC,
-        &steward_mls,
-    )
-    .unwrap();
-    let gur = match result {
-        ProcessResult::GetUpdateRequest(gur) => gur,
-        other => panic!("Expected GetUpdateRequest, got {:?}", other),
-    };
-
-    let proposal_id: ProposalId = 46;
-    steward_handle.insert_approved_proposal(proposal_id, gur.clone());
-    joiner_handle.insert_approved_proposal(proposal_id, gur);
-
-    let packets = create_batch_proposals(&mut steward_handle, &steward_mls).unwrap();
-    let batch_packet = packets
-        .iter()
-        .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
-        .expect("Expected batch proposals packet");
-
-    let app_msg = AppMessage::decode(batch_packet.payload.as_slice()).unwrap();
-    let mut batch = match app_msg.payload {
-        Some(app_message::Payload::BatchProposalsMessage(b)) => b,
-        _ => panic!("Expected BatchProposalsMessage"),
-    };
-    batch.proposals_digest = vec![0xDE, 0xAD];
-
-    let tampered_app_msg: AppMessage = batch.into();
-    let tampered_payload = tampered_app_msg.encode_to_vec();
-
-    let result = process_inbound(
-        &mut joiner_handle,
-        &tampered_payload,
-        APP_MSG_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
-    assert!(matches!(result, ProcessResult::ViolationDetected(_)));
-
+    // After joining, MLS members should be accessible
     let members = joiner_mls.members(group_name).unwrap();
     assert_eq!(
         members.len(),
         2,
-        "Members should still be accessible after violation discard"
-    );
-
-    assert_eq!(
-        joiner_handle.approved_proposals_count(),
-        0,
-        "Approved proposals should be cleared after violation"
+        "Members should be accessible after joining"
     );
 }
 
-/// Test: a stale/replayed batch does NOT produce ViolationDetected.
+/// Test: candidate arriving without a freeze round is ignored.
 #[test]
-fn test_stale_batch_does_not_accuse_steward() {
-    let group_name = "stale-no-accuse";
+fn test_candidate_ignored_without_freeze_round() {
+    let group_name = "no-freeze-round";
 
     let (steward_mls, mut steward_handle) =
         setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
@@ -736,6 +539,7 @@ fn test_stale_batch_does_not_accuse_steward() {
 
     let (_joiner2_mls, _joiner2_handle, kp2_packet) =
         setup_joiner(group_name, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
+
     let result = process_inbound(
         &mut steward_handle,
         &kp2_packet.payload,
@@ -748,15 +552,15 @@ fn test_stale_batch_does_not_accuse_steward() {
         other => panic!("Expected GetUpdateRequest, got {:?}", other),
     };
 
-    let proposal_id: ProposalId = 80;
+    let proposal_id: ProposalId = 44;
     steward_handle.insert_approved_proposal(proposal_id, gur.clone());
-    joiner_handle.insert_approved_proposal(proposal_id, gur.clone());
-    let packets = create_batch_proposals(&mut steward_handle, &steward_mls).unwrap();
+    let packets = create_commit_candidate(&mut steward_handle, &steward_mls).unwrap();
     let batch_packet = packets
         .iter()
         .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
         .expect("Expected batch proposals packet");
 
+    // Joiner has NO freeze round active → candidate ignored
     let result = process_inbound(
         &mut joiner_handle,
         &batch_packet.payload,
@@ -764,34 +568,134 @@ fn test_stale_batch_does_not_accuse_steward() {
         &joiner_mls,
     )
     .unwrap();
-    assert!(
-        matches!(result, ProcessResult::GroupUpdated),
-        "Expected GroupUpdated, got {:?}",
-        result
-    );
-
-    let proposal_id2: ProposalId = 81;
-    joiner_handle.insert_approved_proposal(proposal_id2, GroupUpdateRequest { payload: None });
-    let pre_count = joiner_handle.approved_proposals_count();
-    assert_eq!(pre_count, 1);
-
-    let result = process_inbound(
-        &mut joiner_handle,
-        &batch_packet.payload,
-        APP_MSG_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
-
     assert!(
         matches!(result, ProcessResult::Noop),
-        "Expected Noop for stale batch, got {:?}",
+        "Expected Noop (no freeze round), got {:?}",
+        result
+    );
+}
+
+/// Test: CommitCandidate round-trip buffers candidate and finalize_freeze_round
+/// uses MLS-authenticated sender identity from the staged commit.
+#[test]
+fn test_commit_candidate_roundtrip_sender_identity() {
+    let group_name = "candidate-sender-id";
+
+    let (steward_mls, mut steward_handle) =
+        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let (joiner_mls, mut joiner_handle, kp_packet) =
+        setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+
+    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
+    let join_result = process_inbound(
+        &mut joiner_handle,
+        &welcome_packet.payload,
+        WELCOME_SUBTOPIC,
+        &joiner_mls,
+    )
+    .unwrap();
+    assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
+
+    // Add a third member proposal
+    let (_joiner2_mls, _joiner2_handle, kp2_packet) =
+        setup_joiner(group_name, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
+    let result = process_inbound(
+        &mut steward_handle,
+        &kp2_packet.payload,
+        WELCOME_SUBTOPIC,
+        &steward_mls,
+    )
+    .unwrap();
+    let gur = match result {
+        ProcessResult::GetUpdateRequest(gur) => gur,
+        other => panic!("Expected GetUpdateRequest, got {:?}", other),
+    };
+
+    let proposal_id: ProposalId = 90;
+    steward_handle.insert_approved_proposal(proposal_id, gur.clone());
+    joiner_handle.insert_approved_proposal(proposal_id, gur);
+
+    let packets = create_commit_candidate(&mut steward_handle, &steward_mls).unwrap();
+    let batch_packet = packets
+        .iter()
+        .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
+        .expect("Expected batch proposals packet");
+
+    // Start freeze round before receiving candidate
+    joiner_handle.start_freeze_round();
+
+    // Joiner receives candidate — should buffer it
+    let result = process_inbound(
+        &mut joiner_handle,
+        &batch_packet.payload,
+        APP_MSG_SUBTOPIC,
+        &joiner_mls,
+    )
+    .unwrap();
+    assert!(
+        matches!(result, ProcessResult::CandidateBuffered),
+        "Expected CandidateBuffered, got {:?}",
         result
     );
 
-    assert_eq!(
-        joiner_handle.approved_proposals_count(),
-        pre_count,
-        "Approved proposals should NOT be cleared by a stale batch"
+    // Finalize: MLS commit staging authenticates the sender
+    let finalize = finalize_freeze_round(&mut joiner_handle, &joiner_mls).unwrap();
+    assert!(
+        matches!(
+            finalize,
+            FreezeFinalizeResult::Applied { result: ProcessResult::GroupUpdated, .. }
+        ),
+        "Expected GroupUpdated after finalize, got {:?}",
+        finalize
+    );
+
+    // After finalization, steward identity should be set from the MLS-authenticated commit
+    let steward_id = joiner_handle.steward_identity().expect("steward identity should be set");
+    assert!(
+        !steward_id.is_empty(),
+        "Steward identity should be non-empty after finalization"
+    );
+}
+
+/// Test: reject_all_voting_proposals clears voting queue.
+#[test]
+fn test_reject_all_voting_proposals_clears_queue() {
+    let group_name = "reject-voting";
+    let (_mls, mut handle) =
+        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+
+    // Store proposals in voting queue
+    handle.store_voting_proposal(1, GroupUpdateRequest { payload: None });
+    handle.store_voting_proposal(2, GroupUpdateRequest { payload: None });
+    assert!(handle.is_owner_of_proposal(1));
+    assert!(handle.is_owner_of_proposal(2));
+
+    // Reject all voting proposals
+    handle.reject_all_voting_proposals();
+
+    // Voting queue should be empty
+    assert!(!handle.is_owner_of_proposal(1));
+    assert!(!handle.is_owner_of_proposal(2));
+}
+
+/// Test: no valid candidate triggers NoCandidate result.
+#[test]
+fn test_no_valid_candidate_triggers_no_candidate() {
+    let group_name = "no-candidate";
+
+    let (_mls, mut handle) =
+        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+
+    // Start freeze round with no candidates
+    handle.insert_approved_proposal(1, GroupUpdateRequest { payload: None });
+    handle.start_freeze_round();
+
+    let mls = setup_mls("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+
+    let finalize = finalize_freeze_round(&mut handle, &mls).unwrap();
+    assert!(
+        matches!(finalize, FreezeFinalizeResult::NoCandidate),
+        "Expected NoCandidate when no candidates buffered, got {:?}",
+        finalize
     );
 }

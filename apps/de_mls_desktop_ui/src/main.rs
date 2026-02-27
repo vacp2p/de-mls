@@ -8,7 +8,7 @@ use std::sync::{
 };
 
 use de_mls::{
-    core::convert_group_request_to_display,
+    app::convert_group_request_to_display,
     mls_crypto::parse_wallet_address,
     protos::de_mls::messages::v1::{ConversationMessage, VotePayload},
 };

@@ -87,6 +87,11 @@ impl CurrentEpochProposals {
         self.voting_proposals.remove(&proposal_id);
     }
 
+    /// Clear all voting proposals (used on freeze timeout with no candidate).
+    pub fn clear_voting_proposals(&mut self) {
+        self.voting_proposals.clear();
+    }
+
     /// Clear the approved proposals, archiving them to epoch history.
     pub fn clear_approved_proposals(&mut self) {
         if !self.approved_proposals.is_empty() {

@@ -14,7 +14,7 @@
 //! 3. Users vote via cast_vote() → votes sent as MLS messages
 //! 4. Consensus service emits outcome
 //! 5. App calls apply_consensus_result() → updates proposal state
-//! 6. Steward calls create_batch_proposals() → applies approved changes
+//! 6. Steward calls create_commit_candidate() → broadcasts commit candidate
 //! ```
 //!
 //! # Key Functions
@@ -41,9 +41,7 @@ use hashgraph_like_consensus::{
     types::CreateProposalRequest,
 };
 
-use crate::core::{
-    CoreError, DeMlsProvider, GroupEventHandler, GroupHandle, build_message,
-};
+use crate::core::{CoreError, DeMlsProvider, GroupEventHandler, GroupHandle, build_message};
 use crate::mls_crypto::{DeMlsStorage, MlsService};
 use crate::protos::de_mls::messages::v1::{
     AppMessage, GroupUpdateRequest, VotePayload, group_update_request,

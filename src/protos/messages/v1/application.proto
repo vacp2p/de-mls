@@ -9,13 +9,13 @@ import "hashgraph-like-consensus/v1/consensus.proto";
 message AppMessage {
   oneof payload {
     ConversationMessage conversation_message = 1;
-    BatchProposalsMessage batch_proposals_message = 2;
-    BanRequest ban_request = 3;
-    consensus.v1.Proposal proposal = 4;
-    consensus.v1.Vote vote = 5;
-    VotePayload vote_payload = 6;
-    UserVote user_vote = 7;
-    ProposalAdded proposal_added = 8;
+    BanRequest ban_request = 2;
+    consensus.v1.Proposal proposal = 3;
+    consensus.v1.Vote vote = 4;
+    VotePayload vote_payload = 5;
+    UserVote user_vote = 6;
+    ProposalAdded proposal_added = 7;
+    CommitCandidate commit_candidate = 8;
   }
 }
 
@@ -30,13 +30,10 @@ message ConversationMessage {
   string group_name = 3;
 }
 
-message BatchProposalsMessage {
+message CommitCandidate {
   bytes group_name = 1;
-  repeated bytes mls_proposals = 2;  // Individual MLS proposal messages
-  bytes commit_message = 3;          // MLS commit message
-  repeated uint32 proposal_ids = 4;  // Consensus proposal IDs included in this batch
-  bytes proposals_digest = 5;        // SHA-256 over canonical (id, payload) pairs
-  reserved 6;  // was steward_identity — removed, identity derived from MLS sender
+  repeated bytes mls_proposals = 2;
+  bytes commit_message = 3;
 }
 
 // Yes/No vote for a given proposal. Based on the result, the `Vote` will be created.

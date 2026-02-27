@@ -5,11 +5,11 @@ use std::sync::RwLock;
 
 use alloy::primitives::Address;
 use openmls::credentials::CredentialWithKey;
-use openmls::group::{GroupId, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig};
 use openmls::group::StagedCommit;
+use openmls::group::{GroupId, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig};
 use openmls::prelude::{
     BasicCredential, Ciphersuite, DeserializeBytes, MlsMessageBodyIn, MlsMessageIn,
-    ProcessedMessageContent, ProtocolMessage, StagedWelcome,
+    ProcessedMessageContent, Proposal, ProtocolMessage, StagedWelcome,
 };
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::{MemoryStorage, RustCrypto};
@@ -19,7 +19,10 @@ use crate::mls_crypto::{
     error::{IdentityError, MlsError, MlsServiceError, Result, StorageError},
     identity::IdentityData,
     storage::DeMlsStorage,
-    types::{CommitResult, DecryptResult, GroupUpdate, KeyPackageBytes, MlsProposalAction, StagedCommitResult},
+    types::{
+        CommitCandidate, DecryptResult, GroupUpdate, KeyPackageBytes, MlsMessageKind,
+        MlsProposalAction, StagedCommitResult,
+    },
 };
 
 /// The MLS ciphersuite used for all operations.
@@ -323,9 +326,113 @@ where
         Ok(message.to_bytes()?)
     }
 
+    /// Decrypt an inbound MLS message, accepting only application messages.
+    ///
+    /// Unlike [`decrypt`], this method does NOT store proposals in the MLS
+    /// pending queue. If a proposal or commit is encountered on the app
+    /// subtopic, it is ignored — preventing MLS state pollution from rogue
+    /// messages on the wrong channel.
+    ///
+    /// Use this for normal app messages on APP_MSG_SUBTOPIC.
+    pub fn decrypt_application_only(
+        &self,
+        group_id: &str,
+        ciphertext: &[u8],
+    ) -> Result<DecryptResult> {
+        let provider = self.make_provider();
+
+        let mut groups = self
+            .groups
+            .write()
+            .map_err(|e| StorageError::Lock(e.to_string()))?;
+        let group = groups.get_mut(group_id).ok_or_else(|| {
+            MlsError::Service(MlsServiceError::GroupNotFound(group_id.to_string()))
+        })?;
+
+        let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(ciphertext)?;
+        let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
+
+        if protocol_message.group_id().as_slice() != group.group_id().as_slice() {
+            return Ok(DecryptResult::Ignored);
+        }
+
+        // Ignore messages from any non-current epoch — OpenMLS rejects both
+        // old and future epochs, so gracefully ignore both to avoid hard errors
+        // (e.g. when a joiner sends at epoch N+1 before we've merged our commit).
+        if protocol_message.epoch() != group.epoch() {
+            return Ok(DecryptResult::Ignored);
+        }
+
+        // Reject commits and proposals before process_message to avoid MLS
+        // errors (e.g. MissingProposal when commit's proposals aren't stored).
+        match protocol_message.content_type() {
+            openmls::prelude::ContentType::Commit | openmls::prelude::ContentType::Proposal => {
+                return Ok(DecryptResult::Ignored);
+            }
+            openmls::prelude::ContentType::Application => {}
+        }
+
+        let processed = group.process_message(&provider, protocol_message)?;
+        let sender_identity = processed.credential().serialized_content().to_vec();
+
+        match processed.into_content() {
+            ProcessedMessageContent::ApplicationMessage(app) => Ok(DecryptResult::Application(
+                app.into_bytes(),
+                sender_identity,
+            )),
+            _ => Ok(DecryptResult::Ignored),
+        }
+    }
+
+    /// Process an MLS proposal from a commit candidate and store it in the
+    /// MLS group's pending queue.
+    ///
+    /// This is used exclusively in the candidate pipeline during
+    /// `finalize_freeze_round` Phase 3. Each MLS proposal from the chosen
+    /// candidate is processed here so that the subsequent `process_commit()`
+    /// can reference them.
+    ///
+    /// Returns `DecryptResult::ProposalStored` with the MLS-authenticated
+    /// sender identity and the proposal action.
+    pub fn process_candidate_proposal(
+        &self,
+        group_id: &str,
+        proposal_bytes: &[u8],
+    ) -> Result<DecryptResult> {
+        let provider = self.make_provider();
+
+        let mut groups = self
+            .groups
+            .write()
+            .map_err(|e| StorageError::Lock(e.to_string()))?;
+        let group = groups.get_mut(group_id).ok_or_else(|| {
+            MlsError::Service(MlsServiceError::GroupNotFound(group_id.to_string()))
+        })?;
+
+        let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(proposal_bytes)?;
+        let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
+
+        let processed = group.process_message(&provider, protocol_message)?;
+        let sender_identity = processed.credential().serialized_content().to_vec();
+
+        match processed.into_content() {
+            ProcessedMessageContent::ProposalMessage(proposal) => {
+                let action = Self::extract_proposal_action(group, proposal.proposal());
+
+                // Store in MLS pending queue — required for commit processing
+                group.store_pending_proposal(provider.storage(), proposal.as_ref().clone())?;
+                Ok(DecryptResult::ProposalStored(sender_identity, action))
+            }
+            _ => Err(MlsError::Service(MlsServiceError::UnexpectedMessageType)),
+        }
+    }
+
     /// Decrypt/process an inbound MLS message.
     ///
-    /// Handles application messages, proposals, and commits.
+    /// Handles application messages and proposals.
+    ///
+    /// Commit messages are intentionally rejected in this path and must be
+    /// processed via [`process_commit`] + explicit merge/discard.
     pub fn decrypt(&self, group_id: &str, ciphertext: &[u8]) -> Result<DecryptResult> {
         let provider = self.make_provider();
 
@@ -345,12 +452,22 @@ where
             return Ok(DecryptResult::Ignored);
         }
 
-        // Ignore messages from old epochs - they can't be processed after the group advances
-        if protocol_message.epoch() < group.epoch() {
+        // Ignore messages from any non-current epoch. Old epochs can't be
+        // processed, and future epochs arrive when a joiner sends at epoch N+1
+        // before we've merged our pending commit.
+        if protocol_message.epoch() != group.epoch() {
             tracing::debug!(
-                "Ignoring message from old epoch {} (current: {})",
+                "Ignoring message from epoch {} (current: {})",
                 protocol_message.epoch().as_u64(),
                 group.epoch().as_u64()
+            );
+            return Ok(DecryptResult::Ignored);
+        }
+
+        if protocol_message.content_type() == openmls::prelude::ContentType::Commit {
+            tracing::debug!(
+                "Ignoring commit on decrypt() path for group {}: use process_commit() instead",
+                group_id,
             );
             return Ok(DecryptResult::Ignored);
         }
@@ -364,54 +481,53 @@ where
                 sender_identity,
             )),
             ProcessedMessageContent::ProposalMessage(proposal) => {
-                use openmls::prelude::Proposal;
-                use crate::mls_crypto::types::MlsProposalAction;
-
                 // Extract the action before storing (consuming) the proposal.
-                let action = match proposal.proposal() {
-                    Proposal::Add(add) => {
-                        let id = add.key_package().leaf_node().credential()
-                            .serialized_content().to_vec();
-                        MlsProposalAction::Add(id)
-                    }
-                    Proposal::Remove(remove) => {
-                        let id = group
-                            .member(remove.removed())
-                            .map(|c| c.serialized_content().to_vec())
-                            .unwrap_or_default();
-                        MlsProposalAction::Remove(id)
-                    }
-                    other => MlsProposalAction::Other(format!("{other:?}")),
-                };
+                let action = Self::extract_proposal_action(group, proposal.proposal());
 
                 group.store_pending_proposal(provider.storage(), proposal.as_ref().clone())?;
                 Ok(DecryptResult::ProposalStored(sender_identity, action))
             }
-            ProcessedMessageContent::StagedCommitMessage(staged) => {
-                let removed = staged.self_removed();
-                group.merge_staged_commit(&provider, *staged)?;
-                if removed {
-                    if group.is_active() {
-                        return Err(MlsError::Service(MlsServiceError::GroupStillActive));
-                    }
-                    Ok(DecryptResult::Removed(sender_identity))
-                } else {
-                    Ok(DecryptResult::CommitProcessed(sender_identity))
-                }
-            }
+            ProcessedMessageContent::StagedCommitMessage(_) => Ok(DecryptResult::Ignored),
             ProcessedMessageContent::ExternalJoinProposalMessage(_) => Ok(DecryptResult::Ignored),
         }
+    }
+
+    /// Inspect the untrusted outer kind of an MLS message.
+    ///
+    /// This is useful for strict lane checks (proposal lane vs commit lane)
+    /// before deeper processing.
+    pub fn inspect_message_kind(&self, message_bytes: &[u8]) -> Result<MlsMessageKind> {
+        let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(message_bytes)?;
+        let protocol = match mls_message.extract() {
+            MlsMessageBodyIn::Welcome(_) => return Ok(MlsMessageKind::Welcome),
+            MlsMessageBodyIn::PrivateMessage(m) => ProtocolMessage::PrivateMessage(m),
+            MlsMessageBodyIn::PublicMessage(m) => ProtocolMessage::PublicMessage(Box::new(m)),
+            _ => return Ok(MlsMessageKind::Other),
+        };
+
+        let kind = match protocol.content_type() {
+            openmls::prelude::ContentType::Application => MlsMessageKind::Application,
+            openmls::prelude::ContentType::Proposal => MlsMessageKind::Proposal,
+            openmls::prelude::ContentType::Commit => MlsMessageKind::Commit,
+        };
+        Ok(kind)
     }
 
     // ══════════════════════════════════════════════════════════
     // Steward
     // ══════════════════════════════════════════════════════════
 
-    /// Create proposals for membership changes and commit them.
+    /// Create proposals for membership changes and stage a commit candidate.
     ///
     /// This is the core steward operation: takes a list of add/remove
-    /// operations, creates MLS proposals, and commits them in a batch.
-    pub fn commit(&self, group_id: &str, updates: &[GroupUpdate]) -> Result<CommitResult> {
+    /// operations, creates MLS proposals, and produces a commit candidate.
+    ///
+    /// This does NOT merge the pending commit.
+    pub fn create_commit_candidate(
+        &self,
+        group_id: &str,
+        updates: &[GroupUpdate],
+    ) -> Result<CommitCandidate> {
         let id_guard = self
             .identity
             .read()
@@ -461,18 +577,50 @@ where
 
         let (commit_msg, welcome, _group_info) =
             group.commit_to_pending_proposals(&provider, &identity.signer)?;
-        group.merge_pending_commit(&provider)?;
 
         let welcome_bytes = match welcome {
             Some(w) => Some(w.to_bytes()?),
             None => None,
         };
 
-        Ok(CommitResult {
+        Ok(CommitCandidate {
             proposals: mls_proposals,
             commit: commit_msg.to_bytes()?,
             welcome: welcome_bytes,
         })
+    }
+
+    /// Merge this member's own pending commit candidate.
+    pub fn merge_own_commit(&self, group_id: &str) -> Result<()> {
+        let provider = self.make_provider();
+
+        let mut groups = self
+            .groups
+            .write()
+            .map_err(|e| StorageError::Lock(e.to_string()))?;
+        let group = groups.get_mut(group_id).ok_or_else(|| {
+            MlsError::Service(MlsServiceError::GroupNotFound(group_id.to_string()))
+        })?;
+
+        group.merge_pending_commit(&provider)?;
+        Ok(())
+    }
+
+    /// Discard this member's own pending commit candidate.
+    pub fn discard_own_commit(&self, group_id: &str) -> Result<()> {
+        let provider = self.make_provider();
+
+        let mut groups = self
+            .groups
+            .write()
+            .map_err(|e| StorageError::Lock(e.to_string()))?;
+        let group = groups.get_mut(group_id).ok_or_else(|| {
+            MlsError::Service(MlsServiceError::GroupNotFound(group_id.to_string()))
+        })?;
+
+        let _ = group.clear_pending_commit(provider.storage());
+        let _ = group.clear_pending_proposals(provider.storage());
+        Ok(())
     }
 
     // ══════════════════════════════════════════════════════════
@@ -589,9 +737,7 @@ where
             .map_err(|e| StorageError::Lock(e.to_string()))?
             .remove(group_id)
             .ok_or_else(|| {
-                MlsError::Service(MlsServiceError::NoPendingStagedCommit(
-                    group_id.to_string(),
-                ))
+                MlsError::Service(MlsServiceError::NoPendingStagedCommit(group_id.to_string()))
             })?;
         // pending_staged_commits lock released — staged is an owned value.
 
@@ -637,6 +783,28 @@ where
     // ══════════════════════════════════════════════════════════
     // Internal
     // ══════════════════════════════════════════════════════════
+
+    fn extract_proposal_action(group: &MlsGroup, proposal: &Proposal) -> MlsProposalAction {
+        match proposal {
+            Proposal::Add(add) => {
+                let id = add
+                    .key_package()
+                    .leaf_node()
+                    .credential()
+                    .serialized_content()
+                    .to_vec();
+                MlsProposalAction::Add(id)
+            }
+            Proposal::Remove(remove) => {
+                let id = group
+                    .member(remove.removed())
+                    .map(|c| c.serialized_content().to_vec())
+                    .unwrap_or_default();
+                MlsProposalAction::Remove(id)
+            }
+            other => MlsProposalAction::Other(format!("{other:?}")),
+        }
+    }
 
     fn make_provider(&self) -> MlsProvider<'_> {
         MlsProvider {

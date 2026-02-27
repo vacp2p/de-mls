@@ -6,11 +6,11 @@
 //!
 //! # Overview
 //!
-//! The API is organized into four categories:
+//! The API is organized into three categories:
 //!
 //! ## Group Lifecycle
-//! - [`create_group`] / [`create_group_with_policy`] - Create a new group as steward
-//! - [`prepare_to_join`] / [`prepare_to_join_with_policy`] - Prepare a handle for joining
+//! - [`create_group`] - Create a new group as steward
+//! - [`prepare_to_join`] - Prepare a handle for joining
 //! - [`join_group_from_invite`] - Complete join with welcome message
 //! - [`become_steward`] / [`resign_steward`] - Steward role management
 //!
@@ -22,12 +22,8 @@
 //! - [`process_inbound`] - Process received packets, returns [`ProcessResult`]
 //!
 //! ## Steward Operations
-//! - [`create_batch_proposals`] - Batch approved proposals into MLS commit
-//!
-//! ## Quarantine
-//! - [`retry_quarantined`] - Retry quarantined batches after proposals arrive
-//! - [`quarantine_len`] - Number of quarantined batches
-//! - [`has_quarantined`] - Whether any batches are quarantined
+//! - [`create_commit_candidate`] - Build/broadcast commit candidate (no immediate merge)
+//! - [`finalize_freeze_round`] - Select and apply a buffered candidate
 //!
 //! # Typical Flow
 //!
@@ -52,61 +48,41 @@
 use openmls_rust_crypto::MemoryStorage;
 use prost::Message;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use tracing::info;
+use std::collections::{HashMap, VecDeque};
+use tracing::{info, warn};
 
 use crate::core::{
     ProposalId,
     error::CoreError,
-    group_handle::{GroupHandle, QuarantinePolicy, QuarantinedBatch},
+    group_handle::{BufferedCommitCandidate, GroupHandle},
     types::ProcessResult,
     types::invitation_from_bytes,
 };
 use crate::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
 use crate::mls_crypto::{
-    CommitResult, DeMlsStorage, DecryptResult, GroupUpdate, KeyPackageBytes, MlsProposalAction,
-    MlsService, StagedCommitResult, key_package_bytes_from_json,
+    CommitCandidate as MlsCommitCandidate, DeMlsStorage, DecryptResult, GroupUpdate,
+    KeyPackageBytes, MlsMessageKind, MlsProposalAction, MlsService, StagedCommitResult,
+    key_package_bytes_from_json,
 };
 use crate::protos::de_mls::messages::v1::{
-    AppMessage, BatchProposalsMessage, GroupUpdateRequest, InviteMember, UserKeyPackage,
+    AppMessage, CommitCandidate, GroupUpdateRequest, InviteMember, UserKeyPackage,
     ViolationEvidence, WelcomeMessage, app_message, group_update_request, welcome_message,
 };
 
 // ─────────────────────────── Group Lifecycle ───────────────────────────
 
-/// Create a new MLS group as the steward with default quarantine policy.
+/// Create a new MLS group as the steward.
 pub fn create_group<S>(name: &str, mls: &MlsService<S>) -> Result<GroupHandle, CoreError>
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
-    create_group_with_policy(name, mls, QuarantinePolicy::default())
-}
-
-/// Create a new MLS group as the steward with custom quarantine policy.
-pub fn create_group_with_policy<S>(
-    name: &str,
-    mls: &MlsService<S>,
-    policy: QuarantinePolicy,
-) -> Result<GroupHandle, CoreError>
-where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
-{
     mls.create_group(name)?;
-    Ok(GroupHandle::new_as_creator_with_policy(
-        name,
-        mls.wallet_bytes(),
-        policy,
-    ))
+    Ok(GroupHandle::new_as_creator(name, mls.wallet_bytes()))
 }
 
-/// Prepare a handle for joining an existing group with default quarantine policy.
+/// Prepare a handle for joining an existing group.
 pub fn prepare_to_join(name: &str) -> GroupHandle {
     GroupHandle::new_for_join(name)
-}
-
-/// Prepare a handle for joining an existing group with custom quarantine policy.
-pub fn prepare_to_join_with_policy(name: &str, policy: QuarantinePolicy) -> GroupHandle {
-    GroupHandle::new_for_join_with_policy(name, policy)
 }
 
 /// Complete joining a group using a welcome message.
@@ -261,38 +237,50 @@ where
         return Ok(ProcessResult::Noop);
     }
 
-    // Try to parse as AppMessage first (for batch proposals)
-    if let Ok(app_message) = AppMessage::decode(payload)
-        && let Some(app_message::Payload::BatchProposalsMessage(batch_msg)) = app_message.payload
-    {
-        return process_batch_proposals(handle, batch_msg, mls);
+    // 1. Try plaintext CommitCandidate (sent as plaintext AppMessage)
+    if let Ok(app_message) = AppMessage::decode(payload) {
+        if let Some(app_message::Payload::CommitCandidate(candidate)) = app_message.payload {
+            return process_commit_candidate(handle, candidate, mls);
+        }
     }
 
-    // Fall back to MLS protocol message
-    let res = mls.decrypt(handle.group_name(), payload)?;
+    // 2. MLS-encrypted app messages only — use decrypt_application_only.
+    //    This NEVER stores proposals or processes commits, preventing
+    //    rogue MLS proposals on the app subtopic from polluting state.
+    let res = mls.decrypt_application_only(handle.group_name(), payload)?;
 
     match res {
         DecryptResult::Application(app_bytes, _sender) => {
             AppMessage::decode(app_bytes.as_ref())?.try_into()
         }
         DecryptResult::Removed(_) => Ok(ProcessResult::LeaveGroup),
-        DecryptResult::ProposalStored(..)
-        | DecryptResult::CommitProcessed(_)
-        | DecryptResult::Ignored => Ok(ProcessResult::Noop),
+        _ => {
+            warn!("Unexpected MLS message type on app subtopic, ignoring");
+            Ok(ProcessResult::Noop)
+        }
     }
 }
 
 // ─────────────────────────── Batch Processing (internal helpers) ───────────────────────────
 
-/// Compute a canonical SHA-256 digest over a set of approved proposals.
-fn compute_proposals_digest(proposals: &HashMap<ProposalId, GroupUpdateRequest>) -> Vec<u8> {
-    let sorted: BTreeMap<_, _> = proposals.iter().collect();
-    let mut hasher = Sha256::new();
-    for (&id, req) in &sorted {
-        hasher.update(id.to_le_bytes());
-        hasher.update(req.encode_to_vec());
-    }
-    hasher.finalize().to_vec()
+/// Build deferred welcome outbound packets from a chosen candidate.
+///
+/// Welcome messages are deferred until after commit merge so that joiners
+/// don't advance to the new epoch before the steward does.
+fn build_deferred_welcome(
+    welcome_bytes: Option<Vec<u8>>,
+    handle: &GroupHandle,
+) -> Vec<OutboundPacket> {
+    let Some(welcome_bytes) = welcome_bytes else {
+        return vec![];
+    };
+    let welcome_msg: WelcomeMessage = invitation_from_bytes(welcome_bytes);
+    vec![OutboundPacket::new(
+        welcome_msg.encode_to_vec(),
+        WELCOME_SUBTOPIC,
+        handle.group_name(),
+        handle.app_id(),
+    )]
 }
 
 /// Compute a SHA-256 hash of the raw commit message bytes.
@@ -302,387 +290,418 @@ fn compute_commit_hash(commit_message: &[u8]) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-/// Compute a SHA-256 fingerprint from proposal IDs and digest.
-/// Proposal IDs are sorted before hashing for deterministic output.
-fn compute_batch_fingerprint(proposal_ids: &[u32], proposals_digest: &[u8]) -> Vec<u8> {
-    let mut sorted_ids = proposal_ids.to_vec();
-    sorted_ids.sort();
-    let mut hasher = Sha256::new();
-    for id in &sorted_ids {
-        hasher.update(id.to_le_bytes());
-    }
-    hasher.update(proposals_digest);
-    hasher.finalize().to_vec()
-}
-
-/// Pre-check: empty set check, dedup, quarantine decision.
-/// Returns `Some(ProcessResult)` if the batch should not be processed further.
-fn precheck_batch<S>(
-    handle: &mut GroupHandle,
-    batch_msg: &BatchProposalsMessage,
-    local_ids: &BTreeSet<ProposalId>,
-    batch_ids: &BTreeSet<ProposalId>,
-    _mls: &MlsService<S>,
-) -> Option<ProcessResult>
+/// Validate that candidate wire messages have the expected MLS kinds.
+///
+/// This is a cheap check only (deserialize + outer content type), with no
+/// MLS state mutation.
+fn has_valid_candidate_wire_kinds<S>(candidate: &CommitCandidate, mls: &MlsService<S>) -> bool
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
+    candidate.mls_proposals.iter().all(|proposal| {
+        matches!(
+            mls.inspect_message_kind(proposal),
+            Ok(MlsMessageKind::Proposal)
+        )
+    }) && matches!(
+        mls.inspect_message_kind(&candidate.commit_message),
+        Ok(MlsMessageKind::Commit)
+    )
+}
+
+/// Cleanup staged MLS state for a candidate being discarded.
+fn discard_candidate_state<S>(
+    handle: &mut GroupHandle,
+    mls: &MlsService<S>,
+    group_name: &str,
+) -> Result<(), CoreError>
+where
+    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+{
+    mls.discard_staged_commit(group_name)?;
+    handle.clear_freeze_round();
+    Ok(())
+}
+
+/// Convert commit outcome into the corresponding process result.
+fn process_result_from_commit_outcome(self_removed: bool) -> ProcessResult {
+    if self_removed {
+        ProcessResult::LeaveGroup
+    } else {
+        ProcessResult::GroupUpdated
+    }
+}
+
+/// Cheap pre-checks only — no MLS state mutation.
+///
+/// 1. State check: only buffer during Freezing/Selection (freeze round active).
+/// 2. Dedup: check commit_hash against committed + buffered sets.
+/// 3. Shape check: mls_proposals and commit_message must be non-empty.
+/// 4. Kind check: wire-level inspection (Proposal/Commit) with no MLS state mutation.
+/// 5. Buffer as BufferedCommitCandidate.
+fn process_commit_candidate<S>(
+    handle: &mut GroupHandle,
+    candidate_msg: CommitCandidate,
+    mls: &MlsService<S>,
+) -> Result<ProcessResult, CoreError>
+where
+    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+{
+    // 1. Ensure a freeze round exists. If none is active but the member has
+    //    approved proposals, auto-start one so the candidate isn't dropped
+    //    due to timing mismatch between steward and member epoch boundaries.
+    if handle.freeze_round().is_none() {
+        if handle.approved_proposals_count() > 0 {
+            handle.ensure_freeze_round();
+        } else {
+            tracing::debug!(
+                "Ignoring candidate for group {}: no approved proposals",
+                handle.group_name(),
+            );
+            return Ok(ProcessResult::Noop);
+        }
+    }
+
+    // 2. Dedup
+    let commit_hash = compute_commit_hash(&candidate_msg.commit_message);
+    if handle.is_duplicate_commit_candidate(&commit_hash) {
+        tracing::debug!(
+            "Ignoring duplicate candidate for group {}: already processed/buffered",
+            handle.group_name(),
+        );
+        return Ok(ProcessResult::Noop);
+    }
+
+    // 3. Shape check
+    if candidate_msg.mls_proposals.is_empty() || candidate_msg.commit_message.is_empty() {
+        tracing::debug!(
+            "Ignoring candidate for group {}: empty proposals or commit",
+            handle.group_name(),
+        );
+        return Ok(ProcessResult::Noop);
+    }
+
+    // 4. Kind check (wire-level only, no MLS state mutation)
+    if !has_valid_candidate_wire_kinds(&candidate_msg, mls) {
+        return Ok(ProcessResult::Noop);
+    }
+
+    // 5. Buffer
+    let buffered = handle.buffer_freeze_candidate(BufferedCommitCandidate {
+        candidate_msg,
+        commit_hash,
+        is_local_candidate: false,
+        welcome_bytes: None,
+    });
+    if buffered && !handle.is_steward() {
+        // Only members use CandidateBuffered as a state-transition signal.
+        // Stewards manage their own epoch flow via start_steward_epoch.
+        Ok(ProcessResult::CandidateBuffered)
+    } else {
+        Ok(ProcessResult::Noop)
+    }
+}
+
+// ─────────────────────────── Freeze Round Finalization ───────────────────────────
+
+/// Result of deterministic freeze finalization.
+#[derive(Debug, Clone)]
+pub enum FreezeFinalizeResult {
+    /// A candidate was selected and applied.
+    /// The optional outbound packets include deferred welcome messages that
+    /// must be sent AFTER the commit is merged (to prevent joiners from
+    /// advancing epoch before the steward).
+    Applied {
+        result: ProcessResult,
+        outbound: Vec<OutboundPacket>,
+    },
+    /// No valid candidate could be selected/applied.
+    NoCandidate,
+}
+
+/// Post-validation type for selection (internal to finalize_freeze_round).
+struct ValidatedCandidate {
+    candidate_msg: CommitCandidate,
+    commit_hash: Vec<u8>,
+    is_local_candidate: bool,
+    actions_count: usize,
+    /// Deferred welcome bytes (only present on local candidates with Add proposals).
+    welcome_bytes: Option<Vec<u8>>,
+}
+
+/// Deterministically select and apply a buffered candidate for the active freeze round.
+///
+/// Three distinct phases:
+/// 1. Pre-validation (cheap, no MLS processing)
+/// 2. Selection (deterministic choice from pre-validated candidates)
+/// 3. Application (MLS processing — chosen candidate only)
+pub fn finalize_freeze_round<S>(
+    handle: &mut GroupHandle,
+    mls: &MlsService<S>,
+) -> Result<FreezeFinalizeResult, CoreError>
+where
+    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+{
+    handle.lock_freeze_round_selection();
+
+    let candidates = match handle.freeze_round() {
+        Some(round) if round.epoch == handle.current_epoch() => round.candidates.clone(),
+        _ => return Ok(FreezeFinalizeResult::NoCandidate),
+    };
+
+    if candidates.is_empty() {
+        return Ok(FreezeFinalizeResult::NoCandidate);
+    }
+
+    let local_proposals = handle.approved_proposals();
+    // Count only non-emergency proposals for matching
+    let expected_mls_count = local_proposals
+        .values()
+        .filter(|req| {
+            !matches!(
+                req.payload,
+                Some(group_update_request::Payload::EmergencyCriteria(_))
+            )
+        })
+        .count();
+
+    // ── Phase 1: Pre-validation (cheap, no MLS processing) ──
+    let mut pre_validated: Vec<ValidatedCandidate> = Vec::new();
+
+    for candidate in &candidates {
+        // Count match
+        let allow_subset = handle.allow_subset_candidates();
+        if !allow_subset && candidate.candidate_msg.mls_proposals.len() != expected_mls_count {
+            continue;
+        }
+        if allow_subset && candidate.candidate_msg.mls_proposals.len() > expected_mls_count {
+            continue;
+        }
+
+        // Shape: non-empty (already checked at buffer time, but defensive)
+        if candidate.candidate_msg.mls_proposals.is_empty()
+            || candidate.candidate_msg.commit_message.is_empty()
+        {
+            continue;
+        }
+
+        // Dedup: not already committed
+        if handle.is_duplicate_commit_candidate(&candidate.commit_hash) {
+            continue;
+        }
+
+        // Kind check (wire-level only)
+        if !has_valid_candidate_wire_kinds(&candidate.candidate_msg, mls) {
+            continue;
+        }
+
+        pre_validated.push(ValidatedCandidate {
+            candidate_msg: candidate.candidate_msg.clone(),
+            commit_hash: candidate.commit_hash.clone(),
+            is_local_candidate: candidate.is_local_candidate,
+            actions_count: candidate.candidate_msg.mls_proposals.len(),
+            welcome_bytes: candidate.welcome_bytes.clone(),
+        });
+    }
+
+    if pre_validated.is_empty() {
+        return Ok(FreezeFinalizeResult::NoCandidate);
+    }
+
+    // ── Phase 2: Selection (deterministic choice) ──
+    // Prefer local candidate (steward's own), then largest action set, then lowest commit_hash
+    pre_validated.sort_by(|a, b| {
+        // Local candidate first
+        let local_cmp = b.is_local_candidate.cmp(&a.is_local_candidate);
+        if local_cmp != std::cmp::Ordering::Equal {
+            return local_cmp;
+        }
+        // Larger action set first
+        let size_cmp = b.actions_count.cmp(&a.actions_count);
+        if size_cmp != std::cmp::Ordering::Equal {
+            return size_cmp;
+        }
+        // Lowest commit_hash as tiebreak
+        a.commit_hash.cmp(&b.commit_hash)
+    });
+
+    let chosen = pre_validated.into_iter().next().unwrap();
+
+    // ── Phase 3: Application (MLS processing — chosen candidate only) ──
     let group_name = handle.group_name().to_owned();
 
-    match (local_ids.is_empty(), batch_ids.is_empty()) {
-        (true, true) => {
-            tracing::debug!(
-                "Ignoring batch for group {}: no proposals on either side",
-                group_name
-            );
-            return Some(ProcessResult::Noop);
-        }
-        (true, false) => {
-            let commit_hash = compute_commit_hash(&batch_msg.commit_message);
-            let fingerprint =
-                compute_batch_fingerprint(&batch_msg.proposal_ids, &batch_msg.proposals_digest);
+    // Local candidate: steward already validated when creating the commit
+    if handle.is_steward() && chosen.is_local_candidate {
+        let local_identity = mls.wallet_bytes();
+        let self_removed = local_proposals.values().any(|req| {
+            matches!(
+                req.payload,
+                Some(group_update_request::Payload::RemoveMember(ref remove))
+                    if remove.identity == local_identity
+            )
+        });
 
-            if handle.is_duplicate_batch(&commit_hash, &fingerprint) {
-                tracing::debug!(
-                    "Ignoring duplicate batch for group {}: already processed or quarantined",
-                    group_name,
-                );
-                return Some(ProcessResult::Noop);
-            }
+        mls.merge_own_commit(&group_name)?;
+        handle.set_steward_identity(local_identity);
+        handle.record_committed_batch(chosen.commit_hash);
+        handle.clear_approved_proposals();
 
-            let epoch = handle.current_epoch();
-            let batch_proposal_ids: Vec<u32> = batch_ids.iter().copied().collect();
-            let local_proposal_ids: Vec<u32> = local_ids.iter().copied().collect();
+        // Build deferred welcome packets now that commit is merged
+        let outbound = build_deferred_welcome(chosen.welcome_bytes, handle);
+        handle.clear_freeze_round();
 
-            tracing::debug!(
-                "Quarantining batch for group {}: no local proposals yet, batch contains {:?}",
-                group_name,
-                batch_ids,
-            );
-            handle.quarantine_batch(QuarantinedBatch {
-                batch_msg: batch_msg.clone(),
-                commit_hash,
-                batch_fingerprint: fingerprint,
-                quarantined_at_epoch: epoch,
-            });
-            return Some(ProcessResult::BatchQuarantined {
-                batch_proposal_ids,
-                local_proposal_ids,
-                epoch,
-            });
-        }
-        (false, true) => {
-            tracing::debug!(
-                "Ignoring empty batch for group {}: expected {:?} but batch is empty",
-                group_name,
-                local_ids,
-            );
-            return Some(ProcessResult::Noop);
-        }
-        (false, false) => {}
+        return Ok(FreezeFinalizeResult::Applied {
+            result: process_result_from_commit_outcome(self_removed),
+            outbound,
+        });
     }
 
-    None
-}
+    // Remote candidate: discard own commit if steward
+    if handle.is_steward() {
+        if let Err(e) = mls.discard_own_commit(&group_name) {
+            warn!("[finalize_freeze_round] failed to discard own commit: {e}");
+        }
+    }
 
-/// Stage MLS proposals (decrypt and store). Returns true if any were stored.
-/// On failure, cleans up and returns None (caller should return Noop).
-fn stage_mls_proposals<S>(
-    handle: &GroupHandle,
-    batch_msg: &BatchProposalsMessage,
-    mls: &MlsService<S>,
-) -> Result<Option<bool>, CoreError>
-where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
-{
-    let group_name = handle.group_name();
-    let mut proposals_stored = false;
+    // Process each MLS proposal via process_candidate_proposal (stores in pending queue)
+    let mut proposal_senders: Vec<Vec<u8>> = Vec::new();
+    let mut mls_actions: Vec<MlsProposalAction> = Vec::new();
 
-    for (i, proposal_bytes) in batch_msg.mls_proposals.iter().enumerate() {
-        let decrypt_result = match mls.decrypt(group_name, proposal_bytes) {
-            Ok(result) => result,
-            Err(e) => {
-                tracing::debug!(
-                    "MLS proposal {} for group {} failed to decrypt (pre-auth): {}",
-                    i,
-                    group_name,
-                    e,
-                );
-                if proposals_stored {
-                    mls.discard_staged_commit(group_name)?;
-                }
-                return Ok(None);
+    for (i, proposal_bytes) in chosen.candidate_msg.mls_proposals.iter().enumerate() {
+        match mls.process_candidate_proposal(&group_name, proposal_bytes) {
+            Ok(DecryptResult::ProposalStored(sender, action)) => {
+                proposal_senders.push(sender);
+                mls_actions.push(action);
             }
-        };
-        match decrypt_result {
-            DecryptResult::ProposalStored(_sender, _action) => {
-                proposals_stored = true;
-            }
-            DecryptResult::Ignored => {
+            Ok(other) => {
                 tracing::debug!(
-                    "MLS proposal {} for group {} returned Ignored (stale epoch/wrong group)",
-                    i,
-                    group_name,
-                );
-                if proposals_stored {
-                    mls.discard_staged_commit(group_name)?;
-                }
-                return Ok(None);
-            }
-            other => {
-                tracing::debug!(
-                    "MLS proposal {} for group {} returned {:?}, expected ProposalStored (pre-auth)",
+                    "MLS proposal {} for group {} returned {:?} during application",
                     i,
                     group_name,
                     other,
                 );
-                if proposals_stored {
-                    mls.discard_staged_commit(group_name)?;
-                }
-                return Ok(None);
+                discard_candidate_state(handle, mls, &group_name)?;
+                return Ok(FreezeFinalizeResult::NoCandidate);
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "MLS proposal {} for group {} failed during application: {}",
+                    i,
+                    group_name,
+                    e,
+                );
+                discard_candidate_state(handle, mls, &group_name)?;
+                return Ok(FreezeFinalizeResult::NoCandidate);
             }
         }
     }
 
-    Ok(Some(proposals_stored))
-}
+    // Verify all proposal senders match each other
+    if proposal_senders.len() > 1 {
+        let first = &proposal_senders[0];
+        if proposal_senders.iter().any(|s| s != first) {
+            tracing::warn!(
+                "Violation: proposals have different senders for group {}",
+                group_name,
+            );
+            discard_candidate_state(handle, mls, &group_name)?;
+            let steward_id = proposal_senders.into_iter().next().unwrap_or_default();
+            return Ok(FreezeFinalizeResult::Applied {
+                result: ProcessResult::ViolationDetected(ViolationEvidence::broken_mls_proposal(
+                    steward_id,
+                    handle.current_epoch(),
+                    "proposals have different senders",
+                )),
+                outbound: vec![],
+            });
+        }
+    }
 
-/// Process commit message and return staged result.
-/// On failure, discards and returns None.
-#[allow(clippy::type_complexity)]
-fn stage_commit<S>(
-    handle: &GroupHandle,
-    batch_msg: &BatchProposalsMessage,
-    mls: &MlsService<S>,
-) -> Result<Option<(Vec<u8>, bool, Vec<MlsProposalAction>)>, CoreError>
-where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
-{
-    let group_name = handle.group_name();
-
-    let staged_result = match mls.process_commit(group_name, &batch_msg.commit_message) {
+    // Process commit
+    let staged_result = match mls.process_commit(&group_name, &chosen.candidate_msg.commit_message)
+    {
         Ok(result) => result,
         Err(e) => {
             tracing::debug!(
-                "Commit for group {} failed to process (pre-auth): {}",
+                "Commit for group {} failed to process during application: {}",
                 group_name,
                 e,
             );
-            mls.discard_staged_commit(group_name)?;
-            return Ok(None);
+            discard_candidate_state(handle, mls, &group_name)?;
+            return Ok(FreezeFinalizeResult::NoCandidate);
         }
     };
 
-    match staged_result {
+    let (commit_sender, self_removed, commit_actions) = match staged_result {
         StagedCommitResult::Staged {
             sender_identity,
             self_removed,
             actions,
-        } => Ok(Some((sender_identity, self_removed, actions))),
+        } => (sender_identity, self_removed, actions),
         StagedCommitResult::Ignored => {
-            tracing::debug!(
-                "Commit for group {} returned Ignored (stale/benign)",
+            discard_candidate_state(handle, mls, &group_name)?;
+            return Ok(FreezeFinalizeResult::NoCandidate);
+        }
+    };
+
+    // Verify proposal senders match commit sender
+    if let Some(first_proposal_sender) = proposal_senders.first() {
+        if first_proposal_sender != &commit_sender {
+            tracing::warn!(
+                "Violation: proposal sender != commit sender for group {}",
                 group_name,
             );
-            mls.discard_staged_commit(group_name)?;
-            Ok(None)
+            discard_candidate_state(handle, mls, &group_name)?;
+            return Ok(FreezeFinalizeResult::Applied {
+                result: ProcessResult::ViolationDetected(ViolationEvidence::broken_commit(
+                    commit_sender,
+                    handle.current_epoch(),
+                    "proposal sender differs from commit sender",
+                )),
+                outbound: vec![],
+            });
         }
     }
-}
 
-/// Merge staged commit, record dedup, clear proposals, expire quarantine.
-fn finalize_batch<S>(
-    handle: &mut GroupHandle,
-    batch_msg: &BatchProposalsMessage,
-    mls: &MlsService<S>,
-    self_removed: bool,
-) -> Result<ProcessResult, CoreError>
-where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
-{
-    let group_name = handle.group_name().to_owned();
+    // Validate MLS actions against local voted proposals
+    if let Some(result) =
+        validate_commit_candidate(handle, &local_proposals, &commit_sender, &commit_actions)?
+    {
+        discard_candidate_state(handle, mls, &group_name)?;
+        return Ok(FreezeFinalizeResult::Applied {
+            result,
+            outbound: vec![],
+        });
+    }
+
+    // All checks passed — merge
     mls.merge_staged_commit(&group_name)?;
-
-    let commit_hash = compute_commit_hash(&batch_msg.commit_message);
-    let fingerprint =
-        compute_batch_fingerprint(&batch_msg.proposal_ids, &batch_msg.proposals_digest);
-    handle.record_committed_batch(commit_hash, fingerprint);
+    handle.set_steward_identity(commit_sender);
+    handle.record_committed_batch(chosen.commit_hash);
     handle.clear_approved_proposals();
-    handle.expire_quarantine();
+    handle.clear_freeze_round();
 
-    if self_removed {
-        Ok(ProcessResult::LeaveGroup)
-    } else {
-        Ok(ProcessResult::GroupUpdated)
-    }
-}
-
-fn process_batch_proposals<S>(
-    handle: &mut GroupHandle,
-    batch_msg: BatchProposalsMessage,
-    mls: &MlsService<S>,
-) -> Result<ProcessResult, CoreError>
-where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
-{
-    let local_proposals = handle.approved_proposals();
-    let batch_ids: BTreeSet<ProposalId> = batch_msg.proposal_ids.iter().copied().collect();
-    let local_ids: BTreeSet<ProposalId> = local_proposals.keys().copied().collect();
-
-    // ── 0. Pre-check ──────────────
-    if let Some(result) = precheck_batch(handle, &batch_msg, &local_ids, &batch_ids, mls) {
-        return Ok(result);
-    }
-
-    // ── 1. Stage MLS proposals ──────────────
-    if stage_mls_proposals(handle, &batch_msg, mls)?.is_none() {
-        return Ok(ProcessResult::Noop);
-    }
-
-    // ── 2. Stage commit ──────────────
-    let (steward_id, self_removed, mls_actions) = match stage_commit(handle, &batch_msg, mls)? {
-        Some(result) => result,
-        None => return Ok(ProcessResult::Noop),
-    };
-    handle.set_steward_identity(steward_id.clone());
-
-    // ── 3. Validate proposals against authenticated sender ───
-    if let Some(violation) = validate_batch_proposals(
-        handle,
-        &batch_msg,
-        &local_proposals,
-        &steward_id,
-        &mls_actions,
-    )? {
-        let group_name = handle.group_name().to_owned();
-        mls.discard_staged_commit(&group_name)?;
-        handle.clear_approved_proposals();
-        return Ok(violation);
-    }
-
-    // ── 4. Finalize ────────────
-    finalize_batch(handle, &batch_msg, mls, self_removed)
-}
-
-// ─────────────────────────── Quarantine API ───────────────────────────
-
-/// Retry quarantined batches that may now match local approved proposals.
-///
-/// Returns only actionable results. Batches that still can't be resolved
-/// are silently kept in quarantine. Processes oldest-first (by epoch, then
-/// insertion order). Empty `Vec` means nothing was ready.
-pub fn retry_quarantined<S>(
-    handle: &mut GroupHandle,
-    mls: &MlsService<S>,
-) -> Result<Vec<ProcessResult>, CoreError>
-where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
-{
-    // Enforce age policy before retrying matches.
-    handle.expire_quarantine();
-
-    let mut results = Vec::new();
-
-    while let Some(batch) = handle.take_matching_quarantine() {
-        let result = process_batch_proposals(handle, batch.batch_msg, mls)?;
-        match result {
-            ProcessResult::Noop | ProcessResult::BatchQuarantined { .. } => {
-                // Stale/invalid or re-quarantined — continue to try remaining.
-            }
-            actionable => {
-                results.push(actionable);
-            }
-        }
-    }
-
-    Ok(results)
-}
-
-/// Number of quarantined batches for this group.
-pub fn quarantine_len(handle: &GroupHandle) -> usize {
-    handle.quarantine_len()
-}
-
-/// Whether any batches are quarantined for this group.
-pub fn has_quarantined(handle: &GroupHandle) -> bool {
-    handle.has_quarantined()
+    // Remote candidates never carry welcome bytes (only local candidates do)
+    Ok(FreezeFinalizeResult::Applied {
+        result: process_result_from_commit_outcome(self_removed),
+        outbound: vec![],
+    })
 }
 
 // ─────────────────────────── Batch Validation ───────────────────────────
 
-/// Validate batch proposals against local state using the authenticated steward identity.
+/// Validate MLS actions from a commit against local voted proposals.
 ///
 /// Returns `Some(ProcessResult::ViolationDetected(...))` if a violation is found,
 /// `None` if all checks pass.
-pub(crate) fn validate_batch_proposals(
+pub(crate) fn validate_commit_candidate(
     handle: &GroupHandle,
-    batch_msg: &BatchProposalsMessage,
     local_proposals: &HashMap<ProposalId, GroupUpdateRequest>,
-    steward_id: &[u8],
+    sender_id: &[u8],
     mls_actions: &[MlsProposalAction],
 ) -> Result<Option<ProcessResult>, CoreError> {
     let group_name = handle.group_name();
-    let local_ids: BTreeSet<ProposalId> = local_proposals.keys().copied().collect();
-    let batch_ids: BTreeSet<ProposalId> = batch_msg.proposal_ids.iter().copied().collect();
 
-    // ── Verify proposal-set IDs match ────────────────────────
-    if local_ids != batch_ids {
-        tracing::warn!(
-            "Violation: broken commit for group {} — proposal ID set mismatch \
-             (local={:?}, batch={:?})",
-            group_name,
-            local_ids,
-            batch_ids,
-        );
-        return Ok(Some(ProcessResult::ViolationDetected(
-            ViolationEvidence::broken_commit(
-                steward_id.to_vec(),
-                handle.current_epoch(),
-                format!("proposal ID mismatch: local={local_ids:?}, batch={batch_ids:?}"),
-            ),
-        )));
-    }
-
-    // ── Verify content digest (cryptographic binding) ────────
-    let local_digest = compute_proposals_digest(local_proposals);
-    if batch_msg.proposals_digest != local_digest {
-        tracing::warn!(
-            "Violation: broken commit for group {} — IDs match but \
-             digest mismatch (steward altered proposal content)",
-            group_name,
-        );
-        return Ok(Some(ProcessResult::ViolationDetected(
-            ViolationEvidence::broken_commit(
-                steward_id.to_vec(),
-                handle.current_epoch(),
-                batch_msg.proposals_digest.clone(),
-            ),
-        )));
-    }
-
-    // ── Proposal count must match MLS payloads ───────────────
-    if batch_msg.mls_proposals.len() != local_ids.len() {
-        tracing::warn!(
-            "Violation: broken MLS proposal for group {} — proposal count ({}) \
-             does not match MLS payload count ({})",
-            group_name,
-            local_ids.len(),
-            batch_msg.mls_proposals.len(),
-        );
-        return Ok(Some(ProcessResult::ViolationDetected(
-            ViolationEvidence::broken_mls_proposal(
-                steward_id.to_vec(),
-                handle.current_epoch(),
-                format!(
-                    "expected {} MLS proposals, got {}",
-                    local_ids.len(),
-                    batch_msg.mls_proposals.len()
-                ),
-            ),
-        )));
-    }
-
-    // ── Verify MLS proposal payloads match voted proposals ───
     let mut expected_actions: Vec<MlsProposalAction> = local_proposals
         .values()
         .filter_map(expected_action_for_request)
@@ -702,7 +721,7 @@ pub(crate) fn validate_batch_proposals(
         );
         return Ok(Some(ProcessResult::ViolationDetected(
             ViolationEvidence::broken_mls_proposal(
-                steward_id.to_vec(),
+                sender_id.to_vec(),
                 handle.current_epoch(),
                 format!("MLS actions {actual_actions:?} != voted {expected_actions:?}"),
             ),
@@ -742,8 +761,11 @@ pub fn epoch_history(handle: &GroupHandle) -> &VecDeque<HashMap<ProposalId, Grou
 
 // ─────────────────────────── Steward Operations ───────────────────────────
 
-/// Create and send batch proposals for the current epoch.
-pub fn create_batch_proposals<S>(
+/// Create and broadcast a commit candidate for the current epoch.
+///
+/// This does not merge the commit immediately. The candidate is buffered and
+/// later applied via [`finalize_freeze_round`].
+pub fn create_commit_candidate<S>(
     handle: &mut GroupHandle,
     mls: &MlsService<S>,
 ) -> Result<Vec<OutboundPacket>, CoreError>
@@ -782,8 +804,6 @@ where
         });
     }
 
-    let proposal_ids: Vec<u32> = proposals.keys().copied().collect();
-    let proposals_digest = compute_proposals_digest(&proposals);
     let mut updates = Vec::with_capacity(proposals.len());
     for (_, proposal) in proposals {
         match proposal.payload {
@@ -796,51 +816,43 @@ where
             Some(group_update_request::Payload::RemoveMember(identity)) => {
                 updates.push(GroupUpdate::Remove(identity.identity));
             }
-            Some(group_update_request::Payload::EmergencyCriteria(_)) => {
-                return Err(CoreError::InvalidGroupUpdateRequest);
-            }
-            None => return Err(CoreError::InvalidGroupUpdateRequest),
+            _ => return Err(CoreError::InvalidGroupUpdateRequest),
         }
     }
 
-    let CommitResult {
+    let MlsCommitCandidate {
         proposals: mls_proposals,
         commit,
         welcome,
-    } = mls.commit(handle.group_name(), &updates)?;
+    } = mls.create_commit_candidate(handle.group_name(), &updates)?;
 
-    let batch_msg: AppMessage = BatchProposalsMessage {
+    let candidate = CommitCandidate {
         group_name: handle.group_name_bytes().to_vec(),
         mls_proposals,
         commit_message: commit,
-        proposal_ids,
-        proposals_digest,
-    }
-    .into();
+    };
+
+    // Store own candidate locally for deterministic selection at freeze timeout.
+    // Welcome bytes are deferred — they'll be sent after commit merge in finalize_freeze_round
+    // to prevent joiners from advancing epoch before the steward merges.
+    let commit_hash = compute_commit_hash(&candidate.commit_message);
+    let _ = handle.buffer_freeze_candidate(BufferedCommitCandidate {
+        candidate_msg: candidate.clone(),
+        commit_hash,
+        is_local_candidate: true,
+        welcome_bytes: welcome,
+    });
+
+    let candidate_msg: AppMessage = candidate.into();
 
     let batch_packet = OutboundPacket::new(
-        batch_msg.encode_to_vec(),
+        candidate_msg.encode_to_vec(),
         APP_MSG_SUBTOPIC,
         handle.group_name(),
         handle.app_id(),
     );
 
-    let mut messages = vec![batch_packet];
-
-    if let Some(welcome_bytes) = welcome {
-        let welcome_msg: WelcomeMessage = invitation_from_bytes(welcome_bytes);
-        let welcome_packet = OutboundPacket::new(
-            welcome_msg.encode_to_vec(),
-            WELCOME_SUBTOPIC,
-            handle.group_name(),
-            handle.app_id(),
-        );
-        messages.push(welcome_packet);
-    }
-
-    handle.clear_approved_proposals();
-
-    Ok(messages)
+    Ok(vec![batch_packet])
 }
 
 // ─────────────────────────── Member Queries ───────────────────────────
@@ -920,7 +932,23 @@ mod tests {
 
         let proposal_id = PROPOSAL_COUNTER.fetch_add(1, Ordering::Relaxed);
         steward_handle.insert_approved_proposal(proposal_id, gur);
-        let packets = create_batch_proposals(steward_handle, steward_mls).unwrap();
+        let packets = create_commit_candidate(steward_handle, steward_mls).unwrap();
+
+        let finalize = finalize_freeze_round(steward_handle, steward_mls).unwrap();
+        let welcome_packet = match finalize {
+            FreezeFinalizeResult::Applied { result, outbound } => {
+                assert!(
+                    matches!(result, ProcessResult::GroupUpdated),
+                    "Expected GroupUpdated, got {:?}",
+                    result
+                );
+                outbound
+                    .into_iter()
+                    .find(|p| p.subtopic == WELCOME_SUBTOPIC)
+                    .expect("Expected deferred welcome packet from finalize_freeze_round")
+            }
+            other => panic!("Expected Applied, got {:?}", other),
+        };
 
         let batch_packet = packets
             .iter()
@@ -928,60 +956,12 @@ mod tests {
             .expect("Expected batch proposals packet")
             .clone();
 
-        let welcome_packet = packets
-            .into_iter()
-            .find(|p| p.subtopic == WELCOME_SUBTOPIC)
-            .expect("Expected welcome packet");
-
         (welcome_packet, batch_packet)
     }
 
     #[test]
-    fn test_validate_batch_proposals_id_mismatch() {
-        let group_name = "validate-id-mismatch";
-        let (steward_mls, mut steward_handle) =
-            setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-        let (joiner_mls, mut joiner_handle, kp_packet) =
-            setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
-
-        let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
-        process_inbound(
-            &mut joiner_handle,
-            &welcome_packet.payload,
-            WELCOME_SUBTOPIC,
-            &joiner_mls,
-        )
-        .unwrap();
-
-        let steward_id = steward_handle.steward_identity().unwrap().to_vec();
-        let batch_msg = BatchProposalsMessage {
-            group_name: group_name.as_bytes().to_vec(),
-            mls_proposals: vec![],
-            commit_message: vec![],
-            proposal_ids: vec![999],
-            proposals_digest: vec![],
-        };
-
-        let local_proposals = joiner_handle.approved_proposals();
-        let result = validate_batch_proposals(
-            &joiner_handle,
-            &batch_msg,
-            &local_proposals,
-            &steward_id,
-            &[],
-        )
-        .unwrap();
-
-        assert!(
-            matches!(result, Some(ProcessResult::ViolationDetected(_))),
-            "Expected Some(ViolationDetected) for mismatched proposals, got {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn test_validate_batch_proposals_count_mismatch() {
-        let group_name = "validate-count-mismatch";
+    fn test_validate_batch_proposals_action_mismatch() {
+        let group_name = "validate-action-mismatch";
         let (steward_mls, mut steward_handle) =
             setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
         let (joiner_mls, mut joiner_handle, kp_packet) =
@@ -1011,28 +991,17 @@ mod tests {
         };
 
         let proposal_id: ProposalId = 43;
-        joiner_handle.insert_approved_proposal(proposal_id, gur.clone());
-
-        let mut proposals_map = HashMap::new();
-        proposals_map.insert(proposal_id, gur);
-        let correct_digest = compute_proposals_digest(&proposals_map);
-
-        let batch_msg = BatchProposalsMessage {
-            group_name: group_name.as_bytes().to_vec(),
-            mls_proposals: vec![],
-            commit_message: vec![],
-            proposal_ids: vec![proposal_id],
-            proposals_digest: correct_digest,
-        };
+        joiner_handle.insert_approved_proposal(proposal_id, gur);
 
         let steward_id = steward_handle.steward_identity().unwrap().to_vec();
         let local_proposals = joiner_handle.approved_proposals();
-        let result = validate_batch_proposals(
+
+        // Pass wrong MLS actions (empty) while local has an add proposal
+        let result = validate_commit_candidate(
             &joiner_handle,
-            &batch_msg,
             &local_proposals,
             &steward_id,
-            &[],
+            &[], // empty actions, should mismatch
         )
         .unwrap();
 

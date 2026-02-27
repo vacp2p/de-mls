@@ -6,9 +6,9 @@ use async_trait::async_trait;
 use prost::Message;
 
 use de_mls::core::{
-    CoreError, GroupEventHandler, GroupHandle, ProcessResult,
-    build_key_package_message, build_message, create_batch_proposals, create_group,
-    prepare_to_join, process_inbound,
+    CoreError, FreezeFinalizeResult, GroupEventHandler, GroupHandle, ProcessResult,
+    build_key_package_message, build_message, create_commit_candidate, create_group,
+    finalize_freeze_round, prepare_to_join, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
 use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService, parse_wallet_address};
@@ -163,13 +163,24 @@ fn steward_add_joiner(
     // 2. Insert as approved (skip voting in tests) and create batch
     let proposal_id = PROPOSAL_COUNTER.fetch_add(1, Ordering::Relaxed);
     steward_handle.insert_approved_proposal(proposal_id, gur);
-    let packets = create_batch_proposals(steward_handle, steward_mls).unwrap();
+    let _packets = create_commit_candidate(steward_handle, steward_mls).unwrap();
 
-    // Find the welcome packet
-    packets
-        .into_iter()
-        .find(|p| p.subtopic == WELCOME_SUBTOPIC)
-        .expect("Expected a welcome packet from create_batch_proposals")
+    let finalize = finalize_freeze_round(steward_handle, steward_mls).unwrap();
+    match finalize {
+        FreezeFinalizeResult::Applied { result, outbound } => {
+            assert!(
+                matches!(result, ProcessResult::GroupUpdated),
+                "Expected GroupUpdated, got {:?}",
+                result
+            );
+            // Welcome is now deferred to finalize_freeze_round
+            outbound
+                .into_iter()
+                .find(|p| p.subtopic == WELCOME_SUBTOPIC)
+                .expect("Expected a deferred welcome packet from finalize_freeze_round")
+        }
+        other => panic!("Expected Applied, got {:?}", other),
+    }
 }
 
 // ─────────────────────────── process_inbound tests ───────────────────────────
@@ -385,42 +396,46 @@ fn test_process_inbound_leave_group() {
             ),
         ),
     };
-    steward_handle.insert_approved_proposal(2, remove_req);
-    let packets = create_batch_proposals(&mut steward_handle, &steward_mls).unwrap();
+    steward_handle.insert_approved_proposal(2, remove_req.clone());
+    joiner_handle.insert_approved_proposal(2, remove_req);
+    let packets = create_commit_candidate(&mut steward_handle, &steward_mls).unwrap();
 
     let batch_packet = packets
         .iter()
         .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
         .expect("Expected batch proposals packet");
 
-    let app_msg = AppMessage::decode(batch_packet.payload.as_slice()).unwrap();
-    let batch = match app_msg.payload {
-        Some(app_message::Payload::BatchProposalsMessage(b)) => b,
-        _ => panic!("Expected BatchProposalsMessage"),
-    };
-
-    for proposal_bytes in &batch.mls_proposals {
-        let _r = joiner_mls.decrypt(group_name, proposal_bytes).unwrap();
-    }
+    // Start freeze round before receiving candidate
+    joiner_handle.start_freeze_round();
 
     let remove_result = process_inbound(
         &mut joiner_handle,
-        &batch.commit_message,
+        &batch_packet.payload,
         APP_MSG_SUBTOPIC,
         &joiner_mls,
     )
     .unwrap();
 
     assert!(
-        matches!(remove_result, ProcessResult::LeaveGroup),
-        "Expected LeaveGroup, got {:?}",
+        matches!(remove_result, ProcessResult::CandidateBuffered),
+        "Expected CandidateBuffered, got {:?}",
         remove_result
+    );
+
+    let finalize = finalize_freeze_round(&mut joiner_handle, &joiner_mls).unwrap();
+    assert!(
+        matches!(
+            finalize,
+            FreezeFinalizeResult::Applied { result: ProcessResult::LeaveGroup, .. }
+        ),
+        "Expected LeaveGroup after finalize, got {:?}",
+        finalize
     );
 }
 
 #[test]
-fn test_process_inbound_batch_quarantined_when_no_local_proposals() {
-    let group_name = "batch-quarantine";
+fn test_process_inbound_raw_commit_payload_is_ignored() {
+    let group_name = "raw-commit-ignored";
 
     let (steward_mls, mut steward_handle) =
         setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
@@ -437,40 +452,36 @@ fn test_process_inbound_batch_quarantined_when_no_local_proposals() {
     .unwrap();
     assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
 
-    let (_joiner2_mls, _joiner2_handle, kp2_packet) =
-        setup_joiner(group_name, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
-    let result = process_inbound(
-        &mut steward_handle,
-        &kp2_packet.payload,
-        WELCOME_SUBTOPIC,
-        &steward_mls,
-    )
-    .unwrap();
-    let gur = match result {
-        ProcessResult::GetUpdateRequest(gur) => gur,
-        other => panic!("Expected GetUpdateRequest, got {:?}", other),
+    let joiner_wallet = parse_wallet_address("0x70997970C51812dc3A010C7d01b50e0d17dc79C8").unwrap();
+    let remove_req = GroupUpdateRequest {
+        payload: Some(
+            de_mls::protos::de_mls::messages::v1::group_update_request::Payload::RemoveMember(
+                de_mls::protos::de_mls::messages::v1::RemoveMember {
+                    identity: joiner_wallet.as_slice().to_vec(),
+                },
+            ),
+        ),
     };
+    steward_handle.insert_approved_proposal(7, remove_req);
+    let packets = create_commit_candidate(&mut steward_handle, &steward_mls).unwrap();
 
-    let proposal_id = 44u32;
-    steward_handle.insert_approved_proposal(proposal_id, gur);
-    let packets = create_batch_proposals(&mut steward_handle, &steward_mls).unwrap();
     let batch_packet = packets
         .iter()
         .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
         .expect("Expected batch proposals packet");
 
-    // Joiner receives batch BEFORE consensus delivers proposals → BatchQuarantined
+    let app_msg = AppMessage::decode(batch_packet.payload.as_slice()).unwrap();
+    let raw_commit = match app_msg.payload {
+        Some(app_message::Payload::CommitCandidate(c)) => c.commit_message,
+        _ => panic!("Expected CommitCandidate payload"),
+    };
+
     let result = process_inbound(
         &mut joiner_handle,
-        &batch_packet.payload,
+        &raw_commit,
         APP_MSG_SUBTOPIC,
         &joiner_mls,
     )
     .unwrap();
-    assert!(
-        matches!(result, ProcessResult::BatchQuarantined { .. }),
-        "Expected BatchQuarantined, got {:?}",
-        result
-    );
-    assert!(de_mls::core::has_quarantined(&joiner_handle));
+    assert!(matches!(result, ProcessResult::Noop));
 }

@@ -57,42 +57,28 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use crate::core::group_update_handle::{CurrentEpochProposals, ProposalId};
-use crate::protos::de_mls::messages::v1::{BatchProposalsMessage, GroupUpdateRequest};
+use crate::protos::de_mls::messages::v1::{CommitCandidate, GroupUpdateRequest};
 
 /// Maximum number of committed batch hashes to remember for dedup.
 const MAX_COMMITTED_HASHES: usize = 10;
 
-/// Policy governing quarantine behavior for unsolicited batches.
-///
-/// Lives in core because it governs core protocol behavior (quarantine eviction,
-/// epoch expiry). Integrators can configure it at group creation time.
+/// A commit candidate buffered during freeze for later selection.
 #[derive(Clone, Debug)]
-pub struct QuarantinePolicy {
-    /// Maximum number of quarantined batches per group.
-    pub max_items: usize,
-    /// Maximum epoch age before quarantined entries expire.
-    pub max_epoch_age: u64,
-}
-
-impl Default for QuarantinePolicy {
-    fn default() -> Self {
-        Self {
-            max_items: 5,
-            max_epoch_age: 2,
-        }
-    }
-}
-
-/// A batch that arrived before local proposals were ready.
-///
-/// Stored temporarily until consensus delivers matching proposals,
-/// at which point it can be re-processed.
-#[derive(Clone, Debug)]
-pub(crate) struct QuarantinedBatch {
-    pub batch_msg: BatchProposalsMessage,
+pub(crate) struct BufferedCommitCandidate {
+    pub candidate_msg: CommitCandidate,
     pub commit_hash: Vec<u8>,
-    pub batch_fingerprint: Vec<u8>,
-    pub quarantined_at_epoch: u64,
+    pub is_local_candidate: bool,
+    pub welcome_bytes: Option<Vec<u8>>,
+}
+
+/// In-memory freeze-round state for deterministic selection.
+#[derive(Clone, Debug)]
+pub(crate) struct FreezeRound {
+    pub epoch: u64,
+    #[allow(dead_code)] // retained for future subset-check use
+    pub eligible_proposal_ids: BTreeSet<ProposalId>,
+    pub selection_locked: bool,
+    pub candidates: Vec<BufferedCommitCandidate>,
 }
 
 /// Handle for a single MLS group's app-level state.
@@ -132,22 +118,16 @@ pub struct GroupHandle {
     current_epoch: u64,
     /// Identity (wallet bytes) of the current steward.
     steward_identity: Option<Vec<u8>>,
-    /// Batches received before local proposals were ready (bounded buffer).
-    quarantine: VecDeque<QuarantinedBatch>,
-    /// Recent (commit_hash, batch_fingerprint) pairs for dedup.
-    committed_batch_hashes: VecDeque<(Vec<u8>, Vec<u8>)>,
-    /// Quarantine policy for this group.
-    quarantine_policy: QuarantinePolicy,
+    /// Recent commit hashes for dedup.
+    committed_batch_hashes: VecDeque<Vec<u8>>,
+    /// Freeze-round candidate buffer for deterministic selection.
+    freeze_round: Option<FreezeRound>,
+    /// Whether subset candidates are allowed during selection.
+    allow_subset_candidates: bool,
 }
 
 impl GroupHandle {
-    /// Create a new group handle for an existing group (joining) with default policy.
-    pub fn new_for_join(group_name: &str) -> Self {
-        Self::new_for_join_with_policy(group_name, QuarantinePolicy::default())
-    }
-
-    /// Create a new group handle for an existing group (joining) with custom policy.
-    pub fn new_for_join_with_policy(group_name: &str, policy: QuarantinePolicy) -> Self {
+    fn new_base(group_name: &str) -> Self {
         Self {
             group_name: group_name.to_string(),
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
@@ -156,37 +136,26 @@ impl GroupHandle {
             proposals: CurrentEpochProposals::new(),
             current_epoch: 0,
             steward_identity: None,
-            quarantine: VecDeque::new(),
             committed_batch_hashes: VecDeque::new(),
-            quarantine_policy: policy,
+            freeze_round: None,
+            allow_subset_candidates: false,
         }
     }
 
-    /// Create a new group handle for creating a new group (as steward) with default policy.
+    /// Create a new group handle for an existing group (joining).
+    pub fn new_for_join(group_name: &str) -> Self {
+        Self::new_base(group_name)
+    }
+
+    /// Create a new group handle for creating a new group (as steward).
     ///
     /// The MLS group should be created via `mls_service.create_group()` first.
     pub fn new_as_creator(group_name: &str, creator_identity: Vec<u8>) -> Self {
-        Self::new_as_creator_with_policy(group_name, creator_identity, QuarantinePolicy::default())
-    }
-
-    /// Create a new group handle for creating a new group (as steward) with custom policy.
-    pub fn new_as_creator_with_policy(
-        group_name: &str,
-        creator_identity: Vec<u8>,
-        policy: QuarantinePolicy,
-    ) -> Self {
-        Self {
-            group_name: group_name.to_string(),
-            app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
-            steward: true,
-            mls_initialized: true,
-            proposals: CurrentEpochProposals::new(),
-            current_epoch: 0,
-            steward_identity: Some(creator_identity),
-            quarantine: VecDeque::new(),
-            committed_batch_hashes: VecDeque::new(),
-            quarantine_policy: policy,
-        }
+        let mut handle = Self::new_base(group_name);
+        handle.steward = true;
+        handle.mls_initialized = true;
+        handle.steward_identity = Some(creator_identity);
+        handle
     }
 
     /// Get the group name.
@@ -249,6 +218,16 @@ impl GroupHandle {
         self.steward = false;
     }
 
+    /// Set whether subset candidates are allowed in freeze selection.
+    pub fn set_allow_subset_candidates(&mut self, allow_subset: bool) {
+        self.allow_subset_candidates = allow_subset;
+    }
+
+    /// Whether subset candidates are allowed in freeze selection.
+    pub fn allow_subset_candidates(&self) -> bool {
+        self.allow_subset_candidates
+    }
+
     // ─────────────────────────── Proposal Handle Operations ───────────────────────────
 
     /// Check if this user owns (created) the given proposal.
@@ -307,86 +286,130 @@ impl GroupHandle {
         self.current_epoch += 1;
     }
 
-    /// Get the epoch history (past batches of approved proposals).
-    pub fn epoch_history(&self) -> &VecDeque<HashMap<ProposalId, GroupUpdateRequest>> {
-        self.proposals.epoch_history()
-    }
-
-    // ─────────────────────────── Quarantine Operations ───────────────────────────
-
-    /// Add a batch to quarantine. Evicts oldest entry if at capacity.
-    pub(crate) fn quarantine_batch(&mut self, batch: QuarantinedBatch) {
-        if self.quarantine.len() >= self.quarantine_policy.max_items {
-            self.quarantine.pop_front();
-        }
-        self.quarantine.push_back(batch);
-    }
-
-    /// Remove and return the first quarantined batch whose proposal IDs match current
-    /// approved proposals.
-    pub(crate) fn take_matching_quarantine(&mut self) -> Option<QuarantinedBatch> {
-        // Enforce age policy before trying to match entries.
-        self.expire_quarantine();
-
-        let local_ids: BTreeSet<ProposalId> = self
+    /// Reject all currently approved proposals without advancing epoch.
+    ///
+    /// Used when freeze times out with no valid candidate selected.
+    pub fn reject_all_approved_proposals(&mut self) {
+        let ids: Vec<ProposalId> = self
             .proposals
             .approved_proposals()
             .keys()
             .copied()
             .collect();
-        if local_ids.is_empty() {
-            return None;
+        for id in ids {
+            self.proposals.remove_approved_proposal(id);
+        }
+    }
+
+    /// Reject all currently voting proposals without advancing epoch.
+    ///
+    /// Used alongside `reject_all_approved_proposals()` when freeze times out
+    /// with no valid candidate selected.
+    pub fn reject_all_voting_proposals(&mut self) {
+        self.proposals.clear_voting_proposals();
+    }
+
+    /// Get the epoch history (past batches of approved proposals).
+    pub fn epoch_history(&self) -> &VecDeque<HashMap<ProposalId, GroupUpdateRequest>> {
+        self.proposals.epoch_history()
+    }
+
+    // ─────────────────────────── Freeze Round Operations ───────────────────────────
+
+    fn build_freeze_round(&self, epoch: u64) -> FreezeRound {
+        let eligible_proposal_ids = self
+            .proposals
+            .approved_proposals()
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>();
+
+        FreezeRound {
+            epoch,
+            eligible_proposal_ids,
+            selection_locked: false,
+            candidates: Vec::new(),
+        }
+    }
+
+    /// Ensure a freeze round exists for the current epoch.
+    ///
+    /// If absent or stale, initializes one with the current approved proposal IDs.
+    pub(crate) fn ensure_freeze_round(&mut self) {
+        let epoch = self.current_epoch;
+        if matches!(self.freeze_round, Some(ref round) if round.epoch == epoch) {
+            return;
+        }
+        self.freeze_round = Some(self.build_freeze_round(epoch));
+    }
+
+    /// Start a new freeze round for the current epoch.
+    ///
+    /// Existing round state is replaced.
+    pub fn start_freeze_round(&mut self) {
+        self.freeze_round = Some(self.build_freeze_round(self.current_epoch));
+    }
+
+    /// Add a validated candidate to the active freeze round.
+    ///
+    /// Returns `true` if buffered, `false` if ignored (locked round or duplicate).
+    pub(crate) fn buffer_freeze_candidate(&mut self, candidate: BufferedCommitCandidate) -> bool {
+        self.ensure_freeze_round();
+        let Some(round) = self.freeze_round.as_mut() else {
+            return false;
+        };
+
+        if round.epoch != self.current_epoch || round.selection_locked {
+            return false;
         }
 
-        let pos = self.quarantine.iter().position(|entry| {
-            let batch_ids: BTreeSet<ProposalId> =
-                entry.batch_msg.proposal_ids.iter().copied().collect();
-            batch_ids == local_ids
-        });
-
-        pos.and_then(|i| self.quarantine.remove(i))
-    }
-
-    /// Drop quarantine entries older than `max_epoch_age` epochs.
-    pub(crate) fn expire_quarantine(&mut self) {
-        let current = self.current_epoch;
-        let max_age = self.quarantine_policy.max_epoch_age;
-        self.quarantine
-            .retain(|entry| current.saturating_sub(entry.quarantined_at_epoch) < max_age);
-    }
-
-    /// Check if a batch with the given hashes is a duplicate (in quarantine or committed history).
-    pub(crate) fn is_duplicate_batch(&self, commit_hash: &[u8], fingerprint: &[u8]) -> bool {
-        // Check committed history
-        if self
-            .committed_batch_hashes
+        if round
+            .candidates
             .iter()
-            .any(|(ch, fp)| ch == commit_hash && fp == fingerprint)
+            .any(|c| c.commit_hash == candidate.commit_hash)
         {
-            return true;
+            return false;
         }
-        // Check quarantine
-        self.quarantine
-            .iter()
-            .any(|entry| entry.commit_hash == commit_hash && entry.batch_fingerprint == fingerprint)
+
+        round.candidates.push(candidate);
+        true
     }
 
-    /// Record a committed batch's hashes for future dedup.
-    pub(crate) fn record_committed_batch(&mut self, commit_hash: Vec<u8>, fingerprint: Vec<u8>) {
+    /// Mark the active freeze round as selection-locked.
+    pub(crate) fn lock_freeze_round_selection(&mut self) {
+        if let Some(round) = self.freeze_round.as_mut() {
+            if round.epoch == self.current_epoch {
+                round.selection_locked = true;
+            }
+        }
+    }
+
+    /// Read-only access to the active freeze round.
+    pub(crate) fn freeze_round(&self) -> Option<&FreezeRound> {
+        self.freeze_round.as_ref()
+    }
+
+    /// Clear freeze-round state.
+    pub(crate) fn clear_freeze_round(&mut self) {
+        self.freeze_round = None;
+    }
+
+    // ─────────────────────────── Dedup Operations ───────────────────────────
+
+    /// Check if a commit hash has already been committed (in committed history).
+    ///
+    /// Note: freeze round buffer dedup is handled separately by `buffer_freeze_candidate`.
+    pub(crate) fn is_duplicate_commit_candidate(&self, commit_hash: &[u8]) -> bool {
+        self.committed_batch_hashes
+            .iter()
+            .any(|ch| ch == commit_hash)
+    }
+
+    /// Record a committed batch's hash for future dedup.
+    pub(crate) fn record_committed_batch(&mut self, commit_hash: Vec<u8>) {
         if self.committed_batch_hashes.len() >= MAX_COMMITTED_HASHES {
             self.committed_batch_hashes.pop_front();
         }
-        self.committed_batch_hashes
-            .push_back((commit_hash, fingerprint));
-    }
-
-    /// Number of quarantined batches.
-    pub fn quarantine_len(&self) -> usize {
-        self.quarantine.len()
-    }
-
-    /// Whether any batches are quarantined.
-    pub fn has_quarantined(&self) -> bool {
-        !self.quarantine.is_empty()
+        self.committed_batch_hashes.push_back(commit_hash);
     }
 }

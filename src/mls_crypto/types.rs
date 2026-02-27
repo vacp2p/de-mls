@@ -47,6 +47,18 @@ pub enum MlsProposalAction {
     Other(String),
 }
 
+/// Coarse-grained kind of an MLS wire message.
+///
+/// Used for strict lane checks in the core batch pipeline before processing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MlsMessageKind {
+    Application,
+    Proposal,
+    Commit,
+    Welcome,
+    Other,
+}
+
 /// Result of decrypting an inbound message.
 #[derive(Clone, Debug)]
 pub enum DecryptResult {
@@ -59,9 +71,6 @@ pub enum DecryptResult {
     /// Proposal stored (no action needed).
     /// Contains `(sender_identity, action)`.
     ProposalStored(Vec<u8>, MlsProposalAction),
-    /// Commit processed, group updated.
-    /// Contains the authenticated sender identity.
-    CommitProcessed(Vec<u8>),
     /// Message ignored (wrong group/epoch).
     Ignored,
 }
@@ -88,9 +97,9 @@ pub enum StagedCommitResult {
     Ignored,
 }
 
-/// Result of creating a commit.
+/// Result of creating a commit candidate (not merged yet).
 #[derive(Clone, Debug)]
-pub struct CommitResult {
+pub struct CommitCandidate {
     /// Serialized MLS proposal messages.
     pub proposals: Vec<Vec<u8>>,
     /// Serialized MLS commit message.

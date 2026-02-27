@@ -119,14 +119,13 @@
 //!     ProcessResult::Proposal(p) => { /* forward to consensus */ }
 //!     ProcessResult::Vote(v) => { /* forward to consensus */ }
 //!     ProcessResult::ViolationDetected(ev) => { /* start emergency vote */ }
-//!     ProcessResult::BatchQuarantined { .. } => { /* log / notify UI */ }
 //!     ProcessResult::Noop => {}
 //! }
 //! ```
 //!
 //! # Module Organization
 //!
-//! - `api` - Core group operations (create, join, send, process, quarantine)
+//! - `api` - Core group operations (create, join, send, process)
 //! - `consensus` - Voting workflow and consensus result application
 //! - `display` - Display helpers for protobuf types
 //! - `events` - `GroupEventHandler` trait
@@ -135,7 +134,6 @@
 
 mod api;
 mod consensus;
-mod display;
 mod error;
 mod events;
 mod group_handle;
@@ -146,11 +144,10 @@ mod types;
 
 // ── Core group operations ──
 pub use api::{
-    approved_proposals, approved_proposals_count, become_steward, build_key_package_message,
-    build_message, create_batch_proposals, create_group, create_group_with_policy, epoch_history,
-    group_members, has_quarantined, join_group_from_invite, prepare_to_join,
-    prepare_to_join_with_policy, process_inbound, quarantine_len, resign_steward,
-    retry_quarantined,
+    FreezeFinalizeResult, approved_proposals, approved_proposals_count, become_steward,
+    build_key_package_message, build_message, create_commit_candidate, create_group, epoch_history,
+    finalize_freeze_round, group_members, join_group_from_invite, prepare_to_join, process_inbound,
+    resign_steward,
 };
 
 // ── Consensus integration ──
@@ -159,9 +156,6 @@ pub use consensus::{
     forward_incoming_vote, start_voting,
 };
 
-// ── Display helpers ──
-pub use display::{convert_group_request_to_display, get_identity_from_group_update_request};
-
 // ── Error type ──
 pub use error::CoreError;
 
@@ -169,7 +163,7 @@ pub use error::CoreError;
 pub use events::GroupEventHandler;
 
 // ── Group state ──
-pub use group_handle::{GroupHandle, QuarantinePolicy};
+pub use group_handle::GroupHandle;
 
 // ── Proposal types ──
 pub use group_update_handle::{CurrentEpochProposals, ProposalId};

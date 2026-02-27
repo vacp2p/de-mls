@@ -13,11 +13,11 @@ use hashgraph_like_consensus::{
 };
 
 use crate::app::state_machine::{
-    CommitTimeoutStatus, GroupConfig, GroupState, GroupStateMachine, StateChangeHandler,
+    FreezeTimeoutStatus, GroupConfig, GroupState, GroupStateMachine, StateChangeHandler,
 };
 use crate::core::{
-    self, ConsensusOutcome, CoreError, DeMlsProvider, DefaultProvider, GroupEventHandler,
-    GroupHandle, ProcessResult, create_batch_proposals,
+    self, ConsensusOutcome, CoreError, DeMlsProvider, DefaultProvider, FreezeFinalizeResult,
+    GroupEventHandler, GroupHandle, ProcessResult, create_commit_candidate,
 };
 use crate::ds::InboundPacket;
 use crate::mls_crypto::{
@@ -91,22 +91,20 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         is_creation: bool,
         config: GroupConfig,
     ) -> Result<(), UserError> {
+        let allow_subset_candidates = config.allow_subset_candidates;
         let mut groups = self.groups.write().await;
         if groups.contains_key(group_name) {
             return Err(UserError::GroupAlreadyExists);
         }
 
         let (handle, state_machine) = if is_creation {
-            let handle = core::create_group_with_policy(
-                group_name,
-                &self.mls_service,
-                config.quarantine_policy.clone(),
-            )?;
+            let mut handle = core::create_group(group_name, &self.mls_service)?;
+            handle.set_allow_subset_candidates(allow_subset_candidates);
             let state_machine = GroupStateMachine::new_as_steward_with_config(config);
             (handle, state_machine)
         } else {
-            let handle =
-                core::prepare_to_join_with_policy(group_name, config.quarantine_policy.clone());
+            let mut handle = core::prepare_to_join(group_name);
+            handle.set_allow_subset_candidates(allow_subset_candidates);
             let state_machine = GroupStateMachine::new_as_pending_join_with_config(config);
             (handle, state_machine)
         };
@@ -142,6 +140,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     drop(groups);
                     self.handler.on_leave_group(group_name).await?;
                     return Ok(());
+                }
+                GroupState::Reelection => {
+                    return Err(UserError::GroupBlocked(old_state.to_string()));
                 }
                 GroupState::Leaving => return Err(UserError::AlreadyLeaving),
                 _ => {
@@ -254,7 +255,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
 
         let state = entry.state_machine.current_state();
-        if state == GroupState::PendingJoin || state == GroupState::Waiting {
+        if state == GroupState::PendingJoin {
             return Err(UserError::GroupBlocked(state.to_string()));
         }
 
@@ -337,65 +338,123 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         entry.state_machine.time_until_next_boundary()
     }
 
-    /// Check if the commit has timed out while in Waiting state.
-    pub async fn check_commit_timeout(&self, group_name: &str) -> CommitTimeoutStatus {
-        let (has_proposals, should_accuse, violation_epoch, steward_id) = {
+    /// Check if the freeze phase timed out.
+    ///
+    /// Call this periodically while a group is in `Freezing` state.
+    pub async fn check_freeze_timeout(&self, group_name: &str) -> FreezeTimeoutStatus {
+        let has_proposals = {
             let mut groups = self.groups.write().await;
             let entry = match groups.get_mut(group_name) {
                 Some(e) => e,
-                None => return CommitTimeoutStatus::NotWaiting,
+                None => return FreezeTimeoutStatus::NotFreezing,
             };
 
-            if entry.state_machine.current_state() != GroupState::Waiting {
-                return CommitTimeoutStatus::NotWaiting;
+            let state = entry.state_machine.current_state();
+            if state != GroupState::Freezing {
+                return FreezeTimeoutStatus::NotFreezing;
             }
-            if !entry.state_machine.is_commit_timed_out() {
-                return CommitTimeoutStatus::StillWaiting;
-            }
-
-            let has_proposals = core::approved_proposals_count(&entry.handle) > 0;
-            let epoch = entry.handle.current_epoch();
-            let steward_id = entry
-                .handle
-                .steward_identity()
-                .filter(|id| !id.is_empty())
-                .map(|id| id.to_vec());
-
-            if has_proposals {
-                entry.handle.clear_approved_proposals();
+            if !entry.state_machine.is_freeze_timed_out() {
+                return FreezeTimeoutStatus::StillFreezing;
             }
 
-            let should_accuse = has_proposals && steward_id.is_some();
-
-            entry.state_machine.sync_epoch_boundary();
-            entry.state_machine.start_working();
-            (
-                has_proposals,
-                should_accuse,
-                epoch,
-                steward_id.unwrap_or_default(),
-            )
+            entry.state_machine.start_selection();
+            core::approved_proposals_count(&entry.handle) > 0
         };
 
         self.state_handler
-            .on_state_changed(group_name, GroupState::Working)
+            .on_state_changed(group_name, GroupState::Selection)
             .await;
 
-        if should_accuse {
-            let request = ViolationEvidence::censorship_inactivity(steward_id, violation_epoch)
-                .into_update_request();
-            if let Err(e) = self
-                .start_voting_on_request_background(group_name.to_string(), request)
-                .await
-            {
-                error!("[check_commit_timeout] Failed to start emergency criteria vote: {e}");
+        let finalize_result = {
+            let mut groups = self.groups.write().await;
+            let entry = match groups.get_mut(group_name) {
+                Some(e) => e,
+                None => return FreezeTimeoutStatus::NotFreezing,
+            };
+            match core::finalize_freeze_round(&mut entry.handle, &self.mls_service) {
+                Ok(result) => result,
+                Err(e) => {
+                    error!("[check_freeze_timeout] finalize_freeze_round failed: {e}");
+                    FreezeFinalizeResult::NoCandidate
+                }
+            }
+        };
+
+        match finalize_result {
+            FreezeFinalizeResult::Applied { result, outbound } => {
+                // Send deferred welcome packets now that commit is merged
+                for packet in outbound {
+                    if let Err(e) = self.handler.on_outbound(group_name, packet).await {
+                        error!("[check_freeze_timeout] Failed to send deferred welcome: {e}");
+                    }
+                }
+                if let Err(e) = self.handle_process_result(group_name, result).await {
+                    error!("[check_freeze_timeout] Failed to dispatch finalize result: {e}");
+                }
+                return FreezeTimeoutStatus::Applied;
+            }
+            FreezeFinalizeResult::NoCandidate => {
+                let (next_state, should_accuse, violation_epoch, steward_id) = {
+                    let mut groups = self.groups.write().await;
+                    let entry = match groups.get_mut(group_name) {
+                        Some(e) => e,
+                        None => return FreezeTimeoutStatus::TimedOut { has_proposals },
+                    };
+
+                    if has_proposals {
+                        entry.handle.reject_all_approved_proposals();
+                        entry.handle.reject_all_voting_proposals();
+                        entry.state_machine.clear_proposal_timer();
+                        entry.state_machine.start_reelection();
+                        let violation_epoch = entry.handle.current_epoch();
+                        let steward_id = entry
+                            .handle
+                            .steward_identity()
+                            .filter(|id| !id.is_empty())
+                            .map(|id| id.to_vec())
+                            .unwrap_or_default();
+                        (
+                            GroupState::Reelection,
+                            !steward_id.is_empty(),
+                            violation_epoch,
+                            steward_id,
+                        )
+                    } else {
+                        entry.handle.clear_freeze_round();
+                        entry.state_machine.sync_epoch_boundary();
+                        entry.state_machine.start_working();
+                        (GroupState::Working, false, 0, Vec::new())
+                    }
+                };
+
+                self.state_handler
+                    .on_state_changed(group_name, next_state.clone())
+                    .await;
+
+                if should_accuse {
+                    let request =
+                        ViolationEvidence::censorship_inactivity(steward_id, violation_epoch)
+                            .into_update_request();
+                    if let Err(e) = self
+                        .start_voting_on_request_background(group_name.to_string(), request)
+                        .await
+                    {
+                        error!(
+                            "[check_freeze_timeout] Failed to start emergency criteria vote: {e}"
+                        );
+                    }
+                }
             }
         }
 
-        CommitTimeoutStatus::TimedOut { has_proposals }
+        FreezeTimeoutStatus::TimedOut { has_proposals }
     }
 
-    /// Start a member epoch check.
+    /// Start a member epoch check (steward inactivity detection — Path B).
+    ///
+    /// If the member has approved proposals and the steward hasn't sent a
+    /// candidate within `epoch_duration` of the first approval, transition
+    /// to Freezing so the freeze timeout can detect steward fault.
     pub async fn start_member_epoch(&self, group_name: &str) -> Result<bool, UserError> {
         let mut groups = self.groups.write().await;
         let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
@@ -410,13 +469,15 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
 
         let proposal_count = core::approved_proposals_count(&entry.handle);
-        let entered_waiting = entry.state_machine.check_epoch_boundary(proposal_count);
+        let entered_freezing = entry.state_machine.check_steward_inactivity(proposal_count);
+        if entered_freezing {
+            entry.handle.ensure_freeze_round();
 
-        if entered_waiting {
             let new_state = entry.state_machine.current_state();
             info!(
-                "[start_member_epoch]: Entered Waiting at epoch boundary for group {group_name} \
-                 ({proposal_count} approved proposals)"
+                "[start_member_epoch]: Steward inactivity → {} for group {group_name} \
+                 ({proposal_count} approved proposals)",
+                new_state
             );
             drop(groups);
             self.state_handler
@@ -424,7 +485,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 .await;
         }
 
-        Ok(entered_waiting)
+        Ok(entered_freezing)
     }
 
     /// Start a steward epoch.
@@ -443,30 +504,21 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let mut groups = self.groups.write().await;
             let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
             entry.state_machine.start_steward_epoch()?;
+            entry.handle.ensure_freeze_round();
         }
         self.state_handler
-            .on_state_changed(group_name, GroupState::Waiting)
+            .on_state_changed(group_name, GroupState::Freezing)
             .await;
 
         let messages = {
             let mut groups = self.groups.write().await;
             let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
-            create_batch_proposals(&mut entry.handle, &self.mls_service)?
+            create_commit_candidate(&mut entry.handle, &self.mls_service)?
         };
 
         for message in messages {
             self.handler.on_outbound(group_name, message).await?;
         }
-
-        {
-            let mut groups = self.groups.write().await;
-            if let Some(entry) = groups.get_mut(group_name) {
-                entry.state_machine.start_working();
-            }
-        }
-        self.state_handler
-            .on_state_changed(group_name, GroupState::Working)
-            .await;
 
         Ok(())
     }
@@ -479,6 +531,22 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let expected_voters = {
             let groups = self.groups.read().await;
             let entry = groups.get(&group_name).ok_or(UserError::GroupNotFound)?;
+            let state = entry.state_machine.current_state();
+            match state {
+                GroupState::Reelection => {
+                    let is_emergency = matches!(
+                        upd_request.payload,
+                        Some(group_update_request::Payload::EmergencyCriteria(_))
+                    );
+                    if !is_emergency {
+                        return Err(UserError::GroupBlocked(state.to_string()));
+                    }
+                }
+                GroupState::Freezing | GroupState::Selection => {
+                    return Err(UserError::GroupBlocked(state.to_string()));
+                }
+                _ => {}
+            }
             let members = core::group_members(&entry.handle, &self.mls_service)?;
             members.len() as u32
         };
@@ -546,7 +614,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
 
         let state = entry.state_machine.current_state();
-        if state == GroupState::Waiting {
+        if state == GroupState::Freezing || state == GroupState::Selection {
             return Err(UserError::GroupBlocked(state.to_string()));
         }
 
@@ -570,7 +638,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     // ─────────────────────────── Inbound Processing ───────────────────────────
 
     /// Dispatches a single ProcessResult to the appropriate handler/consensus/state-machine action.
-    /// Used by both process_inbound_packet() and retry_quarantined() call sites.
+    /// Used by process_inbound_packet() and freeze finalization.
     async fn handle_process_result(
         &self,
         group_name: &str,
@@ -639,7 +707,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     let mut groups = self.groups.write().await;
                     if let Some(entry) = groups.get_mut(group_name) {
                         let state = entry.state_machine.current_state();
-                        if state == GroupState::Working || state == GroupState::Waiting {
+                        if state == GroupState::Working
+                            || state == GroupState::Freezing
+                            || state == GroupState::Selection
+                            || state == GroupState::Reelection
+                        {
                             entry.state_machine.sync_epoch_boundary();
                             entry.state_machine.start_working();
                             true
@@ -672,17 +744,27 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 )
                 .await?;
             }
-            ProcessResult::BatchQuarantined {
-                batch_proposal_ids,
-                epoch,
-                ..
-            } => {
-                tracing::debug!(
-                    "Batch quarantined for group {}: proposal_ids={:?}, epoch={}",
-                    group_name,
-                    batch_proposal_ids,
-                    epoch
-                );
+            ProcessResult::CandidateBuffered => {
+                let transitioned = {
+                    let mut groups = self.groups.write().await;
+                    if let Some(entry) = groups.get_mut(group_name) {
+                        if entry.state_machine.current_state() == GroupState::Working {
+                            entry.state_machine.start_freezing();
+                            entry.handle.ensure_freeze_round();
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                };
+
+                if transitioned {
+                    self.state_handler
+                        .on_state_changed(group_name, GroupState::Freezing)
+                        .await;
+                }
             }
             ProcessResult::Noop => {}
         }
@@ -768,7 +850,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let mut groups = self.groups.write().await;
             let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
 
-            match (approved, is_owner) {
+            let approved_before = core::approved_proposals_count(&entry.handle);
+
+            let result = match (approved, is_owner) {
                 (true, true) => {
                     info!("Consensus reached for proposal {proposal_id}: result=true (owner)");
                     core::apply_consensus_result(
@@ -795,20 +879,16 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                         ConsensusOutcome::Rejected,
                     )
                 }
-            }
+            };
+
+            let approved_after = core::approved_proposals_count(&entry.handle);
+            entry
+                .state_machine
+                .notify_proposal_approved(approved_before, approved_after);
+
+            result
         };
         outcome_result?;
-
-        // Phase 4: Retry quarantined batches
-        let quarantine_results = {
-            let mut groups = self.groups.write().await;
-            let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
-            core::retry_quarantined(&mut entry.handle, &self.mls_service)?
-        };
-
-        for result in quarantine_results {
-            self.handle_process_result(group_name, result).await?;
-        }
 
         Ok(())
     }

@@ -15,7 +15,7 @@ use crate::{
     core::CoreError,
     mls_crypto::parse_wallet_to_bytes,
     protos::de_mls::messages::v1::{
-        AppMessage, BanRequest, BatchProposalsMessage, ConversationMessage, GroupUpdateRequest,
+        AppMessage, BanRequest, CommitCandidate, ConversationMessage, GroupUpdateRequest,
         InvitationToJoin, Outcome, ProposalAdded, RemoveMember, UserKeyPackage, UserVote,
         ViolationEvidence, VotePayload, WelcomeMessage, app_message, group_update_request,
         welcome_message,
@@ -25,13 +25,13 @@ use crate::{
 // Message type constants for consistency and type safety
 pub mod message_types {
     pub const CONVERSATION_MESSAGE: &str = "ConversationMessage";
-    pub const BATCH_PROPOSALS_MESSAGE: &str = "BatchProposalsMessage";
     pub const BAN_REQUEST: &str = "BanRequest";
     pub const PROPOSAL: &str = "Proposal";
     pub const VOTE: &str = "Vote";
     pub const VOTE_PAYLOAD: &str = "VotePayload";
     pub const USER_VOTE: &str = "UserVote";
     pub const PROPOSAL_ADDED: &str = "ProposalAdded";
+    pub const COMMIT_CANDIDATE: &str = "CommitCandidate";
     pub const UNKNOWN: &str = "Unknown";
 }
 
@@ -45,13 +45,13 @@ impl MessageType for app_message::Payload {
         use message_types::*;
         match self {
             app_message::Payload::ConversationMessage(_) => CONVERSATION_MESSAGE,
-            app_message::Payload::BatchProposalsMessage(_) => BATCH_PROPOSALS_MESSAGE,
             app_message::Payload::BanRequest(_) => BAN_REQUEST,
             app_message::Payload::Proposal(_) => PROPOSAL,
             app_message::Payload::Vote(_) => VOTE,
             app_message::Payload::VotePayload(_) => VOTE_PAYLOAD,
             app_message::Payload::UserVote(_) => USER_VOTE,
             app_message::Payload::ProposalAdded(_) => PROPOSAL_ADDED,
+            app_message::Payload::CommitCandidate(_) => COMMIT_CANDIDATE,
         }
     }
 }
@@ -90,7 +90,6 @@ impl MessageType for GroupUpdateRequest {
 /// - `GroupUpdated` - MLS state changed (batch commit applied)
 /// - `LeaveGroup` - User was removed from the group
 /// - `ViolationDetected` - Steward violation detected during commit validation
-/// - `BatchQuarantined` - Batch was quarantined (arrived before local proposals)
 /// - `Noop` - Nothing to do (message not for us, already processed, etc.)
 #[derive(Debug, Clone)]
 pub enum ProcessResult {
@@ -129,7 +128,7 @@ pub enum ProcessResult {
 
     /// Group MLS state was updated (batch commit applied).
     ///
-    /// Application should transition state from Waiting to Working.
+    /// Application should transition state back to Working.
     GroupUpdated,
 
     /// A steward violation was detected during commit validation.
@@ -138,19 +137,11 @@ pub enum ProcessResult {
     /// an emergency criteria proposal vote for this evidence.
     ViolationDetected(ViolationEvidence),
 
-    /// A batch was quarantined because local proposals were not yet available.
+    /// A remote commit candidate was successfully buffered.
     ///
-    /// The batch will be retried automatically when proposals arrive via
-    /// [`retry_quarantined`](super::retry_quarantined). The application may
-    /// use this signal for logging or UI notification.
-    BatchQuarantined {
-        /// Proposal IDs from the quarantined batch.
-        batch_proposal_ids: Vec<u32>,
-        /// Local proposal IDs at the time of quarantine (usually empty).
-        local_proposal_ids: Vec<u32>,
-        /// The epoch when the batch was quarantined.
-        epoch: u64,
-    },
+    /// The application layer should transition the member to Freezing state
+    /// (if currently Working) so the freeze timeout can finalize the candidate.
+    CandidateBuffered,
 
     /// No action needed.
     ///
@@ -265,12 +256,10 @@ impl From<ConversationMessage> for AppMessage {
     }
 }
 
-impl From<BatchProposalsMessage> for AppMessage {
-    fn from(batch_proposals_message: BatchProposalsMessage) -> Self {
+impl From<CommitCandidate> for AppMessage {
+    fn from(commit_candidate: CommitCandidate) -> Self {
         AppMessage {
-            payload: Some(app_message::Payload::BatchProposalsMessage(
-                batch_proposals_message,
-            )),
+            payload: Some(app_message::Payload::CommitCandidate(commit_candidate)),
         }
     }
 }

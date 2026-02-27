@@ -10,19 +10,16 @@ use de_mls::core::{
     CoreError,
     DeMlsProvider,
     DefaultProvider,
+    FreezeFinalizeResult,
     GroupEventHandler,
     GroupHandle,
-    ProcessResult,
-    QuarantinePolicy,
     // Pure core functions
     apply_consensus_result,
     // Consensus convenience ops (still public)
     cast_vote,
+    finalize_freeze_round,
     forward_incoming_proposal,
     forward_incoming_vote,
-    has_quarantined,
-    quarantine_len,
-    retry_quarantined,
     start_voting,
 };
 use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService};
@@ -41,22 +38,12 @@ fn _check_apply_consensus_result(handle: &mut GroupHandle) -> Result<(), CoreErr
     apply_consensus_result(handle, 1, ConsensusOutcome::Rejected)
 }
 
-/// Verify `retry_quarantined` returns Vec<ProcessResult>.
-fn _check_retry_quarantined(
+/// Verify `finalize_freeze_round` signature compiles.
+fn _check_finalize_freeze_round(
     handle: &mut GroupHandle,
     mls: &MlsService<MemoryDeMlsStorage>,
-) -> Result<Vec<ProcessResult>, CoreError> {
-    retry_quarantined(handle, mls)
-}
-
-/// Verify `quarantine_len` and `has_quarantined` compile.
-fn _check_quarantine_queries(handle: &GroupHandle) -> (usize, bool) {
-    (quarantine_len(handle), has_quarantined(handle))
-}
-
-/// Verify `QuarantinePolicy` is constructible with Default.
-fn _check_quarantine_policy() -> QuarantinePolicy {
-    QuarantinePolicy::default()
+) -> Result<FreezeFinalizeResult, CoreError> {
+    finalize_freeze_round(handle, mls)
 }
 
 /// Verify that `start_voting` is callable with `DefaultProvider` type params.
@@ -101,5 +88,4 @@ async fn _check_cast_vote(
 #[test]
 fn core_api_is_public() {
     // If this file compiles, the API surface is accessible.
-    // Verify removed APIs are absent — normal compile breakage is sufficient.
 }
