@@ -2,7 +2,10 @@ use futures::channel::mpsc::UnboundedSender;
 use hex::ToHex;
 use std::sync::{Arc, atomic::Ordering};
 
-use de_mls::{ds::WakuDeliveryService, protos::de_mls::messages::v1::group_update_request};
+use de_mls::{
+    ds::WakuDeliveryService, mls_crypto::format_wallet_address,
+    protos::de_mls::messages::v1::group_update_request,
+};
 use de_mls_ui_protocol::v1::AppEvent;
 
 use crate::{CoreCtx, Gateway, UserRef};
@@ -29,6 +32,19 @@ pub(crate) async fn push_consensus_state(
                 Some(group_update_request::Payload::RemoveMember(id)) => {
                     Some(("Remove Member".to_string(), id.identity.encode_hex()))
                 }
+                Some(group_update_request::Payload::EmergencyCriteria(ec)) => {
+                    let (label, target) = match ec.evidence.as_ref() {
+                        Some(e) => (
+                            format!("Emergency: {}", e.violation_type_label()),
+                            format_wallet_address(&e.target_member_id),
+                        ),
+                        None => (
+                            "Emergency: Unknown Violation".to_string(),
+                            "unknown".to_string(),
+                        ),
+                    };
+                    Some((label, target))
+                }
                 None => None,
             })
             .collect();
@@ -51,6 +67,19 @@ pub(crate) async fn push_consensus_state(
                         }
                         Some(group_update_request::Payload::RemoveMember(id)) => {
                             Some(("Remove Member".to_string(), id.identity.encode_hex()))
+                        }
+                        Some(group_update_request::Payload::EmergencyCriteria(ec)) => {
+                            let (label, target) = match ec.evidence.as_ref() {
+                                Some(e) => (
+                                    format!("Emergency: {}", e.violation_type_label()),
+                                    format_wallet_address(&e.target_member_id),
+                                ),
+                                None => (
+                                    "Emergency: Unknown Violation".to_string(),
+                                    "unknown".to_string(),
+                                ),
+                            };
+                            Some((label, target))
                         }
                         None => None,
                     })

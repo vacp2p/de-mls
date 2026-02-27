@@ -9,7 +9,8 @@ use std::sync::Arc;
 use tokio::task::spawn_blocking;
 
 use de_mls::{
-    core::{CoreError, GroupEventHandler, MessageType, message_types},
+    app::{MessageType, message_types},
+    core::{CallbackError, GroupEventHandler},
     ds::{DeliveryService, OutboundPacket, TopicFilter},
     protos::de_mls::messages::v1::{AppMessage, ConversationMessage, app_message},
 };
@@ -31,27 +32,26 @@ impl<DS: DeliveryService> GroupEventHandler for GatewayEventHandler<DS> {
         &self,
         _group_name: &str,
         packet: OutboundPacket,
-    ) -> Result<String, CoreError> {
+    ) -> Result<String, CallbackError> {
         let delivery = self.delivery.clone();
         spawn_blocking(move || {
             delivery
                 .send(packet)
-                .map_err(|e| CoreError::DeliveryError(e.to_string()))
+                .map_err(|e| CallbackError(e.to_string()))
         })
         .await
-        .map_err(|e| CoreError::DeliveryError(e.to_string()))?
+        .map_err(|e| CallbackError(e.to_string()))?
     }
 
     async fn on_app_message(
         &self,
         _group_name: &str,
         message: AppMessage,
-    ) -> Result<(), CoreError> {
-        forward_app_message(&self.evt_tx, message)
-            .map_err(|e| CoreError::HandlerError(e.to_string()))
+    ) -> Result<(), CallbackError> {
+        forward_app_message(&self.evt_tx, message).map_err(|e| CallbackError(e.to_string()))
     }
 
-    async fn on_leave_group(&self, group_name: &str) -> Result<(), CoreError> {
+    async fn on_leave_group(&self, group_name: &str) -> Result<(), CallbackError> {
         self.topics.remove_many(group_name).await;
 
         let _ = self
@@ -69,7 +69,7 @@ impl<DS: DeliveryService> GroupEventHandler for GatewayEventHandler<DS> {
         Ok(())
     }
 
-    async fn on_joined_group(&self, _group_name: &str) -> Result<(), CoreError> {
+    async fn on_joined_group(&self, _group_name: &str) -> Result<(), CallbackError> {
         Ok(())
     }
 

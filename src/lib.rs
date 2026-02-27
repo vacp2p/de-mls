@@ -10,19 +10,18 @@
 //! │                         Your Application                            │
 //! └───────────────────────────────┬─────────────────────────────────────┘
 //!                                 │
+//!                        ┌────────┴────────┐
+//!                        │      app        │
+//!                        │ (reference impl,│
+//!                        │   optional)     │
+//!                        └────────┬────────┘
+//!                                 │
 //!         ┌───────────────────────┼───────────────────────┐
 //!         ▼                       ▼                       ▼
 //! ┌───────────────┐      ┌───────────────┐      ┌───────────────┐
 //! │     core      │      │   mls_crypto  │      │      ds       │
 //! │  (protocol)   │      │ (encryption)  │      │ (transport)   │
 //! └───────────────┘      └───────────────┘      └───────────────┘
-//!         │                       │                       │
-//!         └───────────────────────┼───────────────────────┘
-//!                                 ▼
-//!                        ┌───────────────┐
-//!                        │      app      │
-//!                        │ (reference)   │
-//!                        └───────────────┘
 //! ```
 //!
 //! ## Modules
@@ -38,7 +37,7 @@
 //! Most developers should start with the [`core`] module documentation, which explains:
 //! - What traits you need to implement ([`core::GroupEventHandler`])
 //! - Core operations (create group, join, send messages)
-//! - The ProcessResult → DispatchAction flow
+//! - The `ProcessResult` matching flow
 //!
 //! If you want a ready-to-use solution, see [`app::User`] which provides complete
 //! group management with state machine and epoch handling.
@@ -46,21 +45,22 @@
 //! ## Quick Example
 //!
 //! ```ignore
-//! use de_mls::core::{DefaultProvider, GroupEventHandler};
+//! use de_mls::core::{DefaultProvider, GroupEventHandler, ProcessResult};
 //! use de_mls::app::User;
 //!
 //! // Create a user with an Ethereum private key
-//! let user: User<DefaultProvider> = User::with_private_key(
-//!     "0xac0974...",  // Private key
-//!     consensus,      // Consensus service
-//!     handler,        // Your GroupEventHandler implementation
+//! let user: User<DefaultProvider, _, _> = User::with_private_key(
+//!     "0xac0974...",   // Private key
+//!     consensus,       // Consensus service
+//!     event_handler,   // Your GroupEventHandler implementation
+//!     state_handler,   // Your StateChangeHandler implementation
 //! )?;
 //!
 //! // Create a group (as steward)
 //! user.create_group("my-group", true).await?;
 //!
 //! // Send a message
-//! user.send_message("my-group", b"Hello, world!").await?;
+//! user.send_app_message("my-group", b"Hello, world!".to_vec()).await?;
 //! ```
 
 /// Protocol implementation: message processing, consensus, and group operations.

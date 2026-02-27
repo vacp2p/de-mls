@@ -114,6 +114,9 @@ pub enum MlsServiceError {
 
     #[error("Welcome message not for this user")]
     WelcomeNotForUs,
+
+    #[error("No pending staged commit for group: {0}")]
+    NoPendingStagedCommit(String),
 }
 
 /// Unified MLS error type.

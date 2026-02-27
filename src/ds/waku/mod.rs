@@ -158,7 +158,11 @@ impl WakuDeliveryService {
             "clusterId": 15,
             "shards": [1],
             "numShardsInNetwork": 8,
-            "logLevel": "FATAL",
+            "logLevel": "ERROR",
+            // Keep metrics disabled for libwaku runtime to avoid exposing
+            // Prometheus/logging endpoints from embedded nodes.
+            "metricsServer": false,
+            "metricsLogging": false,
         });
 
         if cfg.discv5 {

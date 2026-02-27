@@ -414,7 +414,7 @@ button.mini {
 .panel.consensus .status-row {
     display: flex;
     gap: 24px;
-    margin-bottom: 12px;
+    margin-bottom: 4px;
 }
 
 .panel.consensus .status {
@@ -511,6 +511,18 @@ button.mini {
     color: var(--primary);
     border-bottom: 1px solid var(--border);
     padding-bottom: 8px;
+}
+
+.panel.consensus .state-context {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.panel.consensus .state-context-header {
+    color: var(--primary);
+    font-size: 14px;
+    font-weight: 600;
 }
 
 .panel.consensus .no-data {

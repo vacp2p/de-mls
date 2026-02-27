@@ -9,13 +9,13 @@ import "hashgraph-like-consensus/v1/consensus.proto";
 message AppMessage {
   oneof payload {
     ConversationMessage conversation_message = 1;
-    BatchProposalsMessage batch_proposals_message = 2;
-    BanRequest ban_request = 3;
-    consensus.v1.Proposal proposal = 4;
-    consensus.v1.Vote vote = 5;
-    VotePayload vote_payload = 6;
-    UserVote user_vote = 7;
-    ProposalAdded proposal_added = 8;
+    BanRequest ban_request = 2;
+    consensus.v1.Proposal proposal = 3;
+    consensus.v1.Vote vote = 4;
+    VotePayload vote_payload = 5;
+    UserVote user_vote = 6;
+    ProposalAdded proposal_added = 7;
+    CommitCandidate commit_candidate = 8;
   }
 }
 
@@ -30,12 +30,10 @@ message ConversationMessage {
   string group_name = 3;
 }
 
-message BatchProposalsMessage {
+message CommitCandidate {
   bytes group_name = 1;
-  repeated bytes mls_proposals = 2;  // Individual MLS proposal messages
-  bytes commit_message = 3;          // MLS commit message
-  repeated uint32 proposal_ids = 4;  // Consensus proposal IDs included in this batch
-  bytes proposals_digest = 5;        // SHA-256 over canonical (id, payload) pairs
+  repeated bytes mls_proposals = 2;
+  bytes commit_message = 3;
 }
 
 // Yes/No vote for a given proposal. Based on the result, the `Vote` will be created.
@@ -55,7 +53,26 @@ message GroupUpdateRequest {
   oneof payload {
     InviteMember invite_member = 1;
     RemoveMember remove_member = 2;
+    EmergencyCriteriaProposal emergency_criteria = 3;
   }
+}
+
+enum ViolationType {
+  VIOLATION_UNSPECIFIED = 0;
+  BROKEN_COMMIT = 1;        // Commit doesn't match voted proposals
+  BROKEN_MLS_PROPOSAL = 2;  // MLS proposal doesn't match voting proposal
+  CENSORSHIP_INACTIVITY = 3; // Steward didn't commit within threshold_duration
+}
+
+message ViolationEvidence {
+  ViolationType violation_type = 1;
+  bytes target_member_id = 2;       // Malicious steward's identity
+  bytes evidence_payload = 3;       // Proof (mismatched hashes, timestamps, etc.)
+  uint64 epoch = 4;                 // Epoch where violation occurred
+}
+
+message EmergencyCriteriaProposal {
+  ViolationEvidence evidence = 1;
 }
 
 message InviteMember {

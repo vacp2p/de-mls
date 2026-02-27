@@ -1,37 +1,52 @@
-//! Event handler trait for group operations.
+//! I/O interface for group operations.
 //!
-//! The [`GroupEventHandler`] trait is the primary integration point between
-//! the DE-MLS core and your application. Implement this trait to handle
-//! output events from group operations.
+//! [`GroupEventHandler`] is the I/O contract between the protocol layer and
+//! your application. It is defined in core because it references core types
+//! ([`crate::ds::OutboundPacket`], [`crate::protos::de_mls::messages::v1::AppMessage`]),
+//! but it is **called by the app layer** (e.g. [`crate::app::User`]) after
+//! dispatching a [`crate::core::ProcessResult`] — core itself never calls it.
 
 use async_trait::async_trait;
 
-use crate::core::error::CoreError;
 use crate::ds::OutboundPacket;
 use crate::protos::de_mls::messages::v1::AppMessage;
 
-/// Trait for handling output events from group operations.
+/// Error returned by [`GroupEventHandler`] callback implementations.
 ///
-/// This is the main trait you need to implement to integrate DE-MLS with
-/// your application. It receives callbacks for all significant output events:
+/// Wrap your transport or UI errors with this type to signal failure
+/// back to the calling layer.
 ///
-/// - Network packets that need to be sent
-/// - Application messages for UI display
-/// - Group membership changes (join/leave)
-/// - Background operation errors
+/// # Example
+///
+/// ```ignore
+/// async fn on_outbound(&self, _: &str, packet: OutboundPacket) -> Result<String, CallbackError> {
+///     self.transport.send(packet)
+///         .map_err(|e| CallbackError(e.to_string()))
+/// }
+/// ```
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct CallbackError(pub String);
+
+/// I/O interface for connecting group operations to transport and UI.
+///
+/// Implement this trait to wire DE-MLS into your application. The app layer
+/// (e.g. [`crate::app::User`]) calls these methods when dispatching
+/// [`crate::core::ProcessResult`] variants — they are never called by core
+/// functions directly.
 ///
 /// # Thread Safety
 ///
-/// This trait requires `Send + Sync` because callbacks may be invoked from
-/// async contexts and multiple groups may be processed concurrently.
+/// Requires `Send + Sync` because the app layer may call callbacks from
+/// async contexts while managing multiple groups concurrently.
 ///
 /// # Example
 ///
 /// ```ignore
 /// use async_trait::async_trait;
-/// use de_mls::core::{GroupEventHandler, CoreError};
+/// use de_mls::core::{CallbackError, GroupEventHandler};
 /// use de_mls::protos::de_mls::messages::v1::AppMessage;
-/// use ds::transport::OutboundPacket;
+/// use de_mls::ds::OutboundPacket;
 ///
 /// struct MyHandler {
 ///     transport: MyTransport,
@@ -44,28 +59,28 @@ use crate::protos::de_mls::messages::v1::AppMessage;
 ///         &self,
 ///         group_name: &str,
 ///         packet: OutboundPacket,
-///     ) -> Result<String, CoreError> {
+///     ) -> Result<String, CallbackError> {
 ///         self.transport.send(packet).await
-///             .map_err(|e| CoreError::DeliveryError(e.to_string()))
+///             .map_err(|e| CallbackError(e.to_string()))
 ///     }
 ///
 ///     async fn on_app_message(
 ///         &self,
 ///         group_name: &str,
 ///         message: AppMessage,
-///     ) -> Result<(), CoreError> {
+///     ) -> Result<(), CallbackError> {
 ///         self.ui_sender.send(UiEvent::Message { group_name, message }).await
-///             .map_err(|e| CoreError::HandlerError(e.to_string()))
+///             .map_err(|e| CallbackError(e.to_string()))
 ///     }
 ///
-///     async fn on_leave_group(&self, group_name: &str) -> Result<(), CoreError> {
+///     async fn on_leave_group(&self, group_name: &str) -> Result<(), CallbackError> {
 ///         self.ui_sender.send(UiEvent::GroupRemoved(group_name.to_string())).await
-///             .map_err(|e| CoreError::HandlerError(e.to_string()))
+///             .map_err(|e| CallbackError(e.to_string()))
 ///     }
 ///
-///     async fn on_joined_group(&self, group_name: &str) -> Result<(), CoreError> {
+///     async fn on_joined_group(&self, group_name: &str) -> Result<(), CallbackError> {
 ///         self.ui_sender.send(UiEvent::GroupJoined(group_name.to_string())).await
-///             .map_err(|e| CoreError::HandlerError(e.to_string()))
+///             .map_err(|e| CallbackError(e.to_string()))
 ///     }
 ///
 ///     async fn on_error(&self, group_name: &str, operation: &str, error: &str) {
@@ -90,12 +105,12 @@ pub trait GroupEventHandler: Send + Sync {
     /// # Implementation Notes
     /// - This should send the packet via your transport layer (Waku, libp2p, etc.)
     /// - The packet's `subtopic` determines the message type (welcome vs app)
-    /// - Failures should be returned as `CoreError::DeliveryError`
+    /// - Failures should be returned as `CallbackError`
     async fn on_outbound(
         &self,
         group_name: &str,
         packet: OutboundPacket,
-    ) -> Result<String, CoreError>;
+    ) -> Result<String, CallbackError>;
 
     /// Called when an application message should be delivered to the UI.
     ///
@@ -113,7 +128,11 @@ pub trait GroupEventHandler: Send + Sync {
     /// - Dispatch based on `message.payload` variant
     /// - `VotePayload` should trigger UI for user to approve/reject
     /// - `ConversationMessage` should be displayed in chat
-    async fn on_app_message(&self, group_name: &str, message: AppMessage) -> Result<(), CoreError>;
+    async fn on_app_message(
+        &self,
+        group_name: &str,
+        message: AppMessage,
+    ) -> Result<(), CallbackError>;
 
     /// Called when the user has been removed from a group.
     ///
@@ -125,10 +144,11 @@ pub trait GroupEventHandler: Send + Sync {
     /// * `group_name` - The name of the group to leave
     ///
     /// # Implementation Notes
-    /// - Remove the group from your registry
-    /// - Stop any background tasks for this group
-    /// - Notify the UI that the group was removed
-    async fn on_leave_group(&self, group_name: &str) -> Result<(), CoreError>;
+    /// - When using [`crate::app::User`], the group is already removed from its
+    ///   internal registry before this callback fires — use it only for UI/transport
+    ///   cleanup (unsubscribe topics, show "removed" notification, etc.)
+    /// - When building a custom app layer, remove the group from your own registry here.
+    async fn on_leave_group(&self, group_name: &str) -> Result<(), CallbackError>;
 
     /// Called when the user successfully joined a group.
     ///
@@ -139,9 +159,10 @@ pub trait GroupEventHandler: Send + Sync {
     /// * `group_name` - The name of the group joined
     ///
     /// # Implementation Notes
-    /// - Update UI to show the user is now a member
-    /// - Start any background tasks for this group (epoch timer, etc.)
-    async fn on_joined_group(&self, group_name: &str) -> Result<(), CoreError>;
+    /// - When using [`crate::app::User`], epoch synchronization and state machine
+    ///   transitions are handled automatically — use this only for UI notification.
+    /// - When building a custom app layer, start epoch timers and transition state here.
+    async fn on_joined_group(&self, group_name: &str) -> Result<(), CallbackError>;
 
     /// Called when a background operation fails.
     ///

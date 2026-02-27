@@ -45,16 +45,27 @@ pub enum CoreError {
     #[error("Invalid group update request")]
     InvalidGroupUpdateRequest,
 
-    /// Generic handler failure.
-    #[error("Handler error: {0}")]
-    HandlerError(String),
-
-    /// Transport/delivery failure.
-    #[error("Delivery error: {0}")]
-    DeliveryError(String),
-
     #[error("Invalid subtopic: {0}")]
     InvalidSubtopic(String),
+
+    /// Emergency criteria proposals found in approved queue during batch creation.
+    /// This indicates a bug: emergency proposals should be removed by
+    /// apply_consensus_result before create_batch_proposals is called.
+    #[error(
+        "Emergency criteria proposals found in approved queue (ids: {proposal_ids:?}). \
+         They should have been removed by apply_consensus_result."
+    )]
+    UnexpectedEmergencyProposals { proposal_ids: Vec<u32> },
+
+    /// The consensus outcome does not match the handle's ownership state.
+    /// For example, `ApprovedOwner` was passed but the handle does not own the proposal,
+    /// or `Approved { payload }` was passed but the handle does own it.
+    #[error("Invalid consensus outcome: {0}")]
+    InvalidConsensusOutcome(String),
+
+    /// The proposal ID was not found in the handle's voting or approved proposals.
+    #[error("Proposal not found: {0}")]
+    ProposalNotFound(u32),
 }
 
 impl From<mls_crypto::MlsError> for CoreError {

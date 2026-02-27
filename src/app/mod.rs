@@ -8,7 +8,7 @@
 //!
 //! The app layer adds:
 //! - **`User`** - Multi-group manager with consensus integration
-//! - **`GroupStateMachine`** - State transitions (PendingJoin → Working ⇄ Waiting → Leaving)
+//! - **`GroupStateMachine`** - State transitions
 //! - **`StateChangeHandler`** - Callbacks for UI state updates
 //! - **Epoch scheduling** - Configurable steward epoch timing
 //!
@@ -40,15 +40,15 @@
 //! │   └── state_handler: S (StateChangeHandler)             │
 //! │                                                         │
 //! │   GroupStateMachine                                     │
-//! │   ├── state: PendingJoin | Working | Waiting | Leaving  │
+//! │   ├── state: PendingJoin | Working | Freezing | Selection | Reelection | Leaving │
 //! │   ├── epoch timing (last_boundary, epoch_duration)      │
-//! │   └── timeout tracking (pending_join, commit)           │
+//! │   └── timeout tracking (pending_join, freeze)           │
 //! └─────────────────────────────────────────────────────────┘
 //!                           │
 //!                           ▼
 //! ┌─────────────────────────────────────────────────────────┐
 //! │                    de_mls::core                         │
-//! │   GroupHandle, process_inbound, dispatch_result, ...    │
+//! │   GroupHandle, process_inbound, apply_consensus_result  │
 //! └─────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -65,19 +65,18 @@
 //!                    │   Working    │◄─────────────────┐
 //!                    │              │                  │
 //!                    └──────┬───────┘                  │
-//!                           │ epoch boundary           │ commit received
+//!                           │ epoch boundary           │ selected commit applied
 //!                           │ (has proposals)          │
 //!                           ▼                          │
 //!                    ┌──────────────┐                  │
-//!                    │   Waiting    │──────────────────┘
-//!                    │              │
-//!                    └──────┬───────┘
-//!                           │ leave_group()
-//!                           ▼
-//!                    ┌──────────────┐
-//!                    │   Leaving    │ ─────────────────► cleanup
-//!                    │              │   (commit received)
-//!                    └──────────────┘
+//!                    │  Freezing    │──Δ elapsed──►┌──────────────┐
+//!                    │              │              │  Selection   │
+//!                    └──────────────┘              └──────┬───────┘
+//!                                                         │ no candidate
+//!                                                         ▼
+//!                                                  ┌──────────────┐
+//!                                                  │ Reelection   │
+//!                                                  └──────────────┘
 //! ```
 //!
 //! # Quick Start
@@ -116,7 +115,7 @@
 //! user.start_steward_epoch("my-chat").await?;
 //!
 //! // Member epoch (call at epoch boundaries for non-steward groups)
-//! let entered_waiting = user.start_member_epoch("other-chat").await?;
+//! let entered_freezing = user.start_member_epoch("other-chat").await?;
 //! ```
 //!
 //! # Configuration
@@ -135,12 +134,20 @@
 //! user.create_group_with_config("fast-chat", true, GroupConfig::with_epoch_duration(Duration::from_secs(10))).await?;
 //! ```
 
+mod consensus;
+mod display;
+mod error;
+mod message_type;
 mod scheduler;
 mod state_machine;
 mod user;
 
+pub use consensus::{cast_vote, forward_incoming_proposal, forward_incoming_vote, start_voting};
+pub use display::{convert_group_request_to_display, get_identity_from_group_update_request};
+pub use error::UserError;
+pub use message_type::{MessageType, message_types};
 pub use scheduler::{IntervalScheduler, StewardScheduler, StewardSchedulerConfig};
 pub use state_machine::{
-    CommitTimeoutStatus, GroupConfig, GroupState, GroupStateMachine, StateChangeHandler,
+    FreezeTimeoutStatus, GroupConfig, GroupState, GroupStateMachine, StateChangeHandler,
 };
-pub use user::{User, UserError};
+pub use user::User;

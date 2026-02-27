@@ -3,10 +3,7 @@
 //! This module defines the key data types used throughout the DE-MLS core:
 //!
 //! - [`ProcessResult`] - Outcome of processing an inbound message
-//! - [`MessageType`] - Trait for identifying message types
 //! - Various `From` implementations for protobuf message conversions
-
-use prost::Message;
 
 use hashgraph_like_consensus::{
     protos::consensus::v1::{Proposal, Vote},
@@ -15,63 +12,19 @@ use hashgraph_like_consensus::{
 
 use crate::{
     core::CoreError,
-    mls_crypto::{format_wallet_address, parse_wallet_to_bytes},
+    mls_crypto::parse_wallet_to_bytes,
     protos::de_mls::messages::v1::{
-        AppMessage, BanRequest, BatchProposalsMessage, ConversationMessage, GroupUpdateRequest,
+        AppMessage, BanRequest, CommitCandidate, ConversationMessage, GroupUpdateRequest,
         InvitationToJoin, Outcome, ProposalAdded, RemoveMember, UserKeyPackage, UserVote,
-        VotePayload, WelcomeMessage, app_message, group_update_request, welcome_message,
+        ViolationEvidence, VotePayload, WelcomeMessage, app_message, group_update_request,
+        welcome_message,
     },
 };
-
-// Message type constants for consistency and type safety
-pub mod message_types {
-    pub const CONVERSATION_MESSAGE: &str = "ConversationMessage";
-    pub const BATCH_PROPOSALS_MESSAGE: &str = "BatchProposalsMessage";
-    pub const BAN_REQUEST: &str = "BanRequest";
-    pub const PROPOSAL: &str = "Proposal";
-    pub const VOTE: &str = "Vote";
-    pub const VOTE_PAYLOAD: &str = "VotePayload";
-    pub const USER_VOTE: &str = "UserVote";
-    pub const PROPOSAL_ADDED: &str = "ProposalAdded";
-    pub const UNKNOWN: &str = "Unknown";
-}
-
-/// Trait for getting message type as a string constant
-pub trait MessageType {
-    fn message_type(&self) -> &'static str;
-}
-
-impl MessageType for app_message::Payload {
-    fn message_type(&self) -> &'static str {
-        use message_types::*;
-        match self {
-            app_message::Payload::ConversationMessage(_) => CONVERSATION_MESSAGE,
-            app_message::Payload::BatchProposalsMessage(_) => BATCH_PROPOSALS_MESSAGE,
-            app_message::Payload::BanRequest(_) => BAN_REQUEST,
-            app_message::Payload::Proposal(_) => PROPOSAL,
-            app_message::Payload::Vote(_) => VOTE,
-            app_message::Payload::VotePayload(_) => VOTE_PAYLOAD,
-            app_message::Payload::UserVote(_) => USER_VOTE,
-            app_message::Payload::ProposalAdded(_) => PROPOSAL_ADDED,
-        }
-    }
-}
-
-impl MessageType for GroupUpdateRequest {
-    fn message_type(&self) -> &'static str {
-        match self.payload {
-            Some(group_update_request::Payload::InviteMember(_)) => "Add Member",
-            Some(group_update_request::Payload::RemoveMember(_)) => "Remove Member",
-            _ => "Unknown",
-        }
-    }
-}
 
 /// Result of processing an inbound packet.
 ///
 /// This enum represents all possible outcomes from [`process_inbound`](super::process_inbound).
-/// Pass it to [`dispatch_result`](super::dispatch_result) to handle consensus routing
-/// and get a [`DispatchAction`](super::DispatchAction) for your application.
+/// Match it directly in your application layer to handle each variant.
 ///
 /// # Variants
 ///
@@ -81,6 +34,7 @@ impl MessageType for GroupUpdateRequest {
 /// - `JoinedGroup` - Successfully joined via welcome message
 /// - `GroupUpdated` - MLS state changed (batch commit applied)
 /// - `LeaveGroup` - User was removed from the group
+/// - `ViolationDetected` - Steward violation detected during commit validation
 /// - `Noop` - Nothing to do (message not for us, already processed, etc.)
 #[derive(Debug, Clone)]
 pub enum ProcessResult {
@@ -92,13 +46,13 @@ pub enum ProcessResult {
     /// A consensus proposal was received from another peer.
     ///
     /// Should be forwarded to the consensus service via
-    /// [`forward_incoming_proposal`](super::forward_incoming_proposal).
+    /// `crate::app::forward_incoming_proposal`.
     Proposal(Proposal),
 
     /// A consensus vote was received from another peer.
     ///
     /// Should be forwarded to the consensus service via
-    /// [`forward_incoming_vote`](super::forward_incoming_vote).
+    /// `crate::app::forward_incoming_vote`.
     Vote(Vote),
 
     /// The user was removed from the group.
@@ -119,13 +73,60 @@ pub enum ProcessResult {
 
     /// Group MLS state was updated (batch commit applied).
     ///
-    /// Application should transition state from Waiting to Working.
+    /// Application should transition state back to Working.
     GroupUpdated,
+
+    /// A steward violation was detected during commit validation.
+    ///
+    /// Contains evidence of the violation. The application should start
+    /// an emergency criteria proposal vote for this evidence.
+    ViolationDetected(ViolationEvidence),
+
+    /// A remote commit candidate was successfully buffered in the freeze round.
+    CandidateBuffered,
 
     /// No action needed.
     ///
     /// The message was not for us, was a duplicate, or required no action.
     Noop,
+}
+
+// ── ViolationEvidence constructors ────────────────────────────────
+
+use crate::protos::de_mls::messages::v1::ViolationType;
+
+impl ViolationEvidence {
+    /// Steward included different proposal IDs than what was voted on,
+    /// or IDs match but content digest differs.
+    pub fn broken_commit(target: Vec<u8>, epoch: u64, payload: impl Into<Vec<u8>>) -> Self {
+        Self {
+            violation_type: ViolationType::BrokenCommit as i32,
+            target_member_id: target,
+            evidence_payload: payload.into(),
+            epoch,
+        }
+    }
+
+    /// MLS payload count doesn't match proposal count,
+    /// or an MLS proposal failed to decrypt/store correctly.
+    pub fn broken_mls_proposal(target: Vec<u8>, epoch: u64, payload: impl Into<Vec<u8>>) -> Self {
+        Self {
+            violation_type: ViolationType::BrokenMlsProposal as i32,
+            target_member_id: target,
+            evidence_payload: payload.into(),
+            epoch,
+        }
+    }
+
+    /// Steward didn't commit within the threshold duration.
+    pub fn censorship_inactivity(target: Vec<u8>, epoch: u64) -> Self {
+        Self {
+            violation_type: ViolationType::CensorshipInactivity as i32,
+            target_member_id: target,
+            evidence_payload: Vec::new(),
+            epoch,
+        }
+    }
 }
 
 // WELCOME MESSAGE SUBTOPIC
@@ -176,12 +177,10 @@ impl From<ConversationMessage> for AppMessage {
     }
 }
 
-impl From<BatchProposalsMessage> for AppMessage {
-    fn from(batch_proposals_message: BatchProposalsMessage) -> Self {
+impl From<CommitCandidate> for AppMessage {
+    fn from(commit_candidate: CommitCandidate) -> Self {
         AppMessage {
-            payload: Some(app_message::Payload::BatchProposalsMessage(
-                batch_proposals_message,
-            )),
+            payload: Some(app_message::Payload::CommitCandidate(commit_candidate)),
         }
     }
 }
@@ -259,33 +258,5 @@ impl TryFrom<AppMessage> for ProcessResult {
             }
             _ => Ok(ProcessResult::Noop),
         }
-    }
-}
-
-// Helper function to convert protobuf GroupUpdateRequest to display format
-pub fn convert_group_request_to_display(request: Vec<u8>) -> (String, String) {
-    let request = GroupUpdateRequest::decode(request.as_slice()).unwrap_or_default();
-    match request.payload {
-        Some(group_update_request::Payload::InviteMember(im)) => (
-            "Add Member".to_string(),
-            format_wallet_address(&im.identity),
-        ),
-        Some(group_update_request::Payload::RemoveMember(rm)) => (
-            "Remove Member".to_string(),
-            format_wallet_address(&rm.identity),
-        ),
-        _ => ("Unknown".to_string(), "Invalid request".to_string()),
-    }
-}
-
-pub fn get_identity_from_group_update_request(req: GroupUpdateRequest) -> String {
-    match req.payload {
-        Some(group_update_request::Payload::InviteMember(im)) => {
-            format_wallet_address(&im.identity)
-        }
-        Some(group_update_request::Payload::RemoveMember(rm)) => {
-            format_wallet_address(&rm.identity)
-        }
-        _ => "unknown".to_string(),
     }
 }

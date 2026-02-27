@@ -1,10 +1,13 @@
 //! State machine for steward epoch management and group operations.
 use async_trait::async_trait;
 use std::{
+    collections::HashSet,
     fmt::Display,
     time::{Duration, Instant},
 };
 use tracing::info;
+
+use crate::core::ProposalId;
 
 use crate::app::scheduler::DEFAULT_EPOCH_DURATION;
 
@@ -15,12 +18,20 @@ use crate::app::scheduler::DEFAULT_EPOCH_DURATION;
 pub struct GroupConfig {
     /// Duration of each epoch.
     pub epoch_duration: Duration,
+    /// Duration of the freeze phase before deterministic selection.
+    ///
+    /// Defaults to `epoch_duration / 2`.
+    pub freeze_duration: Duration,
+    /// Whether subset commit candidates are allowed during deterministic selection.
+    pub allow_subset_candidates: bool,
 }
 
 impl Default for GroupConfig {
     fn default() -> Self {
         Self {
             epoch_duration: DEFAULT_EPOCH_DURATION,
+            freeze_duration: DEFAULT_EPOCH_DURATION / 2,
+            allow_subset_candidates: false,
         }
     }
 }
@@ -28,7 +39,16 @@ impl Default for GroupConfig {
 impl GroupConfig {
     /// Create a new config with custom epoch duration.
     pub fn with_epoch_duration(epoch_duration: Duration) -> Self {
-        Self { epoch_duration }
+        Self {
+            epoch_duration,
+            freeze_duration: epoch_duration / 2,
+            allow_subset_candidates: false,
+        }
+    }
+
+    /// Effective freeze duration: explicit value or `epoch_duration / 2`.
+    pub fn freeze_duration(&self) -> Duration {
+        self.freeze_duration
     }
 }
 
@@ -38,7 +58,7 @@ impl GroupConfig {
 /// notifications when the group state changes.
 #[async_trait]
 pub trait StateChangeHandler: Send + Sync {
-    /// Called when the group state changes (PendingJoin, Working, Waiting, Leaving).
+    /// Called when the group state changes.
     ///
     /// # Arguments
     /// * `group_name` - The name of the group
@@ -53,8 +73,12 @@ pub enum GroupState {
     PendingJoin,
     /// Normal operation state - users can send any message freely.
     Working,
-    /// Waiting state during steward epoch - only steward can send BATCH_PROPOSALS_MESSAGE.
-    Waiting,
+    /// Freeze window for collecting commit candidates.
+    Freezing,
+    /// Deterministic candidate selection phase.
+    Selection,
+    /// Emergency reelection phase (chat allowed, membership changes blocked).
+    Reelection,
     /// User has requested to leave; waiting for the removal commit to arrive.
     Leaving,
 }
@@ -64,22 +88,27 @@ impl Display for GroupState {
         let state = match self {
             GroupState::PendingJoin => "PendingJoin",
             GroupState::Working => "Working",
-            GroupState::Waiting => "Waiting",
+            GroupState::Freezing => "Freezing",
+            GroupState::Selection => "Selection",
+            GroupState::Reelection => "Reelection",
             GroupState::Leaving => "Leaving",
         };
         write!(f, "{state}")
     }
 }
 
-/// Result of checking commit timeout status.
+/// Result of checking freeze timeout status.
 #[derive(Debug, PartialEq)]
-pub enum CommitTimeoutStatus {
-    /// Not in Waiting state — nothing to check.
-    NotWaiting,
-    /// In Waiting state but timeout hasn't been reached yet.
-    StillWaiting,
-    /// Timeout reached and state reverted to Working.
-    /// `has_proposals` indicates if approved proposals still existed (steward fault).
+pub enum FreezeTimeoutStatus {
+    /// Not in Freezing state — nothing to check.
+    NotFreezing,
+    /// In Freezing state but timeout hasn't been reached yet.
+    StillFreezing,
+    /// Timeout reached, a candidate was selected and applied successfully.
+    Applied,
+    /// Timeout reached but no valid candidate was applied.
+    /// `has_proposals` indicates if approved proposals existed at timeout
+    /// (true = steward fault, false = empty epoch).
     TimedOut { has_proposals: bool },
 }
 
@@ -92,13 +121,24 @@ pub struct GroupStateMachine {
     is_steward: bool,
     /// Timestamp when PendingJoin state was entered (for timeout).
     pending_join_started_at: Option<Instant>,
-    /// Timestamp when Waiting state was entered (for commit timeout).
-    waiting_started_at: Option<Instant>,
+    /// Timestamp when freeze/waiting-like phase was entered.
+    phase_started_at: Option<Instant>,
     /// Timestamp of the last epoch boundary (commit/welcome reception).
     /// Used by members to sync their epoch with the steward.
     last_epoch_boundary: Option<Instant>,
+    /// Timestamp when the first proposal was approved (going from 0 → 1+).
+    /// Used by members to detect steward inactivity (Path B).
+    first_proposal_approved_at: Option<Instant>,
     /// Duration of each epoch.
     epoch_duration: Duration,
+    /// Freeze window duration before selection.
+    freeze_duration: Duration,
+    /// Whether subset commit candidates are allowed during deterministic selection.
+    allow_subset_candidates: bool,
+    /// Proposal IDs of emergency criteria proposals that have been observed but not yet
+    /// finalized by consensus. While non-empty, lower-priority proposals MUST be blocked
+    /// (RFC §"Partial Freeze Semantics").
+    active_emergency_proposal_ids: HashSet<ProposalId>,
 }
 
 impl Default for GroupStateMachine {
@@ -119,9 +159,13 @@ impl GroupStateMachine {
             state: GroupState::Working,
             is_steward: false,
             pending_join_started_at: None,
-            waiting_started_at: None,
+            phase_started_at: None,
             last_epoch_boundary: None,
+            first_proposal_approved_at: None,
             epoch_duration: config.epoch_duration,
+            freeze_duration: config.freeze_duration(),
+            allow_subset_candidates: config.allow_subset_candidates,
+            active_emergency_proposal_ids: HashSet::new(),
         }
     }
 
@@ -136,9 +180,13 @@ impl GroupStateMachine {
             state: GroupState::Working,
             is_steward: true,
             pending_join_started_at: None,
-            waiting_started_at: None,
+            phase_started_at: None,
             last_epoch_boundary: None,
+            first_proposal_approved_at: None,
             epoch_duration: config.epoch_duration,
+            freeze_duration: config.freeze_duration(),
+            allow_subset_candidates: config.allow_subset_candidates,
+            active_emergency_proposal_ids: HashSet::new(),
         }
     }
 
@@ -153,9 +201,13 @@ impl GroupStateMachine {
             state: GroupState::PendingJoin,
             is_steward: false,
             pending_join_started_at: Some(Instant::now()),
-            waiting_started_at: None,
+            phase_started_at: None,
             last_epoch_boundary: None,
+            first_proposal_approved_at: None,
             epoch_duration: config.epoch_duration,
+            freeze_duration: config.freeze_duration(),
+            allow_subset_candidates: config.allow_subset_candidates,
+            active_emergency_proposal_ids: HashSet::new(),
         }
     }
 
@@ -169,28 +221,68 @@ impl GroupStateMachine {
         self.is_steward
     }
 
-    /// Set steward status.
-    pub fn set_steward(&mut self, is_steward: bool) {
-        self.is_steward = is_steward;
+    /// Whether subset commit candidates are allowed during deterministic selection.
+    pub fn allow_subset_candidates(&self) -> bool {
+        self.allow_subset_candidates
+    }
+
+    // ── Partial Freeze Semantics (RFC §"Partial Freeze Semantics") ──
+
+    /// Record an observed emergency criteria proposal that has not yet been finalized.
+    ///
+    /// While any emergency proposal is active, lower-priority proposals (commit,
+    /// steward election) MUST be blocked — see `has_active_emergency_proposal`.
+    pub fn observe_emergency_proposal(&mut self, proposal_id: ProposalId) {
+        self.active_emergency_proposal_ids.insert(proposal_id);
+    }
+
+    /// Mark an emergency criteria proposal as finalized (approved or rejected).
+    ///
+    /// Called from `handle_consensus_event` regardless of outcome, so the set
+    /// never leaks stale IDs from rejected or failed proposals.
+    pub fn resolve_emergency_proposal(&mut self, proposal_id: ProposalId) {
+        self.active_emergency_proposal_ids.remove(&proposal_id);
+    }
+
+    /// Returns `true` if any emergency criteria proposal is currently unresolved.
+    ///
+    /// Used by `start_voting_on_request_background` to enforce the partial freeze:
+    /// lower-priority proposals MUST NOT be created or propagated while this is true.
+    pub fn has_active_emergency_proposal(&self) -> bool {
+        !self.active_emergency_proposal_ids.is_empty()
     }
 
     /// Start working state.
     pub fn start_working(&mut self) {
         self.state = GroupState::Working;
-        self.waiting_started_at = None;
+        self.phase_started_at = None;
+        self.first_proposal_approved_at = None;
         info!("[start_working] Transitioning to Working state");
     }
 
-    /// Start waiting state.
-    pub fn start_waiting(&mut self) {
-        self.state = GroupState::Waiting;
-        self.waiting_started_at = Some(Instant::now());
-        info!("[start_waiting] Transitioning to Waiting state");
+    /// Start freezing state.
+    pub fn start_freezing(&mut self) {
+        self.state = GroupState::Freezing;
+        self.phase_started_at = Some(Instant::now());
+        info!("[start_freezing] Transitioning to Freezing state");
+    }
+
+    /// Start deterministic selection state.
+    pub fn start_selection(&mut self) {
+        self.state = GroupState::Selection;
+        info!("[start_selection] Transitioning to Selection state");
+    }
+
+    /// Enter emergency reelection state.
+    pub fn start_reelection(&mut self) {
+        self.state = GroupState::Reelection;
+        self.phase_started_at = None;
+        info!("[start_reelection] Transitioning to Reelection state");
     }
 
     /// Transition to Leaving state.
     ///
-    /// Caller must ensure valid state transition (typically from Working or Waiting).
+    /// Caller must ensure valid state transition.
     /// The `User::leave_group` method handles PendingJoin and Leaving states separately.
     pub fn start_leaving(&mut self) {
         self.state = GroupState::Leaving;
@@ -218,22 +310,16 @@ impl GroupStateMachine {
         false
     }
 
-    // ─────────────────────────── Commit Timeout ───────────────────────────
+    // ─────────────────────────── Freeze Timeout ───────────────────────────
 
-    /// Check if the commit has timed out while in Waiting state.
-    ///
-    /// Returns `true` if the member has been in Waiting for longer than
-    /// `epoch_duration / 2` without receiving a commit from the steward.
-    pub fn is_commit_timed_out(&self) -> bool {
-        if self.state != GroupState::Waiting {
+    /// Check if the freeze window elapsed while in `Freezing`.
+    pub fn is_freeze_timed_out(&self) -> bool {
+        if self.state != GroupState::Freezing {
             return false;
         }
 
-        if let Some(started_at) = self.waiting_started_at {
-            let timeout = self.epoch_duration / 2;
-            if Instant::now() >= started_at + timeout {
-                return true;
-            }
+        if let Some(started_at) = self.phase_started_at {
+            return Instant::now() >= started_at + self.freeze_duration;
         }
 
         false
@@ -249,59 +335,6 @@ impl GroupStateMachine {
         info!("[sync_epoch_boundary] Epoch boundary synchronized");
     }
 
-    /// Check if we've reached the expected epoch boundary and should enter Waiting.
-    ///
-    /// Called by the member epoch timer. Returns `true` if entering Waiting state
-    /// (meaning a commit timeout should be started).
-    ///
-    /// # Arguments
-    /// * `approved_proposals_count` - Number of approved proposals waiting for commit
-    ///
-    /// # Returns
-    /// `true` if transitioned to Waiting state, `false` otherwise.
-    pub fn check_epoch_boundary(&mut self, approved_proposals_count: usize) -> bool {
-        // Skip if steward (they manage their own epoch) or not initialized
-        if self.is_steward {
-            return false;
-        }
-
-        // Skip if in PendingJoin or Leaving state
-        if self.state == GroupState::PendingJoin || self.state == GroupState::Leaving {
-            return false;
-        }
-
-        // Already Waiting for commit — don't re-enter or reset the timeout timer.
-        // The commit timeout mechanism handles this case.
-        if self.state == GroupState::Waiting {
-            return false;
-        }
-
-        // Check if we've reached the expected boundary
-        if let Some(last_boundary) = self.last_epoch_boundary {
-            let expected = last_boundary + self.epoch_duration;
-            if Instant::now() >= expected {
-                // Advance boundary for next epoch
-                self.last_epoch_boundary = Some(expected);
-
-                if approved_proposals_count > 0 {
-                    // We have approved proposals → freeze and wait for commit
-                    self.state = GroupState::Waiting;
-                    info!(
-                        "[check_epoch_boundary] Entering Waiting state with {} approved proposals",
-                        approved_proposals_count
-                    );
-                    return true;
-                }
-                // No proposals → stay Working, just advanced the boundary
-                info!("[check_epoch_boundary] No proposals, staying in Working state");
-            }
-        }
-        // No last_epoch_boundary set means we haven't synced yet (first epoch after join)
-        // Just wait for the first commit to sync
-
-        false
-    }
-
     /// Get the time until the next expected epoch boundary.
     /// Returns `None` if no epoch boundary has been set yet.
     pub fn time_until_next_boundary(&self) -> Option<Duration> {
@@ -309,6 +342,57 @@ impl GroupStateMachine {
             let expected = last + self.epoch_duration;
             expected.saturating_duration_since(Instant::now())
         })
+    }
+
+    // ─────────────────────────── Proposal Timer (Member Inactivity) ───────────────────────────
+
+    /// Notify the state machine that a proposal was approved.
+    ///
+    /// If the approved count transitions from 0 to >0, start the inactivity timer.
+    /// Additional proposals do NOT restart the timer.
+    pub fn notify_proposal_approved(&mut self, before_count: usize, after_count: usize) {
+        if before_count == 0 && after_count > 0 {
+            self.first_proposal_approved_at = Some(Instant::now());
+            info!("[notify_proposal_approved] Inactivity timer started (0 → {after_count})");
+        }
+    }
+
+    /// Clear the proposal inactivity timer.
+    pub fn clear_proposal_timer(&mut self) {
+        self.first_proposal_approved_at = None;
+    }
+
+    /// Check if the steward has been inactive long enough to trigger Freezing.
+    ///
+    /// For non-steward members in `Working` state: if `first_proposal_approved_at`
+    /// is set AND `elapsed >= epoch_duration` AND `approved_proposals_count > 0`,
+    /// transition to Freezing and return `true`.
+    pub fn check_steward_inactivity(&mut self, approved_proposals_count: usize) -> bool {
+        if self.is_steward {
+            return false;
+        }
+
+        if self.state != GroupState::Working {
+            return false;
+        }
+
+        if approved_proposals_count == 0 {
+            return false;
+        }
+
+        if let Some(first_approved) = self.first_proposal_approved_at {
+            if Instant::now() >= first_approved + self.epoch_duration {
+                self.start_freezing();
+                info!(
+                    "[check_steward_inactivity] Steward inactivity detected after {:?} \
+                     with {} approved proposals",
+                    self.epoch_duration, approved_proposals_count
+                );
+                return true;
+            }
+        }
+
+        false
     }
 
     // ─────────────────────────── Steward Operations ───────────────────────────
@@ -321,7 +405,7 @@ impl GroupStateMachine {
         if self.state != GroupState::Working {
             return Err(StateMachineError::InvalidTransition {
                 from: self.state.to_string(),
-                to: "Waiting".to_string(),
+                to: "Freezing".to_string(),
             });
         }
 
@@ -329,7 +413,7 @@ impl GroupStateMachine {
             return Err(StateMachineError::NotSteward);
         }
 
-        self.start_waiting();
+        self.start_freezing();
         Ok(())
     }
 }
@@ -412,102 +496,102 @@ mod tests {
     }
 
     #[test]
-    fn test_epoch_sync_and_boundary_check() {
-        let mut state_machine = GroupStateMachine::new_as_member();
-
-        // No boundary set initially
-        assert!(state_machine.time_until_next_boundary().is_none());
-
-        // Sync epoch boundary
-        state_machine.sync_epoch_boundary();
-        assert!(state_machine.time_until_next_boundary().is_some());
-
-        // Immediately after sync, boundary not reached
-        assert!(!state_machine.check_epoch_boundary(5));
-        assert_eq!(state_machine.current_state(), GroupState::Working);
-    }
-
-    #[test]
-    fn test_epoch_boundary_with_no_proposals() {
-        let mut state_machine = GroupStateMachine::new_as_member();
-        // Simulate past epoch boundary
-        state_machine.last_epoch_boundary = Some(Instant::now() - Duration::from_secs(60));
-
-        // No proposals → stay Working
-        assert!(!state_machine.check_epoch_boundary(0));
-        assert_eq!(state_machine.current_state(), GroupState::Working);
-    }
-
-    #[test]
-    fn test_epoch_boundary_with_proposals() {
-        let mut state_machine = GroupStateMachine::new_as_member();
-        // Simulate past epoch boundary
-        state_machine.last_epoch_boundary = Some(Instant::now() - Duration::from_secs(60));
-
-        // Has proposals → enter Waiting
-        assert!(state_machine.check_epoch_boundary(3));
-        assert_eq!(state_machine.current_state(), GroupState::Waiting);
-    }
-
-    #[test]
-    fn test_steward_skips_epoch_boundary_check() {
-        let mut state_machine = GroupStateMachine::new_as_steward();
-        state_machine.last_epoch_boundary = Some(Instant::now() - Duration::from_secs(60));
-
-        // Steward should not enter Waiting via check_epoch_boundary
-        assert!(!state_machine.check_epoch_boundary(5));
-        assert_eq!(state_machine.current_state(), GroupState::Working);
-    }
-
-    #[test]
-    fn test_commit_timeout_not_in_waiting() {
+    fn test_freeze_timeout_not_in_freezing() {
         let state_machine = GroupStateMachine::new_as_member();
-        // Not in Waiting → not timed out
-        assert!(!state_machine.is_commit_timed_out());
+        // Not in Freezing → not timed out
+        assert!(!state_machine.is_freeze_timed_out());
     }
 
     #[test]
-    fn test_commit_timeout_fresh_waiting() {
+    fn test_freeze_timeout_fresh_freezing() {
         let mut state_machine = GroupStateMachine::new_as_member();
-        state_machine.start_waiting();
-        // Just entered Waiting → not timed out yet
-        assert!(!state_machine.is_commit_timed_out());
+        state_machine.start_freezing();
+        // Just entered Freezing → not timed out yet
+        assert!(!state_machine.is_freeze_timed_out());
     }
 
     #[test]
-    fn test_commit_timeout_expired() {
+    fn test_freeze_timeout_expired() {
         let mut state_machine = GroupStateMachine::new_as_member();
-        state_machine.start_waiting();
-        // Backdate waiting_started_at to well past epoch_duration/2 (15s for default 30s epoch)
-        state_machine.waiting_started_at = Some(Instant::now() - Duration::from_secs(30));
-        assert!(state_machine.is_commit_timed_out());
+        state_machine.start_freezing();
+        // Backdate phase start well past freeze duration.
+        state_machine.phase_started_at = Some(Instant::now() - Duration::from_secs(30));
+        assert!(state_machine.is_freeze_timed_out());
     }
 
     #[test]
-    fn test_commit_timeout_cleared_on_working() {
+    fn test_freeze_timeout_cleared_on_working() {
         let mut state_machine = GroupStateMachine::new_as_member();
-        state_machine.start_waiting();
-        assert!(state_machine.waiting_started_at.is_some());
+        state_machine.start_freezing();
+        assert!(state_machine.phase_started_at.is_some());
 
         state_machine.start_working();
-        assert!(state_machine.waiting_started_at.is_none());
-        assert!(!state_machine.is_commit_timed_out());
+        assert!(state_machine.phase_started_at.is_none());
+        assert!(!state_machine.is_freeze_timed_out());
+    }
+
+    // ─────────────────────────── Proposal Timer Tests ───────────────────────────
+
+    #[test]
+    fn test_proposal_timer_starts_on_zero_to_one() {
+        let mut sm = GroupStateMachine::new_as_member();
+        assert!(sm.first_proposal_approved_at.is_none());
+
+        sm.notify_proposal_approved(0, 1);
+        assert!(sm.first_proposal_approved_at.is_some());
     }
 
     #[test]
-    fn test_check_epoch_boundary_skips_when_already_waiting() {
-        let mut state_machine = GroupStateMachine::new_as_member();
-        state_machine.last_epoch_boundary = Some(Instant::now() - Duration::from_secs(60));
+    fn test_proposal_timer_no_restart_on_additional() {
+        let mut sm = GroupStateMachine::new_as_member();
+        sm.notify_proposal_approved(0, 1);
+        let first_time = sm.first_proposal_approved_at.unwrap();
 
-        // First call: enters Waiting
-        assert!(state_machine.check_epoch_boundary(3));
-        assert_eq!(state_machine.current_state(), GroupState::Waiting);
+        // Simulate a small delay
+        std::thread::sleep(Duration::from_millis(5));
 
-        // Advance boundary past next epoch
-        state_machine.last_epoch_boundary = Some(Instant::now() - Duration::from_secs(60));
+        sm.notify_proposal_approved(1, 2);
+        // Timer should NOT have been reset
+        assert_eq!(sm.first_proposal_approved_at.unwrap(), first_time);
+    }
 
-        // Second call while still Waiting: should NOT re-enter (returns false)
-        assert!(!state_machine.check_epoch_boundary(3));
-        assert_eq!(state_machine.current_state(), GroupState::Waiting);
+    #[test]
+    fn test_proposal_timer_clears_on_working() {
+        let mut sm = GroupStateMachine::new_as_member();
+        sm.notify_proposal_approved(0, 1);
+        assert!(sm.first_proposal_approved_at.is_some());
+
+        sm.start_working();
+        assert!(sm.first_proposal_approved_at.is_none());
+    }
+
+    #[test]
+    fn test_steward_inactivity_triggers_freezing() {
+        let config = GroupConfig {
+            epoch_duration: Duration::from_millis(50),
+            freeze_duration: Duration::from_millis(25),
+            allow_subset_candidates: false,
+        };
+        let mut sm = GroupStateMachine::new_as_member_with_config(config);
+        // Backdate the first proposal approval to well past epoch_duration
+        sm.first_proposal_approved_at = Some(Instant::now() - Duration::from_secs(1));
+
+        assert!(sm.check_steward_inactivity(1));
+        assert_eq!(sm.current_state(), GroupState::Freezing);
+    }
+
+    #[test]
+    fn test_steward_inactivity_skips_steward() {
+        let config = GroupConfig {
+            epoch_duration: Duration::from_millis(50),
+            freeze_duration: Duration::from_millis(25),
+            allow_subset_candidates: false,
+        };
+        let mut sm = GroupStateMachine::new_as_steward_with_config(config);
+        sm.first_proposal_approved_at = Some(Instant::now() - Duration::from_secs(1));
+
+        // Steward should always return false
+        assert!(!sm.check_steward_inactivity(1));
+        assert_eq!(sm.current_state(), GroupState::Working);
     }
 }

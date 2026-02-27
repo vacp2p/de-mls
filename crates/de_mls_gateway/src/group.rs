@@ -1,7 +1,8 @@
 use hex::ToHex;
 
+use de_mls::mls_crypto::format_wallet_address;
 use de_mls::{
-    app::{CommitTimeoutStatus, IntervalScheduler, StewardScheduler, StewardSchedulerConfig},
+    app::{FreezeTimeoutStatus, IntervalScheduler, StewardScheduler, StewardSchedulerConfig},
     ds::WakuDeliveryService,
     protos::de_mls::messages::v1::{BanRequest, group_update_request},
 };
@@ -25,13 +26,36 @@ impl Gateway<WakuDeliveryService> {
             let mut scheduler = IntervalScheduler::new(StewardSchedulerConfig::default());
             loop {
                 scheduler.next_tick().await;
-                match user_clone
+                let epoch_result = user_clone
                     .write()
                     .await
                     .start_steward_epoch(&group_name)
-                    .await
-                {
-                    Ok(()) => {}
+                    .await;
+
+                match epoch_result {
+                    Ok(()) => loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        match user_clone
+                            .read()
+                            .await
+                            .check_freeze_timeout(&group_name)
+                            .await
+                        {
+                            FreezeTimeoutStatus::StillFreezing => continue,
+                            FreezeTimeoutStatus::NotFreezing | FreezeTimeoutStatus::Applied => {
+                                break;
+                            }
+                            FreezeTimeoutStatus::TimedOut { has_proposals } => {
+                                if has_proposals {
+                                    tracing::warn!(
+                                        "Steward commit timeout for group {group_name:?} \
+                                             with pending proposals (steward fault)"
+                                    );
+                                }
+                                break;
+                            }
+                        }
+                    },
                     Err(e) => {
                         if e.is_fatal() {
                             tracing::warn!(
@@ -66,7 +90,6 @@ impl Gateway<WakuDeliveryService> {
         // Phase 2 (Working): Wait until epoch boundaries and check for Waiting transition
         let user_clone = user_ref.clone();
         let group_name_clone = group_name.clone();
-        let evt_tx = self.evt_tx.clone();
         tokio::spawn(async move {
             // Phase 1: Wait for join
             loop {
@@ -97,70 +120,47 @@ impl Gateway<WakuDeliveryService> {
 
             tracing::info!("Member joined group {group_name_clone:?}");
 
-            // Phase 2: Epoch boundary loop
+            // Phase 2: Unified polling loop
+            // Both candidate-driven (Path A) and inactivity-driven (Path B) flows
+            // converge here. The state machine transitions are triggered by:
+            //   Path A: CandidateBuffered → handle_process_result → Freezing
+            //   Path B: start_member_epoch → check_steward_inactivity → Freezing
             loop {
-                let wait_time = user_clone
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                match user_clone
                     .read()
                     .await
-                    .time_until_next_epoch(&group_name_clone)
-                    .await;
-
-                match wait_time {
-                    Some(d) if d > std::time::Duration::ZERO => tokio::time::sleep(d).await,
-                    Some(_) => {} // Already at boundary
-                    None => {
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        continue;
-                    }
-                }
-
-                let entered_waiting = match user_clone
-                    .read()
-                    .await
-                    .start_member_epoch(&group_name_clone)
+                    .check_freeze_timeout(&group_name_clone)
                     .await
                 {
-                    Ok(entered) => entered,
-                    Err(e) => {
-                        if e.is_fatal() {
-                            tracing::warn!(
-                                "Member epoch loop exiting for group {group_name_clone:?}: {e}"
-                            );
-                            break;
-                        }
-                        tracing::warn!(
-                            "Member epoch failed for group {group_name_clone:?} (will retry): {e}"
-                        );
-                        false
-                    }
-                };
-
-                // Poll for commit timeout only if we entered Waiting state
-                if entered_waiting {
-                    loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    FreezeTimeoutStatus::NotFreezing => {
+                        // Not freezing — check for steward inactivity (Path B)
                         match user_clone
                             .read()
                             .await
-                            .check_commit_timeout(&group_name_clone)
+                            .start_member_epoch(&group_name_clone)
                             .await
                         {
-                            CommitTimeoutStatus::NotWaiting => break,
-                            CommitTimeoutStatus::StillWaiting => continue,
-                            CommitTimeoutStatus::TimedOut { has_proposals } => {
-                                if has_proposals {
+                            Ok(true) => { /* entered Freezing via inactivity */ }
+                            Ok(false) => {}
+                            Err(e) => {
+                                if e.is_fatal() {
                                     tracing::warn!(
-                                        "Steward commit timeout for group {group_name_clone:?} \
-                                         with pending proposals (steward fault)"
+                                        "Member epoch loop exiting for group {group_name_clone:?}: {e}"
                                     );
-                                    let _ = evt_tx.unbounded_send(
-                                        de_mls_ui_protocol::v1::AppEvent::Error(format!(
-                                            "Steward failed to commit for group {group_name_clone}"
-                                        )),
-                                    );
+                                    break;
                                 }
-                                break;
                             }
+                        }
+                    }
+                    FreezeTimeoutStatus::StillFreezing => continue,
+                    FreezeTimeoutStatus::Applied => {}
+                    FreezeTimeoutStatus::TimedOut { has_proposals } => {
+                        if has_proposals {
+                            tracing::warn!(
+                                "Steward commit timeout for group {group_name_clone:?} \
+                                 with pending proposals — emergency vote initiated"
+                            );
                         }
                     }
                 }
@@ -272,6 +272,19 @@ impl Gateway<WakuDeliveryService> {
                 Some(group_update_request::Payload::RemoveMember(id)) => {
                     display_proposals.push(("Remove Member".to_string(), id.identity.encode_hex()))
                 }
+                Some(group_update_request::Payload::EmergencyCriteria(ec)) => {
+                    let (label, target) = match ec.evidence.as_ref() {
+                        Some(e) => (
+                            format!("Emergency: {}", e.violation_type_label()),
+                            format_wallet_address(&e.target_member_id),
+                        ),
+                        None => (
+                            "Emergency: Unknown Violation".to_string(),
+                            "unknown".to_string(),
+                        ),
+                    };
+                    display_proposals.push((label, target));
+                }
                 None => return Err(anyhow::anyhow!("message")),
             }
         }
@@ -305,6 +318,19 @@ impl Gateway<WakuDeliveryService> {
                     }
                     Some(group_update_request::Payload::RemoveMember(id)) => {
                         display_batch.push(("Remove Member".to_string(), id.identity.encode_hex()));
+                    }
+                    Some(group_update_request::Payload::EmergencyCriteria(ec)) => {
+                        let (label, target) = match ec.evidence.as_ref() {
+                            Some(e) => (
+                                format!("Emergency: {}", e.violation_type_label()),
+                                format_wallet_address(&e.target_member_id),
+                            ),
+                            None => (
+                                "Emergency: Unknown Violation".to_string(),
+                                "unknown".to_string(),
+                            ),
+                        };
+                        display_batch.push((label, target));
                     }
                     None => {}
                 }

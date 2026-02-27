@@ -29,7 +29,12 @@ use crate::protos::de_mls::messages::v1::GroupUpdateRequest;
 /// Consensus proposal identifier (assigned by the consensus service).
 pub type ProposalId = u32;
 
-/// Maximum number of past epoch batches to retain for UI display.
+/// Maximum number of past epoch batches to retain.
+///
+/// TODO(M2): RFC §"Creating Voting Proposal" requires retaining finalized proposals
+/// for at least `threshold_duration`. This count-based cap is a simplification;
+/// replace with time-based expiry keyed on `GroupConfig::epoch_duration` when
+/// peer scoring (M2) introduces `threshold_duration` as a first-class config value.
 const MAX_EPOCH_HISTORY: usize = 10;
 
 /// Tracks proposals through voting, approval, and commit lifecycle.
@@ -87,6 +92,11 @@ impl CurrentEpochProposals {
         self.voting_proposals.remove(&proposal_id);
     }
 
+    /// Clear all voting proposals (used on freeze timeout with no candidate).
+    pub fn clear_voting_proposals(&mut self) {
+        self.voting_proposals.clear();
+    }
+
     /// Clear the approved proposals, archiving them to epoch history.
     pub fn clear_approved_proposals(&mut self) {
         if !self.approved_proposals.is_empty() {
@@ -101,6 +111,17 @@ impl CurrentEpochProposals {
     /// Get the epoch history (past batches of approved proposals, most recent last).
     pub fn epoch_history(&self) -> &VecDeque<HashMap<ProposalId, GroupUpdateRequest>> {
         &self.epoch_history
+    }
+
+    /// Remove a single proposal from the approved queue.
+    ///
+    /// Used for proposals that don't produce MLS operations (e.g., emergency criteria).
+    pub fn remove_approved_proposal(&mut self, proposal_id: ProposalId) {
+        self.approved_proposals.remove(&proposal_id);
+    }
+
+    pub fn has_approved_proposal(&self, proposal_id: ProposalId) -> bool {
+        self.approved_proposals.contains_key(&proposal_id)
     }
 
     pub fn move_proposal_to_approved(&mut self, proposal_id: ProposalId) {
