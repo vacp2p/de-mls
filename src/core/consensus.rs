@@ -12,6 +12,7 @@
 use prost::Message;
 use tracing::info;
 
+use crate::core::peer_scoring::ConsensusApplyResult;
 use crate::core::{CoreError, GroupHandle};
 use crate::protos::de_mls::messages::v1::{GroupUpdateRequest, group_update_request};
 
@@ -39,6 +40,10 @@ pub enum ConsensusOutcome<'a> {
 /// - `Approved { payload }` → verify non-ownership, decode and insert approved proposal
 /// - `Rejected` → mark proposal as rejected (if owned) or log (if not owned)
 ///
+/// Returns a [`ConsensusApplyResult`] containing any [`ScoreOp`](super::ScoreOp)s
+/// that the application layer should feed into a [`PeerScoringService`](crate::app::PeerScoringService).
+/// Currently returns empty score ops — wiring is deferred to PR #2.
+///
 /// # Defense-in-depth
 ///
 /// Even though `ConsensusOutcome` prevents most invalid combinations at the type level,
@@ -50,7 +55,7 @@ pub fn apply_consensus_result(
     handle: &mut GroupHandle,
     proposal_id: u32,
     outcome: ConsensusOutcome<'_>,
-) -> Result<(), CoreError> {
+) -> Result<ConsensusApplyResult, CoreError> {
     match outcome {
         ConsensusOutcome::ApprovedOwner => {
             if !handle.is_owner_of_proposal(proposal_id) {
@@ -112,5 +117,6 @@ pub fn apply_consensus_result(
         }
     }
 
-    Ok(())
+    // TODO(M1): Replace with actual ScoreOps once wiring is done (PR #2).
+    Ok(ConsensusApplyResult::empty())
 }

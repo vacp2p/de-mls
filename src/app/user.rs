@@ -953,7 +953,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
             result
         };
-        outcome_result?;
+        // ConsensusApplyResult contains score_ops for the peer scoring service.
+        // TODO(M1 PR #2): feed score_ops into PeerScoringService.
+        let _consensus_apply = outcome_result?;
 
         Ok(())
     }
