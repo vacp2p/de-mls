@@ -13,7 +13,7 @@ use de_mls::{
     protos::de_mls::messages::v1::{ConversationMessage, VotePayload},
 };
 use de_mls_gateway::{GATEWAY, bootstrap_core_from_env};
-use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
+use de_mls_ui_protocol::v1::{AppCmd, AppEvent, MemberInfo};
 use hashgraph_like_consensus::types::ConsensusEvent;
 
 mod logging;
@@ -41,7 +41,7 @@ struct GroupsState {
 struct ChatState {
     opened_group: Option<String>,       // which group is “Open” in the UI
     messages: Vec<ConversationMessage>, // all messages; filtered per view
-    members: Vec<String>,               // cached member addresses for opened group
+    members: Vec<MemberInfo>,           // cached member info for opened group
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -757,9 +757,9 @@ fn ChatSection() -> Element {
 
     let members_snapshot = chat.read().members.clone();
     let my_address = (*my_name).clone();
-    let selectable_members: Vec<String> = members_snapshot
+    let selectable_members: Vec<MemberInfo> = members_snapshot
         .into_iter()
-        .filter(|member| !member.eq_ignore_ascii_case(&my_address))
+        .filter(|m| !m.address.eq_ignore_ascii_case(&my_address))
         .collect();
 
     let pick_member_handler = {
@@ -855,13 +855,14 @@ fn ChatSection() -> Element {
                         div { class: "member-list",
                             for member in selectable_members.iter() {
                                 div {
-                                    key: "{member}",
+                                    key: "{member.address}",
                                     class: "member-item",
                                     div { class: "member-actions",
-                                        span { class: "member-id mono", "{member}" }
+                                        span { class: "member-id mono", "{member.address}" }
+                                        span { class: "member-score mono muted", " ({member.score})" }
                                         button {
                                             class: "member-choose",
-                                            onclick: pick_member_handler(member.clone()),
+                                            onclick: pick_member_handler(member.address.clone()),
                                             "Choose"
                                         }
                                     }

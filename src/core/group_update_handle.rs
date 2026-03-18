@@ -31,10 +31,10 @@ pub type ProposalId = u32;
 
 /// Maximum number of past epoch batches to retain.
 ///
-/// TODO(M2): RFC §"Creating Voting Proposal" requires retaining finalized proposals
+/// TODO(M1): RFC §"Creating Voting Proposal" requires retaining finalized proposals
 /// for at least `threshold_duration`. This count-based cap is a simplification;
 /// replace with time-based expiry keyed on `GroupConfig::epoch_duration` when
-/// peer scoring (M2) introduces `threshold_duration` as a first-class config value.
+/// peer scoring (M1) introduces `threshold_duration` as a first-class config value.
 const MAX_EPOCH_HISTORY: usize = 10;
 
 /// Tracks proposals through voting, approval, and commit lifecycle.

@@ -141,6 +141,7 @@ mod error;
 mod events;
 mod group_handle;
 mod group_update_handle;
+mod peer_scoring;
 mod proposal_priority;
 mod provider;
 mod types;
@@ -154,6 +155,9 @@ pub use api::{
 
 // ── Consensus result application (pure, synchronous) ──
 pub use consensus::{ConsensusOutcome, apply_consensus_result};
+pub use peer_scoring::{
+    ConsensusApplyResult, PeerScoreStorage, ScoreEvent, ScoreOp, ScoringConfig, ScoringProvider,
+};
 
 // ── Error type ──
 pub use error::CoreError;

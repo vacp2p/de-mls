@@ -10,6 +10,15 @@ pub mod v1 {
         },
     };
 
+    /// Information about a group member, including their peer score.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    pub struct MemberInfo {
+        /// Formatted wallet address (e.g. `0x...`).
+        pub address: String,
+        /// Peer reputation score (default: 100 for new members).
+        pub score: i64,
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[non_exhaustive]
     pub enum AppCmd {
@@ -103,7 +112,7 @@ pub mod v1 {
         },
         GroupMembers {
             group_id: String,
-            members: Vec<String>,
+            members: Vec<MemberInfo>,
         },
         EpochHistory {
             group_id: String,

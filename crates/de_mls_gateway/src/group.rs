@@ -6,6 +6,7 @@ use de_mls::{
     ds::WakuDeliveryService,
     protos::de_mls::messages::v1::{BanRequest, group_update_request},
 };
+use de_mls_ui_protocol::v1::MemberInfo;
 
 use crate::{Gateway, forwarder::push_consensus_state};
 
@@ -291,9 +292,17 @@ impl Gateway<WakuDeliveryService> {
         Ok(display_proposals)
     }
 
-    pub async fn get_group_members(&self, group_name: String) -> anyhow::Result<Vec<String>> {
+    pub async fn get_group_members(&self, group_name: String) -> anyhow::Result<Vec<MemberInfo>> {
         let user_ref = self.user()?;
-        let members = user_ref.read().await.get_group_members(&group_name).await?;
+        let addresses = user_ref.read().await.get_group_members(&group_name).await?;
+        // TODO(M1): Once PeerScoringService is wired into User, look up actual scores here.
+        let members = addresses
+            .into_iter()
+            .map(|address| MemberInfo {
+                address,
+                score: 100,
+            })
+            .collect();
         Ok(members)
     }
 

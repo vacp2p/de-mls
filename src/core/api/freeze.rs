@@ -259,11 +259,11 @@ where
     // All nodes must converge on the same candidate regardless of which is "local".
     // Prefer largest action set first, then lowest commit_hash as tiebreak.
     // is_local_candidate is intentionally excluded: it is node-local knowledge
-    // and would cause divergence if multiple stewards exist (M3).
+    // and would cause divergence if multiple stewards exist (M2).
     //
-    // TODO(M3): RFC §"Commit validation service" specifies the tiebreak for equal-length
+    // TODO(M2): RFC §"Commit validation service" specifies the tiebreak for equal-length
     // proposal sets as: epoch steward first, then lexicographically smallest committer ID.
-    // The commit_hash tiebreak here is equivalent for M1 (single steward, one candidate)
+    // The commit_hash tiebreak here is equivalent for single-steward (one candidate)
     // but must be replaced with committer-identity comparison for multi-steward.
     pre_validated.sort_by(|a, b| {
         // Larger action set first
@@ -271,14 +271,14 @@ where
         if size_cmp != std::cmp::Ordering::Equal {
             return size_cmp;
         }
-        // Lowest commit_hash as tiebreak (see TODO(M3) above)
+        // Lowest commit_hash as tiebreak (see TODO(M2) above)
         a.commit_hash.cmp(&b.commit_hash)
     });
 
-    // TODO(M3): If Phase 3 application fails for the top-sorted candidate, we currently
+    // TODO(M2): If Phase 3 application fails for the top-sorted candidate, we currently
     // return NoCandidate without attempting the next pre-validated candidate. A malicious
     // node could exploit this by broadcasting a syntactically valid but MLS-invalid commit
-    // to DoS the freeze round. For M3, retry through pre_validated in sorted order until
+    // to DoS the freeze round. For M2, retry through pre_validated in sorted order until
     // one succeeds or the list is exhausted (RFC §"Commit validation service" §"Fallback").
     let chosen = pre_validated.into_iter().next().unwrap();
 

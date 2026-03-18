@@ -170,7 +170,7 @@ No external relay required — just run multiple local nodes.
 **Node 1** (bootstrap node):
 
 ```bash
-NODE_PORT=60001 cargo run -p de-mls-desktop-ui
+NODE_PORT=60001 DISCV5=true DISCV5_UDP_PORT=9001 cargo run -p de-mls-desktop-ui
 ```
 
 Copy the `Local ENR: enr:-QE...` line from the logs.
@@ -178,9 +178,9 @@ Copy the `Local ENR: enr:-QE...` line from the logs.
 **Nodes 2–4** (bootstrap off node 1):
 
 ```bash
-NODE_PORT=60002 DISCV5_BOOTSTRAP_ENRS="enr:-QE..." cargo run -p de-mls-desktop-ui
-NODE_PORT=60003 DISCV5_BOOTSTRAP_ENRS="enr:-QE..." cargo run -p de-mls-desktop-ui
-NODE_PORT=60004 DISCV5_BOOTSTRAP_ENRS="enr:-QE..." cargo run -p de-mls-desktop-ui
+NODE_PORT=60002 DISCV5=true DISCV5_UDP_PORT=9002 DISCV5_BOOTSTRAP_ENRS="enr:-QE..." cargo run -p de-mls-desktop-ui
+NODE_PORT=60003 DISCV5=true DISCV5_UDP_PORT=9003 DISCV5_BOOTSTRAP_ENRS="enr:-QE..." cargo run -p de-mls-desktop-ui
+NODE_PORT=60004 DISCV5=true DISCV5_UDP_PORT=9004 DISCV5_BOOTSTRAP_ENRS="enr:-QE..." cargo run -p de-mls-desktop-ui
 ```
 
 All nodes discover each other via the DHT and form a gossipsub relay mesh automatically.

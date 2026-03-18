@@ -138,6 +138,7 @@ mod consensus;
 mod display;
 mod error;
 mod message_type;
+mod peer_scoring;
 mod scheduler;
 mod state_machine;
 mod user;
@@ -146,6 +147,7 @@ pub use consensus::{cast_vote, forward_incoming_proposal, forward_incoming_vote,
 pub use display::{convert_group_request_to_display, get_identity_from_group_update_request};
 pub use error::UserError;
 pub use message_type::{MessageType, message_types};
+pub use peer_scoring::{FixedScoringProvider, InMemoryPeerScoreStorage, PeerScoringService};
 pub use scheduler::{IntervalScheduler, StewardScheduler, StewardSchedulerConfig};
 pub use state_machine::{
     FreezeTimeoutStatus, GroupConfig, GroupState, GroupStateMachine, StateChangeHandler,
