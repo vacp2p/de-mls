@@ -22,7 +22,6 @@ fn default_deltas() -> HashMap<ScoreEvent, i64> {
         (ScoreEvent::EmergencyYesCreator, 20),
         (ScoreEvent::EmergencyNoCreator, -50),
         (ScoreEvent::NonFinalizedProposalCommit, -30),
-        (ScoreEvent::RecoveryModeLosingCandidate, -5),
     ])
 }
 

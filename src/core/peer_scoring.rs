@@ -34,8 +34,6 @@ pub enum ScoreEvent {
     EmergencyNoCreator,
     /// Commit referenced proposals that were not yet finalized by consensus.
     NonFinalizedProposalCommit,
-    /// Non-winning candidate in recovery mode (small penalty to discourage flooding).
-    RecoveryModeLosingCandidate,
 }
 
 /// A score operation produced by core logic.
