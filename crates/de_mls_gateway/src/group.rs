@@ -294,13 +294,20 @@ impl Gateway<WakuDeliveryService> {
 
     pub async fn get_group_members(&self, group_name: String) -> anyhow::Result<Vec<MemberInfo>> {
         let user_ref = self.user()?;
-        let addresses = user_ref.read().await.get_group_members(&group_name).await?;
-        // TODO(M1): Once PeerScoringService is wired into User, look up actual scores here.
+        let user = user_ref.read().await;
+        let addresses = user.get_group_members(&group_name).await?;
+        let scores = user.get_member_scores(&group_name);
+
         let members = addresses
             .into_iter()
-            .map(|address| MemberInfo {
-                address,
-                score: 100,
+            .map(|address| {
+                // Look up score by matching formatted address against raw member bytes
+                let score = scores
+                    .iter()
+                    .find(|(raw_id, _)| format_wallet_address(raw_id.as_slice()) == address)
+                    .map(|(_, s)| *s)
+                    .unwrap_or(100);
+                MemberInfo { address, score }
             })
             .collect();
         Ok(members)

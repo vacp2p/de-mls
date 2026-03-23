@@ -69,6 +69,7 @@ message ViolationEvidence {
   bytes target_member_id = 2;       // Malicious steward's identity
   bytes evidence_payload = 3;       // Proof (mismatched hashes, timestamps, etc.)
   uint64 epoch = 4;                 // Epoch where violation occurred
+  bytes creator_member_id = 5;      // Identity of the proposal creator (for scoring)
 }
 
 message EmergencyCriteriaProposal {

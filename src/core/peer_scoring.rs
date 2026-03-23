@@ -14,25 +14,43 @@
 
 /// A scoreable event in the protocol.
 ///
-/// This is a finite, predetermined catalog. Members are scored only on events
-/// from this list — no free-form penalties.
+/// Each variant maps to a single score delta. Violation types (BrokenCommit, etc.)
+/// go through the ECP consensus path — when accepted, the target receives a
+/// violation-type-specific penalty and the creator receives a flat reward.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScoreEvent {
-    /// Steward committed proposals that don't match what was voted on.
+    // ── ECP target penalties (mapped from ViolationType in evidence) ──
+    /// ECP accepted: steward committed proposals that don't match what was voted on.
     BrokenCommit,
-    /// MLS proposal payload was malformed or didn't match the voted action.
+    /// ECP accepted: MLS proposal payload was malformed or didn't match the voted action.
     BrokenMlsProposal,
-    /// Steward failed to commit within the threshold duration.
+    /// ECP accepted: steward failed to commit within the threshold duration.
     CensorshipInactivity,
+
+    // ── ECP creator outcomes ──
+    /// ECP accepted — flat reward to the proposal creator.
+    EmergencyYesCreator,
+    /// ECP rejected — flat penalty to the proposal creator (false accusation).
+    EmergencyNoCreator,
+
+    // ── Commit selection (M2) ──
     /// Steward successfully committed a valid batch.
     SuccessfulCommit,
-    /// Emergency criteria accepted — penalty to the accused target.
-    EmergencyYesTarget,
-    /// Emergency criteria accepted — reward to the proposal creator.
-    EmergencyYesCreator,
-    /// Emergency criteria rejected — penalty to the proposal creator (false accusation).
-    EmergencyNoCreator,
+    /// Competing commit with same proposals but different MLS entropy.
+    /// Honest participation — reward. (RFC: "MUST NOT be classified as misbehavior")
+    HonestCommitAttempt,
+    /// Competing commit with different proposal set than the selected commit.
+    /// Misbehavior — penalty. (RFC: "MUST be classified as misbehavior")
+    MisbehavingCommit,
+
+    // ── Partial freeze (M2) ──
+    /// Propagated lower-priority governance traffic during active emergency freeze.
+    /// RFC MAY penalize.
+    FreezeViolation,
+
+    // ── Commit validation (M5) ──
     /// Commit referenced proposals that were not yet finalized by consensus.
+    /// Direct local observation penalty (not via ECP).
     NonFinalizedProposalCommit,
 }
 

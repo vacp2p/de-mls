@@ -154,7 +154,7 @@ pub use api::{
 };
 
 // ── Consensus result application (pure, synchronous) ──
-pub use consensus::{ConsensusOutcome, apply_consensus_result};
+pub use consensus::apply_consensus_result;
 pub use peer_scoring::{
     ConsensusApplyResult, PeerScoreStorage, ScoreEvent, ScoreOp, ScoringConfig, ScoringProvider,
 };

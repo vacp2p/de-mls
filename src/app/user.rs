@@ -4,6 +4,7 @@
 //! managing multiple `GroupHandle`s and coordinating operations.
 
 use alloy::signers::local::PrivateKeySigner;
+use std::sync::Mutex;
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 use tokio::sync::RwLock;
 use tracing::{error, info};
@@ -16,12 +17,15 @@ use crate::app::consensus::{
     cast_vote, forward_incoming_proposal, forward_incoming_vote, start_voting,
 };
 use crate::app::error::UserError;
+use crate::app::peer_scoring::{
+    FixedScoringProvider, InMemoryPeerScoreStorage, PeerScoringService,
+};
 use crate::app::state_machine::{
     FreezeTimeoutStatus, GroupConfig, GroupState, GroupStateMachine, StateChangeHandler,
 };
 use crate::core::{
-    self, ConsensusOutcome, DeMlsProvider, DefaultProvider, FreezeFinalizeResult,
-    GroupEventHandler, GroupHandle, ProcessResult, create_commit_candidate,
+    self, DeMlsProvider, DefaultProvider, FreezeFinalizeResult, GroupEventHandler, GroupHandle,
+    ProcessResult, ScoreEvent, ScoringConfig, create_commit_candidate,
 };
 use crate::ds::InboundPacket;
 use crate::mls_crypto::{
@@ -53,6 +57,7 @@ pub struct User<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler>
     handler: Arc<H>,
     state_handler: Arc<SCH>,
     default_group_config: GroupConfig,
+    scoring_service: Mutex<PeerScoringService<InMemoryPeerScoreStorage, FixedScoringProvider>>,
 }
 
 impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
@@ -74,7 +79,42 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             handler,
             state_handler,
             default_group_config,
+            scoring_service: Mutex::new(PeerScoringService::new(
+                InMemoryPeerScoreStorage::new(),
+                FixedScoringProvider::new(Self::default_score_deltas()),
+                ScoringConfig {
+                    default_score: 100,
+                    removal_threshold: 0,
+                },
+            )),
         }
+    }
+
+    /// Default score deltas for all events.
+    fn default_score_deltas() -> HashMap<ScoreEvent, i64> {
+        HashMap::from([
+            // ECP target penalties (violation-type-specific)
+            (ScoreEvent::BrokenCommit, -50),
+            (ScoreEvent::BrokenMlsProposal, -30),
+            (ScoreEvent::CensorshipInactivity, -40),
+            // ECP creator outcomes
+            (ScoreEvent::EmergencyYesCreator, 20),
+            (ScoreEvent::EmergencyNoCreator, -50),
+            // Commit selection (M2)
+            (ScoreEvent::SuccessfulCommit, 10),
+            // Commit validation (M5)
+            (ScoreEvent::NonFinalizedProposalCommit, -30),
+        ])
+    }
+
+    /// Lock the scoring service, recovering from a poisoned mutex.
+    fn scoring(
+        &self,
+    ) -> std::sync::MutexGuard<'_, PeerScoringService<InMemoryPeerScoreStorage, FixedScoringProvider>>
+    {
+        self.scoring_service
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Get the user's identity string (wallet address as checksummed hex).
@@ -126,6 +166,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             },
         );
         drop(groups);
+
+        // Register creator in peer scoring (only if actually creating, not joining)
+        if is_creation {
+            self.scoring()
+                .add_member(group_name, &self.mls_service.wallet_bytes());
+        }
 
         self.state_handler
             .on_state_changed(group_name, initial_state)
@@ -214,6 +260,43 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             .into_iter()
             .map(|raw| format_wallet_address(raw.as_slice()).to_string())
             .collect())
+    }
+
+    /// Get member scores for a group from the peer scoring service.
+    pub fn get_member_scores(&self, group_name: &str) -> Vec<(Vec<u8>, i64)> {
+        self.scoring().all_members_with_scores(group_name)
+    }
+
+    /// Get the score for a specific member in a group.
+    pub fn get_member_score(&self, group_name: &str, member_id: &[u8]) -> Option<i64> {
+        self.scoring().score_for(group_name, member_id)
+    }
+
+    /// Sync the scoring service's member list with the MLS group's actual members.
+    ///
+    /// Adds any MLS members not yet tracked and removes scored members no longer in MLS.
+    fn sync_scoring_members(&self, group_name: &str, handle: &GroupHandle) {
+        let mls_members = match core::group_members(handle, &self.mls_service) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+
+        let mut scoring = self.scoring();
+        let scored = scoring.all_members_with_scores(group_name);
+        let scored_ids: std::collections::HashSet<Vec<u8>> =
+            scored.iter().map(|(id, _)| id.clone()).collect();
+        let mls_ids: std::collections::HashSet<Vec<u8>> = mls_members.iter().cloned().collect();
+
+        for member_id in &mls_ids {
+            if !scored_ids.contains(member_id) {
+                scoring.add_member(group_name, member_id);
+            }
+        }
+        for member_id in &scored_ids {
+            if !mls_ids.contains(member_id) {
+                scoring.remove_member(group_name, member_id);
+            }
+        }
     }
 
     /// Get current epoch proposals for a group.
@@ -448,8 +531,16 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
                 if should_accuse {
                     let request =
-                        ViolationEvidence::censorship_inactivity(steward_id, violation_epoch)
-                            .into_update_request();
+                        match ViolationEvidence::censorship_inactivity(steward_id, violation_epoch)
+                            .with_creator(self.mls_service.wallet_bytes())
+                            .into_update_request()
+                        {
+                            Ok(r) => r,
+                            Err(e) => {
+                                error!("[check_freeze_timeout] Failed to build ECP: {e}");
+                                return FreezeTimeoutStatus::TimedOut { has_proposals };
+                            }
+                        };
                     if let Err(e) = self
                         .start_voting_on_request_background(group_name.to_string(), request)
                         .await
@@ -744,6 +835,14 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 self.handler.on_outbound(&name, packet).await?;
                 self.handler.on_joined_group(&name).await?;
 
+                // Sync MLS members into peer scoring
+                {
+                    let groups = self.groups.read().await;
+                    if let Some(entry) = groups.get(&name) {
+                        self.sync_scoring_members(&name, &entry.handle);
+                    }
+                }
+
                 // Sync epoch boundary and transition to Working
                 let state = {
                     let mut groups = self.groups.write().await;
@@ -760,6 +859,18 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 }
             }
             ProcessResult::GroupUpdated => {
+                // TODO(M2): Reward the commit author with SuccessfulCommit once
+                // ProcessResult/FreezeFinalizeResult carries the commit sender identity.
+                // Cannot use steward_identity() — in multi-steward the winner may differ.
+
+                // Sync member list in peer scoring (commit may add/remove members)
+                {
+                    let groups = self.groups.read().await;
+                    if let Some(entry) = groups.get(group_name) {
+                        self.sync_scoring_members(group_name, &entry.handle);
+                    }
+                }
+
                 let transitioned = {
                     let mut groups = self.groups.write().await;
                     if let Some(entry) = groups.get_mut(group_name) {
@@ -795,9 +906,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     "Violation detected: type={}, target={:?}",
                     evidence.violation_type, evidence.target_member_id
                 );
+                let evidence = evidence.with_creator(self.mls_service.wallet_bytes());
                 self.start_voting_on_request_background(
                     group_name.to_string(),
-                    evidence.into_update_request(),
+                    evidence.into_update_request()?,
                 )
                 .await?;
             }
@@ -874,88 +986,57 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         group_name: &str,
         event: ConsensusEvent,
     ) -> Result<(), UserError> {
-        // Phase 1: Check ownership (read lock)
-        let (proposal_id, approved, is_owner) = match &event {
+        let (proposal_id, approved) = match &event {
             ConsensusEvent::ConsensusReached {
                 proposal_id,
                 result,
                 ..
-            } => {
-                let groups = self.groups.read().await;
-                let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-                let is_owner = entry.handle.is_owner_of_proposal(*proposal_id);
-                (*proposal_id, *result, is_owner)
-            }
-            ConsensusEvent::ConsensusFailed { proposal_id, .. } => {
-                let groups = self.groups.read().await;
-                let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-                let is_owner = entry.handle.is_owner_of_proposal(*proposal_id);
-                (*proposal_id, false, is_owner)
-            }
+            } => (*proposal_id, *result),
+            ConsensusEvent::ConsensusFailed { proposal_id, .. } => (*proposal_id, false),
         };
 
-        // Phase 2: Fetch payload if needed (NO lock held)
-        let payload = if approved && !is_owner {
-            let scope = P::Scope::from(group_name.to_string());
-            Some(
-                self.consensus_service
-                    .get_proposal_payload(&scope, proposal_id)
-                    .await?,
-            )
-        } else {
-            None
-        };
+        // Fetch payload from consensus service (no lock held).
+        let scope = P::Scope::from(group_name.to_string());
+        let payload = self
+            .consensus_service
+            .get_proposal_payload(&scope, proposal_id)
+            .await?;
 
-        // Phase 3: Build typed outcome + apply mutation (write lock, sync)
-        let outcome_result = {
+        // Apply consensus result (write lock)
+        let consensus_apply = {
             let mut groups = self.groups.write().await;
             let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
 
             let approved_before = core::approved_proposals_count(&entry.handle);
 
-            let result = match (approved, is_owner) {
-                (true, true) => {
-                    info!("Consensus reached for proposal {proposal_id}: result=true (owner)");
-                    core::apply_consensus_result(
-                        &mut entry.handle,
-                        proposal_id,
-                        ConsensusOutcome::ApprovedOwner,
-                    )
-                }
-                (true, false) => {
-                    info!("Consensus reached for proposal {proposal_id}: result=true (non-owner)");
-                    core::apply_consensus_result(
-                        &mut entry.handle,
-                        proposal_id,
-                        ConsensusOutcome::Approved {
-                            payload: payload.as_deref().unwrap(),
-                        },
-                    )
-                }
-                (false, _) => {
-                    info!("Consensus reached for proposal {proposal_id}: result=false");
-                    core::apply_consensus_result(
-                        &mut entry.handle,
-                        proposal_id,
-                        ConsensusOutcome::Rejected,
-                    )
-                }
-            };
+            info!("Consensus reached for proposal {proposal_id}: approved={approved}");
+            let result =
+                core::apply_consensus_result(&mut entry.handle, proposal_id, approved, &payload)?;
 
             let approved_after = core::approved_proposals_count(&entry.handle);
             entry
                 .state_machine
                 .notify_proposal_approved(approved_before, approved_after);
 
-            // RFC §"Partial Freeze Semantics": lift the freeze once the emergency
-            // proposal is resolved (approved or rejected — either way it's finalized).
-            entry.state_machine.resolve_emergency_proposal(proposal_id);
-
             result
         };
-        // ConsensusApplyResult contains score_ops for the peer scoring service.
-        // TODO(M1 PR #2): feed score_ops into PeerScoringService.
-        let _consensus_apply = outcome_result?;
+
+        if !consensus_apply.score_ops.is_empty() {
+            // Emergency proposal was resolved — apply scores and lift partial freeze.
+            {
+                let mut scoring = self.scoring();
+                for op in &consensus_apply.score_ops {
+                    scoring.apply_event(group_name, &op.member_id, op.event);
+                }
+            }
+
+            // RFC §"Partial Freeze Semantics": lift the freeze once the emergency
+            // proposal is resolved (approved or rejected — either way it's finalized).
+            let mut groups = self.groups.write().await;
+            if let Some(entry) = groups.get_mut(group_name) {
+                entry.state_machine.resolve_emergency_proposal(proposal_id);
+            }
+        }
 
         Ok(())
     }

@@ -212,14 +212,14 @@ impl GroupHandle {
         self.proposals.approved_proposals()
     }
 
-    /// Check if the proposal exists in the approved queue.
-    pub(crate) fn has_approved_proposal(&self, proposal_id: ProposalId) -> bool {
-        self.proposals.has_approved_proposal(proposal_id)
-    }
-
     /// Move a proposal from voting to approved queue.
     pub fn mark_proposal_as_approved(&mut self, proposal_id: ProposalId) {
         self.proposals.move_proposal_to_approved(proposal_id);
+    }
+
+    /// Get a reference to a proposal's payload in the voting queue.
+    pub fn voting_proposal_payload(&self, proposal_id: ProposalId) -> Option<&GroupUpdateRequest> {
+        self.proposals.voting_proposal(proposal_id)
     }
 
     /// Remove a proposal from the voting queue (rejected or failed).

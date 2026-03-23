@@ -7,9 +7,9 @@ use async_trait::async_trait;
 use prost::Message;
 
 use de_mls::core::{
-    CallbackError, ConsensusOutcome, CoreError, FreezeFinalizeResult, GroupEventHandler,
-    GroupHandle, ProcessResult, ProposalId, apply_consensus_result, build_key_package_message,
-    create_commit_candidate, create_group, finalize_freeze_round, prepare_to_join, process_inbound,
+    CallbackError, FreezeFinalizeResult, GroupEventHandler, GroupHandle, ProcessResult, ProposalId,
+    ScoreEvent, apply_consensus_result, build_key_package_message, create_commit_candidate,
+    create_group, finalize_freeze_round, prepare_to_join, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
 use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService, parse_wallet_address};
@@ -196,8 +196,9 @@ fn steward_add_joiner(
 /// Test: ViolationDetected carries correct evidence for emergency criteria proposal.
 #[test]
 fn test_violation_detected_produces_emergency_proposal() {
-    let evidence = ViolationEvidence::broken_commit(vec![0xAA, 0xBB], 5, vec![0xDE, 0xAD]);
-    let request = evidence.into_update_request();
+    let evidence = ViolationEvidence::broken_commit(vec![0xAA, 0xBB], 5, vec![0xDE, 0xAD])
+        .with_creator(vec![0x01]);
+    let request = evidence.into_update_request().unwrap();
 
     match request.payload {
         Some(group_update_request::Payload::EmergencyCriteria(ec)) => {
@@ -216,8 +217,10 @@ fn test_emergency_in_approved_queue_returns_error() {
     let group_name = "emergency-only-batch";
     let (mls, mut handle) = setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
-    let emergency_request =
-        ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new()).into_update_request();
+    let emergency_request = ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new())
+        .with_creator(vec![0x01])
+        .into_update_request()
+        .unwrap();
     handle.insert_approved_proposal(50, emergency_request);
     assert_eq!(handle.approved_proposals_count(), 1);
 
@@ -238,8 +241,10 @@ fn test_remove_approved_proposal() {
     let (_mls, mut handle) =
         setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
-    let emergency_request =
-        ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new()).into_update_request();
+    let emergency_request = ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new())
+        .with_creator(vec![0x01])
+        .into_update_request()
+        .unwrap();
     handle.insert_approved_proposal(50, emergency_request);
     assert_eq!(handle.approved_proposals_count(), 1);
 
@@ -280,87 +285,82 @@ fn test_epoch_advances_on_clear_approved_proposals() {
 
 /// Test: apply_consensus_result for emergency criteria proposal (owner, accepted)
 /// moves proposal to approved then immediately removes it (no MLS operation).
+/// Emits BrokenCommit on target and EmergencyYesCreator on local user.
 #[test]
 fn test_apply_consensus_result_emergency_accepted_owner() {
     let group_name = "consensus-emergency-owner";
     let (_mls, mut handle) =
         setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
+    let target_id = vec![0xAA];
+    let creator_id = b"local".to_vec();
     let emergency_request =
-        ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new()).into_update_request();
+        ViolationEvidence::broken_commit(target_id.clone(), 0, Vec::<u8>::new())
+            .with_creator(creator_id.clone())
+            .into_update_request()
+            .unwrap();
+    let payload = emergency_request.encode_to_vec();
     let proposal_id = 77;
     handle.store_voting_proposal(proposal_id, emergency_request);
     assert!(handle.is_owner_of_proposal(proposal_id));
 
-    apply_consensus_result(&mut handle, proposal_id, ConsensusOutcome::ApprovedOwner).unwrap();
+    let result = apply_consensus_result(&mut handle, proposal_id, true, &payload).unwrap();
 
     // Emergency proposal should NOT remain in approved queue
     assert_eq!(handle.approved_proposals_count(), 0);
+
+    // Score ops: target penalty + creator reward
+    assert_eq!(result.score_ops.len(), 2);
+    assert_eq!(result.score_ops[0].member_id, target_id);
+    assert_eq!(result.score_ops[0].event, ScoreEvent::BrokenCommit);
+    assert_eq!(result.score_ops[1].member_id, creator_id);
+    assert_eq!(result.score_ops[1].event, ScoreEvent::EmergencyYesCreator);
 }
 
 /// Test: apply_consensus_result for emergency criteria proposal (non-owner, accepted)
 /// does not insert into approved queue.
+/// Emits CensorshipInactivity on target and EmergencyYesCreator on creator from evidence.
 #[test]
 fn test_apply_consensus_result_emergency_accepted_non_owner() {
     let group_name = "consensus-emergency-non-owner";
     let (_mls, mut handle) =
         setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
-    // Create the emergency proposal payload
-    let emergency_request =
-        ViolationEvidence::censorship_inactivity(vec![0xBB], 1).into_update_request();
+    let target_id = vec![0xBB];
+    let creator_id = b"alice".to_vec();
+    // Create the emergency proposal payload with creator identity
+    let emergency_request = ViolationEvidence::censorship_inactivity(target_id.clone(), 1)
+        .with_creator(creator_id.clone())
+        .into_update_request()
+        .unwrap();
     let payload = emergency_request.encode_to_vec();
 
     // The handle does NOT own this proposal (non-owner path)
     let proposal_id = 88;
     assert!(!handle.is_owner_of_proposal(proposal_id));
 
-    apply_consensus_result(
-        &mut handle,
-        proposal_id,
-        ConsensusOutcome::Approved { payload: &payload },
-    )
-    .unwrap();
+    let result = apply_consensus_result(&mut handle, proposal_id, true, &payload).unwrap();
 
     // Emergency proposal should NOT be in approved queue
     assert_eq!(handle.approved_proposals_count(), 0);
+
+    // Score ops: target penalty + creator reward (from evidence, not local_id)
+    assert_eq!(result.score_ops.len(), 2);
+    assert_eq!(result.score_ops[0].member_id, target_id);
+    assert_eq!(result.score_ops[0].event, ScoreEvent::CensorshipInactivity);
+    assert_eq!(result.score_ops[1].member_id, creator_id);
+    assert_eq!(result.score_ops[1].event, ScoreEvent::EmergencyYesCreator);
 }
 
-/// Test: apply_consensus_result returns ProposalNotFound for unknown proposal ID
-/// on the owner-only path.
+/// Test: apply_consensus_result errors on invalid (unparseable) payload.
 #[test]
-fn test_apply_consensus_result_owner_path_proposal_not_found() {
-    let group_name = "invalid-owner";
+fn test_apply_consensus_result_invalid_payload() {
+    let group_name = "invalid-payload";
     let (_mls, mut handle) =
         setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
-    let result = apply_consensus_result(&mut handle, 999, ConsensusOutcome::ApprovedOwner);
-
+    let result = apply_consensus_result(&mut handle, 999, true, &[0xFF, 0xFF]);
     assert!(result.is_err());
-    match result.unwrap_err() {
-        CoreError::ProposalNotFound(id) => assert_eq!(id, 999),
-        other => panic!("Expected ProposalNotFound, got {:?}", other),
-    }
-}
-
-/// Test: apply_consensus_result rejects ApprovedOwner when proposal is already approved
-/// (not in owner's voting queue anymore).
-#[test]
-fn test_apply_consensus_result_invalid_approved_owner_already_approved() {
-    let group_name = "invalid-owner-approved";
-    let (_mls, mut handle) =
-        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-
-    let proposal_id = 777;
-    handle.insert_approved_proposal(proposal_id, GroupUpdateRequest { payload: None });
-
-    let result = apply_consensus_result(&mut handle, proposal_id, ConsensusOutcome::ApprovedOwner);
-
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        CoreError::InvalidConsensusOutcome(_) => {}
-        other => panic!("Expected InvalidConsensusOutcome, got {:?}", other),
-    }
 }
 
 /// Test: emergency proposals mixed with regular proposals in approved queue
@@ -401,7 +401,10 @@ fn test_emergency_mixed_with_regular_returns_error() {
     steward_handle.insert_approved_proposal(regular_id, gur.clone());
     steward_handle.insert_approved_proposal(
         emergency_id,
-        ViolationEvidence::broken_commit(vec![], 0, Vec::<u8>::new()).into_update_request(),
+        ViolationEvidence::broken_commit(vec![], 0, Vec::<u8>::new())
+            .with_creator(vec![0x01])
+            .into_update_request()
+            .unwrap(),
     );
 
     let result = create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id");
