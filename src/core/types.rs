@@ -14,10 +14,10 @@ use crate::{
     core::CoreError,
     mls_crypto::parse_wallet_to_bytes,
     protos::de_mls::messages::v1::{
-        AppMessage, BanRequest, CommitCandidate, ConversationMessage, GroupUpdateRequest,
-        InvitationToJoin, Outcome, ProposalAdded, RemoveMember, UserKeyPackage, UserVote,
-        ViolationEvidence, VotePayload, WelcomeMessage, app_message, group_update_request,
-        welcome_message,
+        AppMessage, BanRequest, CommitCandidate, ConversationMessage, EmergencyCriteriaProposal,
+        GroupUpdateRequest, InvitationToJoin, Outcome, ProposalAdded, RemoveMember, UserKeyPackage,
+        UserVote, ViolationEvidence, VotePayload, WelcomeMessage, app_message,
+        group_update_request, welcome_message,
     },
 };
 
@@ -104,6 +104,7 @@ impl ViolationEvidence {
             target_member_id: target,
             evidence_payload: payload.into(),
             epoch,
+            creator_member_id: Vec::new(),
         }
     }
 
@@ -115,6 +116,7 @@ impl ViolationEvidence {
             target_member_id: target,
             evidence_payload: payload.into(),
             epoch,
+            creator_member_id: Vec::new(),
         }
     }
 
@@ -125,7 +127,31 @@ impl ViolationEvidence {
             target_member_id: target,
             evidence_payload: Vec::new(),
             epoch,
+            creator_member_id: Vec::new(),
         }
+    }
+
+    /// Set the creator identity on this evidence (called by app layer before voting).
+    pub fn with_creator(mut self, creator: Vec<u8>) -> Self {
+        self.creator_member_id = creator;
+        self
+    }
+
+    /// Wrap this evidence into a `GroupUpdateRequest` for consensus voting.
+    ///
+    /// Returns an error if `creator_member_id` is empty. Call `.with_creator()` before this
+    /// method — every ECP must carry the creator identity for peer scoring (RFC §"Peer Scoring").
+    pub fn into_update_request(self) -> Result<GroupUpdateRequest, CoreError> {
+        if self.creator_member_id.is_empty() {
+            return Err(CoreError::InvalidGroupUpdateRequest);
+        }
+        Ok(GroupUpdateRequest {
+            payload: Some(group_update_request::Payload::EmergencyCriteria(
+                EmergencyCriteriaProposal {
+                    evidence: Some(self),
+                },
+            )),
+        })
     }
 }
 

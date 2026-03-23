@@ -88,6 +88,10 @@ impl CurrentEpochProposals {
         self.voting_proposals.insert(proposal_id, proposal);
     }
 
+    pub fn voting_proposal(&self, proposal_id: ProposalId) -> Option<&GroupUpdateRequest> {
+        self.voting_proposals.get(&proposal_id)
+    }
+
     pub fn remove_voting_proposal(&mut self, proposal_id: ProposalId) {
         self.voting_proposals.remove(&proposal_id);
     }
@@ -118,10 +122,6 @@ impl CurrentEpochProposals {
     /// Used for proposals that don't produce MLS operations (e.g., emergency criteria).
     pub fn remove_approved_proposal(&mut self, proposal_id: ProposalId) {
         self.approved_proposals.remove(&proposal_id);
-    }
-
-    pub fn has_approved_proposal(&self, proposal_id: ProposalId) -> bool {
-        self.approved_proposals.contains_key(&proposal_id)
     }
 
     pub fn move_proposal_to_approved(&mut self, proposal_id: ProposalId) {

@@ -17,10 +17,9 @@ fn default_deltas() -> HashMap<ScoreEvent, i64> {
         (ScoreEvent::BrokenCommit, -50),
         (ScoreEvent::BrokenMlsProposal, -30),
         (ScoreEvent::CensorshipInactivity, -40),
-        (ScoreEvent::SuccessfulCommit, 10),
-        (ScoreEvent::EmergencyYesTarget, -60),
         (ScoreEvent::EmergencyYesCreator, 20),
         (ScoreEvent::EmergencyNoCreator, -50),
+        (ScoreEvent::SuccessfulCommit, 10),
         (ScoreEvent::NonFinalizedProposalCommit, -30),
     ])
 }
@@ -67,7 +66,7 @@ fn test_apply_event_decreases_score() {
     let member = b"alice";
     svc.add_member(GROUP, member);
 
-    let new_score = svc.apply_event(GROUP, member, ScoreEvent::BrokenCommit);
+    let new_score = svc.apply_event(GROUP, member, ScoreEvent::EmergencyNoCreator);
 
     assert_eq!(new_score, Some(50)); // 100 + (-50) = 50
     assert_eq!(svc.score_for(GROUP, member), Some(50));
@@ -88,7 +87,7 @@ fn test_apply_event_increases_score() {
 fn test_apply_event_unknown_member_returns_none() {
     let mut svc = make_service();
 
-    let result = svc.apply_event(GROUP, b"unknown", ScoreEvent::BrokenCommit);
+    let result = svc.apply_event(GROUP, b"unknown", ScoreEvent::EmergencyNoCreator);
 
     assert_eq!(result, None);
 }
@@ -99,8 +98,8 @@ fn test_multiple_events_accumulate() {
     let member = b"alice";
     svc.add_member(GROUP, member);
 
-    svc.apply_event(GROUP, member, ScoreEvent::BrokenCommit); // 100 - 50 = 50
-    svc.apply_event(GROUP, member, ScoreEvent::BrokenMlsProposal); // 50 - 30 = 20
+    svc.apply_event(GROUP, member, ScoreEvent::EmergencyNoCreator); // 100 - 50 = 50
+    svc.apply_event(GROUP, member, ScoreEvent::NonFinalizedProposalCommit); // 50 - 30 = 20
     svc.apply_event(GROUP, member, ScoreEvent::SuccessfulCommit); // 20 + 10 = 30
 
     assert_eq!(svc.score_for(GROUP, member), Some(30));
@@ -113,13 +112,13 @@ fn test_members_below_threshold() {
     svc.add_member(GROUP, b"bob");
     svc.add_member(GROUP, b"charlie");
 
-    // Drop alice below threshold: 100 - 50 - 60 = -10
+    // Drop alice to threshold: 100 - 50 - 50 = 0
+    svc.apply_event(GROUP, b"alice", ScoreEvent::EmergencyNoCreator);
     svc.apply_event(GROUP, b"alice", ScoreEvent::BrokenCommit);
-    svc.apply_event(GROUP, b"alice", ScoreEvent::EmergencyYesTarget);
 
     // Bob stays at 100
     // Drop charlie to exactly 0 (threshold): 100 - 50 - 50 = 0
-    svc.apply_event(GROUP, b"charlie", ScoreEvent::BrokenCommit);
+    svc.apply_event(GROUP, b"charlie", ScoreEvent::EmergencyNoCreator);
     svc.apply_event(GROUP, b"charlie", ScoreEvent::EmergencyNoCreator);
 
     let below = svc.members_below_threshold(GROUP);
@@ -136,11 +135,11 @@ fn test_is_below_threshold() {
 
     assert!(!svc.is_below_threshold(GROUP, b"alice")); // 100 > 0
 
-    // Drop to -10
+    // Drop to 0 (at threshold)
+    svc.apply_event(GROUP, b"alice", ScoreEvent::EmergencyNoCreator);
     svc.apply_event(GROUP, b"alice", ScoreEvent::BrokenCommit);
-    svc.apply_event(GROUP, b"alice", ScoreEvent::EmergencyYesTarget);
 
-    assert!(svc.is_below_threshold(GROUP, b"alice")); // -10 <= 0
+    assert!(svc.is_below_threshold(GROUP, b"alice")); // 0 <= 0
 }
 
 #[test]
@@ -172,7 +171,7 @@ fn test_unknown_event_in_provider_returns_zero_delta() {
     // Create a provider with only one event configured
     let mut svc = PeerScoringService::new(
         InMemoryPeerScoreStorage::new(),
-        FixedScoringProvider::new(HashMap::from([(ScoreEvent::BrokenCommit, -50)])),
+        FixedScoringProvider::new(HashMap::from([(ScoreEvent::EmergencyNoCreator, -50)])),
         default_config(),
     );
     svc.add_member(GROUP, b"alice");
@@ -187,9 +186,9 @@ fn test_unknown_event_in_provider_returns_zero_delta() {
 fn test_determinism_independent_instances() {
     // Two independent services with identical config produce identical scores.
     let events = vec![
-        (b"alice".as_slice(), ScoreEvent::BrokenCommit),
+        (b"alice".as_slice(), ScoreEvent::EmergencyNoCreator),
         (b"alice".as_slice(), ScoreEvent::SuccessfulCommit),
-        (b"bob".as_slice(), ScoreEvent::EmergencyYesTarget),
+        (b"bob".as_slice(), ScoreEvent::BrokenCommit),
         (b"bob".as_slice(), ScoreEvent::SuccessfulCommit),
     ];
 
@@ -241,7 +240,7 @@ fn test_scores_isolated_between_groups() {
     svc.add_member(group_b, member);
 
     // Penalize in group_a only
-    svc.apply_event(group_a, member, ScoreEvent::BrokenCommit); // 100 - 50 = 50
+    svc.apply_event(group_a, member, ScoreEvent::EmergencyNoCreator); // 100 - 50 = 50
 
     assert_eq!(svc.score_for(group_a, member), Some(50));
     assert_eq!(svc.score_for(group_b, member), Some(100)); // unaffected
@@ -257,10 +256,10 @@ fn test_members_below_threshold_only_returns_group_members() {
     svc.add_member(group_b, b"bob");
 
     // Drop both below threshold
+    svc.apply_event(group_a, b"alice", ScoreEvent::EmergencyNoCreator);
     svc.apply_event(group_a, b"alice", ScoreEvent::BrokenCommit);
-    svc.apply_event(group_a, b"alice", ScoreEvent::EmergencyYesTarget);
+    svc.apply_event(group_b, b"bob", ScoreEvent::EmergencyNoCreator);
     svc.apply_event(group_b, b"bob", ScoreEvent::BrokenCommit);
-    svc.apply_event(group_b, b"bob", ScoreEvent::EmergencyYesTarget);
 
     let below_a = svc.members_below_threshold(group_a);
     let below_b = svc.members_below_threshold(group_b);

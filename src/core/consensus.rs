@@ -1,7 +1,7 @@
 //! Pure consensus result application.
 //!
 //! This module contains only [`apply_consensus_result`], which updates a
-//! [`GroupHandle`]'s proposal state based on a typed [`ConsensusOutcome`].
+//! [`GroupHandle`]'s proposal state based on a consensus outcome.
 //! It has no I/O, no service calls, and no event callbacks — it is a pure,
 //! synchronous state transition.
 //!
@@ -12,111 +12,117 @@
 use prost::Message;
 use tracing::info;
 
-use crate::core::peer_scoring::ConsensusApplyResult;
+use crate::core::peer_scoring::{ConsensusApplyResult, ScoreEvent, ScoreOp};
 use crate::core::{CoreError, GroupHandle};
-use crate::protos::de_mls::messages::v1::{GroupUpdateRequest, group_update_request};
+use crate::protos::de_mls::messages::v1::{
+    GroupUpdateRequest, ViolationEvidence, ViolationType, group_update_request,
+};
 
-/// Typed outcome of a consensus decision.
-///
-/// Prevents invalid state combinations at the type level:
-/// - `Approved { payload }` requires the caller to have fetched the payload (non-owner)
-/// - `ApprovedOwner` signals the payload is already in the handle (owner)
-/// - `Rejected` applies to both owner and non-owner
-#[derive(Debug)]
-pub enum ConsensusOutcome<'a> {
-    /// Consensus approved. Caller (non-owner) fetched the payload.
-    Approved { payload: &'a [u8] },
-    /// Consensus approved. The handle already has the payload (owner).
-    ApprovedOwner,
-    /// Consensus rejected (or failed).
-    Rejected,
+/// Map a proto `ViolationType` to the corresponding target penalty `ScoreEvent`.
+fn target_score_event(violation_type: i32) -> ScoreEvent {
+    match ViolationType::try_from(violation_type) {
+        Ok(ViolationType::BrokenCommit) => ScoreEvent::BrokenCommit,
+        Ok(ViolationType::BrokenMlsProposal) => ScoreEvent::BrokenMlsProposal,
+        Ok(ViolationType::CensorshipInactivity) => ScoreEvent::CensorshipInactivity,
+        // Unspecified or unknown — fall back to the most severe penalty.
+        _ => ScoreEvent::BrokenCommit,
+    }
+}
+
+/// Score ops for an accepted emergency: penalize target (violation-specific), reward creator.
+/// Always returns exactly 2 ops.
+fn emergency_accepted_score_ops(evidence: &ViolationEvidence) -> [ScoreOp; 2] {
+    [
+        ScoreOp::new(
+            evidence.target_member_id.clone(),
+            target_score_event(evidence.violation_type),
+        ),
+        ScoreOp::new(
+            evidence.creator_member_id.clone(),
+            ScoreEvent::EmergencyYesCreator,
+        ),
+    ]
+}
+
+/// Score op for a rejected emergency: penalize creator (false accusation).
+/// Always returns exactly 1 op.
+fn emergency_rejected_score_op(evidence: &ViolationEvidence) -> ScoreOp {
+    ScoreOp::new(
+        evidence.creator_member_id.clone(),
+        ScoreEvent::EmergencyNoCreator,
+    )
+}
+
+/// Extract emergency evidence from a `GroupUpdateRequest`, if present.
+fn extract_emergency_evidence(req: &GroupUpdateRequest) -> Option<&ViolationEvidence> {
+    match &req.payload {
+        Some(group_update_request::Payload::EmergencyCriteria(ec)) => ec.evidence.as_ref(),
+        _ => None,
+    }
 }
 
 /// Apply a consensus result to the group handle (pure, synchronous).
 ///
-/// Updates the handle's proposal state based on the outcome:
+/// Determines ownership from the handle and updates proposal state:
+/// - **Approved + owner** → move to approved queue; if emergency, remove and score
+/// - **Approved + non-owner** → insert into approved queue; if emergency, score only
+/// - **Rejected + owner** → remove from voting queue; if emergency, score creator
+/// - **Rejected + non-owner** → no handle mutation; if emergency, score creator
 ///
-/// - `ApprovedOwner` → verify ownership, mark proposal as approved, handle emergency removal
-/// - `Approved { payload }` → verify non-ownership, decode and insert approved proposal
-/// - `Rejected` → mark proposal as rejected (if owned) or log (if not owned)
+/// `payload` is the serialized `GroupUpdateRequest` fetched from the consensus service.
+/// Both owner and non-owner paths decode it to extract emergency evidence.
 ///
-/// Returns a [`ConsensusApplyResult`] containing any [`ScoreOp`](super::ScoreOp)s
-/// that the application layer should feed into a [`PeerScoringService`](crate::app::PeerScoringService).
-/// Currently returns empty score ops — wiring is deferred to PR #2.
-///
-/// # Defense-in-depth
-///
-/// Even though `ConsensusOutcome` prevents most invalid combinations at the type level,
-/// this function validates assumptions against handle state:
-/// - `ApprovedOwner` → verifies `handle.is_owner_of_proposal(id)`
-/// - `Approved { payload }` → verifies `!handle.is_owner_of_proposal(id)`
-/// - Unknown `proposal_id` for owner paths → returns `CoreError::ProposalNotFound`
+/// Returns a [`ConsensusApplyResult`] containing score ops (0, 1, or 2) that the
+/// application layer should feed into a [`PeerScoringService`](crate::app::PeerScoringService).
 pub fn apply_consensus_result(
     handle: &mut GroupHandle,
     proposal_id: u32,
-    outcome: ConsensusOutcome<'_>,
+    approved: bool,
+    payload: &[u8],
 ) -> Result<ConsensusApplyResult, CoreError> {
-    match outcome {
-        ConsensusOutcome::ApprovedOwner => {
-            if !handle.is_owner_of_proposal(proposal_id) {
-                if handle.has_approved_proposal(proposal_id) {
-                    return Err(CoreError::InvalidConsensusOutcome(format!(
-                        "ApprovedOwner for proposal {proposal_id} but proposal is already in approved queue"
-                    )));
-                }
-                return Err(CoreError::ProposalNotFound(proposal_id));
-            }
+    let is_owner = handle.is_owner_of_proposal(proposal_id);
+    let request = GroupUpdateRequest::decode(payload)?;
+    let evidence = extract_emergency_evidence(&request).cloned();
+    let is_emergency = evidence.is_some();
 
+    // Mutate handle state.
+    if approved {
+        if is_owner {
             handle.mark_proposal_as_approved(proposal_id);
-
-            // Emergency proposals don't produce MLS operations — remove from approved queue.
-            let approved = handle.approved_proposals();
-            if let Some(req) = approved.get(&proposal_id) {
-                if matches!(
-                    req.payload,
-                    Some(group_update_request::Payload::EmergencyCriteria(_))
-                ) {
-                    info!(
-                        "Emergency criteria proposal {proposal_id} ACCEPTED (owner). \
-                         TODO (Milestone 2): apply peer score penalty to target."
-                    );
-                    handle.remove_approved_proposal(proposal_id);
-                }
+            if is_emergency {
+                // Emergency proposals don't produce MLS operations.
+                handle.remove_approved_proposal(proposal_id);
             }
+        } else if !is_emergency {
+            // Regular proposal: add to approved queue for the next commit.
+            handle.insert_approved_proposal(proposal_id, request);
         }
-        ConsensusOutcome::Approved { payload } => {
-            if handle.is_owner_of_proposal(proposal_id) {
-                return Err(CoreError::InvalidConsensusOutcome(format!(
-                    "Approved {{ payload }} for proposal {proposal_id} but handle owns it — use ApprovedOwner"
-                )));
-            }
-
-            let update_request = GroupUpdateRequest::decode(payload)?;
-
-            if let Some(group_update_request::Payload::EmergencyCriteria(ref ec)) =
-                update_request.payload
-            {
-                info!(
-                    "Emergency criteria proposal {proposal_id} ACCEPTED (non-owner): \
-                     violation_type={:?}. TODO (Milestone 2): apply peer score penalty to target.",
-                    ec.evidence.as_ref().map(|e| e.violation_type)
-                );
-                // Emergency proposals don't produce MLS operations — don't add to approved.
-            } else {
-                handle.insert_approved_proposal(proposal_id, update_request);
-            }
-        }
-        ConsensusOutcome::Rejected => {
-            if handle.is_owner_of_proposal(proposal_id) {
-                handle.mark_proposal_as_rejected(proposal_id);
-            } else {
-                // !result && !is_owner: proposal rejected
-                // TODO (Milestone 2): If emergency criteria, apply false accusation penalty to creator.
-                info!("Proposal {proposal_id} rejected (not owner, no local state to update)");
-            }
-        }
+    } else if is_owner {
+        handle.mark_proposal_as_rejected(proposal_id);
     }
 
-    // TODO(M1): Replace with actual ScoreOps once wiring is done (PR #2).
-    Ok(ConsensusApplyResult::empty())
+    // Produce score ops from evidence.
+    match evidence {
+        Some(ev) if approved => {
+            info!(
+                "Emergency criteria proposal {proposal_id} ACCEPTED: \
+                 target={:?}, creator={:?}",
+                ev.target_member_id, ev.creator_member_id
+            );
+            Ok(ConsensusApplyResult::with_ops(
+                emergency_accepted_score_ops(&ev).into(),
+            ))
+        }
+        Some(ev) => {
+            info!(
+                "Emergency criteria proposal {proposal_id} REJECTED: \
+                 creator={:?}",
+                ev.creator_member_id
+            );
+            Ok(ConsensusApplyResult::with_ops(vec![
+                emergency_rejected_score_op(&ev),
+            ]))
+        }
+        None => Ok(ConsensusApplyResult::empty()),
+    }
 }

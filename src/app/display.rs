@@ -8,8 +8,7 @@ use prost::Message;
 use crate::app::message_type::MessageType;
 use crate::mls_crypto::format_wallet_address;
 use crate::protos::de_mls::messages::v1::{
-    EmergencyCriteriaProposal, GroupUpdateRequest, ViolationEvidence, ViolationType,
-    group_update_request,
+    GroupUpdateRequest, ViolationEvidence, ViolationType, group_update_request,
 };
 
 impl ViolationEvidence {
@@ -20,17 +19,6 @@ impl ViolationEvidence {
             Ok(ViolationType::BrokenMlsProposal) => "Broken MLS Proposal",
             Ok(ViolationType::CensorshipInactivity) => "Censorship/Inactivity",
             _ => "Unknown Violation",
-        }
-    }
-
-    /// Wrap this evidence into a `GroupUpdateRequest` for consensus voting.
-    pub fn into_update_request(self) -> GroupUpdateRequest {
-        GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::EmergencyCriteria(
-                EmergencyCriteriaProposal {
-                    evidence: Some(self),
-                },
-            )),
         }
     }
 }
