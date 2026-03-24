@@ -6,7 +6,7 @@ use de_mls::{
     ds::WakuDeliveryService, mls_crypto::format_wallet_address,
     protos::de_mls::messages::v1::group_update_request,
 };
-use de_mls_ui_protocol::v1::AppEvent;
+use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
 
 use crate::{CoreCtx, Gateway, UserRef};
 
@@ -93,6 +93,38 @@ pub(crate) async fn push_consensus_state(
     }
 }
 
+/// Push refreshed member scores to the UI.
+///
+/// Called after consensus events that may have changed peer scores
+/// (emergency criteria proposals produce score ops on resolution).
+pub(crate) async fn push_member_scores(
+    user: &UserRef,
+    evt_tx: &UnboundedSender<AppEvent>,
+    group_name: &str,
+) {
+    let user = user.read().await;
+    let addresses = match user.get_group_members(group_name).await {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+    let scores = user.get_member_scores(group_name);
+    let members: Vec<MemberInfo> = addresses
+        .into_iter()
+        .map(|address| {
+            let score = scores
+                .iter()
+                .find(|(raw_id, _)| format_wallet_address(raw_id.as_slice()) == address)
+                .map(|(_, s)| *s)
+                .unwrap_or(100);
+            MemberInfo { address, score }
+        })
+        .collect();
+    let _ = evt_tx.unbounded_send(AppEvent::GroupMembers {
+        group_id: group_name.to_string(),
+        members,
+    });
+}
+
 impl Gateway<WakuDeliveryService> {
     /// Spawn the consensus event forwarder.
     ///
@@ -122,8 +154,9 @@ impl Gateway<WakuDeliveryService> {
                     tracing::warn!("handle_consensus_event failed: {e}");
                 }
 
-                // Push refreshed approved queue + epoch history
+                // Push refreshed approved queue, epoch history, and member scores
                 push_consensus_state(&user, &evt_tx, &group_name).await;
+                push_member_scores(&user, &evt_tx, &group_name).await;
             }
             tracing::info!("gateway: consensus forwarder ended");
         });

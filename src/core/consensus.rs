@@ -24,7 +24,9 @@ fn target_score_event(violation_type: i32) -> ScoreEvent {
         Ok(ViolationType::BrokenCommit) => ScoreEvent::BrokenCommit,
         Ok(ViolationType::BrokenMlsProposal) => ScoreEvent::BrokenMlsProposal,
         Ok(ViolationType::CensorshipInactivity) => ScoreEvent::CensorshipInactivity,
-        Ok(ViolationType::ScoreBelowThreshold) => ScoreEvent::ScoreBelowThreshold,
+        // ScoreBelowThreshold has no target penalty (target is being removed).
+        // Fall through to default.
+        //
         // Unspecified or unknown — fall back to the most severe penalty.
         _ => ScoreEvent::BrokenCommit,
     }
@@ -137,9 +139,17 @@ pub fn apply_consensus_result(
                  target={:?}, creator={:?}",
                 ev.target_member_id, ev.creator_member_id
             );
-            Ok(ConsensusApplyResult::with_ops(
-                emergency_accepted_score_ops(&ev).into(),
-            ))
+            let ops = if is_score_below_threshold(&ev) {
+                // Target is already at/below threshold and will be removed —
+                // skip the redundant penalty, only reward the creator.
+                vec![ScoreOp::new(
+                    ev.creator_member_id.clone(),
+                    ScoreEvent::EmergencyYesCreator,
+                )]
+            } else {
+                emergency_accepted_score_ops(&ev).into()
+            };
+            Ok(ConsensusApplyResult::with_ops(ops))
         }
         Some(ev) => {
             info!(

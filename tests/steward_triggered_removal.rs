@@ -35,7 +35,6 @@ fn default_deltas() -> HashMap<ScoreEvent, i64> {
         (ScoreEvent::BrokenCommit, -50),
         (ScoreEvent::BrokenMlsProposal, -30),
         (ScoreEvent::CensorshipInactivity, -40),
-        (ScoreEvent::ScoreBelowThreshold, -50),
         (ScoreEvent::EmergencyYesCreator, 20),
         (ScoreEvent::EmergencyNoCreator, -50),
         (ScoreEvent::SuccessfulCommit, 10),
@@ -80,12 +79,10 @@ fn test_score_below_threshold_yes_transforms_to_remove_member() {
     // Consensus approves
     let result = apply_consensus_result(&mut handle, proposal_id, true, &payload).unwrap();
 
-    // Score ops: target penalized + creator rewarded
-    assert_eq!(result.score_ops.len(), 2);
-    assert_eq!(result.score_ops[0].member_id, target_id);
-    assert_eq!(result.score_ops[0].event, ScoreEvent::ScoreBelowThreshold);
-    assert_eq!(result.score_ops[1].member_id, steward_id);
-    assert_eq!(result.score_ops[1].event, ScoreEvent::EmergencyYesCreator);
+    // Score ops: creator rewarded only (target already at threshold, penalty skipped)
+    assert_eq!(result.score_ops.len(), 1);
+    assert_eq!(result.score_ops[0].member_id, steward_id);
+    assert_eq!(result.score_ops[0].event, ScoreEvent::EmergencyYesCreator);
 
     // RemoveMember should be in the approved queue (transformed from ECP)
     assert_eq!(handle.approved_proposals_count(), 1);
@@ -119,8 +116,9 @@ fn test_score_below_threshold_yes_non_owner() {
     // Non-owner: do NOT store in voting queue
     let result = apply_consensus_result(&mut handle, proposal_id, true, &payload).unwrap();
 
-    // Score ops still produced
-    assert_eq!(result.score_ops.len(), 2);
+    // Score ops: creator rewarded only (target penalty skipped)
+    assert_eq!(result.score_ops.len(), 1);
+    assert_eq!(result.score_ops[0].event, ScoreEvent::EmergencyYesCreator);
 
     // RemoveMember should be in approved queue
     assert_eq!(handle.approved_proposals_count(), 1);

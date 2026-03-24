@@ -97,8 +97,6 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             (ScoreEvent::BrokenCommit, -50),
             (ScoreEvent::BrokenMlsProposal, -30),
             (ScoreEvent::CensorshipInactivity, -40),
-            // Steward-triggered removal
-            (ScoreEvent::ScoreBelowThreshold, -50),
             // ECP creator outcomes
             (ScoreEvent::EmergencyYesCreator, 20),
             (ScoreEvent::EmergencyNoCreator, -50),
@@ -364,8 +362,20 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                  (score={current_score}) in group {group_name}",
                 target_id
             );
-            self.start_voting_on_request_background(group_name.to_string(), request)
-                .await?;
+            if let Err(e) = self
+                .start_voting_on_request_background(group_name.to_string(), request)
+                .await
+            {
+                // Clean up pending target on failure so it can be retried next time.
+                let mut groups = self.groups.write().await;
+                if let Some(entry) = groups.get_mut(group_name) {
+                    entry.state_machine.resolve_removal_target(&target_id);
+                }
+                error!(
+                    "Failed to start SCORE_BELOW_THRESHOLD vote for {:?}: {e}",
+                    target_id
+                );
+            }
         }
 
         Ok(())
