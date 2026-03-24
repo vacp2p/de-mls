@@ -299,6 +299,88 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
     }
 
+    /// Check if any members are below the removal threshold and initiate ECPs.
+    ///
+    /// Only the steward initiates score-based removals. Skips self and any
+    /// member for which a removal ECP is already pending.
+    async fn check_and_initiate_score_removals(&self, group_name: &str) -> Result<(), UserError> {
+        let (is_steward, epoch, self_id) = {
+            let groups = self.groups.read().await;
+            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            (
+                entry.state_machine.is_steward(),
+                entry.handle.current_epoch(),
+                self.mls_service.wallet_bytes(),
+            )
+        };
+
+        if !is_steward {
+            return Ok(());
+        }
+
+        let targets: Vec<(Vec<u8>, i64)> = {
+            let scoring = self.scoring();
+            scoring
+                .members_below_threshold(group_name)
+                .into_iter()
+                .filter(|id| *id != self_id) // skip self (deferred to M2)
+                .map(|id| {
+                    let score = scoring.score_for(group_name, &id).unwrap_or(0);
+                    (id, score)
+                })
+                .collect()
+        };
+
+        for (target_id, current_score) in targets {
+            // Skip if already pending
+            {
+                let groups = self.groups.read().await;
+                if let Some(entry) = groups.get(group_name) {
+                    if entry.state_machine.has_pending_removal_for(&target_id) {
+                        continue;
+                    }
+                }
+            }
+
+            let evidence =
+                ViolationEvidence::score_below_threshold(target_id.clone(), epoch, current_score)
+                    .with_creator(self_id.clone());
+            let request = evidence.into_update_request()?;
+
+            // Track before submitting to prevent duplicates
+            {
+                let mut groups = self.groups.write().await;
+                if let Some(entry) = groups.get_mut(group_name) {
+                    entry
+                        .state_machine
+                        .observe_removal_target(target_id.clone());
+                }
+            }
+
+            info!(
+                "Steward initiating SCORE_BELOW_THRESHOLD removal for member {:?} \
+                 (score={current_score}) in group {group_name}",
+                target_id
+            );
+            if let Err(e) = self
+                .start_voting_on_request_background(group_name.to_string(), request)
+                .await
+            {
+                // Clean up pending target on failure so it can be retried next time.
+                let mut groups = self.groups.write().await;
+                if let Some(entry) = groups.get_mut(group_name) {
+                    entry.state_machine.resolve_removal_target(&target_id);
+                }
+                error!(
+                    "Failed to start SCORE_BELOW_THRESHOLD vote for {:?}: {e}",
+                    target_id
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// Get current epoch proposals for a group.
     pub async fn get_approved_proposal_for_current_epoch(
         &self,
@@ -1030,11 +1112,33 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 }
             }
 
+            // Resolve removal target tracking for SCORE_BELOW_THRESHOLD ECPs.
+            // Extract the target_member_id from the payload evidence.
+            if let Ok(req) = GroupUpdateRequest::decode(payload.as_slice()) {
+                if let Some(group_update_request::Payload::EmergencyCriteria(ec)) = &req.payload {
+                    if let Some(ev) = &ec.evidence {
+                        let mut groups = self.groups.write().await;
+                        if let Some(entry) = groups.get_mut(group_name) {
+                            entry
+                                .state_machine
+                                .resolve_removal_target(&ev.target_member_id);
+                        }
+                    }
+                }
+            }
+
             // RFC §"Partial Freeze Semantics": lift the freeze once the emergency
             // proposal is resolved (approved or rejected — either way it's finalized).
-            let mut groups = self.groups.write().await;
-            if let Some(entry) = groups.get_mut(group_name) {
-                entry.state_machine.resolve_emergency_proposal(proposal_id);
+            {
+                let mut groups = self.groups.write().await;
+                if let Some(entry) = groups.get_mut(group_name) {
+                    entry.state_machine.resolve_emergency_proposal(proposal_id);
+                }
+            }
+
+            // After scoring changes, check if any members now fall below the threshold.
+            if let Err(e) = self.check_and_initiate_score_removals(group_name).await {
+                error!("[handle_consensus_event] check_and_initiate_score_removals failed: {e}");
             }
         }
 

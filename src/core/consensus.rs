@@ -15,7 +15,7 @@ use tracing::info;
 use crate::core::peer_scoring::{ConsensusApplyResult, ScoreEvent, ScoreOp};
 use crate::core::{CoreError, GroupHandle};
 use crate::protos::de_mls::messages::v1::{
-    GroupUpdateRequest, ViolationEvidence, ViolationType, group_update_request,
+    GroupUpdateRequest, RemoveMember, ViolationEvidence, ViolationType, group_update_request,
 };
 
 /// Map a proto `ViolationType` to the corresponding target penalty `ScoreEvent`.
@@ -24,6 +24,9 @@ fn target_score_event(violation_type: i32) -> ScoreEvent {
         Ok(ViolationType::BrokenCommit) => ScoreEvent::BrokenCommit,
         Ok(ViolationType::BrokenMlsProposal) => ScoreEvent::BrokenMlsProposal,
         Ok(ViolationType::CensorshipInactivity) => ScoreEvent::CensorshipInactivity,
+        // ScoreBelowThreshold has no target penalty (target is being removed).
+        // Fall through to default.
+        //
         // Unspecified or unknown — fall back to the most severe penalty.
         _ => ScoreEvent::BrokenCommit,
     }
@@ -61,6 +64,20 @@ fn extract_emergency_evidence(req: &GroupUpdateRequest) -> Option<&ViolationEvid
     }
 }
 
+/// Check whether evidence is a `SCORE_BELOW_THRESHOLD` violation.
+fn is_score_below_threshold(evidence: &ViolationEvidence) -> bool {
+    ViolationType::try_from(evidence.violation_type) == Ok(ViolationType::ScoreBelowThreshold)
+}
+
+/// Build a `RemoveMember` `GroupUpdateRequest` for the target in score-below-threshold evidence.
+fn removal_request_for(evidence: &ViolationEvidence) -> GroupUpdateRequest {
+    GroupUpdateRequest {
+        payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
+            identity: evidence.target_member_id.clone(),
+        })),
+    }
+}
+
 /// Apply a consensus result to the group handle (pure, synchronous).
 ///
 /// Determines ownership from the handle and updates proposal state:
@@ -85,14 +102,27 @@ pub fn apply_consensus_result(
     let evidence = extract_emergency_evidence(&request).cloned();
     let is_emergency = evidence.is_some();
 
+    // Should the approved ECP transform into a RemoveMember?
+    let transforms_to_removal =
+        approved && is_emergency && evidence.as_ref().is_some_and(is_score_below_threshold);
+
     // Mutate handle state.
     if approved {
         if is_owner {
             handle.mark_proposal_as_approved(proposal_id);
-            if is_emergency {
-                // Emergency proposals don't produce MLS operations.
+            if transforms_to_removal {
+                // Replace ECP with RemoveMember in approved queue (reuse proposal_id).
+                let removal = removal_request_for(evidence.as_ref().unwrap());
+                handle.remove_approved_proposal(proposal_id);
+                handle.insert_approved_proposal(proposal_id, removal);
+            } else if is_emergency {
+                // Other emergencies don't produce MLS operations.
                 handle.remove_approved_proposal(proposal_id);
             }
+        } else if transforms_to_removal {
+            // Non-owner: insert RemoveMember directly (the ECP was never stored).
+            let removal = removal_request_for(evidence.as_ref().unwrap());
+            handle.insert_approved_proposal(proposal_id, removal);
         } else if !is_emergency {
             // Regular proposal: add to approved queue for the next commit.
             handle.insert_approved_proposal(proposal_id, request);
@@ -109,9 +139,17 @@ pub fn apply_consensus_result(
                  target={:?}, creator={:?}",
                 ev.target_member_id, ev.creator_member_id
             );
-            Ok(ConsensusApplyResult::with_ops(
-                emergency_accepted_score_ops(&ev).into(),
-            ))
+            let ops = if is_score_below_threshold(&ev) {
+                // Target is already at/below threshold and will be removed —
+                // skip the redundant penalty, only reward the creator.
+                vec![ScoreOp::new(
+                    ev.creator_member_id.clone(),
+                    ScoreEvent::EmergencyYesCreator,
+                )]
+            } else {
+                emergency_accepted_score_ops(&ev).into()
+            };
+            Ok(ConsensusApplyResult::with_ops(ops))
         }
         Some(ev) => {
             info!(

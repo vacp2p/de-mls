@@ -18,6 +18,7 @@ impl ViolationEvidence {
             Ok(ViolationType::BrokenCommit) => "Broken Commit",
             Ok(ViolationType::BrokenMlsProposal) => "Broken MLS Proposal",
             Ok(ViolationType::CensorshipInactivity) => "Censorship/Inactivity",
+            Ok(ViolationType::ScoreBelowThreshold) => "Score Below Threshold",
             _ => "Unknown Violation",
         }
     }
