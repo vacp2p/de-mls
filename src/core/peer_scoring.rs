@@ -43,6 +43,10 @@ pub enum ScoreEvent {
     /// Misbehavior — penalty. (RFC: "MUST be classified as misbehavior")
     MisbehavingCommit,
 
+    // ── Steward-triggered removal ──
+    /// ECP accepted: member's peer score dropped to/below the removal threshold.
+    ScoreBelowThreshold,
+
     // ── Partial freeze (M2) ──
     /// Propagated lower-priority governance traffic during active emergency freeze.
     /// RFC MAY penalize.

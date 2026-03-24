@@ -139,6 +139,9 @@ pub struct GroupStateMachine {
     /// finalized by consensus. While non-empty, lower-priority proposals MUST be blocked
     /// (RFC §"Partial Freeze Semantics").
     active_emergency_proposal_ids: HashSet<ProposalId>,
+    /// Member IDs for which a `SCORE_BELOW_THRESHOLD` ECP has already been submitted
+    /// but not yet finalized. Prevents duplicate ECPs for the same target.
+    pending_removal_targets: HashSet<Vec<u8>>,
 }
 
 impl Default for GroupStateMachine {
@@ -166,6 +169,7 @@ impl GroupStateMachine {
             freeze_duration: config.freeze_duration(),
             allow_subset_candidates: config.allow_subset_candidates,
             active_emergency_proposal_ids: HashSet::new(),
+            pending_removal_targets: HashSet::new(),
         }
     }
 
@@ -187,6 +191,7 @@ impl GroupStateMachine {
             freeze_duration: config.freeze_duration(),
             allow_subset_candidates: config.allow_subset_candidates,
             active_emergency_proposal_ids: HashSet::new(),
+            pending_removal_targets: HashSet::new(),
         }
     }
 
@@ -208,6 +213,7 @@ impl GroupStateMachine {
             freeze_duration: config.freeze_duration(),
             allow_subset_candidates: config.allow_subset_candidates,
             active_emergency_proposal_ids: HashSet::new(),
+            pending_removal_targets: HashSet::new(),
         }
     }
 
@@ -250,6 +256,23 @@ impl GroupStateMachine {
     /// lower-priority proposals MUST NOT be created or propagated while this is true.
     pub fn has_active_emergency_proposal(&self) -> bool {
         !self.active_emergency_proposal_ids.is_empty()
+    }
+
+    // ── Pending Removal Targets (steward-triggered removal dedup) ──
+
+    /// Record that a `SCORE_BELOW_THRESHOLD` ECP has been submitted for this member.
+    pub fn observe_removal_target(&mut self, member_id: Vec<u8>) {
+        self.pending_removal_targets.insert(member_id);
+    }
+
+    /// Check if a removal ECP is already pending for this member.
+    pub fn has_pending_removal_for(&self, member_id: &[u8]) -> bool {
+        self.pending_removal_targets.contains(member_id)
+    }
+
+    /// Mark a pending removal target as finalized (ECP resolved, regardless of outcome).
+    pub fn resolve_removal_target(&mut self, member_id: &[u8]) {
+        self.pending_removal_targets.remove(member_id);
     }
 
     /// Start working state.

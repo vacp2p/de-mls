@@ -50,6 +50,7 @@ impl MessageType for GroupUpdateRequest {
                     Ok(ViolationType::BrokenCommit) => "Emergency: Broken Commit",
                     Ok(ViolationType::BrokenMlsProposal) => "Emergency: Broken MLS Proposal",
                     Ok(ViolationType::CensorshipInactivity) => "Emergency: Censorship/Inactivity",
+                    Ok(ViolationType::ScoreBelowThreshold) => "Emergency: Score Below Threshold",
                     _ => "Emergency: Unknown Violation",
                 })
                 .unwrap_or("Emergency: Unknown Violation"),

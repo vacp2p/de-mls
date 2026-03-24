@@ -131,6 +131,17 @@ impl ViolationEvidence {
         }
     }
 
+    /// Member's peer score dropped to or below the removal threshold.
+    pub fn score_below_threshold(target: Vec<u8>, epoch: u64, current_score: i64) -> Self {
+        Self {
+            violation_type: ViolationType::ScoreBelowThreshold as i32,
+            target_member_id: target,
+            evidence_payload: current_score.to_le_bytes().to_vec(),
+            epoch,
+            creator_member_id: Vec::new(),
+        }
+    }
+
     /// Set the creator identity on this evidence (called by app layer before voting).
     pub fn with_creator(mut self, creator: Vec<u8>) -> Self {
         self.creator_member_id = creator;
