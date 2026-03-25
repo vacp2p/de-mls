@@ -144,6 +144,7 @@ mod group_update_handle;
 mod peer_scoring;
 mod proposal_priority;
 mod provider;
+mod steward_list;
 mod types;
 
 // ── Core group operations ──
@@ -173,6 +174,9 @@ pub use group_update_handle::ProposalId;
 
 // ── Proposal priority ──
 pub use proposal_priority::ProposalPriority;
+
+// ── Steward list ──
+pub use steward_list::{StewardList, StewardListConfig};
 
 // ── Provider traits ──
 pub use provider::{DeMlsProvider, DefaultProvider};
