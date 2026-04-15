@@ -10,13 +10,15 @@ pub mod v1 {
         },
     };
 
-    /// Information about a group member, including their peer score.
+    /// Information about a group member, including their peer score and steward role.
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     pub struct MemberInfo {
         /// Formatted wallet address (e.g. `0x...`).
         pub address: String,
         /// Peer reputation score (default: 100 for new members).
         pub score: i64,
+        /// Steward role: "epoch_steward", "backup_steward", "steward", or "member".
+        pub role: String,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +115,11 @@ pub mod v1 {
         GroupMembers {
             group_id: String,
             members: Vec<MemberInfo>,
+        },
+        FreezeCandidates {
+            group_id: String,
+            received: usize,
+            expected: usize,
         },
         EpochHistory {
             group_id: String,

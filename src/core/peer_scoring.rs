@@ -65,6 +65,7 @@ pub struct ScoreOp {
 }
 
 impl ScoreOp {
+    /// Create a new score operation.
     pub fn new(member_id: Vec<u8>, event: ScoreEvent) -> Self {
         Self { member_id, event }
     }
@@ -110,19 +111,45 @@ pub trait PeerScoreStorage {
 
 // ── Result type for consensus ───────────────────────────────────────
 
+/// Outcome data from an accepted steward election proposal.
+///
+/// Returned inside [`ConsensusApplyResult`] so the app layer can validate
+/// and apply the new steward list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElectionOutcome {
+    pub proposed_stewards: Vec<Vec<u8>>,
+    pub election_epoch: u64,
+}
+
 /// Result of applying a consensus outcome, including any score events
 /// that the application layer should feed into a [`PeerScoringService`](crate::app::PeerScoringService).
 #[derive(Debug, Clone, Default)]
 pub struct ConsensusApplyResult {
     pub score_ops: Vec<ScoreOp>,
+    /// Present when an election proposal was accepted. The app layer should
+    /// validate and apply the new steward list.
+    pub election: Option<ElectionOutcome>,
 }
 
 impl ConsensusApplyResult {
+    /// Create an empty result with no score ops or election.
     pub fn empty() -> Self {
         Self::default()
     }
 
+    /// Create a result with score operations.
     pub fn with_ops(score_ops: Vec<ScoreOp>) -> Self {
-        Self { score_ops }
+        Self {
+            score_ops,
+            election: None,
+        }
+    }
+
+    /// Create a result with an election outcome.
+    pub fn with_election(outcome: ElectionOutcome) -> Self {
+        Self {
+            score_ops: Vec::new(),
+            election: Some(outcome),
+        }
     }
 }

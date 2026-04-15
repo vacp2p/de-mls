@@ -40,14 +40,14 @@ const MAX_EPOCH_HISTORY: usize = 10;
 /// Tracks proposals through voting, approval, and commit lifecycle.
 ///
 /// This is the internal state container for proposal management.
-/// Use [`GroupHandle`](crate::core::GroupHandle) methods for access.
+/// Use [`Group`](crate::core::Group) methods for access.
 #[derive(Clone, Debug, Default)]
 pub struct CurrentEpochProposals {
-    /// Proposals waiting for consensus voting.
-    /// Key: proposal_id from consensus service
+    /// Proposals that passed consensus, waiting for steward to commit.
+    /// Key: proposal_id from consensus service.
     approved_proposals: HashMap<ProposalId, GroupUpdateRequest>,
 
-    /// Proposals that passed consensus, waiting for steward to commit.
+    /// Proposals waiting for consensus voting.
     voting_proposals: HashMap<ProposalId, GroupUpdateRequest>,
 
     /// History of committed proposal batches (most recent last).
@@ -88,10 +88,7 @@ impl CurrentEpochProposals {
         self.voting_proposals.insert(proposal_id, proposal);
     }
 
-    pub fn voting_proposal(&self, proposal_id: ProposalId) -> Option<&GroupUpdateRequest> {
-        self.voting_proposals.get(&proposal_id)
-    }
-
+    /// Remove a proposal from the voting queue.
     pub fn remove_voting_proposal(&mut self, proposal_id: ProposalId) {
         self.voting_proposals.remove(&proposal_id);
     }
@@ -112,6 +109,13 @@ impl CurrentEpochProposals {
         }
     }
 
+    /// Discard all approved proposals without archiving to history.
+    ///
+    /// Used when freeze times out with no valid candidate — proposals are rejected, not committed.
+    pub fn discard_approved_proposals(&mut self) {
+        self.approved_proposals.clear();
+    }
+
     /// Get the epoch history (past batches of approved proposals, most recent last).
     pub fn epoch_history(&self) -> &VecDeque<HashMap<ProposalId, GroupUpdateRequest>> {
         &self.epoch_history
@@ -124,12 +128,14 @@ impl CurrentEpochProposals {
         self.approved_proposals.remove(&proposal_id);
     }
 
+    /// Move a proposal from the voting queue to the approved queue.
     pub fn move_proposal_to_approved(&mut self, proposal_id: ProposalId) {
         if let Some(proposal) = self.voting_proposals.remove(&proposal_id) {
             self.approved_proposals.insert(proposal_id, proposal);
         }
     }
 
+    /// Check if a proposal is in the voting queue (i.e., this user created it).
     pub fn is_owner_of_proposal(&self, proposal_id: ProposalId) -> bool {
         self.voting_proposals.contains_key(&proposal_id)
     }

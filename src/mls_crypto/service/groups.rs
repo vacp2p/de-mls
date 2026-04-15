@@ -119,4 +119,29 @@ where
             .map(|m| m.credential.serialized_content().to_vec())
             .collect())
     }
+
+    /// Get the current MLS epoch for a group.
+    ///
+    /// The epoch is a monotonically increasing counter managed by OpenMLS,
+    /// incremented on each valid commit that results in a state transition.
+    /// This is the single source of truth for epoch (RFC §Epoch definition).
+    pub fn current_epoch(&self, group_id: &str) -> Result<u64> {
+        let groups = self
+            .groups
+            .read()
+            .map_err(|e| StorageError::Lock(e.to_string()))?;
+        let group = groups.get(group_id).ok_or_else(|| {
+            MlsError::Service(MlsServiceError::GroupNotFound(group_id.to_string()))
+        })?;
+
+        Ok(group.epoch().as_u64())
+    }
+
+    /// Check if MLS state exists for a group.
+    pub fn has_group(&self, group_id: &str) -> bool {
+        self.groups
+            .read()
+            .map(|g| g.contains_key(group_id))
+            .unwrap_or(false)
+    }
 }

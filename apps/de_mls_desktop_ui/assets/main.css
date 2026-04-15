@@ -260,7 +260,7 @@ button.mini {
 
 .layout {
     display: grid;
-    grid-template-columns: 280px 1fr 500px;
+    grid-template-columns: 240px 1fr 340px 260px;
     gap: 12px;
 }
 
@@ -661,4 +661,97 @@ button.mini {
     gap: 8px;
     justify-content: flex-end;
     margin-top: 6px;
+}
+
+/* ── Members Panel ── */
+
+.panel.members {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.panel.members .member-table {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.panel.members .member-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 8px;
+    align-items: center;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.03);
+    font-size: 12px;
+}
+
+.panel.members .member-row.header {
+    background: none;
+    font-weight: 700;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    padding-bottom: 4px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.panel.members .col-addr {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.panel.members .col-role {
+    text-align: center;
+}
+
+.panel.members .col-score {
+    text-align: right;
+    min-width: 32px;
+}
+
+.panel.members .role-badge {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+
+.panel.members .role-badge.epoch {
+    background: rgba(0, 178, 255, 0.15);
+    color: var(--primary);
+}
+
+.panel.members .role-badge.backup {
+    background: rgba(0, 178, 255, 0.08);
+    color: var(--primary);
+    opacity: 0.8;
+}
+
+.panel.members .role-badge.steward {
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text);
+}
+
+.panel.members .role-badge.member {
+    background: none;
+    color: var(--muted);
+}
+
+.panel.members .score {
+    color: var(--text);
+}
+
+.panel.members .score.warn {
+    color: var(--warn);
+    font-weight: 600;
+}
+
+.panel.members .score.bad {
+    color: var(--bad);
+    font-weight: 600;
 }

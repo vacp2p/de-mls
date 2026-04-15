@@ -40,6 +40,14 @@ pub fn convert_group_request_to_display(request: Vec<u8>) -> (String, String) {
             .as_ref()
             .map(|e| format_wallet_address(&e.target_member_id))
             .unwrap_or_else(|| "unknown".to_string()),
+        Some(group_update_request::Payload::StewardElection(se)) => {
+            let stewards: Vec<String> = se
+                .proposed_stewards
+                .iter()
+                .map(|s| format_wallet_address(s))
+                .collect();
+            format!("epoch {} | {}", se.election_epoch, stewards.join(", "))
+        }
         _ => "Invalid request".to_string(),
     };
     (action, target)
@@ -59,6 +67,14 @@ pub fn get_identity_from_group_update_request(req: GroupUpdateRequest) -> String
             .as_ref()
             .map(|e| format_wallet_address(&e.target_member_id))
             .unwrap_or_else(|| "unknown".to_string()),
+        Some(group_update_request::Payload::StewardElection(se)) => {
+            let stewards: Vec<String> = se
+                .proposed_stewards
+                .iter()
+                .map(|s| format_wallet_address(s))
+                .collect();
+            format!("epoch {} | {}", se.election_epoch, stewards.join(", "))
+        }
         _ => "unknown".to_string(),
     }
 }

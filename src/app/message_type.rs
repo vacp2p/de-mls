@@ -14,6 +14,7 @@ pub mod message_types {
     pub const USER_VOTE: &str = "UserVote";
     pub const PROPOSAL_ADDED: &str = "ProposalAdded";
     pub const COMMIT_CANDIDATE: &str = "CommitCandidate";
+    pub const STEWARD_LIST_SYNC: &str = "StewardListSync";
     pub const UNKNOWN: &str = "Unknown";
 }
 
@@ -34,6 +35,7 @@ impl MessageType for app_message::Payload {
             app_message::Payload::UserVote(_) => USER_VOTE,
             app_message::Payload::ProposalAdded(_) => PROPOSAL_ADDED,
             app_message::Payload::CommitCandidate(_) => COMMIT_CANDIDATE,
+            app_message::Payload::StewardListSync(_) => STEWARD_LIST_SYNC,
         }
     }
 }
@@ -54,6 +56,7 @@ impl MessageType for GroupUpdateRequest {
                     _ => "Emergency: Unknown Violation",
                 })
                 .unwrap_or("Emergency: Unknown Violation"),
+            Some(group_update_request::Payload::StewardElection(_)) => "Steward Election",
             _ => "Unknown",
         }
     }

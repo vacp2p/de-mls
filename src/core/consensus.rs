@@ -1,7 +1,7 @@
 //! Pure consensus result application.
 //!
 //! This module contains only [`apply_consensus_result`], which updates a
-//! [`GroupHandle`]'s proposal state based on a consensus outcome.
+//! [`Group`]'s proposal state based on a consensus outcome.
 //! It has no I/O, no service calls, and no event callbacks — it is a pure,
 //! synchronous state transition.
 //!
@@ -12,10 +12,11 @@
 use prost::Message;
 use tracing::info;
 
-use crate::core::peer_scoring::{ConsensusApplyResult, ScoreEvent, ScoreOp};
-use crate::core::{CoreError, GroupHandle};
+use crate::core::peer_scoring::{ConsensusApplyResult, ElectionOutcome, ScoreEvent, ScoreOp};
+use crate::core::{CoreError, Group};
 use crate::protos::de_mls::messages::v1::{
-    GroupUpdateRequest, RemoveMember, ViolationEvidence, ViolationType, group_update_request,
+    GroupUpdateRequest, RemoveMember, StewardElectionProposal, ViolationEvidence, ViolationType,
+    group_update_request,
 };
 
 /// Map a proto `ViolationType` to the corresponding target penalty `ScoreEvent`.
@@ -64,6 +65,14 @@ fn extract_emergency_evidence(req: &GroupUpdateRequest) -> Option<&ViolationEvid
     }
 }
 
+/// Extract a steward election proposal from a `GroupUpdateRequest`, if present.
+fn extract_election_proposal(req: &GroupUpdateRequest) -> Option<&StewardElectionProposal> {
+    match &req.payload {
+        Some(group_update_request::Payload::StewardElection(se)) => Some(se),
+        _ => None,
+    }
+}
+
 /// Check whether evidence is a `SCORE_BELOW_THRESHOLD` violation.
 fn is_score_below_threshold(evidence: &ViolationEvidence) -> bool {
     ViolationType::try_from(evidence.violation_type) == Ok(ViolationType::ScoreBelowThreshold)
@@ -78,13 +87,13 @@ fn removal_request_for(evidence: &ViolationEvidence) -> GroupUpdateRequest {
     }
 }
 
-/// Apply a consensus result to the group handle (pure, synchronous).
+/// Apply a consensus result to the group (pure, synchronous).
 ///
-/// Determines ownership from the handle and updates proposal state:
+/// Determines ownership from the group and updates proposal state:
 /// - **Approved + owner** → move to approved queue; if emergency, remove and score
 /// - **Approved + non-owner** → insert into approved queue; if emergency, score only
 /// - **Rejected + owner** → remove from voting queue; if emergency, score creator
-/// - **Rejected + non-owner** → no handle mutation; if emergency, score creator
+/// - **Rejected + non-owner** → no group mutation; if emergency, score creator
 ///
 /// `payload` is the serialized `GroupUpdateRequest` fetched from the consensus service.
 /// Both owner and non-owner paths decode it to extract emergency evidence.
@@ -92,43 +101,76 @@ fn removal_request_for(evidence: &ViolationEvidence) -> GroupUpdateRequest {
 /// Returns a [`ConsensusApplyResult`] containing score ops (0, 1, or 2) that the
 /// application layer should feed into a [`PeerScoringService`](crate::app::PeerScoringService).
 pub fn apply_consensus_result(
-    handle: &mut GroupHandle,
+    group: &mut Group,
     proposal_id: u32,
     approved: bool,
     payload: &[u8],
 ) -> Result<ConsensusApplyResult, CoreError> {
-    let is_owner = handle.is_owner_of_proposal(proposal_id);
+    let is_owner = group.is_owner_of_proposal(proposal_id);
     let request = GroupUpdateRequest::decode(payload)?;
     let evidence = extract_emergency_evidence(&request).cloned();
+    let election = extract_election_proposal(&request).cloned();
     let is_emergency = evidence.is_some();
+    let is_election = election.is_some();
+
+    // ── Election proposals: no MLS operation, no score ops ──
+    if is_election {
+        if approved {
+            if is_owner {
+                // Move from voting to approved, then immediately remove (no MLS op).
+                group.mark_proposal_as_approved(proposal_id);
+                group.remove_approved_proposal(proposal_id);
+            }
+            // Non-owner: nothing to store — election proposals don't produce MLS ops.
+            let election = election.unwrap();
+            info!(
+                "Steward election proposal {proposal_id} ACCEPTED: \
+                 election_epoch={}, stewards={}",
+                election.election_epoch,
+                election.proposed_stewards.len()
+            );
+            return Ok(ConsensusApplyResult::with_election(ElectionOutcome {
+                proposed_stewards: election.proposed_stewards,
+                election_epoch: election.election_epoch,
+            }));
+        } else {
+            if is_owner {
+                group.mark_proposal_as_rejected(proposal_id);
+            }
+            info!("Steward election proposal {proposal_id} REJECTED");
+            return Ok(ConsensusApplyResult::empty());
+        }
+    }
+
+    // ── Emergency and regular proposals ──
 
     // Should the approved ECP transform into a RemoveMember?
     let transforms_to_removal =
         approved && is_emergency && evidence.as_ref().is_some_and(is_score_below_threshold);
 
-    // Mutate handle state.
+    // Mutate group state.
     if approved {
         if is_owner {
-            handle.mark_proposal_as_approved(proposal_id);
+            group.mark_proposal_as_approved(proposal_id);
             if transforms_to_removal {
                 // Replace ECP with RemoveMember in approved queue (reuse proposal_id).
                 let removal = removal_request_for(evidence.as_ref().unwrap());
-                handle.remove_approved_proposal(proposal_id);
-                handle.insert_approved_proposal(proposal_id, removal);
+                group.remove_approved_proposal(proposal_id);
+                group.insert_approved_proposal(proposal_id, removal);
             } else if is_emergency {
                 // Other emergencies don't produce MLS operations.
-                handle.remove_approved_proposal(proposal_id);
+                group.remove_approved_proposal(proposal_id);
             }
         } else if transforms_to_removal {
             // Non-owner: insert RemoveMember directly (the ECP was never stored).
             let removal = removal_request_for(evidence.as_ref().unwrap());
-            handle.insert_approved_proposal(proposal_id, removal);
+            group.insert_approved_proposal(proposal_id, removal);
         } else if !is_emergency {
             // Regular proposal: add to approved queue for the next commit.
-            handle.insert_approved_proposal(proposal_id, request);
+            group.insert_approved_proposal(proposal_id, request);
         }
     } else if is_owner {
-        handle.mark_proposal_as_rejected(proposal_id);
+        group.mark_proposal_as_rejected(proposal_id);
     }
 
     // Produce score ops from evidence.

@@ -30,11 +30,11 @@ pub enum CoreError {
     #[error("JSON error: {0}")]
     JsonError(#[from] serde_json::Error),
 
-    /// MLS group is not initialized for this handle.
+    /// MLS group is not initialized for this group.
     #[error("MLS group not initialized")]
     MlsGroupNotInitialized,
 
-    /// Steward is not set for this group handle.
+    /// Steward is not set for this group.
     #[error("Steward not set")]
     StewardNotSet,
 
@@ -48,24 +48,20 @@ pub enum CoreError {
     #[error("Invalid subtopic: {0}")]
     InvalidSubtopic(String),
 
-    /// Emergency criteria proposals found in approved queue during batch creation.
-    /// This indicates a bug: emergency proposals should be removed by
-    /// apply_consensus_result before create_batch_proposals is called.
+    #[error("Empty members list")]
+    EmptyMembersList,
+
+    #[error("Invalid config size")]
+    InvalidConfigSize,
+
+    /// Non-MLS proposals (emergency criteria or steward election) found in approved
+    /// queue during batch creation. These proposals should be removed by
+    /// `apply_consensus_result` before `create_batch_proposals` is called.
     #[error(
-        "Emergency criteria proposals found in approved queue (ids: {proposal_ids:?}). \
+        "Non-MLS proposals found in approved queue (ids: {proposal_ids:?}). \
          They should have been removed by apply_consensus_result."
     )]
-    UnexpectedEmergencyProposals { proposal_ids: Vec<u32> },
-
-    /// The consensus outcome does not match the handle's ownership state.
-    /// For example, `ApprovedOwner` was passed but the handle does not own the proposal,
-    /// or `Approved { payload }` was passed but the handle does own it.
-    #[error("Invalid consensus outcome: {0}")]
-    InvalidConsensusOutcome(String),
-
-    /// The proposal ID was not found in the handle's voting or approved proposals.
-    #[error("Proposal not found: {0}")]
-    ProposalNotFound(u32),
+    UnexpectedNonMlsProposals { proposal_ids: Vec<u32> },
 }
 
 impl From<mls_crypto::MlsError> for CoreError {

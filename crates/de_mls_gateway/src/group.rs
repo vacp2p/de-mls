@@ -2,11 +2,11 @@ use hex::ToHex;
 
 use de_mls::mls_crypto::format_wallet_address;
 use de_mls::{
-    app::{FreezeTimeoutStatus, IntervalScheduler, StewardScheduler, StewardSchedulerConfig},
+    app::FreezeTimeoutStatus,
     ds::WakuDeliveryService,
     protos::de_mls::messages::v1::{BanRequest, group_update_request},
 };
-use de_mls_ui_protocol::v1::MemberInfo;
+use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
 
 use crate::{Gateway, forwarder::push_consensus_state};
 
@@ -21,57 +21,11 @@ impl Gateway<WakuDeliveryService> {
             .await?;
         core.topics.add_many(&group_name).await;
 
+        // Unified polling loop — stewards create commit candidates
+        // automatically via check_member_freeze when the inactivity timer fires.
         let user_clone = user_ref.clone();
         let evt_tx = self.evt_tx.clone();
-        tokio::spawn(async move {
-            let mut scheduler = IntervalScheduler::new(StewardSchedulerConfig::default());
-            loop {
-                scheduler.next_tick().await;
-                let epoch_result = user_clone
-                    .write()
-                    .await
-                    .start_steward_epoch(&group_name)
-                    .await;
-
-                match epoch_result {
-                    Ok(()) => loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        match user_clone
-                            .read()
-                            .await
-                            .check_freeze_timeout(&group_name)
-                            .await
-                        {
-                            FreezeTimeoutStatus::StillFreezing => continue,
-                            FreezeTimeoutStatus::NotFreezing | FreezeTimeoutStatus::Applied => {
-                                break;
-                            }
-                            FreezeTimeoutStatus::TimedOut { has_proposals } => {
-                                if has_proposals {
-                                    tracing::warn!(
-                                        "Steward commit timeout for group {group_name:?} \
-                                             with pending proposals (steward fault)"
-                                    );
-                                }
-                                break;
-                            }
-                        }
-                    },
-                    Err(e) => {
-                        if e.is_fatal() {
-                            tracing::warn!(
-                                "Steward epoch loop exiting for group {group_name:?}: {e}"
-                            );
-                            break;
-                        }
-                        tracing::warn!(
-                            "Steward epoch failed for group {group_name:?} (will retry): {e}"
-                        );
-                    }
-                }
-                push_consensus_state(&user_clone, &evt_tx, &group_name).await;
-            }
-        });
+        tokio::spawn(Self::group_polling_loop(user_clone, evt_tx, group_name));
         Ok(())
     }
 
@@ -91,6 +45,7 @@ impl Gateway<WakuDeliveryService> {
         // Phase 2 (Working): Wait until epoch boundaries and check for Waiting transition
         let user_clone = user_ref.clone();
         let group_name_clone = group_name.clone();
+        let evt_tx_clone = self.evt_tx.clone();
         tokio::spawn(async move {
             // Phase 1: Wait for join
             loop {
@@ -121,54 +76,66 @@ impl Gateway<WakuDeliveryService> {
 
             tracing::info!("Member joined group {group_name_clone:?}");
 
-            // Phase 2: Unified polling loop
-            // Both candidate-driven (Path A) and inactivity-driven (Path B) flows
-            // converge here. The state machine transitions are triggered by:
-            //   Path A: CandidateBuffered → handle_process_result → Freezing
-            //   Path B: start_member_epoch → check_steward_inactivity → Freezing
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                match user_clone
-                    .read()
-                    .await
-                    .check_freeze_timeout(&group_name_clone)
-                    .await
-                {
-                    FreezeTimeoutStatus::NotFreezing => {
-                        // Not freezing — check for steward inactivity (Path B)
-                        match user_clone
-                            .read()
-                            .await
-                            .start_member_epoch(&group_name_clone)
-                            .await
-                        {
-                            Ok(true) => { /* entered Freezing via inactivity */ }
-                            Ok(false) => {}
-                            Err(e) => {
-                                if e.is_fatal() {
-                                    tracing::warn!(
-                                        "Member epoch loop exiting for group {group_name_clone:?}: {e}"
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    FreezeTimeoutStatus::StillFreezing => continue,
-                    FreezeTimeoutStatus::Applied => {}
-                    FreezeTimeoutStatus::TimedOut { has_proposals } => {
-                        if has_proposals {
-                            tracing::warn!(
-                                "Steward commit timeout for group {group_name_clone:?} \
-                                 with pending proposals — emergency vote initiated"
-                            );
-                        }
-                    }
-                }
-            }
+            // Phase 2: same unified polling loop as creator
+            Self::group_polling_loop(user_clone, evt_tx_clone, group_name_clone).await;
         });
 
         Ok(())
+    }
+
+    /// Unified polling loop for any group member (creator or joiner).
+    ///
+    /// Handles freeze status polling, inactivity detection, and commit candidate
+    /// creation for stewards. All members run the same loop — steward-specific
+    /// behavior is triggered inside `check_member_freeze` when `is_steward()` is true.
+    async fn group_polling_loop(
+        user: UserRef,
+        evt_tx: futures::channel::mpsc::UnboundedSender<AppEvent>,
+        group_name: String,
+    ) {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            match user.read().await.poll_freeze_status(&group_name).await {
+                FreezeTimeoutStatus::NotFreezing => {
+                    match user.read().await.check_member_freeze(&group_name).await {
+                        Ok(true) => { /* entered Freezing (+ created candidate if steward) */ }
+                        Ok(false) => {}
+                        Err(e) => {
+                            if e.is_fatal() {
+                                tracing::warn!(
+                                    "Polling loop exiting for group {group_name:?}: {e}"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+                FreezeTimeoutStatus::StillFreezing => {
+                    if let Ok((received, expected)) = user
+                        .read()
+                        .await
+                        .get_freeze_candidate_count(&group_name)
+                        .await
+                    {
+                        let _ = evt_tx.unbounded_send(AppEvent::FreezeCandidates {
+                            group_id: group_name.clone(),
+                            received,
+                            expected,
+                        });
+                    }
+                    continue;
+                }
+                FreezeTimeoutStatus::Applied => {}
+                FreezeTimeoutStatus::TimedOut { has_proposals } => {
+                    if has_proposals {
+                        tracing::warn!(
+                            "Commit timeout for group {group_name:?} \
+                             with pending proposals — emergency vote initiated"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     pub async fn send_message(&self, group_name: String, message: String) -> anyhow::Result<()> {
@@ -286,6 +253,17 @@ impl Gateway<WakuDeliveryService> {
                     };
                     display_proposals.push((label, target));
                 }
+                Some(group_update_request::Payload::StewardElection(se)) => {
+                    let stewards: Vec<String> = se
+                        .proposed_stewards
+                        .iter()
+                        .map(|s| format_wallet_address(s))
+                        .collect();
+                    display_proposals.push((
+                        format!("Steward Election (epoch {})", se.election_epoch),
+                        stewards.join(", "),
+                    ));
+                }
                 None => return Err(anyhow::anyhow!("message")),
             }
         }
@@ -297,17 +275,26 @@ impl Gateway<WakuDeliveryService> {
         let user = user_ref.read().await;
         let addresses = user.get_group_members(&group_name).await?;
         let scores = user.get_member_scores(&group_name);
+        let roles = user.get_member_roles(&group_name).await.unwrap_or_default();
 
         let members = addresses
             .into_iter()
             .map(|address| {
-                // Look up score by matching formatted address against raw member bytes
                 let score = scores
                     .iter()
                     .find(|(raw_id, _)| format_wallet_address(raw_id.as_slice()) == address)
                     .map(|(_, s)| *s)
                     .unwrap_or(100);
-                MemberInfo { address, score }
+                let role = roles
+                    .iter()
+                    .find(|(raw_id, _)| format_wallet_address(raw_id.as_slice()) == address)
+                    .map(|(_, r)| r.clone())
+                    .unwrap_or_else(|| "member".to_string());
+                MemberInfo {
+                    address,
+                    score,
+                    role,
+                }
             })
             .collect();
         Ok(members)
@@ -347,6 +334,12 @@ impl Gateway<WakuDeliveryService> {
                             ),
                         };
                         display_batch.push((label, target));
+                    }
+                    Some(group_update_request::Payload::StewardElection(se)) => {
+                        display_batch.push((
+                            "Steward Election".to_string(),
+                            format!("epoch {}", se.election_epoch),
+                        ));
                     }
                     None => {}
                 }

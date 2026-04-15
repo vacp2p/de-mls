@@ -60,6 +60,8 @@ struct ConsensusState {
     epoch_history: Vec<Vec<(String, String)>>,
     /// Caches proposal content so we can correlate with ProposalDecided events.
     proposal_cache: HashMap<u32, (String, String)>,
+    /// Freeze round candidate progress: (received, expected).
+    freeze_candidates: (usize, usize),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -305,7 +307,13 @@ fn Home() -> Element {
                     }
                     Some(AppEvent::GroupStateChanged { group_id, state }) => {
                         if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
-                            cons.write().group_state = state.clone();
+                            {
+                                let mut c = cons.write();
+                                c.group_state = state.clone();
+                                if state != "Freezing" {
+                                    c.freeze_candidates = (0, 0);
+                                }
+                            }
                             // Refresh proposals and member count on every transition to Working
                             // (clears stale approved queue after a commit is applied).
                             if state == "Working" {
@@ -334,6 +342,15 @@ fn Home() -> Element {
                     Some(AppEvent::GroupMembers { group_id, members }) => {
                         if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
                             chat.write().members = members;
+                        }
+                    }
+                    Some(AppEvent::FreezeCandidates {
+                        group_id,
+                        received,
+                        expected,
+                    }) => {
+                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
+                            cons.write().freeze_candidates = (received, expected);
                         }
                     }
                     Some(AppEvent::EpochHistory { group_id, epochs }) => {
@@ -453,6 +470,7 @@ fn Home() -> Element {
                 GroupListSection {}
                 ChatSection {}
                 ConsensusSection {}
+                MembersSection {}
             }
         }
     }
@@ -1055,9 +1073,12 @@ fn ConsensusSection() -> Element {
                                     }
                                 }
                             }
-                            "Freezing" => rsx! {
-                                div { class: "state-context warn",
-                                    span { "⏳ Collecting commit candidates..." }
+                            "Freezing" => {
+                                let (received, expected) = cons.read().freeze_candidates;
+                                rsx! {
+                                    div { class: "state-context warn",
+                                        span { "⏳ Collecting commit candidates: {received}/{expected}" }
+                                    }
                                 }
                             },
                             "Selection" => rsx! {
@@ -1091,13 +1112,10 @@ fn ConsensusSection() -> Element {
                     if let Some((proposal_id, action, id)) = pending_display {
                         {
                             let is_emergency = action.starts_with("Emergency: ");
-                            let violation_type = if is_emergency {
-                                action.strip_prefix("Emergency: ").unwrap_or("").to_string()
-                            } else {
-                                String::new()
-                            };
+                            let is_election = action.starts_with("Steward Election");
                             let short_id = fmt_addr(&id);
                             if is_emergency {
+                                let violation_type = action.strip_prefix("Emergency: ").unwrap_or("").to_string();
                                 rsx! {
                                     div { class: "proposals-window emergency",
                                         div { class: "emergency-header",
@@ -1110,6 +1128,18 @@ fn ConsensusSection() -> Element {
                                         div { class: "proposal-item",
                                             span { class: "action", "Accused steward:" }
                                             span { class: "value", "{short_id}" }
+                                        }
+                                    }
+                                }
+                            } else if is_election {
+                                rsx! {
+                                    div { class: "proposals-window",
+                                        div { class: "proposal-item proposal-id",
+                                            span { class: "action", "Steward Election #{proposal_id}" }
+                                        }
+                                        div { class: "proposal-item",
+                                            span { class: "action", "Proposed stewards:" }
+                                            span { class: "value", "{id}" }
                                         }
                                     }
                                 }
@@ -1201,6 +1231,67 @@ fn ConsensusSection() -> Element {
                 }
             } else {
                 div { class: "hint", "Open a group to see proposals & voting." }
+            }
+        }
+    }
+}
+
+// ─────────────────────────── Members Panel ───────────────────────────
+
+fn MembersSection() -> Element {
+    let chat = use_context::<Signal<ChatState>>();
+    let opened = chat.read().opened_group.clone();
+    let members_snapshot = chat.read().members.clone();
+    let removal_threshold = 0_i64; // matches ScoringConfig default
+
+    rsx! {
+        div { class: "panel members",
+            h2 { "Members" }
+            if opened.is_some() {
+                if members_snapshot.is_empty() {
+                    div { class: "no-data", "No members loaded." }
+                } else {
+                    div { class: "member-table",
+                        div { class: "member-row header",
+                            span { class: "col-addr", "Address" }
+                            span { class: "col-role", "Role" }
+                            span { class: "col-score", "Score" }
+                        }
+                        for member in members_snapshot.iter() {
+                            {
+                                let role_class = match member.role.as_str() {
+                                    "epoch_steward" => "role-badge epoch",
+                                    "backup_steward" => "role-badge backup",
+                                    "steward" => "role-badge steward",
+                                    _ => "role-badge member",
+                                };
+                                let role_label = match member.role.as_str() {
+                                    "epoch_steward" => "Epoch Steward",
+                                    "backup_steward" => "Backup Steward",
+                                    "steward" => "Steward",
+                                    _ => "Member",
+                                };
+                                let score_class = if member.score <= removal_threshold {
+                                    "score bad"
+                                } else if member.score <= removal_threshold + 30 {
+                                    "score warn"
+                                } else {
+                                    "score"
+                                };
+                                let short = fmt_addr(&member.address);
+                                rsx! {
+                                    div { class: "member-row",
+                                        span { class: "col-addr mono", "{short}" }
+                                        span { class: "col-role {role_class}", "{role_label}" }
+                                        span { class: "col-score {score_class}", "{member.score}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                div { class: "hint", "Open a group to see members." }
             }
         }
     }

@@ -4,7 +4,7 @@ use alloy::signers::local::LocalSignerError;
 use hashgraph_like_consensus::error::ConsensusError;
 
 use crate::core::{CallbackError, CoreError};
-use crate::mls_crypto::IdentityError;
+use crate::mls_crypto::{IdentityError, MlsError};
 
 /// Errors from User operations.
 #[derive(Debug, thiserror::Error)]
@@ -33,9 +33,6 @@ pub enum UserError {
     #[error("Core error: {0}")]
     Core(#[from] CoreError),
 
-    #[error("State machine error: {0}")]
-    StateMachine(#[from] super::state_machine::StateMachineError),
-
     #[error("Consensus error: {0}")]
     Consensus(#[from] ConsensusError),
 
@@ -50,6 +47,9 @@ pub enum UserError {
 
     #[error("Identity error: {0}")]
     Identity(#[from] IdentityError),
+
+    #[error("MLS error: {0}")]
+    Mls(#[from] MlsError),
 }
 
 impl UserError {

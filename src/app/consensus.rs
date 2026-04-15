@@ -26,7 +26,7 @@ use hashgraph_like_consensus::{
 };
 
 use crate::app::error::UserError;
-use crate::core::{CoreError, DeMlsProvider, GroupEventHandler, GroupHandle, build_message};
+use crate::core::{CoreError, DeMlsProvider, Group, GroupEventHandler, build_message};
 use crate::mls_crypto::{DeMlsStorage, MlsService};
 use crate::protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest, VotePayload};
 
@@ -37,7 +37,7 @@ use crate::protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest, VotePa
 ///
 /// # Returns
 /// `(proposal_id, vote_payload)` — the caller must:
-/// 1. Store ownership via `GroupHandle::store_voting_proposal(proposal_id, request)`
+/// 1. Store ownership via `Group::store_voting_proposal(proposal_id, request)`
 /// 2. Then emit `vote_payload` via `GroupEventHandler::on_app_message`
 ///
 /// The two-step caller contract eliminates a race where a consensus event for
@@ -132,8 +132,7 @@ pub async fn forward_incoming_vote<P: DeMlsProvider>(
 /// - **Non-owner**: calls `cast_vote` and broadcasts just the `Vote`
 #[allow(clippy::too_many_arguments)]
 pub async fn cast_vote<P, SN, S>(
-    handle: &GroupHandle,
-    group_name: &str,
+    group: &Group,
     proposal_id: u32,
     vote: bool,
     consensus: &P::Consensus,
@@ -147,7 +146,8 @@ where
     SN: Signer + Send + Sync,
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
-    let is_owner = handle.is_owner_of_proposal(proposal_id);
+    let group_name = group.group_name();
+    let is_owner = group.is_owner_of_proposal(proposal_id);
     let scope = P::Scope::from(group_name.to_string());
 
     let app_message: AppMessage = if is_owner {
@@ -164,7 +164,7 @@ where
         vote_msg.into()
     };
 
-    let packet = build_message(handle, mls, &app_message, app_id)?;
+    let packet = build_message(group, mls, &app_message, app_id)?;
     handler.on_outbound(group_name, packet).await?;
     Ok(())
 }

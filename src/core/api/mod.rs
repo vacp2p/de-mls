@@ -1,7 +1,7 @@
 //! Core API for MLS group operations.
 //!
 //! This module provides the fundamental building blocks for MLS group management.
-//! All functions operate on [`GroupHandle`] instances for app-level state and
+//! All functions operate on [`Group`] instances for app-level state and
 //! [`MlsService`] for MLS cryptographic operations.
 //!
 //! # Overview
@@ -27,15 +27,15 @@
 use openmls_rust_crypto::MemoryStorage;
 use prost::Message;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use tracing::{info, warn};
 
 use crate::core::{
     ProposalId,
     error::CoreError,
-    group_handle::{BufferedCommitCandidate, GroupHandle},
-    types::ProcessResult,
-    types::invitation_from_bytes,
+    group::{BufferedCommitCandidate, Group},
+    process_result::ProcessResult,
+    process_result::invitation_from_bytes,
 };
 use crate::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
 use crate::mls_crypto::{
@@ -48,24 +48,19 @@ use crate::protos::de_mls::messages::v1::{
     ViolationEvidence, WelcomeMessage, app_message, group_update_request, welcome_message,
 };
 
+mod election;
 mod freeze;
 mod inbound;
 mod lifecycle;
 mod steward;
-mod validation;
 
 #[cfg(test)]
 mod tests;
 
+pub use election::{apply_election_result, validate_election_proposal};
 pub use freeze::{FreezeFinalizeResult, finalize_freeze_round};
 pub use inbound::process_inbound;
 pub use lifecycle::{
     build_key_package_message, build_message, create_group, join_group_from_invite, prepare_to_join,
 };
-pub use steward::{
-    approved_proposals, approved_proposals_count, create_commit_candidate, epoch_history,
-    group_members,
-};
-
-#[cfg(test)]
-pub(crate) use validation::validate_commit_candidate;
+pub use steward::{create_commit_candidate, group_members};

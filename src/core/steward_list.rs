@@ -20,25 +20,58 @@
 
 use sha2::{Digest, Sha256};
 
-/// Configuration for steward list size bounds, set at group creation.
+use crate::core::CoreError;
+
+/// Protocol configuration set at group creation.
+///
+/// Contains steward list size bounds and protocol-level flags that govern
+/// group behavior. Shared across core and app layers.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StewardListConfig {
+pub struct ProtocolConfig {
     /// Minimum steward list size. If total members < sn_min, list size = total members.
     pub sn_min: usize,
     /// Maximum steward list size.
     pub sn_max: usize,
+    /// Whether subset commit candidates are allowed during deterministic selection.
+    pub allow_subset_candidates: bool,
 }
 
-impl StewardListConfig {
+impl Default for ProtocolConfig {
+    fn default() -> Self {
+        Self {
+            sn_min: 1,
+            sn_max: 2,
+            allow_subset_candidates: false,
+        }
+    }
+}
+
+impl ProtocolConfig {
     /// Create a new config with the given bounds.
     ///
-    /// # Panics
+    /// Returns `Err` if `sn_min` is 0 or `sn_min > sn_max`.
+    /// Sets `allow_subset_candidates` to `false` by default.
+    pub fn new(sn_min: usize, sn_max: usize) -> Result<Self, super::error::CoreError> {
+        if sn_min < 1 || sn_min > sn_max {
+            return Err(super::error::CoreError::InvalidConfigSize);
+        }
+        Ok(Self {
+            sn_min,
+            sn_max,
+            allow_subset_candidates: false,
+        })
+    }
+
+    /// Compute the appropriate steward list size for a given member count.
     ///
-    /// Panics if `sn_min` is 0 or `sn_min > sn_max`.
-    pub fn new(sn_min: usize, sn_max: usize) -> Self {
-        assert!(sn_min >= 1, "sn_min must be at least 1");
-        assert!(sn_min <= sn_max, "sn_min must be <= sn_max");
-        Self { sn_min, sn_max }
+    /// RFC §Steward list creation: if total members < sn_min, list size = total members.
+    /// Otherwise, `sn = min(total_members, sn_max)` clamped to at least `sn_min`.
+    pub fn compute_list_size(&self, total_members: usize) -> usize {
+        if total_members < self.sn_min {
+            total_members
+        } else {
+            total_members.min(self.sn_max).max(self.sn_min)
+        }
     }
 
     /// Check if a given list size is valid for this config and member count.
@@ -61,7 +94,7 @@ pub struct StewardList {
     /// Ordered steward identities (sorted by deterministic hash).
     members: Vec<Vec<u8>>,
     /// Configuration bounds.
-    config: StewardListConfig,
+    config: ProtocolConfig,
     /// The epoch at which this steward list became active.
     start_epoch: u64,
 }
@@ -81,14 +114,14 @@ impl StewardList {
         group_id: &[u8],
         member_ids: &[Vec<u8>],
         sn: usize,
-        config: StewardListConfig,
-    ) -> Option<Self> {
+        config: ProtocolConfig,
+    ) -> Result<Self, CoreError> {
         if member_ids.is_empty() {
-            return None;
+            return Err(CoreError::EmptyMembersList);
         }
 
         if !config.is_valid_size(sn, member_ids.len()) {
-            return None;
+            return Err(CoreError::InvalidConfigSize);
         }
 
         let mut scored: Vec<(Vec<u8>, Vec<u8>)> = member_ids
@@ -104,11 +137,20 @@ impl StewardList {
 
         let members: Vec<Vec<u8>> = scored.into_iter().take(sn).map(|(_, id)| id).collect();
 
-        Some(Self {
+        Ok(Self {
             members,
             config,
             start_epoch: election_epoch,
         })
+    }
+
+    /// Check that all stewards in the list are present in the given member set.
+    ///
+    /// Protocol invariant: stewards must be group members.
+    pub fn validate_members(proposed_stewards: &[Vec<u8>], group_members: &[Vec<u8>]) -> bool {
+        proposed_stewards
+            .iter()
+            .all(|s| group_members.iter().any(|m| m == s))
     }
 
     /// Validate that a proposed steward list matches the deterministic generation.
@@ -120,15 +162,12 @@ impl StewardList {
         election_epoch: u64,
         group_id: &[u8],
         member_ids: &[Vec<u8>],
-        config: &StewardListConfig,
-    ) -> bool {
+        config: &ProtocolConfig,
+    ) -> Result<bool, CoreError> {
         let sn = proposed.len();
-        let Some(expected) =
-            StewardList::generate(election_epoch, group_id, member_ids, sn, config.clone())
-        else {
-            return false;
-        };
-        expected.members == proposed
+        let expected =
+            StewardList::generate(election_epoch, group_id, member_ids, sn, config.clone())?;
+        Ok(expected.members == proposed)
     }
 
     /// Get the epoch steward for the given epoch.
@@ -171,11 +210,6 @@ impl StewardList {
         self.members.iter().any(|m| m.as_slice() == member_id)
     }
 
-    /// Check if a member is the epoch steward for the given epoch.
-    pub fn is_epoch_steward(&self, member_id: &[u8], epoch: u64) -> bool {
-        self.epoch_steward(epoch).is_some_and(|s| s == member_id)
-    }
-
     /// Get the ordered steward identities.
     pub fn members(&self) -> &[Vec<u8>] {
         &self.members
@@ -192,18 +226,13 @@ impl StewardList {
     }
 
     /// Get the config.
-    pub fn config(&self) -> &StewardListConfig {
+    pub fn config(&self) -> &ProtocolConfig {
         &self.config
     }
 
     /// Get the start epoch.
     pub fn start_epoch(&self) -> u64 {
         self.start_epoch
-    }
-
-    /// Get the last epoch this list covers (inclusive).
-    pub fn last_epoch(&self) -> u64 {
-        self.start_epoch + self.members.len() as u64 - 1
     }
 }
 
@@ -232,7 +261,7 @@ mod tests {
 
     #[test]
     fn test_config_validation() {
-        let config = StewardListConfig::new(2, 5);
+        let config = ProtocolConfig::new(2, 5).unwrap();
 
         // Normal range
         assert!(config.is_valid_size(3, 10));
@@ -249,37 +278,35 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "sn_min must be at least 1")]
     fn test_config_zero_sn_min() {
-        StewardListConfig::new(0, 5);
+        assert!(ProtocolConfig::new(0, 5).is_err());
     }
 
     #[test]
-    #[should_panic(expected = "sn_min must be <= sn_max")]
     fn test_config_min_exceeds_max() {
-        StewardListConfig::new(5, 3);
+        assert!(ProtocolConfig::new(5, 3).is_err());
     }
 
     #[test]
     fn test_generate_empty_members() {
-        let config = StewardListConfig::new(1, 3);
-        assert!(StewardList::generate(0, b"group1", &[], 1, config).is_none());
+        let config = ProtocolConfig::new(1, 3).unwrap();
+        assert!(StewardList::generate(0, b"group1", &[], 1, config).is_err());
     }
 
     #[test]
     fn test_generate_invalid_sn() {
-        let config = StewardListConfig::new(2, 5);
+        let config = ProtocolConfig::new(2, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
         // sn below sn_min
-        assert!(StewardList::generate(0, b"group1", &mems, 1, config.clone()).is_none());
+        assert!(StewardList::generate(0, b"group1", &mems, 1, config.clone()).is_err());
         // sn above sn_max
-        assert!(StewardList::generate(0, b"group1", &mems, 6, config).is_none());
+        assert!(StewardList::generate(0, b"group1", &mems, 6, config).is_err());
     }
 
     #[test]
     fn test_deterministic_generation() {
-        let config = StewardListConfig::new(2, 5);
+        let config = ProtocolConfig::new(2, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
         let group_id = b"test-group";
 
@@ -293,7 +320,7 @@ mod tests {
     #[test]
     fn test_different_epoch_shuffles() {
         // Use all members so the set is the same; order must differ for at least one epoch.
-        let config = StewardListConfig::new(5, 5);
+        let config = ProtocolConfig::new(5, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
         let base = StewardList::generate(0, b"group", &mems, 5, config.clone()).unwrap();
@@ -306,7 +333,7 @@ mod tests {
 
     #[test]
     fn test_different_group_shuffles() {
-        let config = StewardListConfig::new(5, 5);
+        let config = ProtocolConfig::new(5, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
         let base = StewardList::generate(0, b"group1", &mems, 5, config.clone()).unwrap();
@@ -317,7 +344,7 @@ mod tests {
 
     #[test]
     fn test_member_order_does_not_affect_result() {
-        let config = StewardListConfig::new(2, 5);
+        let config = ProtocolConfig::new(2, 5).unwrap();
         let mems_a = members(&[1, 2, 3, 4, 5]);
         let mems_b = members(&[5, 3, 1, 4, 2]);
 
@@ -329,7 +356,7 @@ mod tests {
 
     #[test]
     fn test_epoch_steward_rotation() {
-        let config = StewardListConfig::new(3, 3);
+        let config = ProtocolConfig::new(3, 3).unwrap();
         let mems = members(&[1, 2, 3]);
 
         let list = StewardList::generate(0, b"group", &mems, 3, config).unwrap();
@@ -345,7 +372,7 @@ mod tests {
 
     #[test]
     fn test_backup_steward() {
-        let config = StewardListConfig::new(3, 3);
+        let config = ProtocolConfig::new(3, 3).unwrap();
         let mems = members(&[1, 2, 3]);
 
         let list = StewardList::generate(0, b"group", &mems, 3, config).unwrap();
@@ -369,12 +396,11 @@ mod tests {
 
     #[test]
     fn test_list_exhaustion() {
-        let config = StewardListConfig::new(2, 3);
+        let config = ProtocolConfig::new(2, 3).unwrap();
         let mems = members(&[1, 2, 3]);
 
         let list = StewardList::generate(5, b"group", &mems, 3, config).unwrap();
         assert_eq!(list.start_epoch(), 5);
-        assert_eq!(list.last_epoch(), 7);
 
         // Epochs 5, 6, 7 are covered
         assert!(!list.is_exhausted(5));
@@ -390,7 +416,7 @@ mod tests {
 
     #[test]
     fn test_exhausted_returns_none() {
-        let config = StewardListConfig::new(2, 2);
+        let config = ProtocolConfig::new(2, 2).unwrap();
         let mems = members(&[1, 2]);
 
         let list = StewardList::generate(0, b"group", &mems, 2, config).unwrap();
@@ -401,40 +427,32 @@ mod tests {
 
     #[test]
     fn test_validate_correct_list() {
-        let config = StewardListConfig::new(2, 5);
+        let config = ProtocolConfig::new(2, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
         let list = StewardList::generate(0, b"group", &mems, 3, config.clone()).unwrap();
-        assert!(StewardList::validate(
-            list.members(),
-            0,
-            b"group",
-            &mems,
-            &config,
-        ));
+        let valid = StewardList::validate(list.members(), 0, b"group", &mems, &config);
+        assert!(valid.is_ok());
+        assert!(valid.unwrap())
     }
 
     #[test]
     fn test_validate_tampered_list() {
-        let config = StewardListConfig::new(2, 5);
+        let config = ProtocolConfig::new(2, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
         let mut list = StewardList::generate(0, b"group", &mems, 3, config.clone()).unwrap();
         // Swap first two members
         list.members.swap(0, 1);
 
-        assert!(!StewardList::validate(
-            list.members(),
-            0,
-            b"group",
-            &mems,
-            &config,
-        ));
+        let valid = StewardList::validate(list.members(), 0, b"group", &mems, &config);
+        assert!(valid.is_ok());
+        assert!(!valid.unwrap())
     }
 
     #[test]
     fn test_validate_wrong_epoch() {
-        let config = StewardListConfig::new(5, 5);
+        let config = ProtocolConfig::new(5, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
         let list = StewardList::generate(0, b"group", &mems, 5, config.clone()).unwrap();
@@ -446,35 +464,27 @@ mod tests {
             })
             .expect("should differ within 100 epochs");
 
-        assert!(!StewardList::validate(
-            list.members(),
-            diff_epoch,
-            b"group",
-            &mems,
-            &config,
-        ));
+        let valid = StewardList::validate(list.members(), diff_epoch, b"group", &mems, &config);
+        assert!(valid.is_ok());
+        assert!(!valid.unwrap());
     }
 
     #[test]
     fn test_validate_wrong_members() {
         // Use full selection so any change in the candidate set changes the output.
-        let config = StewardListConfig::new(5, 5);
+        let config = ProtocolConfig::new(5, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
         let other_mems = members(&[1, 2, 3, 4, 6]); // different member 6
 
         let list = StewardList::generate(0, b"group", &mems, 5, config.clone()).unwrap();
-        assert!(!StewardList::validate(
-            list.members(),
-            0,
-            b"group",
-            &other_mems,
-            &config,
-        ));
+        let valid = StewardList::validate(list.members(), 0, b"group", &other_mems, &config);
+        assert!(valid.is_ok());
+        assert!(!valid.unwrap())
     }
 
     #[test]
     fn test_contains() {
-        let config = StewardListConfig::new(2, 3);
+        let config = ProtocolConfig::new(2, 3).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
         let list = StewardList::generate(0, b"group", &mems, 3, config).unwrap();
@@ -485,22 +495,9 @@ mod tests {
     }
 
     #[test]
-    fn test_is_epoch_steward() {
-        let config = StewardListConfig::new(2, 3);
-        let mems = members(&[1, 2, 3]);
-
-        let list = StewardList::generate(0, b"group", &mems, 3, config).unwrap();
-        let steward_0 = list.epoch_steward(0).unwrap().to_vec();
-
-        assert!(list.is_epoch_steward(&steward_0, 0));
-        // The epoch-0 steward is not necessarily the epoch-1 steward
-        // (unless the list has only 1 member)
-    }
-
-    #[test]
     fn test_below_sn_min_uses_total_members() {
         // sn_min=3 but only 2 members — list size must be 2
-        let config = StewardListConfig::new(3, 5);
+        let config = ProtocolConfig::new(3, 5).unwrap();
         let mems = members(&[1, 2]);
 
         let list = StewardList::generate(0, b"group", &mems, 2, config).unwrap();
@@ -509,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_single_member() {
-        let config = StewardListConfig::new(1, 3);
+        let config = ProtocolConfig::new(1, 3).unwrap();
         let mems = members(&[1]);
 
         let list = StewardList::generate(0, b"group", &mems, 1, config).unwrap();
@@ -525,7 +522,7 @@ mod tests {
 
     #[test]
     fn test_sha256_sorting_is_ascending() {
-        let config = StewardListConfig::new(5, 5);
+        let config = ProtocolConfig::new(5, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
         let list = StewardList::generate(0, b"group", &mems, 5, config).unwrap();

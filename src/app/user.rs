@@ -1,7 +1,7 @@
 //! User struct for managing multiple groups.
 //!
 //! This is the main entry point for the application layer,
-//! managing multiple `GroupHandle`s and coordinating operations.
+//! managing multiple `Group`s and coordinating operations.
 
 use alloy::signers::local::PrivateKeySigner;
 use std::sync::Mutex;
@@ -24,8 +24,8 @@ use crate::app::state_machine::{
     FreezeTimeoutStatus, GroupConfig, GroupState, GroupStateMachine, StateChangeHandler,
 };
 use crate::core::{
-    self, DeMlsProvider, DefaultProvider, FreezeFinalizeResult, GroupEventHandler, GroupHandle,
-    ProcessResult, ScoreEvent, ScoringConfig, create_commit_candidate,
+    self, DeMlsProvider, DefaultProvider, FreezeFinalizeResult, Group, GroupEventHandler,
+    ProcessResult, ProtocolConfig, ScoreEvent, ScoringConfig, StewardList, create_commit_candidate,
 };
 use crate::ds::InboundPacket;
 use crate::mls_crypto::{
@@ -35,15 +35,15 @@ use prost::Message;
 
 use crate::protos::de_mls::messages::v1::{
     AppMessage, BanRequest, ConversationMessage, GroupUpdateRequest, RemoveMember,
-    ViolationEvidence, group_update_request,
+    StewardElectionProposal, StewardListSync, ViolationEvidence, group_update_request,
 };
 
 /// Internal state for a group managed by User.
 struct GroupEntry {
-    handle: GroupHandle,
+    group: Group,
     state_machine: GroupStateMachine,
     /// Per-instance UUID embedded in outbound packets for echo-dedup on pub/sub networks.
-    /// Generated once at group creation/join; lives here rather than in `GroupHandle`
+    /// Generated once at group creation/join; lives here rather than in `Group`
     /// because it is a transport concern, not a protocol concept.
     app_id: Vec<u8>,
 }
@@ -146,21 +146,25 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             return Err(UserError::GroupAlreadyExists);
         }
 
-        let (handle, state_machine) = if is_creation {
-            let handle = core::create_group(group_name, &self.mls_service)?;
-            let state_machine = GroupStateMachine::new_as_steward_with_config(config);
-            (handle, state_machine)
+        let (group, state_machine) = if is_creation {
+            let group = core::create_group(group_name, &self.mls_service, config.protocol.clone())?;
+            let state_machine = GroupStateMachine::new_as_member_with_config(config);
+            (group, state_machine)
         } else {
-            let handle = core::prepare_to_join(group_name);
+            let group = core::prepare_to_join(
+                group_name,
+                self.mls_service.wallet_bytes(),
+                config.protocol.clone(),
+            );
             let state_machine = GroupStateMachine::new_as_pending_join_with_config(config);
-            (handle, state_machine)
+            (group, state_machine)
         };
 
         let initial_state = state_machine.current_state();
         groups.insert(
             group_name.to_string(),
             GroupEntry {
-                handle,
+                group,
                 state_machine,
                 app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
             },
@@ -239,11 +243,27 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         groups.keys().cloned().collect()
     }
 
+    /// Get freeze round candidate count: (received, expected).
+    ///
+    /// `received` is the number of buffered commit candidates.
+    /// `expected` is the steward list size (one candidate per steward).
+    /// Returns `(0, 0)` if not in freeze or no steward list.
+    pub async fn get_freeze_candidate_count(
+        &self,
+        group_name: &str,
+    ) -> Result<(usize, usize), UserError> {
+        let groups = self.groups.read().await;
+        let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+        let received = entry.group.freeze_candidate_count();
+        let expected = entry.group.steward_list().map(|l| l.len()).unwrap_or(0);
+        Ok((received, expected))
+    }
+
     /// Check if the user is steward for a group.
     pub async fn is_steward_for_group(&self, group_name: &str) -> Result<bool, UserError> {
         let groups = self.groups.read().await;
         let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-        Ok(entry.state_machine.is_steward())
+        Ok(entry.group.is_steward())
     }
 
     /// Get the members of a group.
@@ -251,11 +271,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let groups = self.groups.read().await;
         let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
 
-        if !entry.handle.is_mls_initialized() {
+        if !self.mls_service.has_group(entry.group.group_name()) {
             return Ok(Vec::new());
         }
 
-        let members = core::group_members(&entry.handle, &self.mls_service)?;
+        let members = core::group_members(&entry.group, &self.mls_service)?;
         Ok(members
             .into_iter()
             .map(|raw| format_wallet_address(raw.as_slice()).to_string())
@@ -272,11 +292,49 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         self.scoring().score_for(group_name, member_id)
     }
 
+    /// Get the steward role for each member in a group.
+    ///
+    /// Returns `(member_id_bytes, role)` pairs where role is one of:
+    /// "epoch_steward", "backup_steward", "steward", or "member".
+    pub async fn get_member_roles(
+        &self,
+        group_name: &str,
+    ) -> Result<Vec<(Vec<u8>, String)>, UserError> {
+        let groups = self.groups.read().await;
+        let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+        let epoch = self.mls_service.current_epoch(group_name)?;
+        let members = core::group_members(&entry.group, &self.mls_service)?;
+
+        let list = entry.group.steward_list();
+        let roles = members
+            .into_iter()
+            .map(|id| {
+                let role = match list {
+                    Some(l) if !l.is_exhausted(epoch) => {
+                        if l.epoch_steward(epoch).is_some_and(|es| es == id) {
+                            "epoch_steward"
+                        } else if l.backup_steward(epoch).is_some_and(|bs| bs == id) {
+                            "backup_steward"
+                        } else if l.contains(&id) {
+                            "steward"
+                        } else {
+                            "member"
+                        }
+                    }
+                    Some(l) if l.contains(&id) => "steward",
+                    _ => "member",
+                };
+                (id, role.to_string())
+            })
+            .collect();
+        Ok(roles)
+    }
+
     /// Sync the scoring service's member list with the MLS group's actual members.
     ///
     /// Adds any MLS members not yet tracked and removes scored members no longer in MLS.
-    fn sync_scoring_members(&self, group_name: &str, handle: &GroupHandle) {
-        let mls_members = match core::group_members(handle, &self.mls_service) {
+    fn sync_scoring_members(&self, group_name: &str, group: &Group) {
+        let mls_members = match core::group_members(group, &self.mls_service) {
             Ok(m) => m,
             Err(_) => return,
         };
@@ -299,6 +357,150 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
     }
 
+    /// Try to auto-fill the steward list when member count is below `sn_min`.
+    ///
+    /// After any commit that changes membership, the group may have fewer members
+    /// than `sn_min`. Per RFC, when `member_count < sn_min` all members become
+    /// stewards deterministically. This helper checks the condition and regenerates
+    /// the steward list if needed.
+    async fn try_auto_fill_steward_list(&self, group_name: &str) -> Result<(), UserError> {
+        // Phase 1: read lock — gather member list and check sn_min threshold.
+        let (needs_fill, members) = {
+            let groups = self.groups.read().await;
+            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            let members = core::group_members(&entry.group, &self.mls_service)?;
+            let needs = members.len() < entry.group.protocol_config().sn_min;
+            (needs, members)
+        };
+
+        if !needs_fill {
+            return Ok(());
+        }
+
+        // Phase 2: write lock — generate and set new list.
+        let epoch = self.mls_service.current_epoch(group_name)?;
+        {
+            let mut groups = self.groups.write().await;
+            let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
+            let sn = entry
+                .group
+                .protocol_config()
+                .compute_list_size(members.len());
+            entry
+                .group
+                .generate_and_set_steward_list(epoch, &members, sn)?;
+        }
+
+        Ok(())
+    }
+
+    /// Check if the steward list is exhausted and initiate an election if needed.
+    ///
+    /// Called after epoch advance. If the list is exhausted for the current epoch,
+    /// generates a deterministic proposed steward list and submits an election
+    /// proposal for consensus.
+    async fn try_initiate_steward_election(&self, group_name: &str) -> Result<(), UserError> {
+        let (members, election_epoch, config) = {
+            let groups = self.groups.read().await;
+            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            let epoch = self.mls_service.current_epoch(group_name)?;
+            if !entry.group.is_steward_list_exhausted(epoch) {
+                return Ok(());
+            }
+            let members = core::group_members(&entry.group, &self.mls_service)?;
+            let config = entry.group.protocol_config().clone();
+            (members, epoch, config)
+        };
+
+        // Generate the proposed list deterministically
+        let sn = config.compute_list_size(members.len());
+        let proposed_list = crate::core::StewardList::generate(
+            election_epoch,
+            group_name.as_bytes(),
+            &members,
+            sn,
+            config,
+        )?;
+
+        let request = GroupUpdateRequest {
+            payload: Some(group_update_request::Payload::StewardElection(
+                StewardElectionProposal {
+                    proposed_stewards: proposed_list.members().to_vec(),
+                    election_epoch,
+                },
+            )),
+        };
+
+        info!(
+            "Steward list exhausted at epoch {election_epoch} for group {group_name}, \
+             initiating election with {} stewards",
+            proposed_list.len()
+        );
+
+        self.start_voting_on_request_background(group_name.to_string(), request)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Post-epoch-advance steward list housekeeping.
+    ///
+    /// Runs the post-epoch sequence after any commit that advances the epoch:
+    /// 1. Auto-fill steward list if membership dropped below sn_min
+    /// 2. Initiate steward election if the list is exhausted
+    ///
+    /// Steward flag is derived automatically from `steward_list.contains(self_identity)`.
+    async fn steward_list_housekeeping(&self, group_name: &str) -> Result<(), UserError> {
+        self.try_auto_fill_steward_list(group_name).await?;
+        // Election initiation may legitimately fail (e.g., group state doesn't
+        // allow new proposals yet). Log and continue — don't block the caller.
+        if let Err(e) = self.try_initiate_steward_election(group_name).await {
+            info!("[steward_list_housekeeping] Election initiation deferred: {e}");
+        }
+        Ok(())
+    }
+
+    /// Send the current steward list to the group as an encrypted app message.
+    ///
+    /// Called by the steward after committing an Add that brings new members into
+    /// the group. The new joiner's handle has `steward_list: None` until this
+    /// sync message is received and validated.
+    ///
+    /// Existing members who already have a list will ignore it (idempotent).
+    async fn send_steward_list_sync(&self, group_name: &str) -> Result<(), UserError> {
+        let (sync_msg, app_id) = {
+            let groups = self.groups.read().await;
+            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+
+            let list = match entry.group.steward_list() {
+                Some(l) => l,
+                None => return Ok(()), // no list to sync
+            };
+
+            let sync = StewardListSync {
+                steward_members: list.members().to_vec(),
+                start_epoch: list.start_epoch(),
+                sn_min: list.config().sn_min as u32,
+                sn_max: list.config().sn_max as u32,
+            };
+
+            let app_msg: AppMessage = sync.into();
+            (app_msg, entry.app_id.clone())
+        };
+
+        let packet = {
+            let groups = self.groups.read().await;
+            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            core::build_message(&entry.group, &self.mls_service, &sync_msg, &app_id)?
+        };
+
+        self.handler.on_outbound(group_name, packet).await?;
+
+        info!("[send_steward_list_sync] Sent steward list sync for group {group_name}");
+
+        Ok(())
+    }
+
     /// Check if any members are below the removal threshold and initiate ECPs.
     ///
     /// Only the steward initiates score-based removals. Skips self and any
@@ -308,8 +510,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let groups = self.groups.read().await;
             let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
             (
-                entry.state_machine.is_steward(),
-                entry.handle.current_epoch(),
+                entry.group.is_steward(),
+                self.mls_service.current_epoch(group_name)?,
                 self.mls_service.wallet_bytes(),
             )
         };
@@ -336,7 +538,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             {
                 let groups = self.groups.read().await;
                 if let Some(entry) = groups.get(group_name) {
-                    if entry.state_machine.has_pending_removal_for(&target_id) {
+                    if entry.group.has_pending_removal(&target_id) {
                         continue;
                     }
                 }
@@ -351,9 +553,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             {
                 let mut groups = self.groups.write().await;
                 if let Some(entry) = groups.get_mut(group_name) {
-                    entry
-                        .state_machine
-                        .observe_removal_target(target_id.clone());
+                    entry.group.observe_pending_removal(target_id.clone());
                 }
             }
 
@@ -369,7 +569,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 // Clean up pending target on failure so it can be retried next time.
                 let mut groups = self.groups.write().await;
                 if let Some(entry) = groups.get_mut(group_name) {
-                    entry.state_machine.resolve_removal_target(&target_id);
+                    entry.group.resolve_pending_removal(&target_id);
                 }
                 error!(
                     "Failed to start SCORE_BELOW_THRESHOLD vote for {:?}: {e}",
@@ -388,7 +588,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     ) -> Result<Vec<GroupUpdateRequest>, UserError> {
         let groups = self.groups.read().await;
         let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-        let approved_proposals = core::approved_proposals(&entry.handle);
+        let approved_proposals = entry.group.approved_proposals();
         let display_proposals: Vec<GroupUpdateRequest> = approved_proposals.into_values().collect();
         Ok(display_proposals)
     }
@@ -400,7 +600,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     ) -> Result<Vec<Vec<GroupUpdateRequest>>, UserError> {
         let groups = self.groups.read().await;
         let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-        let history = core::epoch_history(&entry.handle);
+        let history = entry.group.epoch_history();
         Ok(history
             .iter()
             .map(|batch| batch.values().cloned().collect())
@@ -414,7 +614,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let groups = self.groups.read().await;
         let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
         let packet =
-            core::build_key_package_message(&entry.handle, &self.mls_service, &entry.app_id)?;
+            core::build_key_package_message(&entry.group, &self.mls_service, &entry.app_id)?;
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
     }
@@ -440,8 +640,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
         .into();
 
-        let packet =
-            core::build_message(&entry.handle, &self.mls_service, &app_msg, &entry.app_id)?;
+        let packet = core::build_message(&entry.group, &self.mls_service, &app_msg, &entry.app_id)?;
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
     }
@@ -506,17 +705,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         true
     }
 
-    /// Get the time until the next epoch boundary for a group.
-    pub async fn time_until_next_epoch(&self, group_name: &str) -> Option<std::time::Duration> {
-        let groups = self.groups.read().await;
-        let entry = groups.get(group_name)?;
-        entry.state_machine.time_until_next_boundary()
-    }
-
     /// Check if the freeze phase timed out.
     ///
     /// Call this periodically while a group is in `Freezing` state.
-    pub async fn check_freeze_timeout(&self, group_name: &str) -> FreezeTimeoutStatus {
+    pub async fn poll_freeze_status(&self, group_name: &str) -> FreezeTimeoutStatus {
         let has_proposals = {
             let mut groups = self.groups.write().await;
             let entry = match groups.get_mut(group_name) {
@@ -533,7 +725,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             }
 
             entry.state_machine.start_selection();
-            core::approved_proposals_count(&entry.handle) > 0
+            entry.group.approved_proposals_count() > 0
         };
 
         self.state_handler
@@ -546,15 +738,16 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 Some(e) => e,
                 None => return FreezeTimeoutStatus::NotFreezing,
             };
+            let allow_subset = entry.group.allow_subset_candidates();
             match core::finalize_freeze_round(
-                &mut entry.handle,
+                &mut entry.group,
                 &self.mls_service,
-                entry.state_machine.allow_subset_candidates(),
+                allow_subset,
                 &entry.app_id,
             ) {
                 Ok(result) => result,
                 Err(e) => {
-                    error!("[check_freeze_timeout] finalize_freeze_round failed: {e}");
+                    error!("[poll_freeze_status] finalize_freeze_round failed: {e}");
                     FreezeFinalizeResult::NoCandidate
                 }
             }
@@ -563,13 +756,25 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         match finalize_result {
             FreezeFinalizeResult::Applied { result, outbound } => {
                 // Send deferred welcome packets now that commit is merged
+                let has_welcome = outbound
+                    .iter()
+                    .any(|p| p.subtopic == crate::ds::WELCOME_SUBTOPIC);
                 for packet in outbound {
                     if let Err(e) = self.handler.on_outbound(group_name, packet).await {
-                        error!("[check_freeze_timeout] Failed to send deferred welcome: {e}");
+                        error!("[poll_freeze_status] Failed to send deferred welcome: {e}");
                     }
                 }
+
+                // Send steward list sync to new joiners after welcome packets
+                if has_welcome {
+                    if let Err(e) = self.send_steward_list_sync(group_name).await {
+                        error!("[poll_freeze_status] Failed to send steward list sync: {e}");
+                    }
+                }
+
+                // Dispatch result first — this transitions state to Working
                 if let Err(e) = self.handle_process_result(group_name, result).await {
-                    error!("[check_freeze_timeout] Failed to dispatch finalize result: {e}");
+                    error!("[poll_freeze_status] Failed to dispatch finalize result: {e}");
                 }
                 return FreezeTimeoutStatus::Applied;
             }
@@ -582,14 +787,15 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     };
 
                     if has_proposals {
-                        entry.handle.reject_all_approved_proposals();
-                        entry.handle.reject_all_voting_proposals();
+                        entry.group.reject_all_approved_proposals();
+                        entry.group.reject_all_voting_proposals();
                         entry.state_machine.clear_proposal_timer();
                         entry.state_machine.start_reelection();
-                        let violation_epoch = entry.handle.current_epoch();
+                        let violation_epoch =
+                            self.mls_service.current_epoch(group_name).unwrap_or(0);
                         let steward_id = entry
-                            .handle
-                            .steward_identity()
+                            .group
+                            .epoch_steward(violation_epoch)
                             .filter(|id| !id.is_empty())
                             .map(|id| id.to_vec())
                             .unwrap_or_default();
@@ -600,8 +806,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                             steward_id,
                         )
                     } else {
-                        entry.handle.clear_freeze_round();
-                        entry.state_machine.sync_epoch_boundary();
+                        entry.group.clear_freeze_round();
+
                         entry.state_machine.start_working();
                         (GroupState::Working, false, 0, Vec::new())
                     }
@@ -619,7 +825,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                         {
                             Ok(r) => r,
                             Err(e) => {
-                                error!("[check_freeze_timeout] Failed to build ECP: {e}");
+                                error!("[poll_freeze_status] Failed to build ECP: {e}");
                                 return FreezeTimeoutStatus::TimedOut { has_proposals };
                             }
                         };
@@ -627,9 +833,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                         .start_voting_on_request_background(group_name.to_string(), request)
                         .await
                     {
-                        error!(
-                            "[check_freeze_timeout] Failed to start emergency criteria vote: {e}"
-                        );
+                        error!("[poll_freeze_status] Failed to start emergency criteria vote: {e}");
                     }
                 }
             }
@@ -638,77 +842,54 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         FreezeTimeoutStatus::TimedOut { has_proposals }
     }
 
-    /// Start a member epoch check (steward inactivity detection — Path B).
+    /// Check for steward inactivity and transition to Freezing if needed.
     ///
-    /// If the member has approved proposals and the steward hasn't sent a
-    /// candidate within `epoch_duration` of the first approval, transition
-    /// to Freezing so the freeze timeout can detect steward fault.
-    pub async fn start_member_epoch(&self, group_name: &str) -> Result<bool, UserError> {
+    /// If approved proposals exist and the epoch steward hasn't committed
+    /// within `epoch_duration`, transition to Freezing so the freeze timeout
+    /// can detect steward fault. Any member (steward or not) can detect this.
+    pub async fn check_member_freeze(&self, group_name: &str) -> Result<bool, UserError> {
         let mut groups = self.groups.write().await;
         let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
-
-        if entry.state_machine.is_steward() {
-            return Ok(false);
-        }
 
         let state = entry.state_machine.current_state();
         if state == GroupState::PendingJoin || state == GroupState::Leaving {
             return Ok(false);
         }
 
-        let proposal_count = core::approved_proposals_count(&entry.handle);
+        let proposal_count = entry.group.approved_proposals_count();
         let entered_freezing = entry.state_machine.check_steward_inactivity(proposal_count);
         if entered_freezing {
-            entry.handle.ensure_freeze_round();
+            let epoch = self.mls_service.current_epoch(group_name)?;
+            entry.group.ensure_freeze_round(epoch);
+            let is_steward = entry.group.is_steward();
 
             let new_state = entry.state_machine.current_state();
             info!(
-                "[start_member_epoch]: Steward inactivity → {} for group {group_name} \
+                "[check_member_freeze]: Steward inactivity → {} for group {group_name} \
                  ({proposal_count} approved proposals)",
                 new_state
             );
-            drop(groups);
-            self.state_handler
-                .on_state_changed(group_name, new_state.clone())
-                .await;
+
+            // If this member is a steward, create a commit candidate immediately.
+            if is_steward {
+                let messages =
+                    create_commit_candidate(&mut entry.group, &self.mls_service, &entry.app_id)?;
+                drop(groups);
+                self.state_handler
+                    .on_state_changed(group_name, new_state.clone())
+                    .await;
+                for message in messages {
+                    self.handler.on_outbound(group_name, message).await?;
+                }
+            } else {
+                drop(groups);
+                self.state_handler
+                    .on_state_changed(group_name, new_state.clone())
+                    .await;
+            }
         }
 
         Ok(entered_freezing)
-    }
-
-    /// Start a steward epoch.
-    pub async fn start_steward_epoch(&mut self, group_name: &str) -> Result<(), UserError> {
-        let has_proposals = {
-            let groups = self.groups.read().await;
-            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-            core::approved_proposals_count(&entry.handle) > 0
-        };
-
-        if !has_proposals {
-            return Ok(());
-        }
-
-        {
-            let mut groups = self.groups.write().await;
-            let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
-            entry.state_machine.start_steward_epoch()?;
-            entry.handle.ensure_freeze_round();
-        }
-        self.state_handler
-            .on_state_changed(group_name, GroupState::Freezing)
-            .await;
-
-        let messages = {
-            let mut groups = self.groups.write().await;
-            let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
-            create_commit_candidate(&mut entry.handle, &self.mls_service, &entry.app_id)?
-        };
-
-        for message in messages {
-            self.handler.on_outbound(group_name, message).await?;
-        }
-
-        Ok(())
     }
 
     pub async fn start_voting_on_request_background(
@@ -720,7 +901,6 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             upd_request.payload,
             Some(group_update_request::Payload::EmergencyCriteria(_))
         );
-
         let expected_voters = {
             let groups = self.groups.read().await;
             let entry = groups.get(&group_name).ok_or(UserError::GroupNotFound)?;
@@ -737,12 +917,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 _ => {
                     // RFC §"Partial Freeze Semantics": while any emergency criteria proposal
                     // is unresolved, lower-priority proposals MUST NOT be created.
-                    if !is_emergency && entry.state_machine.has_active_emergency_proposal() {
+                    // This blocks both election and commit proposals during active emergency.
+                    if !is_emergency && entry.group.has_active_emergency() {
                         return Err(UserError::PartialFreeze);
                     }
                 }
             }
-            let members = core::group_members(&entry.handle, &self.mls_service)?;
+            let members = core::group_members(&entry.group, &self.mls_service)?;
             members.len() as u32
         };
         let identity_string = self.mls_service.wallet_hex();
@@ -772,12 +953,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     let mut groups = groups.write().await;
                     if let Some(entry) = groups.get_mut(&group_name) {
                         entry
-                            .handle
+                            .group
                             .store_voting_proposal(proposal_id, upd_request);
                         if is_emergency {
-                            entry
-                                .state_machine
-                                .observe_emergency_proposal(proposal_id);
+                            entry.group.observe_emergency(proposal_id);
                         }
                     } else {
                         error!(
@@ -825,13 +1004,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             return Err(UserError::GroupBlocked(state.to_string()));
         }
 
-        let handle = entry.handle.clone();
+        let group = entry.group.clone();
         let app_id = entry.app_id.clone();
         drop(groups);
 
         cast_vote::<P, _, _>(
-            &handle,
-            group_name,
+            &group,
             proposal_id,
             vote,
             &*self.consensus_service,
@@ -867,9 +1045,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     ) {
                         let mut groups = self.groups.write().await;
                         if let Some(entry) = groups.get_mut(group_name) {
-                            entry
-                                .state_machine
-                                .observe_emergency_proposal(proposal.proposal_id);
+                            entry.group.observe_emergency(proposal.proposal_id);
                         }
                     }
                 }
@@ -891,7 +1067,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             ProcessResult::Vote(vote) => {
                 forward_incoming_vote::<P>(group_name, vote, &*self.consensus_service).await?;
             }
-            ProcessResult::GetUpdateRequest(request) => {
+            ProcessResult::MembershipChangeReceived(request) => {
                 self.start_voting_on_request_background(group_name.to_string(), request)
                     .await?;
             }
@@ -909,7 +1085,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 let packet = {
                     let groups = self.groups.read().await;
                     if let Some(entry) = groups.get(&name) {
-                        core::build_message(&entry.handle, &self.mls_service, &msg, &entry.app_id)?
+                        core::build_message(&entry.group, &self.mls_service, &msg, &entry.app_id)?
                     } else {
                         return Ok(());
                     }
@@ -921,7 +1097,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 {
                     let groups = self.groups.read().await;
                     if let Some(entry) = groups.get(&name) {
-                        self.sync_scoring_members(&name, &entry.handle);
+                        self.sync_scoring_members(&name, &entry.group);
                     }
                 }
 
@@ -929,7 +1105,6 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 let state = {
                     let mut groups = self.groups.write().await;
                     if let Some(entry) = groups.get_mut(&name) {
-                        entry.state_machine.sync_epoch_boundary();
                         entry.state_machine.start_working();
                         Some(entry.state_machine.current_state())
                     } else {
@@ -943,16 +1118,17 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             ProcessResult::GroupUpdated => {
                 // TODO(M2): Reward the commit author with SuccessfulCommit once
                 // ProcessResult/FreezeFinalizeResult carries the commit sender identity.
-                // Cannot use steward_identity() — in multi-steward the winner may differ.
+                // In multi-steward mode the winner may differ from the epoch steward.
 
                 // Sync member list in peer scoring (commit may add/remove members)
                 {
                     let groups = self.groups.read().await;
                     if let Some(entry) = groups.get(group_name) {
-                        self.sync_scoring_members(group_name, &entry.handle);
+                        self.sync_scoring_members(group_name, &entry.group);
                     }
                 }
 
+                // Transition to Working BEFORE steward checks (election needs Working state)
                 let transitioned = {
                     let mut groups = self.groups.write().await;
                     if let Some(entry) = groups.get_mut(group_name) {
@@ -962,7 +1138,6 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                             || state == GroupState::Selection
                             || state == GroupState::Reelection
                         {
-                            entry.state_machine.sync_epoch_boundary();
                             entry.state_machine.start_working();
                             true
                         } else {
@@ -972,6 +1147,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                         false
                     }
                 };
+
+                // Now run steward checks (auto-fill, flag sync, election) in Working state
+                self.steward_list_housekeeping(group_name).await?;
 
                 if transitioned {
                     self.state_handler
@@ -995,17 +1173,16 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 )
                 .await?;
             }
-            ProcessResult::CandidateBuffered => {
+            ProcessResult::CommitCandidateReceived => {
                 let transitioned = {
                     let mut groups = self.groups.write().await;
                     if let Some(entry) = groups.get_mut(group_name) {
-                        // Stewards manage their own epoch flow via start_steward_epoch;
-                        // only non-steward members need to enter Freezing on candidate receipt.
-                        if !entry.state_machine.is_steward()
-                            && entry.state_machine.current_state() == GroupState::Working
-                        {
+                        // Enter Freezing on candidate receipt if in Working state.
+                        // The state guard prevents double-entry if already freezing.
+                        if entry.state_machine.current_state() == GroupState::Working {
                             entry.state_machine.start_freezing();
-                            entry.handle.ensure_freeze_round();
+                            let epoch = self.mls_service.current_epoch(group_name).unwrap_or(0);
+                            entry.group.ensure_freeze_round(epoch);
                             true
                         } else {
                             false
@@ -1019,6 +1196,64 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     self.state_handler
                         .on_state_changed(group_name, GroupState::Freezing)
                         .await;
+                }
+            }
+            ProcessResult::StewardListSyncReceived(sync) => {
+                // Phase 1: read lock — check if list needed, fetch members.
+                let members = {
+                    let groups = self.groups.read().await;
+                    let Some(entry) = groups.get(group_name) else {
+                        return Ok(());
+                    };
+                    if entry.group.steward_list().is_some() {
+                        None // Already has list, skip
+                    } else {
+                        Some(core::group_members(&entry.group, &self.mls_service)?)
+                    }
+                };
+
+                let Some(members) = members else {
+                    return Ok(());
+                };
+
+                // Validate: (1) all proposed stewards are current group members,
+                // (2) the list ordering is self-consistent (matches deterministic
+                // generation with the steward members as the candidate pool).
+                // We validate against steward_members, NOT full group, because
+                // the list may have been generated before the joiner existed.
+                let all_present = StewardList::validate_members(&sync.steward_members, &members);
+                let ordering_valid = StewardList::validate(
+                    &sync.steward_members,
+                    sync.start_epoch,
+                    group_name.as_bytes(),
+                    &sync.steward_members,
+                    &ProtocolConfig::new(sync.sn_min as usize, sync.sn_max as usize)
+                        .unwrap_or_default(),
+                )?;
+
+                if all_present && ordering_valid {
+                    // Phase 2: write lock — apply validated list.
+                    let sn = sync.steward_members.len();
+                    {
+                        let mut groups = self.groups.write().await;
+                        if let Some(entry) = groups.get_mut(group_name) {
+                            entry.group.generate_and_set_steward_list(
+                                sync.start_epoch,
+                                &sync.steward_members,
+                                sn,
+                            )?;
+                        }
+                    }
+                    info!(
+                        "[StewardListSyncReceived] Applied steward list for group \
+                         {group_name} (start_epoch={}, len={sn})",
+                        sync.start_epoch,
+                    );
+                } else {
+                    info!(
+                        "[StewardListSyncReceived] Ignoring invalid sync for group \
+                         {group_name} (present={all_present}, ordering={ordering_valid})"
+                    );
                 }
             }
             ProcessResult::Noop => {}
@@ -1050,7 +1285,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 .ok_or(UserError::GroupNotFound)?;
 
             core::process_inbound(
-                &mut entry.handle,
+                &mut entry.group,
                 &packet.payload,
                 &packet.subtopic,
                 &self.mls_service,
@@ -1089,13 +1324,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let mut groups = self.groups.write().await;
             let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
 
-            let approved_before = core::approved_proposals_count(&entry.handle);
+            let approved_before = entry.group.approved_proposals_count();
 
             info!("Consensus reached for proposal {proposal_id}: approved={approved}");
             let result =
-                core::apply_consensus_result(&mut entry.handle, proposal_id, approved, &payload)?;
+                core::apply_consensus_result(&mut entry.group, proposal_id, approved, &payload)?;
 
-            let approved_after = core::approved_proposals_count(&entry.handle);
+            let approved_after = entry.group.approved_proposals_count();
             entry
                 .state_machine
                 .notify_proposal_approved(approved_before, approved_after);
@@ -1103,6 +1338,46 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             result
         };
 
+        // ── Handle election outcome ──
+        if let Some(election) = consensus_apply.election {
+            // Validate the proposed list against the current member set.
+            let (is_valid, _) = {
+                let groups = self.groups.read().await;
+                let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+                let members = core::group_members(&entry.group, &self.mls_service)?;
+                let valid = core::validate_election_proposal(
+                    &entry.group,
+                    &election.proposed_stewards,
+                    election.election_epoch,
+                    &members,
+                )?;
+                (valid, members)
+            };
+
+            if is_valid {
+                {
+                    let mut groups = self.groups.write().await;
+                    let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
+                    core::apply_election_result(
+                        &mut entry.group,
+                        &election.proposed_stewards,
+                        election.election_epoch,
+                    )?;
+                }
+                // Sync steward flag from the new list.
+                info!(
+                    "Steward election applied for group {group_name}: \
+                     epoch={}, stewards={}",
+                    election.election_epoch,
+                    election.proposed_stewards.len()
+                );
+            } else {
+                info!("Steward election proposal rejected (invalid list) for group {group_name}");
+            }
+            return Ok(());
+        }
+
+        // ── Handle emergency score ops ──
         if !consensus_apply.score_ops.is_empty() {
             // Emergency proposal was resolved — apply scores and lift partial freeze.
             {
@@ -1119,9 +1394,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     if let Some(ev) = &ec.evidence {
                         let mut groups = self.groups.write().await;
                         if let Some(entry) = groups.get_mut(group_name) {
-                            entry
-                                .state_machine
-                                .resolve_removal_target(&ev.target_member_id);
+                            entry.group.resolve_pending_removal(&ev.target_member_id);
                         }
                     }
                 }
@@ -1132,7 +1405,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             {
                 let mut groups = self.groups.write().await;
                 if let Some(entry) = groups.get_mut(group_name) {
-                    entry.state_machine.resolve_emergency_proposal(proposal_id);
+                    entry.group.resolve_emergency(proposal_id);
                 }
             }
 

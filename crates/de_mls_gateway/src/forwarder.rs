@@ -45,6 +45,10 @@ pub(crate) async fn push_consensus_state(
                     };
                     Some((label, target))
                 }
+                Some(group_update_request::Payload::StewardElection(se)) => Some((
+                    "Steward Election".to_string(),
+                    format!("epoch {}", se.election_epoch),
+                )),
                 None => None,
             })
             .collect();
@@ -81,6 +85,10 @@ pub(crate) async fn push_consensus_state(
                             };
                             Some((label, target))
                         }
+                        Some(group_update_request::Payload::StewardElection(se)) => Some((
+                            "Steward Election".to_string(),
+                            format!("epoch {}", se.election_epoch),
+                        )),
                         None => None,
                     })
                     .collect()
@@ -108,6 +116,7 @@ pub(crate) async fn push_member_scores(
         Err(_) => return,
     };
     let scores = user.get_member_scores(group_name);
+    let roles = user.get_member_roles(group_name).await.unwrap_or_default();
     let members: Vec<MemberInfo> = addresses
         .into_iter()
         .map(|address| {
@@ -116,12 +125,28 @@ pub(crate) async fn push_member_scores(
                 .find(|(raw_id, _)| format_wallet_address(raw_id.as_slice()) == address)
                 .map(|(_, s)| *s)
                 .unwrap_or(100);
-            MemberInfo { address, score }
+            let role = roles
+                .iter()
+                .find(|(raw_id, _)| format_wallet_address(raw_id.as_slice()) == address)
+                .map(|(_, r)| r.clone())
+                .unwrap_or_else(|| "member".to_string());
+            MemberInfo {
+                address,
+                score,
+                role,
+            }
         })
         .collect();
     let _ = evt_tx.unbounded_send(AppEvent::GroupMembers {
         group_id: group_name.to_string(),
         members,
+    });
+
+    // Also push steward status — it may have changed after election or epoch advance.
+    let is_steward = user.is_steward_for_group(group_name).await.unwrap_or(false);
+    let _ = evt_tx.unbounded_send(AppEvent::StewardStatus {
+        group_id: group_name.to_string(),
+        is_steward,
     });
 }
 
