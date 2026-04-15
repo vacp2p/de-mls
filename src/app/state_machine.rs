@@ -6,48 +6,7 @@ use std::{
 };
 use tracing::info;
 
-/// Default epoch duration (30 seconds).
-const DEFAULT_EPOCH_DURATION: Duration = Duration::from_secs(30);
-use crate::core::ProtocolConfig;
-
-/// Configuration for a group's epoch behavior.
-///
-/// This struct is extensible for future per-group settings.
-#[derive(Debug, Clone)]
-pub struct GroupConfig {
-    /// Duration of each epoch.
-    pub epoch_duration: Duration,
-    /// Duration of the freeze phase before deterministic selection. Defaults to `epoch_duration / 2`.
-    pub freeze_duration: Duration,
-    /// Protocol configuration (steward list bounds and protocol-level flags).
-    pub protocol: ProtocolConfig,
-}
-
-impl Default for GroupConfig {
-    fn default() -> Self {
-        Self {
-            epoch_duration: DEFAULT_EPOCH_DURATION,
-            freeze_duration: DEFAULT_EPOCH_DURATION / 2,
-            protocol: ProtocolConfig::default(),
-        }
-    }
-}
-
-impl GroupConfig {
-    /// Create a new config with custom epoch duration.
-    pub fn with_epoch_duration(epoch_duration: Duration) -> Self {
-        Self {
-            epoch_duration,
-            freeze_duration: epoch_duration / 2,
-            protocol: ProtocolConfig::default(),
-        }
-    }
-
-    /// Effective freeze duration: explicit value or `epoch_duration / 2`.
-    pub fn freeze_duration(&self) -> Duration {
-        self.freeze_duration
-    }
-}
+use crate::app::config::GroupConfig;
 
 /// Trait for handling state machine state changes.
 ///
@@ -287,6 +246,7 @@ impl GroupStateMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::ProtocolConfig;
 
     #[test]
     fn test_state_machine_creation() {
@@ -419,6 +379,7 @@ mod tests {
             epoch_duration: Duration::from_millis(50),
             freeze_duration: Duration::from_millis(25),
             protocol: ProtocolConfig::new(1, 5).unwrap(),
+            ..GroupConfig::default()
         };
         let mut sm = GroupStateMachine::new_as_member_with_config(config);
         // Backdate the first proposal approval to well past epoch_duration
@@ -434,6 +395,7 @@ mod tests {
             epoch_duration: Duration::from_millis(50),
             freeze_duration: Duration::from_millis(25),
             protocol: ProtocolConfig::new(1, 5).unwrap(),
+            ..GroupConfig::default()
         };
         let mut sm = GroupStateMachine::new_as_member_with_config(config);
         sm.phase_timer = Some(Instant::now() - Duration::from_secs(1));

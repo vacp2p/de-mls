@@ -8,7 +8,7 @@ use super::*;
 ///
 /// Returns `Some(ProcessResult::ViolationDetected(...))` if a violation is found,
 /// `None` if all checks pass.
-pub(super) fn validate_commit_candidate(
+pub fn validate_commit_candidate(
     group: &Group,
     local_proposals: &HashMap<ProposalId, GroupUpdateRequest>,
     sender_id: &[u8],
@@ -112,7 +112,7 @@ fn build_deferred_welcome(
 }
 
 /// Compute a SHA-256 hash of the raw commit message bytes.
-pub(super) fn compute_commit_hash(commit_message: &[u8]) -> Vec<u8> {
+pub fn compute_commit_hash(commit_message: &[u8]) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(commit_message);
     hasher.finalize().to_vec()
@@ -122,10 +122,7 @@ pub(super) fn compute_commit_hash(commit_message: &[u8]) -> Vec<u8> {
 ///
 /// This is a cheap check only (deserialize + outer content type), with no
 /// MLS state mutation.
-pub(super) fn has_valid_candidate_wire_kinds<S>(
-    candidate: &CommitCandidate,
-    mls: &MlsService<S>,
-) -> bool
+fn has_valid_candidate_wire_kinds<S>(candidate: &CommitCandidate, mls: &MlsService<S>) -> bool
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
@@ -167,7 +164,7 @@ fn process_result_from_commit_outcome(self_removed: bool) -> ProcessResult {
 /// 3. Shape check: mls_proposals and commit_message must be non-empty.
 /// 4. Kind check: wire-level inspection (Proposal/Commit) with no MLS state mutation.
 /// 5. Buffer as BufferedCommitCandidate.
-pub(super) fn process_commit_candidate<S>(
+pub fn process_commit_candidate<S>(
     group: &mut Group,
     candidate_msg: CommitCandidate,
     mls: &MlsService<S>,

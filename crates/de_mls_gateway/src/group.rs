@@ -8,7 +8,7 @@ use de_mls::{
 };
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
 
-use crate::{Gateway, forwarder::push_consensus_state};
+use crate::{Gateway, UserRef};
 
 impl Gateway<WakuDeliveryService> {
     pub async fn create_group(&self, group_name: String) -> anyhow::Result<()> {
@@ -95,7 +95,17 @@ impl Gateway<WakuDeliveryService> {
     ) {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            match user.read().await.poll_freeze_status(&group_name).await {
+            let freeze_status = match user.read().await.poll_freeze_status(&group_name).await {
+                Ok(status) => status,
+                Err(e) => {
+                    if e.is_fatal() {
+                        tracing::warn!("Polling loop exiting for group {group_name:?}: {e}");
+                        break;
+                    }
+                    continue;
+                }
+            };
+            match freeze_status {
                 FreezeTimeoutStatus::NotFreezing => {
                     match user.read().await.check_member_freeze(&group_name).await {
                         Ok(true) => { /* entered Freezing (+ created candidate if steward) */ }
@@ -288,7 +298,7 @@ impl Gateway<WakuDeliveryService> {
                 let role = roles
                     .iter()
                     .find(|(raw_id, _)| format_wallet_address(raw_id.as_slice()) == address)
-                    .map(|(_, r)| r.clone())
+                    .map(|(_, r)| r.to_string())
                     .unwrap_or_else(|| "member".to_string());
                 MemberInfo {
                     address,

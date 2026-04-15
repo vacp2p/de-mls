@@ -6,8 +6,8 @@
 //! synchronous state transition.
 //!
 //! App-layer helpers that wire consensus events to the UI and transport
-//! (`start_voting`, `cast_vote`, `forward_incoming_proposal`,
-//! `forward_incoming_vote`) live in `crate::app::consensus`.
+//! (`submit_proposal`, `cast_vote`, `forward_incoming_proposal`,
+//! `forward_incoming_vote`) live in `crate::app::consensus_bridge`.
 
 use prost::Message;
 use tracing::info;

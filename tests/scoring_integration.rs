@@ -187,7 +187,7 @@ fn test_scoring_pipeline_create_join_emergency() {
     .unwrap();
     assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
 
-    // Bob's scoring: sync from MLS group members (mirrors User::handle_process_result JoinedGroup)
+    // Bob's scoring: sync from MLS group members (mirrors User::dispatch_inbound_result JoinedGroup)
     let mut bob_scoring = default_scoring_service();
     sync_scoring_members(&mut bob_scoring, group_name, &bob_handle, &bob_mls);
 

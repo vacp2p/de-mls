@@ -125,7 +125,7 @@ pub fn forward_app_message(
             }))
             .map_err(|e| anyhow::anyhow!("error sending chat message: {e}")),
         Some(app_message::Payload::StewardListSync(_)) => {
-            // Steward list sync is handled by the app layer (handle_process_result),
+            // Steward list sync is handled by the app layer (dispatch_inbound_result),
             // not forwarded to the UI. Nothing to display.
             Ok(())
         }

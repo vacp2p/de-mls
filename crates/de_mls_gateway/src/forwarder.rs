@@ -128,7 +128,7 @@ pub(crate) async fn push_member_scores(
             let role = roles
                 .iter()
                 .find(|(raw_id, _)| format_wallet_address(raw_id.as_slice()) == address)
-                .map(|(_, r)| r.clone())
+                .map(|(_, r)| r.to_string())
                 .unwrap_or_else(|| "member".to_string());
             MemberInfo {
                 address,
@@ -154,7 +154,7 @@ impl Gateway<WakuDeliveryService> {
     /// Spawn the consensus event forwarder.
     ///
     /// This handles both UI notification (AppEvent::ProposalDecided) and
-    /// user-side processing (handle_consensus_event internally calls handler).
+    /// user-side processing (apply_consensus_outcome internally calls handler).
     pub(crate) fn spawn_consensus_forwarder(
         &self,
         core: Arc<CoreCtx<WakuDeliveryService>>,
@@ -173,10 +173,10 @@ impl Gateway<WakuDeliveryService> {
                 if let Err(e) = user
                     .write()
                     .await
-                    .handle_consensus_event(&group_name, event)
+                    .apply_consensus_outcome(&group_name, event)
                     .await
                 {
-                    tracing::warn!("handle_consensus_event failed: {e}");
+                    tracing::warn!("apply_consensus_outcome failed: {e}");
                 }
 
                 // Push refreshed approved queue, epoch history, and member scores

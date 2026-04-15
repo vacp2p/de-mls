@@ -120,7 +120,7 @@ async fn do_join(
 ) {
     joiner.send_kp_message(group).await.unwrap();
 
-    // Deliver KP to steward → triggers start_voting_on_request_background (tokio::spawn)
+    // Deliver KP to steward → triggers initiate_proposal (tokio::spawn)
     for p in joiner_h.drain_packets() {
         let _ = steward.process_inbound_packet(to_in(&p)).await;
     }
@@ -149,7 +149,7 @@ async fn do_join(
     settle().await;
 
     // Instead of subscribing to broadcast (unreliable in tests with auto-vote),
-    // poll the consensus service for the result and call handle_consensus_event directly.
+    // poll the consensus service for the result and call apply_consensus_outcome directly.
     {
         use hashgraph_like_consensus::api::ConsensusServiceAPI;
         let scope = group.to_string();
@@ -166,7 +166,7 @@ async fn do_join(
                 all.push(u);
             }
             for u in all.iter_mut() {
-                let _ = u.handle_consensus_event(group, ev.clone()).await;
+                let _ = u.apply_consensus_outcome(group, ev.clone()).await;
             }
             let _ = payload; // suppress unused warning
         }
@@ -177,7 +177,7 @@ async fn do_join(
     tokio::time::sleep(Duration::from_millis(100)).await;
     steward.check_member_freeze(group).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
-    steward.poll_freeze_status(group).await;
+    steward.poll_freeze_status(group).await.unwrap();
 
     // Deliver welcome/commit
     for p in steward_h.drain_packets() {
@@ -198,7 +198,7 @@ async fn approve_ecp(
     cs: &DefaultConsensusService,
 ) {
     submitter
-        .start_voting_on_request_background(group.to_string(), request)
+        .initiate_proposal(group.to_string(), request)
         .await
         .unwrap();
     settle().await;
@@ -239,7 +239,7 @@ async fn approve_ecp(
                 all.push(u);
             }
             for u in all.iter_mut() {
-                let _ = u.handle_consensus_event(group, ev.clone()).await;
+                let _ = u.apply_consensus_outcome(group, ev.clone()).await;
             }
         }
     }
@@ -256,6 +256,7 @@ async fn test_user_layer_score_removal_pipeline() {
         epoch_duration: Duration::from_millis(50),
         freeze_duration: Duration::from_millis(10),
         protocol: ProtocolConfig::new(1, 5).unwrap(),
+        ..GroupConfig::default()
     };
     let cs = Arc::new(DefaultConsensusService::new_with_max_sessions(100));
 
@@ -337,7 +338,7 @@ async fn test_user_layer_score_removal_pipeline() {
     assert_eq!(alice.get_member_score(group, &bob_bytes), Some(0));
 
     // Step 5: Steward should have auto-created SCORE_BELOW_THRESHOLD ECP.
-    // check_and_initiate_score_removals runs inside handle_consensus_event.
+    // check_and_initiate_score_removals runs inside apply_consensus_outcome.
     settle().await;
 
     // Check that the SCORE_BELOW_THRESHOLD ECP was created
@@ -374,6 +375,7 @@ async fn test_ecp_scores_applied_on_all_nodes() {
         epoch_duration: Duration::from_millis(50),
         freeze_duration: Duration::from_millis(10),
         protocol: ProtocolConfig::new(1, 5).unwrap(),
+        ..GroupConfig::default()
     };
     let cs = Arc::new(DefaultConsensusService::new_with_max_sessions(100));
 

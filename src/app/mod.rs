@@ -132,20 +132,23 @@
 //! user.create_group_with_config("fast-chat", true, GroupConfig::with_epoch_duration(Duration::from_secs(10))).await?;
 //! ```
 
-mod consensus;
+mod config;
+mod consensus_bridge;
 mod display;
 mod error;
-mod message_type;
 mod peer_scoring;
 mod state_machine;
 mod user;
 
-pub use consensus::{cast_vote, forward_incoming_proposal, forward_incoming_vote, start_voting};
-pub use display::{convert_group_request_to_display, get_identity_from_group_update_request};
-pub use error::UserError;
-pub use message_type::{MessageType, message_types};
-pub use peer_scoring::{FixedScoringProvider, InMemoryPeerScoreStorage, PeerScoringService};
-pub use state_machine::{
-    FreezeTimeoutStatus, GroupConfig, GroupState, GroupStateMachine, StateChangeHandler,
+pub use config::GroupConfig;
+pub use consensus_bridge::{
+    cast_vote, forward_incoming_proposal, forward_incoming_vote, submit_proposal,
 };
+pub use display::{
+    MemberRole, MessageType, convert_group_request_to_display,
+    get_identity_from_group_update_request, message_types,
+};
+pub use error::UserError;
+pub use peer_scoring::{FixedScoringProvider, InMemoryPeerScoreStorage, PeerScoringService};
+pub use state_machine::{FreezeTimeoutStatus, GroupState, GroupStateMachine, StateChangeHandler};
 pub use user::User;
