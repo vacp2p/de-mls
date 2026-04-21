@@ -12,14 +12,13 @@ use std::time::Duration;
 use tracing::info;
 
 use hashgraph_like_consensus::{
-    api::ConsensusServiceAPI,
     protos::consensus::v1::{Proposal, Vote},
     session::ConsensusConfig,
     types::CreateProposalRequest,
 };
 
 use crate::app::error::UserError;
-use crate::core::{CoreError, DeMlsProvider, Group, GroupEventHandler};
+use crate::core::{CoreError, DeMlsProvider, Group, GroupEventHandler, ProviderConsensus};
 use crate::protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest, VotePayload};
 
 /// Create a consensus proposal for a group update request and start voting.
@@ -39,7 +38,7 @@ pub async fn submit_proposal<P: DeMlsProvider>(
     request: &GroupUpdateRequest,
     expected_voters: u32,
     identity_string: String,
-    consensus: &P::Consensus,
+    consensus: &ProviderConsensus<P>,
     proposal_expiration: Duration,
     consensus_timeout: Duration,
 ) -> Result<(u32, AppMessage), CoreError> {
@@ -87,7 +86,7 @@ pub async fn cast_vote<P, SN>(
     group: &Group,
     proposal_id: u32,
     vote: bool,
-    consensus: &P::Consensus,
+    consensus: &ProviderConsensus<P>,
     signer: SN,
 ) -> Result<AppMessage, UserError>
 where
@@ -123,7 +122,7 @@ where
 pub async fn forward_incoming_proposal<P: DeMlsProvider>(
     group_name: &str,
     proposal: Proposal,
-    consensus: &P::Consensus,
+    consensus: &ProviderConsensus<P>,
     handler: &dyn GroupEventHandler,
 ) -> Result<(), UserError> {
     let scope = P::Scope::from(group_name.to_string());
@@ -148,12 +147,29 @@ pub async fn forward_incoming_proposal<P: DeMlsProvider>(
 }
 
 /// Forward a vote received from another peer to the consensus service.
+///
+/// A late vote may arrive after the proposal session has been reaped by a
+/// timeout on this node (the library returns `SessionNotActive`). That's a
+/// benign race — consensus already concluded locally — so we downgrade it
+/// to a debug log instead of surfacing it as an error up to the forwarder.
+/// All other consensus errors still propagate.
 pub async fn forward_incoming_vote<P: DeMlsProvider>(
     group_name: &str,
     vote: Vote,
-    consensus: &P::Consensus,
+    consensus: &ProviderConsensus<P>,
 ) -> Result<(), CoreError> {
+    use hashgraph_like_consensus::error::ConsensusError;
+
     let scope = P::Scope::from(group_name.to_string());
-    consensus.process_incoming_vote(&scope, vote).await?;
-    Ok(())
+    match consensus.process_incoming_vote(&scope, vote).await {
+        Ok(()) => Ok(()),
+        Err(ConsensusError::SessionNotActive) => {
+            tracing::debug!(
+                "[forward_incoming_vote] dropped late vote for group {group_name}: \
+                 session already resolved"
+            );
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
 }

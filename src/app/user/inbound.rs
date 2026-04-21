@@ -17,26 +17,45 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 self.handler.on_app_message(group_name, msg).await?;
             }
             ProcessResult::Proposal(proposal) => {
-                // RFC SS"Partial Freeze Semantics": track any incoming emergency proposal
-                // so the partial freeze applies to all peers, not just the creator.
-                if let Ok(req) = GroupUpdateRequest::decode(proposal.payload.as_slice()) {
-                    if matches!(
-                        req.payload,
-                        Some(group_update_request::Payload::EmergencyCriteria(_))
-                    ) {
-                        let mut groups = self.groups.write().await;
-                        if let Some(entry) = groups.get_mut(group_name) {
-                            entry.group.observe_emergency(proposal.proposal_id);
+                // Decode once for downstream actions (emergency tracking,
+                // membership-update buffering).
+                let decoded = GroupUpdateRequest::decode(proposal.payload.as_slice()).ok();
+                if let Some(req) = &decoded {
+                    let current_epoch = self.mls_service.current_epoch(group_name).unwrap_or(0);
+                    let mut groups = self.groups.write().await;
+                    if let Some(entry) = groups.get_mut(group_name) {
+                        match &req.payload {
+                            // RFC SS"Partial Freeze Semantics": track any incoming
+                            // emergency proposal so the partial freeze applies to
+                            // all peers, not just the creator.
+                            Some(group_update_request::Payload::EmergencyCriteria(_)) => {
+                                entry.group.observe_emergency(proposal.proposal_id);
+                            }
+                            // Mirror membership-change intents (UI-initiated leave,
+                            // remove) into the local pending-update buffer so a
+                            // future epoch steward can retry if this commit round
+                            // fails. KP-derived Adds already get buffered via the
+                            // welcome-subtopic path; re-buffering here is an idempotent
+                            // no-op (keyed by target identity).
+                            Some(group_update_request::Payload::InviteMember(_))
+                            | Some(group_update_request::Payload::RemoveMember(_)) => {
+                                entry
+                                    .group
+                                    .buffer_pending_update(req.clone(), current_epoch);
+                            }
+                            _ => {}
                         }
                     }
                 }
-                // TODO(M3c): RFC SS"Partial Freeze Semantics" also requires that
-                // lower-priority proposals received from peers are DROPPED when an
-                // emergency is active -- not just blocked locally. `forward_incoming_proposal`
-                // feeds the local consensus service and cannot be filtered here without
-                // risk of consensus inconsistency (other nodes may already have accepted
-                // the proposal). Full enforcement requires consensus-service-level
-                // priority gating (see ROADMAP.md M3c SS3c.1).
+                // RFC §Partial Freeze Semantics asks that lower-priority
+                // proposals received from peers during an active emergency
+                // be DROPPED, not just locally blocked. We don't drop here
+                // today: the RFC's Δ-synchrony assumption (all honest peers
+                // see the emergency within Δ) means divergence windows are
+                // small and honest nodes arrive at the same consensus
+                // outcome. If Δ turns out to be unreliable we need
+                // consensus-service-level priority gating — tracked as a
+                // backlog item in docs/ROADMAP.md.
                 forward_incoming_proposal::<P>(
                     group_name,
                     proposal,
@@ -49,7 +68,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 forward_incoming_vote::<P>(group_name, vote, &*self.consensus_service).await?;
             }
             ProcessResult::MembershipChangeReceived(request) => {
-                self.initiate_proposal(group_name.to_string(), request)
+                self.handle_incoming_update_request(group_name, request)
                     .await?;
             }
             ProcessResult::JoinedGroup(name) => {
@@ -97,9 +116,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 }
             }
             ProcessResult::GroupUpdated => {
-                // TODO(M2): Reward the commit author with SuccessfulCommit once
-                // ProcessResult/FreezeFinalizeResult carries the commit sender identity.
-                // In multi-steward mode the winner may differ from the epoch steward.
+                // Reward the commit author with SuccessfulCommit once
+                // ProcessResult / FreezeFinalizeResult carries the commit
+                // sender identity. Bundled with Track A (commit validation
+                // refactor) in docs/ROADMAP.md since that's where the
+                // author identity becomes available.
 
                 // Sync member list in peer scoring (commit may add/remove members)
                 {
@@ -108,6 +129,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                         self.sync_scoring_members(group_name, &entry.group);
                     }
                 }
+
+                // Prune the pending-update buffer: drop Add entries whose target
+                // is now a member and Remove entries whose target is now gone.
+                self.prune_pending_updates_after_commit(group_name).await?;
 
                 // Transition to Working BEFORE steward checks (election needs Working state)
                 let transitioned = {
@@ -132,6 +157,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 // Now run steward checks (auto-fill, flag sync, election) in Working state
                 self.steward_list_housekeeping(group_name).await?;
 
+                // After epoch advance, the new epoch steward drains any buffered
+                // updates that previous stewards failed to commit.
+                self.process_buffered_updates(group_name).await?;
+
                 if transitioned {
                     self.state_handler
                         .on_state_changed(group_name, GroupState::Working)
@@ -140,6 +169,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             }
             ProcessResult::LeaveGroup => {
                 self.groups.write().await.remove(group_name);
+                self.cleanup_consensus_scope(group_name).await?;
                 self.handler.on_leave_group(group_name).await?;
             }
             ProcessResult::ViolationDetected(evidence) => {
@@ -152,7 +182,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     .await?;
             }
             ProcessResult::CommitCandidateReceived => {
-                let transitioned = {
+                let (transitioned, outbound) = {
                     let mut groups = self.groups.write().await;
                     if let Some(entry) = groups.get_mut(group_name) {
                         // Enter Freezing on candidate receipt if in Working state.
@@ -161,12 +191,32 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                             entry.state_machine.start_freezing();
                             let epoch = self.mls_service.current_epoch(group_name).unwrap_or(0);
                             entry.group.ensure_freeze_round(epoch);
-                            true
+
+                            // If this node is a steward, also create our own candidate.
+                            let outbound = if entry.group.is_steward() {
+                                match create_commit_candidate(
+                                    &mut entry.group,
+                                    &self.mls_service,
+                                    &self.app_id,
+                                ) {
+                                    Ok(packets) => packets,
+                                    Err(e) => {
+                                        error!(
+                                            "[CommitCandidateReceived] Failed to create own \
+                                             candidate for group {group_name}: {e}"
+                                        );
+                                        vec![]
+                                    }
+                                }
+                            } else {
+                                vec![]
+                            };
+                            (true, outbound)
                         } else {
-                            false
+                            (false, vec![])
                         }
                     } else {
-                        false
+                        (false, vec![])
                     }
                 };
 
@@ -174,9 +224,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     self.state_handler
                         .on_state_changed(group_name, GroupState::Freezing)
                         .await;
+                    for message in outbound {
+                        self.handler.on_outbound(group_name, message).await?;
+                    }
                 }
             }
-            ProcessResult::StewardListSyncReceived(sync) => {
+            ProcessResult::GroupSyncReceived(sync) => {
                 // Phase 1: read lock -- check if list needed, fetch members.
                 let members = {
                     let groups = self.groups.read().await;
@@ -194,6 +247,17 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     return Ok(());
                 };
 
+                // Epoch freshness: sync must not reference a future epoch.
+                let current_epoch = self.mls_service.current_epoch(group_name)?;
+                if sync.start_epoch > current_epoch {
+                    info!(
+                        "[GroupSyncReceived] Rejecting sync for group {group_name}: \
+                         start_epoch {} > current_epoch {current_epoch}",
+                        sync.start_epoch,
+                    );
+                    return Ok(());
+                }
+
                 // Validate: (1) all proposed stewards are current group members,
                 // (2) the list ordering is self-consistent (matches deterministic
                 // generation with the steward members as the candidate pool).
@@ -210,7 +274,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 )?;
 
                 if all_present && ordering_valid {
-                    // Phase 2: write lock -- apply validated list.
+                    // Phase 2: write lock -- apply steward list + protocol config.
                     let sn = sync.steward_members.len();
                     {
                         let mut groups = self.groups.write().await;
@@ -220,16 +284,39 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                                 &sync.steward_members,
                                 sn,
                             )?;
+                            entry
+                                .group
+                                .set_allow_subset_candidates(sync.allow_subset_candidates);
+
+                            // Apply timing config if present.
+                            if let Some(timing) = &sync.timing {
+                                let epoch_dur =
+                                    std::time::Duration::from_millis(timing.epoch_duration_ms);
+                                let freeze_dur =
+                                    std::time::Duration::from_millis(timing.freeze_duration_ms);
+                                entry.state_machine.update_timing(epoch_dur, freeze_dur);
+                            }
                         }
                     }
+
+                    // Apply peer scores outside the group lock.
+                    if !sync.peer_scores.is_empty() {
+                        let mut scoring = self.scoring();
+                        for ps in &sync.peer_scores {
+                            scoring.set_score(group_name, &ps.member_id, ps.score);
+                        }
+                    }
+
                     info!(
-                        "[StewardListSyncReceived] Applied steward list for group \
-                         {group_name} (start_epoch={}, len={sn})",
+                        "[GroupSyncReceived] Applied group sync for {group_name} \
+                         (start_epoch={}, stewards={sn}, scores={}, timing={})",
                         sync.start_epoch,
+                        sync.peer_scores.len(),
+                        sync.timing.is_some(),
                     );
                 } else {
                     info!(
-                        "[StewardListSyncReceived] Ignoring invalid sync for group \
+                        "[GroupSyncReceived] Ignoring invalid sync for group \
                          {group_name} (present={all_present}, ordering={ordering_valid})"
                     );
                 }
@@ -291,10 +378,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
         // Fetch payload from consensus service (no lock held).
         let scope = P::Scope::from(group_name.to_string());
-        let payload = self
+        let proposal = self
             .consensus_service
-            .get_proposal_payload(&scope, proposal_id)
+            .storage()
+            .get_proposal(&scope, proposal_id)
             .await?;
+        let payload = proposal.payload;
 
         // Apply consensus result (write lock)
         let consensus_apply = {
@@ -348,6 +437,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     election.election_epoch,
                     election.proposed_stewards.len()
                 );
+
+                // A new epoch steward may have just been assigned. Drain the
+                // pending-update buffer so they pick up anything left over
+                // from the previous (failed) steward's attempt.
+                self.process_buffered_updates(group_name).await?;
             } else {
                 info!("Steward election proposal rejected (invalid list) for group {group_name}");
             }

@@ -15,9 +15,9 @@ use crate::{
     mls_crypto::parse_wallet_to_bytes,
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, CommitCandidate, ConversationMessage, EmergencyCriteriaProposal,
-        GroupUpdateRequest, InvitationToJoin, Outcome, ProposalAdded, RemoveMember,
-        StewardListSync, UserKeyPackage, UserVote, ViolationEvidence, VotePayload, WelcomeMessage,
-        app_message, group_update_request, welcome_message,
+        GroupSync, GroupUpdateRequest, InvitationToJoin, Outcome, ProposalAdded, RemoveMember,
+        UserKeyPackage, UserVote, ViolationEvidence, VotePayload, WelcomeMessage, app_message,
+        group_update_request, welcome_message,
     },
 };
 
@@ -85,11 +85,11 @@ pub enum ProcessResult {
     /// A remote commit candidate was successfully buffered in the freeze round.
     CommitCandidateReceived,
 
-    /// A steward list sync message was received from the current steward.
+    /// A group sync message was received from the current steward.
     ///
-    /// Contains the list data so the app layer can validate and apply it.
+    /// Contains steward list, peer scores, timing config, and protocol flags.
     /// Only meaningful for joiners whose handle has `steward_list() == None`.
-    StewardListSyncReceived(StewardListSync),
+    GroupSyncReceived(GroupSync),
 
     /// No action needed.
     ///
@@ -253,10 +253,10 @@ impl From<Vote> for AppMessage {
     }
 }
 
-impl From<StewardListSync> for AppMessage {
-    fn from(sync: StewardListSync) -> Self {
+impl From<GroupSync> for AppMessage {
+    fn from(sync: GroupSync) -> Self {
         AppMessage {
-            payload: Some(app_message::Payload::StewardListSync(sync)),
+            payload: Some(app_message::Payload::GroupSync(sync)),
         }
     }
 }
@@ -308,8 +308,8 @@ impl TryFrom<AppMessage> for ProcessResult {
                     })),
                 }),
             ),
-            Some(app_message::Payload::StewardListSync(sync)) => {
-                Ok(ProcessResult::StewardListSyncReceived(sync.clone()))
+            Some(app_message::Payload::GroupSync(sync)) => {
+                Ok(ProcessResult::GroupSyncReceived(sync.clone()))
             }
             _ => Ok(ProcessResult::Noop),
         }

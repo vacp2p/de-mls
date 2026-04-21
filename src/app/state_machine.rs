@@ -122,6 +122,22 @@ impl GroupStateMachine {
         self.state.clone()
     }
 
+    /// Get the configured epoch duration.
+    pub fn epoch_duration(&self) -> Duration {
+        self.epoch_duration
+    }
+
+    /// Get the configured freeze duration.
+    pub fn freeze_duration(&self) -> Duration {
+        self.freeze_duration
+    }
+
+    /// Update timing configuration (used when receiving GroupSync from steward).
+    pub fn update_timing(&mut self, epoch_duration: Duration, freeze_duration: Duration) {
+        self.epoch_duration = epoch_duration;
+        self.freeze_duration = freeze_duration;
+    }
+
     /// Start working state.
     pub fn start_working(&mut self) {
         self.state = GroupState::Working;
@@ -170,7 +186,9 @@ impl GroupStateMachine {
         }
 
         if let Some(started_at) = self.phase_timer {
-            let max_wait = self.epoch_duration * 2;
+            // Pipeline: consensus (~15s) + epoch_duration + freeze_duration (epoch/2)
+            // = ~1.5× epoch + consensus overhead. Use 3× epoch for safety margin.
+            let max_wait = self.epoch_duration * 3;
             if Instant::now() >= started_at + max_wait {
                 return true;
             }
@@ -211,7 +229,7 @@ impl GroupStateMachine {
         self.phase_timer = None;
     }
 
-    /// Detect steward inactivity and transition to Freezing if needed.
+    /// Check if the epoch commit window has elapsed and transition to Freezing.
     ///
     /// Returns `true` if transitioned to Freezing, `false` otherwise.
     /// Skips if:
@@ -231,8 +249,8 @@ impl GroupStateMachine {
             if Instant::now() >= first_approved + self.epoch_duration {
                 self.start_freezing();
                 info!(
-                    "[check_steward_inactivity] Steward inactivity detected after {:?} \
-                     with {} approved proposals",
+                    "[check_steward_inactivity] Epoch commit window elapsed ({:?}), \
+                     entering freeze with {} approved proposals",
                     self.epoch_duration, approved_proposals_count
                 );
                 return true;

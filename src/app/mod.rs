@@ -145,7 +145,7 @@ pub use consensus_bridge::{
     cast_vote, forward_incoming_proposal, forward_incoming_vote, submit_proposal,
 };
 pub use display::{
-    MemberRole, MessageType, convert_group_request_to_display,
+    MemberRole, MessageType, convert_group_request_to_display, format_group_request,
     get_identity_from_group_update_request, message_types,
 };
 pub use error::UserError;

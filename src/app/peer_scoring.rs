@@ -158,6 +158,11 @@ impl<S: PeerScoreStorage, P: ScoringProvider> PeerScoringService<S, P> {
         self.storage.get(group_id, member_id)
     }
 
+    /// Set a member's score directly (used when receiving GroupSync from steward).
+    pub fn set_score(&mut self, group_id: &str, member_id: &[u8], score: i64) {
+        self.storage.set(group_id, member_id, score);
+    }
+
     /// Returns member IDs whose score is at or below the removal threshold in a group.
     pub fn members_below_threshold(&self, group_id: &str) -> Vec<Vec<u8>> {
         self.storage

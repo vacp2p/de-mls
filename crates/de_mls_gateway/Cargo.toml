@@ -22,7 +22,7 @@ hex = "0.4"
 tokio-util = { version = "0.7", features = ["rt"] }
 thiserror = "2.0"
 
-hashgraph-like-consensus = "0.1.1"
+hashgraph-like-consensus = "0.2.0"
 
 de-mls-ui-protocol = { path = "../de_mls_ui_protocol" }
 de-mls = { path = "../../", features = ["waku"] }

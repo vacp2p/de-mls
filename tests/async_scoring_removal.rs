@@ -151,10 +151,15 @@ async fn do_join(
     // Instead of subscribing to broadcast (unreliable in tests with auto-vote),
     // poll the consensus service for the result and call apply_consensus_outcome directly.
     {
-        use hashgraph_like_consensus::api::ConsensusServiceAPI;
+        use hashgraph_like_consensus::storage::ConsensusStorage;
         let scope = group.to_string();
         // Try to get the payload — if the proposal resolved, this should work
-        if let Ok(payload) = cs.get_proposal_payload(&scope, pid).await {
+        if let Ok(payload) = cs
+            .storage()
+            .get_proposal(&scope, pid)
+            .await
+            .map(|p| p.payload)
+        {
             // We know it resolved. Build a ConsensusReached event.
             let ev = hashgraph_like_consensus::types::ConsensusEvent::ConsensusReached {
                 proposal_id: pid,
@@ -226,9 +231,15 @@ async fn approve_ecp(
 
     // Directly dispatch the consensus event to all users
     {
-        use hashgraph_like_consensus::api::ConsensusServiceAPI;
+        use hashgraph_like_consensus::storage::ConsensusStorage;
         let scope = group.to_string();
-        if (cs.get_proposal_payload(&scope, pid).await).is_ok() {
+        if (cs
+            .storage()
+            .get_proposal(&scope, pid)
+            .await
+            .map(|p| p.payload))
+        .is_ok()
+        {
             let ev = hashgraph_like_consensus::types::ConsensusEvent::ConsensusReached {
                 proposal_id: pid,
                 result: true,
@@ -273,6 +284,12 @@ async fn test_user_layer_score_removal_pipeline() {
         bob.get_group_state(group).await.unwrap(),
         GroupState::Working
     );
+
+    // After Bob joins, the epoch has advanced past Alice's initial single-steward
+    // list (start_epoch=0, len=1). Simulate the steward election completing so
+    // Alice remains a valid epoch steward before Charlie tries to join.
+    alice.regenerate_steward_list(group).await.unwrap();
+    bob.regenerate_steward_list(group).await.unwrap();
 
     charlie.create_group(group, false).await.unwrap();
     do_join(

@@ -223,6 +223,12 @@ where
         epoch,
     );
     if buffered {
+        info!(
+            "[process_commit_candidate] Buffered remote candidate for group {} \
+             (epoch={epoch}, total_candidates={})",
+            group.group_name(),
+            group.freeze_candidate_count(),
+        );
         Ok(ProcessResult::CommitCandidateReceived)
     } else {
         Ok(ProcessResult::Noop)
@@ -413,11 +419,12 @@ where
 
     sort_candidates_by_priority(&mut pre_validated, epoch_steward_id.as_deref());
 
-    // TODO(M2): If Phase 3 application fails for the top-sorted candidate, we currently
-    // return NoCandidate without attempting the next pre-validated candidate. A malicious
-    // node could exploit this by broadcasting a syntactically valid but MLS-invalid commit
-    // to DoS the freeze round. For M2, retry through pre_validated in sorted order until
-    // one succeeds or the list is exhausted (RFC §"Commit validation service" §"Fallback").
+    // If Phase 3 application fails for the top-sorted candidate today we
+    // return NoCandidate rather than trying the next pre-validated entry.
+    // The RFC-aligned fix (docs/ROADMAP.md → Track A) is to fold real MLS
+    // staging into validation so only known-applyable candidates reach
+    // this point; candidates that fail staging get MisbehavingCommit
+    // score ops against their author and are dropped from the set.
     let chosen = pre_validated.into_iter().next().unwrap();
 
     // ── Phase 3: Application (MLS processing — chosen candidate only) ──

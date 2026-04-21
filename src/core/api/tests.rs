@@ -103,6 +103,17 @@ fn test_validate_batch_proposals_action_mismatch() {
     )
     .unwrap();
 
+    // After commit, epoch is 1 and steward list is exhausted. Regenerate
+    // the list (simulating re-election) so the steward can handle new KPs.
+    let epoch = steward_mls.current_epoch(group_name).unwrap();
+    let members = crate::core::group_members(&steward_handle, &steward_mls).unwrap();
+    let sn = steward_handle
+        .protocol_config()
+        .compute_list_size(members.len());
+    steward_handle
+        .generate_and_set_steward_list(epoch, &members, sn)
+        .unwrap();
+
     let (_joiner2_mls, _joiner2_handle, kp2_packet) =
         setup_joiner(group_name, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
     let result = process_inbound(

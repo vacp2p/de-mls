@@ -16,6 +16,16 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     }
 
     /// Send a conversation message to a group.
+    ///
+    /// Blocked during states where MLS epoch keys are about to rotate:
+    /// - `PendingJoin` — we don't have the group keys yet.
+    /// - `Freezing` — a steward is building a commit candidate; messages
+    ///   sent now may not decrypt on members who've already merged a commit.
+    /// - `Selection` — a winning commit is being merged; same reason.
+    ///
+    /// Governance traffic (votes, proposal notifications) lives above MLS
+    /// and is permitted in any state where its own check allows it — see
+    /// `check_proposal_allowed` / `process_user_vote`.
     pub async fn send_app_message(
         &self,
         group_name: &str,
@@ -26,7 +36,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
 
             let state = entry.state_machine.current_state();
-            if state == GroupState::PendingJoin {
+            if matches!(
+                state,
+                GroupState::PendingJoin | GroupState::Freezing | GroupState::Selection
+            ) {
                 return Err(UserError::GroupBlocked(state.to_string()));
             }
 

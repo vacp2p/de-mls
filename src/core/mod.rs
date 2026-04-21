@@ -124,7 +124,7 @@
 //!     ProcessResult::Vote(v) => { /* forward to consensus */ }
 //!     ProcessResult::ViolationDetected(ev) => { /* start emergency vote */ }
 //!     ProcessResult::CommitCandidateReceived => { /* state machine: Working → Freezing */ }
-//!     ProcessResult::StewardListSyncReceived(sync) => { /* validate and apply steward list */ }
+//!     ProcessResult::GroupSyncReceived(sync) => { /* validate and apply group state */ }
 //!     ProcessResult::Noop => {}
 //! }
 //! ```
@@ -170,7 +170,7 @@ pub use error::CoreError;
 pub use events::{CallbackError, GroupEventHandler};
 
 // ── Group state ──
-pub use group::Group;
+pub use group::{Group, PendingUpdate, target_identity_of};
 
 // ── Proposal types ──
 pub use proposals::ProposalId;
@@ -182,7 +182,7 @@ pub use proposal_priority::ProposalPriority;
 pub use steward_list::{ProtocolConfig, StewardList};
 
 // ── Provider traits ──
-pub use provider::{DeMlsProvider, DefaultProvider};
+pub use provider::{DeMlsProvider, DefaultProvider, ProviderConsensus};
 
 // ── Process results ──
 pub use process_result::ProcessResult;

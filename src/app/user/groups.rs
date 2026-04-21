@@ -42,6 +42,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         };
 
         let initial_state = state_machine.current_state();
+        if initial_state == GroupState::PendingJoin {
+            info!(
+                "[create_group] Group {group_name}: PendingJoin, waiting for welcome \
+                 (timeout={}s)",
+                state_machine.epoch_duration().as_secs() * 3,
+            );
+        }
         groups.insert(
             group_name.to_string(),
             GroupEntry {
@@ -76,6 +83,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 GroupState::PendingJoin => {
                     groups.remove(group_name);
                     drop(groups);
+                    self.cleanup_consensus_scope(group_name).await?;
                     self.handler.on_leave_group(group_name).await?;
                     return Ok(());
                 }
@@ -98,15 +106,27 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             "[leave_group]: Transitioning from {old_state} to Leaving, sending self-removal for group {group_name}"
         );
 
-        self.initiate_proposal(
-            group_name.to_string(),
-            GroupUpdateRequest {
-                payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
-                    identity: parse_wallet_to_bytes(&self.identity_string())?,
-                })),
-            },
-        )
-        .await?;
+        let request = GroupUpdateRequest {
+            payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
+                identity: parse_wallet_to_bytes(&self.identity_string())?,
+            })),
+        };
+
+        // Buffer the self-removal on our own Group so that if this commit
+        // round fails (self-remove MLS error, steward offline), the intent
+        // survives and the next epoch steward can retry via
+        // `process_buffered_updates`. Peers buffer independently when they
+        // receive the proposal on the app subtopic (see `dispatch_inbound_result`).
+        {
+            let epoch = self.mls_service.current_epoch(group_name).unwrap_or(0);
+            let mut groups = self.groups.write().await;
+            if let Some(entry) = groups.get_mut(group_name) {
+                entry.group.buffer_pending_update(request.clone(), epoch);
+            }
+        }
+
+        self.initiate_proposal(group_name.to_string(), request)
+            .await?;
         Ok(())
     }
 
@@ -183,14 +203,20 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let members = core::group_members(&entry.group, &self.mls_service)?;
 
         let list = entry.group.steward_list();
+        // Use live rotation so removed stewards are skipped in the role display.
+        // All members with the same steward list + MLS member set compute the
+        // same live epoch/backup steward.
+        let live_epoch = list.and_then(|l| l.live_epoch_steward(epoch, &members));
+        let live_backup = list.and_then(|l| l.live_backup_steward(epoch, &members));
         let roles = members
-            .into_iter()
+            .iter()
+            .cloned()
             .map(|id| {
                 let role = match list {
                     Some(l) if !l.is_exhausted(epoch) => {
-                        if l.epoch_steward(epoch).is_some_and(|es| es == id) {
+                        if live_epoch.is_some_and(|es| es == id) {
                             MemberRole::EpochSteward
-                        } else if l.backup_steward(epoch).is_some_and(|bs| bs == id) {
+                        } else if live_backup.is_some_and(|bs| bs == id) {
                             MemberRole::BackupSteward
                         } else if l.contains(&id) {
                             MemberRole::Steward

@@ -31,24 +31,27 @@ where
     let welcome_msg = WelcomeMessage::decode(payload)?;
     match welcome_msg.payload {
         Some(welcome_message::Payload::UserKeyPackage(user_kp)) => {
-            if group.is_steward() {
-                info!(
-                    "Steward received key package for group {}",
-                    group.group_name()
-                );
-                let (key_package_bytes, identity) =
-                    key_package_bytes_from_json(user_kp.key_package_bytes)?;
+            // Every member records incoming KPs into its pending-update buffer.
+            // The app layer decides whether to promote this into a voting
+            // proposal right now (only the epoch steward does) or to hold it
+            // for the next epoch steward if the current one fails to commit.
+            let (key_package_bytes, identity) =
+                key_package_bytes_from_json(user_kp.key_package_bytes)?;
 
-                let gur = GroupUpdateRequest {
-                    payload: Some(group_update_request::Payload::InviteMember(InviteMember {
-                        key_package_bytes,
-                        identity,
-                    })),
-                };
+            info!(
+                "Received key package for group {} from identity {:?}",
+                group.group_name(),
+                identity
+            );
 
-                return Ok(ProcessResult::MembershipChangeReceived(gur));
-            }
-            Ok(ProcessResult::Noop)
+            let gur = GroupUpdateRequest {
+                payload: Some(group_update_request::Payload::InviteMember(InviteMember {
+                    key_package_bytes,
+                    identity,
+                })),
+            };
+
+            Ok(ProcessResult::MembershipChangeReceived(gur))
         }
         Some(welcome_message::Payload::InvitationToJoin(invitation)) => {
             if group.is_steward() || mls.has_group(group.group_name()) {
@@ -98,6 +101,10 @@ where
             AppMessage::decode(app_bytes.as_ref())?.try_into()
         }
         DecryptResult::Removed(_) => Ok(ProcessResult::LeaveGroup),
+        DecryptResult::Ignored => {
+            tracing::debug!("Ignored message on app subtopic (wrong epoch or group)");
+            Ok(ProcessResult::Noop)
+        }
         _ => {
             warn!("Unexpected MLS message type on app subtopic, ignoring");
             Ok(ProcessResult::Noop)

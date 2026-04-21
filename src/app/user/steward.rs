@@ -135,14 +135,148 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         Ok(())
     }
 
-    /// Send the current steward list to the group as an encrypted app message.
+    /// Regenerate the steward list at the current MLS epoch using the group's
+    /// current member set. Equivalent to what a successful steward election
+    /// would apply. Intended for tests and administrative tooling.
+    pub async fn regenerate_steward_list(&self, group_name: &str) -> Result<(), UserError> {
+        let current_epoch = self.mls_service.current_epoch(group_name)?;
+        let members = {
+            let groups = self.groups.read().await;
+            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            core::group_members(&entry.group, &self.mls_service)?
+        };
+
+        let mut groups = self.groups.write().await;
+        let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
+        let sn = entry
+            .group
+            .protocol_config()
+            .compute_list_size(members.len());
+        entry
+            .group
+            .generate_and_set_steward_list(current_epoch, &members, sn)?;
+        Ok(())
+    }
+
+    /// Prune the pending-update buffer after a commit has merged.
+    ///
+    /// Drops entries whose target identity has now joined (for Add) or left
+    /// (for Remove) the group, and expires stale entries older than
+    /// `pending_update_max_epochs`.
+    pub async fn prune_pending_updates_after_commit(
+        &self,
+        group_name: &str,
+    ) -> Result<(), UserError> {
+        let current_epoch = self.mls_service.current_epoch(group_name).unwrap_or(0);
+        let max_age = self.default_group_config.pending_update_max_epochs;
+
+        let members = {
+            let groups = self.groups.read().await;
+            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            if !self.mls_service.has_group(entry.group.group_name()) {
+                return Ok(());
+            }
+            core::group_members(&entry.group, &self.mls_service)?
+        };
+
+        let mut groups = self.groups.write().await;
+        let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
+        let before = entry.group.pending_update_count();
+        entry.group.prune_pending_updates_for_members(&members);
+        let expired = entry.group.expire_pending_updates(current_epoch, max_age);
+        let after = entry.group.pending_update_count();
+        if before != after {
+            info!(
+                "[prune_pending_updates_after_commit] group {group_name}: \
+                 {before} → {after} (expired={})",
+                expired.len()
+            );
+        }
+        Ok(())
+    }
+
+    /// Drain the pending-update buffer and initiate proposals if this node is
+    /// the current epoch steward. Invoked on every epoch advance.
+    ///
+    /// Skips entries that are already reflected in the current voting/approved
+    /// queues to avoid duplicate proposals.
+    pub async fn process_buffered_updates(&self, group_name: &str) -> Result<(), UserError> {
+        let current_epoch = self.mls_service.current_epoch(group_name).unwrap_or(0);
+
+        let to_propose: Vec<GroupUpdateRequest> = {
+            let groups = self.groups.read().await;
+            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+
+            let members = if self.mls_service.has_group(entry.group.group_name()) {
+                core::group_members(&entry.group, &self.mls_service).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            if !entry.group.is_live_epoch_steward(current_epoch, &members) {
+                return Ok(());
+            }
+
+            // Collect buffered updates whose target isn't already in the
+            // active proposal queues. The approved queue is also in the group.
+            let approved = entry.group.approved_proposals();
+            let approved_targets: std::collections::HashSet<Vec<u8>> = approved
+                .values()
+                .filter_map(|req| crate::core::target_identity_of(req).map(|id| id.to_vec()))
+                .collect();
+
+            entry
+                .group
+                .pending_updates()
+                .iter()
+                .filter(|(id, _)| !approved_targets.contains(*id))
+                .map(|(_, p)| p.request.clone())
+                .collect()
+        };
+
+        if to_propose.is_empty() {
+            return Ok(());
+        }
+
+        info!(
+            "[process_buffered_updates] group {group_name}: promoting {} buffered \
+             update(s) to voting proposals (epoch={current_epoch})",
+            to_propose.len()
+        );
+
+        for request in to_propose {
+            if let Err(e) = self
+                .initiate_proposal(group_name.to_string(), request)
+                .await
+            {
+                info!(
+                    "[process_buffered_updates] group {group_name}: initiate_proposal \
+                     deferred: {e}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Send group state to the group as an encrypted app message.
     ///
     /// Called by the steward after committing an Add that brings new members into
-    /// the group. The new joiner's handle has `steward_list: None` until this
-    /// sync message is received and validated.
-    ///
-    /// Existing members who already have a list will ignore it (idempotent).
-    pub async fn send_steward_list_sync(&self, group_name: &str) -> Result<(), UserError> {
+    /// the group. Carries steward list, protocol config, peer scores, and timing
+    /// so new joiners can fully participate. Existing members who already have a
+    /// steward list will ignore it (idempotent).
+    pub async fn send_group_sync(&self, group_name: &str) -> Result<(), UserError> {
+        // Read scores under Mutex first (sync lock, no await).
+        let scores: Vec<PeerScore> = {
+            let scoring = self.scoring();
+            scoring
+                .all_members_with_scores(group_name)
+                .into_iter()
+                .map(|(id, score)| PeerScore {
+                    member_id: id,
+                    score,
+                })
+                .collect()
+        };
+
         let packet = {
             let groups = self.groups.read().await;
             let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
@@ -152,11 +286,23 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 None => return Ok(()),
             };
 
-            let sync = StewardListSync {
+            let timing = TimingConfig {
+                epoch_duration_ms: entry.state_machine.epoch_duration().as_millis() as u64,
+                freeze_duration_ms: entry.state_machine.freeze_duration().as_millis() as u64,
+                proposal_expiration_ms: self.default_group_config.proposal_expiration.as_millis()
+                    as u64,
+                consensus_timeout_ms: self.default_group_config.consensus_timeout.as_millis()
+                    as u64,
+            };
+
+            let sync = GroupSync {
                 steward_members: list.members().to_vec(),
                 start_epoch: list.start_epoch(),
                 sn_min: list.config().sn_min as u32,
                 sn_max: list.config().sn_max as u32,
+                allow_subset_candidates: entry.group.allow_subset_candidates(),
+                peer_scores: scores,
+                timing: Some(timing),
             };
 
             let app_msg: AppMessage = sync.into();
@@ -164,7 +310,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         };
 
         self.handler.on_outbound(group_name, packet).await?;
-        info!("[send_steward_list_sync] Sent steward list sync for group {group_name}");
+        info!("[send_group_sync] Sent group sync for group {group_name}");
         Ok(())
     }
 

@@ -533,6 +533,18 @@ button.mini {
     font-size: 13px;
 }
 
+.panel.consensus .proposal-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.panel.consensus .proposal-row:last-child {
+    border-bottom: none;
+}
+
 .panel.consensus .proposals-window {
     overflow-y: auto;
     display: flex;
@@ -544,7 +556,7 @@ button.mini {
     display: flex;
     gap: 8px;
     justify-content: flex-end;
-    margin-top: 12px;
+    margin-top: 8px;
 }
 
 /* History window */

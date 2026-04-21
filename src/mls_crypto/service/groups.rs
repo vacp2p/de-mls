@@ -73,7 +73,9 @@ where
                 .remove_key_package_ref(secret.new_member().as_slice());
         }
 
-        let config = MlsGroupJoinConfig::builder().build();
+        let config = MlsGroupJoinConfig::builder()
+            .use_ratchet_tree_extension(true)
+            .build();
         let group = StagedWelcome::new_from_welcome(&provider, &config, welcome, None)?
             .into_group(&provider)?;
 

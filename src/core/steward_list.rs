@@ -174,6 +174,9 @@ impl StewardList {
     ///
     /// The epoch steward is at index `(epoch - start_epoch) % len`.
     /// Returns `None` if the list is exhausted for this epoch.
+    ///
+    /// This is the *nominal* rotation — use [`Self::live_epoch_steward`] to
+    /// skip stewards that have since been removed from the group.
     pub fn epoch_steward(&self, epoch: u64) -> Option<&[u8]> {
         if self.is_exhausted(epoch) {
             return None;
@@ -192,6 +195,40 @@ impl StewardList {
         }
         let index = ((epoch - self.start_epoch) as usize + 1) % self.members.len();
         Some(&self.members[index])
+    }
+
+    /// Get the *live* epoch steward for the given epoch — the first steward in
+    /// rotation order (starting at the nominal index and wrapping within the
+    /// list) who is still a group member.
+    ///
+    /// Returns `None` if the list is exhausted at this epoch or all nominal
+    /// stewards have been removed from the group. Every node with the same
+    /// steward list + MLS member set computes the same value.
+    pub fn live_epoch_steward(&self, epoch: u64, members: &[Vec<u8>]) -> Option<&[u8]> {
+        self.live_steward_from(epoch, 0, members)
+    }
+
+    /// Get the *live* backup steward — the next live steward after the live
+    /// epoch steward in rotation order. Returns `None` if only one live
+    /// steward remains or the list is exhausted.
+    pub fn live_backup_steward(&self, epoch: u64, members: &[Vec<u8>]) -> Option<&[u8]> {
+        self.live_steward_from(epoch, 1, members)
+    }
+
+    fn live_steward_from(&self, epoch: u64, offset: usize, members: &[Vec<u8>]) -> Option<&[u8]> {
+        if self.is_exhausted(epoch) {
+            return None;
+        }
+        let len = self.members.len();
+        let start = ((epoch - self.start_epoch) as usize + offset) % len;
+        for step in 0..len {
+            let idx = (start + step) % len;
+            let candidate = &self.members[idx];
+            if members.iter().any(|m| m == candidate) {
+                return Some(candidate);
+            }
+        }
+        None
     }
 
     /// Check if the list is exhausted at the given epoch.
@@ -518,6 +555,51 @@ mod tests {
             list.backup_steward(0).unwrap()
         );
         assert!(list.is_exhausted(1));
+    }
+
+    #[test]
+    fn test_live_epoch_steward_skips_removed() {
+        let config = ProtocolConfig::new(3, 3).unwrap();
+        let mems = members(&[1, 2, 3]);
+
+        let list = StewardList::generate(0, b"group", &mems, 3, config).unwrap();
+        let nominal_e0 = list.epoch_steward(0).unwrap().to_vec();
+
+        // With all members present, live == nominal.
+        let all_present = mems.clone();
+        assert_eq!(
+            list.live_epoch_steward(0, &all_present),
+            Some(nominal_e0.as_slice())
+        );
+
+        // Remove the nominal epoch steward — live must skip to the next live steward.
+        let after_removal: Vec<Vec<u8>> =
+            mems.iter().filter(|m| **m != nominal_e0).cloned().collect();
+        let live = list.live_epoch_steward(0, &after_removal).unwrap();
+        assert_ne!(live, nominal_e0.as_slice());
+        assert!(after_removal.iter().any(|m| m == live));
+    }
+
+    #[test]
+    fn test_live_epoch_steward_none_when_all_dead() {
+        let config = ProtocolConfig::new(2, 2).unwrap();
+        let mems = members(&[1, 2]);
+
+        let list = StewardList::generate(0, b"group", &mems, 2, config).unwrap();
+        // No member is currently in the group.
+        assert!(list.live_epoch_steward(0, &[]).is_none());
+    }
+
+    #[test]
+    fn test_live_backup_steward_distinct_from_epoch() {
+        let config = ProtocolConfig::new(3, 3).unwrap();
+        let mems = members(&[1, 2, 3]);
+
+        let list = StewardList::generate(0, b"group", &mems, 3, config).unwrap();
+        let all_present = mems.clone();
+        let live_epoch = list.live_epoch_steward(0, &all_present).unwrap().to_vec();
+        let live_backup = list.live_backup_steward(0, &all_present).unwrap().to_vec();
+        assert_ne!(live_epoch, live_backup);
     }
 
     #[test]

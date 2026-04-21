@@ -313,7 +313,7 @@ fn test_process_inbound_welcome_steward_receives_key_package() {
 }
 
 #[test]
-fn test_process_inbound_welcome_non_steward_ignores_key_package() {
+fn test_process_inbound_welcome_non_steward_buffers_key_package() {
     let group_name = "non-steward-kp";
 
     let mls = setup_mls("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
@@ -324,9 +324,11 @@ fn test_process_inbound_welcome_non_steward_ignores_key_package() {
 
     let result = process_inbound(&mut group, &kp_packet.payload, WELCOME_SUBTOPIC, &mls).unwrap();
 
+    // Every member (steward or not) now surfaces KPs so the app layer can
+    // buffer them; promotion to a voting proposal is the app's decision.
     assert!(
-        matches!(result, ProcessResult::Noop),
-        "Expected Noop, got {:?}",
+        matches!(result, ProcessResult::MembershipChangeReceived(_)),
+        "Expected MembershipChangeReceived, got {:?}",
         result
     );
 }
@@ -605,13 +607,13 @@ fn test_auto_fill_never_triggers_with_default_config() {
     );
 }
 
-// ─────────────────────────── Steward list sync tests ───────────────────────────
+// ─────────────────────────── Group sync tests ───────────────────────────
 
-/// Steward sends a StewardListSync app message after adding a joiner.
+/// Steward sends a GroupSync app message after adding a joiner.
 /// The joiner receives it, validates it, and applies the steward list.
 #[test]
-fn test_steward_list_sync_roundtrip() {
-    use de_mls::protos::de_mls::messages::v1::StewardListSync;
+fn test_group_sync_roundtrip() {
+    use de_mls::protos::de_mls::messages::v1::GroupSync;
 
     let group_name = "sync-list-group";
     let steward_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
@@ -643,11 +645,14 @@ fn test_steward_list_sync_roundtrip() {
     let steward_list = steward_handle
         .steward_list()
         .expect("steward should have a list");
-    let sync = StewardListSync {
+    let sync = GroupSync {
         steward_members: steward_list.members().to_vec(),
         start_epoch: steward_list.start_epoch(),
         sn_min: steward_list.config().sn_min as u32,
         sn_max: steward_list.config().sn_max as u32,
+        allow_subset_candidates: false,
+        peer_scores: vec![],
+        timing: None,
     };
     let app_msg: AppMessage = sync.clone().into();
     let sync_packet =
@@ -662,19 +667,19 @@ fn test_steward_list_sync_roundtrip() {
     )
     .unwrap();
 
-    // Should get StewardListSyncReceived
+    // Should get GroupSyncReceived
     match &result {
-        ProcessResult::StewardListSyncReceived(received_sync) => {
+        ProcessResult::GroupSyncReceived(received_sync) => {
             assert_eq!(received_sync.steward_members, sync.steward_members);
             assert_eq!(received_sync.start_epoch, sync.start_epoch);
             assert_eq!(received_sync.sn_min, sync.sn_min);
             assert_eq!(received_sync.sn_max, sync.sn_max);
         }
-        other => panic!("Expected StewardListSyncReceived, got {:?}", other),
+        other => panic!("Expected GroupSyncReceived, got {:?}", other),
     }
 
     // Simulate app-layer handling: validate and apply
-    if let ProcessResult::StewardListSyncReceived(sync) = result {
+    if let ProcessResult::GroupSyncReceived(sync) = result {
         let config = ProtocolConfig::new(sync.sn_min as usize, sync.sn_max as usize).unwrap();
         let members = group_members(&joiner_handle, &joiner_mls).unwrap();
 
@@ -722,8 +727,8 @@ fn test_steward_list_sync_roundtrip() {
 
 /// If a member already has a steward list, receiving a sync message is a no-op.
 #[test]
-fn test_steward_list_sync_idempotent_for_existing_members() {
-    use de_mls::protos::de_mls::messages::v1::StewardListSync;
+fn test_group_sync_idempotent_for_existing_members() {
+    use de_mls::protos::de_mls::messages::v1::GroupSync;
 
     let group_name = "sync-idempotent-group";
     let steward_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
@@ -756,17 +761,20 @@ fn test_steward_list_sync_idempotent_for_existing_members() {
 
     // Now steward sends a sync message
     let steward_list = steward_handle.steward_list().unwrap();
-    let sync = StewardListSync {
+    let sync = GroupSync {
         steward_members: steward_list.members().to_vec(),
         start_epoch: steward_list.start_epoch(),
         sn_min: steward_list.config().sn_min as u32,
         sn_max: steward_list.config().sn_max as u32,
+        allow_subset_candidates: false,
+        peer_scores: vec![],
+        timing: None,
     };
     let app_msg: AppMessage = sync.into();
     let sync_packet =
         build_message(&steward_handle, &steward_mls, &app_msg, b"test-app-id").unwrap();
 
-    // Joiner processes sync — should get StewardListSyncReceived at the core level
+    // Joiner processes sync — should get GroupSyncReceived at the core level
     let result = process_inbound(
         &mut joiner_handle,
         &sync_packet.payload,
@@ -775,8 +783,8 @@ fn test_steward_list_sync_idempotent_for_existing_members() {
     )
     .unwrap();
     assert!(
-        matches!(result, ProcessResult::StewardListSyncReceived(_)),
-        "Core should still return StewardListSyncReceived"
+        matches!(result, ProcessResult::GroupSyncReceived(_)),
+        "Core should still return GroupSyncReceived"
     );
 
     // But the app layer would skip it because the list is already set.

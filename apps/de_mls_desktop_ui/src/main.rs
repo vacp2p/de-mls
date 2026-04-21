@@ -48,13 +48,14 @@ struct ChatState {
 struct RejectedProposal {
     action: String,
     address: String,
+    reason: &'static str,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct ConsensusState {
     is_steward: bool,
     group_state: String,
-    pending: Option<VotePayload>,
+    pending_votes: Vec<VotePayload>,
     approved_queue: Vec<(String, String)>,
     rejected: Vec<RejectedProposal>,
     epoch_history: Vec<Vec<(String, String)>>,
@@ -405,7 +406,13 @@ fn Home() -> Element {
                                 convert_group_request_to_display(vp.payload.clone());
                             let mut c = cons.write();
                             c.proposal_cache.insert(vp.proposal_id, (action, address));
-                            c.pending = Some(vp);
+                            if !c
+                                .pending_votes
+                                .iter()
+                                .any(|p| p.proposal_id == vp.proposal_id)
+                            {
+                                c.pending_votes.push(vp);
+                            }
                         }
                     }
                     Some(AppEvent::ProposalDecided(group_id, consensus_event)) => {
@@ -423,7 +430,11 @@ fn Home() -> Element {
                                         if let Some((action, address)) =
                                             c.proposal_cache.remove(proposal_id)
                                         {
-                                            c.rejected.push(RejectedProposal { action, address });
+                                            c.rejected.push(RejectedProposal {
+                                                action,
+                                                address,
+                                                reason: "Rejected",
+                                            });
                                             if c.rejected.len() > MAX_VISIBLE_REJECTED {
                                                 c.rejected.remove(0);
                                             }
@@ -436,7 +447,11 @@ fn Home() -> Element {
                                     if let Some((action, address)) =
                                         c.proposal_cache.remove(proposal_id)
                                     {
-                                        c.rejected.push(RejectedProposal { action, address });
+                                        c.rejected.push(RejectedProposal {
+                                            action,
+                                            address,
+                                            reason: "Timed out",
+                                        });
                                         if c.rejected.len() > MAX_VISIBLE_REJECTED {
                                             c.rejected.remove(0);
                                         }
@@ -444,7 +459,11 @@ fn Home() -> Element {
                                 }
                             }
                         }
-                        c.pending = None;
+                        let decided_id = match &consensus_event {
+                            ConsensusEvent::ConsensusReached { proposal_id, .. } => *proposal_id,
+                            ConsensusEvent::ConsensusFailed { proposal_id, .. } => *proposal_id,
+                        };
+                        c.pending_votes.retain(|v| v.proposal_id != decided_id);
                     }
                     Some(AppEvent::GroupRemoved(name)) => {
                         let mut g = groups.write();
@@ -906,52 +925,45 @@ fn ConsensusSection() -> Element {
     let chat = use_context::<Signal<ChatState>>();
     let mut cons = use_context::<Signal<ConsensusState>>();
 
-    let vote_yes = {
-        move |_| {
-            let pending_proposal = cons.read().pending.clone();
-            if let Some(v) = pending_proposal {
-                cons.write().pending = None;
-                spawn(async move {
-                    let _ = GATEWAY
-                        .send(AppCmd::Vote {
-                            group_id: v.group_id.clone(),
-                            proposal_id: v.proposal_id,
-                            choice: true,
-                        })
-                        .await;
-                });
-            }
-        }
-    };
-    let vote_no = {
-        move |_| {
-            let pending_proposal = cons.read().pending.clone();
-            if let Some(v) = pending_proposal {
-                cons.write().pending = None;
-                spawn(async move {
-                    let _ = GATEWAY
-                        .send(AppCmd::Vote {
-                            group_id: v.group_id.clone(),
-                            proposal_id: v.proposal_id,
-                            choice: false,
-                        })
-                        .await;
-                });
-            }
+    let mut do_vote = move |proposal_id: u32, choice: bool| {
+        let vote = cons
+            .read()
+            .pending_votes
+            .iter()
+            .find(|v| v.proposal_id == proposal_id)
+            .cloned();
+        if let Some(v) = vote {
+            cons.write()
+                .pending_votes
+                .retain(|p| p.proposal_id != proposal_id);
+            spawn(async move {
+                let _ = GATEWAY
+                    .send(AppCmd::Vote {
+                        group_id: v.group_id.clone(),
+                        proposal_id: v.proposal_id,
+                        choice,
+                    })
+                    .await;
+            });
         }
     };
 
     let opened = chat.read().opened_group.clone();
-    let pending = cons
+    let pending_votes: Vec<VotePayload> = cons
         .read()
-        .pending
-        .clone()
-        .filter(|p| Some(p.group_id.as_str()) == opened.as_deref());
+        .pending_votes
+        .iter()
+        .filter(|p| Some(p.group_id.as_str()) == opened.as_deref())
+        .cloned()
+        .collect();
 
-    let pending_display = pending.as_ref().map(|v| {
-        let (action, id) = convert_group_request_to_display(v.payload.clone());
-        (v.proposal_id, action, id)
-    });
+    let pending_display: Vec<(u32, String, String)> = pending_votes
+        .iter()
+        .map(|v| {
+            let (action, id) = convert_group_request_to_display(v.payload.clone());
+            (v.proposal_id, action, id)
+        })
+        .collect();
 
     let approved_snapshot = cons.read().approved_queue.clone();
     let rejected_snapshot = cons.read().rejected.clone();
@@ -1106,63 +1118,80 @@ fn ConsensusSection() -> Element {
                     }
                 }
 
-                // Active Vote
+                // Active Votes
                 div { class: "consensus-section",
                     h3 { "Active Vote" }
-                    if let Some((proposal_id, action, id)) = pending_display {
-                        {
-                            let is_emergency = action.starts_with("Emergency: ");
-                            let is_election = action.starts_with("Steward Election");
-                            let short_id = fmt_addr(&id);
-                            if is_emergency {
-                                let violation_type = action.strip_prefix("Emergency: ").unwrap_or("").to_string();
-                                rsx! {
-                                    div { class: "proposals-window emergency",
-                                        div { class: "emergency-header",
-                                            span { class: "bad", "⚠ Emergency Proposal #{proposal_id}" }
-                                        }
-                                        div { class: "proposal-item",
-                                            span { class: "action", "Violation:" }
-                                            span { class: "value bad", "{violation_type}" }
-                                        }
-                                        div { class: "proposal-item",
-                                            span { class: "action", "Accused steward:" }
-                                            span { class: "value", "{short_id}" }
+                    if pending_display.is_empty() {
+                        div { class: "no-data", "No active vote" }
+                    } else {
+                        for (pid, action, id) in pending_display.iter() {
+                            {
+                                let proposal_id = *pid;
+                                let is_emergency = action.starts_with("Emergency: ");
+                                let is_election = action.starts_with("Steward Election");
+                                let short_id = fmt_addr(id);
+                                if is_emergency {
+                                    let violation_type = action.strip_prefix("Emergency: ").unwrap_or("").to_string();
+                                    rsx! {
+                                        div { class: "proposal-row",
+                                            div { class: "proposals-window emergency",
+                                                div { class: "emergency-header",
+                                                    span { class: "bad", "⚠ Emergency Proposal #{proposal_id}" }
+                                                }
+                                                div { class: "proposal-item",
+                                                    span { class: "action", "Violation:" }
+                                                    span { class: "value bad", "{violation_type}" }
+                                                }
+                                                div { class: "proposal-item",
+                                                    span { class: "action", "Accused steward:" }
+                                                    span { class: "value", "{short_id}" }
+                                                }
+                                            }
+                                            div { class: "vote-actions",
+                                                button { class: "primary", onclick: move |_| do_vote(proposal_id, true), "YES" }
+                                                button { class: "ghost",   onclick: move |_| do_vote(proposal_id, false),  "NO"  }
+                                            }
                                         }
                                     }
-                                }
-                            } else if is_election {
-                                rsx! {
-                                    div { class: "proposals-window",
-                                        div { class: "proposal-item proposal-id",
-                                            span { class: "action", "Steward Election #{proposal_id}" }
-                                        }
-                                        div { class: "proposal-item",
-                                            span { class: "action", "Proposed stewards:" }
-                                            span { class: "value", "{id}" }
+                                } else if is_election {
+                                    rsx! {
+                                        div { class: "proposal-row",
+                                            div { class: "proposals-window",
+                                                div { class: "proposal-item proposal-id",
+                                                    span { class: "action", "Steward Election #{proposal_id}" }
+                                                }
+                                                div { class: "proposal-item",
+                                                    span { class: "action", "Proposed stewards:" }
+                                                    span { class: "value", "{id}" }
+                                                }
+                                            }
+                                            div { class: "vote-actions",
+                                                button { class: "primary", onclick: move |_| do_vote(proposal_id, true), "YES" }
+                                                button { class: "ghost",   onclick: move |_| do_vote(proposal_id, false),  "NO"  }
+                                            }
                                         }
                                     }
-                                }
-                            } else {
-                                rsx! {
-                                    div { class: "proposals-window",
-                                        div { class: "proposal-item proposal-id",
-                                            span { class: "action", "Proposal #{proposal_id}" }
-                                        }
-                                        div { class: "proposal-item",
-                                            span { class: "action", "{action}:" }
-                                            span { class: "value", "{short_id}" }
+                                } else {
+                                    rsx! {
+                                        div { class: "proposal-row",
+                                            div { class: "proposals-window",
+                                                div { class: "proposal-item proposal-id",
+                                                    span { class: "action", "Proposal #{proposal_id}" }
+                                                }
+                                                div { class: "proposal-item",
+                                                    span { class: "action", "{action}:" }
+                                                    span { class: "value", "{short_id}" }
+                                                }
+                                            }
+                                            div { class: "vote-actions",
+                                                button { class: "primary", onclick: move |_| do_vote(proposal_id, true), "YES" }
+                                                button { class: "ghost",   onclick: move |_| do_vote(proposal_id, false),  "NO"  }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                        div { class: "vote-actions",
-                            button { class: "primary", onclick: vote_yes, "YES" }
-                            button { class: "ghost",   onclick: vote_no,  "NO"  }
-                        }
-                    } else {
-                        div { class: "no-data", "No active vote" }
                     }
                 }
 
@@ -1178,10 +1207,12 @@ fn ConsensusSection() -> Element {
                                     for rp in rejected_snapshot.iter().rev() {
                                         {
                                             let short = fmt_addr(&rp.address);
+                                            let reason = rp.reason;
                                             rsx! {
                                                 div { class: "history-entry rejected",
                                                     span { class: "action", "{rp.action}:" }
                                                     span { class: "value", "{short}" }
+                                                    span { class: "muted", " ({reason})" }
                                                 }
                                             }
                                         }

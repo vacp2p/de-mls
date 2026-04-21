@@ -16,9 +16,7 @@ use std::{collections::HashMap, str::FromStr, sync::Arc};
 use tokio::sync::RwLock;
 use tracing::{error, info};
 
-use hashgraph_like_consensus::{
-    api::ConsensusServiceAPI, service::DefaultConsensusService, types::ConsensusEvent,
-};
+use hashgraph_like_consensus::{storage::ConsensusStorage, types::ConsensusEvent};
 
 use crate::app::config::GroupConfig;
 use crate::app::consensus_bridge::{forward_incoming_proposal, forward_incoming_vote};
@@ -32,7 +30,8 @@ use crate::app::state_machine::{
 };
 use crate::core::{
     self, DeMlsProvider, DefaultProvider, FreezeFinalizeResult, Group, GroupEventHandler,
-    ProcessResult, ProtocolConfig, ScoreEvent, ScoringConfig, StewardList, create_commit_candidate,
+    ProcessResult, ProtocolConfig, ProviderConsensus, ScoreEvent, ScoringConfig, StewardList,
+    create_commit_candidate,
 };
 use crate::ds::InboundPacket;
 use crate::mls_crypto::{
@@ -41,8 +40,8 @@ use crate::mls_crypto::{
 use prost::Message;
 
 use crate::protos::de_mls::messages::v1::{
-    AppMessage, BanRequest, ConversationMessage, GroupUpdateRequest, RemoveMember,
-    StewardElectionProposal, StewardListSync, ViolationEvidence, group_update_request,
+    AppMessage, BanRequest, ConversationMessage, GroupSync, GroupUpdateRequest, PeerScore,
+    RemoveMember, StewardElectionProposal, TimingConfig, ViolationEvidence, group_update_request,
 };
 
 /// Internal state for a group managed by User.
@@ -53,9 +52,9 @@ struct GroupEntry {
 
 /// User manages multiple MLS groups.
 pub struct User<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler> {
-    mls_service: MlsService<P::Storage>,
+    mls_service: Arc<MlsService<P::Storage>>,
     groups: Arc<RwLock<HashMap<String, GroupEntry>>>,
-    consensus_service: Arc<P::Consensus>,
+    consensus_service: Arc<ProviderConsensus<P>>,
     eth_signer: PrivateKeySigner,
     handler: Arc<H>,
     state_handler: Arc<SCH>,
@@ -72,14 +71,14 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 {
     fn new_with_config(
         mls_service: MlsService<P::Storage>,
-        consensus_service: Arc<P::Consensus>,
+        consensus_service: Arc<ProviderConsensus<P>>,
         eth_signer: PrivateKeySigner,
         handler: Arc<H>,
         state_handler: Arc<SCH>,
         default_group_config: GroupConfig,
     ) -> Self {
         Self {
-            mls_service,
+            mls_service: Arc::new(mls_service),
             groups: Arc::new(RwLock::new(HashMap::new())),
             consensus_service,
             eth_signer,
@@ -129,6 +128,19 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     pub fn identity_string(&self) -> String {
         self.mls_service.wallet_hex()
     }
+
+    /// Clean up consensus state for a group scope.
+    ///
+    /// Called when a group is removed (leave, timeout, re-creation).
+    /// Removes all proposals, votes, and sessions from the consensus service.
+    async fn cleanup_consensus_scope(&self, group_name: &str) -> Result<(), UserError> {
+        let scope = P::Scope::from(group_name.to_string());
+        self.consensus_service
+            .storage()
+            .delete_scope(&scope)
+            .await?;
+        Ok(())
+    }
 }
 
 // ─────────────────────────── DefaultProvider Convenience ───────────────────────────
@@ -139,7 +151,7 @@ impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
     /// Convenience constructor for the default provider with default group config.
     pub fn with_private_key(
         private_key: &str,
-        consensus_service: Arc<DefaultConsensusService>,
+        consensus_service: Arc<ProviderConsensus<DefaultProvider>>,
         handler: Arc<H>,
         state_handler: Arc<SCH>,
     ) -> Result<Self, UserError> {
@@ -155,7 +167,7 @@ impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
     /// Convenience constructor for the default provider with custom group config.
     pub fn with_private_key_and_config(
         private_key: &str,
-        consensus_service: Arc<DefaultConsensusService>,
+        consensus_service: Arc<ProviderConsensus<DefaultProvider>>,
         handler: Arc<H>,
         state_handler: Arc<SCH>,
         default_group_config: GroupConfig,

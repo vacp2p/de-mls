@@ -1,10 +1,9 @@
 use futures::channel::mpsc::UnboundedSender;
-use hex::ToHex;
+use hashgraph_like_consensus::events::ConsensusEventBus;
 use std::sync::{Arc, atomic::Ordering};
 
 use de_mls::{
-    ds::WakuDeliveryService, mls_crypto::format_wallet_address,
-    protos::de_mls::messages::v1::group_update_request,
+    app::format_group_request, ds::WakuDeliveryService, mls_crypto::format_wallet_address,
 };
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
 
@@ -24,33 +23,9 @@ pub(crate) async fn push_consensus_state(
         .await
     {
         let display: Vec<(String, String)> = proposals
-            .into_iter()
-            .filter_map(|p| match p.payload {
-                Some(group_update_request::Payload::InviteMember(kp)) => {
-                    Some(("Add Member".to_string(), kp.identity.encode_hex()))
-                }
-                Some(group_update_request::Payload::RemoveMember(id)) => {
-                    Some(("Remove Member".to_string(), id.identity.encode_hex()))
-                }
-                Some(group_update_request::Payload::EmergencyCriteria(ec)) => {
-                    let (label, target) = match ec.evidence.as_ref() {
-                        Some(e) => (
-                            format!("Emergency: {}", e.violation_type_label()),
-                            format_wallet_address(&e.target_member_id),
-                        ),
-                        None => (
-                            "Emergency: Unknown Violation".to_string(),
-                            "unknown".to_string(),
-                        ),
-                    };
-                    Some((label, target))
-                }
-                Some(group_update_request::Payload::StewardElection(se)) => Some((
-                    "Steward Election".to_string(),
-                    format!("epoch {}", se.election_epoch),
-                )),
-                None => None,
-            })
+            .iter()
+            .filter(|p| p.payload.is_some())
+            .map(|p| format_group_request(p))
             .collect();
         let _ = evt_tx.unbounded_send(AppEvent::CurrentEpochProposals {
             group_id: group_name.to_string(),
@@ -64,33 +39,9 @@ pub(crate) async fn push_consensus_state(
             .into_iter()
             .map(|batch| {
                 batch
-                    .into_iter()
-                    .filter_map(|p| match p.payload {
-                        Some(group_update_request::Payload::InviteMember(kp)) => {
-                            Some(("Add Member".to_string(), kp.identity.encode_hex()))
-                        }
-                        Some(group_update_request::Payload::RemoveMember(id)) => {
-                            Some(("Remove Member".to_string(), id.identity.encode_hex()))
-                        }
-                        Some(group_update_request::Payload::EmergencyCriteria(ec)) => {
-                            let (label, target) = match ec.evidence.as_ref() {
-                                Some(e) => (
-                                    format!("Emergency: {}", e.violation_type_label()),
-                                    format_wallet_address(&e.target_member_id),
-                                ),
-                                None => (
-                                    "Emergency: Unknown Violation".to_string(),
-                                    "unknown".to_string(),
-                                ),
-                            };
-                            Some((label, target))
-                        }
-                        Some(group_update_request::Payload::StewardElection(se)) => Some((
-                            "Steward Election".to_string(),
-                            format!("epoch {}", se.election_epoch),
-                        )),
-                        None => None,
-                    })
+                    .iter()
+                    .filter(|p| p.payload.is_some())
+                    .map(|p| format_group_request(p))
                     .collect()
             })
             .collect();
@@ -161,7 +112,7 @@ impl Gateway<WakuDeliveryService> {
         user: UserRef,
     ) {
         let evt_tx = self.evt_tx.clone();
-        let mut rx = core.consensus.subscribe_to_events();
+        let mut rx = core.consensus.event_bus().subscribe();
 
         tokio::spawn(async move {
             tracing::info!("gateway: consensus forwarder started");
@@ -206,7 +157,15 @@ impl Gateway<WakuDeliveryService> {
             let mut rx = core.app_state.pubsub.subscribe();
             tracing::info!("gateway: pubsub forwarder started");
 
-            while let Ok(pkt) = rx.recv().await {
+            loop {
+                let pkt = match rx.recv().await {
+                    Ok(pkt) => pkt,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("pubsub forwarder lagged, dropped {n} messages");
+                        continue;
+                    }
+                    Err(_) => break,
+                };
                 if !core.topics.contains(&pkt.group_id, &pkt.subtopic).await {
                     continue;
                 }

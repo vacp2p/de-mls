@@ -13,6 +13,13 @@ pub const DEFAULT_PROPOSAL_EXPIRATION: Duration = Duration::from_secs(3600);
 /// Default consensus timeout (15 seconds).
 pub const DEFAULT_CONSENSUS_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Default lifetime of a buffered membership update (in epochs).
+pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
+
+/// Default delay before the proposal creator's auto-YES fires (10s of 15s
+/// consensus timeout — leaves room for a manual NO to land first).
+pub const DEFAULT_CREATOR_AUTO_VOTE_DELAY: Duration = Duration::from_secs(10);
+
 /// Configuration for a group's epoch behavior.
 ///
 /// Combines timing parameters (app-layer) with protocol parameters (core-layer).
@@ -26,6 +33,15 @@ pub struct GroupConfig {
     pub proposal_expiration: Duration,
     /// Timeout for consensus voting to complete.
     pub consensus_timeout: Duration,
+    /// Maximum age (in epochs) of a buffered membership update before it is dropped.
+    /// If the epoch steward fails to commit a buffered Add/Remove for this many
+    /// consecutive epochs, the entry is discarded.
+    pub pending_update_max_epochs: u32,
+    /// Delay after proposal creation at which the creator auto-casts YES.
+    /// `None` disables — the creator must vote manually from the UI.
+    /// Keep below `consensus_timeout` so the auto-vote still affects the
+    /// outcome. The creator can override by voting manually before the timer.
+    pub creator_auto_vote_delay: Option<Duration>,
     /// Protocol configuration (steward list bounds and protocol-level flags).
     pub protocol: ProtocolConfig,
 }
@@ -37,6 +53,8 @@ impl Default for GroupConfig {
             freeze_duration: DEFAULT_EPOCH_DURATION / 2,
             proposal_expiration: DEFAULT_PROPOSAL_EXPIRATION,
             consensus_timeout: DEFAULT_CONSENSUS_TIMEOUT,
+            pending_update_max_epochs: DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
+            creator_auto_vote_delay: Some(DEFAULT_CREATOR_AUTO_VOTE_DELAY),
             protocol: ProtocolConfig::default(),
         }
     }
@@ -50,6 +68,8 @@ impl GroupConfig {
             freeze_duration: epoch_duration / 2,
             proposal_expiration: DEFAULT_PROPOSAL_EXPIRATION,
             consensus_timeout: DEFAULT_CONSENSUS_TIMEOUT,
+            pending_update_max_epochs: DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
+            creator_auto_vote_delay: Some(DEFAULT_CREATOR_AUTO_VOTE_DELAY),
             protocol: ProtocolConfig::default(),
         }
     }

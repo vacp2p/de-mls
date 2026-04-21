@@ -6,7 +6,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     User<P, H, SCH>
 {
     /// Check if still in pending join state.
-    pub async fn check_pending_join(&self, group_name: &str) -> bool {
+    ///
+    /// Returns `true` if still waiting, `false` if joined or timed out.
+    pub async fn check_pending_join(&self, group_name: &str) -> Result<bool, UserError> {
         let (state, expired) = {
             let groups = self.groups.read().await;
             match groups.get(group_name) {
@@ -14,12 +16,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     entry.state_machine.current_state(),
                     entry.state_machine.is_pending_join_expired(),
                 ),
-                None => return false,
+                None => return Ok(false),
             }
         };
 
         if state != GroupState::PendingJoin {
-            return false;
+            return Ok(false);
         }
 
         if expired {
@@ -28,11 +30,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                  (time-based fallback)"
             );
             self.groups.write().await.remove(group_name);
+            self.cleanup_consensus_scope(group_name).await?;
             let _ = self.handler.on_leave_group(group_name).await;
-            return false;
+            return Ok(false);
         }
 
-        true
+        Ok(true)
     }
 
     /// Check if the freeze phase timed out.
@@ -50,7 +53,15 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             if state != GroupState::Freezing {
                 return Ok(FreezeTimeoutStatus::NotFreezing);
             }
-            if !entry.state_machine.is_freeze_timed_out() {
+
+            // Early selection: skip remaining freeze time if all expected
+            // stewards have submitted candidates.
+            let all_candidates_in = entry
+                .group
+                .steward_list()
+                .is_some_and(|list| entry.group.freeze_candidate_count() >= list.len());
+
+            if !all_candidates_in && !entry.state_machine.is_freeze_timed_out() {
                 return Ok(FreezeTimeoutStatus::StillFreezing);
             }
 
@@ -92,10 +103,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     }
                 }
 
-                // Send steward list sync to new joiners after welcome packets
+                // Send group sync to new joiners after welcome packets
                 if has_welcome {
-                    if let Err(e) = self.send_steward_list_sync(group_name).await {
-                        error!("[poll_freeze_status] Failed to send steward list sync: {e}");
+                    if let Err(e) = self.send_group_sync(group_name).await {
+                        error!("[poll_freeze_status] Failed to send group sync: {e}");
                     }
                 }
 
@@ -108,9 +119,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             FreezeFinalizeResult::NoCandidate => {
                 let (next_state, should_accuse, violation_epoch, steward_id) = {
                     let mut groups = self.groups.write().await;
-                    let entry = groups
-                        .get_mut(group_name)
-                        .ok_or(UserError::GroupNotFound)?;
+                    let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
 
                     if has_proposals {
                         entry.group.reject_all_approved_proposals();
@@ -119,9 +128,17 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                         entry.state_machine.start_reelection();
                         let violation_epoch =
                             self.mls_service.current_epoch(group_name).unwrap_or(0);
+                        // Accuse the live epoch steward — the member who was
+                        // actually responsible for committing given current
+                        // membership. If the nominal steward was removed
+                        // earlier this epoch, their identity is no longer in
+                        // the group and accusing them would file an ECP
+                        // against a ghost.
+                        let members = core::group_members(&entry.group, &self.mls_service)
+                            .unwrap_or_default();
                         let steward_id = entry
                             .group
-                            .epoch_steward(violation_epoch)
+                            .live_epoch_steward(violation_epoch, &members)
                             .filter(|id| !id.is_empty())
                             .map(|id| id.to_vec())
                             .unwrap_or_default();
@@ -189,8 +206,19 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             entry.group.ensure_freeze_round(epoch);
 
             // If steward, create commit candidate while we still hold the lock.
+            // Candidate creation failure must not block the freeze transition —
+            // this node can still process other stewards' candidates.
             let outbound = if entry.group.is_steward() {
-                create_commit_candidate(&mut entry.group, &self.mls_service, &self.app_id)?
+                match create_commit_candidate(&mut entry.group, &self.mls_service, &self.app_id) {
+                    Ok(packets) => packets,
+                    Err(e) => {
+                        error!(
+                            "[check_member_freeze] Failed to create commit candidate \
+                             for group {group_name}: {e}"
+                        );
+                        vec![]
+                    }
+                }
             } else {
                 vec![]
             };

@@ -48,7 +48,7 @@ pub mod message_types {
     pub const USER_VOTE: &str = "UserVote";
     pub const PROPOSAL_ADDED: &str = "ProposalAdded";
     pub const COMMIT_CANDIDATE: &str = "CommitCandidate";
-    pub const STEWARD_LIST_SYNC: &str = "StewardListSync";
+    pub const GROUP_SYNC: &str = "GroupSync";
     pub const UNKNOWN: &str = "Unknown";
 }
 
@@ -69,7 +69,7 @@ impl MessageType for app_message::Payload {
             app_message::Payload::UserVote(_) => USER_VOTE,
             app_message::Payload::ProposalAdded(_) => PROPOSAL_ADDED,
             app_message::Payload::CommitCandidate(_) => COMMIT_CANDIDATE,
-            app_message::Payload::StewardListSync(_) => STEWARD_LIST_SYNC,
+            app_message::Payload::GroupSync(_) => GROUP_SYNC,
         }
     }
 }
@@ -113,11 +113,9 @@ impl ViolationEvidence {
 
 // ─────────────────────────── Request Display ───────────────────────────
 
-/// Convert a serialized `GroupUpdateRequest` to a display-friendly `(action, target)` pair.
-pub fn convert_group_request_to_display(request: Vec<u8>) -> (String, String) {
-    let request = GroupUpdateRequest::decode(request.as_slice()).unwrap_or_default();
-    let action = request.message_type().to_string();
-    let target = match &request.payload {
+/// Format target string from a `GroupUpdateRequest`.
+fn format_group_request_target(request: &GroupUpdateRequest) -> String {
+    match &request.payload {
         Some(group_update_request::Payload::InviteMember(im)) => {
             format_wallet_address(&im.identity)
         }
@@ -138,8 +136,21 @@ pub fn convert_group_request_to_display(request: Vec<u8>) -> (String, String) {
             format!("epoch {} | {}", se.election_epoch, stewards.join(", "))
         }
         _ => "Invalid request".to_string(),
-    };
-    (action, target)
+    }
+}
+
+/// Convert a `GroupUpdateRequest` reference to a display-friendly `(action, target)` pair.
+pub fn format_group_request(request: &GroupUpdateRequest) -> (String, String) {
+    (
+        request.message_type().to_string(),
+        format_group_request_target(request),
+    )
+}
+
+/// Convert a serialized `GroupUpdateRequest` to a display-friendly `(action, target)` pair.
+pub fn convert_group_request_to_display(request: Vec<u8>) -> (String, String) {
+    let request = GroupUpdateRequest::decode(request.as_slice()).unwrap_or_default();
+    format_group_request(&request)
 }
 
 /// Extract the identity string from a `GroupUpdateRequest`.

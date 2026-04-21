@@ -30,6 +30,26 @@ where
         return Err(CoreError::MlsGroupNotInitialized);
     }
 
+    // MLS forbids committing one's own removal. If the approved batch contains
+    // RemoveMember(self), skip local candidate creation — another steward will
+    // commit the batch (including this node's removal) once they enter freeze.
+    let self_identity = mls.wallet_bytes();
+    let self_removal_pending = proposals.values().any(|req| {
+        matches!(
+            req.payload.as_ref(),
+            Some(group_update_request::Payload::RemoveMember(r))
+                if r.identity == self_identity
+        )
+    });
+    if self_removal_pending {
+        info!(
+            "[create_commit_candidate] Skipping local candidate for group {}: \
+             approved batch contains self-remove — waiting for another steward",
+            group.group_name()
+        );
+        return Ok(vec![]);
+    }
+
     // Emergency criteria and steward election proposals are consensus-only — they don't
     // produce MLS operations and must NOT be in the approved queue at batch creation time.
     let non_mls_ids: Vec<u32> = proposals
@@ -92,6 +112,13 @@ where
             welcome_bytes: welcome,
         },
         epoch,
+    );
+
+    info!(
+        "[create_commit_candidate] Created candidate for group {} \
+         (epoch={epoch}, proposals={})",
+        group.group_name(),
+        updates.len(),
     );
 
     let candidate_msg: AppMessage = candidate.into();

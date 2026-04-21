@@ -60,7 +60,36 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::core::CoreError;
 use crate::core::proposals::{CurrentEpochProposals, ProposalId};
 use crate::core::steward_list::{ProtocolConfig, StewardList};
-use crate::protos::de_mls::messages::v1::{CommitCandidate, GroupUpdateRequest};
+use crate::protos::de_mls::messages::v1::{
+    CommitCandidate, GroupUpdateRequest, group_update_request,
+};
+
+/// Return the target identity of a membership-changing `GroupUpdateRequest`.
+///
+/// Used as the stable key for buffering pending updates so duplicates don't
+/// stack when the same KP is re-broadcast. Returns `None` for non-membership
+/// requests (emergency criteria, steward election).
+pub fn target_identity_of(request: &GroupUpdateRequest) -> Option<&[u8]> {
+    match request.payload.as_ref()? {
+        group_update_request::Payload::InviteMember(m) => Some(&m.identity),
+        group_update_request::Payload::RemoveMember(m) => Some(&m.identity),
+        _ => None,
+    }
+}
+
+/// A membership update that has been observed but may not yet have been committed.
+///
+/// Every member buffers these so that, if the epoch steward fails to commit the
+/// change, the next epoch steward can pick it up. Entries are pruned once the
+/// change has been applied to the group (member added/removed) or after
+/// `max_age_epochs` epochs have elapsed since the entry was first seen.
+#[derive(Clone, Debug)]
+pub struct PendingUpdate {
+    /// The `GroupUpdateRequest` carrying either `InviteMember` or `RemoveMember`.
+    pub request: GroupUpdateRequest,
+    /// MLS epoch at which this update was first observed locally.
+    pub first_seen_epoch: u64,
+}
 
 /// Maximum number of committed batch hashes to remember for dedup.
 const MAX_COMMITTED_HASHES: usize = 10;
@@ -124,6 +153,10 @@ pub struct Group {
     committed_batch_hashes: VecDeque<Vec<u8>>,
     /// Freeze-round candidate buffer for deterministic selection.
     freeze_round: Option<FreezeRound>,
+    /// Buffer of membership updates (Add/Remove) that every member records so a
+    /// future epoch steward can retry them if the current one fails to commit.
+    /// Keyed by target identity so duplicates don't stack.
+    pending_updates: HashMap<Vec<u8>, PendingUpdate>,
 }
 
 impl Group {
@@ -138,6 +171,7 @@ impl Group {
             pending_removal_targets: HashSet::new(),
             committed_batch_hashes: VecDeque::new(),
             freeze_round: None,
+            pending_updates: HashMap::new(),
         }
     }
 
@@ -188,12 +222,45 @@ impl Group {
         self.protocol_config.allow_subset_candidates
     }
 
+    /// Update the `allow_subset_candidates` flag (used when receiving GroupSync).
+    pub fn set_allow_subset_candidates(&mut self, allow: bool) {
+        self.protocol_config.allow_subset_candidates = allow;
+    }
+
     /// Derived from `steward_list.contains(self_identity)`. Returns `false`
     /// for joiners before they receive the list via sync.
     pub fn is_steward(&self) -> bool {
         self.steward_list
             .as_ref()
             .is_some_and(|l| l.contains(&self.self_identity))
+    }
+
+    /// Check if this node is the epoch steward for the given epoch.
+    pub fn is_epoch_steward(&self, epoch: u64) -> bool {
+        self.epoch_steward(epoch)
+            .is_some_and(|es| es == self.self_identity)
+    }
+
+    /// Check if this node is the *live* epoch steward — i.e. the epoch-steward
+    /// slot after dead (non-member) stewards are skipped in rotation order.
+    pub fn is_live_epoch_steward(&self, epoch: u64, members: &[Vec<u8>]) -> bool {
+        self.live_epoch_steward(epoch, members)
+            .is_some_and(|es| es == self.self_identity)
+    }
+
+    /// Resolve the live epoch steward by skipping stewards that are no longer
+    /// members of the group. See [`StewardList::live_epoch_steward`].
+    pub fn live_epoch_steward<'a>(&'a self, epoch: u64, members: &[Vec<u8>]) -> Option<&'a [u8]> {
+        self.steward_list
+            .as_ref()
+            .and_then(|l| l.live_epoch_steward(epoch, members))
+    }
+
+    /// Resolve the live backup steward. See [`StewardList::live_backup_steward`].
+    pub fn live_backup_steward<'a>(&'a self, epoch: u64, members: &[Vec<u8>]) -> Option<&'a [u8]> {
+        self.steward_list
+            .as_ref()
+            .and_then(|l| l.live_backup_steward(epoch, members))
     }
 
     // ─────────────────────────── Proposal Handle Operations ───────────────────────────
@@ -447,6 +514,91 @@ impl Group {
             self.committed_batch_hashes.pop_front();
         }
         self.committed_batch_hashes.push_back(commit_hash);
+    }
+
+    // ─────────────────────────── Pending Update Buffer ───────────────────────────
+
+    /// Insert a `GroupUpdateRequest` into the pending-updates buffer.
+    ///
+    /// Keyed by target identity — a second insertion for the same identity
+    /// keeps the original `first_seen_epoch` so it can still expire on schedule.
+    /// Returns `true` if this is a new entry, `false` if already buffered.
+    pub fn buffer_pending_update(
+        &mut self,
+        request: GroupUpdateRequest,
+        current_epoch: u64,
+    ) -> bool {
+        let Some(identity) = target_identity_of(&request) else {
+            return false;
+        };
+        let key = identity.to_vec();
+        if self.pending_updates.contains_key(&key) {
+            return false;
+        }
+        self.pending_updates.insert(
+            key,
+            PendingUpdate {
+                request,
+                first_seen_epoch: current_epoch,
+            },
+        );
+        true
+    }
+
+    /// Drop a buffered update by target identity.
+    ///
+    /// Returns `true` if an entry was removed.
+    pub fn remove_pending_update(&mut self, identity: &[u8]) -> bool {
+        self.pending_updates.remove(identity).is_some()
+    }
+
+    /// Read-only access to the pending-updates buffer.
+    pub fn pending_updates(&self) -> &HashMap<Vec<u8>, PendingUpdate> {
+        &self.pending_updates
+    }
+
+    /// Number of buffered pending updates.
+    pub fn pending_update_count(&self) -> usize {
+        self.pending_updates.len()
+    }
+
+    /// Check whether a pending update exists for the given identity.
+    pub fn has_pending_update(&self, identity: &[u8]) -> bool {
+        self.pending_updates.contains_key(identity)
+    }
+
+    /// Drop entries whose `first_seen_epoch` is older than `current_epoch - max_age`.
+    ///
+    /// Returns the identities of expired entries for logging.
+    pub fn expire_pending_updates(&mut self, current_epoch: u64, max_age: u32) -> Vec<Vec<u8>> {
+        let cutoff = current_epoch.saturating_sub(max_age as u64);
+        let expired: Vec<Vec<u8>> = self
+            .pending_updates
+            .iter()
+            .filter(|(_, p)| p.first_seen_epoch < cutoff)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in &expired {
+            self.pending_updates.remove(k);
+        }
+        expired
+    }
+
+    /// Drop Add entries whose target is now a group member, and Remove entries
+    /// whose target is no longer a group member. Call after a commit has merged.
+    pub fn prune_pending_updates_for_members(&mut self, current_members: &[Vec<u8>]) {
+        let in_group: HashSet<&Vec<u8>> = current_members.iter().collect();
+        self.pending_updates.retain(|identity, entry| {
+            let payload = match entry.request.payload.as_ref() {
+                Some(p) => p,
+                None => return false,
+            };
+            match payload {
+                group_update_request::Payload::InviteMember(_) => !in_group.contains(identity),
+                group_update_request::Payload::RemoveMember(_) => in_group.contains(identity),
+                _ => false,
+            }
+        });
     }
 }
 
