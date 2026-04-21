@@ -15,8 +15,8 @@ use crate::{
     mls_crypto::parse_wallet_to_bytes,
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, CommitCandidate, ConversationMessage, EmergencyCriteriaProposal,
-        GroupUpdateRequest, InvitationToJoin, Outcome, ProposalAdded, RemoveMember, UserKeyPackage,
-        UserVote, ViolationEvidence, VotePayload, WelcomeMessage, app_message,
+        GroupSync, GroupUpdateRequest, InvitationToJoin, Outcome, ProposalAdded, RemoveMember,
+        UserKeyPackage, UserVote, ViolationEvidence, VotePayload, WelcomeMessage, app_message,
         group_update_request, welcome_message,
     },
 };
@@ -30,7 +30,7 @@ use crate::{
 ///
 /// - `AppMessage` - A chat message or other application-level message
 /// - `Proposal` / `Vote` - Consensus messages that need forwarding
-/// - `GetUpdateRequest` - Steward received a membership change request
+/// - `MembershipChangeReceived` - Steward received a membership change request
 /// - `JoinedGroup` - Successfully joined via welcome message
 /// - `GroupUpdated` - MLS state changed (batch commit applied)
 /// - `LeaveGroup` - User was removed from the group
@@ -63,7 +63,7 @@ pub enum ProcessResult {
     /// Steward received a membership change request (key package or ban).
     ///
     /// Application should start a consensus vote for this request.
-    GetUpdateRequest(GroupUpdateRequest),
+    MembershipChangeReceived(GroupUpdateRequest),
 
     /// The user successfully joined a group via welcome message.
     ///
@@ -83,7 +83,13 @@ pub enum ProcessResult {
     ViolationDetected(ViolationEvidence),
 
     /// A remote commit candidate was successfully buffered in the freeze round.
-    CandidateBuffered,
+    CommitCandidateReceived,
+
+    /// A group sync message was received from the current steward.
+    ///
+    /// Contains steward list, peer scores, timing config, and protocol flags.
+    /// Only meaningful for joiners whose handle has `steward_list() == None`.
+    GroupSyncReceived(GroupSync),
 
     /// No action needed.
     ///
@@ -168,6 +174,7 @@ impl ViolationEvidence {
 
 // WELCOME MESSAGE SUBTOPIC
 
+/// Wrap MLS welcome bytes into a `WelcomeMessage` proto.
 pub fn invitation_from_bytes(mls_bytes: Vec<u8>) -> WelcomeMessage {
     let invitation = InvitationToJoin {
         mls_message_out_bytes: mls_bytes,
@@ -246,6 +253,14 @@ impl From<Vote> for AppMessage {
     }
 }
 
+impl From<GroupSync> for AppMessage {
+    fn from(sync: GroupSync) -> Self {
+        AppMessage {
+            payload: Some(app_message::Payload::GroupSync(sync)),
+        }
+    }
+}
+
 impl From<ProposalAdded> for AppMessage {
     fn from(proposal_added: ProposalAdded) -> Self {
         AppMessage {
@@ -286,12 +301,15 @@ impl TryFrom<AppMessage> for ProcessResult {
                 Ok(ProcessResult::Proposal(proposal.clone()))
             }
             Some(app_message::Payload::Vote(vote)) => Ok(ProcessResult::Vote(vote.clone())),
-            Some(app_message::Payload::BanRequest(ban_request)) => {
-                Ok(ProcessResult::GetUpdateRequest(GroupUpdateRequest {
+            Some(app_message::Payload::BanRequest(ban_request)) => Ok(
+                ProcessResult::MembershipChangeReceived(GroupUpdateRequest {
                     payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
                         identity: parse_wallet_to_bytes(ban_request.user_to_ban.as_str())?,
                     })),
-                }))
+                }),
+            ),
+            Some(app_message::Payload::GroupSync(sync)) => {
+                Ok(ProcessResult::GroupSyncReceived(sync.clone()))
             }
             _ => Ok(ProcessResult::Noop),
         }

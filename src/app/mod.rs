@@ -10,7 +10,7 @@
 //! - **`User`** - Multi-group manager with consensus integration
 //! - **`GroupStateMachine`** - State transitions
 //! - **`StateChangeHandler`** - Callbacks for UI state updates
-//! - **Epoch scheduling** - Configurable steward epoch timing
+//! - **Freeze/commit lifecycle** - Timer-based freeze and commit selection
 //!
 //! # When to Use This Layer
 //!
@@ -33,7 +33,7 @@
 //! │   User<P, H, S>                                         │
 //! │   ├── groups: HashMap<String, GroupEntry>               │
 //! │   │   └── GroupEntry                                    │
-//! │   │       ├── handle: GroupHandle (from core)           │
+//! │   │       ├── group: Group (from core)           │
 //! │   │       └── state_machine: GroupStateMachine          │
 //! │   ├── consensus_service                                 │
 //! │   ├── handler: H (GroupEventHandler)                    │
@@ -48,7 +48,7 @@
 //!                           ▼
 //! ┌─────────────────────────────────────────────────────────┐
 //! │                    de_mls::core                         │
-//! │   GroupHandle, process_inbound, apply_consensus_result  │
+//! │   Group, process_inbound, apply_consensus_result  │
 //! └─────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -111,11 +111,9 @@
 //! // Process inbound (call from your transport receive loop)
 //! user.process_inbound_packet(inbound_packet).await?;
 //!
-//! // Steward epoch (call periodically for steward groups)
-//! user.start_steward_epoch("my-chat").await?;
-//!
-//! // Member epoch (call at epoch boundaries for non-steward groups)
-//! let entered_freezing = user.start_member_epoch("other-chat").await?;
+//! // Poll for freeze (call periodically for all groups — stewards auto-create
+//! // commit candidates when the inactivity timer fires)
+//! let entered_freezing = user.check_member_freeze("my-chat").await?;
 //! ```
 //!
 //! # Configuration
@@ -134,22 +132,23 @@
 //! user.create_group_with_config("fast-chat", true, GroupConfig::with_epoch_duration(Duration::from_secs(10))).await?;
 //! ```
 
-mod consensus;
+mod config;
+mod consensus_bridge;
 mod display;
 mod error;
-mod message_type;
 mod peer_scoring;
-mod scheduler;
 mod state_machine;
 mod user;
 
-pub use consensus::{cast_vote, forward_incoming_proposal, forward_incoming_vote, start_voting};
-pub use display::{convert_group_request_to_display, get_identity_from_group_update_request};
-pub use error::UserError;
-pub use message_type::{MessageType, message_types};
-pub use peer_scoring::{FixedScoringProvider, InMemoryPeerScoreStorage, PeerScoringService};
-pub use scheduler::{IntervalScheduler, StewardScheduler, StewardSchedulerConfig};
-pub use state_machine::{
-    FreezeTimeoutStatus, GroupConfig, GroupState, GroupStateMachine, StateChangeHandler,
+pub use config::GroupConfig;
+pub use consensus_bridge::{
+    cast_vote, forward_incoming_proposal, forward_incoming_vote, submit_proposal,
 };
+pub use display::{
+    MemberRole, MessageType, convert_group_request_to_display, format_group_request,
+    get_identity_from_group_update_request, message_types,
+};
+pub use error::UserError;
+pub use peer_scoring::{FixedScoringProvider, InMemoryPeerScoreStorage, PeerScoringService};
+pub use state_machine::{FreezeTimeoutStatus, GroupState, GroupStateMachine, StateChangeHandler};
 pub use user::User;

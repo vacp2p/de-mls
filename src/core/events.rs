@@ -171,7 +171,7 @@ pub trait GroupEventHandler: Send + Sync {
     ///
     /// # Arguments
     /// * `group_name` - The name of the group
-    /// * `operation` - Description of the failed operation (e.g., "start_voting")
+    /// * `operation` - Description of the failed operation (e.g., "submit_proposal")
     /// * `error` - The error message
     ///
     /// # Implementation Notes

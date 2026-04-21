@@ -12,7 +12,7 @@ use prost::Message;
 
 use de_mls::app::{FixedScoringProvider, InMemoryPeerScoreStorage, PeerScoringService};
 use de_mls::core::{
-    FreezeFinalizeResult, GroupHandle, ProcessResult, ScoreEvent, ScoringConfig,
+    FreezeFinalizeResult, Group, ProcessResult, ProtocolConfig, ScoreEvent, ScoringConfig,
     apply_consensus_result, build_key_package_message, create_commit_candidate, create_group,
     finalize_freeze_round, group_members, prepare_to_join, process_inbound,
 };
@@ -58,10 +58,10 @@ fn default_scoring_service() -> PeerScoringService<InMemoryPeerScoreStorage, Fix
 fn sync_scoring_members<S: de_mls::core::PeerScoreStorage, P: de_mls::core::ScoringProvider>(
     scoring: &mut PeerScoringService<S, P>,
     group_name: &str,
-    handle: &GroupHandle,
+    group: &Group,
     mls: &MlsService<MemoryDeMlsStorage>,
 ) {
-    let mls_members = group_members(handle, mls).unwrap();
+    let mls_members = group_members(group, mls).unwrap();
     let scored = scoring.all_members_with_scores(group_name);
     let scored_ids: std::collections::HashSet<Vec<u8>> =
         scored.iter().map(|(id, _)| id.clone()).collect();
@@ -83,7 +83,7 @@ fn sync_scoring_members<S: de_mls::core::PeerScoreStorage, P: de_mls::core::Scor
 /// Returns (welcome_packet, batch_packet).
 fn steward_add_joiner(
     steward_mls: &MlsService<MemoryDeMlsStorage>,
-    steward_handle: &mut GroupHandle,
+    steward_handle: &mut Group,
     joiner_kp_packet: &OutboundPacket,
 ) -> (OutboundPacket, OutboundPacket) {
     let result = process_inbound(
@@ -95,8 +95,8 @@ fn steward_add_joiner(
     .unwrap();
 
     let gur = match result {
-        ProcessResult::GetUpdateRequest(gur) => gur,
-        other => panic!("Expected GetUpdateRequest, got {:?}", other),
+        ProcessResult::MembershipChangeReceived(gur) => gur,
+        other => panic!("Expected MembershipChangeReceived, got {:?}", other),
     };
 
     steward_handle.insert_approved_proposal(1, gur);
@@ -140,7 +140,8 @@ fn test_scoring_pipeline_create_join_emergency() {
 
     // ── Step 1: Alice creates group ──
     let alice_mls = setup_mls(alice_hex);
-    let mut alice_handle = create_group(group_name, &alice_mls).unwrap();
+    let mut alice_handle =
+        create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
     let alice_id = alice_mls.wallet_bytes();
 
     let mut scoring = default_scoring_service();
@@ -156,7 +157,11 @@ fn test_scoring_pipeline_create_join_emergency() {
 
     // ── Step 2: Bob joins ──
     let bob_mls = setup_mls(bob_hex);
-    let mut bob_handle = prepare_to_join(group_name);
+    let mut bob_handle = prepare_to_join(
+        group_name,
+        bob_mls.wallet_bytes(),
+        ProtocolConfig::new(1, 5).unwrap(),
+    );
     let bob_kp = build_key_package_message(&bob_handle, &bob_mls, b"test-app-id").unwrap();
     let bob_id = bob_mls.wallet_bytes();
 
@@ -182,7 +187,7 @@ fn test_scoring_pipeline_create_join_emergency() {
     .unwrap();
     assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
 
-    // Bob's scoring: sync from MLS group members (mirrors User::handle_process_result JoinedGroup)
+    // Bob's scoring: sync from MLS group members (mirrors User::dispatch_inbound_result JoinedGroup)
     let mut bob_scoring = default_scoring_service();
     sync_scoring_members(&mut bob_scoring, group_name, &bob_handle, &bob_mls);
 
@@ -249,11 +254,16 @@ fn test_scoring_pipeline_emergency_rejected() {
     let bob_hex = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 
     let alice_mls = setup_mls(alice_hex);
-    let mut alice_handle = create_group(group_name, &alice_mls).unwrap();
+    let mut alice_handle =
+        create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
     let alice_id = alice_mls.wallet_bytes();
 
     let bob_mls = setup_mls(bob_hex);
-    let mut bob_handle = prepare_to_join(group_name);
+    let mut bob_handle = prepare_to_join(
+        group_name,
+        bob_mls.wallet_bytes(),
+        ProtocolConfig::new(1, 5).unwrap(),
+    );
     let bob_kp = build_key_package_message(&bob_handle, &bob_mls, b"test-app-id").unwrap();
     let bob_id = bob_mls.wallet_bytes();
 
@@ -336,7 +346,8 @@ fn test_scoring_no_ops_for_regular_proposal() {
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 
     let alice_mls = setup_mls(alice_hex);
-    let mut alice_handle = create_group(group_name, &alice_mls).unwrap();
+    let mut alice_handle =
+        create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
 
     // Simulate a regular (non-emergency) proposal being approved as owner
     let regular_request = de_mls::protos::de_mls::messages::v1::GroupUpdateRequest {
@@ -370,7 +381,8 @@ fn test_new_joiner_starts_with_default_scores() {
     let bob_hex = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 
     let alice_mls = setup_mls(alice_hex);
-    let mut alice_handle = create_group(group_name, &alice_mls).unwrap();
+    let mut alice_handle =
+        create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
     let alice_id = alice_mls.wallet_bytes();
 
     // Alice's scoring has her at a non-default score (simulating prior events)
@@ -384,7 +396,11 @@ fn test_new_joiner_starts_with_default_scores() {
 
     // Bob joins
     let bob_mls = setup_mls(bob_hex);
-    let mut bob_handle = prepare_to_join(group_name);
+    let mut bob_handle = prepare_to_join(
+        group_name,
+        bob_mls.wallet_bytes(),
+        ProtocolConfig::new(1, 5).unwrap(),
+    );
     let bob_kp = build_key_package_message(&bob_handle, &bob_mls, b"test-app-id").unwrap();
 
     let (welcome, _batch) = steward_add_joiner(&alice_mls, &mut alice_handle, &bob_kp);
@@ -419,13 +435,14 @@ fn test_violation_type_specific_penalties() {
     let target_id = vec![0xAA];
 
     // BrokenCommit → -50
-    let mut handle = create_group(group_name, &alice_mls).unwrap();
+    let mut group =
+        create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
     let ecp = ViolationEvidence::broken_commit(target_id.clone(), 0, Vec::<u8>::new())
         .with_creator(creator_id.clone())
         .into_update_request()
         .unwrap();
     let payload = ecp.encode_to_vec();
-    let result = apply_consensus_result(&mut handle, 1, true, &payload).unwrap();
+    let result = apply_consensus_result(&mut group, 1, true, &payload).unwrap();
     assert_eq!(result.score_ops[0].event, ScoreEvent::BrokenCommit);
 
     let mut scoring = default_scoring_service();
@@ -444,7 +461,7 @@ fn test_violation_type_specific_penalties() {
         .into_update_request()
         .unwrap();
     let payload = ecp.encode_to_vec();
-    let result = apply_consensus_result(&mut handle, 2, true, &payload).unwrap();
+    let result = apply_consensus_result(&mut group, 2, true, &payload).unwrap();
     assert_eq!(result.score_ops[0].event, ScoreEvent::BrokenMlsProposal);
     scoring.apply_event(group_name, &target_id, result.score_ops[0].event);
     assert_eq!(
@@ -460,7 +477,7 @@ fn test_violation_type_specific_penalties() {
         .into_update_request()
         .unwrap();
     let payload = ecp.encode_to_vec();
-    let result = apply_consensus_result(&mut handle, 3, true, &payload).unwrap();
+    let result = apply_consensus_result(&mut group, 3, true, &payload).unwrap();
     assert_eq!(result.score_ops[0].event, ScoreEvent::CensorshipInactivity);
     scoring.apply_event(group_name, &target_id, result.score_ops[0].event);
     assert_eq!(

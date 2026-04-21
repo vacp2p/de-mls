@@ -124,6 +124,11 @@ pub fn forward_app_message(
                 group_name: cm.group_name.clone(),
             }))
             .map_err(|e| anyhow::anyhow!("error sending chat message: {e}")),
+        Some(app_message::Payload::GroupSync(_)) => {
+            // Group sync is handled by the app layer (dispatch_inbound_result),
+            // not forwarded to the UI. Nothing to display.
+            Ok(())
+        }
         _ => {
             let msg_type = app_msg
                 .payload

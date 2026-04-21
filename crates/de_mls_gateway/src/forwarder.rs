@@ -1,10 +1,9 @@
 use futures::channel::mpsc::UnboundedSender;
-use hex::ToHex;
+use hashgraph_like_consensus::events::ConsensusEventBus;
 use std::sync::{Arc, atomic::Ordering};
 
 use de_mls::{
-    ds::WakuDeliveryService, mls_crypto::format_wallet_address,
-    protos::de_mls::messages::v1::group_update_request,
+    app::format_group_request, ds::WakuDeliveryService, mls_crypto::format_wallet_address,
 };
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
 
@@ -24,29 +23,9 @@ pub(crate) async fn push_consensus_state(
         .await
     {
         let display: Vec<(String, String)> = proposals
-            .into_iter()
-            .filter_map(|p| match p.payload {
-                Some(group_update_request::Payload::InviteMember(kp)) => {
-                    Some(("Add Member".to_string(), kp.identity.encode_hex()))
-                }
-                Some(group_update_request::Payload::RemoveMember(id)) => {
-                    Some(("Remove Member".to_string(), id.identity.encode_hex()))
-                }
-                Some(group_update_request::Payload::EmergencyCriteria(ec)) => {
-                    let (label, target) = match ec.evidence.as_ref() {
-                        Some(e) => (
-                            format!("Emergency: {}", e.violation_type_label()),
-                            format_wallet_address(&e.target_member_id),
-                        ),
-                        None => (
-                            "Emergency: Unknown Violation".to_string(),
-                            "unknown".to_string(),
-                        ),
-                    };
-                    Some((label, target))
-                }
-                None => None,
-            })
+            .iter()
+            .filter(|p| p.payload.is_some())
+            .map(|p| format_group_request(p))
             .collect();
         let _ = evt_tx.unbounded_send(AppEvent::CurrentEpochProposals {
             group_id: group_name.to_string(),
@@ -60,29 +39,9 @@ pub(crate) async fn push_consensus_state(
             .into_iter()
             .map(|batch| {
                 batch
-                    .into_iter()
-                    .filter_map(|p| match p.payload {
-                        Some(group_update_request::Payload::InviteMember(kp)) => {
-                            Some(("Add Member".to_string(), kp.identity.encode_hex()))
-                        }
-                        Some(group_update_request::Payload::RemoveMember(id)) => {
-                            Some(("Remove Member".to_string(), id.identity.encode_hex()))
-                        }
-                        Some(group_update_request::Payload::EmergencyCriteria(ec)) => {
-                            let (label, target) = match ec.evidence.as_ref() {
-                                Some(e) => (
-                                    format!("Emergency: {}", e.violation_type_label()),
-                                    format_wallet_address(&e.target_member_id),
-                                ),
-                                None => (
-                                    "Emergency: Unknown Violation".to_string(),
-                                    "unknown".to_string(),
-                                ),
-                            };
-                            Some((label, target))
-                        }
-                        None => None,
-                    })
+                    .iter()
+                    .filter(|p| p.payload.is_some())
+                    .map(|p| format_group_request(p))
                     .collect()
             })
             .collect();
@@ -108,6 +67,7 @@ pub(crate) async fn push_member_scores(
         Err(_) => return,
     };
     let scores = user.get_member_scores(group_name);
+    let roles = user.get_member_roles(group_name).await.unwrap_or_default();
     let members: Vec<MemberInfo> = addresses
         .into_iter()
         .map(|address| {
@@ -116,12 +76,28 @@ pub(crate) async fn push_member_scores(
                 .find(|(raw_id, _)| format_wallet_address(raw_id.as_slice()) == address)
                 .map(|(_, s)| *s)
                 .unwrap_or(100);
-            MemberInfo { address, score }
+            let role = roles
+                .iter()
+                .find(|(raw_id, _)| format_wallet_address(raw_id.as_slice()) == address)
+                .map(|(_, r)| r.to_string())
+                .unwrap_or_else(|| "member".to_string());
+            MemberInfo {
+                address,
+                score,
+                role,
+            }
         })
         .collect();
     let _ = evt_tx.unbounded_send(AppEvent::GroupMembers {
         group_id: group_name.to_string(),
         members,
+    });
+
+    // Also push steward status — it may have changed after election or epoch advance.
+    let is_steward = user.is_steward_for_group(group_name).await.unwrap_or(false);
+    let _ = evt_tx.unbounded_send(AppEvent::StewardStatus {
+        group_id: group_name.to_string(),
+        is_steward,
     });
 }
 
@@ -129,14 +105,14 @@ impl Gateway<WakuDeliveryService> {
     /// Spawn the consensus event forwarder.
     ///
     /// This handles both UI notification (AppEvent::ProposalDecided) and
-    /// user-side processing (handle_consensus_event internally calls handler).
+    /// user-side processing (apply_consensus_outcome internally calls handler).
     pub(crate) fn spawn_consensus_forwarder(
         &self,
         core: Arc<CoreCtx<WakuDeliveryService>>,
         user: UserRef,
     ) {
         let evt_tx = self.evt_tx.clone();
-        let mut rx = core.consensus.subscribe_to_events();
+        let mut rx = core.consensus.event_bus().subscribe();
 
         tokio::spawn(async move {
             tracing::info!("gateway: consensus forwarder started");
@@ -148,10 +124,10 @@ impl Gateway<WakuDeliveryService> {
                 if let Err(e) = user
                     .write()
                     .await
-                    .handle_consensus_event(&group_name, event)
+                    .apply_consensus_outcome(&group_name, event)
                     .await
                 {
-                    tracing::warn!("handle_consensus_event failed: {e}");
+                    tracing::warn!("apply_consensus_outcome failed: {e}");
                 }
 
                 // Push refreshed approved queue, epoch history, and member scores
@@ -181,7 +157,15 @@ impl Gateway<WakuDeliveryService> {
             let mut rx = core.app_state.pubsub.subscribe();
             tracing::info!("gateway: pubsub forwarder started");
 
-            while let Ok(pkt) = rx.recv().await {
+            loop {
+                let pkt = match rx.recv().await {
+                    Ok(pkt) => pkt,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("pubsub forwarder lagged, dropped {n} messages");
+                        continue;
+                    }
+                    Err(_) => break,
+                };
                 if !core.topics.contains(&pkt.group_id, &pkt.subtopic).await {
                     continue;
                 }

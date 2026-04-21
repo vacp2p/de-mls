@@ -57,15 +57,15 @@
 //!
 //! # Core Concepts
 //!
-//! ## GroupHandle
+//! ## Group
 //!
-//! `GroupHandle` is the per-group app-level state container. It holds:
+//! `Group` is the per-group app-level state container. It holds:
 //! - Steward status (who can commit membership changes)
 //! - Pending and approved proposals for the current epoch
 //! - Freeze-round candidate buffer for commit selection
 //!
 //! MLS cryptographic state (key material, epoch secrets) lives in `MlsService`,
-//! keyed by group name. `GroupHandle` and `MlsService` are always used together.
+//! keyed by group name. `Group` and `MlsService` are always used together.
 //!
 //! ## Steward Role
 //!
@@ -85,7 +85,7 @@
 //! ```ignore
 //! use de_mls::core::{
 //!     create_group, build_message, process_inbound,
-//!     GroupEventHandler, GroupHandle, ProcessResult,
+//!     GroupEventHandler, Group, ProcessResult,
 //!     DefaultProvider,
 //! };
 //!
@@ -104,25 +104,27 @@
 //! }
 //!
 //! // 2. Create a group (as steward)
-//! let handle = create_group("my-chat", &mls)?;
+//! let config = ProtocolConfig::new(1, 5)?;
+//! let group = create_group("my-chat", &mls, config)?;
 //!
 //! // 3. Send a message
 //! let app_msg = ConversationMessage { message: b"Hello".to_vec(), .. }.into();
-//! let packet = build_message(&handle, &mls, &app_msg, &app_id)?;
+//! let packet = build_message(&group, &mls, &app_msg, &app_id)?;
 //! handler.on_outbound("my-chat", packet).await?;
 //!
 //! // 4. Process inbound messages (in your receive loop)
-//! let result = process_inbound(&mut handle, &payload, subtopic, &mls)?;
+//! let result = process_inbound(&mut group, &payload, subtopic, &mls)?;
 //! match result {
 //!     ProcessResult::AppMessage(msg) => { handler.on_app_message("my-chat", msg).await?; }
 //!     ProcessResult::GroupUpdated => { /* state machine: → Working */ }
 //!     ProcessResult::LeaveGroup => { /* cleanup group state */ }
 //!     ProcessResult::JoinedGroup(name) => { /* state machine: PendingJoin → Working */ }
-//!     ProcessResult::GetUpdateRequest(req) => { /* start consensus vote */ }
+//!     ProcessResult::MembershipChangeReceived(req) => { /* start consensus vote */ }
 //!     ProcessResult::Proposal(p) => { /* forward to consensus */ }
 //!     ProcessResult::Vote(v) => { /* forward to consensus */ }
 //!     ProcessResult::ViolationDetected(ev) => { /* start emergency vote */ }
-//!     ProcessResult::CandidateBuffered => { /* state machine: Working → Freezing */ }
+//!     ProcessResult::CommitCandidateReceived => { /* state machine: Working → Freezing */ }
+//!     ProcessResult::GroupSyncReceived(sync) => { /* validate and apply group state */ }
 //!     ProcessResult::Noop => {}
 //! }
 //! ```
@@ -139,25 +141,26 @@ mod api;
 mod consensus;
 mod error;
 mod events;
-mod group_handle;
-mod group_update_handle;
+mod group;
 mod peer_scoring;
+mod process_result;
 mod proposal_priority;
+mod proposals;
 mod provider;
 mod steward_list;
-mod types;
 
 // ── Core group operations ──
 pub use api::{
-    FreezeFinalizeResult, approved_proposals, approved_proposals_count, build_key_package_message,
-    build_message, create_commit_candidate, create_group, epoch_history, finalize_freeze_round,
-    group_members, join_group_from_invite, prepare_to_join, process_inbound,
+    FreezeFinalizeResult, apply_election_result, build_key_package_message, build_message,
+    create_commit_candidate, create_group, finalize_freeze_round, group_members,
+    join_group_from_invite, prepare_to_join, process_inbound, validate_election_proposal,
 };
 
 // ── Consensus result application (pure, synchronous) ──
 pub use consensus::apply_consensus_result;
 pub use peer_scoring::{
-    ConsensusApplyResult, PeerScoreStorage, ScoreEvent, ScoreOp, ScoringConfig, ScoringProvider,
+    ConsensusApplyResult, ElectionOutcome, PeerScoreStorage, ScoreEvent, ScoreOp, ScoringConfig,
+    ScoringProvider,
 };
 
 // ── Error type ──
@@ -167,19 +170,19 @@ pub use error::CoreError;
 pub use events::{CallbackError, GroupEventHandler};
 
 // ── Group state ──
-pub use group_handle::GroupHandle;
+pub use group::{Group, PendingUpdate, target_identity_of};
 
 // ── Proposal types ──
-pub use group_update_handle::ProposalId;
+pub use proposals::ProposalId;
 
 // ── Proposal priority ──
 pub use proposal_priority::ProposalPriority;
 
 // ── Steward list ──
-pub use steward_list::{StewardList, StewardListConfig};
+pub use steward_list::{ProtocolConfig, StewardList};
 
 // ── Provider traits ──
-pub use provider::{DeMlsProvider, DefaultProvider};
+pub use provider::{DeMlsProvider, DefaultProvider, ProviderConsensus};
 
-// ── Core types ──
-pub use types::ProcessResult;
+// ── Process results ──
+pub use process_result::ProcessResult;

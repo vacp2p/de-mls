@@ -8,10 +8,10 @@ use std::collections::HashMap;
 
 use prost::Message;
 
-use de_mls::app::{
-    FixedScoringProvider, GroupStateMachine, InMemoryPeerScoreStorage, PeerScoringService,
+use de_mls::app::{FixedScoringProvider, InMemoryPeerScoreStorage, PeerScoringService};
+use de_mls::core::{
+    ProtocolConfig, ScoreEvent, ScoringConfig, apply_consensus_result, create_group,
 };
-use de_mls::core::{ScoreEvent, ScoringConfig, apply_consensus_result, create_group};
 use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService, parse_wallet_address};
 use de_mls::protos::de_mls::messages::v1::{
     ViolationEvidence, ViolationType, group_update_request,
@@ -61,7 +61,8 @@ fn test_score_below_threshold_yes_transforms_to_remove_member() {
     let group_name = "removal-yes";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
     let alice_mls = setup_mls(alice_hex);
-    let mut handle = create_group(group_name, &alice_mls).unwrap();
+    let mut group =
+        create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
     let steward_id = alice_mls.wallet_bytes();
 
     let target_id = vec![0xBB];
@@ -74,10 +75,10 @@ fn test_score_below_threshold_yes_transforms_to_remove_member() {
     let payload = request.encode_to_vec();
 
     // Owner path: store in voting queue first
-    handle.store_voting_proposal(proposal_id, request);
+    group.store_voting_proposal(proposal_id, request);
 
     // Consensus approves
-    let result = apply_consensus_result(&mut handle, proposal_id, true, &payload).unwrap();
+    let result = apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
 
     // Score ops: creator rewarded only (target already at threshold, penalty skipped)
     assert_eq!(result.score_ops.len(), 1);
@@ -85,8 +86,8 @@ fn test_score_below_threshold_yes_transforms_to_remove_member() {
     assert_eq!(result.score_ops[0].event, ScoreEvent::EmergencyYesCreator);
 
     // RemoveMember should be in the approved queue (transformed from ECP)
-    assert_eq!(handle.approved_proposals_count(), 1);
-    let approved = handle.approved_proposals();
+    assert_eq!(group.approved_proposals_count(), 1);
+    let approved = group.approved_proposals();
     let (_, gur) = approved.iter().next().unwrap();
     match &gur.payload {
         Some(group_update_request::Payload::RemoveMember(rm)) => {
@@ -102,7 +103,8 @@ fn test_score_below_threshold_yes_non_owner() {
     let group_name = "removal-yes-nonowner";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
     let alice_mls = setup_mls(alice_hex);
-    let mut handle = create_group(group_name, &alice_mls).unwrap();
+    let mut group =
+        create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
 
     let target_id = vec![0xBB];
     let creator_id = vec![0xCC]; // someone else
@@ -114,15 +116,15 @@ fn test_score_below_threshold_yes_non_owner() {
     let payload = request.encode_to_vec();
 
     // Non-owner: do NOT store in voting queue
-    let result = apply_consensus_result(&mut handle, proposal_id, true, &payload).unwrap();
+    let result = apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
 
     // Score ops: creator rewarded only (target penalty skipped)
     assert_eq!(result.score_ops.len(), 1);
     assert_eq!(result.score_ops[0].event, ScoreEvent::EmergencyYesCreator);
 
     // RemoveMember should be in approved queue
-    assert_eq!(handle.approved_proposals_count(), 1);
-    let approved = handle.approved_proposals();
+    assert_eq!(group.approved_proposals_count(), 1);
+    let approved = group.approved_proposals();
     let (_, gur) = approved.iter().next().unwrap();
     match &gur.payload {
         Some(group_update_request::Payload::RemoveMember(rm)) => {
@@ -138,7 +140,8 @@ fn test_score_below_threshold_no_penalizes_creator() {
     let group_name = "removal-no";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
     let alice_mls = setup_mls(alice_hex);
-    let mut handle = create_group(group_name, &alice_mls).unwrap();
+    let mut group =
+        create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
     let steward_id = alice_mls.wallet_bytes();
 
     let target_id = vec![0xBB];
@@ -149,10 +152,10 @@ fn test_score_below_threshold_no_penalizes_creator() {
     let request = evidence.into_update_request().unwrap();
     let payload = request.encode_to_vec();
 
-    handle.store_voting_proposal(proposal_id, request);
+    group.store_voting_proposal(proposal_id, request);
 
     // Consensus rejects
-    let result = apply_consensus_result(&mut handle, proposal_id, false, &payload).unwrap();
+    let result = apply_consensus_result(&mut group, proposal_id, false, &payload).unwrap();
 
     // Creator penalized, target unaffected
     assert_eq!(result.score_ops.len(), 1);
@@ -160,7 +163,7 @@ fn test_score_below_threshold_no_penalizes_creator() {
     assert_eq!(result.score_ops[0].event, ScoreEvent::EmergencyNoCreator);
 
     // No RemoveMember in approved queue
-    assert_eq!(handle.approved_proposals_count(), 0);
+    assert_eq!(group.approved_proposals_count(), 0);
 }
 
 /// Full pipeline: penalties → below threshold → ECP → YES → RemoveMember in queue.
@@ -169,7 +172,8 @@ fn test_full_pipeline_penalties_to_removal() {
     let group_name = "removal-pipeline";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
     let alice_mls = setup_mls(alice_hex);
-    let mut handle = create_group(group_name, &alice_mls).unwrap();
+    let mut group =
+        create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
     let steward_id = alice_mls.wallet_bytes();
     let target_id = vec![0xDD];
 
@@ -197,10 +201,10 @@ fn test_full_pipeline_penalties_to_removal() {
     let payload = request.encode_to_vec();
 
     let proposal_id = 200;
-    handle.store_voting_proposal(proposal_id, request);
+    group.store_voting_proposal(proposal_id, request);
 
     // Consensus approves
-    let result = apply_consensus_result(&mut handle, proposal_id, true, &payload).unwrap();
+    let result = apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
 
     // Apply score ops
     for op in &result.score_ops {
@@ -208,8 +212,8 @@ fn test_full_pipeline_penalties_to_removal() {
     }
 
     // RemoveMember should be in approved queue
-    assert_eq!(handle.approved_proposals_count(), 1);
-    let approved = handle.approved_proposals();
+    assert_eq!(group.approved_proposals_count(), 1);
+    let approved = group.approved_proposals();
     let (_, gur) = approved.iter().next().unwrap();
     match &gur.payload {
         Some(group_update_request::Payload::RemoveMember(rm)) => {
@@ -219,24 +223,29 @@ fn test_full_pipeline_penalties_to_removal() {
     }
 }
 
-/// Dedup: state machine prevents duplicate ECP for same target.
+/// Dedup: Group prevents duplicate ECP for same target.
 #[test]
 fn test_dedup_pending_removal_targets() {
-    let mut sm = GroupStateMachine::new_as_steward();
+    let mut group = create_group(
+        "dedup-group",
+        &setup_mls("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"),
+        ProtocolConfig::new(1, 5).unwrap(),
+    )
+    .unwrap();
     let target = vec![0xAA];
 
-    assert!(!sm.has_pending_removal_for(&target));
+    assert!(!group.has_pending_removal(&target));
 
-    sm.observe_removal_target(target.clone());
-    assert!(sm.has_pending_removal_for(&target));
+    group.observe_pending_removal(target.clone());
+    assert!(group.has_pending_removal(&target));
 
     // Second observation is idempotent
-    sm.observe_removal_target(target.clone());
-    assert!(sm.has_pending_removal_for(&target));
+    group.observe_pending_removal(target.clone());
+    assert!(group.has_pending_removal(&target));
 
     // Resolve clears it
-    sm.resolve_removal_target(&target);
-    assert!(!sm.has_pending_removal_for(&target));
+    group.resolve_pending_removal(&target);
+    assert!(!group.has_pending_removal(&target));
 }
 
 /// Self-guard: steward skips itself when checking members below threshold.
@@ -312,7 +321,8 @@ fn test_regular_emergency_yes_no_transform() {
     let group_name = "no-transform";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
     let alice_mls = setup_mls(alice_hex);
-    let mut handle = create_group(group_name, &alice_mls).unwrap();
+    let mut group =
+        create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
 
     let target_id = vec![0xBB];
     let creator_id = alice_mls.wallet_bytes();
@@ -324,13 +334,13 @@ fn test_regular_emergency_yes_no_transform() {
     let request = evidence.into_update_request().unwrap();
     let payload = request.encode_to_vec();
 
-    handle.store_voting_proposal(proposal_id, request);
+    group.store_voting_proposal(proposal_id, request);
 
-    let result = apply_consensus_result(&mut handle, proposal_id, true, &payload).unwrap();
+    let result = apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
 
     // Score ops present (it's an accepted emergency)
     assert_eq!(result.score_ops.len(), 2);
 
     // But NO RemoveMember in approved queue (regular emergencies are consumed)
-    assert_eq!(handle.approved_proposals_count(), 0);
+    assert_eq!(group.approved_proposals_count(), 0);
 }

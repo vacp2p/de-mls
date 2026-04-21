@@ -3,11 +3,11 @@ use tokio::sync::{broadcast, broadcast::Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use de_mls::core::{DefaultProvider, ProviderConsensus};
 use de_mls::ds::{
     DeliveryService, DeliveryServiceError, InboundPacket, TopicFilter, WakuConfig,
     WakuDeliveryService, WakuStartResult,
 };
-use hashgraph_like_consensus::service::DefaultConsensusService;
 
 pub struct AppState<DS: DeliveryService> {
     pub delivery: DS,
@@ -18,7 +18,7 @@ pub struct AppState<DS: DeliveryService> {
 pub struct CoreCtx<DS: DeliveryService> {
     pub app_state: Arc<AppState<DS>>,
     pub topics: Arc<TopicFilter>,
-    pub consensus: DefaultConsensusService,
+    pub consensus: ProviderConsensus<DefaultProvider>,
 }
 
 impl<DS: DeliveryService> CoreCtx<DS> {
@@ -26,7 +26,7 @@ impl<DS: DeliveryService> CoreCtx<DS> {
         Self {
             app_state,
             topics: Arc::new(TopicFilter::new()),
-            consensus: DefaultConsensusService::new_with_max_sessions(10),
+            consensus: ProviderConsensus::<DefaultProvider>::new_with_max_sessions(10),
         }
     }
 }
@@ -62,8 +62,9 @@ pub async fn bootstrap_core(
         discv5_bootstrap_enrs: cfg.discv5_bootstrap_enrs,
     })?;
 
-    // Broadcast inbound packets inside the app
-    let (pubsub_tx, _) = broadcast::channel::<InboundPacket>(100);
+    // Broadcast inbound packets inside the app.
+    // Capacity must handle bursts (multiple proposals + votes + candidates in flight).
+    let (pubsub_tx, _) = broadcast::channel::<InboundPacket>(512);
 
     // Subscribe before moving delivery into AppState.
     let rx = delivery.subscribe();

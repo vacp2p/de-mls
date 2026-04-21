@@ -12,7 +12,7 @@ use prost::Message;
 use hashgraph_like_consensus::service::DefaultConsensusService;
 
 use de_mls::app::{GroupConfig, GroupState, StateChangeHandler, User};
-use de_mls::core::{CallbackError, DefaultProvider, GroupEventHandler};
+use de_mls::core::{CallbackError, DefaultProvider, GroupEventHandler, ProtocolConfig};
 use de_mls::ds::{InboundPacket, OutboundPacket};
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, GroupUpdateRequest, ViolationEvidence, ViolationType, app_message,
@@ -108,7 +108,7 @@ async fn settle() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 }
 
-/// Complete join flow: KP → vote → steward epoch → welcome.
+/// Complete join flow: KP → vote → freeze → commit → welcome.
 async fn do_join(
     steward: &mut TU,
     steward_h: &H,
@@ -120,7 +120,7 @@ async fn do_join(
 ) {
     joiner.send_kp_message(group).await.unwrap();
 
-    // Deliver KP to steward → triggers start_voting_on_request_background (tokio::spawn)
+    // Deliver KP to steward → triggers initiate_proposal (tokio::spawn)
     for p in joiner_h.drain_packets() {
         let _ = steward.process_inbound_packet(to_in(&p)).await;
     }
@@ -149,12 +149,17 @@ async fn do_join(
     settle().await;
 
     // Instead of subscribing to broadcast (unreliable in tests with auto-vote),
-    // poll the consensus service for the result and call handle_consensus_event directly.
+    // poll the consensus service for the result and call apply_consensus_outcome directly.
     {
-        use hashgraph_like_consensus::api::ConsensusServiceAPI;
+        use hashgraph_like_consensus::storage::ConsensusStorage;
         let scope = group.to_string();
         // Try to get the payload — if the proposal resolved, this should work
-        if let Ok(payload) = cs.get_proposal_payload(&scope, pid).await {
+        if let Ok(payload) = cs
+            .storage()
+            .get_proposal(&scope, pid)
+            .await
+            .map(|p| p.payload)
+        {
             // We know it resolved. Build a ConsensusReached event.
             let ev = hashgraph_like_consensus::types::ConsensusEvent::ConsensusReached {
                 proposal_id: pid,
@@ -166,16 +171,18 @@ async fn do_join(
                 all.push(u);
             }
             for u in all.iter_mut() {
-                let _ = u.handle_consensus_event(group, ev.clone()).await;
+                let _ = u.apply_consensus_outcome(group, ev.clone()).await;
             }
             let _ = payload; // suppress unused warning
         }
     }
 
-    // Steward epoch → freeze → commit
-    steward.start_steward_epoch(group).await.unwrap();
+    // Wait for epoch_duration to elapse then trigger inactivity detection.
+    // check_member_freeze creates the commit candidate if is_steward().
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    steward.check_member_freeze(group).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
-    steward.check_freeze_timeout(group).await;
+    steward.poll_freeze_status(group).await.unwrap();
 
     // Deliver welcome/commit
     for p in steward_h.drain_packets() {
@@ -196,7 +203,7 @@ async fn approve_ecp(
     cs: &DefaultConsensusService,
 ) {
     submitter
-        .start_voting_on_request_background(group.to_string(), request)
+        .initiate_proposal(group.to_string(), request)
         .await
         .unwrap();
     settle().await;
@@ -224,9 +231,15 @@ async fn approve_ecp(
 
     // Directly dispatch the consensus event to all users
     {
-        use hashgraph_like_consensus::api::ConsensusServiceAPI;
+        use hashgraph_like_consensus::storage::ConsensusStorage;
         let scope = group.to_string();
-        if (cs.get_proposal_payload(&scope, pid).await).is_ok() {
+        if (cs
+            .storage()
+            .get_proposal(&scope, pid)
+            .await
+            .map(|p| p.payload))
+        .is_ok()
+        {
             let ev = hashgraph_like_consensus::types::ConsensusEvent::ConsensusReached {
                 proposal_id: pid,
                 result: true,
@@ -237,7 +250,7 @@ async fn approve_ecp(
                 all.push(u);
             }
             for u in all.iter_mut() {
-                let _ = u.handle_consensus_event(group, ev.clone()).await;
+                let _ = u.apply_consensus_outcome(group, ev.clone()).await;
             }
         }
     }
@@ -251,9 +264,10 @@ async fn approve_ecp(
 async fn test_user_layer_score_removal_pipeline() {
     let group = "score-removal";
     let cfg = GroupConfig {
-        epoch_duration: Duration::from_secs(60),
+        epoch_duration: Duration::from_millis(50),
         freeze_duration: Duration::from_millis(10),
-        allow_subset_candidates: false,
+        protocol: ProtocolConfig::new(1, 5).unwrap(),
+        ..GroupConfig::default()
     };
     let cs = Arc::new(DefaultConsensusService::new_with_max_sessions(100));
 
@@ -270,6 +284,12 @@ async fn test_user_layer_score_removal_pipeline() {
         bob.get_group_state(group).await.unwrap(),
         GroupState::Working
     );
+
+    // After Bob joins, the epoch has advanced past Alice's initial single-steward
+    // list (start_epoch=0, len=1). Simulate the steward election completing so
+    // Alice remains a valid epoch steward before Charlie tries to join.
+    alice.regenerate_steward_list(group).await.unwrap();
+    bob.regenerate_steward_list(group).await.unwrap();
 
     charlie.create_group(group, false).await.unwrap();
     do_join(
@@ -335,7 +355,7 @@ async fn test_user_layer_score_removal_pipeline() {
     assert_eq!(alice.get_member_score(group, &bob_bytes), Some(0));
 
     // Step 5: Steward should have auto-created SCORE_BELOW_THRESHOLD ECP.
-    // check_and_initiate_score_removals runs inside handle_consensus_event.
+    // check_and_initiate_score_removals runs inside apply_consensus_outcome.
     settle().await;
 
     // Check that the SCORE_BELOW_THRESHOLD ECP was created
@@ -369,9 +389,10 @@ async fn test_user_layer_score_removal_pipeline() {
 async fn test_ecp_scores_applied_on_all_nodes() {
     let group = "score-sync";
     let cfg = GroupConfig {
-        epoch_duration: Duration::from_secs(60),
+        epoch_duration: Duration::from_millis(50),
         freeze_duration: Duration::from_millis(10),
-        allow_subset_candidates: false,
+        protocol: ProtocolConfig::new(1, 5).unwrap(),
+        ..GroupConfig::default()
     };
     let cs = Arc::new(DefaultConsensusService::new_with_max_sessions(100));
 

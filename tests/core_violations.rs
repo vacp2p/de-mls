@@ -7,9 +7,9 @@ use async_trait::async_trait;
 use prost::Message;
 
 use de_mls::core::{
-    CallbackError, FreezeFinalizeResult, GroupEventHandler, GroupHandle, ProcessResult, ProposalId,
-    ScoreEvent, apply_consensus_result, build_key_package_message, create_commit_candidate,
-    create_group, finalize_freeze_round, prepare_to_join, process_inbound,
+    CallbackError, FreezeFinalizeResult, Group, GroupEventHandler, ProcessResult, ProposalId,
+    ProtocolConfig, ScoreEvent, apply_consensus_result, build_key_package_message,
+    create_commit_candidate, create_group, finalize_freeze_round, prepare_to_join, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
 use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService, parse_wallet_address};
@@ -113,6 +113,10 @@ impl GroupEventHandler for MockHandler {
 
 // ─────────────────────────── Helpers ───────────────────────────
 
+fn default_steward_config() -> ProtocolConfig {
+    ProtocolConfig::new(1, 5).unwrap()
+}
+
 fn setup_mls(wallet_hex: &str) -> MlsService<MemoryDeMlsStorage> {
     let storage = MemoryDeMlsStorage::new();
     let mls = MlsService::new(storage);
@@ -121,28 +125,25 @@ fn setup_mls(wallet_hex: &str) -> MlsService<MemoryDeMlsStorage> {
     mls
 }
 
-fn setup_steward(
-    group_name: &str,
-    wallet_hex: &str,
-) -> (MlsService<MemoryDeMlsStorage>, GroupHandle) {
+fn setup_steward(group_name: &str, wallet_hex: &str) -> (MlsService<MemoryDeMlsStorage>, Group) {
     let mls = setup_mls(wallet_hex);
-    let handle = create_group(group_name, &mls).unwrap();
-    (mls, handle)
+    let group = create_group(group_name, &mls, default_steward_config()).unwrap();
+    (mls, group)
 }
 
 fn setup_joiner(
     group_name: &str,
     wallet_hex: &str,
-) -> (MlsService<MemoryDeMlsStorage>, GroupHandle, OutboundPacket) {
+) -> (MlsService<MemoryDeMlsStorage>, Group, OutboundPacket) {
     let mls = setup_mls(wallet_hex);
-    let handle = prepare_to_join(group_name);
-    let kp_packet = build_key_package_message(&handle, &mls, b"test-app-id").unwrap();
-    (mls, handle, kp_packet)
+    let group = prepare_to_join(group_name, mls.wallet_bytes(), default_steward_config());
+    let kp_packet = build_key_package_message(&group, &mls, b"test-app-id").unwrap();
+    (mls, group, kp_packet)
 }
 
 fn steward_add_joiner(
     steward_mls: &MlsService<MemoryDeMlsStorage>,
-    steward_handle: &mut GroupHandle,
+    steward_handle: &mut Group,
     joiner_kp_packet: &OutboundPacket,
 ) -> (OutboundPacket, OutboundPacket) {
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -157,8 +158,8 @@ fn steward_add_joiner(
     .unwrap();
 
     let gur = match result {
-        ProcessResult::GetUpdateRequest(gur) => gur,
-        other => panic!("Expected GetUpdateRequest, got {:?}", other),
+        ProcessResult::MembershipChangeReceived(gur) => gur,
+        other => panic!("Expected MembershipChangeReceived, got {:?}", other),
     };
 
     let proposal_id = PROPOSAL_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -215,22 +216,22 @@ fn test_violation_detected_produces_emergency_proposal() {
 #[test]
 fn test_emergency_in_approved_queue_returns_error() {
     let group_name = "emergency-only-batch";
-    let (mls, mut handle) = setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let (mls, mut group) = setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
     let emergency_request = ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new())
         .with_creator(vec![0x01])
         .into_update_request()
         .unwrap();
-    handle.insert_approved_proposal(50, emergency_request);
-    assert_eq!(handle.approved_proposals_count(), 1);
+    group.insert_approved_proposal(50, emergency_request);
+    assert_eq!(group.approved_proposals_count(), 1);
 
-    let result = create_commit_candidate(&mut handle, &mls, b"test-app-id");
+    let result = create_commit_candidate(&mut group, &mls, b"test-app-id");
     assert!(result.is_err());
     match result.unwrap_err() {
-        de_mls::core::CoreError::UnexpectedEmergencyProposals { proposal_ids } => {
+        de_mls::core::CoreError::UnexpectedNonMlsProposals { proposal_ids } => {
             assert_eq!(proposal_ids, vec![50]);
         }
-        other => panic!("Expected UnexpectedEmergencyProposals, got {:?}", other),
+        other => panic!("Expected UnexpectedNonMlsProposals, got {:?}", other),
     }
 }
 
@@ -238,18 +239,17 @@ fn test_emergency_in_approved_queue_returns_error() {
 #[test]
 fn test_remove_approved_proposal() {
     let group_name = "remove-approved";
-    let (_mls, mut handle) =
-        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let (_mls, mut group) = setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
     let emergency_request = ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new())
         .with_creator(vec![0x01])
         .into_update_request()
         .unwrap();
-    handle.insert_approved_proposal(50, emergency_request);
-    assert_eq!(handle.approved_proposals_count(), 1);
+    group.insert_approved_proposal(50, emergency_request);
+    assert_eq!(group.approved_proposals_count(), 1);
 
-    handle.remove_approved_proposal(50);
-    assert_eq!(handle.approved_proposals_count(), 0);
+    group.remove_approved_proposal(50);
+    assert_eq!(group.approved_proposals_count(), 0);
 }
 
 /// Test: ViolationEvidence carries correct target_member_id and epoch.
@@ -264,23 +264,26 @@ fn test_violation_evidence_carries_steward_id_and_epoch() {
 
 /// Test: epoch counter increments when approved proposals are cleared.
 #[test]
-fn test_epoch_advances_on_clear_approved_proposals() {
-    let group_name = "epoch-advance";
-    let (_mls, mut handle) =
-        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+fn test_mls_epoch_accessible_after_group_creation() {
+    let group_name = "epoch-mls";
+    let (mls, _handle) = setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
-    assert_eq!(handle.current_epoch(), 0);
+    // MLS epoch starts at 0 for a newly created group
+    let epoch = mls.current_epoch(group_name).unwrap();
+    assert_eq!(epoch, 0);
+}
 
-    handle.insert_approved_proposal(1, GroupUpdateRequest { payload: None });
-    handle.clear_approved_proposals();
-    assert_eq!(handle.current_epoch(), 1);
+#[test]
+fn test_clear_approved_proposals_does_not_change_mls_epoch() {
+    let group_name = "epoch-no-change";
+    let (mls, mut group) = setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
-    handle.insert_approved_proposal(2, GroupUpdateRequest { payload: None });
-    handle.clear_approved_proposals();
-    assert_eq!(handle.current_epoch(), 2);
+    assert_eq!(mls.current_epoch(group_name).unwrap(), 0);
 
-    handle.advance_epoch();
-    assert_eq!(handle.current_epoch(), 3);
+    group.insert_approved_proposal(1, GroupUpdateRequest { payload: None });
+    group.clear_approved_proposals();
+    // MLS epoch only advances on actual commit merge, not on clear_approved_proposals
+    assert_eq!(mls.current_epoch(group_name).unwrap(), 0);
 }
 
 /// Test: apply_consensus_result for emergency criteria proposal (owner, accepted)
@@ -289,8 +292,7 @@ fn test_epoch_advances_on_clear_approved_proposals() {
 #[test]
 fn test_apply_consensus_result_emergency_accepted_owner() {
     let group_name = "consensus-emergency-owner";
-    let (_mls, mut handle) =
-        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let (_mls, mut group) = setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
     let target_id = vec![0xAA];
     let creator_id = b"local".to_vec();
@@ -301,13 +303,13 @@ fn test_apply_consensus_result_emergency_accepted_owner() {
             .unwrap();
     let payload = emergency_request.encode_to_vec();
     let proposal_id = 77;
-    handle.store_voting_proposal(proposal_id, emergency_request);
-    assert!(handle.is_owner_of_proposal(proposal_id));
+    group.store_voting_proposal(proposal_id, emergency_request);
+    assert!(group.is_owner_of_proposal(proposal_id));
 
-    let result = apply_consensus_result(&mut handle, proposal_id, true, &payload).unwrap();
+    let result = apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
 
     // Emergency proposal should NOT remain in approved queue
-    assert_eq!(handle.approved_proposals_count(), 0);
+    assert_eq!(group.approved_proposals_count(), 0);
 
     // Score ops: target penalty + creator reward
     assert_eq!(result.score_ops.len(), 2);
@@ -323,8 +325,7 @@ fn test_apply_consensus_result_emergency_accepted_owner() {
 #[test]
 fn test_apply_consensus_result_emergency_accepted_non_owner() {
     let group_name = "consensus-emergency-non-owner";
-    let (_mls, mut handle) =
-        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let (_mls, mut group) = setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
     let target_id = vec![0xBB];
     let creator_id = b"alice".to_vec();
@@ -335,14 +336,14 @@ fn test_apply_consensus_result_emergency_accepted_non_owner() {
         .unwrap();
     let payload = emergency_request.encode_to_vec();
 
-    // The handle does NOT own this proposal (non-owner path)
+    // The  group does NOT own this proposal (non-owner path)
     let proposal_id = 88;
-    assert!(!handle.is_owner_of_proposal(proposal_id));
+    assert!(!group.is_owner_of_proposal(proposal_id));
 
-    let result = apply_consensus_result(&mut handle, proposal_id, true, &payload).unwrap();
+    let result = apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
 
     // Emergency proposal should NOT be in approved queue
-    assert_eq!(handle.approved_proposals_count(), 0);
+    assert_eq!(group.approved_proposals_count(), 0);
 
     // Score ops: target penalty + creator reward (from evidence, not local_id)
     assert_eq!(result.score_ops.len(), 2);
@@ -356,10 +357,9 @@ fn test_apply_consensus_result_emergency_accepted_non_owner() {
 #[test]
 fn test_apply_consensus_result_invalid_payload() {
     let group_name = "invalid-payload";
-    let (_mls, mut handle) =
-        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let (_mls, mut group) = setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
-    let result = apply_consensus_result(&mut handle, 999, true, &[0xFF, 0xFF]);
+    let result = apply_consensus_result(&mut group, 999, true, &[0xFF, 0xFF]);
     assert!(result.is_err());
 }
 
@@ -392,8 +392,8 @@ fn test_emergency_mixed_with_regular_returns_error() {
     )
     .unwrap();
     let gur = match result {
-        ProcessResult::GetUpdateRequest(gur) => gur,
-        other => panic!("Expected GetUpdateRequest, got {:?}", other),
+        ProcessResult::MembershipChangeReceived(gur) => gur,
+        other => panic!("Expected MembershipChangeReceived, got {:?}", other),
     };
 
     let regular_id: ProposalId = 60;
@@ -410,10 +410,10 @@ fn test_emergency_mixed_with_regular_returns_error() {
     let result = create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id");
     assert!(result.is_err());
     match result.unwrap_err() {
-        de_mls::core::CoreError::UnexpectedEmergencyProposals { proposal_ids } => {
+        de_mls::core::CoreError::UnexpectedNonMlsProposals { proposal_ids } => {
             assert_eq!(proposal_ids, vec![emergency_id]);
         }
-        other => panic!("Expected UnexpectedEmergencyProposals, got {:?}", other),
+        other => panic!("Expected UnexpectedNonMlsProposals, got {:?}", other),
     }
 }
 
@@ -449,8 +449,8 @@ fn test_duplicate_batch_returns_noop() {
     )
     .unwrap();
     let gur = match result {
-        ProcessResult::GetUpdateRequest(gur) => gur,
-        other => panic!("Expected GetUpdateRequest, got {:?}", other),
+        ProcessResult::MembershipChangeReceived(gur) => gur,
+        other => panic!("Expected MembershipChangeReceived, got {:?}", other),
     };
 
     let proposal_id: ProposalId = 45;
@@ -464,9 +464,10 @@ fn test_duplicate_batch_returns_noop() {
         .expect("Expected batch proposals packet");
 
     // Start freeze round so candidates get buffered
-    joiner_handle.start_freeze_round();
+    let epoch = joiner_mls.current_epoch(group_name).unwrap();
+    joiner_handle.start_freeze_round(epoch);
 
-    // First receive: candidate buffered → CandidateBuffered
+    // First receive: candidate buffered → CommitCandidateReceived
     let r1 = process_inbound(
         &mut joiner_handle,
         &batch_packet.payload,
@@ -475,8 +476,8 @@ fn test_duplicate_batch_returns_noop() {
     )
     .unwrap();
     assert!(
-        matches!(r1, ProcessResult::CandidateBuffered),
-        "Expected CandidateBuffered, got {:?}",
+        matches!(r1, ProcessResult::CommitCandidateReceived),
+        "Expected CommitCandidateReceived, got {:?}",
         r1
     );
 
@@ -556,8 +557,8 @@ fn test_candidate_ignored_without_freeze_round() {
     )
     .unwrap();
     let gur = match result {
-        ProcessResult::GetUpdateRequest(gur) => gur,
-        other => panic!("Expected GetUpdateRequest, got {:?}", other),
+        ProcessResult::MembershipChangeReceived(gur) => gur,
+        other => panic!("Expected MembershipChangeReceived, got {:?}", other),
     };
 
     let proposal_id: ProposalId = 44;
@@ -616,8 +617,8 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     )
     .unwrap();
     let gur = match result {
-        ProcessResult::GetUpdateRequest(gur) => gur,
-        other => panic!("Expected GetUpdateRequest, got {:?}", other),
+        ProcessResult::MembershipChangeReceived(gur) => gur,
+        other => panic!("Expected MembershipChangeReceived, got {:?}", other),
     };
 
     let proposal_id: ProposalId = 90;
@@ -632,7 +633,8 @@ fn test_commit_candidate_roundtrip_sender_identity() {
         .expect("Expected batch proposals packet");
 
     // Start freeze round before receiving candidate
-    joiner_handle.start_freeze_round();
+    let epoch = joiner_mls.current_epoch(group_name).unwrap();
+    joiner_handle.start_freeze_round(epoch);
 
     // Joiner receives candidate — should buffer it
     let result = process_inbound(
@@ -643,8 +645,8 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     )
     .unwrap();
     assert!(
-        matches!(result, ProcessResult::CandidateBuffered),
-        "Expected CandidateBuffered, got {:?}",
+        matches!(result, ProcessResult::CommitCandidateReceived),
+        "Expected CommitCandidateReceived, got {:?}",
         result
     );
 
@@ -663,13 +665,14 @@ fn test_commit_candidate_roundtrip_sender_identity() {
         finalize
     );
 
-    // After finalization, steward identity should be set from the MLS-authenticated commit
-    let steward_id = joiner_handle
-        .steward_identity()
-        .expect("steward identity should be set");
+    // After finalization, verify the steward list on the creator  group
+    // still contains the steward (the list is the source of truth).
+    let steward_list = steward_handle
+        .steward_list()
+        .expect("steward should have a list");
     assert!(
-        !steward_id.is_empty(),
-        "Steward identity should be non-empty after finalization"
+        steward_list.contains(&steward_mls.wallet_bytes()),
+        "Steward should be on the steward list"
     );
 }
 
@@ -677,21 +680,20 @@ fn test_commit_candidate_roundtrip_sender_identity() {
 #[test]
 fn test_reject_all_voting_proposals_clears_queue() {
     let group_name = "reject-voting";
-    let (_mls, mut handle) =
-        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let (_mls, mut group) = setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
     // Store proposals in voting queue
-    handle.store_voting_proposal(1, GroupUpdateRequest { payload: None });
-    handle.store_voting_proposal(2, GroupUpdateRequest { payload: None });
-    assert!(handle.is_owner_of_proposal(1));
-    assert!(handle.is_owner_of_proposal(2));
+    group.store_voting_proposal(1, GroupUpdateRequest { payload: None });
+    group.store_voting_proposal(2, GroupUpdateRequest { payload: None });
+    assert!(group.is_owner_of_proposal(1));
+    assert!(group.is_owner_of_proposal(2));
 
     // Reject all voting proposals
-    handle.reject_all_voting_proposals();
+    group.reject_all_voting_proposals();
 
     // Voting queue should be empty
-    assert!(!handle.is_owner_of_proposal(1));
-    assert!(!handle.is_owner_of_proposal(2));
+    assert!(!group.is_owner_of_proposal(1));
+    assert!(!group.is_owner_of_proposal(2));
 }
 
 /// Test: no valid candidate triggers NoCandidate result.
@@ -699,16 +701,15 @@ fn test_reject_all_voting_proposals_clears_queue() {
 fn test_no_valid_candidate_triggers_no_candidate() {
     let group_name = "no-candidate";
 
-    let (_mls, mut handle) =
+    let (steward_mls, mut group) =
         setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
     // Start freeze round with no candidates
-    handle.insert_approved_proposal(1, GroupUpdateRequest { payload: None });
-    handle.start_freeze_round();
+    group.insert_approved_proposal(1, GroupUpdateRequest { payload: None });
+    let epoch = steward_mls.current_epoch(group_name).unwrap();
+    group.start_freeze_round(epoch);
 
-    let mls = setup_mls("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-
-    let finalize = finalize_freeze_round(&mut handle, &mls, false, b"test-app-id").unwrap();
+    let finalize = finalize_freeze_round(&mut group, &steward_mls, false, b"test-app-id").unwrap();
     assert!(
         matches!(finalize, FreezeFinalizeResult::NoCandidate),
         "Expected NoCandidate when no candidates buffered, got {:?}",
