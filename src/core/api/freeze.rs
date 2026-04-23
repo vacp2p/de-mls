@@ -15,8 +15,7 @@ use crate::{
         StagedCommitResult,
     },
     protos::de_mls::messages::v1::{
-        CommitCandidate, GroupUpdateRequest, ViolationEvidence, ViolationType,
-        group_update_request::Payload,
+        CommitCandidate, GroupUpdateRequest, ViolationEvidence, group_update_request::Payload,
     },
 };
 
@@ -459,7 +458,7 @@ where
             }
             StagingOutcome::Violation(v) => {
                 mls.discard_staged_commit(&group_name)?;
-                return Ok(CandidateOutcome::Drop(score_op_for_violation(&v)));
+                return Ok(CandidateOutcome::Drop(v.target_score_op()));
             }
         };
 
@@ -467,7 +466,7 @@ where
     if let Some(violation) = check_commit_sender_authorized(group, &commit_sender, current_epoch) {
         tracing::warn!(group = %group_name, "violation: commit from unauthorized sender");
         mls.discard_staged_commit(&group_name)?;
-        return Ok(CandidateOutcome::Drop(score_op_for_violation(&violation)));
+        return Ok(CandidateOutcome::Drop(violation.target_score_op()));
     }
 
     // MLS actions must match the set we voted to approve.
@@ -479,7 +478,7 @@ where
         current_epoch,
     )? {
         mls.discard_staged_commit(&group_name)?;
-        return Ok(CandidateOutcome::Drop(score_op_for_violation(&violation)));
+        return Ok(CandidateOutcome::Drop(violation.target_score_op()));
     }
 
     mls.merge_staged_commit(&group_name)?;
@@ -495,22 +494,6 @@ where
         result: Box::new(result),
         outbound: None,
     }))
-}
-
-/// Pick the score penalty that matches a violation's type. Mirrors the
-/// accepted-ECP mapping in `consensus.rs` so local and consensus-applied
-/// deltas agree.
-fn score_op_for_violation(evidence: &ViolationEvidence) -> ScoreOp {
-    let event = match ViolationType::try_from(evidence.violation_type) {
-        Ok(ViolationType::BrokenCommit) => ScoreEvent::BrokenCommit,
-        Ok(ViolationType::BrokenMlsProposal) => ScoreEvent::BrokenMlsProposal,
-        Ok(ViolationType::CensorshipInactivity) => ScoreEvent::CensorshipInactivity,
-        _ => ScoreEvent::BrokenCommit,
-    };
-    ScoreOp {
-        member_id: evidence.target_member_id.clone(),
-        event,
-    }
 }
 
 // ─────────────────────────── MLS Staging ───────────────────────────
