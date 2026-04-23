@@ -24,8 +24,7 @@ use crate::{
         PeerScoringService, StateChangeHandler, UserError,
     },
     core::{
-        DeMlsProvider, DefaultProvider, Group, GroupEventHandler, ProviderConsensus, ScoreEvent,
-        ScoringConfig,
+        DeMlsProvider, DefaultProvider, Group, GroupEventHandler, ProviderConsensus, ScoringConfig,
     },
     mls_crypto::{MemoryDeMlsStorage, MlsService},
 };
@@ -96,7 +95,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             default_group_config,
             scoring_service: Arc::new(Mutex::new(PeerScoringService::new(
                 InMemoryPeerScoreStorage::new(),
-                FixedScoringProvider::new(Self::default_score_deltas()),
+                FixedScoringProvider::with_default_deltas(),
                 ScoringConfig {
                     default_score: 100,
                     removal_threshold: 0,
@@ -104,26 +103,6 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             ))),
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
         }
-    }
-
-    /// Default score deltas for all events. `NonFinalizedProposalCommit`
-    /// is pre-wired against its future producer (see `docs/ROADMAP.md`).
-    fn default_score_deltas() -> HashMap<ScoreEvent, i64> {
-        HashMap::from([
-            // ECP target penalties (violation-type-specific)
-            (ScoreEvent::BrokenCommit, -50),
-            (ScoreEvent::BrokenMlsProposal, -30),
-            (ScoreEvent::CensorshipInactivity, -40),
-            // ECP creator outcomes
-            (ScoreEvent::EmergencyYesCreator, 20),
-            (ScoreEvent::EmergencyNoCreator, -50),
-            // Commit selection
-            (ScoreEvent::SuccessfulCommit, 10),
-            (ScoreEvent::HonestCommitAttempt, 5),
-            (ScoreEvent::MisbehavingCommit, -30),
-            // Not yet wired
-            (ScoreEvent::NonFinalizedProposalCommit, -30),
-        ])
     }
 
     /// Lock the scoring service, recovering from a poisoned mutex.

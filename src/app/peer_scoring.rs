@@ -61,6 +61,33 @@ impl FixedScoringProvider {
     pub fn new(deltas: HashMap<ScoreEvent, i64>) -> Self {
         Self { deltas }
     }
+
+    /// Default delta for each [`ScoreEvent`]. Values are placeholders
+    /// pending an empirical tuning pass (see `docs/ROADMAP.md`).
+    /// `FreezeViolation` is reserved vocabulary with no producer yet and
+    /// is deliberately omitted.
+    pub fn default_deltas() -> HashMap<ScoreEvent, i64> {
+        HashMap::from([
+            // ECP target penalties (violation-type-specific)
+            (ScoreEvent::BrokenCommit, -50),
+            (ScoreEvent::BrokenMlsProposal, -30),
+            (ScoreEvent::CensorshipInactivity, -40),
+            // ECP creator outcomes
+            (ScoreEvent::EmergencyYesCreator, 20),
+            (ScoreEvent::EmergencyNoCreator, -50),
+            // Commit selection
+            (ScoreEvent::SuccessfulCommit, 10),
+            (ScoreEvent::HonestCommitAttempt, 5),
+            (ScoreEvent::MisbehavingCommit, -30),
+            // Not yet wired
+            (ScoreEvent::NonFinalizedProposalCommit, -30),
+        ])
+    }
+
+    /// Convenience constructor: [`Self::new`] with [`Self::default_deltas`].
+    pub fn with_default_deltas() -> Self {
+        Self::new(Self::default_deltas())
+    }
 }
 
 impl ScoringProvider for FixedScoringProvider {
@@ -162,24 +189,10 @@ mod tests {
         }
     }
 
-    fn default_deltas() -> HashMap<ScoreEvent, i64> {
-        HashMap::from([
-            (ScoreEvent::BrokenCommit, -50),
-            (ScoreEvent::BrokenMlsProposal, -30),
-            (ScoreEvent::CensorshipInactivity, -40),
-            (ScoreEvent::EmergencyYesCreator, 20),
-            (ScoreEvent::EmergencyNoCreator, -50),
-            (ScoreEvent::SuccessfulCommit, 10),
-            (ScoreEvent::HonestCommitAttempt, 5),
-            (ScoreEvent::MisbehavingCommit, -30),
-            (ScoreEvent::NonFinalizedProposalCommit, -30),
-        ])
-    }
-
     fn make_service() -> PeerScoringService<InMemoryPeerScoreStorage, FixedScoringProvider> {
         PeerScoringService::new(
             InMemoryPeerScoreStorage::new(),
-            FixedScoringProvider::new(default_deltas()),
+            FixedScoringProvider::with_default_deltas(),
             default_config(),
         )
     }

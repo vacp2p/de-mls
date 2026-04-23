@@ -6,7 +6,6 @@
 //! at the module level because not every binary exercises every helper.
 #![allow(dead_code)]
 
-use std::collections::HashMap;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU32, Ordering},
@@ -17,7 +16,7 @@ use async_trait::async_trait;
 use de_mls::app::{FixedScoringProvider, InMemoryPeerScoreStorage, PeerScoringService};
 use de_mls::core::{
     CallbackError, FreezeOutcome, Group, GroupEventHandler, ProcessResult, ProtocolConfig,
-    ScoreEvent, ScoringConfig, build_key_package_message, create_commit_candidate, create_group,
+    ScoringConfig, build_key_package_message, create_commit_candidate, create_group,
     finalize_freeze_round, prepare_to_join, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
@@ -224,24 +223,10 @@ pub fn steward_add_joiner(
 
 // ─────────────────────────── Scoring ───────────────────────────
 
-pub fn default_deltas() -> HashMap<ScoreEvent, i64> {
-    HashMap::from([
-        (ScoreEvent::BrokenCommit, -50),
-        (ScoreEvent::BrokenMlsProposal, -30),
-        (ScoreEvent::CensorshipInactivity, -40),
-        (ScoreEvent::EmergencyYesCreator, 20),
-        (ScoreEvent::EmergencyNoCreator, -50),
-        (ScoreEvent::SuccessfulCommit, 10),
-        (ScoreEvent::HonestCommitAttempt, 5),
-        (ScoreEvent::MisbehavingCommit, -30),
-        (ScoreEvent::NonFinalizedProposalCommit, -30),
-    ])
-}
-
 pub fn make_scoring() -> PeerScoringService<InMemoryPeerScoreStorage, FixedScoringProvider> {
     PeerScoringService::new(
         InMemoryPeerScoreStorage::new(),
-        FixedScoringProvider::new(default_deltas()),
+        FixedScoringProvider::with_default_deltas(),
         ScoringConfig {
             default_score: DEFAULT_SCORE,
             removal_threshold: REMOVAL_THRESHOLD,
