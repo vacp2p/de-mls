@@ -333,7 +333,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             return Ok(());
         }
 
-        let all_present = sync.steward_members.iter().all(|s| members.contains(s));
+        // Ghost stewards (removed since the list was elected) are skipped at
+        // query time by the `live_*` rotation helpers, so we tolerate them
+        // here rather than rejecting the whole sync. A sync with zero live
+        // stewards is useless and still rejected. Full list pruning on
+        // member removal is tracked in the roadmap.
+        let any_present = sync.steward_members.iter().any(|s| members.contains(s));
         let ordering_valid = StewardList::validate(
             &sync.steward_members,
             sync.start_epoch,
@@ -342,10 +347,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             &ProtocolConfig::new(sync.sn_min as usize, sync.sn_max as usize)?,
             sync.retry_round,
         )?;
-        if !(all_present && ordering_valid) {
+        if !(any_present && ordering_valid) {
             info!(
                 group = group_name,
-                present = all_present,
+                any_present,
                 ordering = ordering_valid,
                 "group sync rejected: invalid"
             );

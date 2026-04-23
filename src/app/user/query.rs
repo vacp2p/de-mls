@@ -105,8 +105,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let members = group_members(&entry.group, &self.mls_service)?;
 
         let list = entry.group.steward_list();
-        let live_epoch = entry.group.live_epoch_steward(epoch, &members);
-        let live_backup = entry.group.live_backup_steward(epoch, &members);
+        let (live_epoch, live_backup) = entry.group.live_epoch_and_backup(epoch, &members);
         let roles = members
             .iter()
             .cloned()

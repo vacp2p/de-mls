@@ -38,6 +38,22 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             ConsensusEvent::ConsensusFailed { proposal_id, .. } => (*proposal_id, false),
         };
 
+        // Drop re-emissions from the consensus library (timeout-path race)
+        // so we don't re-apply state or double-fire UI events.
+        {
+            let groups = self.groups.read().await;
+            if let Some(entry) = groups.get(group_name)
+                && entry.group.is_consensus_outcome_applied(proposal_id)
+            {
+                tracing::debug!(
+                    group = group_name,
+                    proposal_id,
+                    "duplicate consensus outcome dropped"
+                );
+                return Ok(());
+            }
+        }
+
         // Fetch payload from consensus service (no group lock held).
         let scope = P::Scope::from(group_name.to_string());
         let proposal = self
@@ -56,6 +72,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 group = group_name,
                 proposal_id, approved, "consensus reached"
             );
+            entry.group.mark_consensus_outcome_applied(proposal_id);
             apply_consensus_result(&mut entry.group, proposal_id, approved, &payload)?
         };
 

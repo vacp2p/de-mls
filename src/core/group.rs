@@ -161,6 +161,10 @@ pub struct Group {
     /// Entries are cleared when the corresponding ECP is observed in the
     /// voting queue or resolved via consensus.
     pending_ecps: HashMap<EcpFingerprint, ViolationEvidence>,
+    /// Proposal IDs already dispatched through `apply_consensus_outcome`.
+    /// The consensus library can re-emit `ConsensusReached` (timeout-path
+    /// race); this guards against re-applying state and double-firing events.
+    consensus_outcomes_applied: HashSet<ProposalId>,
 }
 
 impl Group {
@@ -180,7 +184,16 @@ impl Group {
             pending_updates: HashMap::new(),
             reelection_round: 0,
             pending_ecps: HashMap::new(),
+            consensus_outcomes_applied: HashSet::new(),
         }
+    }
+
+    pub fn is_consensus_outcome_applied(&self, proposal_id: ProposalId) -> bool {
+        self.consensus_outcomes_applied.contains(&proposal_id)
+    }
+
+    pub fn mark_consensus_outcome_applied(&mut self, proposal_id: ProposalId) {
+        self.consensus_outcomes_applied.insert(proposal_id);
     }
 
     /// Create a new group handle for a joining member (not yet steward).
@@ -263,13 +276,17 @@ impl Group {
         })
     }
 
-    /// Resolve the live backup steward. Same skip rules as epoch steward.
-    pub fn live_backup_steward<'a>(&'a self, epoch: u64, members: &[Vec<u8>]) -> Option<&'a [u8]> {
-        self.steward_list.as_ref().and_then(|l| {
-            l.live_backup_steward(epoch, |candidate| {
-                self.is_steward_eligible(candidate, members)
-            })
-        })
+    /// Epoch + backup stewards, filtered by [`Self::is_steward_eligible`]
+    /// and guaranteed distinct when ≥2 are eligible.
+    pub fn live_epoch_and_backup<'a>(
+        &'a self,
+        epoch: u64,
+        members: &[Vec<u8>],
+    ) -> (Option<&'a [u8]>, Option<&'a [u8]>) {
+        match self.steward_list.as_ref() {
+            Some(l) => l.live_epoch_and_backup(epoch, |c| self.is_steward_eligible(c, members)),
+            None => (None, None),
+        }
     }
 
     /// Identity authorized to submit an ECP for the given violation.

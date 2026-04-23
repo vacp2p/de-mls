@@ -174,13 +174,19 @@ impl StewardList {
         self.live_steward_from(epoch, 0, eligible)
     }
 
-    /// Like [`Self::live_epoch_steward`] but for the backup slot (offset +1).
-    pub fn live_backup_steward<F: Fn(&[u8]) -> bool>(
+    /// Live epoch steward + a distinct backup. Resolving them together
+    /// stops the epoch-steward walk from landing on the nominal backup
+    /// and collapsing both roles onto the same identity. Backup is `None`
+    /// when fewer than two stewards are eligible.
+    pub fn live_epoch_and_backup<F: Fn(&[u8]) -> bool>(
         &self,
         epoch: u64,
         eligible: F,
-    ) -> Option<&[u8]> {
-        self.live_steward_from(epoch, 1, eligible)
+    ) -> (Option<&[u8]>, Option<&[u8]>) {
+        let epoch_steward = self.live_steward_from(epoch, 0, &eligible);
+        let backup = epoch_steward
+            .and_then(|es| self.live_steward_from(epoch, 1, |c| c != es && eligible(c)));
+        (epoch_steward, backup)
     }
 
     fn live_steward_from<F: Fn(&[u8]) -> bool>(
@@ -538,43 +544,50 @@ mod tests {
         assert!(after.iter().any(|m| m == live));
     }
 
+    /// All stewards ineligible → both slots are None. One eligible → epoch
+    /// resolves, backup stays None (can't be distinct from epoch).
     #[test]
-    fn test_live_epoch_steward_none_when_all_dead() {
+    fn test_live_epoch_and_backup_all_ineligible_and_single_survivor() {
         let config = ProtocolConfig::new(2, 2).unwrap();
         let mems = members(&[1, 2]);
-
         let list = StewardList::generate(0, b"group", &mems, 2, config, 0).unwrap();
-        assert!(list.live_epoch_steward(0, |_| false).is_none());
+
+        let (e, b) = list.live_epoch_and_backup(0, |_| false);
+        assert!(e.is_none() && b.is_none());
+
+        let survivor = mems[0].clone();
+        let (e, b) = list.live_epoch_and_backup(0, |c| c == survivor.as_slice());
+        assert_eq!(e.unwrap(), survivor.as_slice());
+        assert!(b.is_none());
     }
 
+    /// 3 stewards with the nominal epoch steward leaving: both slots must
+    /// rotate and stay distinct. The pre-fix path would collapse them.
     #[test]
-    fn test_live_backup_steward_distinct_from_epoch() {
+    fn test_live_epoch_and_backup_rotates_when_epoch_leaves() {
         let config = ProtocolConfig::new(3, 3).unwrap();
         let mems = members(&[1, 2, 3]);
-
         let list = StewardList::generate(0, b"group", &mems, 3, config, 0).unwrap();
-        let all_present = mems.clone();
-        let in_members = |c: &[u8]| all_present.iter().any(|m| m == c);
-        let live_epoch = list.live_epoch_steward(0, in_members).unwrap().to_vec();
-        let live_backup = list.live_backup_steward(0, in_members).unwrap().to_vec();
-        assert_ne!(live_epoch, live_backup);
+
+        let nominal = list.epoch_steward(0).unwrap().to_vec();
+        let (e, b) = list.live_epoch_and_backup(0, |c| c != nominal.as_slice());
+        assert!(e.is_some() && b.is_some());
+        assert_ne!(e.unwrap(), b.unwrap());
+        assert_ne!(e.unwrap(), nominal.as_slice());
+        assert_ne!(b.unwrap(), nominal.as_slice());
     }
 
-    /// No eligible steward → both slots return None. One eligible → both
-    /// resolve to that single steward.
+    /// Happy path (no leavers) → matches the nominal `epoch_steward` /
+    /// `backup_steward` assignment.
     #[test]
-    fn test_live_epoch_steward_all_stewards_pending_leave() {
-        let config = ProtocolConfig::new(2, 2).unwrap();
-        let mems = members(&[1, 2]);
-        let list = StewardList::generate(0, b"group", &mems, 2, config, 0).unwrap();
+    fn test_live_epoch_and_backup_matches_nominal_when_all_eligible() {
+        let config = ProtocolConfig::new(3, 3).unwrap();
+        let mems = members(&[1, 2, 3]);
+        let list = StewardList::generate(0, b"group", &mems, 3, config, 0).unwrap();
 
-        assert!(list.live_epoch_steward(0, |_| false).is_none());
-        assert!(list.live_backup_steward(0, |_| false).is_none());
-
-        let live = list
-            .live_epoch_steward(0, |c| c == mems[0].as_slice())
-            .unwrap();
-        assert_eq!(live, mems[0].as_slice());
+        let (e, b) = list.live_epoch_and_backup(0, |_| true);
+        assert_eq!(e, list.epoch_steward(0));
+        assert_eq!(b, list.backup_steward(0));
     }
 
     #[test]
