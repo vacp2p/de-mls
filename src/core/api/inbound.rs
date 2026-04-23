@@ -8,7 +8,8 @@ use crate::core::api::process_commit_candidate;
 use crate::core::{error::CoreError, group::Group, process_result::ProcessResult};
 use crate::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 use crate::mls_crypto::{
-    DeMlsStorage, DecryptResult, MlsService, key_package_bytes_from_json, parse_wallet_to_bytes,
+    DeMlsStorage, DecryptResult, MlsService, ShortId, key_package_bytes_from_json,
+    parse_wallet_to_bytes,
 };
 use crate::protos::de_mls::messages::v1::{
     AppMessage, GroupUpdateRequest, InviteMember, WelcomeMessage, app_message,
@@ -48,17 +49,17 @@ where
 
             if mls.is_member(group.group_name(), &identity) {
                 info!(
-                    "Skipping KP for group {}: identity {:?} is already a member",
-                    group.group_name(),
-                    identity
+                    group = group.group_name(),
+                    identity = %ShortId(&identity),
+                    "key package skipped: already a member"
                 );
                 return Ok(ProcessResult::Noop);
             }
 
             info!(
-                "Received key package for group {} from identity {:?}",
-                group.group_name(),
-                identity
+                group = group.group_name(),
+                identity = %ShortId(&identity),
+                "key package received"
             );
 
             let gur = GroupUpdateRequest {
@@ -77,10 +78,7 @@ where
 
             if mls.is_welcome_for_us(&invitation.mls_message_out_bytes)? {
                 let group_name = mls.join_group(&invitation.mls_message_out_bytes)?;
-                info!(
-                    "[process_welcome_subtopic]: Joined group {}",
-                    group.group_name()
-                );
+                info!(group = group.group_name(), "joined group via welcome");
                 return Ok(ProcessResult::JoinedGroup(group_name));
             }
             Ok(ProcessResult::Noop)
@@ -122,11 +120,10 @@ where
             if let Some(app_message::Payload::LeaveRequest(leave)) = &app_msg.payload {
                 if leave.identity != sender {
                     warn!(
-                        "[process_app_subtopic] LeaveRequest signer mismatch for \
-                         group {}: claimed={:?} sender={:?}",
-                        group.group_name(),
-                        leave.identity,
-                        sender,
+                        group = group.group_name(),
+                        claimed = %ShortId(&leave.identity),
+                        sender = %ShortId(&sender),
+                        "leave request signer mismatch"
                     );
                     return Ok(ProcessResult::Noop);
                 }
@@ -139,9 +136,9 @@ where
                 let target = parse_wallet_to_bytes(&ban.user_to_ban)?;
                 if !mls.is_member(group.group_name(), &target) {
                     info!(
-                        "Skipping BanRequest for group {}: target {:?} is not a member",
-                        group.group_name(),
-                        target
+                        group = group.group_name(),
+                        target = %ShortId(&target),
+                        "ban request skipped: target not a member"
                     );
                     return Ok(ProcessResult::Noop);
                 }
@@ -150,11 +147,17 @@ where
         }
         DecryptResult::Removed(_) => Ok(ProcessResult::LeaveGroup),
         DecryptResult::Ignored => {
-            tracing::debug!("Ignored message on app subtopic (wrong epoch or group)");
+            tracing::debug!(
+                group = group.group_name(),
+                "app message ignored (wrong epoch/group)"
+            );
             Ok(ProcessResult::Noop)
         }
         _ => {
-            warn!("Unexpected MLS message type on app subtopic, ignoring");
+            warn!(
+                group = group.group_name(),
+                "unexpected MLS message type on app subtopic"
+            );
             Ok(ProcessResult::Noop)
         }
     }

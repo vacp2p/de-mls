@@ -107,7 +107,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         {
             Ok(pid) => pid,
             Err(err) => {
-                error!("[initiate_proposal]: background task failed: {err}");
+                error!(group = %group_name, error = %err, "proposal submission failed");
                 self.handler
                     .on_error(&group_name, "Start voting", &err.to_string())
                     .await;
@@ -130,8 +130,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 .await
             {
                 info!(
-                    "[initiate_proposal]: Creator auto-YES skipped for \
-                     proposal {proposal_id}: {e}"
+                    group = %group_name,
+                    proposal_id,
+                    error = %e,
+                    "creator auto-YES skipped"
                 );
             }
         }
@@ -170,7 +172,6 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 entry.group.observe_emergency(proposal_id);
             }
         }
-        info!("[initiate_proposal]: Stored voting proposal: {proposal_id}");
         self.handler
             .on_app_message(group_name, vote_notification)
             .await?;
@@ -219,7 +220,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         .await?;
         let packet = build_message(&group, &self.mls_service, &app_message, &self.app_id)?;
         self.handler.on_outbound(group_name, packet).await?;
-        info!("[creator_auto_yes] Auto-YES cast for proposal {proposal_id}");
+        info!(group = group_name, proposal_id, "creator auto-YES cast");
         Ok(())
     }
 
@@ -241,7 +242,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             .handle_consensus_timeout(scope, proposal_id)
             .await
         {
-            info!("[initiate_proposal]: Timeout resolution for proposal {proposal_id}: {e}");
+            info!(proposal_id, error = %e, "timeout resolution skipped");
         }
     }
 
@@ -306,9 +307,14 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         };
 
         info!(
-            "[handle_incoming_update_request] group={group_name} epoch={current_epoch} \
-             inserted={inserted} buffer_total={buffer_total} is_epoch_steward={is_epoch_steward} \
-             state={state} propose={should_propose}"
+            group = group_name,
+            epoch = current_epoch,
+            inserted,
+            buffer_total,
+            is_epoch_steward,
+            state = %state,
+            propose = should_propose,
+            "update request buffered"
         );
 
         if should_propose {
@@ -318,10 +324,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 .initiate_proposal(group_name.to_string(), request)
                 .await
             {
-                info!(
-                    "[handle_incoming_update_request]: initiate_proposal deferred \
-                     for group {group_name}: {e}"
-                );
+                info!(group = group_name, error = %e, "proposal deferred");
             }
         }
         Ok(())

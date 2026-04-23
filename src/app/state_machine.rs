@@ -125,31 +125,31 @@ impl GroupStateMachine {
     pub fn start_working(&mut self) {
         self.state = GroupState::Working;
         self.phase_timer = None;
-        info!("[start_working] Transitioning to Working state");
+        info!(state = "Working", "state transition");
     }
 
     pub fn start_freezing(&mut self) {
         self.state = GroupState::Freezing;
         self.phase_timer = Some(Instant::now());
-        info!("[start_freezing] Transitioning to Freezing state");
+        info!(state = "Freezing", "state transition");
     }
 
     pub fn start_selection(&mut self) {
         self.state = GroupState::Selection;
-        info!("[start_selection] Transitioning to Selection state");
+        info!(state = "Selection", "state transition");
     }
 
     pub fn start_reelection(&mut self) {
         self.state = GroupState::Reelection;
         self.phase_timer = None;
-        info!("[start_reelection] Transitioning to Reelection state");
+        info!(state = "Reelection", "state transition");
     }
 
     /// Caller must ensure a valid transition. `User::leave_group` handles
     /// the PendingJoin and already-Leaving cases separately.
     pub fn start_leaving(&mut self) {
         self.state = GroupState::Leaving;
-        info!("[start_leaving] Transitioning to Leaving state");
+        info!(state = "Leaving", "state transition");
     }
 
     // ─────────────────────────── Pending Join ───────────────────────────
@@ -213,8 +213,8 @@ impl GroupStateMachine {
             None => {
                 self.phase_timer = Some(Instant::now());
                 info!(
-                    "[check_steward_inactivity] Inactivity timer started \
-                     ({approved_proposals_count} approved proposal(s))"
+                    approved = approved_proposals_count,
+                    "inactivity timer started"
                 );
                 return false;
             }
@@ -226,9 +226,9 @@ impl GroupStateMachine {
 
         self.start_freezing();
         info!(
-            "[check_steward_inactivity] Epoch commit window elapsed ({:?}), \
-             entering freeze with {} approved proposals",
-            self.epoch_duration, approved_proposals_count
+            epoch_duration_ms = self.epoch_duration.as_millis() as u64,
+            approved = approved_proposals_count,
+            "epoch commit window elapsed, entering freeze"
         );
         true
     }

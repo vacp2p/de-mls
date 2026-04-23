@@ -51,8 +51,10 @@ pub async fn submit_proposal<P: DeMlsProvider>(
         .await?;
 
     info!(
-        "[submit_proposal]: Created proposal {} with {} expected voters",
-        proposal.proposal_id, expected_voters
+        group = group_name,
+        proposal_id = proposal.proposal_id,
+        voters = expected_voters,
+        "proposal opened"
     );
 
     let vote_notification: AppMessage = VotePayload {
@@ -85,14 +87,14 @@ where
     let scope = P::Scope::from(group_name.to_string());
 
     let choice = if vote { "YES" } else { "NO" };
+    let actor = if is_owner { "owner" } else { "member" };
+    info!(group = group_name, proposal_id, choice, actor, "vote cast");
     let app_message: AppMessage = if is_owner {
-        info!("[cast_vote]: Owner voting {choice} on proposal {proposal_id}");
         let proposal = consensus
             .cast_vote_and_get_proposal(&scope, proposal_id, vote, signer)
             .await?;
         proposal.into()
     } else {
-        info!("[cast_vote]: User voting {choice} on proposal {proposal_id}");
         let vote_msg = consensus
             .cast_vote(&scope, proposal_id, vote, signer)
             .await?;
@@ -148,8 +150,8 @@ pub async fn forward_incoming_vote<P: DeMlsProvider>(
         Ok(()) => Ok(()),
         Err(ConsensusError::SessionNotActive) => {
             tracing::debug!(
-                "[forward_incoming_vote] dropped late vote for group {group_name}: \
-                 session already resolved"
+                group = group_name,
+                "late vote dropped: consensus session already resolved"
             );
             Ok(())
         }

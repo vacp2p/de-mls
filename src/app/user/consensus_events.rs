@@ -52,7 +52,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let consensus_apply = {
             let mut groups = self.groups.write().await;
             let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
-            info!("Consensus reached for proposal {proposal_id}: approved={approved}");
+            info!(
+                group = group_name,
+                proposal_id, approved, "consensus reached"
+            );
             apply_consensus_result(&mut entry.group, proposal_id, approved, &payload)?
         };
 
@@ -109,7 +112,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             )?
         };
         if !is_valid {
-            info!("Steward election proposal rejected (invalid list) for group {group_name}");
+            info!(
+                group = group_name,
+                "steward election rejected: invalid list"
+            );
             return Ok(());
         }
 
@@ -135,11 +141,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 .await;
         }
         info!(
-            "Steward election applied for group {group_name}: \
-             epoch={}, stewards={}, retry_round={}",
-            election.election_epoch,
-            election.proposed_stewards.len(),
-            election.retry_round,
+            group = group_name,
+            epoch = election.election_epoch,
+            stewards = election.proposed_stewards.len(),
+            retry_round = election.retry_round,
+            "steward election applied"
         );
 
         self.process_buffered_updates(group_name).await
@@ -165,21 +171,18 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 "Steward election stuck after {max} retry(ies) — group {group_name} \
                  needs manual intervention"
             );
-            error!("[apply_consensus_outcome] {msg}");
+            error!(group = group_name, round, max, "steward election stuck");
             self.handler
                 .on_error(group_name, "Reelection stuck", &msg)
                 .await;
             return;
         }
         info!(
-            "[apply_consensus_outcome] election rejected, bumped retry round to \
-             {round} (max={max}) for group {group_name}. Attempting retry."
+            group = group_name,
+            round, max, "steward election rejected, retrying"
         );
         if let Err(e) = self.try_initiate_steward_election(group_name).await {
-            info!(
-                "[apply_consensus_outcome] retry election deferred for \
-                 group {group_name}: {e}"
-            );
+            info!(group = group_name, error = %e, "election retry deferred");
         }
     }
 
@@ -234,7 +237,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
 
         if let Err(e) = self.check_and_initiate_score_removals(group_name).await {
-            error!("[apply_consensus_outcome] check_and_initiate_score_removals failed: {e}");
+            error!(group = group_name, error = %e, "score-removal check failed");
         }
         Ok(())
     }

@@ -9,6 +9,7 @@ use crate::{
         DeMlsProvider, Group, GroupEventHandler, StewardList, build_message, group_members,
         target_identity_of,
     },
+    mls_crypto::ShortId,
     protos::de_mls::messages::v1::{
         AppMessage, GroupSync, GroupUpdateRequest, PeerScore, StewardElectionProposal,
         TimingConfig, ViolationEvidence, group_update_request,
@@ -134,9 +135,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         };
 
         info!(
-            "[try_initiate_steward_election] Initiating election for group {group_name} \
-             (epoch={election_epoch}, retry_round={retry_round}, stewards={})",
-            proposed_list.len()
+            group = group_name,
+            epoch = election_epoch,
+            retry_round,
+            stewards = proposed_list.len(),
+            "initiating steward election"
         );
 
         self.initiate_proposal(group_name.to_string(), request)
@@ -152,7 +155,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     pub async fn steward_list_housekeeping(&self, group_name: &str) -> Result<(), UserError> {
         self.try_auto_fill_steward_list(group_name).await?;
         if let Err(e) = self.try_initiate_steward_election(group_name).await {
-            info!("[steward_list_housekeeping] Election initiation deferred: {e}");
+            info!(group = group_name, error = %e, "election initiation deferred");
         }
         Ok(())
     }
@@ -207,9 +210,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let after = entry.group.pending_update_count();
         if before != after {
             info!(
-                "[prune_pending_updates_after_commit] group {group_name}: \
-                 {before} → {after} (expired={})",
-                expired.len()
+                group = group_name,
+                before,
+                after,
+                expired = expired.len(),
+                "pruned pending updates after commit"
             );
         }
         Ok(())
@@ -266,9 +271,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
 
         info!(
-            "[process_buffered_updates] group {group_name}: promoting {} buffered \
-             update(s) to voting proposals (epoch={current_epoch})",
-            to_propose.len()
+            group = group_name,
+            epoch = current_epoch,
+            count = to_propose.len(),
+            "promoting buffered updates to proposals"
         );
 
         for request in to_propose {
@@ -276,10 +282,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 .initiate_proposal(group_name.to_string(), request)
                 .await
             {
-                info!(
-                    "[process_buffered_updates] group {group_name}: initiate_proposal \
-                     deferred: {e}"
-                );
+                info!(group = group_name, error = %e, "buffered proposal deferred");
             }
         }
         Ok(())
@@ -337,7 +340,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         };
 
         self.handler.on_outbound(group_name, packet).await?;
-        info!("[send_group_sync] Sent group sync for group {group_name}");
+        info!(group = group_name, "group sync sent");
         Ok(())
     }
 
@@ -398,9 +401,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let request = evidence.into_update_request()?;
 
             info!(
-                "Steward initiating SCORE_BELOW_THRESHOLD removal for member {:?} \
-                 (score={current_score}) in group {group_name}",
-                target_id
+                group = group_name,
+                target = %ShortId(&target_id),
+                score = current_score,
+                "initiating SCORE_BELOW_THRESHOLD removal"
             );
             if let Err(e) = self
                 .initiate_proposal(group_name.to_string(), request)
@@ -411,8 +415,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     entry.group.resolve_pending_removal(&target_id);
                 }
                 error!(
-                    "Failed to start SCORE_BELOW_THRESHOLD vote for {:?}: {e}",
-                    target_id
+                    group = group_name,
+                    target = %ShortId(&target_id),
+                    error = %e,
+                    "SCORE_BELOW_THRESHOLD vote failed to start"
                 );
             }
         }

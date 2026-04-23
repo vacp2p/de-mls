@@ -14,6 +14,7 @@ use tracing::info;
 
 use crate::core::peer_scoring::{ScoreEvent, ScoreOp};
 use crate::core::{CoreError, Group};
+use crate::mls_crypto::ShortId;
 use crate::protos::de_mls::messages::v1::{
     GroupUpdateRequest, RemoveMember, StewardElectionProposal, ViolationEvidence, ViolationType,
     group_update_request,
@@ -131,10 +132,10 @@ pub fn apply_consensus_result(
             // Non-owner: nothing to store — election proposals don't produce MLS ops.
             let election = election.unwrap();
             info!(
-                "Steward election proposal {proposal_id} ACCEPTED: \
-                 election_epoch={}, stewards={}",
-                election.election_epoch,
-                election.proposed_stewards.len()
+                proposal_id,
+                epoch = election.election_epoch,
+                stewards = election.proposed_stewards.len(),
+                "steward election proposal accepted"
             );
             return Ok(ConsensusApplyResult {
                 election: Some(election),
@@ -144,7 +145,7 @@ pub fn apply_consensus_result(
             if is_owner {
                 group.mark_proposal_as_rejected(proposal_id);
             }
-            info!("Steward election proposal {proposal_id} REJECTED");
+            info!(proposal_id, "steward election proposal rejected");
             return Ok(ConsensusApplyResult::default());
         }
     }
@@ -182,9 +183,10 @@ pub fn apply_consensus_result(
     match evidence {
         Some(ev) if approved => {
             info!(
-                "Emergency criteria proposal {proposal_id} ACCEPTED: \
-                 target={:?}, creator={:?}",
-                ev.target_member_id, ev.creator_member_id
+                proposal_id,
+                target = %ShortId(&ev.target_member_id),
+                creator = %ShortId(&ev.creator_member_id),
+                "emergency criteria proposal accepted"
             );
             let ops = if is_score_below_threshold(&ev) {
                 // Target is already at/below threshold and will be removed —
@@ -203,9 +205,9 @@ pub fn apply_consensus_result(
         }
         Some(ev) => {
             info!(
-                "Emergency criteria proposal {proposal_id} REJECTED: \
-                 creator={:?}",
-                ev.creator_member_id
+                proposal_id,
+                creator = %ShortId(&ev.creator_member_id),
+                "emergency criteria proposal rejected"
             );
             Ok(ConsensusApplyResult {
                 score_ops: vec![emergency_rejected_score_op(&ev)],

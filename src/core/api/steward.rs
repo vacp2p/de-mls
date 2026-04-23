@@ -59,9 +59,8 @@ where
     });
     if self_removal_pending {
         info!(
-            "[create_commit_candidate] Skipping local candidate for group {}: \
-             approved batch contains self-remove — waiting for another steward",
-            group.group_name()
+            group = group.group_name(),
+            "commit candidate skipped: approved batch contains self-remove"
         );
         return Ok(None);
     }
@@ -142,10 +141,10 @@ where
     );
 
     info!(
-        "[create_commit_candidate] Created candidate for group {} \
-         (epoch={epoch}, proposals={})",
-        group.group_name(),
-        updates.len(),
+        group = group.group_name(),
+        epoch,
+        proposals = updates.len(),
+        "commit candidate created"
     );
 
     let candidate_msg: AppMessage = candidate.into();

@@ -64,7 +64,7 @@ where
     // otherwise the candidate would be silently dropped.
     if group.freeze_round().is_none() {
         if group.approved_proposals_count() == 0 {
-            tracing::debug!("Ignoring candidate for group {group_name}: no approved proposals");
+            tracing::debug!(group = %group_name, "candidate ignored: no approved proposals");
             return Ok(ProcessResult::Noop);
         }
         let epoch = mls.current_epoch(&group_name)?;
@@ -73,17 +73,17 @@ where
 
     let commit_hash = compute_commit_hash(&candidate_msg.commit_message);
     if group.is_duplicate_commit_candidate(&commit_hash) {
-        tracing::debug!("Ignoring duplicate candidate for group {group_name}: already committed");
+        tracing::debug!(group = %group_name, "candidate ignored: already committed");
         return Ok(ProcessResult::Noop);
     }
 
     if candidate_msg.mls_proposals.is_empty() || candidate_msg.commit_message.is_empty() {
-        tracing::debug!("Ignoring candidate for group {group_name}: empty proposals or commit");
+        tracing::debug!(group = %group_name, "candidate ignored: empty proposals or commit");
         return Ok(ProcessResult::Noop);
     }
 
     if candidate_msg.steward_identity.is_empty() {
-        tracing::debug!("Ignoring candidate for group {group_name}: empty steward_identity");
+        tracing::debug!(group = %group_name, "candidate ignored: empty steward_identity");
         return Ok(ProcessResult::Noop);
     }
 
@@ -115,9 +115,10 @@ where
     }
 
     info!(
-        "[process_commit_candidate] Buffered remote candidate for group {group_name} \
-         (epoch={epoch}, total_candidates={})",
-        group.freeze_candidate_count(),
+        group = %group_name,
+        epoch,
+        total_candidates = group.freeze_candidate_count(),
+        "remote candidate buffered"
     );
     Ok(ProcessResult::CommitCandidateReceived)
 }
@@ -301,7 +302,7 @@ where
     // staged commit is a benign no-op, hence log-and-continue on failure.
     if group.is_steward() {
         if let Err(e) = mls.discard_own_commit(&group_name) {
-            warn!("[apply_incoming_candidate] discard_own_commit failed: {e}");
+            warn!(group = %group_name, error = %e, "discard_own_commit failed");
         }
     }
 
@@ -318,7 +319,7 @@ where
 
     // Commit sender must be on the steward list (RFC §"Commit validation service").
     if let Some(violation) = check_commit_sender_authorized(group, &commit_sender, current_epoch) {
-        tracing::warn!("Violation: commit from unauthorized sender for group {group_name:?}");
+        tracing::warn!(group = %group_name, "violation: commit from unauthorized sender");
         return discard_and_report_violation(group, mls, violation);
     }
 
@@ -387,7 +388,10 @@ where
             Ok(DecryptResult::ProposalStored(sender, _action)) => proposal_senders.push(sender),
             outcome => {
                 tracing::debug!(
-                    "MLS proposal {i} for group {group_name:?} rejected during application: {outcome:?}",
+                    group = group_name,
+                    index = i,
+                    outcome = ?outcome,
+                    "MLS proposal rejected during application"
                 );
                 return Ok(StagingOutcome::Abort);
             }
@@ -397,7 +401,10 @@ where
     // All proposals must come from the same sender.
     if let Some(first) = proposal_senders.first() {
         if proposal_senders.iter().any(|s| s != first) {
-            tracing::warn!("Violation: proposals have different senders for group {group_name:?}");
+            tracing::warn!(
+                group = group_name,
+                "violation: proposals have different senders"
+            );
             return Ok(StagingOutcome::Violation(
                 ViolationEvidence::broken_mls_proposal(
                     first.clone(),
@@ -412,7 +419,9 @@ where
         Ok(r) => r,
         Err(e) => {
             tracing::debug!(
-                "Commit for group {group_name:?} failed to process during application: {e}",
+                group = group_name,
+                error = %e,
+                "commit failed to process during application"
             );
             return Ok(StagingOutcome::Abort);
         }
@@ -429,7 +438,10 @@ where
     // Commit sender must match the proposals' sender.
     if let Some(first) = proposal_senders.first() {
         if first != &commit_sender {
-            tracing::warn!("Violation: proposal sender != commit sender for group {group_name:?}");
+            tracing::warn!(
+                group = group_name,
+                "violation: proposal sender != commit sender"
+            );
             return Ok(StagingOutcome::Violation(ViolationEvidence::broken_commit(
                 commit_sender,
                 current_epoch,
@@ -465,11 +477,10 @@ fn validate_commit_candidate(
 
     if actual_actions != expected_actions {
         tracing::warn!(
-            "Violation: broken MLS proposal for group {} — \
-             MLS actions {:?} don't match voted {:?}",
-            group_name,
-            actual_actions,
-            expected_actions,
+            group = group_name,
+            actual = ?actual_actions,
+            expected = ?expected_actions,
+            "violation: MLS actions don't match voted proposals"
         );
         return Ok(Some(ProcessResult::ViolationDetected(
             ViolationEvidence::broken_mls_proposal(

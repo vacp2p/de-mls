@@ -34,10 +34,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
 
         if expired {
-            info!(
-                "[check_pending_join]: Join timed out for group {group_name} \
-                 (time-based fallback)"
-            );
+            info!(group = group_name, "pending join timed out");
             self.groups.write().await.remove(group_name);
             self.cleanup_consensus_scope(group_name).await?;
             let _ = self.handler.on_leave_group(group_name).await;
@@ -93,7 +90,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             ) {
                 Ok(result) => result,
                 Err(e) => {
-                    error!("[poll_freeze_status] finalize_freeze_round failed: {e}");
+                    error!(group = group_name, error = %e, "freeze finalize failed");
                     FreezeFinalizeResult::NoCandidate
                 }
             }
@@ -108,7 +105,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     .is_some_and(|p| p.subtopic == crate::ds::WELCOME_SUBTOPIC);
                 if let Some(packet) = outbound {
                     if let Err(e) = self.handler.on_outbound(group_name, packet).await {
-                        error!("[poll_freeze_status] Failed to send deferred welcome: {e}");
+                        error!(group = group_name, error = %e, "deferred welcome send failed");
                     }
                 }
 
@@ -117,12 +114,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 // to catch up.
                 if has_welcome {
                     if let Err(e) = self.send_group_sync(group_name).await {
-                        error!("[poll_freeze_status] Failed to send group sync: {e}");
+                        error!(group = group_name, error = %e, "group sync send failed");
                     }
                 }
 
                 if let Err(e) = self.dispatch_inbound_result(group_name, *result).await {
-                    error!("[poll_freeze_status] Failed to dispatch finalize result: {e}");
+                    error!(group = group_name, error = %e, "finalize result dispatch failed");
                 }
                 return Ok(FreezeTimeoutStatus::Applied);
             }
@@ -172,7 +169,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                         {
                             Ok(r) => r,
                             Err(e) => {
-                                error!("[poll_freeze_status] Failed to build ECP: {e}");
+                                error!(group = group_name, error = %e, "ECP build failed");
                                 return Ok(FreezeTimeoutStatus::TimedOut { has_proposals });
                             }
                         };
@@ -180,7 +177,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                         .initiate_proposal(group_name.to_string(), request)
                         .await
                     {
-                        error!("[poll_freeze_status] Failed to start emergency criteria vote: {e}");
+                        error!(group = group_name, error = %e, "emergency vote start failed");
                     }
                 }
             }
@@ -215,8 +212,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(
-                            "[check_member_freeze] Failed to create commit candidate \
-                             for group {group_name}: {e}"
+                            group = group_name,
+                            error = %e,
+                            "commit candidate build failed"
                         );
                         None
                     }
@@ -227,9 +225,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
             let new_state = entry.state_machine.current_state();
             info!(
-                "[check_member_freeze]: Steward inactivity → {} for group {group_name} \
-                 ({proposal_count} approved proposals)",
-                new_state
+                group = group_name,
+                state = %new_state,
+                approved = proposal_count,
+                "steward inactivity transition"
             );
 
             // Drop lock before any async calls.

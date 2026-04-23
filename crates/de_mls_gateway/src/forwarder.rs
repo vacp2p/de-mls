@@ -133,7 +133,7 @@ impl Gateway<WakuDeliveryService> {
         let mut rx = core.consensus.event_bus().subscribe();
 
         tokio::spawn(async move {
-            tracing::info!("gateway: consensus forwarder started");
+            tracing::info!("consensus forwarder started");
             while let Ok((group_name, event)) = rx.recv().await {
                 // Forward to UI
                 let _ = evt_tx
@@ -145,14 +145,14 @@ impl Gateway<WakuDeliveryService> {
                     .apply_consensus_outcome(&group_name, event)
                     .await
                 {
-                    tracing::warn!("apply_consensus_outcome failed: {e}");
+                    tracing::warn!(group = %group_name, error = %e, "apply_consensus_outcome failed");
                 }
 
                 // Push refreshed approved queue, epoch history, and member scores
                 push_consensus_state(&user, &evt_tx, &group_name).await;
                 push_member_scores(&user, &evt_tx, &group_name).await;
             }
-            tracing::info!("gateway: consensus forwarder ended");
+            tracing::info!("consensus forwarder ended");
         });
     }
 
@@ -173,13 +173,13 @@ impl Gateway<WakuDeliveryService> {
 
         tokio::spawn(async move {
             let mut rx = core.app_state.pubsub.subscribe();
-            tracing::info!("gateway: pubsub forwarder started");
+            tracing::info!("pubsub forwarder started");
 
             loop {
                 let pkt = match rx.recv().await {
                     Ok(pkt) => pkt,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("pubsub forwarder lagged, dropped {n} messages");
+                        tracing::warn!(dropped = n, "pubsub forwarder lagged");
                         continue;
                     }
                     Err(_) => break,
@@ -191,7 +191,7 @@ impl Gateway<WakuDeliveryService> {
                 let group_id = pkt.group_id.clone();
 
                 if let Err(e) = user.write().await.process_inbound_packet(pkt).await {
-                    tracing::error!("process_inbound_packet failed: {e}");
+                    tracing::error!(group = %group_id, error = %e, "process_inbound_packet failed");
                 }
 
                 // Push refreshed approved queue + epoch history + members.
@@ -202,7 +202,7 @@ impl Gateway<WakuDeliveryService> {
                 push_member_scores(&user, &evt_tx, &group_id).await;
             }
 
-            tracing::info!("gateway: pubsub forwarder ended");
+            tracing::info!("pubsub forwarder ended");
         });
     }
 }

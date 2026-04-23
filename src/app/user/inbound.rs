@@ -14,6 +14,7 @@ use crate::{
         build_message, create_commit_candidate, group_members, process_inbound,
     },
     ds::InboundPacket,
+    mls_crypto::ShortId,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationMessage, GroupSync, GroupUpdateRequest, LeaveRequest,
         ViolationEvidence, group_update_request,
@@ -220,8 +221,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         evidence: ViolationEvidence,
     ) -> Result<(), UserError> {
         info!(
-            "Violation detected: type={}, target={:?}",
-            evidence.violation_type, evidence.target_member_id
+            group = group_name,
+            violation_type = evidence.violation_type,
+            target = %ShortId(&evidence.target_member_id),
+            "violation detected"
         );
         let evidence = evidence.with_creator(self.mls_service.wallet_bytes());
         let self_identity = self.mls_service.wallet_bytes();
@@ -240,8 +243,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             if !is_responsible {
                 entry.group.buffer_pending_ecp(evidence.clone());
                 info!(
-                    "[ViolationDetected] deferring ECP for group {group_name}: \
-                     responsible proposer = {responsible:?}"
+                    group = group_name,
+                    responsible = responsible
+                        .as_deref()
+                        .map(ShortId)
+                        .map_or_else(|| "unknown".to_string(), |s| s.to_string()),
+                    "ECP deferred (not responsible proposer)"
                 );
             }
             is_responsible
@@ -275,8 +282,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(
-                            "[CommitCandidateReceived] Failed to create own candidate \
-                             for group {group_name}: {e}"
+                            group = group_name,
+                            error = %e,
+                            "own commit candidate build failed"
                         );
                         None
                     }
@@ -317,9 +325,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let current_epoch = self.mls_service.current_epoch(group_name)?;
         if sync.start_epoch > current_epoch {
             info!(
-                "[GroupSyncReceived] Rejecting sync for group {group_name}: \
-                 start_epoch {} > current_epoch {current_epoch}",
-                sync.start_epoch,
+                group = group_name,
+                start_epoch = sync.start_epoch,
+                current_epoch,
+                "group sync rejected: start_epoch > current_epoch"
             );
             return Ok(());
         }
@@ -335,8 +344,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         )?;
         if !(all_present && ordering_valid) {
             info!(
-                "[GroupSyncReceived] Ignoring invalid sync for group {group_name} \
-                 (present={all_present}, ordering={ordering_valid})"
+                group = group_name,
+                present = all_present,
+                ordering = ordering_valid,
+                "group sync rejected: invalid"
             );
             return Ok(());
         }
@@ -369,11 +380,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
 
         info!(
-            "[GroupSyncReceived] Applied group sync for {group_name} \
-             (start_epoch={}, stewards={sn}, scores={}, timing={})",
-            sync.start_epoch,
-            sync.peer_scores.len(),
-            sync.timing.is_some(),
+            group = group_name,
+            start_epoch = sync.start_epoch,
+            stewards = sn,
+            scores = sync.peer_scores.len(),
+            timing = sync.timing.is_some(),
+            "group sync applied"
         );
         Ok(())
     }
@@ -394,9 +406,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let members = group_members(&entry.group, &self.mls_service)?;
             if !members.iter().any(|m| m == &leave.identity) {
                 tracing::warn!(
-                    "[LeaveRequestReceived] ignoring leave for group {group_name}: \
-                     sender {:?} not a current member",
-                    leave.identity
+                    group = group_name,
+                    sender = %ShortId(&leave.identity),
+                    "leave request ignored: sender not a current member"
                 );
                 false
             } else {
@@ -407,9 +419,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         };
         if accepted {
             info!(
-                "[LeaveRequestReceived] accepted auto-approved leave for group \
-                 {group_name} (identity={:?})",
-                leave.identity
+                group = group_name,
+                identity = %ShortId(&leave.identity),
+                "leave accepted (auto-approved)"
             );
         }
         Ok(())

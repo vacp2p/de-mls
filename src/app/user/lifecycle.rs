@@ -55,9 +55,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let initial_state = state_machine.current_state();
         if initial_state == GroupState::PendingJoin {
             info!(
-                "[create_group] Group {group_name}: PendingJoin, waiting for welcome \
-                 (timeout={}s)",
-                state_machine.epoch_duration().as_secs() * 3,
+                group = group_name,
+                timeout_s = state_machine.epoch_duration().as_secs() * 3,
+                "pending join, awaiting welcome"
             );
         }
         groups.insert(
@@ -93,7 +93,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     ///
     /// `PendingJoin` short-circuits: nothing to leave, just tear down local state.
     pub async fn leave_group(&mut self, group_name: &str) -> Result<(), UserError> {
-        info!("[leave_group]: Leaving group {group_name}");
+        info!(group = group_name, "leaving group");
 
         let is_pending_join = {
             let groups = self.groups.read().await;
@@ -117,8 +117,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
             if entry.group.is_pending_self_leave(&self_identity) {
                 info!(
-                    "[leave_group]: self-leave already in flight for {group_name}, \
-                     ignoring duplicate"
+                    group = group_name,
+                    "self-leave already in flight, ignoring duplicate"
                 );
                 return Ok(());
             }
