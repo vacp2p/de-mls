@@ -85,6 +85,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         state_handler: Arc<SCH>,
         default_group_config: GroupConfig,
     ) -> Self {
+        let scoring_config = ScoringConfig {
+            default_score: default_group_config.default_peer_score,
+            removal_threshold: default_group_config.threshold_peer_score,
+        };
         Self {
             mls_service: Arc::new(mls_service),
             groups: Arc::new(RwLock::new(HashMap::new())),
@@ -96,10 +100,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             scoring_service: Arc::new(Mutex::new(PeerScoringService::new(
                 InMemoryPeerScoreStorage::new(),
                 FixedScoringProvider::with_default_deltas(),
-                ScoringConfig {
-                    default_score: 100,
-                    removal_threshold: 0,
-                },
+                scoring_config,
             ))),
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
         }

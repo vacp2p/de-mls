@@ -23,6 +23,13 @@ pub const DEFAULT_MAX_REELECTION_RETRIES: u32 = 1;
 /// for stricter policies that require explicit YES votes.
 pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
 
+/// RFC §Peer Scoring `default_peer_score`: score assigned to a newly added member.
+pub const DEFAULT_PEER_SCORE: i64 = 100;
+
+/// RFC §Peer Scoring `threshold_peer_score`: a member at or below this
+/// score is eligible for removal via a `SCORE_BELOW_THRESHOLD` ECP.
+pub const DEFAULT_THRESHOLD_PEER_SCORE: i64 = 0;
+
 /// Fallback [`ProtocolConfig`] for a group created without explicit bounds —
 /// tiny groups with `sn ∈ [1, 2]`. Real deployments override.
 fn default_protocol_config() -> ProtocolConfig {
@@ -52,6 +59,10 @@ pub struct GroupConfig {
     /// Whether silent voters count as YES at `consensus_timeout` (RFC
     /// §Creating Voting Proposal). See [`DEFAULT_LIVENESS_CRITERIA_YES`].
     pub liveness_criteria_yes: bool,
+    /// RFC §Peer Scoring `default_peer_score`. See [`DEFAULT_PEER_SCORE`].
+    pub default_peer_score: i64,
+    /// RFC §Peer Scoring `threshold_peer_score`. See [`DEFAULT_THRESHOLD_PEER_SCORE`].
+    pub threshold_peer_score: i64,
     pub protocol: ProtocolConfig,
 }
 
@@ -66,6 +77,8 @@ impl Default for GroupConfig {
             creator_auto_vote_delay: Some(DEFAULT_CREATOR_AUTO_VOTE_DELAY),
             max_reelection_retries: DEFAULT_MAX_REELECTION_RETRIES,
             liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,
+            default_peer_score: DEFAULT_PEER_SCORE,
+            threshold_peer_score: DEFAULT_THRESHOLD_PEER_SCORE,
             protocol: default_protocol_config(),
         }
     }
