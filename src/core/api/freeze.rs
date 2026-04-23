@@ -54,13 +54,6 @@ pub enum FreezeOutcome {
     NoCandidate,
 }
 
-/// Result of trying to apply one candidate. `Terminal` ends the round;
-/// `Drop` records a local score penalty and the caller tries the next.
-enum CandidateOutcome {
-    Terminal(FreezeOutcome),
-    Drop(ScoreOp),
-}
-
 /// Canonical commit hash used for dedup of buffered/committed candidates.
 pub fn compute_commit_hash(commit_message: &[u8]) -> Vec<u8> {
     let mut hasher = Sha256::new();
@@ -149,8 +142,8 @@ where
 /// Pick and apply a buffered candidate for the active freeze round.
 ///
 /// Three phases:
-/// 1. Read the approved-queue snapshot (`ExpectedBatch`) the candidates
-///    must match.
+/// 1. Snapshot the round context — approved-queue actions, current
+///    epoch, and the pre-merge live epoch steward.
 /// 2. Filter candidates by action count and rank them by RFC priority.
 /// 3. Apply in priority order, falling back on the next candidate when
 ///    MLS staging rejects the current one.
@@ -175,38 +168,53 @@ where
         return Ok(FreezeFinalizeResult::default());
     }
 
-    let expected = ExpectedBatch::from_approved_queue(group, &mls.wallet_bytes());
-    let sorted = rank_applicable_candidates(
-        candidates,
-        &expected,
-        allow_subset_candidates,
-        group,
-        current_epoch,
-    );
+    let ctx = RoundContext::snapshot(group, mls, current_epoch)?;
+    let sorted = rank_applicable_candidates(candidates, &ctx, allow_subset_candidates, group);
 
     if sorted.is_empty() {
         group.clear_freeze_round();
         return Ok(FreezeFinalizeResult::default());
     }
 
-    apply_in_priority_order(group, mls, sorted, &expected, current_epoch, app_id)
+    apply_in_priority_order(group, mls, sorted, &ctx, app_id)
 }
 
-/// Snapshot of the approved queue that every commit candidate must match.
+// ═════════════════════════════════════════════════════════════════════════════
+// PRIVATE HELPERS
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ─────────────────────────── Round Setup ───────────────────────────
+
+/// Precomputed round-level data: the approved-queue snapshot every
+/// candidate must match, the epoch the round targets, and the identities
+/// used for self-accusation skips and committer-vs-expected checks.
 ///
-/// `mls_actions` is the set we expect to see in a candidate's commit;
-/// non-MLS payloads (emergency, election) are filtered out during
-/// construction. `self_remove_pending` flags the case where the approved
-/// batch contains our own removal, which changes the terminal outcome
-/// for a successful local apply (`LeaveGroup` instead of `GroupUpdated`).
-struct ExpectedBatch {
+/// `mls_actions` is the expected MLS action set (non-MLS payloads
+/// filtered out). `self_remove_pending` flips the local apply's terminal
+/// result to `LeaveGroup` when our removal is in the batch.
+/// `live_epoch_steward_id` is the pre-merge eligibility-filtered steward
+/// expected to have committed at `current_epoch`; used to penalise an
+/// absent steward when a backup commits in their place.
+struct RoundContext {
     mls_actions: Vec<MlsProposalAction>,
     mls_count: usize,
     self_remove_pending: bool,
+    current_epoch: u64,
+    live_epoch_steward_id: Option<Vec<u8>>,
+    self_identity: Vec<u8>,
 }
 
-impl ExpectedBatch {
-    fn from_approved_queue(group: &Group, self_identity: &[u8]) -> Self {
+impl RoundContext {
+    fn snapshot<S>(
+        group: &Group,
+        mls: &MlsService<S>,
+        current_epoch: u64,
+    ) -> Result<Self, CoreError>
+    where
+        S: DeMlsStorage<MlsStorage = MemoryStorage>,
+    {
+        let self_identity = mls.wallet_bytes();
+
         let mut mls_actions: Vec<MlsProposalAction> = Vec::new();
         let mut self_remove_pending = false;
         for req in group.approved_proposals().values() {
@@ -221,26 +229,38 @@ impl ExpectedBatch {
             }
         }
         let mls_count = mls_actions.len();
-        Self {
+
+        let members = mls.members(group.group_name())?;
+        let live_epoch_steward_id = group
+            .live_epoch_steward(current_epoch, &members)
+            .map(|s| s.to_vec());
+
+        Ok(Self {
             mls_actions,
             mls_count,
             self_remove_pending,
-        }
+            current_epoch,
+            live_epoch_steward_id,
+            self_identity,
+        })
     }
 }
 
 /// Filter candidates by action count (Phase 1) and sort survivors by the
 /// RFC priority comparator (Phase 2). Result is ordered best-first.
+///
+/// Priority tiering uses the *nominal* epoch steward from the steward
+/// list, so selection order stays deterministic across nodes even when
+/// the live steward has rotated past someone.
 fn rank_applicable_candidates(
     candidates: Vec<BufferedCommitCandidate>,
-    expected: &ExpectedBatch,
+    ctx: &RoundContext,
     allow_subset: bool,
     group: &Group,
-    current_epoch: u64,
 ) -> Vec<BufferedCommitCandidate> {
     let epoch_steward_id = group
         .steward_list()
-        .and_then(|l| l.epoch_steward(current_epoch))
+        .and_then(|l| l.epoch_steward(ctx.current_epoch))
         .map(|s| s.to_vec());
 
     let mut sorted: Vec<_> = candidates
@@ -248,14 +268,23 @@ fn rank_applicable_candidates(
         .filter(|c| {
             let n = c.candidate_msg.mls_proposals.len();
             if allow_subset {
-                n <= expected.mls_count
+                n <= ctx.mls_count
             } else {
-                n == expected.mls_count
+                n == ctx.mls_count
             }
         })
         .collect();
     sorted.sort_by(|a, b| compare_candidate_priority(a, b, epoch_steward_id.as_deref()));
     sorted
+}
+
+// ─────────────────────────── Phase-3 Loop ───────────────────────────
+
+/// Result of trying to apply one candidate. `Terminal` ends the round;
+/// `Drop` records a local score penalty and the caller tries the next.
+enum CandidateOutcome {
+    Terminal(FreezeOutcome),
+    Drop(ScoreOp),
 }
 
 /// Walk `sorted` in priority order. Each rejected candidate adds a local
@@ -270,8 +299,7 @@ fn apply_in_priority_order<S>(
     group: &mut Group,
     mls: &MlsService<S>,
     sorted: Vec<BufferedCommitCandidate>,
-    expected: &ExpectedBatch,
-    current_epoch: u64,
+    ctx: &RoundContext,
     app_id: &[u8],
 ) -> Result<FreezeFinalizeResult, CoreError>
 where
@@ -292,7 +320,7 @@ where
                 );
                 continue;
             }
-            apply_local_candidate(group, mls, chosen, expected.self_remove_pending, app_id)?
+            apply_local_candidate(group, mls, chosen, ctx.self_remove_pending, app_id)?
         } else {
             if !own_commit_discarded && group.is_steward() {
                 // A failure here leaves an old pending commit in MLS and
@@ -301,15 +329,28 @@ where
                 mls.discard_own_commit(&group_name)?;
                 own_commit_discarded = true;
             }
-            apply_incoming_candidate(group, mls, chosen, &expected.mls_actions, current_epoch)?
+            apply_incoming_candidate(group, mls, chosen, &ctx.mls_actions, ctx.current_epoch)?
         };
 
         match apply_result {
             CandidateOutcome::Terminal(outcome) => {
                 score_ops.push(ScoreOp {
-                    member_id: author_id,
+                    member_id: author_id.clone(),
                     event: ScoreEvent::SuccessfulCommit,
                 });
+                // If a backup committed in place of the epoch steward,
+                // penalise the absent steward (RFC §Steward violation
+                // list: censorship/inactivity). Skip self-accusation —
+                // we know our own liveness directly.
+                if let Some(expected) = ctx.live_epoch_steward_id.as_deref() {
+                    if expected != author_id.as_slice() && expected != ctx.self_identity.as_slice()
+                    {
+                        score_ops.push(ScoreOp {
+                            member_id: expected.to_vec(),
+                            event: ScoreEvent::CensorshipInactivity,
+                        });
+                    }
+                }
                 // Unpicked candidates that passed the count filter are
                 // honest competitors under Δ-synchrony (same approved set,
                 // different MLS entropy). RFC §Commit Validation: "MUST
@@ -332,10 +373,6 @@ where
         score_ops,
     })
 }
-
-// ═════════════════════════════════════════════════════════════════════════════
-// PRIVATE HELPERS
-// ═════════════════════════════════════════════════════════════════════════════
 
 // ─────────────────────────── Selection ───────────────────────────
 
@@ -464,7 +501,6 @@ where
 
     // Commit sender must be on the steward list (RFC §"Commit validation service").
     if let Some(violation) = check_commit_sender_authorized(group, &commit_sender, current_epoch) {
-        tracing::warn!(group = %group_name, "violation: commit from unauthorized sender");
         mls.discard_staged_commit(&group_name)?;
         return Ok(CandidateOutcome::Drop(violation.target_score_op()));
     }
@@ -648,6 +684,10 @@ fn check_commit_sender_authorized(
     if list.contains(commit_sender) {
         return None;
     }
+    tracing::warn!(
+        group = group.group_name(),
+        "violation: commit from unauthorized sender"
+    );
     Some(ViolationEvidence::broken_commit(
         commit_sender.to_vec(),
         epoch,
