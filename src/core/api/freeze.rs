@@ -541,23 +541,6 @@ where
         }
     }
 
-    // All proposals must come from the same sender.
-    if let Some(first) = proposal_senders.first() {
-        if proposal_senders.iter().any(|s| s != first) {
-            tracing::warn!(
-                group = group_name,
-                "violation: proposals have different senders"
-            );
-            return Ok(StagingOutcome::Violation(
-                ViolationEvidence::broken_mls_proposal(
-                    first.clone(),
-                    current_epoch,
-                    "proposals have different senders",
-                ),
-            ));
-        }
-    }
-
     let staged_result = match mls.process_commit(group_name, &candidate.commit_message) {
         Ok(r) => r,
         Err(e) => {
@@ -578,19 +561,21 @@ where
         StagedCommitResult::Ignored => return Ok(StagingOutcome::Abort),
     };
 
-    // Commit sender must match the proposals' sender.
-    if let Some(first) = proposal_senders.first() {
-        if first != &commit_sender {
-            tracing::warn!(
-                group = group_name,
-                "violation: proposal sender != commit sender"
-            );
-            return Ok(StagingOutcome::Violation(ViolationEvidence::broken_commit(
-                commit_sender,
-                current_epoch,
-                "proposal sender differs from commit sender",
-            )));
-        }
+    // Every bundled proposal must come from the committer — catches both
+    // "proposals signed by a third party" and "proposals don't all agree
+    // on a sender". Attribution always lands on the committer (RFC
+    // §Steward violation list: only the member who released the commit is
+    // accused).
+    if proposal_senders.iter().any(|s| s != &commit_sender) {
+        tracing::warn!(
+            group = group_name,
+            "violation: bundled proposals don't match the commit sender"
+        );
+        return Ok(StagingOutcome::Violation(ViolationEvidence::broken_commit(
+            commit_sender,
+            current_epoch,
+            "commit bundles proposals not signed by the committer",
+        )));
     }
 
     Ok(StagingOutcome::Staged {
