@@ -1,28 +1,16 @@
 //! Main MLS service providing all cryptographic operations.
 
-use std::collections::HashMap;
-use std::sync::RwLock;
+use std::{collections::HashMap, sync::RwLock};
 
-use alloy::primitives::Address;
-use openmls::credentials::CredentialWithKey;
-use openmls::group::StagedCommit;
-use openmls::group::{GroupId, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig};
-use openmls::prelude::{
-    BasicCredential, Ciphersuite, DeserializeBytes, MlsMessageBodyIn, MlsMessageIn,
-    ProcessedMessageContent, Proposal, ProtocolMessage, StagedWelcome,
+use openmls::{
+    group::{MlsGroup, StagedCommit},
+    prelude::{Ciphersuite, Proposal},
 };
-use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::{MemoryStorage, RustCrypto};
 use openmls_traits::OpenMlsProvider;
 
 use crate::mls_crypto::{
-    error::{IdentityError, MlsError, MlsServiceError, Result, StorageError},
-    identity::IdentityData,
-    storage::DeMlsStorage,
-    types::{
-        CommitCandidate, DecryptResult, GroupUpdate, KeyPackageBytes, MlsMessageKind,
-        MlsProposalAction, StagedCommitResult,
-    },
+    DeMlsStorage, MlsError, MlsProposalAction, MlsServiceError, Result, identity::IdentityData,
 };
 
 mod commits;
@@ -93,7 +81,7 @@ where
     // Internal
     // ══════════════════════════════════════════════════════════
 
-    fn extract_proposal_action(group: &MlsGroup, proposal: &Proposal) -> MlsProposalAction {
+    fn extract_proposal_action(group: &MlsGroup, proposal: &Proposal) -> Result<MlsProposalAction> {
         match proposal {
             Proposal::Add(add) => {
                 let id = add
@@ -102,16 +90,19 @@ where
                     .credential()
                     .serialized_content()
                     .to_vec();
-                MlsProposalAction::Add(id)
+                Ok(MlsProposalAction::Add(id))
             }
             Proposal::Remove(remove) => {
+                let removed = remove.removed();
                 let id = group
-                    .member(remove.removed())
+                    .member(removed)
                     .map(|c| c.serialized_content().to_vec())
-                    .unwrap_or_default();
-                MlsProposalAction::Remove(id)
+                    .ok_or(MlsError::Service(MlsServiceError::UnknownLeafIndex(
+                        removed.u32(),
+                    )))?;
+                Ok(MlsProposalAction::Remove(id))
             }
-            other => MlsProposalAction::Other(format!("{other:?}")),
+            other => Ok(MlsProposalAction::Other(format!("{other:?}"))),
         }
     }
 

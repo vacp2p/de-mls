@@ -12,49 +12,56 @@
 use prost::Message;
 use tracing::info;
 
-use crate::core::peer_scoring::{ConsensusApplyResult, ElectionOutcome, ScoreEvent, ScoreOp};
+use crate::core::peer_scoring::{ScoreEvent, ScoreOp};
 use crate::core::{CoreError, Group};
 use crate::protos::de_mls::messages::v1::{
     GroupUpdateRequest, RemoveMember, StewardElectionProposal, ViolationEvidence, ViolationType,
     group_update_request,
 };
 
+/// Result of applying a consensus outcome: any score ops the app should feed
+/// to its peer-scoring service, plus the accepted election proposal (if any)
+/// for the app to validate and apply as a new steward list.
+#[derive(Debug, Clone, Default)]
+pub struct ConsensusApplyResult {
+    pub score_ops: Vec<ScoreOp>,
+    pub election: Option<StewardElectionProposal>,
+}
+
 /// Map a proto `ViolationType` to the corresponding target penalty `ScoreEvent`.
+///
+/// Callers gate `ScoreBelowThreshold` out upstream (the target is being removed
+/// anyway), so only the three penalty kinds reach this function in practice.
+/// Unknown / `Unspecified` wire values fall back to the harshest penalty.
 fn target_score_event(violation_type: i32) -> ScoreEvent {
     match ViolationType::try_from(violation_type) {
         Ok(ViolationType::BrokenCommit) => ScoreEvent::BrokenCommit,
         Ok(ViolationType::BrokenMlsProposal) => ScoreEvent::BrokenMlsProposal,
         Ok(ViolationType::CensorshipInactivity) => ScoreEvent::CensorshipInactivity,
-        // ScoreBelowThreshold has no target penalty (target is being removed).
-        // Fall through to default.
-        //
-        // Unspecified or unknown — fall back to the most severe penalty.
         _ => ScoreEvent::BrokenCommit,
     }
 }
 
-/// Score ops for an accepted emergency: penalize target (violation-specific), reward creator.
-/// Always returns exactly 2 ops.
+/// Accepted emergency → violation-specific target penalty + flat creator reward.
 fn emergency_accepted_score_ops(evidence: &ViolationEvidence) -> [ScoreOp; 2] {
     [
-        ScoreOp::new(
-            evidence.target_member_id.clone(),
-            target_score_event(evidence.violation_type),
-        ),
-        ScoreOp::new(
-            evidence.creator_member_id.clone(),
-            ScoreEvent::EmergencyYesCreator,
-        ),
+        ScoreOp {
+            member_id: evidence.target_member_id.clone(),
+            event: target_score_event(evidence.violation_type),
+        },
+        ScoreOp {
+            member_id: evidence.creator_member_id.clone(),
+            event: ScoreEvent::EmergencyYesCreator,
+        },
     ]
 }
 
-/// Score op for a rejected emergency: penalize creator (false accusation).
-/// Always returns exactly 1 op.
+/// Rejected emergency → flat creator penalty (false accusation).
 fn emergency_rejected_score_op(evidence: &ViolationEvidence) -> ScoreOp {
-    ScoreOp::new(
-        evidence.creator_member_id.clone(),
-        ScoreEvent::EmergencyNoCreator,
-    )
+    ScoreOp {
+        member_id: evidence.creator_member_id.clone(),
+        event: ScoreEvent::EmergencyNoCreator,
+    }
 }
 
 /// Extract emergency evidence from a `GroupUpdateRequest`, if present.
@@ -129,16 +136,16 @@ pub fn apply_consensus_result(
                 election.election_epoch,
                 election.proposed_stewards.len()
             );
-            return Ok(ConsensusApplyResult::with_election(ElectionOutcome {
-                proposed_stewards: election.proposed_stewards,
-                election_epoch: election.election_epoch,
-            }));
+            return Ok(ConsensusApplyResult {
+                election: Some(election),
+                ..Default::default()
+            });
         } else {
             if is_owner {
                 group.mark_proposal_as_rejected(proposal_id);
             }
             info!("Steward election proposal {proposal_id} REJECTED");
-            return Ok(ConsensusApplyResult::empty());
+            return Ok(ConsensusApplyResult::default());
         }
     }
 
@@ -148,7 +155,6 @@ pub fn apply_consensus_result(
     let transforms_to_removal =
         approved && is_emergency && evidence.as_ref().is_some_and(is_score_below_threshold);
 
-    // Mutate group state.
     if approved {
         if is_owner {
             group.mark_proposal_as_approved(proposal_id);
@@ -173,7 +179,6 @@ pub fn apply_consensus_result(
         group.mark_proposal_as_rejected(proposal_id);
     }
 
-    // Produce score ops from evidence.
     match evidence {
         Some(ev) if approved => {
             info!(
@@ -184,14 +189,17 @@ pub fn apply_consensus_result(
             let ops = if is_score_below_threshold(&ev) {
                 // Target is already at/below threshold and will be removed —
                 // skip the redundant penalty, only reward the creator.
-                vec![ScoreOp::new(
-                    ev.creator_member_id.clone(),
-                    ScoreEvent::EmergencyYesCreator,
-                )]
+                vec![ScoreOp {
+                    member_id: ev.creator_member_id.clone(),
+                    event: ScoreEvent::EmergencyYesCreator,
+                }]
             } else {
                 emergency_accepted_score_ops(&ev).into()
             };
-            Ok(ConsensusApplyResult::with_ops(ops))
+            Ok(ConsensusApplyResult {
+                score_ops: ops,
+                ..Default::default()
+            })
         }
         Some(ev) => {
             info!(
@@ -199,10 +207,104 @@ pub fn apply_consensus_result(
                  creator={:?}",
                 ev.creator_member_id
             );
-            Ok(ConsensusApplyResult::with_ops(vec![
-                emergency_rejected_score_op(&ev),
-            ]))
+            Ok(ConsensusApplyResult {
+                score_ops: vec![emergency_rejected_score_op(&ev)],
+                ..Default::default()
+            })
         }
-        None => Ok(ConsensusApplyResult::empty()),
+        None => Ok(ConsensusApplyResult::default()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::steward_list::{ProtocolConfig, StewardList};
+    use crate::protos::de_mls::messages::v1::{
+        GroupUpdateRequest, StewardElectionProposal, group_update_request,
+    };
+    use prost::Message;
+
+    fn member(id: u8) -> Vec<u8> {
+        vec![id; 20]
+    }
+
+    fn members(ids: &[u8]) -> Vec<Vec<u8>> {
+        ids.iter().map(|&id| member(id)).collect()
+    }
+
+    fn election_request(stewards: Vec<Vec<u8>>, epoch: u64) -> GroupUpdateRequest {
+        GroupUpdateRequest {
+            payload: Some(group_update_request::Payload::StewardElection(
+                StewardElectionProposal {
+                    proposed_stewards: stewards,
+                    election_epoch: epoch,
+                    retry_round: 0,
+                },
+            )),
+        }
+    }
+
+    /// YES on an election the local node owns returns the accepted proposal,
+    /// doesn't leave the proposal in the approved queue, and emits no score ops.
+    #[test]
+    fn election_yes_owner_returns_outcome_and_clears_queue() {
+        let config = ProtocolConfig::new(2, 5).unwrap();
+        let mut group = Group::new_as_creator("test-group", member(1), config.clone()).unwrap();
+        let mems = members(&[1, 2, 3, 4, 5]);
+        let sn = mems.len().min(config.sn_max);
+        let list = StewardList::generate(10, b"test-group", &mems, sn, config, 0).unwrap();
+        let request = election_request(list.members().to_vec(), 10);
+
+        let proposal_id = 42;
+        group.store_voting_proposal(proposal_id, request.clone());
+
+        let result =
+            apply_consensus_result(&mut group, proposal_id, true, &request.encode_to_vec())
+                .unwrap();
+
+        let outcome = result.election.expect("election outcome expected");
+        assert_eq!(outcome.election_epoch, 10);
+        assert_eq!(outcome.proposed_stewards.len(), 5);
+        assert!(result.score_ops.is_empty());
+        assert_eq!(group.approved_proposals_count(), 0);
+    }
+
+    /// NO on an election returns no outcome and leaves the approved queue empty.
+    #[test]
+    fn election_no_returns_empty() {
+        let config = ProtocolConfig::new(2, 5).unwrap();
+        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        let request = election_request(vec![member(1), member(2)], 10);
+
+        let proposal_id = 43;
+        group.store_voting_proposal(proposal_id, request.clone());
+
+        let result =
+            apply_consensus_result(&mut group, proposal_id, false, &request.encode_to_vec())
+                .unwrap();
+
+        assert!(result.election.is_none());
+        assert!(result.score_ops.is_empty());
+        assert_eq!(group.approved_proposals_count(), 0);
+    }
+
+    /// YES on an election the local node *doesn't* own still returns the outcome
+    /// (non-owner path), and doesn't touch any proposal queues.
+    #[test]
+    fn election_yes_nonowner_returns_outcome_without_queue_side_effects() {
+        let config = ProtocolConfig::new(2, 5).unwrap();
+        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        let request = election_request(vec![member(1), member(2), member(3)], 5);
+
+        let proposal_id = 44;
+        let result =
+            apply_consensus_result(&mut group, proposal_id, true, &request.encode_to_vec())
+                .unwrap();
+
+        let outcome = result.election.expect("election outcome expected");
+        assert_eq!(outcome.election_epoch, 5);
+        assert_eq!(outcome.proposed_stewards.len(), 3);
+        assert_eq!(group.approved_proposals_count(), 0);
     }
 }

@@ -1,196 +1,19 @@
 //! Integration tests for steward violation detection, emergency criteria proposals,
 //! freeze round selection, and dedup.
 
-use std::sync::{Arc, Mutex};
-
-use async_trait::async_trait;
 use prost::Message;
 
 use de_mls::core::{
-    CallbackError, FreezeFinalizeResult, Group, GroupEventHandler, ProcessResult, ProposalId,
-    ProtocolConfig, ScoreEvent, apply_consensus_result, build_key_package_message,
-    create_commit_candidate, create_group, finalize_freeze_round, prepare_to_join, process_inbound,
+    FreezeFinalizeResult, ProcessResult, ProposalId, ScoreEvent, apply_consensus_result,
+    create_commit_candidate, finalize_freeze_round, process_inbound,
 };
-use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
-use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService, parse_wallet_address};
+use de_mls::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 use de_mls::protos::de_mls::messages::v1::{
-    AppMessage, GroupUpdateRequest, ViolationEvidence, ViolationType, group_update_request,
+    GroupUpdateRequest, ViolationEvidence, ViolationType, group_update_request,
 };
 
-// ─────────────────────────── Mock Handler ───────────────────────────
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-enum Event {
-    Outbound {
-        group: String,
-        packet: OutboundPacket,
-    },
-    AppMessage {
-        group: String,
-        msg: AppMessage,
-    },
-    LeaveGroup {
-        group: String,
-    },
-    JoinedGroup {
-        group: String,
-    },
-    Error {
-        group: String,
-        op: String,
-        err: String,
-    },
-}
-
-#[derive(Clone)]
-struct MockHandler {
-    events: Arc<Mutex<Vec<Event>>>,
-}
-
-impl MockHandler {
-    #[allow(dead_code)]
-    fn new() -> Self {
-        Self {
-            events: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    #[allow(dead_code)]
-    fn events(&self) -> Vec<Event> {
-        self.events.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl GroupEventHandler for MockHandler {
-    async fn on_outbound(
-        &self,
-        group_name: &str,
-        packet: OutboundPacket,
-    ) -> Result<String, CallbackError> {
-        self.events.lock().unwrap().push(Event::Outbound {
-            group: group_name.to_string(),
-            packet,
-        });
-        Ok("mock-id".to_string())
-    }
-
-    async fn on_app_message(
-        &self,
-        group_name: &str,
-        message: AppMessage,
-    ) -> Result<(), CallbackError> {
-        self.events.lock().unwrap().push(Event::AppMessage {
-            group: group_name.to_string(),
-            msg: message,
-        });
-        Ok(())
-    }
-
-    async fn on_leave_group(&self, group_name: &str) -> Result<(), CallbackError> {
-        self.events.lock().unwrap().push(Event::LeaveGroup {
-            group: group_name.to_string(),
-        });
-        Ok(())
-    }
-
-    async fn on_joined_group(&self, group_name: &str) -> Result<(), CallbackError> {
-        self.events.lock().unwrap().push(Event::JoinedGroup {
-            group: group_name.to_string(),
-        });
-        Ok(())
-    }
-
-    async fn on_error(&self, group_name: &str, operation: &str, error: &str) {
-        self.events.lock().unwrap().push(Event::Error {
-            group: group_name.to_string(),
-            op: operation.to_string(),
-            err: error.to_string(),
-        });
-    }
-}
-
-// ─────────────────────────── Helpers ───────────────────────────
-
-fn default_steward_config() -> ProtocolConfig {
-    ProtocolConfig::new(1, 5).unwrap()
-}
-
-fn setup_mls(wallet_hex: &str) -> MlsService<MemoryDeMlsStorage> {
-    let storage = MemoryDeMlsStorage::new();
-    let mls = MlsService::new(storage);
-    let wallet = parse_wallet_address(wallet_hex).unwrap();
-    mls.init(wallet).unwrap();
-    mls
-}
-
-fn setup_steward(group_name: &str, wallet_hex: &str) -> (MlsService<MemoryDeMlsStorage>, Group) {
-    let mls = setup_mls(wallet_hex);
-    let group = create_group(group_name, &mls, default_steward_config()).unwrap();
-    (mls, group)
-}
-
-fn setup_joiner(
-    group_name: &str,
-    wallet_hex: &str,
-) -> (MlsService<MemoryDeMlsStorage>, Group, OutboundPacket) {
-    let mls = setup_mls(wallet_hex);
-    let group = prepare_to_join(group_name, mls.wallet_bytes(), default_steward_config());
-    let kp_packet = build_key_package_message(&group, &mls, b"test-app-id").unwrap();
-    (mls, group, kp_packet)
-}
-
-fn steward_add_joiner(
-    steward_mls: &MlsService<MemoryDeMlsStorage>,
-    steward_handle: &mut Group,
-    joiner_kp_packet: &OutboundPacket,
-) -> (OutboundPacket, OutboundPacket) {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static PROPOSAL_COUNTER: AtomicU32 = AtomicU32::new(100);
-
-    let result = process_inbound(
-        steward_handle,
-        &joiner_kp_packet.payload,
-        WELCOME_SUBTOPIC,
-        steward_mls,
-    )
-    .unwrap();
-
-    let gur = match result {
-        ProcessResult::MembershipChangeReceived(gur) => gur,
-        other => panic!("Expected MembershipChangeReceived, got {:?}", other),
-    };
-
-    let proposal_id = PROPOSAL_COUNTER.fetch_add(1, Ordering::Relaxed);
-    steward_handle.insert_approved_proposal(proposal_id, gur);
-    let packets = create_commit_candidate(steward_handle, steward_mls, b"test-app-id").unwrap();
-
-    let finalize =
-        finalize_freeze_round(steward_handle, steward_mls, false, b"test-app-id").unwrap();
-    let welcome_packet = match finalize {
-        FreezeFinalizeResult::Applied { result, outbound } => {
-            assert!(
-                matches!(result, ProcessResult::GroupUpdated),
-                "Expected GroupUpdated, got {:?}",
-                result
-            );
-            outbound
-                .into_iter()
-                .find(|p| p.subtopic == WELCOME_SUBTOPIC)
-                .expect("Expected deferred welcome packet from finalize_freeze_round")
-        }
-        other => panic!("Expected Applied, got {:?}", other),
-    };
-
-    let batch_packet = packets
-        .iter()
-        .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
-        .expect("Expected batch proposals packet")
-        .clone();
-
-    (welcome_packet, batch_packet)
-}
+mod common;
+use common::{setup_joiner, setup_steward, steward_add_joiner};
 
 // ─────────────────────────── Tests ───────────────────────────
 
@@ -653,16 +476,13 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     // Finalize: MLS commit staging authenticates the sender
     let finalize =
         finalize_freeze_round(&mut joiner_handle, &joiner_mls, false, b"test-app-id").unwrap();
+    let matched = matches!(
+        &finalize,
+        FreezeFinalizeResult::Outcome { result, .. } if matches!(**result, ProcessResult::GroupUpdated)
+    );
     assert!(
-        matches!(
-            finalize,
-            FreezeFinalizeResult::Applied {
-                result: ProcessResult::GroupUpdated,
-                ..
-            }
-        ),
-        "Expected GroupUpdated after finalize, got {:?}",
-        finalize
+        matched,
+        "Expected GroupUpdated after finalize, got {finalize:?}"
     );
 
     // After finalization, verify the steward list on the creator  group

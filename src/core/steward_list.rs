@@ -1,22 +1,8 @@
-//! Deterministic steward list generation and rotation.
-//!
-//! The steward list is an ordered list of member identities that determines
-//! who creates commits for each epoch. All members independently derive the
-//! same list using `SHA256(epoch || member_id || group_id)` sorting.
-//!
-//! # Generation Algorithm (RFC §Steward list creation)
-//!
-//! 1. For each candidate member, compute `SHA256(epoch || member_id || group_id)`
-//! 2. Sort candidates in ascending order by hash value
-//! 3. Take the first `sn` members (`sn_min ≤ sn ≤ sn_max`)
-//!
-//! # Rotation
-//!
-//! - **Epoch steward**: steward at index `epoch % list_len`
-//! - **Backup steward**: steward at index `(epoch + 1) % list_len`
-//!
-//! When all stewards have served (epoch reaches `start_epoch + list_len`),
-//! the list is exhausted and a new election MUST be initiated.
+//! Deterministic steward list — who commits each epoch, derived identically
+//! on every member. See [`StewardList::generate`] for the hash-sort algorithm
+//! and [`StewardList::epoch_steward`] / [`StewardList::backup_steward`] for
+//! rotation. When `epoch >= start_epoch + len` the list is exhausted and a
+//! new election MUST follow (RFC §Steward list creation).
 
 use sha2::{Digest, Sha256};
 
@@ -36,24 +22,14 @@ pub struct ProtocolConfig {
     pub allow_subset_candidates: bool,
 }
 
-impl Default for ProtocolConfig {
-    fn default() -> Self {
-        Self {
-            sn_min: 1,
-            sn_max: 2,
-            allow_subset_candidates: false,
-        }
-    }
-}
-
 impl ProtocolConfig {
     /// Create a new config with the given bounds.
     ///
     /// Returns `Err` if `sn_min` is 0 or `sn_min > sn_max`.
     /// Sets `allow_subset_candidates` to `false` by default.
-    pub fn new(sn_min: usize, sn_max: usize) -> Result<Self, super::error::CoreError> {
+    pub fn new(sn_min: usize, sn_max: usize) -> Result<Self, CoreError> {
         if sn_min < 1 || sn_min > sn_max {
-            return Err(super::error::CoreError::InvalidConfigSize);
+            return Err(CoreError::InvalidConfigSize);
         }
         Ok(Self {
             sn_min,
@@ -62,26 +38,25 @@ impl ProtocolConfig {
         })
     }
 
-    /// Compute the appropriate steward list size for a given member count.
-    ///
-    /// RFC §Steward list creation: if total members < sn_min, list size = total members.
-    /// Otherwise, `sn = min(total_members, sn_max)` clamped to at least `sn_min`.
-    pub fn compute_list_size(&self, total_members: usize) -> usize {
+    /// Inclusive range of valid list sizes for `total_members` (RFC §Steward
+    /// list creation). When `total_members < sn_min` the only valid size is
+    /// `total_members`; otherwise the range is `[sn_min, min(sn_max, total)]`.
+    fn size_bounds(&self, total_members: usize) -> std::ops::RangeInclusive<usize> {
         if total_members < self.sn_min {
-            total_members
+            total_members..=total_members
         } else {
-            total_members.min(self.sn_max).max(self.sn_min)
+            self.sn_min..=self.sn_max.min(total_members)
         }
     }
 
-    /// Check if a given list size is valid for this config and member count.
+    /// Preferred list size (the upper end of the valid range).
+    pub fn compute_list_size(&self, total_members: usize) -> usize {
+        *self.size_bounds(total_members).end()
+    }
+
+    /// `true` iff `size` lies within the valid range for this config.
     pub fn is_valid_size(&self, size: usize, total_members: usize) -> bool {
-        if total_members < self.sn_min {
-            // RFC: if total members < sn_min, list size = total member count
-            size == total_members
-        } else {
-            size >= self.sn_min && size <= self.sn_max && size <= total_members
-        }
+        self.size_bounds(total_members).contains(&size)
     }
 }
 
@@ -100,43 +75,24 @@ pub struct StewardList {
 }
 
 impl StewardList {
-    /// Generate a deterministic steward list from the given members.
-    ///
-    /// Sorts candidates by `SHA256(epoch || member_id || group_id)` and takes
-    /// the first `sn` entries. The `sn` parameter controls list size and must
-    /// satisfy `sn_min ≤ sn ≤ sn_max` (or equal total members if below sn_min).
-    ///
-    /// Returns `None` if:
-    /// - `member_ids` is empty
-    /// - `sn` is not valid for the config and member count
+    /// Generate the deterministic steward list. Sorts candidates by
+    /// `SHA256(epoch || retry_round || member_id || group_id)` and takes the
+    /// first `sn`. Errors on empty `member_ids` or `sn` outside the config bounds.
     pub fn generate(
         election_epoch: u64,
         group_id: &[u8],
         member_ids: &[Vec<u8>],
         sn: usize,
         config: ProtocolConfig,
+        retry_round: u32,
     ) -> Result<Self, CoreError> {
-        if member_ids.is_empty() {
-            return Err(CoreError::EmptyMembersList);
-        }
-
-        if !config.is_valid_size(sn, member_ids.len()) {
-            return Err(CoreError::InvalidConfigSize);
-        }
-
-        let mut scored: Vec<(Vec<u8>, Vec<u8>)> = member_ids
-            .iter()
-            .map(|member_id| {
-                let hash = compute_steward_hash(election_epoch, member_id, group_id);
-                (hash, member_id.clone())
-            })
+        check_generation_inputs(&config, member_ids, sn)?;
+        let ordered = sorted_steward_indices(election_epoch, retry_round, group_id, member_ids);
+        let members = ordered
+            .into_iter()
+            .take(sn)
+            .map(|i| member_ids[i].clone())
             .collect();
-
-        // Sort ascending by hash value
-        scored.sort_by(|(hash_a, _), (hash_b, _)| hash_a.cmp(hash_b));
-
-        let members: Vec<Vec<u8>> = scored.into_iter().take(sn).map(|(_, id)| id).collect();
-
         Ok(Self {
             members,
             config,
@@ -144,39 +100,29 @@ impl StewardList {
         })
     }
 
-    /// Check that all stewards in the list are present in the given member set.
-    ///
-    /// Protocol invariant: stewards must be group members.
-    pub fn validate_members(proposed_stewards: &[Vec<u8>], group_members: &[Vec<u8>]) -> bool {
-        proposed_stewards
-            .iter()
-            .all(|s| group_members.iter().any(|m| m == s))
-    }
-
-    /// Validate that a proposed steward list matches the deterministic generation.
-    ///
-    /// Returns `true` if `proposed` equals the list that `generate()` would produce
-    /// with the same parameters.
+    /// True iff `proposed` equals what [`Self::generate`] would produce for
+    /// the same parameters. Compares in place — does not allocate a full
+    /// [`StewardList`].
     pub fn validate(
         proposed: &[Vec<u8>],
         election_epoch: u64,
         group_id: &[u8],
         member_ids: &[Vec<u8>],
         config: &ProtocolConfig,
+        retry_round: u32,
     ) -> Result<bool, CoreError> {
         let sn = proposed.len();
-        let expected =
-            StewardList::generate(election_epoch, group_id, member_ids, sn, config.clone())?;
-        Ok(expected.members == proposed)
+        check_generation_inputs(config, member_ids, sn)?;
+        let ordered = sorted_steward_indices(election_epoch, retry_round, group_id, member_ids);
+        Ok(ordered
+            .iter()
+            .take(sn)
+            .zip(proposed.iter())
+            .all(|(&i, want)| &member_ids[i] == want))
     }
 
-    /// Get the epoch steward for the given epoch.
-    ///
-    /// The epoch steward is at index `(epoch - start_epoch) % len`.
-    /// Returns `None` if the list is exhausted for this epoch.
-    ///
-    /// This is the *nominal* rotation — use [`Self::live_epoch_steward`] to
-    /// skip stewards that have since been removed from the group.
+    /// Nominal epoch steward at index `(epoch - start_epoch) % len`. Use
+    /// [`Self::live_epoch_steward`] to skip stewards no longer in the group.
     pub fn epoch_steward(&self, epoch: u64) -> Option<&[u8]> {
         if self.is_exhausted(epoch) {
             return None;
@@ -185,10 +131,7 @@ impl StewardList {
         Some(&self.members[index])
     }
 
-    /// Get the backup steward for the given epoch.
-    ///
-    /// The backup steward is at index `(epoch - start_epoch + 1) % len`.
-    /// Returns `None` if the list is exhausted for this epoch.
+    /// Nominal backup steward at index `(epoch - start_epoch + 1) % len`.
     pub fn backup_steward(&self, epoch: u64) -> Option<&[u8]> {
         if self.is_exhausted(epoch) {
             return None;
@@ -197,25 +140,55 @@ impl StewardList {
         Some(&self.members[index])
     }
 
-    /// Get the *live* epoch steward for the given epoch — the first steward in
-    /// rotation order (starting at the nominal index and wrapping within the
-    /// list) who is still a group member.
-    ///
-    /// Returns `None` if the list is exhausted at this epoch or all nominal
-    /// stewards have been removed from the group. Every node with the same
-    /// steward list + MLS member set computes the same value.
-    pub fn live_epoch_steward(&self, epoch: u64, members: &[Vec<u8>]) -> Option<&[u8]> {
-        self.live_steward_from(epoch, 0, members)
+    /// Deterministic proposer of the next election when this list exhausts.
+    /// Walks rotation from index 0; returns `None` if no steward is eligible.
+    pub fn responsible_election_proposer<F: Fn(&[u8]) -> bool>(
+        &self,
+        eligible: F,
+    ) -> Option<&[u8]> {
+        // Passing `start_epoch` makes live_epoch_steward start at index 0.
+        self.live_epoch_steward(self.start_epoch, eligible)
     }
 
-    /// Get the *live* backup steward — the next live steward after the live
-    /// epoch steward in rotation order. Returns `None` if only one live
-    /// steward remains or the list is exhausted.
-    pub fn live_backup_steward(&self, epoch: u64, members: &[Vec<u8>]) -> Option<&[u8]> {
-        self.live_steward_from(epoch, 1, members)
+    /// Deterministic ECP proposer for a violation. Walks rotation from the
+    /// epoch-steward slot at `violation_epoch`, skipping the target and any
+    /// ineligible member. `None` when the list is exhausted or no candidate
+    /// passes the predicate.
+    pub fn responsible_ecp_proposer<F: Fn(&[u8]) -> bool>(
+        &self,
+        violation_epoch: u64,
+        target: &[u8],
+        eligible: F,
+    ) -> Option<&[u8]> {
+        self.live_steward_from(violation_epoch, 0, |c| c != target && eligible(c))
     }
 
-    fn live_steward_from(&self, epoch: u64, offset: usize, members: &[Vec<u8>]) -> Option<&[u8]> {
+    /// Epoch steward with the nominal rotation advanced past any steward for
+    /// whom `eligible` returns `false` (typically: removed members or those
+    /// pending a self-leave).
+    pub fn live_epoch_steward<F: Fn(&[u8]) -> bool>(
+        &self,
+        epoch: u64,
+        eligible: F,
+    ) -> Option<&[u8]> {
+        self.live_steward_from(epoch, 0, eligible)
+    }
+
+    /// Like [`Self::live_epoch_steward`] but for the backup slot (offset +1).
+    pub fn live_backup_steward<F: Fn(&[u8]) -> bool>(
+        &self,
+        epoch: u64,
+        eligible: F,
+    ) -> Option<&[u8]> {
+        self.live_steward_from(epoch, 1, eligible)
+    }
+
+    fn live_steward_from<F: Fn(&[u8]) -> bool>(
+        &self,
+        epoch: u64,
+        offset: usize,
+        eligible: F,
+    ) -> Option<&[u8]> {
         if self.is_exhausted(epoch) {
             return None;
         }
@@ -224,17 +197,15 @@ impl StewardList {
         for step in 0..len {
             let idx = (start + step) % len;
             let candidate = &self.members[idx];
-            if members.iter().any(|m| m == candidate) {
+            if eligible(candidate) {
                 return Some(candidate);
             }
         }
         None
     }
 
-    /// Check if the list is exhausted at the given epoch.
-    ///
-    /// The list covers epochs `[start_epoch, start_epoch + len)`. Once all
-    /// stewards have served, a new election MUST be initiated.
+    /// `true` once every steward has served — the list covers
+    /// `[start_epoch, start_epoch + len)`. A new election MUST follow.
     pub fn is_exhausted(&self, epoch: u64) -> bool {
         if epoch < self.start_epoch {
             return true;
@@ -242,43 +213,80 @@ impl StewardList {
         (epoch - self.start_epoch) >= self.members.len() as u64
     }
 
-    /// Check if a member is in the steward list.
     pub fn contains(&self, member_id: &[u8]) -> bool {
         self.members.iter().any(|m| m.as_slice() == member_id)
     }
 
-    /// Get the ordered steward identities.
     pub fn members(&self) -> &[Vec<u8>] {
         &self.members
     }
 
-    /// Get the number of stewards in the list.
     pub fn len(&self) -> usize {
         self.members.len()
     }
 
-    /// Check if the list is empty.
     pub fn is_empty(&self) -> bool {
         self.members.is_empty()
     }
 
-    /// Get the config.
     pub fn config(&self) -> &ProtocolConfig {
         &self.config
     }
 
-    /// Get the start epoch.
     pub fn start_epoch(&self) -> u64 {
         self.start_epoch
     }
 }
 
-/// Compute the deterministic hash for steward list sorting.
-///
-/// `SHA256(epoch || member_id || group_id)` where epoch is big-endian u64.
-fn compute_steward_hash(epoch: u64, member_id: &[u8], group_id: &[u8]) -> Vec<u8> {
+/// Shared precondition check for [`StewardList::generate`] and [`StewardList::validate`].
+fn check_generation_inputs(
+    config: &ProtocolConfig,
+    member_ids: &[Vec<u8>],
+    sn: usize,
+) -> Result<(), CoreError> {
+    if member_ids.is_empty() {
+        return Err(CoreError::EmptyMembersList);
+    }
+    if !config.is_valid_size(sn, member_ids.len()) {
+        return Err(CoreError::InvalidConfigSize);
+    }
+    Ok(())
+}
+
+/// Return candidate member indices sorted ascending by their steward hash.
+/// Kept index-based so callers decide whether to clone or borrow.
+fn sorted_steward_indices(
+    election_epoch: u64,
+    retry_round: u32,
+    group_id: &[u8],
+    member_ids: &[Vec<u8>],
+) -> Vec<usize> {
+    let mut scored: Vec<(Vec<u8>, usize)> = member_ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| {
+            (
+                compute_steward_hash(election_epoch, retry_round, id, group_id),
+                i,
+            )
+        })
+        .collect();
+    scored.sort_by(|(a, _), (b, _)| a.cmp(b));
+    scored.into_iter().map(|(_, i)| i).collect()
+}
+
+/// `SHA256(epoch || retry_round || member_id || group_id)`, big-endian for
+/// the integers. `retry_round` is mixed in so successive election retries
+/// within one MLS epoch propose different list compositions.
+fn compute_steward_hash(
+    epoch: u64,
+    retry_round: u32,
+    member_id: &[u8],
+    group_id: &[u8],
+) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(epoch.to_be_bytes());
+    hasher.update(retry_round.to_be_bytes());
     hasher.update(member_id);
     hasher.update(group_id);
     hasher.finalize().to_vec()
@@ -300,34 +308,28 @@ mod tests {
     fn test_config_validation() {
         let config = ProtocolConfig::new(2, 5).unwrap();
 
-        // Normal range
+        // Within [sn_min, sn_max]
         assert!(config.is_valid_size(3, 10));
         assert!(config.is_valid_size(2, 10));
         assert!(config.is_valid_size(5, 10));
-
-        // Out of range
         assert!(!config.is_valid_size(1, 10));
         assert!(!config.is_valid_size(6, 10));
 
-        // Below sn_min members: list size must equal total
+        // Fewer members than sn_min → only `size == total` is valid.
         assert!(config.is_valid_size(1, 1));
         assert!(!config.is_valid_size(2, 1));
     }
 
     #[test]
-    fn test_config_zero_sn_min() {
-        assert!(ProtocolConfig::new(0, 5).is_err());
-    }
-
-    #[test]
-    fn test_config_min_exceeds_max() {
-        assert!(ProtocolConfig::new(5, 3).is_err());
+    fn test_new_rejects_bad_bounds() {
+        assert!(ProtocolConfig::new(0, 5).is_err(), "sn_min == 0");
+        assert!(ProtocolConfig::new(5, 3).is_err(), "sn_min > sn_max");
     }
 
     #[test]
     fn test_generate_empty_members() {
         let config = ProtocolConfig::new(1, 3).unwrap();
-        assert!(StewardList::generate(0, b"group1", &[], 1, config).is_err());
+        assert!(StewardList::generate(0, b"group1", &[], 1, config, 0).is_err());
     }
 
     #[test]
@@ -335,10 +337,14 @@ mod tests {
         let config = ProtocolConfig::new(2, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
-        // sn below sn_min
-        assert!(StewardList::generate(0, b"group1", &mems, 1, config.clone()).is_err());
-        // sn above sn_max
-        assert!(StewardList::generate(0, b"group1", &mems, 6, config).is_err());
+        assert!(
+            StewardList::generate(0, b"group1", &mems, 1, config.clone(), 0).is_err(),
+            "below sn_min"
+        );
+        assert!(
+            StewardList::generate(0, b"group1", &mems, 6, config, 0).is_err(),
+            "above sn_max"
+        );
     }
 
     #[test]
@@ -347,22 +353,23 @@ mod tests {
         let mems = members(&[1, 2, 3, 4, 5]);
         let group_id = b"test-group";
 
-        let list1 = StewardList::generate(0, group_id, &mems, 3, config.clone()).unwrap();
-        let list2 = StewardList::generate(0, group_id, &mems, 3, config).unwrap();
+        let list1 = StewardList::generate(0, group_id, &mems, 3, config.clone(), 0).unwrap();
+        let list2 = StewardList::generate(0, group_id, &mems, 3, config, 0).unwrap();
 
         assert_eq!(list1.members(), list2.members());
         assert_eq!(list1.len(), 3);
     }
 
+    /// With the full candidate set and only the epoch differing, the order
+    /// must shuffle for at least one epoch in a small window.
     #[test]
     fn test_different_epoch_shuffles() {
-        // Use all members so the set is the same; order must differ for at least one epoch.
         let config = ProtocolConfig::new(5, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
-        let base = StewardList::generate(0, b"group", &mems, 5, config.clone()).unwrap();
+        let base = StewardList::generate(0, b"group", &mems, 5, config.clone(), 0).unwrap();
         let any_diff = (1..10).any(|e| {
-            let other = StewardList::generate(e, b"group", &mems, 5, config.clone()).unwrap();
+            let other = StewardList::generate(e, b"group", &mems, 5, config.clone(), 0).unwrap();
             other.members() != base.members()
         });
         assert!(any_diff);
@@ -373,9 +380,8 @@ mod tests {
         let config = ProtocolConfig::new(5, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
-        let base = StewardList::generate(0, b"group1", &mems, 5, config.clone()).unwrap();
-        let other = StewardList::generate(0, b"group2", &mems, 5, config).unwrap();
-        // With 5! = 120 possible orderings, collision is extremely unlikely
+        let base = StewardList::generate(0, b"group1", &mems, 5, config.clone(), 0).unwrap();
+        let other = StewardList::generate(0, b"group2", &mems, 5, config, 0).unwrap();
         assert_ne!(base.members(), other.members());
     }
 
@@ -385,8 +391,8 @@ mod tests {
         let mems_a = members(&[1, 2, 3, 4, 5]);
         let mems_b = members(&[5, 3, 1, 4, 2]);
 
-        let list_a = StewardList::generate(0, b"group", &mems_a, 3, config.clone()).unwrap();
-        let list_b = StewardList::generate(0, b"group", &mems_b, 3, config).unwrap();
+        let list_a = StewardList::generate(0, b"group", &mems_a, 3, config.clone(), 0).unwrap();
+        let list_b = StewardList::generate(0, b"group", &mems_b, 3, config, 0).unwrap();
 
         assert_eq!(list_a.members(), list_b.members());
     }
@@ -396,39 +402,27 @@ mod tests {
         let config = ProtocolConfig::new(3, 3).unwrap();
         let mems = members(&[1, 2, 3]);
 
-        let list = StewardList::generate(0, b"group", &mems, 3, config).unwrap();
+        let list = StewardList::generate(0, b"group", &mems, 3, config, 0).unwrap();
         let s0 = list.epoch_steward(0).unwrap().to_vec();
         let s1 = list.epoch_steward(1).unwrap().to_vec();
         let s2 = list.epoch_steward(2).unwrap().to_vec();
 
-        // All three stewards should be different (different members)
         assert_ne!(s0, s1);
         assert_ne!(s1, s2);
         assert_ne!(s0, s2);
     }
 
+    /// Backup at epoch `e` is the epoch steward at `e + 1` (mod len).
     #[test]
     fn test_backup_steward() {
         let config = ProtocolConfig::new(3, 3).unwrap();
         let mems = members(&[1, 2, 3]);
 
-        let list = StewardList::generate(0, b"group", &mems, 3, config).unwrap();
+        let list = StewardList::generate(0, b"group", &mems, 3, config, 0).unwrap();
 
-        // Backup for epoch 0 should be epoch steward for epoch 1
-        assert_eq!(
-            list.backup_steward(0).unwrap(),
-            list.epoch_steward(1).unwrap()
-        );
-        // Backup for epoch 1 should be epoch steward for epoch 2
-        assert_eq!(
-            list.backup_steward(1).unwrap(),
-            list.epoch_steward(2).unwrap()
-        );
-        // Backup for epoch 2 wraps around to epoch steward for epoch 0
-        assert_eq!(
-            list.backup_steward(2).unwrap(),
-            list.epoch_steward(0).unwrap()
-        );
+        assert_eq!(list.backup_steward(0), list.epoch_steward(1));
+        assert_eq!(list.backup_steward(1), list.epoch_steward(2));
+        assert_eq!(list.backup_steward(2), list.epoch_steward(0));
     }
 
     #[test]
@@ -436,30 +430,18 @@ mod tests {
         let config = ProtocolConfig::new(2, 3).unwrap();
         let mems = members(&[1, 2, 3]);
 
-        let list = StewardList::generate(5, b"group", &mems, 3, config).unwrap();
+        let list = StewardList::generate(5, b"group", &mems, 3, config, 0).unwrap();
         assert_eq!(list.start_epoch(), 5);
 
-        // Epochs 5, 6, 7 are covered
+        // Covered epochs: [5, 8)
         assert!(!list.is_exhausted(5));
-        assert!(!list.is_exhausted(6));
         assert!(!list.is_exhausted(7));
-
-        // Epoch 8 is exhausted
         assert!(list.is_exhausted(8));
+        assert!(list.is_exhausted(4), "before start_epoch is exhausted");
 
-        // Before start is also exhausted
-        assert!(list.is_exhausted(4));
-    }
-
-    #[test]
-    fn test_exhausted_returns_none() {
-        let config = ProtocolConfig::new(2, 2).unwrap();
-        let mems = members(&[1, 2]);
-
-        let list = StewardList::generate(0, b"group", &mems, 2, config).unwrap();
-
-        assert!(list.epoch_steward(2).is_none());
-        assert!(list.backup_steward(2).is_none());
+        // Exhausted epochs return None from both rotation slots.
+        assert!(list.epoch_steward(8).is_none());
+        assert!(list.backup_steward(8).is_none());
     }
 
     #[test]
@@ -467,8 +449,8 @@ mod tests {
         let config = ProtocolConfig::new(2, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
-        let list = StewardList::generate(0, b"group", &mems, 3, config.clone()).unwrap();
-        let valid = StewardList::validate(list.members(), 0, b"group", &mems, &config);
+        let list = StewardList::generate(0, b"group", &mems, 3, config.clone(), 0).unwrap();
+        let valid = StewardList::validate(list.members(), 0, b"group", &mems, &config, 0);
         assert!(valid.is_ok());
         assert!(valid.unwrap())
     }
@@ -478,11 +460,11 @@ mod tests {
         let config = ProtocolConfig::new(2, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
-        let mut list = StewardList::generate(0, b"group", &mems, 3, config.clone()).unwrap();
+        let mut list = StewardList::generate(0, b"group", &mems, 3, config.clone(), 0).unwrap();
         // Swap first two members
         list.members.swap(0, 1);
 
-        let valid = StewardList::validate(list.members(), 0, b"group", &mems, &config);
+        let valid = StewardList::validate(list.members(), 0, b"group", &mems, &config, 0);
         assert!(valid.is_ok());
         assert!(!valid.unwrap())
     }
@@ -492,53 +474,32 @@ mod tests {
         let config = ProtocolConfig::new(5, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
-        let list = StewardList::generate(0, b"group", &mems, 5, config.clone()).unwrap();
+        let list = StewardList::generate(0, b"group", &mems, 5, config.clone(), 0).unwrap();
         // Find an epoch that produces a different ordering
         let diff_epoch = (1..100u64)
             .find(|&e| {
-                let o = StewardList::generate(e, b"group", &mems, 5, config.clone()).unwrap();
+                let o = StewardList::generate(e, b"group", &mems, 5, config.clone(), 0).unwrap();
                 o.members() != list.members()
             })
             .expect("should differ within 100 epochs");
 
-        let valid = StewardList::validate(list.members(), diff_epoch, b"group", &mems, &config);
+        let valid = StewardList::validate(list.members(), diff_epoch, b"group", &mems, &config, 0);
         assert!(valid.is_ok());
         assert!(!valid.unwrap());
     }
 
+    /// `sn == total_members` so any change in the candidate set forces a
+    /// different output ordering.
     #[test]
     fn test_validate_wrong_members() {
-        // Use full selection so any change in the candidate set changes the output.
         let config = ProtocolConfig::new(5, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
-        let other_mems = members(&[1, 2, 3, 4, 6]); // different member 6
+        let other_mems = members(&[1, 2, 3, 4, 6]);
 
-        let list = StewardList::generate(0, b"group", &mems, 5, config.clone()).unwrap();
-        let valid = StewardList::validate(list.members(), 0, b"group", &other_mems, &config);
+        let list = StewardList::generate(0, b"group", &mems, 5, config.clone(), 0).unwrap();
+        let valid = StewardList::validate(list.members(), 0, b"group", &other_mems, &config, 0);
         assert!(valid.is_ok());
         assert!(!valid.unwrap())
-    }
-
-    #[test]
-    fn test_contains() {
-        let config = ProtocolConfig::new(2, 3).unwrap();
-        let mems = members(&[1, 2, 3, 4, 5]);
-
-        let list = StewardList::generate(0, b"group", &mems, 3, config).unwrap();
-
-        // Some of the 5 members should be in the list of 3
-        let in_list: Vec<bool> = (1..=5).map(|id| list.contains(&member(id))).collect();
-        assert_eq!(in_list.iter().filter(|&&b| b).count(), 3);
-    }
-
-    #[test]
-    fn test_below_sn_min_uses_total_members() {
-        // sn_min=3 but only 2 members — list size must be 2
-        let config = ProtocolConfig::new(3, 5).unwrap();
-        let mems = members(&[1, 2]);
-
-        let list = StewardList::generate(0, b"group", &mems, 2, config).unwrap();
-        assert_eq!(list.len(), 2);
     }
 
     #[test]
@@ -546,38 +507,35 @@ mod tests {
         let config = ProtocolConfig::new(1, 3).unwrap();
         let mems = members(&[1]);
 
-        let list = StewardList::generate(0, b"group", &mems, 1, config).unwrap();
+        let list = StewardList::generate(0, b"group", &mems, 1, config, 0).unwrap();
         assert_eq!(list.len(), 1);
-
-        // Same steward for every epoch in range
-        assert_eq!(
-            list.epoch_steward(0).unwrap(),
-            list.backup_steward(0).unwrap()
-        );
+        // With one steward, epoch and backup slots collapse to the same person.
+        assert_eq!(list.epoch_steward(0), list.backup_steward(0));
         assert!(list.is_exhausted(1));
     }
 
+    /// With everyone eligible, live == nominal. With the nominal filtered out,
+    /// live rotates to the next eligible steward.
     #[test]
     fn test_live_epoch_steward_skips_removed() {
         let config = ProtocolConfig::new(3, 3).unwrap();
         let mems = members(&[1, 2, 3]);
 
-        let list = StewardList::generate(0, b"group", &mems, 3, config).unwrap();
-        let nominal_e0 = list.epoch_steward(0).unwrap().to_vec();
+        let list = StewardList::generate(0, b"group", &mems, 3, config, 0).unwrap();
+        let nominal = list.epoch_steward(0).unwrap().to_vec();
 
-        // With all members present, live == nominal.
-        let all_present = mems.clone();
+        let all_eligible = |c: &[u8]| mems.iter().any(|m| m == c);
         assert_eq!(
-            list.live_epoch_steward(0, &all_present),
-            Some(nominal_e0.as_slice())
+            list.live_epoch_steward(0, all_eligible),
+            Some(nominal.as_slice())
         );
 
-        // Remove the nominal epoch steward — live must skip to the next live steward.
-        let after_removal: Vec<Vec<u8>> =
-            mems.iter().filter(|m| **m != nominal_e0).cloned().collect();
-        let live = list.live_epoch_steward(0, &after_removal).unwrap();
-        assert_ne!(live, nominal_e0.as_slice());
-        assert!(after_removal.iter().any(|m| m == live));
+        let after: Vec<Vec<u8>> = mems.iter().filter(|m| **m != nominal).cloned().collect();
+        let live = list
+            .live_epoch_steward(0, |c| after.iter().any(|m| m == c))
+            .unwrap();
+        assert_ne!(live, nominal.as_slice());
+        assert!(after.iter().any(|m| m == live));
     }
 
     #[test]
@@ -585,9 +543,8 @@ mod tests {
         let config = ProtocolConfig::new(2, 2).unwrap();
         let mems = members(&[1, 2]);
 
-        let list = StewardList::generate(0, b"group", &mems, 2, config).unwrap();
-        // No member is currently in the group.
-        assert!(list.live_epoch_steward(0, &[]).is_none());
+        let list = StewardList::generate(0, b"group", &mems, 2, config, 0).unwrap();
+        assert!(list.live_epoch_steward(0, |_| false).is_none());
     }
 
     #[test]
@@ -595,11 +552,29 @@ mod tests {
         let config = ProtocolConfig::new(3, 3).unwrap();
         let mems = members(&[1, 2, 3]);
 
-        let list = StewardList::generate(0, b"group", &mems, 3, config).unwrap();
+        let list = StewardList::generate(0, b"group", &mems, 3, config, 0).unwrap();
         let all_present = mems.clone();
-        let live_epoch = list.live_epoch_steward(0, &all_present).unwrap().to_vec();
-        let live_backup = list.live_backup_steward(0, &all_present).unwrap().to_vec();
+        let in_members = |c: &[u8]| all_present.iter().any(|m| m == c);
+        let live_epoch = list.live_epoch_steward(0, in_members).unwrap().to_vec();
+        let live_backup = list.live_backup_steward(0, in_members).unwrap().to_vec();
         assert_ne!(live_epoch, live_backup);
+    }
+
+    /// No eligible steward → both slots return None. One eligible → both
+    /// resolve to that single steward.
+    #[test]
+    fn test_live_epoch_steward_all_stewards_pending_leave() {
+        let config = ProtocolConfig::new(2, 2).unwrap();
+        let mems = members(&[1, 2]);
+        let list = StewardList::generate(0, b"group", &mems, 2, config, 0).unwrap();
+
+        assert!(list.live_epoch_steward(0, |_| false).is_none());
+        assert!(list.live_backup_steward(0, |_| false).is_none());
+
+        let live = list
+            .live_epoch_steward(0, |c| c == mems[0].as_slice())
+            .unwrap();
+        assert_eq!(live, mems[0].as_slice());
     }
 
     #[test]
@@ -607,17 +582,113 @@ mod tests {
         let config = ProtocolConfig::new(5, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
-        let list = StewardList::generate(0, b"group", &mems, 5, config).unwrap();
-
-        // Verify that the list is sorted by ascending hash
+        let list = StewardList::generate(0, b"group", &mems, 5, config, 0).unwrap();
         let hashes: Vec<Vec<u8>> = list
             .members()
             .iter()
-            .map(|m| compute_steward_hash(0, m, b"group"))
+            .map(|m| compute_steward_hash(0, 0, m, b"group"))
             .collect();
 
         for window in hashes.windows(2) {
-            assert!(window[0] < window[1], "hashes must be in ascending order");
+            assert!(window[0] < window[1], "hashes must be ascending");
         }
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_list() {
+        let config = ProtocolConfig::new(3, 5).unwrap();
+        let mems = members(&[1, 2, 3, 4, 5]);
+        let empty: Vec<Vec<u8>> = vec![];
+
+        assert!(StewardList::validate(&empty, 0, b"group", &mems, &config, 0).is_err());
+    }
+
+    /// `sn_min=5` but only 3 members: `generate` clamps to total available.
+    #[test]
+    fn test_below_sn_min_uses_all_members() {
+        let config = ProtocolConfig::new(5, 10).unwrap();
+        let mems = members(&[1, 2, 3]);
+
+        let list = StewardList::generate(0, b"group", &mems, 3, config, 0).unwrap();
+        assert_eq!(list.len(), 3);
+    }
+
+    #[test]
+    fn test_large_group_subset_selection() {
+        let config = ProtocolConfig::new(3, 5).unwrap();
+        let mems: Vec<Vec<u8>> = (1..=20).map(member).collect();
+
+        let list = StewardList::generate(0, b"group", &mems, 5, config, 0).unwrap();
+        assert_eq!(list.len(), 5);
+        for steward in list.members() {
+            assert!(mems.contains(steward));
+        }
+    }
+
+    /// The target of a violation must not be selected as its own proposer,
+    /// even if rotation would otherwise land on them.
+    #[test]
+    fn test_responsible_ecp_proposer_skips_target() {
+        let config = ProtocolConfig::new(3, 3).unwrap();
+        let mems = members(&[1, 2, 3]);
+        let list = StewardList::generate(0, b"group", &mems, 3, config, 0).unwrap();
+
+        let epoch0_steward = list.epoch_steward(0).unwrap().to_vec();
+        let always_eligible = |_: &[u8]| true;
+
+        let proposer = list
+            .responsible_ecp_proposer(0, &epoch0_steward, always_eligible)
+            .unwrap()
+            .to_vec();
+
+        assert_ne!(proposer, epoch0_steward, "must not propose against self");
+        assert!(mems.iter().any(|m| m == &proposer));
+    }
+
+    #[test]
+    fn test_responsible_ecp_proposer_deterministic() {
+        let config = ProtocolConfig::new(3, 5).unwrap();
+        let mems = members(&[1, 2, 3, 4, 5]);
+        let list = StewardList::generate(0, b"group", &mems, 3, config, 0).unwrap();
+        let target = member(2);
+        let always = |_: &[u8]| true;
+
+        let a = list.responsible_ecp_proposer(1, &target, always);
+        let b = list.responsible_ecp_proposer(1, &target, always);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_responsible_ecp_proposer_none_when_only_target_eligible() {
+        let config = ProtocolConfig::new(2, 2).unwrap();
+        let mems = members(&[1, 2]);
+        let list = StewardList::generate(0, b"group", &mems, 2, config, 0).unwrap();
+
+        let target = list.members()[0].clone();
+        let target_cloned = target.clone();
+        let only_target = move |c: &[u8]| c == target_cloned.as_slice();
+
+        assert!(
+            list.responsible_ecp_proposer(0, &target, only_target)
+                .is_none()
+        );
+    }
+
+    /// With 4 members and sn=2, different retry_round values MUST produce at
+    /// least some different orderings. Otherwise the retry mechanism is broken.
+    #[test]
+    fn test_retry_rounds_produce_different_lists() {
+        let config = ProtocolConfig::new(1, 2).unwrap();
+        let mems: Vec<Vec<u8>> = (1..=4u8).map(member).collect();
+
+        let base = StewardList::generate(1, b"group", &mems, 2, config.clone(), 0).unwrap();
+        let any_diff = (1..10u32).any(|r| {
+            let other = StewardList::generate(1, b"group", &mems, 2, config.clone(), r).unwrap();
+            other.members() != base.members()
+        });
+        assert!(
+            any_diff,
+            "retries should produce at least one different list"
+        );
     }
 }

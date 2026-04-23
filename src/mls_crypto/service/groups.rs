@@ -1,4 +1,12 @@
-use super::*;
+use openmls::{
+    group::{GroupId, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, StagedWelcome},
+    prelude::{DeserializeBytes, MlsMessageBodyIn, MlsMessageIn},
+};
+use openmls_rust_crypto::MemoryStorage;
+
+use crate::mls_crypto::{
+    DeMlsStorage, IdentityError, MlsError, MlsService, MlsServiceError, Result, StorageError,
+};
 
 impl<S> MlsService<S>
 where
@@ -120,6 +128,16 @@ where
             .members()
             .map(|m| m.credential.serialized_content().to_vec())
             .collect())
+    }
+
+    /// `true` if `identity` is a current member of the group. Returns `false`
+    /// (not an error) when the group doesn't exist locally — callers that
+    /// only need a boolean answer shouldn't have to discriminate between
+    /// the two cases.
+    pub fn is_member(&self, group_id: &str, identity: &[u8]) -> bool {
+        self.members(group_id)
+            .map(|members| members.iter().any(|m| m.as_slice() == identity))
+            .unwrap_or(false)
     }
 
     /// Get the current MLS epoch for a group.

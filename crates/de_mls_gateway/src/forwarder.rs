@@ -4,71 +4,41 @@ use std::sync::{Arc, atomic::Ordering};
 
 use de_mls::{
     app::format_group_request, ds::WakuDeliveryService, mls_crypto::format_wallet_address,
+    protos::de_mls::messages::v1::GroupUpdateRequest,
 };
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
 
 use crate::{CoreCtx, Gateway, UserRef};
 
-/// Push refreshed approved-queue and epoch-history events to the UI.
-pub(crate) async fn push_consensus_state(
-    user: &UserRef,
-    evt_tx: &UnboundedSender<AppEvent>,
-    group_name: &str,
-) {
-    // Approved queue
-    if let Ok(proposals) = user
-        .read()
-        .await
-        .get_approved_proposal_for_current_epoch(group_name)
-        .await
-    {
-        let display: Vec<(String, String)> = proposals
-            .iter()
-            .filter(|p| p.payload.is_some())
-            .map(|p| format_group_request(p))
-            .collect();
-        let _ = evt_tx.unbounded_send(AppEvent::CurrentEpochProposals {
-            group_id: group_name.to_string(),
-            proposals: display,
-        });
-    }
-
-    // Epoch history
-    if let Ok(history) = user.read().await.get_epoch_history(group_name).await {
-        let epochs: Vec<Vec<(String, String)>> = history
-            .into_iter()
-            .map(|batch| {
-                batch
-                    .iter()
-                    .filter(|p| p.payload.is_some())
-                    .map(|p| format_group_request(p))
-                    .collect()
-            })
-            .collect();
-        let _ = evt_tx.unbounded_send(AppEvent::EpochHistory {
-            group_id: group_name.to_string(),
-            epochs,
-        });
-    }
+/// Render a batch of approved proposals as `(action, identity)` pairs,
+/// dropping any entry with an empty payload.
+pub(crate) fn display_batch(batch: &[GroupUpdateRequest]) -> Vec<(String, String)> {
+    batch
+        .iter()
+        .filter(|p| p.payload.is_some())
+        .map(format_group_request)
+        .collect()
 }
 
-/// Push refreshed member scores to the UI.
-///
-/// Called after consensus events that may have changed peer scores
-/// (emergency criteria proposals produce score ops on resolution).
-pub(crate) async fn push_member_scores(
+/// Load the member roster for `group_name`, joining addresses with scores,
+/// roles, and pending-leave markers into `MemberInfo` records.
+pub(crate) async fn load_member_info(
     user: &UserRef,
-    evt_tx: &UnboundedSender<AppEvent>,
     group_name: &str,
-) {
+) -> anyhow::Result<Vec<MemberInfo>> {
     let user = user.read().await;
-    let addresses = match user.get_group_members(group_name).await {
-        Ok(a) => a,
-        Err(_) => return,
-    };
+    let addresses = user.get_group_members(group_name).await?;
     let scores = user.get_member_scores(group_name);
     let roles = user.get_member_roles(group_name).await.unwrap_or_default();
-    let members: Vec<MemberInfo> = addresses
+    let pending_leavers: Vec<String> = user
+        .get_pending_leave_identities(group_name)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|id| format_wallet_address(id.as_slice()).to_string())
+        .collect();
+
+    Ok(addresses
         .into_iter()
         .map(|address| {
             let score = scores
@@ -81,20 +51,68 @@ pub(crate) async fn push_member_scores(
                 .find(|(raw_id, _)| format_wallet_address(raw_id.as_slice()) == address)
                 .map(|(_, r)| r.to_string())
                 .unwrap_or_else(|| "member".to_string());
+            let pending_leave = pending_leavers.iter().any(|a| a == &address);
             MemberInfo {
                 address,
                 score,
                 role,
+                pending_leave,
             }
         })
-        .collect();
+        .collect())
+}
+
+/// Push refreshed approved-queue and epoch-history events to the UI.
+pub(crate) async fn push_consensus_state(
+    user: &UserRef,
+    evt_tx: &UnboundedSender<AppEvent>,
+    group_name: &str,
+) {
+    if let Ok(proposals) = user
+        .read()
+        .await
+        .get_approved_proposal_for_current_epoch(group_name)
+        .await
+    {
+        let _ = evt_tx.unbounded_send(AppEvent::CurrentEpochProposals {
+            group_id: group_name.to_string(),
+            proposals: display_batch(&proposals),
+        });
+    }
+
+    if let Ok(history) = user.read().await.get_epoch_history(group_name).await {
+        let epochs: Vec<Vec<(String, String)>> =
+            history.iter().map(|batch| display_batch(batch)).collect();
+        let _ = evt_tx.unbounded_send(AppEvent::EpochHistory {
+            group_id: group_name.to_string(),
+            epochs,
+        });
+    }
+}
+
+/// Push refreshed member scores and steward status to the UI.
+///
+/// Called after consensus events that may have changed peer scores
+/// (emergency criteria proposals produce score ops on resolution).
+pub(crate) async fn push_member_scores(
+    user: &UserRef,
+    evt_tx: &UnboundedSender<AppEvent>,
+    group_name: &str,
+) {
+    let Ok(members) = load_member_info(user, group_name).await else {
+        return;
+    };
     let _ = evt_tx.unbounded_send(AppEvent::GroupMembers {
         group_id: group_name.to_string(),
         members,
     });
 
-    // Also push steward status — it may have changed after election or epoch advance.
-    let is_steward = user.is_steward_for_group(group_name).await.unwrap_or(false);
+    let is_steward = user
+        .read()
+        .await
+        .is_steward_for_group(group_name)
+        .await
+        .unwrap_or(false);
     let _ = evt_tx.unbounded_send(AppEvent::StewardStatus {
         group_id: group_name.to_string(),
         is_steward,
@@ -176,9 +194,12 @@ impl Gateway<WakuDeliveryService> {
                     tracing::error!("process_inbound_packet failed: {e}");
                 }
 
-                // Push refreshed approved queue + epoch history
-                // (covers batch processing clearing the queue)
+                // Push refreshed approved queue + epoch history + members.
+                // Members refresh keeps the pending-leave badge visible
+                // without waiting for an explicit poll when a peer receives
+                // a LeaveRequest (or a commit that changes membership).
                 push_consensus_state(&user, &evt_tx, &group_id).await;
+                push_member_scores(&user, &evt_tx, &group_id).await;
             }
 
             tracing::info!("gateway: pubsub forwarder ended");

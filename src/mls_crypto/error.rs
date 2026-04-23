@@ -117,6 +117,9 @@ pub enum MlsServiceError {
 
     #[error("No pending staged commit for group: {0}")]
     NoPendingStagedCommit(String),
+
+    #[error("Remove proposal references leaf index {0} with no active credential")]
+    UnknownLeafIndex(u32),
 }
 
 /// Unified MLS error type.

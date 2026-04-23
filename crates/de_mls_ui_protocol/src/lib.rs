@@ -4,7 +4,7 @@ pub mod v1 {
     use serde::{Deserialize, Serialize};
 
     use de_mls::{
-        app::{MessageType, get_identity_from_group_update_request},
+        app::{MessageType, format_group_request_target},
         protos::de_mls::messages::v1::{
             BanRequest, ConversationMessage, ProposalAdded, VotePayload,
         },
@@ -19,6 +19,11 @@ pub mod v1 {
         pub score: i64,
         /// Steward role: "epoch_steward", "backup_steward", "steward", or "member".
         pub role: String,
+        /// `true` if this member has broadcast a self-leave request that
+        /// hasn't been committed yet. UI should show a "leaving next epoch"
+        /// badge and suppress actions targeting them.
+        #[serde(default)]
+        pub pending_leave: bool,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,7 +136,7 @@ pub mod v1 {
     impl From<ProposalAdded> for AppEvent {
         fn from(proposal_added: ProposalAdded) -> Self {
             let request = proposal_added.request.unwrap();
-            let address = get_identity_from_group_update_request(request.clone());
+            let address = format_group_request_target(&request);
             AppEvent::ProposalAdded {
                 group_id: proposal_added.group_id.clone(),
                 action: request.message_type().to_string(),

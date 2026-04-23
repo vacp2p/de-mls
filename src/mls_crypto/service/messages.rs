@@ -1,4 +1,13 @@
-use super::*;
+use openmls::prelude::{
+    DeserializeBytes, MlsMessageBodyIn, MlsMessageIn, ProcessedMessageContent, ProtocolMessage,
+};
+use openmls_rust_crypto::MemoryStorage;
+use openmls_traits::OpenMlsProvider;
+
+use crate::mls_crypto::{
+    DeMlsStorage, DecryptResult, IdentityError, MlsError, MlsMessageKind, MlsService,
+    MlsServiceError, Result, StorageError,
+};
 
 impl<S> MlsService<S>
 where
@@ -125,7 +134,7 @@ where
 
         match processed.into_content() {
             ProcessedMessageContent::ProposalMessage(proposal) => {
-                let action = Self::extract_proposal_action(group, proposal.proposal());
+                let action = Self::extract_proposal_action(group, proposal.proposal())?;
 
                 // Store in MLS pending queue — required for commit processing
                 group.store_pending_proposal(provider.storage(), proposal.as_ref().clone())?;
@@ -190,7 +199,7 @@ where
             )),
             ProcessedMessageContent::ProposalMessage(proposal) => {
                 // Extract the action before storing (consuming) the proposal.
-                let action = Self::extract_proposal_action(group, proposal.proposal());
+                let action = Self::extract_proposal_action(group, proposal.proposal())?;
 
                 group.store_pending_proposal(provider.storage(), proposal.as_ref().clone())?;
                 Ok(DecryptResult::ProposalStored(sender_identity, action))

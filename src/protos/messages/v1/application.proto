@@ -17,7 +17,14 @@ message AppMessage {
     ProposalAdded proposal_added = 7;
     CommitCandidate commit_candidate = 8;
     GroupSync group_sync = 9;
+    LeaveRequest leave_request = 10;
   }
+}
+
+// Self-leave intent. Auto-approved — no consensus vote.
+// Signer must equal `identity`.
+message LeaveRequest {
+  bytes identity = 1;
 }
 
 message BanRequest {
@@ -63,6 +70,10 @@ message GroupUpdateRequest {
 message StewardElectionProposal {
   repeated bytes proposed_stewards = 1;
   uint64 election_epoch = 2;
+  // Retry round within the same MLS epoch. Rotates the deterministic list
+  // generation so a rejected election can be re-attempted with a different
+  // composition without advancing the MLS epoch.
+  uint32 retry_round = 3;
 }
 
 enum ViolationType {
@@ -102,6 +113,9 @@ message GroupSync {
   bool allow_subset_candidates = 5;
   repeated PeerScore peer_scores = 6;
   TimingConfig timing = 7;
+  // Retry round the accepted steward list was generated with. Joiners
+  // need this to reproduce the deterministic sort when validating.
+  uint32 retry_round = 8;
 }
 
 message PeerScore {

@@ -1,7 +1,19 @@
 //! Inbound message routing and processing.
 
-use super::freeze::process_commit_candidate;
-use super::*;
+use openmls_rust_crypto::MemoryStorage;
+use prost::Message;
+use tracing::{info, warn};
+
+use crate::core::api::process_commit_candidate;
+use crate::core::{error::CoreError, group::Group, process_result::ProcessResult};
+use crate::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
+use crate::mls_crypto::{
+    DeMlsStorage, DecryptResult, MlsService, key_package_bytes_from_json, parse_wallet_to_bytes,
+};
+use crate::protos::de_mls::messages::v1::{
+    AppMessage, GroupUpdateRequest, InviteMember, WelcomeMessage, app_message,
+    group_update_request, welcome_message,
+};
 
 /// Process an inbound packet and determine what action is needed.
 pub fn process_inbound<S>(
@@ -31,12 +43,17 @@ where
     let welcome_msg = WelcomeMessage::decode(payload)?;
     match welcome_msg.payload {
         Some(welcome_message::Payload::UserKeyPackage(user_kp)) => {
-            // Every member records incoming KPs into its pending-update buffer.
-            // The app layer decides whether to promote this into a voting
-            // proposal right now (only the epoch steward does) or to hold it
-            // for the next epoch steward if the current one fails to commit.
             let (key_package_bytes, identity) =
                 key_package_bytes_from_json(user_kp.key_package_bytes)?;
+
+            if mls.is_member(group.group_name(), &identity) {
+                info!(
+                    "Skipping KP for group {}: identity {:?} is already a member",
+                    group.group_name(),
+                    identity
+                );
+                return Ok(ProcessResult::Noop);
+            }
 
             info!(
                 "Received key package for group {} from identity {:?}",
@@ -97,8 +114,39 @@ where
     let res = mls.decrypt_application_only(group.group_name(), payload)?;
 
     match res {
-        DecryptResult::Application(app_bytes, _sender) => {
-            AppMessage::decode(app_bytes.as_ref())?.try_into()
+        DecryptResult::Application(app_bytes, sender) => {
+            let app_msg = AppMessage::decode(app_bytes.as_ref())?;
+            // LeaveRequest is auto-approved — the MLS-authenticated sender
+            // MUST equal the identity being removed. Reject mismatches here
+            // so the app layer can trust the pair downstream.
+            if let Some(app_message::Payload::LeaveRequest(leave)) = &app_msg.payload {
+                if leave.identity != sender {
+                    warn!(
+                        "[process_app_subtopic] LeaveRequest signer mismatch for \
+                         group {}: claimed={:?} sender={:?}",
+                        group.group_name(),
+                        leave.identity,
+                        sender,
+                    );
+                    return Ok(ProcessResult::Noop);
+                }
+                return Ok(ProcessResult::LeaveRequestReceived(leave.clone()));
+            }
+            // Drop BanRequests whose target isn't in the group — saves a
+            // useless consensus round. Mirrors the already-a-member check
+            // on KPs in `process_welcome_subtopic`.
+            if let Some(app_message::Payload::BanRequest(ban)) = &app_msg.payload {
+                let target = parse_wallet_to_bytes(&ban.user_to_ban)?;
+                if !mls.is_member(group.group_name(), &target) {
+                    info!(
+                        "Skipping BanRequest for group {}: target {:?} is not a member",
+                        group.group_name(),
+                        target
+                    );
+                    return Ok(ProcessResult::Noop);
+                }
+            }
+            app_msg.try_into()
         }
         DecryptResult::Removed(_) => Ok(ProcessResult::LeaveGroup),
         DecryptResult::Ignored => {

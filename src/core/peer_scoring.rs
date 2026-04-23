@@ -1,14 +1,6 @@
-//! Protocol vocabulary for peer scoring.
-//!
-//! This module defines the types and traits that core functions use to communicate
-//! scoring-relevant events. The actual scoring service and default implementations
-//! live in the `app::peer_scoring` module (re-exported via [`crate::app`]).
-//!
-//! # Data flow
-//!
-//! ```text
-//! core functions ──► Vec<ScoreOp> ──► app layer ──► PeerScoringService
-//! ```
+//! Types and traits core uses to describe scoring-relevant events. The
+//! scoring service itself lives in `crate::app::peer_scoring` and consumes
+//! the `Vec<ScoreOp>` that core functions return.
 
 // ── Score events ────────────────────────────────────────────────────
 
@@ -17,6 +9,11 @@
 /// Each variant maps to a single score delta. Violation types (BrokenCommit, etc.)
 /// go through the ECP consensus path — when accepted, the target receives a
 /// violation-type-specific penalty and the creator receives a flat reward.
+///
+/// Some variants below are **reserved RFC vocabulary** — declared and wired
+/// into the scoring-delta table but not yet produced by core code (see
+/// `docs/ROADMAP.md`). They're listed here so adding the producer later is
+/// a one-line change instead of a new enum variant + migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScoreEvent {
     // ── ECP target penalties (mapped from ViolationType in evidence) ──
@@ -33,58 +30,46 @@ pub enum ScoreEvent {
     /// ECP rejected — flat penalty to the proposal creator (false accusation).
     EmergencyNoCreator,
 
-    // ── Commit selection (M2) ──
+    // ── Commit selection ──
+    // TODO(roadmap): wire producers for `SuccessfulCommit`, `HonestCommitAttempt`,
+    // and `MisbehavingCommit` when the commit-selection scoring work lands.
     /// Steward successfully committed a valid batch.
     SuccessfulCommit,
-    /// Competing commit with same proposals but different MLS entropy.
-    /// Honest participation — reward. (RFC: "MUST NOT be classified as misbehavior")
+    /// Competing commit with same proposals but different MLS entropy — honest
+    /// participation (RFC: "MUST NOT be classified as misbehavior").
     HonestCommitAttempt,
-    /// Competing commit with different proposal set than the selected commit.
-    /// Misbehavior — penalty. (RFC: "MUST be classified as misbehavior")
+    /// Competing commit with a different proposal set than the selected one
+    /// (RFC: "MUST be classified as misbehavior").
     MisbehavingCommit,
 
-    // ── Partial freeze (M2) ──
-    /// Propagated lower-priority governance traffic during active emergency freeze.
-    /// RFC MAY penalize.
+    // ── Partial freeze ──
+    // TODO(roadmap): produced when peer-side partial-freeze enforcement lands.
+    /// Propagated lower-priority governance traffic during an active freeze.
     FreezeViolation,
 
-    // ── Commit validation (M5) ──
-    /// Commit referenced proposals that were not yet finalized by consensus.
-    /// Direct local observation penalty (not via ECP).
+    // ── Commit validation ──
+    // TODO(roadmap): produced when local commit-validation scoring lands.
+    /// Commit referenced proposals not yet finalised by consensus. Detected
+    /// locally, not via ECP.
     NonFinalizedProposalCommit,
 }
 
-/// A score operation produced by core logic.
-///
-/// Core functions return these to describe scoring-relevant events. The application
-/// layer feeds them into a [`PeerScoringService`](crate::app::PeerScoringService).
+/// A score operation produced by core logic and fed into the app's
+/// [`PeerScoringService`](crate::app::PeerScoringService).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScoreOp {
     pub member_id: Vec<u8>,
     pub event: ScoreEvent,
 }
 
-impl ScoreOp {
-    /// Create a new score operation.
-    pub fn new(member_id: Vec<u8>, event: ScoreEvent) -> Self {
-        Self { member_id, event }
-    }
-}
-
 // ── Scoring configuration ───────────────────────────────────────────
 
-/// Maps each [`ScoreEvent`] to a score delta.
-///
-/// Implement this trait to customize score values. A default implementation
-/// ([`FixedScoringProvider`](crate::app::FixedScoringProvider)) is provided in the app layer.
+/// Maps each [`ScoreEvent`] to a signed score delta (positive = reward).
+/// Default impl: [`FixedScoringProvider`](crate::app::FixedScoringProvider).
 pub trait ScoringProvider {
-    /// Returns the score change for the given event.
-    ///
-    /// Positive values reward, negative values penalize.
     fn score_delta(&self, event: ScoreEvent) -> i64;
 }
 
-/// Configuration for a [`PeerScoringService`](crate::app::PeerScoringService).
 #[derive(Debug, Clone)]
 pub struct ScoringConfig {
     /// Score assigned to newly added members.
@@ -93,63 +78,11 @@ pub struct ScoringConfig {
     pub removal_threshold: i64,
 }
 
-// ── Storage trait ───────────────────────────────────────────────────
-
-/// Persistence layer for peer scores.
-///
-/// Scores are scoped by group — each `(group_id, member_id)` pair has its own
-/// score. A default in-memory implementation
-/// ([`InMemoryPeerScoreStorage`](crate::app::InMemoryPeerScoreStorage)) is
-/// provided in the app layer. Implement this trait to back scores with a
-/// database or other durable store.
+/// Per-(group, member) score persistence. Default impl:
+/// [`InMemoryPeerScoreStorage`](crate::app::InMemoryPeerScoreStorage).
 pub trait PeerScoreStorage {
     fn get(&self, group_id: &str, member_id: &[u8]) -> Option<i64>;
     fn set(&mut self, group_id: &str, member_id: &[u8], score: i64);
     fn remove(&mut self, group_id: &str, member_id: &[u8]);
     fn all_scores(&self, group_id: &str) -> Vec<(Vec<u8>, i64)>;
-}
-
-// ── Result type for consensus ───────────────────────────────────────
-
-/// Outcome data from an accepted steward election proposal.
-///
-/// Returned inside [`ConsensusApplyResult`] so the app layer can validate
-/// and apply the new steward list.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ElectionOutcome {
-    pub proposed_stewards: Vec<Vec<u8>>,
-    pub election_epoch: u64,
-}
-
-/// Result of applying a consensus outcome, including any score events
-/// that the application layer should feed into a [`PeerScoringService`](crate::app::PeerScoringService).
-#[derive(Debug, Clone, Default)]
-pub struct ConsensusApplyResult {
-    pub score_ops: Vec<ScoreOp>,
-    /// Present when an election proposal was accepted. The app layer should
-    /// validate and apply the new steward list.
-    pub election: Option<ElectionOutcome>,
-}
-
-impl ConsensusApplyResult {
-    /// Create an empty result with no score ops or election.
-    pub fn empty() -> Self {
-        Self::default()
-    }
-
-    /// Create a result with score operations.
-    pub fn with_ops(score_ops: Vec<ScoreOp>) -> Self {
-        Self {
-            score_ops,
-            election: None,
-        }
-    }
-
-    /// Create a result with an election outcome.
-    pub fn with_election(outcome: ElectionOutcome) -> Self {
-        Self {
-            score_ops: Vec::new(),
-            election: Some(outcome),
-        }
-    }
 }

@@ -2,7 +2,7 @@
 
 use openmls::key_packages::KeyPackage as MlsKeyPackage;
 
-use super::error::{MlsError, MlsServiceError};
+use crate::mls_crypto::{MlsError, MlsServiceError};
 
 /// Serialized key package for joining groups.
 ///

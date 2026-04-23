@@ -1,13 +1,22 @@
-//! Freeze/commit lifecycle operations.
+//! Timer polls for pending-join expiry, freeze timeout, and steward inactivity.
 
-use super::*;
+use tracing::{error, info};
+
+use crate::{
+    app::{FreezeTimeoutStatus, GroupState, StateChangeHandler, User, UserError},
+    core::{
+        DeMlsProvider, FreezeFinalizeResult, GroupEventHandler, create_commit_candidate,
+        finalize_freeze_round, group_members,
+    },
+    protos::de_mls::messages::v1::ViolationEvidence,
+};
 
 impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
     User<P, H, SCH>
 {
-    /// Check if still in pending join state.
-    ///
-    /// Returns `true` if still waiting, `false` if joined or timed out.
+    /// Poll a `PendingJoin` group. Returns `true` while still waiting,
+    /// `false` once joined or once the join attempt has been torn down
+    /// after timing out.
     pub async fn check_pending_join(&self, group_name: &str) -> Result<bool, UserError> {
         let (state, expired) = {
             let groups = self.groups.read().await;
@@ -38,9 +47,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         Ok(true)
     }
 
-    /// Check if the freeze phase timed out.
-    ///
-    /// Call this periodically while a group is in `Freezing` state.
+    /// Poll tick for `Freezing`: drives Freezing → Selection once candidates
+    /// are all in or the freeze window elapses, then finalises and dispatches.
     pub async fn poll_freeze_status(
         &self,
         group_name: &str,
@@ -77,7 +85,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let mut groups = self.groups.write().await;
             let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
             let allow_subset = entry.group.allow_subset_candidates();
-            match core::finalize_freeze_round(
+            match finalize_freeze_round(
                 &mut entry.group,
                 &self.mls_service,
                 allow_subset,
@@ -92,32 +100,40 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         };
 
         match finalize_result {
-            FreezeFinalizeResult::Applied { result, outbound } => {
-                // Send deferred welcome packets now that commit is merged
+            FreezeFinalizeResult::Outcome { result, outbound } => {
+                // Welcomes are deferred to here so joiners can't advance
+                // epoch ahead of the steward.
                 let has_welcome = outbound
-                    .iter()
-                    .any(|p| p.subtopic == crate::ds::WELCOME_SUBTOPIC);
-                for packet in outbound {
+                    .as_ref()
+                    .is_some_and(|p| p.subtopic == crate::ds::WELCOME_SUBTOPIC);
+                if let Some(packet) = outbound {
                     if let Err(e) = self.handler.on_outbound(group_name, packet).await {
                         error!("[poll_freeze_status] Failed to send deferred welcome: {e}");
                     }
                 }
 
-                // Send group sync to new joiners after welcome packets
+                // GroupSync carries the steward list + timing + scores to
+                // new joiners; send it only after the welcome they'll use
+                // to catch up.
                 if has_welcome {
                     if let Err(e) = self.send_group_sync(group_name).await {
                         error!("[poll_freeze_status] Failed to send group sync: {e}");
                     }
                 }
 
-                // Dispatch result first -- this transitions state to Working
-                if let Err(e) = self.dispatch_inbound_result(group_name, result).await {
+                if let Err(e) = self.dispatch_inbound_result(group_name, *result).await {
                     error!("[poll_freeze_status] Failed to dispatch finalize result: {e}");
                 }
                 return Ok(FreezeTimeoutStatus::Applied);
             }
             FreezeFinalizeResult::NoCandidate => {
-                let (next_state, should_accuse, violation_epoch, steward_id) = {
+                // Censorship ECP target. `Some` only when we saw approved
+                // proposals go unanswered *and* can attribute the miss to a
+                // live steward other than ourselves. Self-accusations are
+                // skipped because the RFC's responsible-proposer rule has
+                // peers file the ECP deterministically — us duplicating it
+                // would just create competing evidence for the same event.
+                let (next_state, accuse_target) = {
                     let mut groups = self.groups.write().await;
                     let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
 
@@ -126,41 +142,29 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                         entry.group.reject_all_voting_proposals();
                         entry.state_machine.clear_proposal_timer();
                         entry.state_machine.start_reelection();
-                        let violation_epoch =
-                            self.mls_service.current_epoch(group_name).unwrap_or(0);
-                        // Accuse the live epoch steward — the member who was
-                        // actually responsible for committing given current
-                        // membership. If the nominal steward was removed
-                        // earlier this epoch, their identity is no longer in
-                        // the group and accusing them would file an ECP
-                        // against a ghost.
-                        let members = core::group_members(&entry.group, &self.mls_service)
-                            .unwrap_or_default();
-                        let steward_id = entry
+
+                        let violation_epoch = self.mls_service.current_epoch(group_name)?;
+                        let self_identity = self.mls_service.wallet_bytes();
+                        let members = group_members(&entry.group, &self.mls_service)?;
+                        let target = entry
                             .group
                             .live_epoch_steward(violation_epoch, &members)
-                            .filter(|id| !id.is_empty())
-                            .map(|id| id.to_vec())
-                            .unwrap_or_default();
-                        (
-                            GroupState::Reelection,
-                            !steward_id.is_empty(),
-                            violation_epoch,
-                            steward_id,
-                        )
+                            .filter(|id| !id.is_empty() && *id != self_identity.as_slice())
+                            .map(|id| (id.to_vec(), violation_epoch));
+
+                        (GroupState::Reelection, target)
                     } else {
                         entry.group.clear_freeze_round();
-
                         entry.state_machine.start_working();
-                        (GroupState::Working, false, 0, Vec::new())
+                        (GroupState::Working, None)
                     }
                 };
 
                 self.state_handler
-                    .on_state_changed(group_name, next_state.clone())
+                    .on_state_changed(group_name, next_state)
                     .await;
 
-                if should_accuse {
+                if let Some((steward_id, violation_epoch)) = accuse_target {
                     let request =
                         match ViolationEvidence::censorship_inactivity(steward_id, violation_epoch)
                             .with_creator(self.mls_service.wallet_bytes())
@@ -185,11 +189,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         Ok(FreezeTimeoutStatus::TimedOut { has_proposals })
     }
 
-    /// Check for steward inactivity and transition to Freezing if needed.
-    ///
-    /// If approved proposals exist and the epoch steward hasn't committed
-    /// within `epoch_duration`, transition to Freezing so the freeze timeout
-    /// can detect steward fault. Any member (steward or not) can detect this.
+    /// Drives Working → Freezing when the steward has sat on approved
+    /// proposals for more than `epoch_duration`. Any member polls — not
+    /// just the steward — so a fault gets picked up group-wide.
     pub async fn check_member_freeze(&self, group_name: &str) -> Result<bool, UserError> {
         let mut groups = self.groups.write().await;
         let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
@@ -205,9 +207,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let epoch = self.mls_service.current_epoch(group_name)?;
             entry.group.ensure_freeze_round(epoch);
 
-            // If steward, create commit candidate while we still hold the lock.
-            // Candidate creation failure must not block the freeze transition —
-            // this node can still process other stewards' candidates.
+            // Stewards build their own candidate under the same lock.
+            // Candidate-build failure must not block the freeze transition —
+            // peers' candidates still get processed.
             let outbound = if entry.group.is_steward() {
                 match create_commit_candidate(&mut entry.group, &self.mls_service, &self.app_id) {
                     Ok(packets) => packets,
@@ -216,11 +218,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                             "[check_member_freeze] Failed to create commit candidate \
                              for group {group_name}: {e}"
                         );
-                        vec![]
+                        None
                     }
                 }
             } else {
-                vec![]
+                None
             };
 
             let new_state = entry.state_machine.current_state();
@@ -235,7 +237,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             self.state_handler
                 .on_state_changed(group_name, new_state)
                 .await;
-            for message in outbound {
+            if let Some(message) = outbound {
                 self.handler.on_outbound(group_name, message).await?;
             }
         }

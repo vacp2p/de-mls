@@ -148,48 +148,58 @@ async fn do_join(
     }
     settle().await;
 
-    // Instead of subscribing to broadcast (unreliable in tests with auto-vote),
-    // poll the consensus service for the result and call apply_consensus_outcome directly.
+    // Dispatch ConsensusReached to all EXISTING members only. The joiner isn't
+    // subscribed to the group's consensus scope yet, so in production they
+    // never see this event. Dispatching it to the joiner here would pollute
+    // their local approved queue with the invite-self proposal (never cleared
+    // because the joiner receives a welcome, not a commit, to enter the group).
     {
         use hashgraph_like_consensus::storage::ConsensusStorage;
         let scope = group.to_string();
-        // Try to get the payload — if the proposal resolved, this should work
         if let Ok(payload) = cs
             .storage()
             .get_proposal(&scope, pid)
             .await
             .map(|p| p.payload)
         {
-            // We know it resolved. Build a ConsensusReached event.
             let ev = hashgraph_like_consensus::types::ConsensusEvent::ConsensusReached {
                 proposal_id: pid,
                 result: true,
                 timestamp: 0,
             };
-            let mut all: Vec<&mut TU> = vec![steward, joiner];
+            let mut all: Vec<&mut TU> = vec![steward];
             for (u, _) in others.iter_mut() {
                 all.push(u);
             }
             for u in all.iter_mut() {
                 let _ = u.apply_consensus_outcome(group, ev.clone()).await;
             }
-            let _ = payload; // suppress unused warning
+            let _ = payload;
         }
     }
 
-    // Wait for epoch_duration to elapse then trigger inactivity detection.
-    // check_member_freeze creates the commit candidate if is_steward().
+    // `check_steward_inactivity` self-starts the timer on the first call
+    // that sees approved work. Call once to kick it off, then wait for
+    // epoch_duration, then call again to actually trigger the freeze
+    // transition.
+    steward.check_member_freeze(group).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     steward.check_member_freeze(group).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     steward.poll_freeze_status(group).await.unwrap();
 
-    // Deliver welcome/commit
+    // Deliver commit candidate + welcome packets from the steward.
+    // Others that receive the candidate enter Freezing; they need their own
+    // poll_freeze_status to select and apply the commit.
     for p in steward_h.drain_packets() {
         let _ = joiner.process_inbound_packet(to_in(&p)).await;
         for (u, _) in others.iter_mut() {
             let _ = u.process_inbound_packet(to_in(&p)).await;
         }
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    for (u, _) in others.iter_mut() {
+        let _ = u.poll_freeze_status(group).await;
     }
 }
 
@@ -286,22 +296,48 @@ async fn test_user_layer_score_removal_pipeline() {
     );
 
     // After Bob joins, the epoch has advanced past Alice's initial single-steward
-    // list (start_epoch=0, len=1). Simulate the steward election completing so
-    // Alice remains a valid epoch steward before Charlie tries to join.
+    // list (start_epoch=0, len=1). Simulate the steward election completing
+    // so someone is the live epoch steward before Charlie joins.
     alice.regenerate_steward_list(group).await.unwrap();
     bob.regenerate_steward_list(group).await.unwrap();
 
+    // Deterministic generation decides whether Alice or Bob ends up at list[0];
+    // both are valid stewards from the protocol's perspective. Query the live
+    // epoch steward via the public role API and route Charlie's join through
+    // them. Avoids baking a specific hash ordering into the test.
+    use de_mls::app::MemberRole;
+    let alice_bytes = de_mls::mls_crypto::parse_wallet_to_bytes(&alice.identity_string()).unwrap();
+    let alice_is_epoch_steward = alice
+        .get_member_roles(group)
+        .await
+        .unwrap()
+        .iter()
+        .any(|(id, role)| *role == MemberRole::EpochSteward && *id == alice_bytes);
+
     charlie.create_group(group, false).await.unwrap();
-    do_join(
-        &mut alice,
-        &ah,
-        &mut charlie,
-        &ch,
-        &mut [(&mut bob, &bh)],
-        &cs,
-        group,
-    )
-    .await;
+    if alice_is_epoch_steward {
+        do_join(
+            &mut alice,
+            &ah,
+            &mut charlie,
+            &ch,
+            &mut [(&mut bob, &bh)],
+            &cs,
+            group,
+        )
+        .await;
+    } else {
+        do_join(
+            &mut bob,
+            &bh,
+            &mut charlie,
+            &ch,
+            &mut [(&mut alice, &ah)],
+            &cs,
+            group,
+        )
+        .await;
+    }
     assert_eq!(
         charlie.get_group_state(group).await.unwrap(),
         GroupState::Working

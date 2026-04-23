@@ -1,7 +1,14 @@
 //! Group lifecycle operations: creation, joining, and message building.
 
-use super::*;
-use crate::core::steward_list::ProtocolConfig;
+use openmls_rust_crypto::MemoryStorage;
+use prost::Message;
+
+use crate::{
+    core::{error::CoreError, group::Group, steward_list::ProtocolConfig},
+    ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC},
+    mls_crypto::{DeMlsStorage, MlsService},
+    protos::de_mls::messages::v1::{AppMessage, InvitationToJoin, UserKeyPackage, WelcomeMessage},
+};
 
 // ─────────────────────────── Group Lifecycle ───────────────────────────
 
@@ -30,19 +37,6 @@ pub fn prepare_to_join(
     protocol_config: ProtocolConfig,
 ) -> Group {
     Group::new_as_joiner(name, self_identity, protocol_config)
-}
-
-/// Complete joining a group using a welcome message.
-pub fn join_group_from_invite<S>(
-    _handle: &mut Group,
-    welcome_bytes: &[u8],
-    mls: &MlsService<S>,
-) -> Result<String, CoreError>
-where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
-{
-    let group_name = mls.join_group(welcome_bytes)?;
-    Ok(group_name)
 }
 
 // ─────────────────────────── Message Building ───────────────────────────
@@ -94,4 +88,20 @@ where
     ))
 }
 
-// ─────────────────────────── Inbound Processing ───────────────────────────
+/// Wrap raw MLS welcome bytes into an `OutboundPacket` on the welcome subtopic.
+pub fn build_invitation_packet(
+    welcome_bytes: Vec<u8>,
+    group: &Group,
+    app_id: &[u8],
+) -> OutboundPacket {
+    let welcome_msg: WelcomeMessage = InvitationToJoin {
+        mls_message_out_bytes: welcome_bytes,
+    }
+    .into();
+    OutboundPacket::new(
+        welcome_msg.encode_to_vec(),
+        WELCOME_SUBTOPIC,
+        group.group_name(),
+        app_id,
+    )
+}

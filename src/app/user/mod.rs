@@ -1,56 +1,49 @@
-//! User struct for managing multiple groups.
+//! [`User`] — multi-group facade over core. One node owns one `User`, which
+//! holds the MLS service, consensus service, event handler, peer-scoring
+//! service, and per-group state map. Methods split across the submodules:
+//! `lifecycle` (create/leave), `query` (read-only getters), `messaging`
+//! (send/ban), `consensus` (voting), `consensus_events` (outcome dispatch),
+//! `inbound` (packet dispatch), `freeze` (timers), `steward` (steward-side
+//! housekeeping).
 //!
-//! This is the main entry point for the application layer,
-//! managing multiple `Group`s and coordinating operations.
-
-mod consensus;
-mod freeze;
-mod groups;
-mod inbound;
-mod messaging;
-mod steward;
+//! `User` is `Clone` — all fields are `Arc` or cheap `Clone` — so background
+//! tasks just take their own handle via `self.clone()`.
 
 use alloy::signers::local::PrivateKeySigner;
-use std::sync::Mutex;
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use hashgraph_like_consensus::storage::ConsensusStorage;
+use std::{
+    collections::HashMap,
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
 use tokio::sync::RwLock;
-use tracing::{error, info};
 
-use hashgraph_like_consensus::{storage::ConsensusStorage, types::ConsensusEvent};
-
-use crate::app::config::GroupConfig;
-use crate::app::consensus_bridge::{forward_incoming_proposal, forward_incoming_vote};
-use crate::app::display::MemberRole;
-use crate::app::error::UserError;
-use crate::app::peer_scoring::{
-    FixedScoringProvider, InMemoryPeerScoreStorage, PeerScoringService,
-};
-use crate::app::state_machine::{
-    FreezeTimeoutStatus, GroupState, GroupStateMachine, StateChangeHandler,
-};
-use crate::core::{
-    self, DeMlsProvider, DefaultProvider, FreezeFinalizeResult, Group, GroupEventHandler,
-    ProcessResult, ProtocolConfig, ProviderConsensus, ScoreEvent, ScoringConfig, StewardList,
-    create_commit_candidate,
-};
-use crate::ds::InboundPacket;
-use crate::mls_crypto::{
-    MemoryDeMlsStorage, MlsService, format_wallet_address, parse_wallet_to_bytes,
-};
-use prost::Message;
-
-use crate::protos::de_mls::messages::v1::{
-    AppMessage, BanRequest, ConversationMessage, GroupSync, GroupUpdateRequest, PeerScore,
-    RemoveMember, StewardElectionProposal, TimingConfig, ViolationEvidence, group_update_request,
+use crate::{
+    app::{
+        FixedScoringProvider, GroupConfig, GroupStateMachine, InMemoryPeerScoreStorage,
+        PeerScoringService, StateChangeHandler, UserError,
+    },
+    core::{
+        DeMlsProvider, DefaultProvider, Group, GroupEventHandler, ProviderConsensus, ScoreEvent,
+        ScoringConfig,
+    },
+    mls_crypto::{MemoryDeMlsStorage, MlsService},
 };
 
-/// Internal state for a group managed by User.
+mod consensus;
+mod consensus_events;
+mod freeze;
+mod inbound;
+mod lifecycle;
+mod messaging;
+mod query;
+mod steward;
+
 struct GroupEntry {
     group: Group,
     state_machine: GroupStateMachine,
 }
 
-/// User manages multiple MLS groups.
 pub struct User<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler> {
     mls_service: Arc<MlsService<P::Storage>>,
     groups: Arc<RwLock<HashMap<String, GroupEntry>>>,
@@ -59,11 +52,26 @@ pub struct User<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler>
     handler: Arc<H>,
     state_handler: Arc<SCH>,
     default_group_config: GroupConfig,
-    /// Per-instance UUID for echo-dedup on pub/sub networks.
-    /// Embedded in all outbound packets — inbound packets with matching
-    /// app_id are self-echoes and get silently dropped.
+    /// Per-instance UUID embedded in every outbound packet. Inbound packets
+    /// carrying our `app_id` are self-echoes and silently dropped.
     app_id: Vec<u8>,
-    scoring_service: Mutex<PeerScoringService<InMemoryPeerScoreStorage, FixedScoringProvider>>,
+    scoring_service: Arc<Mutex<PeerScoringService<InMemoryPeerScoreStorage, FixedScoringProvider>>>,
+}
+
+impl<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler> Clone for User<P, H, SCH> {
+    fn clone(&self) -> Self {
+        Self {
+            mls_service: Arc::clone(&self.mls_service),
+            groups: Arc::clone(&self.groups),
+            consensus_service: Arc::clone(&self.consensus_service),
+            eth_signer: self.eth_signer.clone(),
+            handler: Arc::clone(&self.handler),
+            state_handler: Arc::clone(&self.state_handler),
+            default_group_config: self.default_group_config.clone(),
+            app_id: self.app_id.clone(),
+            scoring_service: Arc::clone(&self.scoring_service),
+        }
+    }
 }
 
 impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
@@ -85,19 +93,21 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             handler,
             state_handler,
             default_group_config,
-            scoring_service: Mutex::new(PeerScoringService::new(
+            scoring_service: Arc::new(Mutex::new(PeerScoringService::new(
                 InMemoryPeerScoreStorage::new(),
                 FixedScoringProvider::new(Self::default_score_deltas()),
                 ScoringConfig {
                     default_score: 100,
                     removal_threshold: 0,
                 },
-            )),
+            ))),
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
         }
     }
 
-    /// Default score deltas for all events.
+    /// Default score deltas for all events. Entries without an active producer
+    /// (`SuccessfulCommit`, `NonFinalizedProposalCommit`) are pre-wired so the
+    /// table doesn't need a migration once the roadmap items land.
     fn default_score_deltas() -> HashMap<ScoreEvent, i64> {
         HashMap::from([
             // ECP target penalties (violation-type-specific)
@@ -107,9 +117,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             // ECP creator outcomes
             (ScoreEvent::EmergencyYesCreator, 20),
             (ScoreEvent::EmergencyNoCreator, -50),
-            // Commit selection (M2)
+            // Roadmap: commit selection
             (ScoreEvent::SuccessfulCommit, 10),
-            // Commit validation (M5)
+            // Roadmap: commit validation
             (ScoreEvent::NonFinalizedProposalCommit, -30),
         ])
     }
@@ -124,15 +134,14 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             .unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Get the user's identity string (wallet address as checksummed hex).
+    /// Wallet address as checksummed hex.
     pub fn identity_string(&self) -> String {
         self.mls_service.wallet_hex()
     }
 
-    /// Clean up consensus state for a group scope.
-    ///
-    /// Called when a group is removed (leave, timeout, re-creation).
-    /// Removes all proposals, votes, and sessions from the consensus service.
+    /// Drop all proposals / votes / sessions for this group from the
+    /// consensus service. Called on leave, pending-join timeout, and
+    /// re-creation.
     async fn cleanup_consensus_scope(&self, group_name: &str) -> Result<(), UserError> {
         let scope = P::Scope::from(group_name.to_string());
         self.consensus_service
@@ -148,7 +157,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
     User<DefaultProvider, H, SCH>
 {
-    /// Convenience constructor for the default provider with default group config.
+    /// Construct a `User` on [`DefaultProvider`] with the default config.
     pub fn with_private_key(
         private_key: &str,
         consensus_service: Arc<ProviderConsensus<DefaultProvider>>,
@@ -164,7 +173,7 @@ impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
         )
     }
 
-    /// Convenience constructor for the default provider with custom group config.
+    /// Construct a `User` on [`DefaultProvider`] with a custom config.
     pub fn with_private_key_and_config(
         private_key: &str,
         consensus_service: Arc<ProviderConsensus<DefaultProvider>>,

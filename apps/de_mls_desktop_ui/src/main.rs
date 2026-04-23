@@ -8,13 +8,14 @@ use std::sync::{
 };
 
 use de_mls::{
-    app::convert_group_request_to_display,
+    app::format_group_request,
     mls_crypto::parse_wallet_address,
-    protos::de_mls::messages::v1::{ConversationMessage, VotePayload},
+    protos::de_mls::messages::v1::{ConversationMessage, GroupUpdateRequest, VotePayload},
 };
 use de_mls_gateway::{GATEWAY, bootstrap_core_from_env};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent, MemberInfo};
 use hashgraph_like_consensus::types::ConsensusEvent;
+use prost::Message;
 
 mod logging;
 
@@ -22,6 +23,7 @@ static CSS: Asset = asset!("/assets/main.css");
 static NEXT_ALERT_ID: AtomicU64 = AtomicU64::new(1);
 const MAX_VISIBLE_ALERTS: usize = 5;
 const MAX_VISIBLE_REJECTED: usize = 20;
+const MAX_VISIBLE_ELECTIONS: usize = 20;
 
 // ─────────────────────────── App state ───────────────────────────
 
@@ -51,6 +53,19 @@ struct RejectedProposal {
     reason: &'static str,
 }
 
+/// Compact record of a completed steward-election attempt. Lives in a
+/// separate list from membership-change history so the UI can render the
+/// two timelines side by side instead of interleaving them.
+#[derive(Clone, Debug, PartialEq)]
+struct ElectionRecord {
+    /// Pre-formatted display string, e.g. `"epoch 1, retry 0 | 0x…, 0x…"`.
+    details: String,
+    /// `true` if consensus accepted this election, `false` if rejected/timed-out.
+    accepted: bool,
+    /// Informational reason for rejection (`"Rejected"`, `"Timed out"`); `None` when accepted.
+    reason: Option<&'static str>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 struct ConsensusState {
     is_steward: bool,
@@ -58,6 +73,8 @@ struct ConsensusState {
     pending_votes: Vec<VotePayload>,
     approved_queue: Vec<(String, String)>,
     rejected: Vec<RejectedProposal>,
+    /// Full steward-election history (accepted + rejected) in chronological order.
+    elections: Vec<ElectionRecord>,
     epoch_history: Vec<Vec<(String, String)>>,
     /// Caches proposal content so we can correlate with ProposalDecided events.
     proposal_cache: HashMap<u32, (String, String)>,
@@ -156,7 +173,7 @@ fn main() {
     let config = Config::new().with_window(
         WindowBuilder::new()
             .with_title("DE-MLS Desktop UI")
-            .with_inner_size(LogicalSize::new(1280, 820))
+            .with_inner_size(LogicalSize::new(1200, 740))
             .with_resizable(true),
     );
 
@@ -403,7 +420,11 @@ fn Home() -> Element {
                         let opened = chat.read().opened_group.clone();
                         if opened.as_deref() == Some(vp.group_id.as_str()) {
                             let (action, address) =
-                                convert_group_request_to_display(vp.payload.clone());
+                                GroupUpdateRequest::decode(vp.payload.as_slice())
+                                    .map(|req| format_group_request(&req))
+                                    .unwrap_or_else(|_| {
+                                        ("Invalid".to_string(), "malformed payload".to_string())
+                                    });
                             let mut c = cons.write();
                             c.proposal_cache.insert(vp.proposal_id, (action, address));
                             if !c
@@ -420,43 +441,46 @@ fn Home() -> Element {
                             chat.read().opened_group.as_deref() == Some(group_id.as_str());
                         let mut c = cons.write();
                         if is_current {
-                            match &consensus_event {
-                                ConsensusEvent::ConsensusReached {
-                                    proposal_id,
-                                    result,
-                                    ..
-                                } => {
-                                    if !result {
-                                        if let Some((action, address)) =
-                                            c.proposal_cache.remove(proposal_id)
-                                        {
-                                            c.rejected.push(RejectedProposal {
-                                                action,
-                                                address,
-                                                reason: "Rejected",
-                                            });
-                                            if c.rejected.len() > MAX_VISIBLE_REJECTED {
-                                                c.rejected.remove(0);
-                                            }
-                                        }
-                                    } else {
-                                        c.proposal_cache.remove(proposal_id);
+                            // Accepted vs rejected, and rejection reason. Election
+                            // proposals go to a dedicated list (accepted + rejected
+                            // together) so the UI can keep membership history and
+                            // election history visually separate.
+                            let (accepted, reason) = match &consensus_event {
+                                ConsensusEvent::ConsensusReached { result, .. } => {
+                                    (*result, if *result { None } else { Some("Rejected") })
+                                }
+                                ConsensusEvent::ConsensusFailed { .. } => {
+                                    (false, Some("Timed out"))
+                                }
+                            };
+                            let proposal_id = match &consensus_event {
+                                ConsensusEvent::ConsensusReached { proposal_id, .. } => {
+                                    *proposal_id
+                                }
+                                ConsensusEvent::ConsensusFailed { proposal_id, .. } => *proposal_id,
+                            };
+                            if let Some((action, address)) = c.proposal_cache.remove(&proposal_id) {
+                                if action.starts_with("Steward Election") {
+                                    c.elections.push(ElectionRecord {
+                                        details: address,
+                                        accepted,
+                                        reason,
+                                    });
+                                    if c.elections.len() > MAX_VISIBLE_ELECTIONS {
+                                        c.elections.remove(0);
+                                    }
+                                } else if !accepted {
+                                    c.rejected.push(RejectedProposal {
+                                        action,
+                                        address,
+                                        reason: reason.unwrap_or("Rejected"),
+                                    });
+                                    if c.rejected.len() > MAX_VISIBLE_REJECTED {
+                                        c.rejected.remove(0);
                                     }
                                 }
-                                ConsensusEvent::ConsensusFailed { proposal_id, .. } => {
-                                    if let Some((action, address)) =
-                                        c.proposal_cache.remove(proposal_id)
-                                    {
-                                        c.rejected.push(RejectedProposal {
-                                            action,
-                                            address,
-                                            reason: "Timed out",
-                                        });
-                                        if c.rejected.len() > MAX_VISIBLE_REJECTED {
-                                            c.rejected.remove(0);
-                                        }
-                                    }
-                                }
+                                // Accepted non-election proposals: no history entry
+                                // here — they surface as part of the epoch batch.
                             }
                         }
                         let decided_id = match &consensus_event {
@@ -680,14 +704,28 @@ fn GroupListSection() -> Element {
 
 fn ChatSection() -> Element {
     let chat = use_context::<Signal<ChatState>>();
+    let cons = use_context::<Signal<ConsensusState>>();
     let session = use_context::<Signal<SessionState>>();
     let mut msg_input = use_signal(String::new);
     let mut show_ban_modal = use_signal(|| false);
     let mut ban_address = use_signal(String::new);
     let mut ban_error = use_signal(|| Option::<String>::None);
 
+    // States where `send_app_message` refuses (matches the core guard in
+    // `src/app/user/messaging.rs`). Keep these two lists in sync.
+    let send_block_reason: Option<&'static str> = match cons.read().group_state.as_str() {
+        "PendingJoin" => Some("Waiting to join — chat disabled until welcome arrives"),
+        "Freezing" => Some("Steward is committing — chat paused for the freeze round"),
+        "Selection" => Some("Applying commit — chat paused until the new epoch"),
+        _ => None,
+    };
+    let send_disabled = send_block_reason.is_some();
+
     let send_msg = {
         move |_| {
+            if send_disabled {
+                return;
+            }
             let text = msg_input.read().trim().to_string();
             if text.is_empty() {
                 return;
@@ -790,7 +828,6 @@ fn ChatSection() -> Element {
     };
 
     let my_name = Arc::new(session.read().address.clone());
-    let my_name_for_leave = my_name.clone();
 
     let members_snapshot = chat.read().members.clone();
     let my_address = (*my_name).clone();
@@ -817,11 +854,11 @@ fn ChatSection() -> Element {
                         class: "ghost mini",
                         onclick: move |_| {
                             let group_id = gid.clone();
-                            let addr = my_name_for_leave.clone();
-                            // Send a self-ban (leave) request: requester filled by backend
+                            // Auto-approved self-leave: no consensus vote; a live
+                            // steward's next commit removes us.
                             spawn(async move {
                                 let _ = GATEWAY
-                                    .send(AppCmd::SendBanRequest { group_id: group_id.clone(), user_to_ban: (*addr).clone() })
+                                    .send(AppCmd::LeaveGroup { group_id })
                                     .await;
                             });
                         },
@@ -856,14 +893,23 @@ fn ChatSection() -> Element {
                         }
                     }
                 }
+                if let Some(reason) = send_block_reason {
+                    div { class: "composer-notice", "{reason}" }
+                }
                 div { class: "composer",
                     input {
                         r#type: "text",
                         value: "{msg_input}",
                         oninput: move |e| msg_input.set(e.value()),
-                        placeholder: "Type a message…",
+                        placeholder: if send_disabled { "Chat paused…" } else { "Type a message…" },
+                        disabled: send_disabled,
                     }
-                    button { class: "primary", onclick: send_msg, "Send" }
+                    button {
+                        class: "primary",
+                        onclick: send_msg,
+                        disabled: send_disabled,
+                        "Send"
+                    }
                 }
             }
         }
@@ -960,16 +1006,16 @@ fn ConsensusSection() -> Element {
     let pending_display: Vec<(u32, String, String)> = pending_votes
         .iter()
         .map(|v| {
-            let (action, id) = convert_group_request_to_display(v.payload.clone());
+            let (action, id) = GroupUpdateRequest::decode(v.payload.as_slice())
+                .map(|req| format_group_request(&req))
+                .unwrap_or_else(|_| ("Invalid".to_string(), "malformed payload".to_string()));
             (v.proposal_id, action, id)
         })
         .collect();
 
     let approved_snapshot = cons.read().approved_queue.clone();
-    let rejected_snapshot = cons.read().rejected.clone();
-    let epoch_snapshot = cons.read().epoch_history.clone();
-    let epoch_count = epoch_snapshot.len();
-    let has_history = !rejected_snapshot.is_empty() || !epoch_snapshot.is_empty();
+    let elections_snapshot = cons.read().elections.clone();
+    let has_election_history = !elections_snapshot.is_empty();
 
     rsx! {
         div { class: "panel consensus",
@@ -1129,7 +1175,14 @@ fn ConsensusSection() -> Element {
                                 let proposal_id = *pid;
                                 let is_emergency = action.starts_with("Emergency: ");
                                 let is_election = action.starts_with("Steward Election");
-                                let short_id = fmt_addr(id);
+                                // Election target is a composite "epoch N, retry R | 0x…, 0x…"
+                                // string — passing it through fmt_addr would prepend 0x and
+                                // garble the output. Only raw addresses need the fixup.
+                                let short_id = if is_election {
+                                    id.clone()
+                                } else {
+                                    fmt_addr(id)
+                                };
                                 if is_emergency {
                                     let violation_type = action.strip_prefix("Emergency: ").unwrap_or("").to_string();
                                     rsx! {
@@ -1195,12 +1248,141 @@ fn ConsensusSection() -> Element {
                     }
                 }
 
-                // Epoch History
+                // Steward Elections: separate timeline showing which retry
+                // round produced the applied list and which were rejected.
+                // Accepted entries are "good" (green), rejected are "bad" (red).
+                // `details` is preformatted as "epoch N, retry R | stewards…";
+                // we split at the pipe so the outcome sits next to epoch/retry
+                // on the first line and the steward list trails below,
+                // guaranteeing the reason is visible without wrapping.
                 div { class: "consensus-section",
-                    h3 { "Epoch History" }
-                    if has_history {
+                    h3 { "Steward Elections" }
+                    if has_election_history {
                         div { class: "history-window",
-                            // Rejected proposals
+                            for er in elections_snapshot.iter().rev() {
+                                {
+                                    let (entry_class, outcome_label, outcome_class) =
+                                        if er.accepted {
+                                            ("history-entry election", "applied", "good")
+                                        } else {
+                                            ("history-entry election rejected", "rejected", "bad")
+                                        };
+                                    let show_reason = er.reason.is_some_and(|r| r != "Rejected");
+                                    let (header_part, stewards_part) =
+                                        er.details.split_once(" | ").unwrap_or((er.details.as_str(), ""));
+                                    rsx! {
+                                        div { class: "{entry_class}",
+                                            span { class: "action", "Election:" }
+                                            div { class: "election-body",
+                                                div { class: "election-header",
+                                                    span { class: "value", "{header_part}" }
+                                                    span { class: "{outcome_class}",
+                                                        " — {outcome_label}"
+                                                    }
+                                                    if let Some(reason) = er.reason {
+                                                        if show_reason {
+                                                            span { class: "muted", " ({reason})" }
+                                                        }
+                                                    }
+                                                }
+                                                if !stewards_part.is_empty() {
+                                                    span { class: "election-stewards mono", "{stewards_part}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        div { class: "no-data", "No elections yet" }
+                    }
+                }
+            } else {
+                div { class: "hint", "Open a group to see proposals & voting." }
+            }
+        }
+    }
+}
+
+// ─────────────────────────── Members Panel ───────────────────────────
+
+fn MembersSection() -> Element {
+    let chat = use_context::<Signal<ChatState>>();
+    let cons = use_context::<Signal<ConsensusState>>();
+    let opened = chat.read().opened_group.clone();
+    let members_snapshot = chat.read().members.clone();
+    let rejected_snapshot = cons.read().rejected.clone();
+    let epoch_snapshot = cons.read().epoch_history.clone();
+    let epoch_count = epoch_snapshot.len();
+    let has_membership_history = !rejected_snapshot.is_empty() || !epoch_snapshot.is_empty();
+    let removal_threshold = 0_i64; // matches ScoringConfig default
+
+    rsx! {
+        div { class: "panel members",
+            h2 { "Members" }
+            if opened.is_some() {
+                if members_snapshot.is_empty() {
+                    div { class: "no-data", "No members loaded." }
+                } else {
+                    div { class: "member-table",
+                        div { class: "member-row header",
+                            span { class: "col-addr", "Address" }
+                            span { class: "col-role", "Role" }
+                            span { class: "col-score", "Score" }
+                        }
+                        div { class: "member-rows",
+                            for member in members_snapshot.iter() {
+                                {
+                                    let role_class = match member.role.as_str() {
+                                        "epoch_steward" => "role-badge epoch",
+                                        "backup_steward" => "role-badge backup",
+                                        "steward" => "role-badge steward",
+                                        _ => "role-badge member",
+                                    };
+                                    let role_label = match member.role.as_str() {
+                                        "epoch_steward" => "Epoch Steward",
+                                        "backup_steward" => "Backup Steward",
+                                        "steward" => "Steward",
+                                        _ => "Member",
+                                    };
+                                    let score_class = if member.score <= removal_threshold {
+                                        "score bad"
+                                    } else if member.score <= removal_threshold + 30 {
+                                        "score warn"
+                                    } else {
+                                        "score"
+                                    };
+                                    let short = fmt_addr(&member.address);
+                                    let row_class = if member.pending_leave {
+                                        "member-row leaving"
+                                    } else {
+                                        "member-row"
+                                    };
+                                    rsx! {
+                                        div { class: "{row_class}",
+                                            span { class: "col-addr mono", "{short}" }
+                                            span { class: "col-role {role_class}", "{role_label}" }
+                                            span { class: "col-score {score_class}", "{member.score}" }
+                                            if member.pending_leave {
+                                                span { class: "leave-badge", title: "Leaving next epoch", "⤴ leaving" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Membership History: past epochs (commits) + rejected
+                // membership/emergency proposals. Kept next to the members
+                // list so the "who's in the group now" and "how did we get
+                // here" timelines live in the same panel.
+                div { class: "members-history",
+                    h3 { "Membership History" }
+                    if has_membership_history {
+                        div { class: "history-window",
                             if !rejected_snapshot.is_empty() {
                                 div { class: "history-group",
                                     span { class: "history-label rejected-label", "Rejected" }
@@ -1208,11 +1390,14 @@ fn ConsensusSection() -> Element {
                                         {
                                             let short = fmt_addr(&rp.address);
                                             let reason = rp.reason;
+                                            let show_reason = reason != "Rejected";
                                             rsx! {
                                                 div { class: "history-entry rejected",
                                                     span { class: "action", "{rp.action}:" }
                                                     span { class: "value", "{short}" }
-                                                    span { class: "muted", " ({reason})" }
+                                                    if show_reason {
+                                                        span { class: "muted", " ({reason})" }
+                                                    }
                                                 }
                                             }
                                         }
@@ -1220,7 +1405,6 @@ fn ConsensusSection() -> Element {
                                 }
                             }
 
-                            // Past epochs
                             if !epoch_snapshot.is_empty() {
                                 div { class: "history-group",
                                     span { class: "history-label", "Past Epochs" }
@@ -1258,67 +1442,6 @@ fn ConsensusSection() -> Element {
                         }
                     } else {
                         div { class: "no-data", "No history yet" }
-                    }
-                }
-            } else {
-                div { class: "hint", "Open a group to see proposals & voting." }
-            }
-        }
-    }
-}
-
-// ─────────────────────────── Members Panel ───────────────────────────
-
-fn MembersSection() -> Element {
-    let chat = use_context::<Signal<ChatState>>();
-    let opened = chat.read().opened_group.clone();
-    let members_snapshot = chat.read().members.clone();
-    let removal_threshold = 0_i64; // matches ScoringConfig default
-
-    rsx! {
-        div { class: "panel members",
-            h2 { "Members" }
-            if opened.is_some() {
-                if members_snapshot.is_empty() {
-                    div { class: "no-data", "No members loaded." }
-                } else {
-                    div { class: "member-table",
-                        div { class: "member-row header",
-                            span { class: "col-addr", "Address" }
-                            span { class: "col-role", "Role" }
-                            span { class: "col-score", "Score" }
-                        }
-                        for member in members_snapshot.iter() {
-                            {
-                                let role_class = match member.role.as_str() {
-                                    "epoch_steward" => "role-badge epoch",
-                                    "backup_steward" => "role-badge backup",
-                                    "steward" => "role-badge steward",
-                                    _ => "role-badge member",
-                                };
-                                let role_label = match member.role.as_str() {
-                                    "epoch_steward" => "Epoch Steward",
-                                    "backup_steward" => "Backup Steward",
-                                    "steward" => "Steward",
-                                    _ => "Member",
-                                };
-                                let score_class = if member.score <= removal_threshold {
-                                    "score bad"
-                                } else if member.score <= removal_threshold + 30 {
-                                    "score warn"
-                                } else {
-                                    "score"
-                                };
-                                let short = fmt_addr(&member.address);
-                                rsx! {
-                                    div { class: "member-row",
-                                        span { class: "col-addr mono", "{short}" }
-                                        span { class: "col-role {role_class}", "{role_label}" }
-                                        span { class: "col-score {score_class}", "{member.score}" }
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
             } else {

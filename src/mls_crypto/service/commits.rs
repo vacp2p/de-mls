@@ -1,4 +1,11 @@
-use super::*;
+use openmls::prelude::{DeserializeBytes, MlsMessageIn, ProcessedMessageContent, ProtocolMessage};
+use openmls_rust_crypto::MemoryStorage;
+use openmls_traits::OpenMlsProvider;
+
+use crate::mls_crypto::{
+    CommitCandidate, DeMlsStorage, GroupUpdate, IdentityError, MlsError, MlsProposalAction,
+    MlsService, MlsServiceError, Result, StagedCommitResult, StorageError,
+};
 
 impl<S> MlsService<S>
 where
@@ -181,7 +188,9 @@ where
                         let id = group
                             .member(removed_index)
                             .map(|c| c.serialized_content().to_vec())
-                            .unwrap_or_default();
+                            .ok_or(MlsError::Service(MlsServiceError::UnknownLeafIndex(
+                                removed_index.u32(),
+                            )))?;
                         actions.push(MlsProposalAction::Remove(id));
                     }
 

@@ -1,11 +1,9 @@
-use de_mls::mls_crypto::format_wallet_address;
 use de_mls::{
-    app::{FreezeTimeoutStatus, format_group_request},
-    ds::WakuDeliveryService,
-    protos::de_mls::messages::v1::BanRequest,
+    app::FreezeTimeoutStatus, ds::WakuDeliveryService, protos::de_mls::messages::v1::BanRequest,
 };
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
 
+use crate::forwarder::{display_batch, load_member_info};
 use crate::{Gateway, UserRef};
 
 impl Gateway<WakuDeliveryService> {
@@ -249,43 +247,11 @@ impl Gateway<WakuDeliveryService> {
             .await
             .get_approved_proposal_for_current_epoch(&group_name)
             .await?;
-
-        let display_proposals: Vec<(String, String)> = proposals
-            .iter()
-            .filter(|p| p.payload.is_some())
-            .map(|p| format_group_request(p))
-            .collect();
-        Ok(display_proposals)
+        Ok(display_batch(&proposals))
     }
 
     pub async fn get_group_members(&self, group_name: String) -> anyhow::Result<Vec<MemberInfo>> {
-        let user_ref = self.user()?;
-        let user = user_ref.read().await;
-        let addresses = user.get_group_members(&group_name).await?;
-        let scores = user.get_member_scores(&group_name);
-        let roles = user.get_member_roles(&group_name).await.unwrap_or_default();
-
-        let members = addresses
-            .into_iter()
-            .map(|address| {
-                let score = scores
-                    .iter()
-                    .find(|(raw_id, _)| format_wallet_address(raw_id.as_slice()) == address)
-                    .map(|(_, s)| *s)
-                    .unwrap_or(100);
-                let role = roles
-                    .iter()
-                    .find(|(raw_id, _)| format_wallet_address(raw_id.as_slice()) == address)
-                    .map(|(_, r)| r.to_string())
-                    .unwrap_or_else(|| "member".to_string());
-                MemberInfo {
-                    address,
-                    score,
-                    role,
-                }
-            })
-            .collect();
-        Ok(members)
+        load_member_info(&self.user()?, &group_name).await
     }
 
     /// Get epoch history for a group (past batches of approved proposals).
@@ -297,17 +263,6 @@ impl Gateway<WakuDeliveryService> {
     ) -> anyhow::Result<Vec<Vec<(String, String)>>> {
         let user_ref = self.user()?;
         let history = user_ref.read().await.get_epoch_history(&group_name).await?;
-
-        let result: Vec<Vec<(String, String)>> = history
-            .into_iter()
-            .map(|batch| {
-                batch
-                    .iter()
-                    .filter(|p| p.payload.is_some())
-                    .map(|p| format_group_request(p))
-                    .collect()
-            })
-            .collect();
-        Ok(result)
+        Ok(history.iter().map(|batch| display_batch(batch)).collect())
     }
 }

@@ -256,12 +256,18 @@ button.mini {
 /* Home layout */
 .page.home {
     padding: 12px;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
 }
 
 .layout {
     display: grid;
-    grid-template-columns: 240px 1fr 340px 260px;
+    grid-template-columns: 240px 1fr 340px 320px;
     gap: 12px;
+    flex: 1 1 auto;
+    min-height: 0;
 }
 
 .mono {
@@ -283,6 +289,8 @@ button.mini {
     display: flex;
     flex-direction: column;
     gap: 10px;
+    overflow: hidden;
+    min-height: 0;
 }
 
 .panel h2 {
@@ -406,8 +414,28 @@ button.mini {
     min-width: 0;
 }
 
+.composer input:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
 .composer button {
     flex: 0 0 auto;
+}
+
+.composer button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    box-shadow: none;
+}
+
+.composer-notice {
+    font-size: 12px;
+    color: var(--warn);
+    background: rgba(255, 184, 0, 0.08);
+    border: 1px solid rgba(255, 184, 0, 0.25);
+    padding: 6px 10px;
+    border-radius: 8px;
 }
 
 /* Consensus panel */
@@ -489,6 +517,8 @@ button.mini {
     display: flex;
     flex-direction: column;
     gap: 12px;
+    overflow-y: auto;
+    min-height: 0;
 }
 
 .panel.consensus .status {
@@ -559,8 +589,9 @@ button.mini {
     margin-top: 8px;
 }
 
-/* History window */
-.panel.consensus .history-window {
+/* History window — shared between consensus panel (elections) and members
+   panel (membership history). */
+.history-window {
     overflow-y: auto;
     max-height: 300px;
     display: flex;
@@ -568,13 +599,13 @@ button.mini {
     gap: 12px;
 }
 
-.panel.consensus .history-group {
+.history-group {
     display: flex;
     flex-direction: column;
     gap: 6px;
 }
 
-.panel.consensus .history-label {
+.history-label {
     font-size: 11px;
     font-weight: 700;
     text-transform: uppercase;
@@ -584,11 +615,11 @@ button.mini {
     border-bottom: 1px solid var(--border);
 }
 
-.panel.consensus .history-label.rejected-label {
+.history-label.rejected-label {
     color: var(--muted);
 }
 
-.panel.consensus .history-entry {
+.history-entry {
     display: grid;
     grid-template-columns: minmax(6rem, max-content) 1fr;
     align-items: start;
@@ -600,38 +631,62 @@ button.mini {
     font-size: 12px;
 }
 
-.panel.consensus .history-entry .action {
+.history-entry .action {
     color: var(--primary);
     font-weight: 600;
 }
 
-.panel.consensus .history-entry .value {
+.history-entry .value {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
     color: var(--text);
     overflow-wrap: anywhere;
     word-break: break-word;
 }
 
-.panel.consensus .history-entry.rejected {
+.history-entry.rejected {
     border-color: rgba(255, 0, 92, 0.25);
     background: rgba(255, 0, 92, 0.05);
 }
 
-.panel.consensus .history-entry.rejected .action {
+.history-entry.rejected .action {
     color: var(--bad);
 }
 
-.panel.consensus .epoch-group {
+.epoch-group {
     display: flex;
     flex-direction: column;
     gap: 4px;
 }
 
-.panel.consensus .epoch-label {
+.epoch-label {
     font-size: 12px;
     font-weight: 600;
     color: var(--primary);
     padding: 2px 0;
+}
+
+/* Election entry: outcome + reason sit on the epoch/retry line; the
+   steward list trails below as monospace so the reason never wraps out
+   of sight. */
+.history-entry.election .election-body {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.history-entry.election .election-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px;
+}
+
+.history-entry.election .election-stewards {
+    color: var(--muted);
+    font-size: 11px;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 /* Modal */
@@ -680,13 +735,49 @@ button.mini {
 .panel.members {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 10px;
+    min-height: 0;
 }
 
 .panel.members .member-table {
     display: flex;
     flex-direction: column;
     gap: 2px;
+    flex: 0 1 auto;
+    min-height: 0;
+    max-height: 45%;
+}
+
+.panel.members .member-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overflow-y: auto;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+.panel.members .members-history {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex: 1 1 0;
+    min-height: 0;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+}
+
+.panel.members .members-history h3 {
+    margin: 0 0 4px 0;
+    font-size: 14px;
+    color: var(--primary);
+    font-weight: 600;
+}
+
+.panel.members .members-history .history-window {
+    flex: 1 1 0;
+    min-height: 0;
+    max-height: none;
 }
 
 .panel.members .member-row {
@@ -752,6 +843,22 @@ button.mini {
 .panel.members .role-badge.member {
     background: none;
     color: var(--muted);
+}
+
+.panel.members .member-row.leaving {
+    opacity: 0.6;
+    font-style: italic;
+}
+
+.panel.members .leave-badge {
+    margin-left: 8px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    background: rgba(255, 200, 80, 0.15);
+    color: var(--warn);
+    white-space: nowrap;
 }
 
 .panel.members .score {

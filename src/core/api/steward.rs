@@ -1,28 +1,44 @@
 //! Steward commit candidate creation and group member queries.
 
-use super::freeze::compute_commit_hash;
-use super::*;
+use openmls_rust_crypto::MemoryStorage;
+use prost::Message;
+use tracing::info;
+
+use crate::core::api::compute_commit_hash;
+use crate::core::proposal_kind::ProposalKind;
+use crate::core::{
+    error::CoreError,
+    group::{BufferedCommitCandidate, Group},
+};
+use crate::ds::{APP_MSG_SUBTOPIC, OutboundPacket};
+use crate::mls_crypto::{
+    CommitCandidate as MlsCommitCandidate, DeMlsStorage, GroupUpdate, KeyPackageBytes, MlsService,
+};
+use crate::protos::de_mls::messages::v1::{AppMessage, CommitCandidate, group_update_request};
 
 // ─────────────────────────── Steward Operations ───────────────────────────
 
-/// Create and broadcast a commit candidate for the current epoch.
+/// Build a commit candidate and buffer it for [`crate::core::finalize_freeze_round`].
 ///
-/// This does not merge the commit immediately. The candidate is buffered and
-/// later applied via [`finalize_freeze_round`].
+/// The gate is plain `is_steward()` (list membership) — intentionally **not**
+/// `is_live_epoch_steward` or a list-exhaustion check. If an election fails
+/// its retries and the list exhausts, members of the *previous* list can
+/// still commit recovery actions (e.g. a leave) to advance the epoch and
+/// trigger a fresh election. Without that escape hatch a stuck group is
+/// permanently frozen.
 pub fn create_commit_candidate<S>(
     group: &mut Group,
     mls: &MlsService<S>,
     app_id: &[u8],
-) -> Result<Vec<OutboundPacket>, CoreError>
+) -> Result<Option<OutboundPacket>, CoreError>
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
     if !group.is_steward() {
-        return Err(CoreError::StewardNotSet);
+        return Err(CoreError::NotASteward);
     }
 
-    let proposals = group.approved_proposals();
-    if proposals.is_empty() {
+    if group.approved_proposals().is_empty() {
         return Err(CoreError::NoProposals);
     }
 
@@ -34,7 +50,7 @@ where
     // RemoveMember(self), skip local candidate creation — another steward will
     // commit the batch (including this node's removal) once they enter freeze.
     let self_identity = mls.wallet_bytes();
-    let self_removal_pending = proposals.values().any(|req| {
+    let self_removal_pending = group.approved_proposals().values().any(|req| {
         matches!(
             req.payload.as_ref(),
             Some(group_update_request::Payload::RemoveMember(r))
@@ -47,20 +63,15 @@ where
              approved batch contains self-remove — waiting for another steward",
             group.group_name()
         );
-        return Ok(vec![]);
+        return Ok(None);
     }
 
-    // Emergency criteria and steward election proposals are consensus-only — they don't
-    // produce MLS operations and must NOT be in the approved queue at batch creation time.
-    let non_mls_ids: Vec<u32> = proposals
+    // Governance proposals (emergency, election) are consensus-only and must
+    // not be in the approved queue at batch creation time.
+    let non_mls_ids: Vec<u32> = group
+        .approved_proposals()
         .iter()
-        .filter(|(_, req)| {
-            matches!(
-                req.payload,
-                Some(group_update_request::Payload::EmergencyCriteria(_))
-                    | Some(group_update_request::Payload::StewardElection(_))
-            )
-        })
+        .filter(|(_, req)| ProposalKind::of(req).is_governance())
         .map(|(&id, _)| id)
         .collect();
 
@@ -70,20 +81,37 @@ where
         });
     }
 
+    // Drop approved entries already reflected in group state (stale
+    // rebroadcast KPs, duplicate removes) — without this MLS would reject
+    // the whole batch with "Duplicate signature key in proposals and group".
+    let current_members = mls.members(group.group_name())?;
+    let is_member = |id: &[u8]| current_members.iter().any(|m| m == id);
+
+    let proposals = group.approved_proposals();
     let mut updates = Vec::with_capacity(proposals.len());
-    for (_, proposal) in proposals {
-        match proposal.payload {
+    for proposal in proposals.values() {
+        match proposal.payload.as_ref() {
             Some(group_update_request::Payload::InviteMember(im)) => {
+                if is_member(&im.identity) {
+                    continue;
+                }
                 updates.push(GroupUpdate::Add(KeyPackageBytes::new(
-                    im.key_package_bytes,
-                    im.identity,
+                    im.key_package_bytes.clone(),
+                    im.identity.clone(),
                 )));
             }
-            Some(group_update_request::Payload::RemoveMember(identity)) => {
-                updates.push(GroupUpdate::Remove(identity.identity));
+            Some(group_update_request::Payload::RemoveMember(rm)) => {
+                if !is_member(&rm.identity) {
+                    continue;
+                }
+                updates.push(GroupUpdate::Remove(rm.identity.clone()));
             }
             _ => return Err(CoreError::InvalidGroupUpdateRequest),
         }
+    }
+
+    if updates.is_empty() {
+        return Ok(None);
     }
 
     let MlsCommitCandidate {
@@ -99,9 +127,8 @@ where
         steward_identity: mls.wallet_bytes(),
     };
 
-    // Store own candidate locally for deterministic selection at freeze timeout.
-    // Welcome bytes are deferred — they'll be sent after commit merge in finalize_freeze_round
-    // to prevent joiners from advancing epoch before the steward merges.
+    // Welcome bytes are deferred: sent from finalize_freeze_round after the
+    // commit merges, so joiners can't advance epoch ahead of the steward.
     let commit_hash = compute_commit_hash(&candidate.commit_message);
     let epoch = mls.current_epoch(group.group_name())?;
     let _ = group.add_freeze_candidate(
@@ -122,15 +149,12 @@ where
     );
 
     let candidate_msg: AppMessage = candidate.into();
-
-    let batch_packet = OutboundPacket::new(
+    Ok(Some(OutboundPacket::new(
         candidate_msg.encode_to_vec(),
         APP_MSG_SUBTOPIC,
         group.group_name(),
         app_id,
-    );
-
-    Ok(vec![batch_packet])
+    )))
 }
 
 // ─────────────────────────── Member Queries ───────────────────────────

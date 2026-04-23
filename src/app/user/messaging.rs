@@ -1,31 +1,32 @@
 //! Send operations (key packages, app messages, ban requests).
 
-use super::*;
+use crate::{
+    app::{GroupState, StateChangeHandler, User, UserError},
+    core::{DeMlsProvider, GroupEventHandler, build_key_package_message, build_message},
+    mls_crypto::parse_wallet_to_bytes,
+    protos::de_mls::messages::v1::{
+        AppMessage, BanRequest, ConversationMessage, GroupUpdateRequest, RemoveMember,
+        group_update_request,
+    },
+};
 
 impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
     User<P, H, SCH>
 {
-    /// Build and send a key package message for a group via the handler.
+    /// Broadcast our key-package on the welcome subtopic so the steward
+    /// can invite us.
     pub async fn send_kp_message(&self, group_name: &str) -> Result<(), UserError> {
         let groups = self.groups.read().await;
         let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-        let packet =
-            core::build_key_package_message(&entry.group, &self.mls_service, &self.app_id)?;
+        let packet = build_key_package_message(&entry.group, &self.mls_service, &self.app_id)?;
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
     }
 
-    /// Send a conversation message to a group.
-    ///
-    /// Blocked during states where MLS epoch keys are about to rotate:
-    /// - `PendingJoin` — we don't have the group keys yet.
-    /// - `Freezing` — a steward is building a commit candidate; messages
-    ///   sent now may not decrypt on members who've already merged a commit.
-    /// - `Selection` — a winning commit is being merged; same reason.
-    ///
-    /// Governance traffic (votes, proposal notifications) lives above MLS
-    /// and is permitted in any state where its own check allows it — see
-    /// `check_proposal_allowed` / `process_user_vote`.
+    /// Send a chat message. Blocked in `PendingJoin` (no keys yet),
+    /// `Freezing`, and `Selection` (epoch rotation in flight — the message
+    /// might not decrypt on peers who have already merged the next commit).
+    /// Governance traffic has its own gate (`check_proposal_allowed`).
     pub async fn send_app_message(
         &self,
         group_name: &str,
@@ -50,13 +51,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             }
             .into();
 
-            core::build_message(&entry.group, &self.mls_service, &app_msg, &self.app_id)?
+            build_message(&entry.group, &self.mls_service, &app_msg, &self.app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
     }
 
-    /// Process a ban request.
+    /// Start a `RemoveMember` consensus round targeting `ban_request.user_to_ban`.
     pub async fn process_ban_request(
         &mut self,
         ban_request: BanRequest,
