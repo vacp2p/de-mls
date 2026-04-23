@@ -146,10 +146,10 @@ fn role_for(role: &str) -> (&'static str, &'static str) {
     }
 }
 
-/// Split the steward-election composite string `"epoch N, retry R | addr, addr"`
-/// into a human-readable meta line and a list of steward addresses. Used by
-/// the active-vote banner to render stewards vertically instead of wrapping
-/// one long line of commas.
+/// Split the steward-election composite string `"epoch N | addr, addr"`
+/// (with `, retry R` appended when `R > 0`) into a human-readable meta line
+/// and a list of steward addresses. Used by the active-vote banner to render
+/// stewards vertically instead of wrapping one long line of commas.
 fn parse_election_details(raw: &str) -> (String, Vec<String>) {
     let (meta_raw, list_raw) = raw.split_once(" | ").unwrap_or((raw, ""));
     let meta = meta_raw

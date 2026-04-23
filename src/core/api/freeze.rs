@@ -169,7 +169,7 @@ where
     }
 
     let ctx = RoundContext::snapshot(group, mls, current_epoch)?;
-    let sorted = rank_applicable_candidates(candidates, &ctx, allow_subset_candidates, group);
+    let sorted = rank_applicable_candidates(candidates, &ctx, allow_subset_candidates);
 
     if sorted.is_empty() {
         group.clear_freeze_round();
@@ -256,13 +256,7 @@ fn rank_applicable_candidates(
     candidates: Vec<BufferedCommitCandidate>,
     ctx: &RoundContext,
     allow_subset: bool,
-    group: &Group,
 ) -> Vec<BufferedCommitCandidate> {
-    let epoch_steward_id = group
-        .steward_list()
-        .and_then(|l| l.epoch_steward(ctx.current_epoch))
-        .map(|s| s.to_vec());
-
     let mut sorted: Vec<_> = candidates
         .into_iter()
         .filter(|c| {
@@ -274,7 +268,7 @@ fn rank_applicable_candidates(
             }
         })
         .collect();
-    sorted.sort_by(|a, b| compare_candidate_priority(a, b, epoch_steward_id.as_deref()));
+    sorted.sort_by(|a, b| compare_candidate_priority(a, b, ctx.live_epoch_steward_id.as_deref()));
     sorted
 }
 
