@@ -6,8 +6,8 @@ use tracing::info;
 
 use crate::{
     core::{
-        CoreError, Group, ProcessResult, api::lifecycle::build_invitation_packet,
-        group::BufferedCommitCandidate,
+        CoreError, Group, ProcessResult, ScoreEvent, ScoreOp,
+        api::lifecycle::build_invitation_packet, group::BufferedCommitCandidate,
     },
     ds::OutboundPacket,
     mls_crypto::{
@@ -25,16 +25,32 @@ use crate::{
 
 /// What [`finalize_freeze_round`] hands back to the caller.
 ///
-/// `result` is boxed because [`ProcessResult`] is a large enum (~240 bytes);
-/// keeping it inline would bloat every `NoCandidate` return too.
-#[derive(Debug, Clone)]
-pub enum FreezeFinalizeResult {
+/// `score_ops` accumulates during the phase-3 loop — each time a candidate
+/// is dropped for MLS-staging failure the caller records a
+/// [`ScoreEvent::MisbehavingCommit`] against its author. The app layer
+/// feeds these directly into the peer-scoring service without an ECP
+/// round-trip (RFC §Peer Scoring: locally-observed violations may be
+/// scored immediately).
+#[derive(Debug, Clone, Default)]
+pub struct FreezeFinalizeResult {
+    pub outcome: FreezeOutcome,
+    pub score_ops: Vec<ScoreOp>,
+}
+
+/// Terminal outcome of a freeze round: either a dispatchable result or no
+/// candidate was applyable.
+///
+/// `result` is boxed because [`ProcessResult`] is a large enum (~240 bytes)
+/// and `NoCandidate` is the common case.
+#[derive(Debug, Clone, Default)]
+pub enum FreezeOutcome {
     /// A dispatchable result — successful apply, self-leave, or violation.
     /// `outbound` carries deferred welcomes when our own candidate won.
-    Outcome {
+    Applied {
         result: Box<ProcessResult>,
         outbound: Option<OutboundPacket>,
     },
+    #[default]
     NoCandidate,
 }
 
@@ -145,11 +161,11 @@ where
 
     let candidates = match group.freeze_round() {
         Some(round) if round.epoch == current_epoch => round.candidates.clone(),
-        _ => return Ok(FreezeFinalizeResult::NoCandidate),
+        _ => return Ok(FreezeFinalizeResult::default()),
     };
 
     if candidates.is_empty() {
-        return Ok(FreezeFinalizeResult::NoCandidate);
+        return Ok(FreezeFinalizeResult::default());
     }
 
     let expected = ExpectedBatch::from_approved_queue(group, &mls.wallet_bytes());
@@ -163,7 +179,7 @@ where
 
     if sorted.is_empty() {
         group.clear_freeze_round();
-        return Ok(FreezeFinalizeResult::NoCandidate);
+        return Ok(FreezeFinalizeResult::default());
     }
 
     apply_in_priority_order(group, mls, sorted, &expected, current_epoch, app_id)
@@ -237,7 +253,8 @@ fn rank_applicable_candidates(
 
 /// Walk `sorted` in order, applying each candidate until one succeeds or
 /// produces a terminal violation. Candidates that fail MLS staging are
-/// dropped and the loop advances to the next.
+/// dropped with a [`ScoreEvent::MisbehavingCommit`] recorded against
+/// their author, and the loop advances to the next.
 ///
 /// `own_commit_discarded` enforces MLS's rule that only one pending commit
 /// can exist per group: the first incoming attempt clears our own pending
@@ -253,10 +270,12 @@ fn apply_in_priority_order<S>(
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
+    let mut score_ops: Vec<ScoreOp> = Vec::new();
     let mut own_commit_discarded = false;
     let group_name = group.group_name().to_owned();
 
     for chosen in sorted {
+        let steward_id = chosen.candidate_msg.steward_identity.clone();
         let apply_result = if chosen.is_local_candidate {
             if own_commit_discarded {
                 tracing::debug!(
@@ -277,13 +296,22 @@ where
             apply_incoming_candidate(group, mls, chosen, &expected.mls_actions, current_epoch)?
         };
 
-        if let Some(outcome) = apply_result {
-            return Ok(outcome);
+        match apply_result {
+            Some(outcome) => return Ok(FreezeFinalizeResult { outcome, score_ops }),
+            None => {
+                score_ops.push(ScoreOp {
+                    member_id: steward_id,
+                    event: ScoreEvent::MisbehavingCommit,
+                });
+            }
         }
     }
 
     group.clear_freeze_round();
-    Ok(FreezeFinalizeResult::NoCandidate)
+    Ok(FreezeFinalizeResult {
+        outcome: FreezeOutcome::NoCandidate,
+        score_ops,
+    })
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -344,7 +372,7 @@ fn compare_candidate_priority(
 /// Merge our own commit and send the deferred welcomes we held back.
 /// Validation happened at commit-creation time, so no re-staging is needed.
 ///
-/// Always returns `Some(Outcome)` on a clean merge; the `Option` matches
+/// Always returns `Some(Applied)` on a clean merge; the `Option` matches
 /// the signature of [`apply_incoming_candidate`] so the caller can share
 /// one loop body across both paths.
 fn apply_local_candidate<S>(
@@ -353,7 +381,7 @@ fn apply_local_candidate<S>(
     chosen: BufferedCommitCandidate,
     self_removed: bool,
     app_id: &[u8],
-) -> Result<Option<FreezeFinalizeResult>, CoreError>
+) -> Result<Option<FreezeOutcome>, CoreError>
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
@@ -371,7 +399,7 @@ where
     } else {
         ProcessResult::GroupUpdated
     };
-    Ok(Some(FreezeFinalizeResult::Outcome {
+    Ok(Some(FreezeOutcome::Applied {
         result: Box::new(result),
         outbound,
     }))
@@ -395,7 +423,7 @@ fn apply_incoming_candidate<S>(
     chosen: BufferedCommitCandidate,
     expected_actions: &[MlsProposalAction],
     current_epoch: u64,
-) -> Result<Option<FreezeFinalizeResult>, CoreError>
+) -> Result<Option<FreezeOutcome>, CoreError>
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
@@ -434,7 +462,7 @@ where
         current_epoch,
     )? {
         discard_candidate_state(group, mls)?;
-        return Ok(Some(FreezeFinalizeResult::Outcome {
+        return Ok(Some(FreezeOutcome::Applied {
             result: Box::new(result),
             outbound: None,
         }));
@@ -449,7 +477,7 @@ where
     } else {
         ProcessResult::GroupUpdated
     };
-    Ok(Some(FreezeFinalizeResult::Outcome {
+    Ok(Some(FreezeOutcome::Applied {
         result: Box::new(result),
         outbound: None,
     }))
@@ -652,12 +680,12 @@ fn discard_and_report_violation<S>(
     group: &mut Group,
     mls: &MlsService<S>,
     violation: ViolationEvidence,
-) -> Result<FreezeFinalizeResult, CoreError>
+) -> Result<FreezeOutcome, CoreError>
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
     discard_candidate_state(group, mls)?;
-    Ok(FreezeFinalizeResult::Outcome {
+    Ok(FreezeOutcome::Applied {
         result: Box::new(ProcessResult::ViolationDetected(violation)),
         outbound: None,
     })

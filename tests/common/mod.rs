@@ -16,7 +16,7 @@ use async_trait::async_trait;
 
 use de_mls::app::{FixedScoringProvider, InMemoryPeerScoreStorage, PeerScoringService};
 use de_mls::core::{
-    CallbackError, FreezeFinalizeResult, Group, GroupEventHandler, ProcessResult, ProtocolConfig,
+    CallbackError, FreezeOutcome, Group, GroupEventHandler, ProcessResult, ProtocolConfig,
     ScoreEvent, ScoringConfig, build_key_package_message, create_commit_candidate, create_group,
     finalize_freeze_round, prepare_to_join, process_inbound,
 };
@@ -198,8 +198,8 @@ pub fn steward_add_joiner(
 
     let finalize =
         finalize_freeze_round(steward_handle, steward_mls, false, b"test-app-id").unwrap();
-    let welcome_packet = match finalize {
-        FreezeFinalizeResult::Outcome { result, outbound } => {
+    let welcome_packet = match finalize.outcome {
+        FreezeOutcome::Applied { result, outbound } => {
             assert!(
                 matches!(*result, ProcessResult::GroupUpdated),
                 "Expected GroupUpdated, got {:?}",

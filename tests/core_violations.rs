@@ -4,7 +4,7 @@
 use prost::Message;
 
 use de_mls::core::{
-    FreezeFinalizeResult, ProcessResult, ProposalId, ScoreEvent, apply_consensus_result,
+    FreezeOutcome, ProcessResult, ProposalId, ScoreEvent, apply_consensus_result,
     create_commit_candidate, finalize_freeze_round, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
@@ -477,8 +477,8 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     let finalize =
         finalize_freeze_round(&mut joiner_handle, &joiner_mls, false, b"test-app-id").unwrap();
     let matched = matches!(
-        &finalize,
-        FreezeFinalizeResult::Outcome { result, .. } if matches!(**result, ProcessResult::GroupUpdated)
+        &finalize.outcome,
+        FreezeOutcome::Applied { result, .. } if matches!(**result, ProcessResult::GroupUpdated)
     );
     assert!(
         matched,
@@ -531,7 +531,7 @@ fn test_no_valid_candidate_triggers_no_candidate() {
 
     let finalize = finalize_freeze_round(&mut group, &steward_mls, false, b"test-app-id").unwrap();
     assert!(
-        matches!(finalize, FreezeFinalizeResult::NoCandidate),
+        matches!(finalize.outcome, FreezeOutcome::NoCandidate),
         "Expected NoCandidate when no candidates buffered, got {:?}",
         finalize
     );

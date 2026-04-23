@@ -26,8 +26,9 @@ mod steward_list;
 
 // ── Core group operations ──
 pub use api::{
-    FreezeFinalizeResult, build_key_package_message, build_message, create_commit_candidate,
-    create_group, finalize_freeze_round, group_members, prepare_to_join, process_inbound,
+    FreezeFinalizeResult, FreezeOutcome, build_key_package_message, build_message,
+    create_commit_candidate, create_group, finalize_freeze_round, group_members, prepare_to_join,
+    process_inbound,
 };
 
 // ── Consensus result application (pure, synchronous) ──

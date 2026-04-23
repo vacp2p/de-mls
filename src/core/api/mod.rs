@@ -11,7 +11,8 @@ mod lifecycle;
 mod steward;
 
 pub use freeze::{
-    FreezeFinalizeResult, compute_commit_hash, finalize_freeze_round, process_commit_candidate,
+    FreezeFinalizeResult, FreezeOutcome, compute_commit_hash, finalize_freeze_round,
+    process_commit_candidate,
 };
 pub use inbound::process_inbound;
 pub use lifecycle::{build_key_package_message, build_message, create_group, prepare_to_join};

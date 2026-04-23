@@ -5,8 +5,8 @@ use tracing::{error, info};
 use crate::{
     app::{FreezeTimeoutStatus, GroupState, StateChangeHandler, User, UserError},
     core::{
-        DeMlsProvider, FreezeFinalizeResult, GroupEventHandler, create_commit_candidate,
-        finalize_freeze_round, group_members,
+        DeMlsProvider, FreezeFinalizeResult, FreezeOutcome, GroupEventHandler,
+        create_commit_candidate, finalize_freeze_round, group_members,
     },
     protos::de_mls::messages::v1::ViolationEvidence,
 };
@@ -91,13 +91,23 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 Ok(result) => result,
                 Err(e) => {
                     error!(group = group_name, error = %e, "freeze finalize failed");
-                    FreezeFinalizeResult::NoCandidate
+                    FreezeFinalizeResult::default()
                 }
             }
         };
 
-        match finalize_result {
-            FreezeFinalizeResult::Outcome { result, outbound } => {
+        // Apply locally-observed score events before dispatching the
+        // outcome. These come from dropped candidates in the phase-3 loop
+        // (RFC §Peer Scoring: direct local observation, no ECP needed).
+        if !finalize_result.score_ops.is_empty() {
+            let mut scoring = self.scoring();
+            for op in &finalize_result.score_ops {
+                scoring.apply_event(group_name, &op.member_id, op.event);
+            }
+        }
+
+        match finalize_result.outcome {
+            FreezeOutcome::Applied { result, outbound } => {
                 // Welcomes are deferred to here so joiners can't advance
                 // epoch ahead of the steward.
                 let has_welcome = outbound
@@ -123,7 +133,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 }
                 return Ok(FreezeTimeoutStatus::Applied);
             }
-            FreezeFinalizeResult::NoCandidate => {
+            FreezeOutcome::NoCandidate => {
                 // Censorship ECP target. `Some` only when we saw approved
                 // proposals go unanswered *and* can attribute the miss to a
                 // live steward other than ourselves. Self-accusations are
