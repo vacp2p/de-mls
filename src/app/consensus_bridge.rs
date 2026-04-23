@@ -17,6 +17,15 @@ use crate::app::error::UserError;
 use crate::core::{CoreError, DeMlsProvider, Group, GroupEventHandler, ProviderConsensus};
 use crate::protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest, VotePayload};
 
+/// Consensus-session parameters that come from `GroupConfig`. Grouped so
+/// [`submit_proposal`]'s argument list stays readable.
+pub struct ProposalParams {
+    pub expected_voters: u32,
+    pub proposal_expiration: Duration,
+    pub consensus_timeout: Duration,
+    pub liveness_criteria_yes: bool,
+}
+
 /// Submit a proposal to consensus. Returns `(proposal_id, vote_notification)`.
 ///
 /// **Caller contract:** store ownership (`Group::store_voting_proposal`)
@@ -25,20 +34,18 @@ use crate::protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest, VotePa
 pub async fn submit_proposal<P: DeMlsProvider>(
     group_name: &str,
     request: &GroupUpdateRequest,
-    expected_voters: u32,
     identity_string: String,
     consensus: &ProviderConsensus<P>,
-    proposal_expiration: Duration,
-    consensus_timeout: Duration,
+    params: ProposalParams,
 ) -> Result<(u32, AppMessage), CoreError> {
     let payload = request.encode_to_vec();
     let create_request = CreateProposalRequest::new(
         uuid::Uuid::new_v4().to_string(),
         payload.clone(),
         identity_string.into(),
-        expected_voters,
-        proposal_expiration.as_secs(),
-        true,
+        params.expected_voters,
+        params.proposal_expiration.as_secs(),
+        params.liveness_criteria_yes,
     )?;
 
     let scope = P::Scope::from(group_name.to_string());
@@ -46,14 +53,14 @@ pub async fn submit_proposal<P: DeMlsProvider>(
         .create_proposal_with_config(
             &scope,
             create_request,
-            Some(ConsensusConfig::gossipsub().with_timeout(consensus_timeout)?),
+            Some(ConsensusConfig::gossipsub().with_timeout(params.consensus_timeout)?),
         )
         .await?;
 
     info!(
         group = group_name,
         proposal_id = proposal.proposal_id,
-        voters = expected_voters,
+        voters = params.expected_voters,
         "proposal opened"
     );
 

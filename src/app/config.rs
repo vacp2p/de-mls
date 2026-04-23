@@ -17,6 +17,12 @@ pub const DEFAULT_CREATOR_AUTO_VOTE_DELAY: Duration = Duration::from_secs(10);
 /// list composition; beyond that human/policy intervention is expected.
 pub const DEFAULT_MAX_REELECTION_RETRIES: u32 = 1;
 
+/// Under the Δ-synchrony assumption every honest voter reaches a decision
+/// within `consensus_timeout`; counting silent voters as YES keeps small
+/// groups responsive when a participant is briefly slow. Set to `false`
+/// for stricter policies that require explicit YES votes.
+pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
+
 /// Fallback [`ProtocolConfig`] for a group created without explicit bounds —
 /// tiny groups with `sn ∈ [1, 2]`. Real deployments override.
 fn default_protocol_config() -> ProtocolConfig {
@@ -43,6 +49,9 @@ pub struct GroupConfig {
     /// Max steward-election retries within one MLS epoch before the app
     /// surfaces "reelection stuck". `0` disables retry entirely.
     pub max_reelection_retries: u32,
+    /// Whether silent voters count as YES at `consensus_timeout` (RFC
+    /// §Creating Voting Proposal). See [`DEFAULT_LIVENESS_CRITERIA_YES`].
+    pub liveness_criteria_yes: bool,
     pub protocol: ProtocolConfig,
 }
 
@@ -56,6 +65,7 @@ impl Default for GroupConfig {
             pending_update_max_epochs: DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
             creator_auto_vote_delay: Some(DEFAULT_CREATOR_AUTO_VOTE_DELAY),
             max_reelection_retries: DEFAULT_MAX_REELECTION_RETRIES,
+            liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,
             protocol: default_protocol_config(),
         }
     }
