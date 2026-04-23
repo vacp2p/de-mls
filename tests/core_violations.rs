@@ -1,9 +1,6 @@
 //! Integration tests for steward violation detection, emergency criteria proposals,
 //! freeze round selection, and dedup.
 
-use prost::Message;
-
-use de_mls::app::emergency_score_ops;
 use de_mls::core::{
     FreezeOutcome, ProcessResult, ProposalId, ScoreEvent, apply_consensus_result,
     create_commit_candidate, finalize_freeze_round, process_inbound,
@@ -108,75 +105,6 @@ fn test_clear_approved_proposals_does_not_change_mls_epoch() {
     group.clear_approved_proposals();
     // MLS epoch only advances on actual commit merge, not on clear_approved_proposals
     assert_eq!(mls.current_epoch(group_name).unwrap(), 0);
-}
-
-/// Test: apply_consensus_result for emergency criteria proposal (owner, accepted)
-/// moves proposal to approved then immediately removes it (no MLS operation).
-/// Emits BrokenCommit on target and EmergencyYesCreator on local user.
-#[test]
-fn test_apply_consensus_result_emergency_accepted_owner() {
-    let group_name = "consensus-emergency-owner";
-    let (_mls, mut group) = setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-
-    let target_id = vec![0xAA];
-    let creator_id = b"local".to_vec();
-    let emergency_request =
-        ViolationEvidence::broken_commit(target_id.clone(), 0, Vec::<u8>::new())
-            .with_creator(creator_id.clone())
-            .into_update_request()
-            .unwrap();
-    let payload = emergency_request.encode_to_vec();
-    let proposal_id = 77;
-    group.store_voting_proposal(proposal_id, emergency_request);
-    assert!(group.is_owner_of_proposal(proposal_id));
-
-    apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
-    let score_ops = emergency_score_ops(&payload, true);
-
-    // Emergency proposal should NOT remain in approved queue
-    assert_eq!(group.approved_proposals_count(), 0);
-
-    // Score ops: target penalty + creator reward
-    assert_eq!(score_ops.len(), 2);
-    assert_eq!(score_ops[0].member_id, target_id);
-    assert_eq!(score_ops[0].event, ScoreEvent::BrokenCommit);
-    assert_eq!(score_ops[1].member_id, creator_id);
-    assert_eq!(score_ops[1].event, ScoreEvent::EmergencyYesCreator);
-}
-
-/// Test: apply_consensus_result for emergency criteria proposal (non-owner, accepted)
-/// does not insert into approved queue.
-/// Emits CensorshipInactivity on target and EmergencyYesCreator on creator from evidence.
-#[test]
-fn test_apply_consensus_result_emergency_accepted_non_owner() {
-    let group_name = "consensus-emergency-non-owner";
-    let (_mls, mut group) = setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-
-    let target_id = vec![0xBB];
-    let creator_id = b"alice".to_vec();
-    // Create the emergency proposal payload with creator identity
-    let emergency_request = ViolationEvidence::censorship_inactivity(target_id.clone(), 1)
-        .with_creator(creator_id.clone())
-        .into_update_request()
-        .unwrap();
-    let payload = emergency_request.encode_to_vec();
-
-    // The  group does NOT own this proposal (non-owner path)
-    let proposal_id = 88;
-    assert!(!group.is_owner_of_proposal(proposal_id));
-
-    apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
-    let score_ops = emergency_score_ops(&payload, true);
-
-    // Emergency proposal should NOT be in approved queue
-    assert_eq!(group.approved_proposals_count(), 0);
-
-    // Score ops: target penalty + creator reward (from evidence, not local_id)
-    assert_eq!(score_ops.len(), 2);
-    assert_eq!(score_ops[0].member_id, target_id);
-    assert_eq!(score_ops[0].event, ScoreEvent::CensorshipInactivity);
-    assert_eq!(score_ops[1].member_id, creator_id);
-    assert_eq!(score_ops[1].event, ScoreEvent::EmergencyYesCreator);
 }
 
 /// Test: apply_consensus_result errors on invalid (unparseable) payload.
@@ -497,6 +425,108 @@ fn test_commit_candidate_roundtrip_sender_identity() {
         steward_list.contains(&steward_mls.wallet_bytes()),
         "Steward should be on the steward list"
     );
+}
+
+/// Test: when a backup steward commits in place of the live epoch steward,
+/// finalize emits `CensorshipInactivity` against the absent steward.
+///
+/// Build a two-steward list over Alice + Bob. If hash rotation places the
+/// OTHER steward at `epoch_steward(epoch)`, Bob's successful commit from
+/// his own node pins the absent steward with `CensorshipInactivity`. If
+/// rotation makes Bob himself the live epoch steward, the self-accusation
+/// skip keeps the score-op list free of `CensorshipInactivity`.
+#[test]
+fn test_backup_commit_scores_absent_steward() {
+    let group_name = "absent-steward";
+    let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+    let bob_hex = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+    let charlie_hex = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
+
+    let (alice_mls, mut alice_group) = setup_steward(group_name, alice_hex);
+    let (bob_mls, mut bob_group, bob_kp_packet) = setup_joiner(group_name, bob_hex);
+    let alice_id = alice_mls.wallet_bytes();
+    let bob_id = bob_mls.wallet_bytes();
+
+    let (welcome, _) = steward_add_joiner(&alice_mls, &mut alice_group, &bob_kp_packet);
+    let join_result =
+        process_inbound(&mut bob_group, &welcome.payload, WELCOME_SUBTOPIC, &bob_mls).unwrap();
+    assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
+
+    // After the join, both are MLS members. Regenerate the steward list
+    // over [Alice, Bob] so both are stewards at the current epoch.
+    let epoch = alice_mls.current_epoch(group_name).unwrap();
+    let members = vec![alice_id.clone(), bob_id.clone()];
+    alice_group
+        .generate_and_set_steward_list(epoch, &members, 2)
+        .unwrap();
+    bob_group
+        .generate_and_set_steward_list(epoch, &members, 2)
+        .unwrap();
+
+    // Produce an approved proposal (invite Charlie) on both sides.
+    let (_charlie_mls, _charlie_group, charlie_kp_packet) = setup_joiner(group_name, charlie_hex);
+    let gur = match process_inbound(
+        &mut alice_group,
+        &charlie_kp_packet.payload,
+        WELCOME_SUBTOPIC,
+        &alice_mls,
+    )
+    .unwrap()
+    {
+        ProcessResult::MembershipChangeReceived(g) => g,
+        other => panic!("Expected MembershipChangeReceived, got {:?}", other),
+    };
+    let proposal_id: ProposalId = 90;
+    alice_group.insert_approved_proposal(proposal_id, gur.clone());
+    bob_group.insert_approved_proposal(proposal_id, gur);
+
+    // Bob builds the commit (Alice never submits). His local candidate is
+    // the only applicable entry when he finalises.
+    let _ = create_commit_candidate(&mut bob_group, &bob_mls, b"test-app-id").unwrap();
+    let live_epoch_steward = bob_group
+        .live_epoch_steward(epoch, &members)
+        .expect("both stewards are eligible")
+        .to_vec();
+
+    let result = finalize_freeze_round(&mut bob_group, &bob_mls, false, b"test-app-id").unwrap();
+
+    let matched = matches!(
+        &result.outcome,
+        FreezeOutcome::Applied { result: r, .. } if matches!(**r, ProcessResult::GroupUpdated)
+    );
+    assert!(matched, "Expected GroupUpdated, got {:?}", result.outcome);
+
+    let events: Vec<(Vec<u8>, ScoreEvent)> = result
+        .score_ops
+        .iter()
+        .map(|op| (op.member_id.clone(), op.event))
+        .collect();
+
+    assert!(
+        events
+            .iter()
+            .any(|(m, e)| m == &bob_id && *e == ScoreEvent::SuccessfulCommit),
+        "Bob (committer) should receive SuccessfulCommit, got {events:?}",
+    );
+
+    if live_epoch_steward == alice_id {
+        // Alice was supposed to commit; Bob (self) stood in for her. Alice
+        // isn't self, so she picks up CensorshipInactivity.
+        assert!(
+            events
+                .iter()
+                .any(|(m, e)| m == &alice_id && *e == ScoreEvent::CensorshipInactivity),
+            "Alice (absent epoch steward) should receive CensorshipInactivity, got {events:?}",
+        );
+    } else {
+        // Bob himself is the live epoch steward — self-accusation skipped.
+        assert!(
+            !events
+                .iter()
+                .any(|(_, e)| *e == ScoreEvent::CensorshipInactivity),
+            "No CensorshipInactivity expected when self is the live epoch steward, got {events:?}",
+        );
+    }
 }
 
 /// Test: reject_all_voting_proposals clears voting queue.

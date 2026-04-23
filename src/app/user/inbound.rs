@@ -149,10 +149,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
     /// A commit merged. Sync scoring + pending-update buffers, transition to
     /// Working, and run steward housekeeping (auto-fill, election kick-off,
-    /// buffered-update drain).
-    ///
-    /// TODO(track-A): reward the commit author with `SuccessfulCommit` once
-    /// the sender identity is surfaced in ProcessResult / FreezeFinalizeResult.
+    /// buffered-update drain). The commit author's `SuccessfulCommit`
+    /// reward is emitted by `finalize_freeze_round`, not here.
     async fn on_group_updated(&self, group_name: &str) -> Result<(), UserError> {
         {
             let groups = self.groups.read().await;

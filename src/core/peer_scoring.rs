@@ -31,8 +31,6 @@ pub enum ScoreEvent {
     EmergencyNoCreator,
 
     // ── Commit selection ──
-    // TODO(roadmap): wire producers for `SuccessfulCommit`, `HonestCommitAttempt`,
-    // and `MisbehavingCommit` when the commit-selection scoring work lands.
     /// Steward successfully committed a valid batch.
     SuccessfulCommit,
     /// Competing commit with same proposals but different MLS entropy — honest
