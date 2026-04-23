@@ -7,7 +7,7 @@
 use prost::Message;
 
 use de_mls::app::emergency_score_ops;
-use de_mls::core::{ProtocolConfig, ScoreEvent, apply_consensus_result, create_group};
+use de_mls::core::{ProtocolConfig, ScoreEvent, ScoreOp, apply_consensus_result, create_group};
 use de_mls::protos::de_mls::messages::v1::{
     ViolationEvidence, ViolationType, group_update_request,
 };
@@ -148,11 +148,23 @@ fn test_full_pipeline_penalties_to_removal() {
 
     // Apply penalties until target drops below threshold
     // 100 - 50 = 50 (BrokenCommit)
-    scoring.apply_event(group_name, &target_id, ScoreEvent::BrokenCommit);
+    scoring.apply_op(
+        group_name,
+        &ScoreOp {
+            member_id: target_id.clone(),
+            event: ScoreEvent::BrokenCommit,
+        },
+    );
     assert!(!scoring.is_below_threshold(group_name, &target_id));
 
     // 50 - 50 = 0 (EmergencyNoCreator)
-    scoring.apply_event(group_name, &target_id, ScoreEvent::EmergencyNoCreator);
+    scoring.apply_op(
+        group_name,
+        &ScoreOp {
+            member_id: target_id.clone(),
+            event: ScoreEvent::EmergencyNoCreator,
+        },
+    );
     assert!(scoring.is_below_threshold(group_name, &target_id));
 
     // Now steward creates SCORE_BELOW_THRESHOLD ECP
@@ -173,9 +185,7 @@ fn test_full_pipeline_penalties_to_removal() {
     let score_ops = emergency_score_ops(&payload, true);
 
     // Apply score ops
-    for op in &score_ops {
-        scoring.apply_event(group_name, &op.member_id, op.event);
-    }
+    scoring.apply_ops(group_name, &score_ops);
 
     // RemoveMember should be in approved queue
     assert_eq!(group.approved_proposals_count(), 1);
@@ -227,10 +237,34 @@ fn test_steward_skips_self_for_removal() {
     scoring.add_member(group_name, &other_id);
 
     // Drop both below threshold
-    scoring.apply_event(group_name, &steward_id, ScoreEvent::BrokenCommit);
-    scoring.apply_event(group_name, &steward_id, ScoreEvent::EmergencyNoCreator);
-    scoring.apply_event(group_name, &other_id, ScoreEvent::BrokenCommit);
-    scoring.apply_event(group_name, &other_id, ScoreEvent::EmergencyNoCreator);
+    scoring.apply_op(
+        group_name,
+        &ScoreOp {
+            member_id: steward_id.clone(),
+            event: ScoreEvent::BrokenCommit,
+        },
+    );
+    scoring.apply_op(
+        group_name,
+        &ScoreOp {
+            member_id: steward_id.clone(),
+            event: ScoreEvent::EmergencyNoCreator,
+        },
+    );
+    scoring.apply_op(
+        group_name,
+        &ScoreOp {
+            member_id: other_id.clone(),
+            event: ScoreEvent::BrokenCommit,
+        },
+    );
+    scoring.apply_op(
+        group_name,
+        &ScoreOp {
+            member_id: other_id.clone(),
+            event: ScoreEvent::EmergencyNoCreator,
+        },
+    );
 
     assert!(scoring.is_below_threshold(group_name, &steward_id));
     assert!(scoring.is_below_threshold(group_name, &other_id));

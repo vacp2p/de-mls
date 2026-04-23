@@ -5,7 +5,7 @@ use tracing::{error, info};
 use crate::{
     app::{FreezeTimeoutStatus, GroupState, StateChangeHandler, User, UserError},
     core::{
-        DeMlsProvider, FreezeFinalizeResult, FreezeOutcome, GroupEventHandler, ScoreEvent,
+        DeMlsProvider, FreezeFinalizeResult, FreezeOutcome, GroupEventHandler, ScoreEvent, ScoreOp,
         create_commit_candidate, finalize_freeze_round, group_members,
     },
 };
@@ -99,10 +99,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         // outcome. These come from dropped candidates in the phase-3 loop
         // (RFC §Peer Scoring: direct local observation, no ECP needed).
         if !finalize_result.score_ops.is_empty() {
-            let mut scoring = self.scoring();
-            for op in &finalize_result.score_ops {
-                scoring.apply_event(group_name, &op.member_id, op.event);
-            }
+            self.scoring()
+                .apply_ops(group_name, &finalize_result.score_ops);
         }
 
         match finalize_result.outcome {
@@ -174,8 +172,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     // round-trip. Each honest member records the same event
                     // independently; threshold-crossing removal still goes
                     // through SCORE_BELOW_THRESHOLD consensus in steward.rs.
-                    let mut scoring = self.scoring();
-                    scoring.apply_event(group_name, &steward_id, ScoreEvent::CensorshipInactivity);
+                    self.scoring().apply_op(
+                        group_name,
+                        &ScoreOp {
+                            member_id: steward_id,
+                            event: ScoreEvent::CensorshipInactivity,
+                        },
+                    );
                 }
             }
         }

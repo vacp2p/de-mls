@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::core::{PeerScoreStorage, ScoreEvent, ScoringConfig, ScoringProvider};
+use crate::core::{PeerScoreStorage, ScoreEvent, ScoreOp, ScoringConfig, ScoringProvider};
 
 // ── In-memory storage ───────────────────────────────────────────────
 
@@ -98,19 +98,22 @@ impl<S: PeerScoreStorage, P: ScoringProvider> PeerScoringService<S, P> {
         self.storage.remove(group_id, member_id);
     }
 
-    /// Apply `event` to a tracked member; returns the new score, or `None`
-    /// if the member isn't tracked.
-    pub fn apply_event(
-        &mut self,
-        group_id: &str,
-        member_id: &[u8],
-        event: ScoreEvent,
-    ) -> Option<i64> {
-        let current = self.storage.get(group_id, member_id)?;
-        let delta = self.provider.score_delta(event);
+    /// Apply a single [`ScoreOp`] and return the target's new score, or
+    /// `None` if the target isn't tracked.
+    pub fn apply_op(&mut self, group_id: &str, op: &ScoreOp) -> Option<i64> {
+        let current = self.storage.get(group_id, &op.member_id)?;
+        let delta = self.provider.score_delta(op.event);
         let new_score = current.saturating_add(delta);
-        self.storage.set(group_id, member_id, new_score);
+        self.storage.set(group_id, &op.member_id, new_score);
         Some(new_score)
+    }
+
+    /// Apply a batch of [`ScoreOp`]s. Untracked targets are skipped
+    /// silently (same semantics as [`Self::apply_op`]).
+    pub fn apply_ops(&mut self, group_id: &str, ops: &[ScoreOp]) {
+        for op in ops {
+            self.apply_op(group_id, op);
+        }
     }
 
     pub fn score_for(&self, group_id: &str, member_id: &[u8]) -> Option<i64> {
@@ -215,7 +218,13 @@ mod tests {
         let member = b"alice";
         svc.add_member(GROUP, member);
 
-        let new_score = svc.apply_event(GROUP, member, ScoreEvent::EmergencyNoCreator);
+        let new_score = svc.apply_op(
+            GROUP,
+            &ScoreOp {
+                member_id: member.to_vec(),
+                event: ScoreEvent::EmergencyNoCreator,
+            },
+        );
 
         assert_eq!(new_score, Some(50));
         assert_eq!(svc.score_for(GROUP, member), Some(50));
@@ -227,7 +236,13 @@ mod tests {
         let member = b"alice";
         svc.add_member(GROUP, member);
 
-        let new_score = svc.apply_event(GROUP, member, ScoreEvent::SuccessfulCommit);
+        let new_score = svc.apply_op(
+            GROUP,
+            &ScoreOp {
+                member_id: member.to_vec(),
+                event: ScoreEvent::SuccessfulCommit,
+            },
+        );
 
         assert_eq!(new_score, Some(110));
     }
@@ -236,7 +251,13 @@ mod tests {
     fn test_apply_event_unknown_member_returns_none() {
         let mut svc = make_service();
 
-        let result = svc.apply_event(GROUP, b"unknown", ScoreEvent::EmergencyNoCreator);
+        let result = svc.apply_op(
+            GROUP,
+            &ScoreOp {
+                member_id: b"unknown".to_vec(),
+                event: ScoreEvent::EmergencyNoCreator,
+            },
+        );
 
         assert_eq!(result, None);
     }
@@ -247,9 +268,27 @@ mod tests {
         let member = b"alice";
         svc.add_member(GROUP, member);
 
-        svc.apply_event(GROUP, member, ScoreEvent::EmergencyNoCreator);
-        svc.apply_event(GROUP, member, ScoreEvent::NonFinalizedProposalCommit);
-        svc.apply_event(GROUP, member, ScoreEvent::SuccessfulCommit);
+        svc.apply_op(
+            GROUP,
+            &ScoreOp {
+                member_id: member.to_vec(),
+                event: ScoreEvent::EmergencyNoCreator,
+            },
+        );
+        svc.apply_op(
+            GROUP,
+            &ScoreOp {
+                member_id: member.to_vec(),
+                event: ScoreEvent::NonFinalizedProposalCommit,
+            },
+        );
+        svc.apply_op(
+            GROUP,
+            &ScoreOp {
+                member_id: member.to_vec(),
+                event: ScoreEvent::SuccessfulCommit,
+            },
+        );
 
         assert_eq!(svc.score_for(GROUP, member), Some(30));
     }
@@ -261,11 +300,35 @@ mod tests {
         svc.add_member(GROUP, b"bob");
         svc.add_member(GROUP, b"charlie");
 
-        svc.apply_event(GROUP, b"alice", ScoreEvent::EmergencyNoCreator);
-        svc.apply_event(GROUP, b"alice", ScoreEvent::BrokenCommit);
+        svc.apply_op(
+            GROUP,
+            &ScoreOp {
+                member_id: b"alice".to_vec(),
+                event: ScoreEvent::EmergencyNoCreator,
+            },
+        );
+        svc.apply_op(
+            GROUP,
+            &ScoreOp {
+                member_id: b"alice".to_vec(),
+                event: ScoreEvent::BrokenCommit,
+            },
+        );
 
-        svc.apply_event(GROUP, b"charlie", ScoreEvent::EmergencyNoCreator);
-        svc.apply_event(GROUP, b"charlie", ScoreEvent::EmergencyNoCreator);
+        svc.apply_op(
+            GROUP,
+            &ScoreOp {
+                member_id: b"charlie".to_vec(),
+                event: ScoreEvent::EmergencyNoCreator,
+            },
+        );
+        svc.apply_op(
+            GROUP,
+            &ScoreOp {
+                member_id: b"charlie".to_vec(),
+                event: ScoreEvent::EmergencyNoCreator,
+            },
+        );
 
         let below = svc.members_below_threshold(GROUP);
         assert_eq!(below.len(), 2);
@@ -281,8 +344,20 @@ mod tests {
 
         assert!(!svc.is_below_threshold(GROUP, b"alice"));
 
-        svc.apply_event(GROUP, b"alice", ScoreEvent::EmergencyNoCreator);
-        svc.apply_event(GROUP, b"alice", ScoreEvent::BrokenCommit);
+        svc.apply_op(
+            GROUP,
+            &ScoreOp {
+                member_id: b"alice".to_vec(),
+                event: ScoreEvent::EmergencyNoCreator,
+            },
+        );
+        svc.apply_op(
+            GROUP,
+            &ScoreOp {
+                member_id: b"alice".to_vec(),
+                event: ScoreEvent::BrokenCommit,
+            },
+        );
 
         assert!(svc.is_below_threshold(GROUP, b"alice"));
     }
@@ -306,7 +381,13 @@ mod tests {
         );
         svc.add_member(GROUP, b"alice");
 
-        let new_score = svc.apply_event(GROUP, b"alice", ScoreEvent::SuccessfulCommit);
+        let new_score = svc.apply_op(
+            GROUP,
+            &ScoreOp {
+                member_id: b"alice".to_vec(),
+                event: ScoreEvent::SuccessfulCommit,
+            },
+        );
 
         assert_eq!(new_score, Some(i64::MAX));
     }
@@ -320,7 +401,13 @@ mod tests {
         );
         svc.add_member(GROUP, b"alice");
 
-        let new_score = svc.apply_event(GROUP, b"alice", ScoreEvent::SuccessfulCommit);
+        let new_score = svc.apply_op(
+            GROUP,
+            &ScoreOp {
+                member_id: b"alice".to_vec(),
+                event: ScoreEvent::SuccessfulCommit,
+            },
+        );
 
         assert_eq!(new_score, Some(100));
     }
@@ -343,8 +430,20 @@ mod tests {
         }
 
         for (member, event) in &events {
-            svc1.apply_event(GROUP, member, *event);
-            svc2.apply_event(GROUP, member, *event);
+            svc1.apply_op(
+                GROUP,
+                &ScoreOp {
+                    member_id: member.to_vec(),
+                    event: *event,
+                },
+            );
+            svc2.apply_op(
+                GROUP,
+                &ScoreOp {
+                    member_id: member.to_vec(),
+                    event: *event,
+                },
+            );
         }
 
         assert_eq!(
@@ -364,7 +463,13 @@ mod tests {
         svc.add_member(GROUP, b"accuser");
         svc.add_member(GROUP, b"target");
 
-        svc.apply_event(GROUP, b"accuser", ScoreEvent::EmergencyNoCreator);
+        svc.apply_op(
+            GROUP,
+            &ScoreOp {
+                member_id: b"accuser".to_vec(),
+                event: ScoreEvent::EmergencyNoCreator,
+            },
+        );
 
         assert_eq!(svc.score_for(GROUP, b"accuser"), Some(50));
         assert_eq!(svc.score_for(GROUP, b"target"), Some(100));
@@ -380,7 +485,13 @@ mod tests {
         svc.add_member(group_a, member);
         svc.add_member(group_b, member);
 
-        svc.apply_event(group_a, member, ScoreEvent::EmergencyNoCreator);
+        svc.apply_op(
+            group_a,
+            &ScoreOp {
+                member_id: member.to_vec(),
+                event: ScoreEvent::EmergencyNoCreator,
+            },
+        );
 
         assert_eq!(svc.score_for(group_a, member), Some(50));
         assert_eq!(svc.score_for(group_b, member), Some(100));
@@ -395,10 +506,34 @@ mod tests {
         svc.add_member(group_a, b"alice");
         svc.add_member(group_b, b"bob");
 
-        svc.apply_event(group_a, b"alice", ScoreEvent::EmergencyNoCreator);
-        svc.apply_event(group_a, b"alice", ScoreEvent::BrokenCommit);
-        svc.apply_event(group_b, b"bob", ScoreEvent::EmergencyNoCreator);
-        svc.apply_event(group_b, b"bob", ScoreEvent::BrokenCommit);
+        svc.apply_op(
+            group_a,
+            &ScoreOp {
+                member_id: b"alice".to_vec(),
+                event: ScoreEvent::EmergencyNoCreator,
+            },
+        );
+        svc.apply_op(
+            group_a,
+            &ScoreOp {
+                member_id: b"alice".to_vec(),
+                event: ScoreEvent::BrokenCommit,
+            },
+        );
+        svc.apply_op(
+            group_b,
+            &ScoreOp {
+                member_id: b"bob".to_vec(),
+                event: ScoreEvent::EmergencyNoCreator,
+            },
+        );
+        svc.apply_op(
+            group_b,
+            &ScoreOp {
+                member_id: b"bob".to_vec(),
+                event: ScoreEvent::BrokenCommit,
+            },
+        );
 
         let below_a = svc.members_below_threshold(group_a);
         let below_b = svc.members_below_threshold(group_b);

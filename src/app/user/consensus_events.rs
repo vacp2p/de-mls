@@ -211,12 +211,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         payload: &[u8],
         score_ops: &[ScoreOp],
     ) -> Result<(), UserError> {
-        {
-            let mut scoring = self.scoring();
-            for op in score_ops {
-                scoring.apply_event(group_name, &op.member_id, op.event);
-            }
-        }
+        self.scoring().apply_ops(group_name, score_ops);
 
         if let Ok(req) = GroupUpdateRequest::decode(payload)
             && let Some(group_update_request::Payload::EmergencyCriteria(ec)) = &req.payload
