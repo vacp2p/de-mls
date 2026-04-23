@@ -282,7 +282,9 @@ where
     let mut own_commit_discarded = false;
     let group_name = group.group_name().to_owned();
 
-    for chosen in sorted {
+    let mut remaining = sorted.into_iter();
+    while let Some(chosen) = remaining.next() {
+        let author_id = chosen.candidate_msg.steward_identity.clone();
         let apply_result = if chosen.is_local_candidate {
             if own_commit_discarded {
                 tracing::debug!(
@@ -305,6 +307,20 @@ where
 
         match apply_result {
             CandidateOutcome::Terminal(outcome) => {
+                score_ops.push(ScoreOp {
+                    member_id: author_id,
+                    event: ScoreEvent::SuccessfulCommit,
+                });
+                // Unpicked candidates that passed the count filter are
+                // honest competitors under Δ-synchrony (same approved set,
+                // different MLS entropy). RFC §Commit Validation: "MUST
+                // NOT be classified as misbehaviour."
+                for loser in remaining {
+                    score_ops.push(ScoreOp {
+                        member_id: loser.candidate_msg.steward_identity,
+                        event: ScoreEvent::HonestCommitAttempt,
+                    });
+                }
                 return Ok(FreezeFinalizeResult { outcome, score_ops });
             }
             CandidateOutcome::Drop(op) => score_ops.push(op),

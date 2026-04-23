@@ -345,50 +345,44 @@ async fn test_user_layer_score_removal_pipeline() {
 
     assert_eq!(alice.get_group_members(group).await.unwrap().len(), 3);
 
-    // Step 2: Initial scores = 100
-    for (_, score) in alice.get_member_scores(group) {
-        assert_eq!(score, 100);
-    }
-
     let bob_bytes = de_mls::mls_crypto::parse_wallet_to_bytes(&bob.identity_string()).unwrap();
     let alice_bytes = de_mls::mls_crypto::parse_wallet_to_bytes(&alice.identity_string()).unwrap();
 
-    // Step 3: ECP #1 (BrokenCommit against Bob) → Bob goes 100→50
-    let ecp1 = ViolationEvidence::broken_commit(bob_bytes.clone(), 0, Vec::<u8>::new())
-        .with_creator(alice_bytes.clone())
-        .into_update_request()
-        .unwrap();
+    // Baseline after setup — setup commits contributed SuccessfulCommit and
+    // HonestCommitAttempt rewards, so scores are >= 100.
+    let baseline_alice = alice.get_member_score(group, &alice_bytes).unwrap();
+    let baseline_bob = alice.get_member_score(group, &bob_bytes).unwrap();
 
-    approve_ecp(
-        &mut alice,
-        &ah,
-        ecp1,
-        group,
-        &mut [(&mut bob, &bh), (&mut charlie, &ch)],
-        &cs,
-    )
-    .await;
+    // Drive Bob below the removal threshold (0). Each BrokenCommit ECP costs
+    // him 50; the creator (Alice) gains 20 per accepted ECP.
+    let ecps_to_remove = ((baseline_bob + 49) / 50) as usize;
 
-    assert_eq!(alice.get_member_score(group, &bob_bytes), Some(50));
-    assert_eq!(alice.get_member_score(group, &alice_bytes), Some(120));
+    for i in 0..ecps_to_remove {
+        let ecp = ViolationEvidence::broken_commit(bob_bytes.clone(), 0, Vec::<u8>::new())
+            .with_creator(alice_bytes.clone())
+            .into_update_request()
+            .unwrap();
 
-    // Step 4: ECP #2 (BrokenCommit against Bob) → Bob goes 50→0
-    let ecp2 = ViolationEvidence::broken_commit(bob_bytes.clone(), 0, Vec::<u8>::new())
-        .with_creator(alice_bytes.clone())
-        .into_update_request()
-        .unwrap();
+        approve_ecp(
+            &mut alice,
+            &ah,
+            ecp,
+            group,
+            &mut [(&mut bob, &bh), (&mut charlie, &ch)],
+            &cs,
+        )
+        .await;
 
-    approve_ecp(
-        &mut alice,
-        &ah,
-        ecp2,
-        group,
-        &mut [(&mut bob, &bh), (&mut charlie, &ch)],
-        &cs,
-    )
-    .await;
-
-    assert_eq!(alice.get_member_score(group, &bob_bytes), Some(0));
+        let expected_bob = baseline_bob - 50 * (i as i64 + 1);
+        assert_eq!(
+            alice.get_member_score(group, &bob_bytes),
+            Some(expected_bob)
+        );
+        assert_eq!(
+            alice.get_member_score(group, &alice_bytes),
+            Some(baseline_alice + 20 * (i as i64 + 1))
+        );
+    }
 
     // Step 5: Steward should have auto-created SCORE_BELOW_THRESHOLD ECP.
     // check_and_initiate_score_removals runs inside apply_consensus_outcome.
@@ -446,6 +440,10 @@ async fn test_ecp_scores_applied_on_all_nodes() {
     let bob_bytes = de_mls::mls_crypto::parse_wallet_to_bytes(&bob.identity_string()).unwrap();
     let alice_bytes = de_mls::mls_crypto::parse_wallet_to_bytes(&alice.identity_string()).unwrap();
 
+    // Baseline after setup — the join commit rewards the epoch steward.
+    let baseline_alice = alice.get_member_score(group, &alice_bytes).unwrap();
+    let baseline_bob = alice.get_member_score(group, &bob_bytes).unwrap();
+
     let ecp = ViolationEvidence::broken_mls_proposal(bob_bytes.clone(), 0, Vec::<u8>::new())
         .with_creator(alice_bytes.clone())
         .into_update_request()
@@ -453,9 +451,21 @@ async fn test_ecp_scores_applied_on_all_nodes() {
 
     approve_ecp(&mut alice, &ah, ecp, group, &mut [(&mut bob, &bh)], &cs).await;
 
-    // Both nodes should agree
-    assert_eq!(alice.get_member_score(group, &bob_bytes), Some(70));
-    assert_eq!(bob.get_member_score(group, &bob_bytes), Some(70));
-    assert_eq!(alice.get_member_score(group, &alice_bytes), Some(120));
-    assert_eq!(bob.get_member_score(group, &alice_bytes), Some(120));
+    // Both nodes apply identical deltas: target -30, creator +20.
+    assert_eq!(
+        alice.get_member_score(group, &bob_bytes),
+        Some(baseline_bob - 30)
+    );
+    assert_eq!(
+        bob.get_member_score(group, &bob_bytes),
+        Some(baseline_bob - 30)
+    );
+    assert_eq!(
+        alice.get_member_score(group, &alice_bytes),
+        Some(baseline_alice + 20)
+    );
+    assert_eq!(
+        bob.get_member_score(group, &alice_bytes),
+        Some(baseline_alice + 20)
+    );
 }

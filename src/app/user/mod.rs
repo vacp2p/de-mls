@@ -105,9 +105,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
     }
 
-    /// Default score deltas for all events. Entries without an active producer
-    /// (`SuccessfulCommit`, `NonFinalizedProposalCommit`) are pre-wired so the
-    /// table doesn't need a migration once the roadmap items land.
+    /// Default score deltas for all events. `NonFinalizedProposalCommit`
+    /// is pre-wired against its future producer (see `docs/ROADMAP.md`).
     fn default_score_deltas() -> HashMap<ScoreEvent, i64> {
         HashMap::from([
             // ECP target penalties (violation-type-specific)
@@ -117,9 +116,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             // ECP creator outcomes
             (ScoreEvent::EmergencyYesCreator, 20),
             (ScoreEvent::EmergencyNoCreator, -50),
-            // Roadmap: commit selection
+            // Commit selection
             (ScoreEvent::SuccessfulCommit, 10),
-            // Roadmap: commit validation
+            (ScoreEvent::HonestCommitAttempt, 5),
+            (ScoreEvent::MisbehavingCommit, -30),
+            // Not yet wired
             (ScoreEvent::NonFinalizedProposalCommit, -30),
         ])
     }

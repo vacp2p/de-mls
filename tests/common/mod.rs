@@ -232,6 +232,8 @@ pub fn default_deltas() -> HashMap<ScoreEvent, i64> {
         (ScoreEvent::EmergencyYesCreator, 20),
         (ScoreEvent::EmergencyNoCreator, -50),
         (ScoreEvent::SuccessfulCommit, 10),
+        (ScoreEvent::HonestCommitAttempt, 5),
+        (ScoreEvent::MisbehavingCommit, -30),
         (ScoreEvent::NonFinalizedProposalCommit, -30),
     ])
 }
