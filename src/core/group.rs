@@ -8,7 +8,7 @@ use crate::core::CoreError;
 use crate::core::proposal_kind::ProposalKind;
 use crate::core::steward_list::{ProtocolConfig, StewardList};
 use crate::protos::de_mls::messages::v1::{
-    CommitCandidate, GroupUpdateRequest, ViolationEvidence, group_update_request,
+    CommitCandidate, GroupUpdateRequest, group_update_request,
 };
 
 /// Consensus proposal identifier (assigned by the consensus service).
@@ -20,29 +20,6 @@ pub type ProposalId = u32;
 /// at least `threshold_duration`; this count-based cap is a placeholder until
 /// that becomes a first-class config value (see `docs/ROADMAP.md`).
 const MAX_EPOCH_HISTORY: usize = 10;
-
-/// Canonical fingerprint for a violation so the same event detected
-/// independently by multiple members collapses to one key.
-///
-/// Intentionally narrower than the full evidence: `creator_member_id` and
-/// evidence data (hashes etc.) can legitimately differ between detectors
-/// while still describing the same violation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct EcpFingerprint {
-    pub violation_type: i32,
-    pub target_member_id: Vec<u8>,
-    pub violation_epoch: u64,
-}
-
-impl EcpFingerprint {
-    pub fn from_evidence(ev: &ViolationEvidence) -> Self {
-        Self {
-            violation_type: ev.violation_type,
-            target_member_id: ev.target_member_id.clone(),
-            violation_epoch: ev.epoch,
-        }
-    }
-}
 
 /// Derive a deterministic proposal ID for an auto-approved self-leave,
 /// keyed on the leaver's identity. Every node computes the same ID, so
@@ -155,12 +132,6 @@ pub struct Group {
     /// [`StewardList::generate`] so each retry proposes a different
     /// list composition.
     reelection_round: u32,
-    /// Buffer of detected violations observed locally but deferred because
-    /// this node isn't the responsible ECP proposer. Keyed by violation
-    /// fingerprint so repeat detections of the same event don't stack.
-    /// Entries are cleared when the corresponding ECP is observed in the
-    /// voting queue or resolved via consensus.
-    pending_ecps: HashMap<EcpFingerprint, ViolationEvidence>,
     /// Proposal IDs already dispatched through `apply_consensus_outcome`.
     /// The consensus library can re-emit `ConsensusReached` (timeout-path
     /// race); this guards against re-applying state and double-firing events.
@@ -183,7 +154,6 @@ impl Group {
             freeze_round: None,
             pending_updates: HashMap::new(),
             reelection_round: 0,
-            pending_ecps: HashMap::new(),
             consensus_outcomes_applied: HashSet::new(),
         }
     }
@@ -287,57 +257,6 @@ impl Group {
             Some(l) => l.live_epoch_and_backup(epoch, |c| self.is_steward_eligible(c, members)),
             None => (None, None),
         }
-    }
-
-    /// Identity authorized to submit an ECP for the given violation.
-    ///
-    /// Deterministic: all members computing this against the same steward
-    /// list + MLS member set + target agree on a single proposer, so only
-    /// one ECP per violation reaches consensus. Skips the target itself
-    /// (no self-accusation) and stewards pending a self-leave.
-    ///
-    /// Returns `None` if the list is exhausted at `violation_epoch` or no
-    /// steward passes the predicate (e.g., the only eligible stewards are
-    /// all targeted by the violation).
-    pub fn responsible_ecp_proposer<'a>(
-        &'a self,
-        violation_epoch: u64,
-        target: &[u8],
-        members: &[Vec<u8>],
-    ) -> Option<&'a [u8]> {
-        self.steward_list.as_ref().and_then(|l| {
-            l.responsible_ecp_proposer(violation_epoch, target, |candidate| {
-                self.is_steward_eligible(candidate, members)
-            })
-        })
-    }
-
-    /// Buffer a locally-detected violation. Idempotent per fingerprint —
-    /// re-detecting the same event doesn't add a second entry. Returns
-    /// `true` if the entry was newly inserted, `false` if it already existed.
-    pub fn buffer_pending_ecp(&mut self, evidence: ViolationEvidence) -> bool {
-        let key = EcpFingerprint::from_evidence(&evidence);
-        self.pending_ecps.insert(key, evidence).is_none()
-    }
-
-    /// Drop a pending ECP matching this evidence's fingerprint. Called when
-    /// a peer-authored ECP is observed in the voting queue or the emergency
-    /// resolves via consensus — either way we no longer need to track it.
-    pub fn resolve_pending_ecp(&mut self, evidence: &ViolationEvidence) -> bool {
-        let key = EcpFingerprint::from_evidence(evidence);
-        self.pending_ecps.remove(&key).is_some()
-    }
-
-    /// Number of locally-buffered ECPs waiting for the responsible proposer
-    /// to submit.
-    pub fn pending_ecp_count(&self) -> usize {
-        self.pending_ecps.len()
-    }
-
-    /// Read access to buffered ECPs. Used by the app layer to decide whether
-    /// to take over submission when the responsible proposer is ineligible.
-    pub fn pending_ecps(&self) -> &HashMap<EcpFingerprint, ViolationEvidence> {
-        &self.pending_ecps
     }
 
     fn is_steward_eligible(&self, candidate: &[u8], members: &[Vec<u8>]) -> bool {

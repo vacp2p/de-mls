@@ -3,8 +3,9 @@
 
 use prost::Message;
 
+use de_mls::app::emergency_score_ops;
 use de_mls::core::{
-    FreezeFinalizeResult, ProcessResult, ProposalId, ScoreEvent, apply_consensus_result,
+    FreezeOutcome, ProcessResult, ProposalId, ScoreEvent, apply_consensus_result,
     create_commit_candidate, finalize_freeze_round, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
@@ -129,17 +130,18 @@ fn test_apply_consensus_result_emergency_accepted_owner() {
     group.store_voting_proposal(proposal_id, emergency_request);
     assert!(group.is_owner_of_proposal(proposal_id));
 
-    let result = apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
+    apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
+    let score_ops = emergency_score_ops(&payload, true);
 
     // Emergency proposal should NOT remain in approved queue
     assert_eq!(group.approved_proposals_count(), 0);
 
     // Score ops: target penalty + creator reward
-    assert_eq!(result.score_ops.len(), 2);
-    assert_eq!(result.score_ops[0].member_id, target_id);
-    assert_eq!(result.score_ops[0].event, ScoreEvent::BrokenCommit);
-    assert_eq!(result.score_ops[1].member_id, creator_id);
-    assert_eq!(result.score_ops[1].event, ScoreEvent::EmergencyYesCreator);
+    assert_eq!(score_ops.len(), 2);
+    assert_eq!(score_ops[0].member_id, target_id);
+    assert_eq!(score_ops[0].event, ScoreEvent::BrokenCommit);
+    assert_eq!(score_ops[1].member_id, creator_id);
+    assert_eq!(score_ops[1].event, ScoreEvent::EmergencyYesCreator);
 }
 
 /// Test: apply_consensus_result for emergency criteria proposal (non-owner, accepted)
@@ -163,17 +165,18 @@ fn test_apply_consensus_result_emergency_accepted_non_owner() {
     let proposal_id = 88;
     assert!(!group.is_owner_of_proposal(proposal_id));
 
-    let result = apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
+    apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
+    let score_ops = emergency_score_ops(&payload, true);
 
     // Emergency proposal should NOT be in approved queue
     assert_eq!(group.approved_proposals_count(), 0);
 
     // Score ops: target penalty + creator reward (from evidence, not local_id)
-    assert_eq!(result.score_ops.len(), 2);
-    assert_eq!(result.score_ops[0].member_id, target_id);
-    assert_eq!(result.score_ops[0].event, ScoreEvent::CensorshipInactivity);
-    assert_eq!(result.score_ops[1].member_id, creator_id);
-    assert_eq!(result.score_ops[1].event, ScoreEvent::EmergencyYesCreator);
+    assert_eq!(score_ops.len(), 2);
+    assert_eq!(score_ops[0].member_id, target_id);
+    assert_eq!(score_ops[0].event, ScoreEvent::CensorshipInactivity);
+    assert_eq!(score_ops[1].member_id, creator_id);
+    assert_eq!(score_ops[1].event, ScoreEvent::EmergencyYesCreator);
 }
 
 /// Test: apply_consensus_result errors on invalid (unparseable) payload.
@@ -477,8 +480,8 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     let finalize =
         finalize_freeze_round(&mut joiner_handle, &joiner_mls, false, b"test-app-id").unwrap();
     let matched = matches!(
-        &finalize,
-        FreezeFinalizeResult::Outcome { result, .. } if matches!(**result, ProcessResult::GroupUpdated)
+        &finalize.outcome,
+        FreezeOutcome::Applied { result, .. } if matches!(**result, ProcessResult::GroupUpdated)
     );
     assert!(
         matched,
@@ -531,7 +534,7 @@ fn test_no_valid_candidate_triggers_no_candidate() {
 
     let finalize = finalize_freeze_round(&mut group, &steward_mls, false, b"test-app-id").unwrap();
     assert!(
-        matches!(finalize, FreezeFinalizeResult::NoCandidate),
+        matches!(finalize.outcome, FreezeOutcome::NoCandidate),
         "Expected NoCandidate when no candidates buffered, got {:?}",
         finalize
     );

@@ -8,6 +8,7 @@ use prost::Message;
 use tracing::{error, info};
 
 use crate::{
+    app::user::emergency::emergency_score_ops,
     app::{GroupState, StateChangeHandler, User, UserError},
     core::{
         DeMlsProvider, GroupEventHandler, ProposalKind, ScoreOp, apply_consensus_result,
@@ -96,14 +97,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             }
         }
 
-        if !consensus_apply.score_ops.is_empty() {
-            self.handle_emergency_scored(
-                group_name,
-                proposal_id,
-                &payload,
-                &consensus_apply.score_ops,
-            )
-            .await?;
+        let score_ops = emergency_score_ops(&payload, approved);
+        if !score_ops.is_empty() {
+            self.handle_emergency_scored(group_name, proposal_id, &payload, &score_ops)
+                .await?;
         }
 
         Ok(())
@@ -214,12 +211,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         payload: &[u8],
         score_ops: &[ScoreOp],
     ) -> Result<(), UserError> {
-        {
-            let mut scoring = self.scoring();
-            for op in score_ops {
-                scoring.apply_event(group_name, &op.member_id, op.event);
-            }
-        }
+        self.scoring().apply_ops(group_name, score_ops);
 
         if let Ok(req) = GroupUpdateRequest::decode(payload)
             && let Some(group_update_request::Payload::EmergencyCriteria(ec)) = &req.payload
@@ -228,7 +220,6 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let mut groups = self.groups.write().await;
             if let Some(entry) = groups.get_mut(group_name) {
                 entry.group.resolve_pending_removal(&ev.target_member_id);
-                entry.group.resolve_pending_ecp(ev);
             }
         }
 

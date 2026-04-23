@@ -3,7 +3,7 @@
 use prost::Message;
 
 use de_mls::core::{
-    CoreError, FreezeFinalizeResult, ProcessResult, ProtocolConfig, StewardList, build_message,
+    CoreError, FreezeOutcome, ProcessResult, ProtocolConfig, StewardList, build_message,
     create_commit_candidate, finalize_freeze_round, group_members, prepare_to_join,
     process_inbound,
 };
@@ -265,8 +265,8 @@ fn test_process_inbound_leave_group() {
     let finalize =
         finalize_freeze_round(&mut joiner_handle, &joiner_mls, false, b"test-app-id").unwrap();
     let matched = matches!(
-        &finalize,
-        FreezeFinalizeResult::Outcome { result, .. } if matches!(**result, ProcessResult::LeaveGroup)
+        &finalize.outcome,
+        FreezeOutcome::Applied { result, .. } if matches!(**result, ProcessResult::LeaveGroup)
     );
     assert!(
         matched,

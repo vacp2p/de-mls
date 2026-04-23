@@ -1,9 +1,9 @@
 //! Pure consensus result application.
 //!
-//! This module contains only [`apply_consensus_result`], which updates a
-//! [`Group`]'s proposal state based on a consensus outcome.
-//! It has no I/O, no service calls, and no event callbacks — it is a pure,
-//! synchronous state transition.
+//! Updates a [`Group`]'s proposal queues in response to a consensus
+//! outcome. No I/O, no service calls, no peer-scoring policy — score
+//! deltas for emergency outcomes are derived at the app layer in
+//! `crate::app::user::emergency`.
 //!
 //! App-layer helpers that wire consensus events to the UI and transport
 //! (`submit_proposal`, `cast_vote`, `forward_incoming_proposal`,
@@ -12,7 +12,6 @@
 use prost::Message;
 use tracing::info;
 
-use crate::core::peer_scoring::{ScoreEvent, ScoreOp};
 use crate::core::{CoreError, Group};
 use crate::mls_crypto::ShortId;
 use crate::protos::de_mls::messages::v1::{
@@ -20,49 +19,14 @@ use crate::protos::de_mls::messages::v1::{
     group_update_request,
 };
 
-/// Result of applying a consensus outcome: any score ops the app should feed
-/// to its peer-scoring service, plus the accepted election proposal (if any)
-/// for the app to validate and apply as a new steward list.
+/// Result of applying a consensus outcome: the accepted election proposal
+/// (if any) for the app to validate and install as a new steward list.
+///
+/// Score ops for emergency outcomes are produced separately by
+/// `crate::app::user::emergency`.
 #[derive(Debug, Clone, Default)]
 pub struct ConsensusApplyResult {
-    pub score_ops: Vec<ScoreOp>,
     pub election: Option<StewardElectionProposal>,
-}
-
-/// Map a proto `ViolationType` to the corresponding target penalty `ScoreEvent`.
-///
-/// Callers gate `ScoreBelowThreshold` out upstream (the target is being removed
-/// anyway), so only the three penalty kinds reach this function in practice.
-/// Unknown / `Unspecified` wire values fall back to the harshest penalty.
-fn target_score_event(violation_type: i32) -> ScoreEvent {
-    match ViolationType::try_from(violation_type) {
-        Ok(ViolationType::BrokenCommit) => ScoreEvent::BrokenCommit,
-        Ok(ViolationType::BrokenMlsProposal) => ScoreEvent::BrokenMlsProposal,
-        Ok(ViolationType::CensorshipInactivity) => ScoreEvent::CensorshipInactivity,
-        _ => ScoreEvent::BrokenCommit,
-    }
-}
-
-/// Accepted emergency → violation-specific target penalty + flat creator reward.
-fn emergency_accepted_score_ops(evidence: &ViolationEvidence) -> [ScoreOp; 2] {
-    [
-        ScoreOp {
-            member_id: evidence.target_member_id.clone(),
-            event: target_score_event(evidence.violation_type),
-        },
-        ScoreOp {
-            member_id: evidence.creator_member_id.clone(),
-            event: ScoreEvent::EmergencyYesCreator,
-        },
-    ]
-}
-
-/// Rejected emergency → flat creator penalty (false accusation).
-fn emergency_rejected_score_op(evidence: &ViolationEvidence) -> ScoreOp {
-    ScoreOp {
-        member_id: evidence.creator_member_id.clone(),
-        event: ScoreEvent::EmergencyNoCreator,
-    }
 }
 
 /// Extract emergency evidence from a `GroupUpdateRequest`, if present.
@@ -95,19 +59,19 @@ fn removal_request_for(evidence: &ViolationEvidence) -> GroupUpdateRequest {
     }
 }
 
-/// Apply a consensus result to the group (pure, synchronous).
+/// Apply a consensus result to the group's proposal queues.
 ///
-/// Determines ownership from the group and updates proposal state:
-/// - **Approved + owner** → move to approved queue; if emergency, remove and score
-/// - **Approved + non-owner** → insert into approved queue; if emergency, score only
-/// - **Rejected + owner** → remove from voting queue; if emergency, score creator
-/// - **Rejected + non-owner** → no group mutation; if emergency, score creator
-///
-/// `payload` is the serialized `GroupUpdateRequest` fetched from the consensus service.
-/// Both owner and non-owner paths decode it to extract emergency evidence.
-///
-/// Returns a [`ConsensusApplyResult`] containing score ops (0, 1, or 2) that the
-/// application layer should feed into a [`PeerScoringService`](crate::app::PeerScoringService).
+/// Routes by proposal kind:
+/// - **Election (accepted)** — returned via `election` for the app to
+///   validate and install.
+/// - **`SCORE_BELOW_THRESHOLD` (accepted)** — replaced in the approved
+///   queue with a `RemoveMember` request targeting the threshold-crossed
+///   member.
+/// - **Other emergency (accepted)** — transient in the approved queue:
+///   briefly marked approved then removed. No MLS op to commit.
+/// - **Regular proposal (accepted)** — moved to the approved queue.
+/// - **Rejected (any kind)** — dropped from the voting queue if we
+///   owned it.
 pub fn apply_consensus_result(
     group: &mut Group,
     proposal_id: u32,
@@ -121,7 +85,7 @@ pub fn apply_consensus_result(
     let is_emergency = evidence.is_some();
     let is_election = election.is_some();
 
-    // ── Election proposals: no MLS operation, no score ops ──
+    // ── Election proposals: no MLS operation ──
     if is_election {
         if approved {
             if is_owner {
@@ -139,7 +103,6 @@ pub fn apply_consensus_result(
             );
             return Ok(ConsensusApplyResult {
                 election: Some(election),
-                ..Default::default()
             });
         } else {
             if is_owner {
@@ -180,42 +143,24 @@ pub fn apply_consensus_result(
         group.mark_proposal_as_rejected(proposal_id);
     }
 
-    match evidence {
-        Some(ev) if approved => {
+    if let Some(ev) = evidence.as_ref() {
+        if approved {
             info!(
                 proposal_id,
                 target = %ShortId(&ev.target_member_id),
                 creator = %ShortId(&ev.creator_member_id),
                 "emergency criteria proposal accepted"
             );
-            let ops = if is_score_below_threshold(&ev) {
-                // Target is already at/below threshold and will be removed —
-                // skip the redundant penalty, only reward the creator.
-                vec![ScoreOp {
-                    member_id: ev.creator_member_id.clone(),
-                    event: ScoreEvent::EmergencyYesCreator,
-                }]
-            } else {
-                emergency_accepted_score_ops(&ev).into()
-            };
-            Ok(ConsensusApplyResult {
-                score_ops: ops,
-                ..Default::default()
-            })
-        }
-        Some(ev) => {
+        } else {
             info!(
                 proposal_id,
                 creator = %ShortId(&ev.creator_member_id),
                 "emergency criteria proposal rejected"
             );
-            Ok(ConsensusApplyResult {
-                score_ops: vec![emergency_rejected_score_op(&ev)],
-                ..Default::default()
-            })
         }
-        None => Ok(ConsensusApplyResult::default()),
     }
+
+    Ok(ConsensusApplyResult::default())
 }
 
 #[cfg(test)]
@@ -247,8 +192,8 @@ mod tests {
         }
     }
 
-    /// YES on an election the local node owns returns the accepted proposal,
-    /// doesn't leave the proposal in the approved queue, and emits no score ops.
+    /// YES on an election the local node owns returns the accepted proposal
+    /// and doesn't leave the proposal in the approved queue.
     #[test]
     fn election_yes_owner_returns_outcome_and_clears_queue() {
         let config = ProtocolConfig::new(2, 5).unwrap();
@@ -268,7 +213,6 @@ mod tests {
         let outcome = result.election.expect("election outcome expected");
         assert_eq!(outcome.election_epoch, 10);
         assert_eq!(outcome.proposed_stewards.len(), 5);
-        assert!(result.score_ops.is_empty());
         assert_eq!(group.approved_proposals_count(), 0);
     }
 
@@ -287,7 +231,6 @@ mod tests {
                 .unwrap();
 
         assert!(result.election.is_none());
-        assert!(result.score_ops.is_empty());
         assert_eq!(group.approved_proposals_count(), 0);
     }
 

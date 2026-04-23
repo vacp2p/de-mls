@@ -24,14 +24,14 @@ use crate::{
         PeerScoringService, StateChangeHandler, UserError,
     },
     core::{
-        DeMlsProvider, DefaultProvider, Group, GroupEventHandler, ProviderConsensus, ScoreEvent,
-        ScoringConfig,
+        DeMlsProvider, DefaultProvider, Group, GroupEventHandler, ProviderConsensus, ScoringConfig,
     },
     mls_crypto::{MemoryDeMlsStorage, MlsService},
 };
 
 mod consensus;
 mod consensus_events;
+pub(crate) mod emergency;
 mod freeze;
 mod inbound;
 mod lifecycle;
@@ -85,6 +85,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         state_handler: Arc<SCH>,
         default_group_config: GroupConfig,
     ) -> Self {
+        let scoring_config = ScoringConfig {
+            default_score: default_group_config.default_peer_score,
+            removal_threshold: default_group_config.threshold_peer_score,
+        };
         Self {
             mls_service: Arc::new(mls_service),
             groups: Arc::new(RwLock::new(HashMap::new())),
@@ -95,33 +99,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             default_group_config,
             scoring_service: Arc::new(Mutex::new(PeerScoringService::new(
                 InMemoryPeerScoreStorage::new(),
-                FixedScoringProvider::new(Self::default_score_deltas()),
-                ScoringConfig {
-                    default_score: 100,
-                    removal_threshold: 0,
-                },
+                FixedScoringProvider::with_default_deltas(),
+                scoring_config,
             ))),
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
         }
-    }
-
-    /// Default score deltas for all events. Entries without an active producer
-    /// (`SuccessfulCommit`, `NonFinalizedProposalCommit`) are pre-wired so the
-    /// table doesn't need a migration once the roadmap items land.
-    fn default_score_deltas() -> HashMap<ScoreEvent, i64> {
-        HashMap::from([
-            // ECP target penalties (violation-type-specific)
-            (ScoreEvent::BrokenCommit, -50),
-            (ScoreEvent::BrokenMlsProposal, -30),
-            (ScoreEvent::CensorshipInactivity, -40),
-            // ECP creator outcomes
-            (ScoreEvent::EmergencyYesCreator, 20),
-            (ScoreEvent::EmergencyNoCreator, -50),
-            // Roadmap: commit selection
-            (ScoreEvent::SuccessfulCommit, 10),
-            // Roadmap: commit validation
-            (ScoreEvent::NonFinalizedProposalCommit, -30),
-        ])
     }
 
     /// Lock the scoring service, recovering from a poisoned mutex.

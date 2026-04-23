@@ -21,9 +21,14 @@ mod peer_scoring;
 mod state_machine;
 mod user;
 
-pub use config::GroupConfig;
+pub use config::{
+    DEFAULT_CONSENSUS_TIMEOUT, DEFAULT_CREATOR_AUTO_VOTE_DELAY, DEFAULT_EPOCH_DURATION,
+    DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_MAX_REELECTION_RETRIES, DEFAULT_PEER_SCORE,
+    DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION, DEFAULT_THRESHOLD_PEER_SCORE,
+    GroupConfig,
+};
 pub use consensus_bridge::{
-    cast_vote, forward_incoming_proposal, forward_incoming_vote, submit_proposal,
+    ProposalParams, cast_vote, forward_incoming_proposal, forward_incoming_vote, submit_proposal,
 };
 pub use display::{
     MemberRole, MessageType, format_group_request, format_group_request_target, message_types,
@@ -32,3 +37,4 @@ pub use error::UserError;
 pub use peer_scoring::{FixedScoringProvider, InMemoryPeerScoreStorage, PeerScoringService};
 pub use state_machine::{FreezeTimeoutStatus, GroupState, GroupStateMachine, StateChangeHandler};
 pub use user::User;
+pub use user::emergency::emergency_score_ops;

@@ -17,7 +17,7 @@ use crate::{
     mls_crypto::ShortId,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationMessage, GroupSync, GroupUpdateRequest, LeaveRequest,
-        ViolationEvidence, group_update_request,
+        group_update_request,
     },
 };
 
@@ -49,9 +49,6 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             ProcessResult::JoinedGroup(name) => self.on_joined_group(&name).await,
             ProcessResult::GroupUpdated => self.on_group_updated(group_name).await,
             ProcessResult::LeaveGroup => self.on_leave_group(group_name).await,
-            ProcessResult::ViolationDetected(evidence) => {
-                self.on_violation_detected(group_name, evidence).await
-            }
             ProcessResult::CommitCandidateReceived => {
                 self.on_commit_candidate_received(group_name).await
             }
@@ -84,11 +81,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let mut groups = self.groups.write().await;
             if let Some(entry) = groups.get_mut(group_name) {
                 match &req.payload {
-                    Some(group_update_request::Payload::EmergencyCriteria(ec)) => {
+                    Some(group_update_request::Payload::EmergencyCriteria(_)) => {
                         entry.group.observe_emergency(proposal.proposal_id);
-                        if let Some(ev) = &ec.evidence {
-                            entry.group.resolve_pending_ecp(ev);
-                        }
                     }
                     Some(group_update_request::Payload::InviteMember(_))
                     | Some(group_update_request::Payload::RemoveMember(_)) => {
@@ -209,55 +203,6 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         self.groups.write().await.remove(group_name);
         self.cleanup_consensus_scope(group_name).await?;
         self.handler.on_leave_group(group_name).await?;
-        Ok(())
-    }
-
-    /// Only the deterministic responsible proposer submits the ECP for a
-    /// violation; everyone else buffers the evidence so we can take over if
-    /// the responsible proposer is offline.
-    async fn on_violation_detected(
-        &self,
-        group_name: &str,
-        evidence: ViolationEvidence,
-    ) -> Result<(), UserError> {
-        info!(
-            group = group_name,
-            violation_type = evidence.violation_type,
-            target = %ShortId(&evidence.target_member_id),
-            "violation detected"
-        );
-        let evidence = evidence.with_creator(self.mls_service.wallet_bytes());
-        let self_identity = self.mls_service.wallet_bytes();
-
-        let should_submit = {
-            let mut groups = self.groups.write().await;
-            let Some(entry) = groups.get_mut(group_name) else {
-                return Ok(());
-            };
-            let members = group_members(&entry.group, &self.mls_service)?;
-            let responsible = entry
-                .group
-                .responsible_ecp_proposer(evidence.epoch, &evidence.target_member_id, &members)
-                .map(|id| id.to_vec());
-            let is_responsible = responsible.as_ref().is_some_and(|p| p == &self_identity);
-            if !is_responsible {
-                entry.group.buffer_pending_ecp(evidence.clone());
-                info!(
-                    group = group_name,
-                    responsible = responsible
-                        .as_deref()
-                        .map(ShortId)
-                        .map_or_else(|| "unknown".to_string(), |s| s.to_string()),
-                    "ECP deferred (not responsible proposer)"
-                );
-            }
-            is_responsible
-        };
-
-        if should_submit {
-            self.initiate_proposal(group_name.to_string(), evidence.into_update_request()?)
-                .await?;
-        }
         Ok(())
     }
 

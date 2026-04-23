@@ -5,10 +5,9 @@ use tracing::{error, info};
 use crate::{
     app::{FreezeTimeoutStatus, GroupState, StateChangeHandler, User, UserError},
     core::{
-        DeMlsProvider, FreezeFinalizeResult, GroupEventHandler, create_commit_candidate,
-        finalize_freeze_round, group_members,
+        DeMlsProvider, FreezeFinalizeResult, FreezeOutcome, GroupEventHandler, ScoreEvent, ScoreOp,
+        create_commit_candidate, finalize_freeze_round, group_members,
     },
-    protos::de_mls::messages::v1::ViolationEvidence,
 };
 
 impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
@@ -91,13 +90,21 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 Ok(result) => result,
                 Err(e) => {
                     error!(group = group_name, error = %e, "freeze finalize failed");
-                    FreezeFinalizeResult::NoCandidate
+                    FreezeFinalizeResult::default()
                 }
             }
         };
 
-        match finalize_result {
-            FreezeFinalizeResult::Outcome { result, outbound } => {
+        // Apply locally-observed score events before dispatching the
+        // outcome. These come from dropped candidates in the phase-3 loop
+        // (RFC §Peer Scoring: direct local observation, no ECP needed).
+        if !finalize_result.score_ops.is_empty() {
+            self.scoring()
+                .apply_ops(group_name, &finalize_result.score_ops);
+        }
+
+        match finalize_result.outcome {
+            FreezeOutcome::Applied { result, outbound } => {
                 // Welcomes are deferred to here so joiners can't advance
                 // epoch ahead of the steward.
                 let has_welcome = outbound
@@ -123,13 +130,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 }
                 return Ok(FreezeTimeoutStatus::Applied);
             }
-            FreezeFinalizeResult::NoCandidate => {
-                // Censorship ECP target. `Some` only when we saw approved
-                // proposals go unanswered *and* can attribute the miss to a
-                // live steward other than ourselves. Self-accusations are
-                // skipped because the RFC's responsible-proposer rule has
-                // peers file the ECP deterministically — us duplicating it
-                // would just create competing evidence for the same event.
+            FreezeOutcome::NoCandidate => {
+                // `accuse_target` is `Some` only when we had approved proposals
+                // go unanswered *and* can attribute the miss to a live steward
+                // other than ourselves. Self-penalties are skipped — the
+                // node that failed to commit observes its own state directly
+                // and doesn't need to record a ScoreOp against itself.
                 let (next_state, accuse_target) = {
                     let mut groups = self.groups.write().await;
                     let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
@@ -147,7 +153,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                             .group
                             .live_epoch_steward(violation_epoch, &members)
                             .filter(|id| !id.is_empty() && *id != self_identity.as_slice())
-                            .map(|id| (id.to_vec(), violation_epoch));
+                            .map(|id| id.to_vec());
 
                         (GroupState::Reelection, target)
                     } else {
@@ -161,24 +167,18 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     .on_state_changed(group_name, next_state)
                     .await;
 
-                if let Some((steward_id, violation_epoch)) = accuse_target {
-                    let request =
-                        match ViolationEvidence::censorship_inactivity(steward_id, violation_epoch)
-                            .with_creator(self.mls_service.wallet_bytes())
-                            .into_update_request()
-                        {
-                            Ok(r) => r,
-                            Err(e) => {
-                                error!(group = group_name, error = %e, "ECP build failed");
-                                return Ok(FreezeTimeoutStatus::TimedOut { has_proposals });
-                            }
-                        };
-                    if let Err(e) = self
-                        .initiate_proposal(group_name.to_string(), request)
-                        .await
-                    {
-                        error!(group = group_name, error = %e, "emergency vote start failed");
-                    }
+                if let Some(steward_id) = accuse_target {
+                    // Local observation → direct peer-score penalty, no ECP
+                    // round-trip. Each honest member records the same event
+                    // independently; threshold-crossing removal still goes
+                    // through SCORE_BELOW_THRESHOLD consensus in steward.rs.
+                    self.scoring().apply_op(
+                        group_name,
+                        &ScoreOp {
+                            member_id: steward_id,
+                            event: ScoreEvent::CensorshipInactivity,
+                        },
+                    );
                 }
             }
         }

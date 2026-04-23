@@ -8,9 +8,9 @@
 
 use prost::Message;
 
-use de_mls::app::PeerScoringService;
+use de_mls::app::{PeerScoringService, emergency_score_ops};
 use de_mls::core::{
-    Group, ProcessResult, ProtocolConfig, ScoreEvent, apply_consensus_result,
+    Group, ProcessResult, ProtocolConfig, ScoreEvent, ScoreOp, apply_consensus_result,
     build_key_package_message, create_group, group_members, prepare_to_join, process_inbound,
 };
 use de_mls::ds::WELCOME_SUBTOPIC;
@@ -133,19 +133,16 @@ fn test_scoring_pipeline_create_join_emergency() {
     bob_handle.store_voting_proposal(proposal_id, emergency.clone());
 
     // Bob's node: approved owner (payload available from consensus service)
-    let bob_result = apply_consensus_result(&mut bob_handle, proposal_id, true, &payload).unwrap();
-    assert_eq!(bob_result.score_ops.len(), 2);
-    for op in &bob_result.score_ops {
-        bob_scoring.apply_event(group_name, &op.member_id, op.event);
-    }
+    apply_consensus_result(&mut bob_handle, proposal_id, true, &payload).unwrap();
+    let bob_score_ops = emergency_score_ops(&payload, true);
+    assert_eq!(bob_score_ops.len(), 2);
+    bob_scoring.apply_ops(group_name, &bob_score_ops);
 
     // Alice's node: approved non-owner (she receives the payload)
-    let alice_result =
-        apply_consensus_result(&mut alice_handle, proposal_id, true, &payload).unwrap();
-    assert_eq!(alice_result.score_ops.len(), 2);
-    for op in &alice_result.score_ops {
-        scoring.apply_event(group_name, &op.member_id, op.event);
-    }
+    apply_consensus_result(&mut alice_handle, proposal_id, true, &payload).unwrap();
+    let alice_score_ops = emergency_score_ops(&payload, true);
+    assert_eq!(alice_score_ops.len(), 2);
+    scoring.apply_ops(group_name, &alice_score_ops);
 
     // Verify scores: Alice penalized (target), Bob rewarded (creator)
     // Both nodes should agree on scores.
@@ -214,29 +211,20 @@ fn test_scoring_pipeline_emergency_rejected() {
     // Consensus rejects it (false accusation)
 
     // Bob's node: rejected owner (payload available from consensus service)
-    let bob_result = apply_consensus_result(&mut bob_handle, proposal_id, false, &payload).unwrap();
-    assert_eq!(bob_result.score_ops.len(), 1);
-    assert_eq!(
-        bob_result.score_ops[0].event,
-        ScoreEvent::EmergencyNoCreator
-    );
-    assert_eq!(bob_result.score_ops[0].member_id, bob_id);
-    for op in &bob_result.score_ops {
-        bob_scoring.apply_event(group_name, &op.member_id, op.event);
-    }
+    apply_consensus_result(&mut bob_handle, proposal_id, false, &payload).unwrap();
+    let bob_score_ops = emergency_score_ops(&payload, false);
+    assert_eq!(bob_score_ops.len(), 1);
+    assert_eq!(bob_score_ops[0].event, ScoreEvent::EmergencyNoCreator);
+    assert_eq!(bob_score_ops[0].member_id, bob_id);
+    bob_scoring.apply_ops(group_name, &bob_score_ops);
 
     // Alice's node: rejected non-owner
-    let alice_result =
-        apply_consensus_result(&mut alice_handle, proposal_id, false, &payload).unwrap();
-    assert_eq!(alice_result.score_ops.len(), 1);
-    assert_eq!(
-        alice_result.score_ops[0].event,
-        ScoreEvent::EmergencyNoCreator
-    );
-    assert_eq!(alice_result.score_ops[0].member_id, bob_id);
-    for op in &alice_result.score_ops {
-        alice_scoring.apply_event(group_name, &op.member_id, op.event);
-    }
+    apply_consensus_result(&mut alice_handle, proposal_id, false, &payload).unwrap();
+    let alice_score_ops = emergency_score_ops(&payload, false);
+    assert_eq!(alice_score_ops.len(), 1);
+    assert_eq!(alice_score_ops[0].event, ScoreEvent::EmergencyNoCreator);
+    assert_eq!(alice_score_ops[0].member_id, bob_id);
+    alice_scoring.apply_ops(group_name, &alice_score_ops);
 
     // Both nodes: Alice untouched, Bob penalized
     assert_eq!(
@@ -282,8 +270,8 @@ fn test_scoring_no_ops_for_regular_proposal() {
     let proposal_id = 70;
     alice_handle.store_voting_proposal(proposal_id, regular_request);
 
-    let result = apply_consensus_result(&mut alice_handle, proposal_id, true, &payload).unwrap();
-    assert!(result.score_ops.is_empty());
+    apply_consensus_result(&mut alice_handle, proposal_id, true, &payload).unwrap();
+    assert!(emergency_score_ops(&payload, true).is_empty());
 
     // Proposal should be in approved queue (ready for commit)
     assert_eq!(alice_handle.approved_proposals_count(), 1);
@@ -310,7 +298,13 @@ fn test_new_joiner_starts_with_default_scores() {
     // Alice's scoring has her at a non-default score (simulating prior events)
     let mut alice_scoring = make_scoring();
     alice_scoring.add_member(group_name, &alice_id);
-    alice_scoring.apply_event(group_name, &alice_id, ScoreEvent::EmergencyYesCreator);
+    alice_scoring.apply_op(
+        group_name,
+        &ScoreOp {
+            member_id: alice_id.clone(),
+            event: ScoreEvent::EmergencyYesCreator,
+        },
+    );
     assert_eq!(
         alice_scoring.score_for(group_name, &alice_id),
         Some(DEFAULT_SCORE + 20)
@@ -365,12 +359,19 @@ fn test_violation_type_specific_penalties() {
         .into_update_request()
         .unwrap();
     let payload = ecp.encode_to_vec();
-    let result = apply_consensus_result(&mut group, 1, true, &payload).unwrap();
-    assert_eq!(result.score_ops[0].event, ScoreEvent::BrokenCommit);
+    apply_consensus_result(&mut group, 1, true, &payload).unwrap();
+    let score_ops = emergency_score_ops(&payload, true);
+    assert_eq!(score_ops[0].event, ScoreEvent::BrokenCommit);
 
     let mut scoring = make_scoring();
     scoring.add_member(group_name, &target_id);
-    scoring.apply_event(group_name, &target_id, result.score_ops[0].event);
+    scoring.apply_op(
+        group_name,
+        &ScoreOp {
+            member_id: target_id.clone(),
+            event: score_ops[0].event,
+        },
+    );
     assert_eq!(
         scoring.score_for(group_name, &target_id),
         Some(DEFAULT_SCORE - 50)
@@ -384,9 +385,16 @@ fn test_violation_type_specific_penalties() {
         .into_update_request()
         .unwrap();
     let payload = ecp.encode_to_vec();
-    let result = apply_consensus_result(&mut group, 2, true, &payload).unwrap();
-    assert_eq!(result.score_ops[0].event, ScoreEvent::BrokenMlsProposal);
-    scoring.apply_event(group_name, &target_id, result.score_ops[0].event);
+    apply_consensus_result(&mut group, 2, true, &payload).unwrap();
+    let score_ops = emergency_score_ops(&payload, true);
+    assert_eq!(score_ops[0].event, ScoreEvent::BrokenMlsProposal);
+    scoring.apply_op(
+        group_name,
+        &ScoreOp {
+            member_id: target_id.clone(),
+            event: score_ops[0].event,
+        },
+    );
     assert_eq!(
         scoring.score_for(group_name, &target_id),
         Some(DEFAULT_SCORE - 30)
@@ -400,9 +408,16 @@ fn test_violation_type_specific_penalties() {
         .into_update_request()
         .unwrap();
     let payload = ecp.encode_to_vec();
-    let result = apply_consensus_result(&mut group, 3, true, &payload).unwrap();
-    assert_eq!(result.score_ops[0].event, ScoreEvent::CensorshipInactivity);
-    scoring.apply_event(group_name, &target_id, result.score_ops[0].event);
+    apply_consensus_result(&mut group, 3, true, &payload).unwrap();
+    let score_ops = emergency_score_ops(&payload, true);
+    assert_eq!(score_ops[0].event, ScoreEvent::CensorshipInactivity);
+    scoring.apply_op(
+        group_name,
+        &ScoreOp {
+            member_id: target_id.clone(),
+            event: score_ops[0].event,
+        },
+    );
     assert_eq!(
         scoring.score_for(group_name, &target_id),
         Some(DEFAULT_SCORE - 40)

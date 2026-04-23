@@ -6,7 +6,6 @@
 //! at the module level because not every binary exercises every helper.
 #![allow(dead_code)]
 
-use std::collections::HashMap;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU32, Ordering},
@@ -16,8 +15,8 @@ use async_trait::async_trait;
 
 use de_mls::app::{FixedScoringProvider, InMemoryPeerScoreStorage, PeerScoringService};
 use de_mls::core::{
-    CallbackError, FreezeFinalizeResult, Group, GroupEventHandler, ProcessResult, ProtocolConfig,
-    ScoreEvent, ScoringConfig, build_key_package_message, create_commit_candidate, create_group,
+    CallbackError, FreezeOutcome, Group, GroupEventHandler, ProcessResult, ProtocolConfig,
+    ScoringConfig, build_key_package_message, create_commit_candidate, create_group,
     finalize_freeze_round, prepare_to_join, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
@@ -198,8 +197,8 @@ pub fn steward_add_joiner(
 
     let finalize =
         finalize_freeze_round(steward_handle, steward_mls, false, b"test-app-id").unwrap();
-    let welcome_packet = match finalize {
-        FreezeFinalizeResult::Outcome { result, outbound } => {
+    let welcome_packet = match finalize.outcome {
+        FreezeOutcome::Applied { result, outbound } => {
             assert!(
                 matches!(*result, ProcessResult::GroupUpdated),
                 "Expected GroupUpdated, got {:?}",
@@ -224,22 +223,10 @@ pub fn steward_add_joiner(
 
 // ─────────────────────────── Scoring ───────────────────────────
 
-pub fn default_deltas() -> HashMap<ScoreEvent, i64> {
-    HashMap::from([
-        (ScoreEvent::BrokenCommit, -50),
-        (ScoreEvent::BrokenMlsProposal, -30),
-        (ScoreEvent::CensorshipInactivity, -40),
-        (ScoreEvent::EmergencyYesCreator, 20),
-        (ScoreEvent::EmergencyNoCreator, -50),
-        (ScoreEvent::SuccessfulCommit, 10),
-        (ScoreEvent::NonFinalizedProposalCommit, -30),
-    ])
-}
-
 pub fn make_scoring() -> PeerScoringService<InMemoryPeerScoreStorage, FixedScoringProvider> {
     PeerScoringService::new(
         InMemoryPeerScoreStorage::new(),
-        FixedScoringProvider::new(default_deltas()),
+        FixedScoringProvider::with_default_deltas(),
         ScoringConfig {
             default_score: DEFAULT_SCORE,
             removal_threshold: REMOVAL_THRESHOLD,

@@ -7,7 +7,7 @@ use hashgraph_like_consensus::{
 };
 
 use crate::{
-    core::CoreError,
+    core::{CoreError, ScoreEvent, ScoreOp},
     mls_crypto::parse_wallet_to_bytes,
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, CommitCandidate, ConversationMessage, EmergencyCriteriaProposal,
@@ -41,10 +41,6 @@ pub enum ProcessResult {
 
     /// MLS state advanced (batch commit applied).
     GroupUpdated,
-
-    /// Commit-validation caught a steward violation — file an emergency
-    /// criteria proposal with this evidence.
-    ViolationDetected(ViolationEvidence),
 
     /// Remote commit candidate was buffered in the active freeze round.
     CommitCandidateReceived,
@@ -132,6 +128,26 @@ impl ViolationEvidence {
                 },
             )),
         })
+    }
+
+    /// Peer-score penalty the target takes for this violation.
+    /// `ScoreBelowThreshold` is filtered upstream (target is being removed);
+    /// unknown wire values fall back to the harshest penalty.
+    pub fn target_score_event(&self) -> ScoreEvent {
+        match ViolationType::try_from(self.violation_type) {
+            Ok(ViolationType::BrokenCommit) => ScoreEvent::BrokenCommit,
+            Ok(ViolationType::BrokenMlsProposal) => ScoreEvent::BrokenMlsProposal,
+            Ok(ViolationType::CensorshipInactivity) => ScoreEvent::CensorshipInactivity,
+            _ => ScoreEvent::BrokenCommit,
+        }
+    }
+
+    /// `ScoreOp` applying [`Self::target_score_event`] to [`Self::target_member_id`].
+    pub fn target_score_op(&self) -> ScoreOp {
+        ScoreOp {
+            member_id: self.target_member_id.clone(),
+            event: self.target_score_event(),
+        }
     }
 }
 

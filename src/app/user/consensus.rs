@@ -9,7 +9,9 @@ use hashgraph_like_consensus::storage::ConsensusStorage;
 use tracing::{error, info};
 
 use crate::{
-    app::{GroupState, StateChangeHandler, User, UserError, cast_vote, submit_proposal},
+    app::{
+        GroupState, ProposalParams, StateChangeHandler, User, UserError, cast_vote, submit_proposal,
+    },
     core::{
         DeMlsProvider, GroupEventHandler, ProposalKind, build_message, group_members,
         target_identity_of,
@@ -156,11 +158,14 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let (proposal_id, vote_notification) = submit_proposal::<P>(
             group_name,
             &request,
-            expected_voters,
             self.mls_service.wallet_hex(),
             &self.consensus_service,
-            self.default_group_config.proposal_expiration,
-            self.default_group_config.consensus_timeout,
+            ProposalParams {
+                expected_voters,
+                proposal_expiration: self.default_group_config.proposal_expiration,
+                consensus_timeout: self.default_group_config.consensus_timeout,
+                liveness_criteria_yes: self.default_group_config.liveness_criteria_yes,
+            },
         )
         .await?;
 

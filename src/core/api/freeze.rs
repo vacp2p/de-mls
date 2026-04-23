@@ -2,12 +2,12 @@
 
 use openmls_rust_crypto::MemoryStorage;
 use sha2::{Digest, Sha256};
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::{
     core::{
-        CoreError, Group, ProcessResult, api::lifecycle::build_invitation_packet,
-        group::BufferedCommitCandidate,
+        CoreError, Group, ProcessResult, ScoreEvent, ScoreOp,
+        api::lifecycle::build_invitation_packet, group::BufferedCommitCandidate,
     },
     ds::OutboundPacket,
     mls_crypto::{
@@ -25,17 +25,40 @@ use crate::{
 
 /// What [`finalize_freeze_round`] hands back to the caller.
 ///
-/// `result` is boxed because [`ProcessResult`] is a large enum (~240 bytes);
-/// keeping it inline would bloat every `NoCandidate` return too.
-#[derive(Debug, Clone)]
-pub enum FreezeFinalizeResult {
-    /// A dispatchable result — successful apply, self-leave, or violation.
+/// `score_ops` accumulates during the phase-3 loop — each time a candidate
+/// is dropped for MLS-staging failure the caller records a
+/// [`ScoreEvent::MisbehavingCommit`] against its author. The app layer
+/// feeds these directly into the peer-scoring service without an ECP
+/// round-trip (RFC §Peer Scoring: locally-observed violations may be
+/// scored immediately).
+#[derive(Debug, Clone, Default)]
+pub struct FreezeFinalizeResult {
+    pub outcome: FreezeOutcome,
+    pub score_ops: Vec<ScoreOp>,
+}
+
+/// Terminal outcome of a freeze round: either a dispatchable result or no
+/// candidate was applyable.
+///
+/// `result` is boxed because [`ProcessResult`] is a large enum (~240 bytes)
+/// and `NoCandidate` is the common case.
+#[derive(Debug, Clone, Default)]
+pub enum FreezeOutcome {
+    /// A dispatchable result — successful apply or self-leave.
     /// `outbound` carries deferred welcomes when our own candidate won.
-    Outcome {
+    Applied {
         result: Box<ProcessResult>,
         outbound: Option<OutboundPacket>,
     },
+    #[default]
     NoCandidate,
+}
+
+/// Result of trying to apply one candidate. `Terminal` ends the round;
+/// `Drop` records a local score penalty and the caller tries the next.
+enum CandidateOutcome {
+    Terminal(FreezeOutcome),
+    Drop(ScoreOp),
 }
 
 /// Canonical commit hash used for dedup of buffered/committed candidates.
@@ -125,9 +148,12 @@ where
 
 /// Pick and apply a buffered candidate for the active freeze round.
 ///
-/// 1. filter by proposal count,
-/// 2. select via the RFC priority comparator,
-/// 3. apply via the local-candidate or incoming-candidate path.
+/// Three phases:
+/// 1. Read the approved-queue snapshot (`ExpectedBatch`) the candidates
+///    must match.
+/// 2. Filter candidates by action count and rank them by RFC priority.
+/// 3. Apply in priority order, falling back on the next candidate when
+///    MLS staging rejects the current one.
 pub fn finalize_freeze_round<S>(
     group: &mut Group,
     mls: &MlsService<S>,
@@ -142,60 +168,169 @@ where
 
     let candidates = match group.freeze_round() {
         Some(round) if round.epoch == current_epoch => round.candidates.clone(),
-        _ => return Ok(FreezeFinalizeResult::NoCandidate),
+        _ => return Ok(FreezeFinalizeResult::default()),
     };
 
     if candidates.is_empty() {
-        return Ok(FreezeFinalizeResult::NoCandidate);
+        return Ok(FreezeFinalizeResult::default());
     }
 
-    // Pre-compute everything we need from the approved queue so we don't keep
-    // a borrow alive across the `&mut group` calls below. `expected_actions`
-    // doubles as the MLS-producing filter (emergency/election map to `None`).
-    let self_identity = mls.wallet_bytes();
-    let mut expected_actions: Vec<MlsProposalAction> = Vec::new();
-    let mut self_remove_pending = false;
-    for req in group.approved_proposals().values() {
-        if let Some(action) = expected_action_for_request(req) {
-            expected_actions.push(action);
+    let expected = ExpectedBatch::from_approved_queue(group, &mls.wallet_bytes());
+    let sorted = rank_applicable_candidates(
+        candidates,
+        &expected,
+        allow_subset_candidates,
+        group,
+        current_epoch,
+    );
+
+    if sorted.is_empty() {
+        group.clear_freeze_round();
+        return Ok(FreezeFinalizeResult::default());
+    }
+
+    apply_in_priority_order(group, mls, sorted, &expected, current_epoch, app_id)
+}
+
+/// Snapshot of the approved queue that every commit candidate must match.
+///
+/// `mls_actions` is the set we expect to see in a candidate's commit;
+/// non-MLS payloads (emergency, election) are filtered out during
+/// construction. `self_remove_pending` flags the case where the approved
+/// batch contains our own removal, which changes the terminal outcome
+/// for a successful local apply (`LeaveGroup` instead of `GroupUpdated`).
+struct ExpectedBatch {
+    mls_actions: Vec<MlsProposalAction>,
+    mls_count: usize,
+    self_remove_pending: bool,
+}
+
+impl ExpectedBatch {
+    fn from_approved_queue(group: &Group, self_identity: &[u8]) -> Self {
+        let mut mls_actions: Vec<MlsProposalAction> = Vec::new();
+        let mut self_remove_pending = false;
+        for req in group.approved_proposals().values() {
+            if let Some(action) = expected_action_for_request(req) {
+                mls_actions.push(action);
+            }
+            if matches!(
+                &req.payload,
+                Some(Payload::RemoveMember(rm)) if rm.identity == self_identity
+            ) {
+                self_remove_pending = true;
+            }
         }
-        if matches!(&req.payload, Some(Payload::RemoveMember(rm)) if rm.identity == self_identity) {
-            self_remove_pending = true;
+        let mls_count = mls_actions.len();
+        Self {
+            mls_actions,
+            mls_count,
+            self_remove_pending,
         }
     }
-    let expected_mls_count = expected_actions.len();
+}
 
-    // Phase 1 — filter by proposal count. Other invariants were set at buffer time.
-    let applicable = candidates.into_iter().filter(|c| {
-        let n = c.candidate_msg.mls_proposals.len();
-        if allow_subset_candidates {
-            n <= expected_mls_count
-        } else {
-            n == expected_mls_count
-        }
-    });
-
-    // Phase 2 — pick the winner. `min_by` is O(n); we never read past the top.
-    // If the winner fails to apply we return NoCandidate; ROADMAP Track A
-    // folds MLS staging into validation so only applyable candidates survive.
+/// Filter candidates by action count (Phase 1) and sort survivors by the
+/// RFC priority comparator (Phase 2). Result is ordered best-first.
+fn rank_applicable_candidates(
+    candidates: Vec<BufferedCommitCandidate>,
+    expected: &ExpectedBatch,
+    allow_subset: bool,
+    group: &Group,
+    current_epoch: u64,
+) -> Vec<BufferedCommitCandidate> {
     let epoch_steward_id = group
         .steward_list()
         .and_then(|l| l.epoch_steward(current_epoch))
         .map(|s| s.to_vec());
-    let chosen = match applicable
-        .min_by(|a, b| compare_candidate_priority(a, b, epoch_steward_id.as_deref()))
-    {
-        Some(c) => c,
-        None => return Ok(FreezeFinalizeResult::NoCandidate),
-    };
 
-    // Phase 3 — dispatch. `is_local_candidate` is only set by a steward's own
-    // `create_commit_candidate`, so no extra `is_steward()` guard needed.
-    if chosen.is_local_candidate {
-        apply_local_candidate(group, mls, chosen, self_remove_pending, app_id)
-    } else {
-        apply_incoming_candidate(group, mls, chosen, &expected_actions, current_epoch)
+    let mut sorted: Vec<_> = candidates
+        .into_iter()
+        .filter(|c| {
+            let n = c.candidate_msg.mls_proposals.len();
+            if allow_subset {
+                n <= expected.mls_count
+            } else {
+                n == expected.mls_count
+            }
+        })
+        .collect();
+    sorted.sort_by(|a, b| compare_candidate_priority(a, b, epoch_steward_id.as_deref()));
+    sorted
+}
+
+/// Walk `sorted` in priority order. Each rejected candidate adds a local
+/// score penalty; the first candidate that applies wins the round. No
+/// ECP is filed — RFC §Peer Scoring allows direct local scoring for
+/// observable violations.
+///
+/// `own_commit_discarded` enforces MLS's one-pending-commit rule: the
+/// first incoming attempt wipes our own pending commit, so a
+/// lower-priority local candidate afterwards has nothing to apply.
+fn apply_in_priority_order<S>(
+    group: &mut Group,
+    mls: &MlsService<S>,
+    sorted: Vec<BufferedCommitCandidate>,
+    expected: &ExpectedBatch,
+    current_epoch: u64,
+    app_id: &[u8],
+) -> Result<FreezeFinalizeResult, CoreError>
+where
+    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+{
+    let mut score_ops: Vec<ScoreOp> = Vec::new();
+    let mut own_commit_discarded = false;
+    let group_name = group.group_name().to_owned();
+
+    let mut remaining = sorted.into_iter();
+    while let Some(chosen) = remaining.next() {
+        let author_id = chosen.candidate_msg.steward_identity.clone();
+        let apply_result = if chosen.is_local_candidate {
+            if own_commit_discarded {
+                tracing::debug!(
+                    group = %group_name,
+                    "own pending commit is discarded; skipping local candidate"
+                );
+                continue;
+            }
+            apply_local_candidate(group, mls, chosen, expected.self_remove_pending, app_id)?
+        } else {
+            if !own_commit_discarded && group.is_steward() {
+                // A failure here leaves an old pending commit in MLS and
+                // would sabotage every subsequent staging attempt — bubble
+                // the error out of the round instead of pressing on.
+                mls.discard_own_commit(&group_name)?;
+                own_commit_discarded = true;
+            }
+            apply_incoming_candidate(group, mls, chosen, &expected.mls_actions, current_epoch)?
+        };
+
+        match apply_result {
+            CandidateOutcome::Terminal(outcome) => {
+                score_ops.push(ScoreOp {
+                    member_id: author_id,
+                    event: ScoreEvent::SuccessfulCommit,
+                });
+                // Unpicked candidates that passed the count filter are
+                // honest competitors under Δ-synchrony (same approved set,
+                // different MLS entropy). RFC §Commit Validation: "MUST
+                // NOT be classified as misbehaviour."
+                for loser in remaining {
+                    score_ops.push(ScoreOp {
+                        member_id: loser.candidate_msg.steward_identity,
+                        event: ScoreEvent::HonestCommitAttempt,
+                    });
+                }
+                return Ok(FreezeFinalizeResult { outcome, score_ops });
+            }
+            CandidateOutcome::Drop(op) => score_ops.push(op),
+        }
     }
+
+    group.clear_freeze_round();
+    Ok(FreezeFinalizeResult {
+        outcome: FreezeOutcome::NoCandidate,
+        score_ops,
+    })
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -254,14 +389,15 @@ fn compare_candidate_priority(
 // ─────────────────────────── Application Paths ───────────────────────────
 
 /// Merge our own commit and send the deferred welcomes we held back.
-/// We already validated at commit-creation time — no re-staging needed.
+/// Validation happened at commit-creation time, so no re-staging is needed.
+/// Always returns `Terminal(Applied)` on a clean merge.
 fn apply_local_candidate<S>(
     group: &mut Group,
     mls: &MlsService<S>,
     chosen: BufferedCommitCandidate,
     self_removed: bool,
     app_id: &[u8],
-) -> Result<FreezeFinalizeResult, CoreError>
+) -> Result<CandidateOutcome, CoreError>
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
@@ -279,32 +415,30 @@ where
     } else {
         ProcessResult::GroupUpdated
     };
-    Ok(FreezeFinalizeResult::Outcome {
+    Ok(CandidateOutcome::Terminal(FreezeOutcome::Applied {
         result: Box::new(result),
         outbound,
-    })
+    }))
 }
 
 /// Stage, validate, and merge a candidate authored by another steward.
+/// Returns `Terminal(Applied)` on a clean merge, or `Drop` with a score
+/// penalty if any check fails (MLS staging, sender mismatch,
+/// unauthorized sender, action-set mismatch).
+///
+/// Caller must have discarded any own pending commit first — MLS allows
+/// only one per group at a time.
 fn apply_incoming_candidate<S>(
     group: &mut Group,
     mls: &MlsService<S>,
     chosen: BufferedCommitCandidate,
     expected_actions: &[MlsProposalAction],
     current_epoch: u64,
-) -> Result<FreezeFinalizeResult, CoreError>
+) -> Result<CandidateOutcome, CoreError>
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
     let group_name = group.group_name().to_owned();
-
-    // Drop any own staged commit before applying someone else's. Absence of a
-    // staged commit is a benign no-op, hence log-and-continue on failure.
-    if group.is_steward() {
-        if let Err(e) = mls.discard_own_commit(&group_name) {
-            warn!(group = %group_name, error = %e, "discard_own_commit failed");
-        }
-    }
 
     let (commit_sender, self_removed, commit_actions) =
         match stage_candidate(mls, &group_name, &chosen.candidate_msg, current_epoch)? {
@@ -313,29 +447,38 @@ where
                 self_removed,
                 commit_actions,
             } => (commit_sender, self_removed, commit_actions),
-            StagingOutcome::Abort => return discard_and_abort(group, mls),
-            StagingOutcome::Violation(v) => return discard_and_report_violation(group, mls, v),
+            StagingOutcome::Abort => {
+                // Wire-valid but MLS-invalid — penalize the author; the
+                // loop will try the next candidate.
+                mls.discard_staged_commit(&group_name)?;
+                return Ok(CandidateOutcome::Drop(ScoreOp {
+                    member_id: chosen.candidate_msg.steward_identity,
+                    event: ScoreEvent::MisbehavingCommit,
+                }));
+            }
+            StagingOutcome::Violation(v) => {
+                mls.discard_staged_commit(&group_name)?;
+                return Ok(CandidateOutcome::Drop(v.target_score_op()));
+            }
         };
 
     // Commit sender must be on the steward list (RFC §"Commit validation service").
     if let Some(violation) = check_commit_sender_authorized(group, &commit_sender, current_epoch) {
         tracing::warn!(group = %group_name, "violation: commit from unauthorized sender");
-        return discard_and_report_violation(group, mls, violation);
+        mls.discard_staged_commit(&group_name)?;
+        return Ok(CandidateOutcome::Drop(violation.target_score_op()));
     }
 
     // MLS actions must match the set we voted to approve.
-    if let Some(result) = validate_commit_candidate(
+    if let Some(violation) = validate_commit_candidate(
         group,
         expected_actions,
         &commit_sender,
         &commit_actions,
         current_epoch,
     )? {
-        discard_candidate_state(group, mls)?;
-        return Ok(FreezeFinalizeResult::Outcome {
-            result: Box::new(result),
-            outbound: None,
-        });
+        mls.discard_staged_commit(&group_name)?;
+        return Ok(CandidateOutcome::Drop(violation.target_score_op()));
     }
 
     mls.merge_staged_commit(&group_name)?;
@@ -347,10 +490,10 @@ where
     } else {
         ProcessResult::GroupUpdated
     };
-    Ok(FreezeFinalizeResult::Outcome {
+    Ok(CandidateOutcome::Terminal(FreezeOutcome::Applied {
         result: Box::new(result),
         outbound: None,
-    })
+    }))
 }
 
 // ─────────────────────────── MLS Staging ───────────────────────────
@@ -398,23 +541,6 @@ where
         }
     }
 
-    // All proposals must come from the same sender.
-    if let Some(first) = proposal_senders.first() {
-        if proposal_senders.iter().any(|s| s != first) {
-            tracing::warn!(
-                group = group_name,
-                "violation: proposals have different senders"
-            );
-            return Ok(StagingOutcome::Violation(
-                ViolationEvidence::broken_mls_proposal(
-                    first.clone(),
-                    current_epoch,
-                    "proposals have different senders",
-                ),
-            ));
-        }
-    }
-
     let staged_result = match mls.process_commit(group_name, &candidate.commit_message) {
         Ok(r) => r,
         Err(e) => {
@@ -435,19 +561,21 @@ where
         StagedCommitResult::Ignored => return Ok(StagingOutcome::Abort),
     };
 
-    // Commit sender must match the proposals' sender.
-    if let Some(first) = proposal_senders.first() {
-        if first != &commit_sender {
-            tracing::warn!(
-                group = group_name,
-                "violation: proposal sender != commit sender"
-            );
-            return Ok(StagingOutcome::Violation(ViolationEvidence::broken_commit(
-                commit_sender,
-                current_epoch,
-                "proposal sender differs from commit sender",
-            )));
-        }
+    // Every bundled proposal must come from the committer — catches both
+    // "proposals signed by a third party" and "proposals don't all agree
+    // on a sender". Attribution always lands on the committer (RFC
+    // §Steward violation list: only the member who released the commit is
+    // accused).
+    if proposal_senders.iter().any(|s| s != &commit_sender) {
+        tracing::warn!(
+            group = group_name,
+            "violation: bundled proposals don't match the commit sender"
+        );
+        return Ok(StagingOutcome::Violation(ViolationEvidence::broken_commit(
+            commit_sender,
+            current_epoch,
+            "commit bundles proposals not signed by the committer",
+        )));
     }
 
     Ok(StagingOutcome::Staged {
@@ -459,14 +587,15 @@ where
 
 // ─────────────────────────── Validation ───────────────────────────
 
-/// Check that a commit's MLS actions equal the set we voted to approve.
+/// Check that a commit's MLS actions match the voted-approved set.
+/// `Some(evidence)` on mismatch.
 fn validate_commit_candidate(
     group: &Group,
     expected_actions: &[MlsProposalAction],
     sender_id: &[u8],
     mls_actions: &[MlsProposalAction],
     epoch: u64,
-) -> Result<Option<ProcessResult>, CoreError> {
+) -> Result<Option<ViolationEvidence>, CoreError> {
     let group_name = group.group_name();
 
     let mut expected_actions = expected_actions.to_vec();
@@ -482,12 +611,10 @@ fn validate_commit_candidate(
             expected = ?expected_actions,
             "violation: MLS actions don't match voted proposals"
         );
-        return Ok(Some(ProcessResult::ViolationDetected(
-            ViolationEvidence::broken_mls_proposal(
-                sender_id.to_vec(),
-                epoch,
-                format!("MLS actions {actual_actions:?} != voted {expected_actions:?}"),
-            ),
+        return Ok(Some(ViolationEvidence::broken_mls_proposal(
+            sender_id.to_vec(),
+            epoch,
+            format!("MLS actions {actual_actions:?} != voted {expected_actions:?}"),
         )));
     }
 
@@ -530,46 +657,10 @@ fn check_commit_sender_authorized(
 
 // ─────────────────────────── State Utilities ───────────────────────────
 
-fn discard_candidate_state<S>(group: &mut Group, mls: &MlsService<S>) -> Result<(), CoreError>
-where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
-{
-    let group_name = group.group_name();
-    mls.discard_staged_commit(group_name)?;
-    group.clear_freeze_round();
-    Ok(())
-}
-
 fn record_applied_commit(group: &mut Group, commit_hash: Vec<u8>) {
     group.record_committed_batch(commit_hash);
     group.clear_approved_proposals();
     group.clear_freeze_round();
-}
-
-fn discard_and_abort<S>(
-    group: &mut Group,
-    mls: &MlsService<S>,
-) -> Result<FreezeFinalizeResult, CoreError>
-where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
-{
-    discard_candidate_state(group, mls)?;
-    Ok(FreezeFinalizeResult::NoCandidate)
-}
-
-fn discard_and_report_violation<S>(
-    group: &mut Group,
-    mls: &MlsService<S>,
-    violation: ViolationEvidence,
-) -> Result<FreezeFinalizeResult, CoreError>
-where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
-{
-    discard_candidate_state(group, mls)?;
-    Ok(FreezeFinalizeResult::Outcome {
-        result: Box::new(ProcessResult::ViolationDetected(violation)),
-        outbound: None,
-    })
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
