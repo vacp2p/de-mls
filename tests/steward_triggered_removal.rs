@@ -6,6 +6,7 @@
 
 use prost::Message;
 
+use de_mls::app::emergency_score_ops;
 use de_mls::core::{ProtocolConfig, ScoreEvent, apply_consensus_result, create_group};
 use de_mls::protos::de_mls::messages::v1::{
     ViolationEvidence, ViolationType, group_update_request,
@@ -39,12 +40,13 @@ fn test_score_below_threshold_yes_transforms_to_remove_member() {
     group.store_voting_proposal(proposal_id, request);
 
     // Consensus approves
-    let result = apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
+    apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
+    let score_ops = emergency_score_ops(&payload, true);
 
     // Score ops: creator rewarded only (target already at threshold, penalty skipped)
-    assert_eq!(result.score_ops.len(), 1);
-    assert_eq!(result.score_ops[0].member_id, steward_id);
-    assert_eq!(result.score_ops[0].event, ScoreEvent::EmergencyYesCreator);
+    assert_eq!(score_ops.len(), 1);
+    assert_eq!(score_ops[0].member_id, steward_id);
+    assert_eq!(score_ops[0].event, ScoreEvent::EmergencyYesCreator);
 
     // RemoveMember should be in the approved queue (transformed from ECP)
     assert_eq!(group.approved_proposals_count(), 1);
@@ -77,11 +79,12 @@ fn test_score_below_threshold_yes_non_owner() {
     let payload = request.encode_to_vec();
 
     // Non-owner: do NOT store in voting queue
-    let result = apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
+    apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
+    let score_ops = emergency_score_ops(&payload, true);
 
     // Score ops: creator rewarded only (target penalty skipped)
-    assert_eq!(result.score_ops.len(), 1);
-    assert_eq!(result.score_ops[0].event, ScoreEvent::EmergencyYesCreator);
+    assert_eq!(score_ops.len(), 1);
+    assert_eq!(score_ops[0].event, ScoreEvent::EmergencyYesCreator);
 
     // RemoveMember should be in approved queue
     assert_eq!(group.approved_proposals_count(), 1);
@@ -116,12 +119,13 @@ fn test_score_below_threshold_no_penalizes_creator() {
     group.store_voting_proposal(proposal_id, request);
 
     // Consensus rejects
-    let result = apply_consensus_result(&mut group, proposal_id, false, &payload).unwrap();
+    apply_consensus_result(&mut group, proposal_id, false, &payload).unwrap();
+    let score_ops = emergency_score_ops(&payload, false);
 
     // Creator penalized, target unaffected
-    assert_eq!(result.score_ops.len(), 1);
-    assert_eq!(result.score_ops[0].member_id, steward_id);
-    assert_eq!(result.score_ops[0].event, ScoreEvent::EmergencyNoCreator);
+    assert_eq!(score_ops.len(), 1);
+    assert_eq!(score_ops[0].member_id, steward_id);
+    assert_eq!(score_ops[0].event, ScoreEvent::EmergencyNoCreator);
 
     // No RemoveMember in approved queue
     assert_eq!(group.approved_proposals_count(), 0);
@@ -165,10 +169,11 @@ fn test_full_pipeline_penalties_to_removal() {
     group.store_voting_proposal(proposal_id, request);
 
     // Consensus approves
-    let result = apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
+    apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
+    let score_ops = emergency_score_ops(&payload, true);
 
     // Apply score ops
-    for op in &result.score_ops {
+    for op in &score_ops {
         scoring.apply_event(group_name, &op.member_id, op.event);
     }
 
@@ -297,10 +302,11 @@ fn test_regular_emergency_yes_no_transform() {
 
     group.store_voting_proposal(proposal_id, request);
 
-    let result = apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
+    apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
+    let score_ops = emergency_score_ops(&payload, true);
 
     // Score ops present (it's an accepted emergency)
-    assert_eq!(result.score_ops.len(), 2);
+    assert_eq!(score_ops.len(), 2);
 
     // But NO RemoveMember in approved queue (regular emergencies are consumed)
     assert_eq!(group.approved_proposals_count(), 0);

@@ -8,6 +8,7 @@ use prost::Message;
 use tracing::{error, info};
 
 use crate::{
+    app::user::emergency::emergency_score_ops,
     app::{GroupState, StateChangeHandler, User, UserError},
     core::{
         DeMlsProvider, GroupEventHandler, ProposalKind, ScoreOp, apply_consensus_result,
@@ -96,14 +97,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             }
         }
 
-        if !consensus_apply.score_ops.is_empty() {
-            self.handle_emergency_scored(
-                group_name,
-                proposal_id,
-                &payload,
-                &consensus_apply.score_ops,
-            )
-            .await?;
+        let score_ops = emergency_score_ops(&payload, approved);
+        if !score_ops.is_empty() {
+            self.handle_emergency_scored(group_name, proposal_id, &payload, &score_ops)
+                .await?;
         }
 
         Ok(())

@@ -32,3 +32,4 @@ pub use error::UserError;
 pub use peer_scoring::{FixedScoringProvider, InMemoryPeerScoreStorage, PeerScoringService};
 pub use state_machine::{FreezeTimeoutStatus, GroupState, GroupStateMachine, StateChangeHandler};
 pub use user::User;
+pub use user::emergency::emergency_score_ops;
