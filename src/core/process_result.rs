@@ -1,9 +1,5 @@
-//! Core types for group operations.
-//!
-//! This module defines the key data types used throughout the DE-MLS core:
-//!
-//! - [`ProcessResult`] - Outcome of processing an inbound message
-//! - Various `From` implementations for protobuf message conversions
+//! [`ProcessResult`] returned by [`process_inbound`](super::process_inbound)
+//! plus protobuf ↔ message-envelope `From` impls.
 
 use hashgraph_like_consensus::{
     protos::consensus::v1::{Proposal, Vote},
@@ -15,91 +11,58 @@ use crate::{
     mls_crypto::parse_wallet_to_bytes,
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, CommitCandidate, ConversationMessage, EmergencyCriteriaProposal,
-        GroupSync, GroupUpdateRequest, InvitationToJoin, Outcome, ProposalAdded, RemoveMember,
-        UserKeyPackage, UserVote, ViolationEvidence, VotePayload, WelcomeMessage, app_message,
-        group_update_request, welcome_message,
+        GroupSync, GroupUpdateRequest, InvitationToJoin, LeaveRequest, Outcome, ProposalAdded,
+        RemoveMember, UserKeyPackage, UserVote, ViolationEvidence, ViolationType, VotePayload,
+        WelcomeMessage, app_message, group_update_request, welcome_message,
     },
 };
 
-/// Result of processing an inbound packet.
-///
-/// This enum represents all possible outcomes from [`process_inbound`](super::process_inbound).
-/// Match it directly in your application layer to handle each variant.
-///
-/// # Variants
-///
-/// - `AppMessage` - A chat message or other application-level message
-/// - `Proposal` / `Vote` - Consensus messages that need forwarding
-/// - `MembershipChangeReceived` - Steward received a membership change request
-/// - `JoinedGroup` - Successfully joined via welcome message
-/// - `GroupUpdated` - MLS state changed (batch commit applied)
-/// - `LeaveGroup` - User was removed from the group
-/// - `ViolationDetected` - Steward violation detected during commit validation
-/// - `Noop` - Nothing to do (message not for us, already processed, etc.)
+/// Outcome of processing one inbound packet. The app layer matches this
+/// directly and dispatches the side effects.
 #[derive(Debug, Clone)]
 pub enum ProcessResult {
-    /// An application message was received (chat message, etc.).
-    ///
-    /// The message has been decrypted and is ready for display.
+    /// Decrypted application message ready to deliver to the UI.
     AppMessage(AppMessage),
 
-    /// A consensus proposal was received from another peer.
-    ///
-    /// Should be forwarded to the consensus service via
-    /// `crate::app::forward_incoming_proposal`.
+    /// Consensus proposal from a peer — forward to the consensus service.
     Proposal(Proposal),
 
-    /// A consensus vote was received from another peer.
-    ///
-    /// Should be forwarded to the consensus service via
-    /// `crate::app::forward_incoming_vote`.
+    /// Consensus vote from a peer — forward to the consensus service.
     Vote(Vote),
 
-    /// The user was removed from the group.
-    ///
-    /// Application should clean up group state and notify the UI.
+    /// We were removed from the group.
     LeaveGroup,
 
-    /// Steward received a membership change request (key package or ban).
-    ///
-    /// Application should start a consensus vote for this request.
+    /// Steward received a membership change (invite KP / ban) — start a vote.
     MembershipChangeReceived(GroupUpdateRequest),
 
-    /// The user successfully joined a group via welcome message.
-    ///
-    /// Contains the group name. Application should transition state
-    /// from PendingJoin to Working.
+    /// Successfully joined via a welcome message; carries the group name.
     JoinedGroup(String),
 
-    /// Group MLS state was updated (batch commit applied).
-    ///
-    /// Application should transition state back to Working.
+    /// MLS state advanced (batch commit applied).
     GroupUpdated,
 
-    /// A steward violation was detected during commit validation.
-    ///
-    /// Contains evidence of the violation. The application should start
-    /// an emergency criteria proposal vote for this evidence.
+    /// Commit-validation caught a steward violation — file an emergency
+    /// criteria proposal with this evidence.
     ViolationDetected(ViolationEvidence),
 
-    /// A remote commit candidate was successfully buffered in the freeze round.
+    /// Remote commit candidate was buffered in the active freeze round.
     CommitCandidateReceived,
 
-    /// A group sync message was received from the current steward.
-    ///
-    /// Contains steward list, peer scores, timing config, and protocol flags.
-    /// Only meaningful for joiners whose handle has `steward_list() == None`.
+    /// Group-sync message from the steward (steward list, scores, timing,
+    /// protocol flags). Meaningful only for joiners with no steward list yet.
     GroupSyncReceived(GroupSync),
 
-    /// No action needed.
-    ///
-    /// The message was not for us, was a duplicate, or required no action.
+    /// Authenticated self-leave from a member. Auto-approved — the app layer
+    /// verifies the signer matches `identity` and inserts `RemoveMember`
+    /// directly into the approved queue.
+    LeaveRequestReceived(LeaveRequest),
+
+    /// Nothing to do (not for us, duplicate, or already handled).
     Noop,
 }
 
 // ── ViolationEvidence constructors ────────────────────────────────
-
-use crate::protos::de_mls::messages::v1::ViolationType;
 
 impl ViolationEvidence {
     /// Steward included different proposal IDs than what was voted on,
@@ -172,120 +135,46 @@ impl ViolationEvidence {
     }
 }
 
-// WELCOME MESSAGE SUBTOPIC
-
-/// Wrap MLS welcome bytes into a `WelcomeMessage` proto.
-pub fn invitation_from_bytes(mls_bytes: Vec<u8>) -> WelcomeMessage {
-    let invitation = InvitationToJoin {
-        mls_message_out_bytes: mls_bytes,
+/// Build `impl From<Inner> for Envelope` where
+/// `Envelope { payload: Some(<variant path>(Inner)) }`.
+macro_rules! impl_payload_from {
+    ($envelope:ty, $( $inner:ty => $variant:path ),+ $(,)?) => {
+        $(
+            impl From<$inner> for $envelope {
+                fn from(value: $inner) -> Self {
+                    Self { payload: Some($variant(value)) }
+                }
+            }
+        )+
     };
-
-    WelcomeMessage {
-        payload: Some(welcome_message::Payload::InvitationToJoin(invitation)),
-    }
 }
 
-impl From<UserKeyPackage> for WelcomeMessage {
-    fn from(user_key_package: UserKeyPackage) -> Self {
-        WelcomeMessage {
-            payload: Some(welcome_message::Payload::UserKeyPackage(user_key_package)),
-        }
-    }
-}
+impl_payload_from!(
+    WelcomeMessage,
+    UserKeyPackage   => welcome_message::Payload::UserKeyPackage,
+    InvitationToJoin => welcome_message::Payload::InvitationToJoin,
+);
 
-// APPLICATION MESSAGE SUBTOPIC
-
-impl From<VotePayload> for AppMessage {
-    fn from(vote_payload: VotePayload) -> Self {
-        AppMessage {
-            payload: Some(app_message::Payload::VotePayload(vote_payload)),
-        }
-    }
-}
-
-impl From<UserVote> for AppMessage {
-    fn from(user_vote: UserVote) -> Self {
-        AppMessage {
-            payload: Some(app_message::Payload::UserVote(user_vote)),
-        }
-    }
-}
-
-impl From<ConversationMessage> for AppMessage {
-    fn from(conversation_message: ConversationMessage) -> Self {
-        AppMessage {
-            payload: Some(app_message::Payload::ConversationMessage(
-                conversation_message,
-            )),
-        }
-    }
-}
-
-impl From<CommitCandidate> for AppMessage {
-    fn from(commit_candidate: CommitCandidate) -> Self {
-        AppMessage {
-            payload: Some(app_message::Payload::CommitCandidate(commit_candidate)),
-        }
-    }
-}
-
-impl From<BanRequest> for AppMessage {
-    fn from(ban_request: BanRequest) -> Self {
-        AppMessage {
-            payload: Some(app_message::Payload::BanRequest(ban_request)),
-        }
-    }
-}
-
-impl From<Proposal> for AppMessage {
-    fn from(proposal: Proposal) -> Self {
-        AppMessage {
-            payload: Some(app_message::Payload::Proposal(proposal)),
-        }
-    }
-}
-
-impl From<Vote> for AppMessage {
-    fn from(vote: Vote) -> Self {
-        AppMessage {
-            payload: Some(app_message::Payload::Vote(vote)),
-        }
-    }
-}
-
-impl From<GroupSync> for AppMessage {
-    fn from(sync: GroupSync) -> Self {
-        AppMessage {
-            payload: Some(app_message::Payload::GroupSync(sync)),
-        }
-    }
-}
-
-impl From<ProposalAdded> for AppMessage {
-    fn from(proposal_added: ProposalAdded) -> Self {
-        AppMessage {
-            payload: Some(app_message::Payload::ProposalAdded(proposal_added)),
-        }
-    }
-}
+impl_payload_from!(
+    AppMessage,
+    VotePayload         => app_message::Payload::VotePayload,
+    UserVote            => app_message::Payload::UserVote,
+    ConversationMessage => app_message::Payload::ConversationMessage,
+    CommitCandidate     => app_message::Payload::CommitCandidate,
+    BanRequest          => app_message::Payload::BanRequest,
+    LeaveRequest        => app_message::Payload::LeaveRequest,
+    Proposal            => app_message::Payload::Proposal,
+    Vote                => app_message::Payload::Vote,
+    GroupSync           => app_message::Payload::GroupSync,
+    ProposalAdded       => app_message::Payload::ProposalAdded,
+);
 
 impl From<ConsensusEvent> for Outcome {
-    fn from(consensus_event: ConsensusEvent) -> Self {
-        match consensus_event {
-            ConsensusEvent::ConsensusReached {
-                proposal_id: _,
-                result: true,
-                timestamp: _,
-            } => Outcome::Accepted,
-            ConsensusEvent::ConsensusReached {
-                proposal_id: _,
-                result: false,
-                timestamp: _,
-            } => Outcome::Rejected,
-            ConsensusEvent::ConsensusFailed {
-                proposal_id: _,
-                timestamp: _,
-            } => Outcome::Unspecified,
+    fn from(ev: ConsensusEvent) -> Self {
+        match ev {
+            ConsensusEvent::ConsensusReached { result: true, .. } => Outcome::Accepted,
+            ConsensusEvent::ConsensusReached { result: false, .. } => Outcome::Rejected,
+            ConsensusEvent::ConsensusFailed { .. } => Outcome::Unspecified,
         }
     }
 }
@@ -311,6 +200,12 @@ impl TryFrom<AppMessage> for ProcessResult {
             Some(app_message::Payload::GroupSync(sync)) => {
                 Ok(ProcessResult::GroupSyncReceived(sync.clone()))
             }
+            // LeaveRequest is NOT handled here: the authenticated path
+            // (`process_app_subtopic`) is the sole producer of
+            // `LeaveRequestReceived` — it verifies the MLS sender matches
+            // `leave.identity` before emitting the variant. Treating it as
+            // Noop here prevents any caller from bypassing that check via
+            // a generic `AppMessage::try_into()`.
             _ => Ok(ProcessResult::Noop),
         }
     }

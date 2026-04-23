@@ -84,7 +84,7 @@ pub async fn bootstrap_core(
             .name("ds-forwarder".into())
             .spawn(move || {
                 use std::time::Duration;
-                info!("Forwarding delivery → broadcast started");
+                info!("delivery forwarder started");
                 loop {
                     if forward_cancel.is_cancelled() {
                         break;
@@ -97,7 +97,7 @@ pub async fn bootstrap_core(
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 }
-                info!("Forwarding delivery → broadcast stopped");
+                info!("delivery forwarder stopped");
             })
             .map_err(|e| {
                 BootstrapError::DeliveryServiceError(DeliveryServiceError::Other(anyhow::anyhow!(

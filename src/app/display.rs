@@ -1,9 +1,4 @@
-//! Display helpers for converting protobuf types to human-readable formats.
-//!
-//! These functions and traits are convenience utilities for UI display.
-//! They are not required for protocol operation.
-
-use prost::Message;
+//! Display helpers for rendering protobuf types in the UI.
 
 use crate::mls_crypto::format_wallet_address;
 use crate::protos::de_mls::messages::v1::{
@@ -12,14 +7,14 @@ use crate::protos::de_mls::messages::v1::{
 
 // ─────────────────────────── Member Role ───────────────────────────
 
-/// A member's steward role within a group.
+/// A member's steward role at a given epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemberRole {
-    /// The designated steward for the current epoch.
+    /// Epoch steward for this epoch.
     EpochSteward,
-    /// The backup steward for the current epoch.
+    /// Backup steward for this epoch.
     BackupSteward,
-    /// On the steward list, but not epoch or backup steward.
+    /// On the steward list but not in the epoch or backup slot.
     Steward,
     /// Not on the steward list.
     Member,
@@ -38,7 +33,7 @@ impl std::fmt::Display for MemberRole {
 
 // ─────────────────────────── Message Type Labels ───────────────────────────
 
-/// Message type constants for consistency and type safety in app/UI code.
+/// String constants shared with the UI so string-keyed dispatch stays typo-safe.
 pub mod message_types {
     pub const CONVERSATION_MESSAGE: &str = "ConversationMessage";
     pub const BAN_REQUEST: &str = "BanRequest";
@@ -49,10 +44,11 @@ pub mod message_types {
     pub const PROPOSAL_ADDED: &str = "ProposalAdded";
     pub const COMMIT_CANDIDATE: &str = "CommitCandidate";
     pub const GROUP_SYNC: &str = "GroupSync";
+    pub const LEAVE_REQUEST: &str = "LeaveRequest";
     pub const UNKNOWN: &str = "Unknown";
 }
 
-/// Trait for app-facing message type labels.
+/// Maps a protobuf message to a stable label string for the UI.
 pub trait MessageType {
     fn message_type(&self) -> &'static str;
 }
@@ -70,6 +66,7 @@ impl MessageType for app_message::Payload {
             app_message::Payload::ProposalAdded(_) => PROPOSAL_ADDED,
             app_message::Payload::CommitCandidate(_) => COMMIT_CANDIDATE,
             app_message::Payload::GroupSync(_) => GROUP_SYNC,
+            app_message::Payload::LeaveRequest(_) => LEAVE_REQUEST,
         }
     }
 }
@@ -99,7 +96,7 @@ impl MessageType for GroupUpdateRequest {
 // ─────────────────────────── Violation Labels ───────────────────────────
 
 impl ViolationEvidence {
-    /// Human-readable label for the violation type (used in display / UI).
+    /// Human-readable label for the violation type.
     pub fn violation_type_label(&self) -> &'static str {
         match ViolationType::try_from(self.violation_type) {
             Ok(ViolationType::BrokenCommit) => "Broken Commit",
@@ -113,8 +110,9 @@ impl ViolationEvidence {
 
 // ─────────────────────────── Request Display ───────────────────────────
 
-/// Format target string from a `GroupUpdateRequest`.
-fn format_group_request_target(request: &GroupUpdateRequest) -> String {
+/// Wallet address for membership / emergency-evidence targets, or
+/// `"epoch E, retry R | s1, s2, ..."` for elections. `"unknown"` otherwise.
+pub fn format_group_request_target(request: &GroupUpdateRequest) -> String {
     match &request.payload {
         Some(group_update_request::Payload::InviteMember(im)) => {
             format_wallet_address(&im.identity)
@@ -133,48 +131,21 @@ fn format_group_request_target(request: &GroupUpdateRequest) -> String {
                 .iter()
                 .map(|s| format_wallet_address(s))
                 .collect();
-            format!("epoch {} | {}", se.election_epoch, stewards.join(", "))
+            format!(
+                "epoch {}, retry {} | {}",
+                se.election_epoch,
+                se.retry_round,
+                stewards.join(", ")
+            )
         }
-        _ => "Invalid request".to_string(),
+        _ => "unknown".to_string(),
     }
 }
 
-/// Convert a `GroupUpdateRequest` reference to a display-friendly `(action, target)` pair.
+/// `(action, target)` pair suitable for UI rendering.
 pub fn format_group_request(request: &GroupUpdateRequest) -> (String, String) {
     (
         request.message_type().to_string(),
         format_group_request_target(request),
     )
-}
-
-/// Convert a serialized `GroupUpdateRequest` to a display-friendly `(action, target)` pair.
-pub fn convert_group_request_to_display(request: Vec<u8>) -> (String, String) {
-    let request = GroupUpdateRequest::decode(request.as_slice()).unwrap_or_default();
-    format_group_request(&request)
-}
-
-/// Extract the identity string from a `GroupUpdateRequest`.
-pub fn get_identity_from_group_update_request(req: GroupUpdateRequest) -> String {
-    match req.payload {
-        Some(group_update_request::Payload::InviteMember(im)) => {
-            format_wallet_address(&im.identity)
-        }
-        Some(group_update_request::Payload::RemoveMember(rm)) => {
-            format_wallet_address(&rm.identity)
-        }
-        Some(group_update_request::Payload::EmergencyCriteria(ec)) => ec
-            .evidence
-            .as_ref()
-            .map(|e| format_wallet_address(&e.target_member_id))
-            .unwrap_or_else(|| "unknown".to_string()),
-        Some(group_update_request::Payload::StewardElection(se)) => {
-            let stewards: Vec<String> = se
-                .proposed_stewards
-                .iter()
-                .map(|s| format_wallet_address(s))
-                .collect();
-            format!("epoch {} | {}", se.election_epoch, stewards.join(", "))
-        }
-        _ => "unknown".to_string(),
-    }
 }

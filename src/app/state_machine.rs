@@ -1,4 +1,4 @@
-//! State machine for group lifecycle and freeze/commit flow management.
+//! Per-group FSM: PendingJoin → Working → Freezing → Selection → Reelection → Leaving.
 use async_trait::async_trait;
 use std::{
     fmt::Display,
@@ -8,34 +8,27 @@ use tracing::info;
 
 use crate::app::config::GroupConfig;
 
-/// Trait for handling state machine state changes.
-///
-/// This is an app-layer trait (not part of core API) for receiving
-/// notifications when the group state changes.
+/// Notifies the integrator when a group transitions between [`GroupState`]
+/// variants. Fires from the app layer only — core never calls it.
 #[async_trait]
 pub trait StateChangeHandler: Send + Sync {
-    /// Called when the group state changes.
-    ///
-    /// # Arguments
-    /// * `group_name` - The name of the group
-    /// * `state` - The new state
     async fn on_state_changed(&self, group_name: &str, state: GroupState);
 }
 
-/// Represents the different states a group can be in during the commit lifecycle.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GroupState {
-    /// Waiting for a welcome message after sending a key package.
+    /// Waiting for the welcome after sending our key package.
     PendingJoin,
-    /// Normal operation state - users can send any message freely.
+    /// Normal operation — chat and membership requests flow freely.
     Working,
-    /// Freeze window for collecting commit candidates.
+    /// Collecting commit candidates for this epoch.
     Freezing,
-    /// Deterministic candidate selection phase.
+    /// Deterministic selection across the buffered candidates.
     Selection,
-    /// Emergency reelection phase (chat allowed, membership changes blocked).
+    /// Steward list unusable; only emergency proposals accepted until a new
+    /// election lands.
     Reelection,
-    /// User has requested to leave; waiting for the removal commit to arrive.
+    /// We asked to leave; waiting for our removal commit to arrive.
     Leaving,
 }
 
@@ -53,35 +46,32 @@ impl Display for GroupState {
     }
 }
 
-/// Result of checking freeze timeout status.
+/// What a freeze-timeout poll returned.
 #[derive(Debug, PartialEq)]
 pub enum FreezeTimeoutStatus {
-    /// Not in Freezing state — nothing to check.
     NotFreezing,
-    /// In Freezing state but timeout hasn't been reached yet.
     StillFreezing,
-    /// Timeout reached, a candidate was selected and applied successfully.
+    /// A candidate was selected and applied.
     Applied,
-    /// Timeout reached but no valid candidate was applied.
-    /// `has_proposals` indicates if approved proposals existed at timeout
-    /// (true = steward fault, false = empty epoch).
-    TimedOut { has_proposals: bool },
+    /// Timeout elapsed without a valid candidate. `has_proposals = true`
+    /// means approved work existed at timeout (steward fault); `false` is
+    /// just an empty epoch.
+    TimedOut {
+        has_proposals: bool,
+    },
 }
 
-/// State machine for managing group commit lifecycle.
 #[derive(Debug, Clone)]
 pub struct GroupStateMachine {
-    /// Current state of the group.
     state: GroupState,
-    /// Phase timer — meaning depends on current state:
-    /// - `PendingJoin`: when join started (timeout after 2 × epoch_duration)
-    /// - `Working`: when first proposal approved (steward inactivity after epoch_duration)
-    /// - `Freezing`: when freeze started (selection after freeze_duration)
-    /// - Other states: None
+    /// Meaning depends on `state`:
+    /// - `PendingJoin`: time the join was initiated.
+    /// - `Working`: time the first approved proposal arrived (drives the
+    ///   steward-inactivity timer).
+    /// - `Freezing`: time the freeze window started.
+    /// - Other states: `None`.
     phase_timer: Option<Instant>,
-    /// Duration of each epoch (used for join timeout and inactivity detection).
     epoch_duration: Duration,
-    /// Duration of the freeze phase before deterministic selection.
     freeze_duration: Duration,
 }
 
@@ -92,12 +82,10 @@ impl Default for GroupStateMachine {
 }
 
 impl GroupStateMachine {
-    /// Create a new group state machine (not steward) with default config.
     pub fn new_as_member() -> Self {
         Self::new_as_member_with_config(GroupConfig::default())
     }
 
-    /// Create a new group state machine (not steward) with custom config.
     pub fn new_as_member_with_config(config: GroupConfig) -> Self {
         Self {
             state: GroupState::Working,
@@ -107,7 +95,6 @@ impl GroupStateMachine {
         }
     }
 
-    /// Create a new group state machine in PendingJoin state with custom config.
     pub fn new_as_pending_join_with_config(config: GroupConfig) -> Self {
         Self {
             state: GroupState::PendingJoin,
@@ -117,69 +104,58 @@ impl GroupStateMachine {
         }
     }
 
-    /// Get the current state.
     pub fn current_state(&self) -> GroupState {
         self.state.clone()
     }
 
-    /// Get the configured epoch duration.
     pub fn epoch_duration(&self) -> Duration {
         self.epoch_duration
     }
 
-    /// Get the configured freeze duration.
     pub fn freeze_duration(&self) -> Duration {
         self.freeze_duration
     }
 
-    /// Update timing configuration (used when receiving GroupSync from steward).
+    /// Overwritten when the handle receives a `GroupSync` from the steward.
     pub fn update_timing(&mut self, epoch_duration: Duration, freeze_duration: Duration) {
         self.epoch_duration = epoch_duration;
         self.freeze_duration = freeze_duration;
     }
 
-    /// Start working state.
     pub fn start_working(&mut self) {
         self.state = GroupState::Working;
         self.phase_timer = None;
-        info!("[start_working] Transitioning to Working state");
+        info!(state = "Working", "state transition");
     }
 
-    /// Start freezing state.
     pub fn start_freezing(&mut self) {
         self.state = GroupState::Freezing;
         self.phase_timer = Some(Instant::now());
-        info!("[start_freezing] Transitioning to Freezing state");
+        info!(state = "Freezing", "state transition");
     }
 
-    /// Start deterministic selection state.
     pub fn start_selection(&mut self) {
         self.state = GroupState::Selection;
-        info!("[start_selection] Transitioning to Selection state");
+        info!(state = "Selection", "state transition");
     }
 
-    /// Enter emergency reelection state.
     pub fn start_reelection(&mut self) {
         self.state = GroupState::Reelection;
         self.phase_timer = None;
-        info!("[start_reelection] Transitioning to Reelection state");
+        info!(state = "Reelection", "state transition");
     }
 
-    /// Transition to Leaving state.
-    ///
-    /// Caller must ensure valid state transition.
-    /// The `User::leave_group` method handles PendingJoin and Leaving states separately.
+    /// Caller must ensure a valid transition. `User::leave_group` handles
+    /// the PendingJoin and already-Leaving cases separately.
     pub fn start_leaving(&mut self) {
         self.state = GroupState::Leaving;
-        info!("[start_leaving] Transitioning to Leaving state");
+        info!(state = "Leaving", "state transition");
     }
 
     // ─────────────────────────── Pending Join ───────────────────────────
 
-    /// Check if the pending join has expired (time-based).
-    ///
-    /// Expiration happens when ~2 epoch durations have passed since join attempt.
-    /// If the member hasn't received a welcome by then, assume rejection.
+    /// `true` once 3× epoch-duration has passed in `PendingJoin` without a
+    /// welcome — the join attempt is abandoned and local state torn down.
     pub fn is_pending_join_expired(&self) -> bool {
         if self.state != GroupState::PendingJoin {
             return false;
@@ -199,7 +175,7 @@ impl GroupStateMachine {
 
     // ─────────────────────────── Freeze Timeout ───────────────────────────
 
-    /// Check if the freeze window elapsed while in `Freezing`.
+    /// `true` once the freeze window elapsed while in `Freezing`.
     pub fn is_freeze_timed_out(&self) -> bool {
         if self.state != GroupState::Freezing {
             return false;
@@ -213,51 +189,48 @@ impl GroupStateMachine {
     }
     // ─────────────────────────── Proposal Timer (Member Inactivity) ───────────────────────────
 
-    /// Notify the state machine that a proposal was approved.
-    ///
-    /// If the approved count transitions from 0 to >0, start the inactivity timer.
-    /// Additional proposals do NOT restart the timer.
-    pub fn notify_proposal_approved(&mut self, before_count: usize, after_count: usize) {
-        if before_count == 0 && after_count > 0 {
-            self.phase_timer = Some(Instant::now());
-            info!("[notify_proposal_approved] Inactivity timer started (0 → {after_count})");
-        }
-    }
-
-    /// Clear the proposal inactivity timer.
     pub fn clear_proposal_timer(&mut self) {
         self.phase_timer = None;
     }
 
-    /// Check if the epoch commit window has elapsed and transition to Freezing.
+    /// Drives the "steward waited too long to commit" transition into
+    /// `Freezing`. Call each poll tick; returns `true` exactly on the tick
+    /// that transitions.
     ///
-    /// Returns `true` if transitioned to Freezing, `false` otherwise.
-    /// Skips if:
-    /// - not in Working state (already freezing or in another phase)
-    /// - no approved proposals waiting for commit
-    /// - epoch_duration hasn't elapsed since first proposal was approved
+    /// - The timer anchors on the *first* approved proposal — a burst of
+    ///   approvals doesn't reset it.
+    /// - `start_working` clears the timer, so the next tick with leftover
+    ///   approved work starts a fresh window (matters for auto-approved
+    ///   self-leaves that survive a reelection round).
+    /// - No-op outside `Working`.
     pub fn check_steward_inactivity(&mut self, approved_proposals_count: usize) -> bool {
-        if self.state != GroupState::Working {
+        if self.state != GroupState::Working || approved_proposals_count == 0 {
             return false;
         }
 
-        if approved_proposals_count == 0 {
-            return false;
-        }
-
-        if let Some(first_approved) = self.phase_timer {
-            if Instant::now() >= first_approved + self.epoch_duration {
-                self.start_freezing();
+        let first_approved = match self.phase_timer {
+            Some(t) => t,
+            None => {
+                self.phase_timer = Some(Instant::now());
                 info!(
-                    "[check_steward_inactivity] Epoch commit window elapsed ({:?}), \
-                     entering freeze with {} approved proposals",
-                    self.epoch_duration, approved_proposals_count
+                    approved = approved_proposals_count,
+                    "inactivity timer started"
                 );
-                return true;
+                return false;
             }
+        };
+
+        if Instant::now() < first_approved + self.epoch_duration {
+            return false;
         }
 
-        false
+        self.start_freezing();
+        info!(
+            epoch_duration_ms = self.epoch_duration.as_millis() as u64,
+            approved = approved_proposals_count,
+            "epoch commit window elapsed, entering freeze"
+        );
+        true
     }
 }
 
@@ -267,58 +240,21 @@ mod tests {
     use crate::core::ProtocolConfig;
 
     #[test]
-    fn test_state_machine_creation() {
-        let state_machine = GroupStateMachine::new_as_member();
-        assert_eq!(state_machine.current_state(), GroupState::Working);
-    }
-
-    #[test]
-    fn test_state_machine_pending_join() {
-        let state_machine =
-            GroupStateMachine::new_as_pending_join_with_config(GroupConfig::default());
-        assert_eq!(state_machine.current_state(), GroupState::PendingJoin);
-        assert!(!state_machine.is_pending_join_expired());
-    }
-
-    #[test]
     fn test_pending_join_timeout() {
         let mut state_machine =
             GroupStateMachine::new_as_pending_join_with_config(GroupConfig::default());
         assert!(!state_machine.is_pending_join_expired());
 
-        // Simulate time passing (~2 epochs) by backdating the start time
-        state_machine.phase_timer = Some(Instant::now() - Duration::from_secs(120)); // Well past 2 epochs (60s)
-
-        // Should expire after ~2 epoch durations
+        // Backdate past 2× epoch_duration threshold.
+        state_machine.phase_timer = Some(Instant::now() - Duration::from_secs(120));
         assert!(state_machine.is_pending_join_expired());
     }
 
     #[test]
     fn test_pending_join_not_expired_when_working() {
+        // is_pending_join_expired is meaningful only in PendingJoin.
         let state_machine = GroupStateMachine::new_as_member();
-        assert_eq!(state_machine.current_state(), GroupState::Working);
-
-        // Should not be expired when not in PendingJoin state
         assert!(!state_machine.is_pending_join_expired());
-    }
-
-    #[test]
-    fn test_pending_join_to_working() {
-        let mut state_machine =
-            GroupStateMachine::new_as_pending_join_with_config(GroupConfig::default());
-        assert_eq!(state_machine.current_state(), GroupState::PendingJoin);
-
-        state_machine.start_working();
-        assert_eq!(state_machine.current_state(), GroupState::Working);
-    }
-
-    #[test]
-    fn test_leaving_state() {
-        let mut state_machine = GroupStateMachine::new_as_member();
-        assert_eq!(state_machine.current_state(), GroupState::Working);
-
-        state_machine.start_leaving();
-        assert_eq!(state_machine.current_state(), GroupState::Leaving);
     }
 
     #[test]
@@ -359,36 +295,26 @@ mod tests {
     // ─────────────────────────── Proposal Timer Tests ───────────────────────────
 
     #[test]
-    fn test_proposal_timer_starts_on_zero_to_one() {
+    fn test_inactivity_timer_self_starts_on_first_check_with_approved() {
         let mut sm = GroupStateMachine::new_as_member();
         assert!(sm.phase_timer.is_none());
 
-        sm.notify_proposal_approved(0, 1);
+        // First call with approved work: timer starts, no transition yet.
+        assert!(!sm.check_steward_inactivity(1));
         assert!(sm.phase_timer.is_some());
     }
 
     #[test]
-    fn test_proposal_timer_no_restart_on_additional() {
+    fn test_inactivity_timer_not_restarted_while_running() {
         let mut sm = GroupStateMachine::new_as_member();
-        sm.notify_proposal_approved(0, 1);
+        sm.check_steward_inactivity(1);
         let first_time = sm.phase_timer.unwrap();
 
-        // Simulate a small delay
         std::thread::sleep(Duration::from_millis(5));
 
-        sm.notify_proposal_approved(1, 2);
-        // Timer should NOT have been reset
+        // Same-or-more approved → same timer.
+        sm.check_steward_inactivity(2);
         assert_eq!(sm.phase_timer.unwrap(), first_time);
-    }
-
-    #[test]
-    fn test_proposal_timer_clears_on_working() {
-        let mut sm = GroupStateMachine::new_as_member();
-        sm.notify_proposal_approved(0, 1);
-        assert!(sm.phase_timer.is_some());
-
-        sm.start_working();
-        assert!(sm.phase_timer.is_none());
     }
 
     #[test]

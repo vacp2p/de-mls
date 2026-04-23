@@ -1,57 +1,18 @@
-//! Tests for D3: Steward-Triggered Removal.
+//! Steward-triggered removal pipeline.
 //!
 //! Verifies the flow: score drops below threshold → steward creates
 //! SCORE_BELOW_THRESHOLD ECP → consensus vote → YES transforms into
 //! RemoveMember in approved queue (or NO penalizes creator).
 
-use std::collections::HashMap;
-
 use prost::Message;
 
-use de_mls::app::{FixedScoringProvider, InMemoryPeerScoreStorage, PeerScoringService};
-use de_mls::core::{
-    ProtocolConfig, ScoreEvent, ScoringConfig, apply_consensus_result, create_group,
-};
-use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService, parse_wallet_address};
+use de_mls::core::{ProtocolConfig, ScoreEvent, apply_consensus_result, create_group};
 use de_mls::protos::de_mls::messages::v1::{
     ViolationEvidence, ViolationType, group_update_request,
 };
 
-// ─────────────────────────── Helpers ───────────────────────────
-
-const DEFAULT_SCORE: i64 = 100;
-const REMOVAL_THRESHOLD: i64 = 0;
-
-fn setup_mls(wallet_hex: &str) -> MlsService<MemoryDeMlsStorage> {
-    let storage = MemoryDeMlsStorage::new();
-    let mls = MlsService::new(storage);
-    let wallet = parse_wallet_address(wallet_hex).unwrap();
-    mls.init(wallet).unwrap();
-    mls
-}
-
-fn default_deltas() -> HashMap<ScoreEvent, i64> {
-    HashMap::from([
-        (ScoreEvent::BrokenCommit, -50),
-        (ScoreEvent::BrokenMlsProposal, -30),
-        (ScoreEvent::CensorshipInactivity, -40),
-        (ScoreEvent::EmergencyYesCreator, 20),
-        (ScoreEvent::EmergencyNoCreator, -50),
-        (ScoreEvent::SuccessfulCommit, 10),
-        (ScoreEvent::NonFinalizedProposalCommit, -30),
-    ])
-}
-
-fn make_scoring() -> PeerScoringService<InMemoryPeerScoreStorage, FixedScoringProvider> {
-    PeerScoringService::new(
-        InMemoryPeerScoreStorage::new(),
-        FixedScoringProvider::new(default_deltas()),
-        ScoringConfig {
-            default_score: DEFAULT_SCORE,
-            removal_threshold: REMOVAL_THRESHOLD,
-        },
-    )
-}
+mod common;
+use common::{make_scoring, setup_mls};
 
 // ─────────────────────────── Tests ───────────────────────────
 

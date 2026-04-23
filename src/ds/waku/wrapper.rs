@@ -1,11 +1,8 @@
 //! Safe synchronous wrapper around the raw libwaku FFI.
 #![allow(unused)]
-use std::cell::OnceCell;
-use std::ffi::CString;
-use std::os::raw::c_void;
+use std::{cell::OnceCell, ffi::CString, os::raw::c_void};
 
-use super::sys::{self as waku_sys, RET_OK, get_trampoline};
-
+use crate::ds::waku::sys::{self as waku_sys, RET_OK, get_trampoline};
 /// Opaque handle to a libwaku node context.
 pub struct WakuNodeCtx {
     ctx: *mut c_void,

@@ -34,9 +34,9 @@ pub enum CoreError {
     #[error("MLS group not initialized")]
     MlsGroupNotInitialized,
 
-    /// Steward is not set for this group.
-    #[error("Steward not set")]
-    StewardNotSet,
+    /// Caller is not a steward of this group.
+    #[error("caller is not a steward")]
+    NotASteward,
 
     /// No proposals available for the requested operation.
     #[error("No proposals available")]
@@ -54,9 +54,9 @@ pub enum CoreError {
     #[error("Invalid config size")]
     InvalidConfigSize,
 
-    /// Non-MLS proposals (emergency criteria or steward election) found in approved
-    /// queue during batch creation. These proposals should be removed by
-    /// `apply_consensus_result` before `create_batch_proposals` is called.
+    /// Governance proposals (emergency criteria, steward election) slipped into
+    /// the approved queue — `apply_consensus_result` should have removed them
+    /// before `create_commit_candidate` ran.
     #[error(
         "Non-MLS proposals found in approved queue (ids: {proposal_ids:?}). \
          They should have been removed by apply_consensus_result."

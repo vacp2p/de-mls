@@ -1,16 +1,14 @@
-use de_mls::mls_crypto::format_wallet_address;
 use de_mls::{
-    app::{FreezeTimeoutStatus, format_group_request},
-    ds::WakuDeliveryService,
-    protos::de_mls::messages::v1::BanRequest,
+    app::FreezeTimeoutStatus, ds::WakuDeliveryService, protos::de_mls::messages::v1::BanRequest,
 };
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
 
+use crate::forwarder::{display_batch, load_member_info};
 use crate::{Gateway, UserRef};
 
 impl Gateway<WakuDeliveryService> {
     pub async fn create_group(&self, group_name: String) -> anyhow::Result<()> {
-        tracing::info!("[gateway::create_group] Creating group {group_name} as steward");
+        tracing::info!(group = %group_name, "creating group as steward");
         let core = self.core();
         let user_ref = self.user()?;
         user_ref
@@ -19,7 +17,7 @@ impl Gateway<WakuDeliveryService> {
             .create_group(&group_name, true)
             .await?;
         core.topics.add_many(&group_name).await;
-        tracing::info!("[gateway::create_group] Group {group_name} ready; subscribed to subtopics");
+        tracing::info!(group = %group_name, "group ready, subtopics subscribed");
 
         // Unified polling loop — stewards create commit candidates
         // automatically via check_member_freeze when the inactivity timer fires.
@@ -30,7 +28,7 @@ impl Gateway<WakuDeliveryService> {
     }
 
     pub async fn join_group(&self, group_name: String) -> anyhow::Result<()> {
-        tracing::info!("[gateway::join_group] Joining group {group_name}");
+        tracing::info!(group = %group_name, "joining group");
         let core = self.core();
         let user_ref = self.user()?;
         user_ref
@@ -40,7 +38,7 @@ impl Gateway<WakuDeliveryService> {
             .await?;
         core.topics.add_many(&group_name).await;
         user_ref.write().await.send_kp_message(&group_name).await?;
-        tracing::info!("[gateway::join_group] Sent key package for group {group_name}");
+        tracing::info!(group = %group_name, "key package sent");
 
         // Phase 1 (PendingJoin): Poll every 5s until joined or timed out
         // Phase 2 (Working): Wait until epoch boundaries and check for Waiting transition
@@ -60,9 +58,7 @@ impl Gateway<WakuDeliveryService> {
                     Ok(true) => continue, // still waiting
                     Ok(false) => break,   // joined or timed out
                     Err(e) => {
-                        tracing::error!(
-                            "check_pending_join failed for group {group_name_clone:?}: {e}"
-                        );
+                        tracing::error!(group = %group_name_clone, error = %e, "check_pending_join failed");
                         break;
                     }
                 }
@@ -78,11 +74,11 @@ impl Gateway<WakuDeliveryService> {
                 .unwrap_or(false);
 
             if !joined {
-                tracing::debug!("Join failed for group {group_name_clone:?}");
+                tracing::debug!(group = %group_name_clone, "join failed");
                 return;
             }
 
-            tracing::info!("Member joined group {group_name_clone:?}");
+            tracing::info!(group = %group_name_clone, "member joined group");
 
             // Phase 2: same unified polling loop as creator
             Self::group_polling_loop(user_clone, evt_tx_clone, group_name_clone).await;
@@ -107,7 +103,7 @@ impl Gateway<WakuDeliveryService> {
                 Ok(status) => status,
                 Err(e) => {
                     if e.is_fatal() {
-                        tracing::warn!("Polling loop exiting for group {group_name:?}: {e}");
+                        tracing::warn!(group = %group_name, error = %e, "polling loop exiting");
                         break;
                     }
                     continue;
@@ -120,14 +116,10 @@ impl Gateway<WakuDeliveryService> {
                         Ok(false) => {}
                         Err(e) => {
                             if e.is_fatal() {
-                                tracing::warn!(
-                                    "Polling loop exiting for group {group_name:?}: {e}"
-                                );
+                                tracing::warn!(group = %group_name, error = %e, "polling loop exiting");
                                 break;
                             }
-                            tracing::error!(
-                                "check_member_freeze failed for group {group_name:?}: {e}"
-                            );
+                            tracing::error!(group = %group_name, error = %e, "check_member_freeze failed");
                         }
                     }
                 }
@@ -150,8 +142,8 @@ impl Gateway<WakuDeliveryService> {
                 FreezeTimeoutStatus::TimedOut { has_proposals } => {
                     if has_proposals {
                         tracing::warn!(
-                            "Commit timeout for group {group_name:?} \
-                             with pending proposals — emergency vote initiated"
+                            group = %group_name,
+                            "commit timeout with pending proposals, emergency vote initiated"
                         );
                     }
                 }
@@ -166,7 +158,7 @@ impl Gateway<WakuDeliveryService> {
             .await
             .send_app_message(&group_name, message.into_bytes())
             .await?;
-        tracing::debug!("sent message to the group: {:?}", &group_name);
+        tracing::debug!(group = %group_name, "app message sent");
         Ok(())
     }
 
@@ -249,43 +241,11 @@ impl Gateway<WakuDeliveryService> {
             .await
             .get_approved_proposal_for_current_epoch(&group_name)
             .await?;
-
-        let display_proposals: Vec<(String, String)> = proposals
-            .iter()
-            .filter(|p| p.payload.is_some())
-            .map(|p| format_group_request(p))
-            .collect();
-        Ok(display_proposals)
+        Ok(display_batch(&proposals))
     }
 
     pub async fn get_group_members(&self, group_name: String) -> anyhow::Result<Vec<MemberInfo>> {
-        let user_ref = self.user()?;
-        let user = user_ref.read().await;
-        let addresses = user.get_group_members(&group_name).await?;
-        let scores = user.get_member_scores(&group_name);
-        let roles = user.get_member_roles(&group_name).await.unwrap_or_default();
-
-        let members = addresses
-            .into_iter()
-            .map(|address| {
-                let score = scores
-                    .iter()
-                    .find(|(raw_id, _)| format_wallet_address(raw_id.as_slice()) == address)
-                    .map(|(_, s)| *s)
-                    .unwrap_or(100);
-                let role = roles
-                    .iter()
-                    .find(|(raw_id, _)| format_wallet_address(raw_id.as_slice()) == address)
-                    .map(|(_, r)| r.to_string())
-                    .unwrap_or_else(|| "member".to_string());
-                MemberInfo {
-                    address,
-                    score,
-                    role,
-                }
-            })
-            .collect();
-        Ok(members)
+        load_member_info(&self.user()?, &group_name).await
     }
 
     /// Get epoch history for a group (past batches of approved proposals).
@@ -297,17 +257,6 @@ impl Gateway<WakuDeliveryService> {
     ) -> anyhow::Result<Vec<Vec<(String, String)>>> {
         let user_ref = self.user()?;
         let history = user_ref.read().await.get_epoch_history(&group_name).await?;
-
-        let result: Vec<Vec<(String, String)>> = history
-            .into_iter()
-            .map(|batch| {
-                batch
-                    .iter()
-                    .filter(|p| p.payload.is_some())
-                    .map(|p| format_group_request(p))
-                    .collect()
-            })
-            .collect();
-        Ok(result)
+        Ok(history.iter().map(|batch| display_batch(batch)).collect())
     }
 }

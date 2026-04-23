@@ -1,11 +1,7 @@
-//! Consensus integration helpers for the app layer.
-//!
-//! These functions bridge the core MLS operations with the consensus voting
-//! service and the `GroupEventHandler` event callbacks. They are app-layer
-//! adapters — not protocol invariants — because they make concrete decisions
-//! about how to wire consensus events to the UI (VotePayload emission) and
-//! transport (outbound packet broadcasting).
-//!
+//! App-layer adapters over the consensus service: proposal submission, vote
+//! casting, and forwarding peer messages in. Not protocol invariants — they
+//! decide how consensus events reach the UI and the transport.
+
 use alloy::signers::Signer;
 use prost::Message;
 use std::time::Duration;
@@ -21,18 +17,11 @@ use crate::app::error::UserError;
 use crate::core::{CoreError, DeMlsProvider, Group, GroupEventHandler, ProviderConsensus};
 use crate::protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest, VotePayload};
 
-/// Create a consensus proposal for a group update request and start voting.
+/// Submit a proposal to consensus. Returns `(proposal_id, vote_notification)`.
 ///
-/// 1. Encodes the `GroupUpdateRequest` as the proposal payload
-/// 2. Submits it to the consensus service
-///
-/// # Returns
-/// `(proposal_id, vote_notification)` — the caller must:
-/// 1. Store ownership via `Group::store_voting_proposal(proposal_id, request)`
-/// 2. Then emit `vote_notification` via `GroupEventHandler::on_app_message`
-///
-/// The two-step caller contract eliminates a race where a consensus event for
-/// `proposal_id` could arrive between submission and ownership storage.
+/// **Caller contract:** store ownership (`Group::store_voting_proposal`)
+/// *before* emitting the notification via `on_app_message` — otherwise a
+/// consensus result arriving immediately can see `is_owner=false`.
 pub async fn submit_proposal<P: DeMlsProvider>(
     group_name: &str,
     request: &GroupUpdateRequest,
@@ -62,8 +51,10 @@ pub async fn submit_proposal<P: DeMlsProvider>(
         .await?;
 
     info!(
-        "[submit_proposal]: Created proposal {} with {} expected voters",
-        proposal.proposal_id, expected_voters
+        group = group_name,
+        proposal_id = proposal.proposal_id,
+        voters = expected_voters,
+        "proposal opened"
     );
 
     let vote_notification: AppMessage = VotePayload {
@@ -77,11 +68,9 @@ pub async fn submit_proposal<P: DeMlsProvider>(
     Ok((proposal.proposal_id, vote_notification))
 }
 
-/// Cast a vote on a proposal and return it to broadcast it to the group.
-///
-/// Handles two cases:
-/// - **Proposal owner**: calls `cast_vote_and_get_proposal` and return the full `Proposal`
-/// - **Non-owner**: calls `cast_vote` and return just the `Vote`
+/// Cast a vote and return the `AppMessage` to broadcast. Owners broadcast
+/// the full `Proposal` (so peers see it for the first time); non-owners
+/// broadcast just the `Vote`.
 pub async fn cast_vote<P, SN>(
     group: &Group,
     proposal_id: u32,
@@ -97,14 +86,15 @@ where
     let is_owner = group.is_owner_of_proposal(proposal_id);
     let scope = P::Scope::from(group_name.to_string());
 
+    let choice = if vote { "YES" } else { "NO" };
+    let actor = if is_owner { "owner" } else { "member" };
+    info!(group = group_name, proposal_id, choice, actor, "vote cast");
     let app_message: AppMessage = if is_owner {
-        info!("[cast_vote]: Owner voting on proposal {proposal_id}");
         let proposal = consensus
             .cast_vote_and_get_proposal(&scope, proposal_id, vote, signer)
             .await?;
         proposal.into()
     } else {
-        info!("[cast_vote]: User voting on proposal {proposal_id}");
         let vote_msg = consensus
             .cast_vote(&scope, proposal_id, vote, signer)
             .await?;
@@ -114,11 +104,8 @@ where
     Ok(app_message)
 }
 
-/// Forward a proposal received from another peer to the consensus service.
-///
-/// When a peer broadcasts their proposal, other members receive it as an MLS
-/// application message. This function forwards it to the local consensus service
-/// and emits a `VotePayload` so the UI can display the pending vote.
+/// Forward a peer's proposal into the local consensus service and emit a
+/// `VotePayload` so the UI can surface the pending vote.
 pub async fn forward_incoming_proposal<P: DeMlsProvider>(
     group_name: &str,
     proposal: Proposal,
@@ -146,13 +133,11 @@ pub async fn forward_incoming_proposal<P: DeMlsProvider>(
     Ok(())
 }
 
-/// Forward a vote received from another peer to the consensus service.
+/// Forward a peer's vote into the local consensus service.
 ///
-/// A late vote may arrive after the proposal session has been reaped by a
-/// timeout on this node (the library returns `SessionNotActive`). That's a
-/// benign race — consensus already concluded locally — so we downgrade it
-/// to a debug log instead of surfacing it as an error up to the forwarder.
-/// All other consensus errors still propagate.
+/// A late vote may arrive after our local session has been timeout-reaped
+/// (`SessionNotActive`). That's a benign race — consensus concluded locally —
+/// and we downgrade it to a debug log. Other consensus errors propagate.
 pub async fn forward_incoming_vote<P: DeMlsProvider>(
     group_name: &str,
     vote: Vote,
@@ -165,8 +150,8 @@ pub async fn forward_incoming_vote<P: DeMlsProvider>(
         Ok(()) => Ok(()),
         Err(ConsensusError::SessionNotActive) => {
             tracing::debug!(
-                "[forward_incoming_vote] dropped late vote for group {group_name}: \
-                 session already resolved"
+                group = group_name,
+                "late vote dropped: consensus session already resolved"
             );
             Ok(())
         }

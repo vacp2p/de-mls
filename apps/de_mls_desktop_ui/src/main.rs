@@ -8,13 +8,14 @@ use std::sync::{
 };
 
 use de_mls::{
-    app::convert_group_request_to_display,
+    app::format_group_request,
     mls_crypto::parse_wallet_address,
-    protos::de_mls::messages::v1::{ConversationMessage, VotePayload},
+    protos::de_mls::messages::v1::{ConversationMessage, GroupUpdateRequest, VotePayload},
 };
 use de_mls_gateway::{GATEWAY, bootstrap_core_from_env};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent, MemberInfo};
 use hashgraph_like_consensus::types::ConsensusEvent;
+use prost::Message;
 
 mod logging;
 
@@ -22,6 +23,7 @@ static CSS: Asset = asset!("/assets/main.css");
 static NEXT_ALERT_ID: AtomicU64 = AtomicU64::new(1);
 const MAX_VISIBLE_ALERTS: usize = 5;
 const MAX_VISIBLE_REJECTED: usize = 20;
+const MAX_VISIBLE_ELECTIONS: usize = 20;
 
 // ─────────────────────────── App state ───────────────────────────
 
@@ -33,15 +35,15 @@ struct SessionState {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct GroupsState {
-    items: Vec<String>, // names only
+    items: Vec<String>,
     loaded: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct ChatState {
-    opened_group: Option<String>,       // which group is “Open” in the UI
-    messages: Vec<ConversationMessage>, // all messages; filtered per view
-    members: Vec<MemberInfo>,           // cached member info for opened group
+    opened_group: Option<String>,
+    messages: Vec<ConversationMessage>,
+    members: Vec<MemberInfo>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -51,6 +53,14 @@ struct RejectedProposal {
     reason: &'static str,
 }
 
+/// Compact record of a completed steward-election attempt.
+#[derive(Clone, Debug, PartialEq)]
+struct ElectionRecord {
+    details: String,
+    accepted: bool,
+    reason: Option<&'static str>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 struct ConsensusState {
     is_steward: bool,
@@ -58,10 +68,9 @@ struct ConsensusState {
     pending_votes: Vec<VotePayload>,
     approved_queue: Vec<(String, String)>,
     rejected: Vec<RejectedProposal>,
+    elections: Vec<ElectionRecord>,
     epoch_history: Vec<Vec<(String, String)>>,
-    /// Caches proposal content so we can correlate with ProposalDecided events.
     proposal_cache: HashMap<u32, (String, String)>,
-    /// Freeze round candidate progress: (received, expected).
     freeze_candidates: (usize, usize),
 }
 
@@ -74,6 +83,13 @@ struct Alert {
 #[derive(Clone, Debug, Default, PartialEq)]
 struct AlertsState {
     errors: Vec<Alert>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RailTab {
+    Members,
+    Proposals,
+    History,
 }
 
 fn record_error(alerts: &mut Signal<AlertsState>, message: impl Into<String>) {
@@ -113,13 +129,52 @@ fn summarize_error(raw: &str) -> String {
     }
 }
 
-/// Normalize an address for display — ensures `0x` prefix is present, no truncation.
 fn fmt_addr(addr: &str) -> String {
     let hex = addr.trim_start_matches("0x").trim_start_matches("0X");
     if hex.is_empty() {
         return addr.to_string();
     }
     format!("0x{}", hex)
+}
+
+fn role_for(role: &str) -> (&'static str, &'static str) {
+    match role {
+        "epoch_steward" => ("role-badge epoch", "Epoch Steward"),
+        "backup_steward" => ("role-badge backup", "Backup Steward"),
+        "steward" => ("role-badge steward", "Steward"),
+        _ => ("role-badge member", "Member"),
+    }
+}
+
+/// Split the steward-election composite string `"epoch N, retry R | addr, addr"`
+/// into a human-readable meta line and a list of steward addresses. Used by
+/// the active-vote banner to render stewards vertically instead of wrapping
+/// one long line of commas.
+fn parse_election_details(raw: &str) -> (String, Vec<String>) {
+    let (meta_raw, list_raw) = raw.split_once(" | ").unwrap_or((raw, ""));
+    let meta = meta_raw
+        .replace("epoch ", "Epoch ")
+        .replace("retry ", "Retry ")
+        .replace(", ", " · ");
+    let stewards = if list_raw.is_empty() {
+        Vec::new()
+    } else {
+        list_raw.split(", ").map(|s| s.to_string()).collect()
+    };
+    (meta, stewards)
+}
+
+fn state_label(state: &str) -> (&'static str, String) {
+    match state {
+        "Working" => ("good", "Working".to_string()),
+        "Freezing" => ("warn", "Collecting commits".to_string()),
+        "Selection" => ("warn", "Applying commit".to_string()),
+        "Reelection" => ("bad", "Reelection".to_string()),
+        "PendingJoin" => ("warn", "Pending join".to_string()),
+        "Leaving" => ("bad", "Leaving".to_string()),
+        "" => ("muted", "Unknown".to_string()),
+        other => ("muted", other.to_string()),
+    }
 }
 
 // ─────────────────────────── Routing ───────────────────────────
@@ -129,7 +184,7 @@ enum Route {
     #[route("/")]
     Login,
     #[route("/home")]
-    Home, // unified page
+    Home,
 }
 
 // ─────────────────────────── Entry ───────────────────────────
@@ -138,7 +193,6 @@ fn main() {
     let initial_level = logging::init_logging("info");
     tracing::info!("🚀 DE-MLS Desktop UI starting… level={}", initial_level);
 
-    // Build a small RT to run the async bootstrap before the UI
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -148,7 +202,6 @@ fn main() {
         let boot = bootstrap_core_from_env()
             .await
             .expect("bootstrap_core_from_env failed");
-        // hand CoreCtx to the gateway via the UI bridge
         ui_bridge::start_ui_bridge(boot.core.clone());
         boot.core
     });
@@ -157,6 +210,7 @@ fn main() {
         WindowBuilder::new()
             .with_title("DE-MLS Desktop UI")
             .with_inner_size(LogicalSize::new(1280, 820))
+            .with_min_inner_size(LogicalSize::new(1100, 680))
             .with_resizable(true),
     );
 
@@ -170,6 +224,7 @@ fn App() -> Element {
     use_context_provider(|| Signal::new(GroupsState::default()));
     use_context_provider(|| Signal::new(ChatState::default()));
     use_context_provider(|| Signal::new(ConsensusState::default()));
+    use_context_provider(|| Signal::new(RailTab::Members));
 
     rsx! {
         document::Stylesheet { href: CSS }
@@ -180,7 +235,6 @@ fn App() -> Element {
 }
 
 fn HeaderBar() -> Element {
-    // local signal to reflect current level in the select
     let mut level = use_signal(|| std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()));
     let session = use_context::<Signal<SessionState>>();
     let my_addr = session.read().address.clone();
@@ -200,7 +254,7 @@ fn HeaderBar() -> Element {
         div { class: "header",
             div { class: "brand", "DE-MLS" }
             if !my_addr.is_empty() {
-                span { class: "user-hint mono ellipsis", title: "{my_addr}", "{my_addr}" }
+                span { class: "user-chip mono ellipsis", title: "{my_addr}", "{my_addr}" }
             }
             div { class: "spacer" }
             label { class: "label", "Log level" }
@@ -226,7 +280,6 @@ fn Login() -> Element {
     let mut key = use_signal(String::new);
     let mut alerts = use_context::<Signal<AlertsState>>();
 
-    // Local single-consumer loop: only Login() steals LoggedIn events
     use_future({
         move || async move {
             loop {
@@ -292,7 +345,6 @@ fn Home() -> Element {
         }
     });
 
-    // Local event loop for handling events from the gateway
     use_future({
         move || async move {
             loop {
@@ -301,7 +353,6 @@ fn Home() -> Element {
                         group_id,
                         is_steward,
                     }) => {
-                        // only update if it is the currently opened group
                         if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
                             cons.write().is_steward = is_steward;
                         }
@@ -315,8 +366,6 @@ fn Home() -> Element {
                                     c.freeze_candidates = (0, 0);
                                 }
                             }
-                            // Refresh proposals and member count on every transition to Working
-                            // (clears stale approved queue after a commit is applied).
                             if state == "Working" {
                                 let gid = group_id.clone();
                                 spawn(async move {
@@ -378,7 +427,6 @@ fn Home() -> Element {
                     Some(AppEvent::CurrentEpochProposalsCleared { group_id }) => {
                         if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
                             cons.write().approved_queue.clear();
-                            // Batch was committed — re-fetch epoch history and member count
                             let gid = group_id.clone();
                             spawn(async move {
                                 let _ = GATEWAY
@@ -403,7 +451,11 @@ fn Home() -> Element {
                         let opened = chat.read().opened_group.clone();
                         if opened.as_deref() == Some(vp.group_id.as_str()) {
                             let (action, address) =
-                                convert_group_request_to_display(vp.payload.clone());
+                                GroupUpdateRequest::decode(vp.payload.as_slice())
+                                    .map(|req| format_group_request(&req))
+                                    .unwrap_or_else(|_| {
+                                        ("Invalid".to_string(), "malformed payload".to_string())
+                                    });
                             let mut c = cons.write();
                             c.proposal_cache.insert(vp.proposal_id, (action, address));
                             if !c
@@ -420,41 +472,38 @@ fn Home() -> Element {
                             chat.read().opened_group.as_deref() == Some(group_id.as_str());
                         let mut c = cons.write();
                         if is_current {
-                            match &consensus_event {
-                                ConsensusEvent::ConsensusReached {
-                                    proposal_id,
-                                    result,
-                                    ..
-                                } => {
-                                    if !result {
-                                        if let Some((action, address)) =
-                                            c.proposal_cache.remove(proposal_id)
-                                        {
-                                            c.rejected.push(RejectedProposal {
-                                                action,
-                                                address,
-                                                reason: "Rejected",
-                                            });
-                                            if c.rejected.len() > MAX_VISIBLE_REJECTED {
-                                                c.rejected.remove(0);
-                                            }
-                                        }
-                                    } else {
-                                        c.proposal_cache.remove(proposal_id);
-                                    }
+                            let (accepted, reason) = match &consensus_event {
+                                ConsensusEvent::ConsensusReached { result, .. } => {
+                                    (*result, if *result { None } else { Some("Rejected") })
                                 }
-                                ConsensusEvent::ConsensusFailed { proposal_id, .. } => {
-                                    if let Some((action, address)) =
-                                        c.proposal_cache.remove(proposal_id)
-                                    {
-                                        c.rejected.push(RejectedProposal {
-                                            action,
-                                            address,
-                                            reason: "Timed out",
-                                        });
-                                        if c.rejected.len() > MAX_VISIBLE_REJECTED {
-                                            c.rejected.remove(0);
-                                        }
+                                ConsensusEvent::ConsensusFailed { .. } => {
+                                    (false, Some("Timed out"))
+                                }
+                            };
+                            let proposal_id = match &consensus_event {
+                                ConsensusEvent::ConsensusReached { proposal_id, .. } => {
+                                    *proposal_id
+                                }
+                                ConsensusEvent::ConsensusFailed { proposal_id, .. } => *proposal_id,
+                            };
+                            if let Some((action, address)) = c.proposal_cache.remove(&proposal_id) {
+                                if action.starts_with("Steward Election") {
+                                    c.elections.push(ElectionRecord {
+                                        details: address,
+                                        accepted,
+                                        reason,
+                                    });
+                                    if c.elections.len() > MAX_VISIBLE_ELECTIONS {
+                                        c.elections.remove(0);
+                                    }
+                                } else if !accepted {
+                                    c.rejected.push(RejectedProposal {
+                                        action,
+                                        address,
+                                        reason: reason.unwrap_or("Rejected"),
+                                    });
+                                    if c.rejected.len() > MAX_VISIBLE_REJECTED {
+                                        c.rejected.remove(0);
                                     }
                                 }
                             }
@@ -485,11 +534,11 @@ fn Home() -> Element {
 
     rsx! {
         div { class: "page home",
+            StatusStrip {}
             div { class: "layout",
                 GroupListSection {}
                 ChatSection {}
-                ConsensusSection {}
-                MembersSection {}
+                RightRail {}
             }
         }
     }
@@ -533,6 +582,45 @@ fn AlertItem(props: AlertItemProps) -> Element {
     }
 }
 
+// ─────────────────────────── Status strip ───────────────────────────
+
+fn StatusStrip() -> Element {
+    let chat = use_context::<Signal<ChatState>>();
+    let cons = use_context::<Signal<ConsensusState>>();
+    let session = use_context::<Signal<SessionState>>();
+
+    let opened = chat.read().opened_group.clone();
+    let Some(group_name) = opened else {
+        return rsx! {};
+    };
+
+    let members = chat.read().members.clone();
+    let my_addr = session.read().address.clone();
+    let state = cons.read().group_state.clone();
+    let (state_cls, state_text) = state_label(&state);
+    let (role_cls, role_text) = members
+        .iter()
+        .find(|m| m.address.eq_ignore_ascii_case(&my_addr))
+        .map(|m| role_for(m.role.as_str()))
+        .unwrap_or(("role-badge member", "Member"));
+    let member_count = members.len();
+
+    rsx! {
+        div { class: "status-strip",
+            span { class: "status-group", "{group_name}" }
+            span { class: "status-sep" }
+            span { class: "status-label", "State" }
+            span { class: "state-pill {state_cls}", "{state_text}" }
+            span { class: "status-sep" }
+            span { class: "status-label", "You" }
+            span { class: "{role_cls}", "{role_text}" }
+            span { class: "status-sep" }
+            span { class: "status-label", "Members" }
+            span { class: "status-value", "{member_count}" }
+        }
+    }
+}
+
 // ─────────────────────────── Sections ───────────────────────────
 
 fn GroupListSection() -> Element {
@@ -541,7 +629,7 @@ fn GroupListSection() -> Element {
     let mut cons = use_context::<Signal<ConsensusState>>();
     let mut show_modal = use_signal(|| false);
     let mut new_name = use_signal(String::new);
-    let mut create_mode = use_signal(|| true); // true=create, false=join
+    let mut create_mode = use_signal(|| true);
 
     let items_snapshot: Vec<String> = groups_state.read().items.clone();
     let loaded = groups_state.read().loaded;
@@ -680,14 +768,25 @@ fn GroupListSection() -> Element {
 
 fn ChatSection() -> Element {
     let chat = use_context::<Signal<ChatState>>();
+    let cons = use_context::<Signal<ConsensusState>>();
     let session = use_context::<Signal<SessionState>>();
     let mut msg_input = use_signal(String::new);
     let mut show_ban_modal = use_signal(|| false);
     let mut ban_address = use_signal(String::new);
     let mut ban_error = use_signal(|| Option::<String>::None);
 
+    // States where `send_app_message` refuses (matches the core guard in
+    // `src/app/user/messaging.rs`). Keep these two lists in sync.
+    let send_disabled = matches!(
+        cons.read().group_state.as_str(),
+        "PendingJoin" | "Freezing" | "Selection"
+    );
+
     let send_msg = {
         move |_| {
+            if send_disabled {
+                return;
+            }
             let text = msg_input.read().trim().to_string();
             if text.is_empty() {
                 return;
@@ -790,7 +889,6 @@ fn ChatSection() -> Element {
     };
 
     let my_name = Arc::new(session.read().address.clone());
-    let my_name_for_leave = my_name.clone();
 
     let members_snapshot = chat.read().members.clone();
     let my_address = (*my_name).clone();
@@ -813,30 +911,31 @@ fn ChatSection() -> Element {
             div { class: "chat-header",
                 h2 { "Chat" }
                 if let Some(gid) = chat.read().opened_group.clone() {
-                    button {
-                        class: "ghost mini",
-                        onclick: move |_| {
-                            let group_id = gid.clone();
-                            let addr = my_name_for_leave.clone();
-                            // Send a self-ban (leave) request: requester filled by backend
-                            spawn(async move {
-                                let _ = GATEWAY
-                                    .send(AppCmd::SendBanRequest { group_id: group_id.clone(), user_to_ban: (*addr).clone() })
-                                    .await;
-                            });
-                        },
-                        "Leave group"
-                    }
-                    button {
-                        class: "ghost mini",
-                        onclick: open_ban_modal,
-                        "Request ban"
+                    div { class: "chat-actions",
+                        button {
+                            class: "ghost mini",
+                            onclick: move |_| {
+                                let group_id = gid.clone();
+                                spawn(async move {
+                                    let _ = GATEWAY
+                                        .send(AppCmd::LeaveGroup { group_id })
+                                        .await;
+                                });
+                            },
+                            "Leave group"
+                        }
+                        button {
+                            class: "ghost mini",
+                            onclick: open_ban_modal,
+                            "Request ban"
+                        }
                     }
                 }
             }
             if chat.read().opened_group.is_none() {
                 div { class: "hint", "Pick a group to chat." }
             } else {
+                ActiveVotesBanner {}
                 div { class: "messages",
                     for (i, m) in msgs_for_group.iter().enumerate() {
                         if (*my_name).clone() == m.sender || m.sender.eq_ignore_ascii_case("me") {
@@ -856,14 +955,21 @@ fn ChatSection() -> Element {
                         }
                     }
                 }
+                StateContextStrip {}
                 div { class: "composer",
                     input {
                         r#type: "text",
                         value: "{msg_input}",
                         oninput: move |e| msg_input.set(e.value()),
-                        placeholder: "Type a message…",
+                        placeholder: if send_disabled { "Chat paused…" } else { "Type a message…" },
+                        disabled: send_disabled,
                     }
-                    button { class: "primary", onclick: send_msg, "Send" }
+                    button {
+                        class: "primary",
+                        onclick: send_msg,
+                        disabled: send_disabled,
+                        "Send"
+                    }
                 }
             }
         }
@@ -921,9 +1027,24 @@ fn ChatSection() -> Element {
     }
 }
 
-fn ConsensusSection() -> Element {
+// ─────────────────────────── Active votes banner ───────────────────────────
+
+fn ActiveVotesBanner() -> Element {
     let chat = use_context::<Signal<ChatState>>();
     let mut cons = use_context::<Signal<ConsensusState>>();
+
+    let opened = chat.read().opened_group.clone();
+    let pending_votes: Vec<VotePayload> = cons
+        .read()
+        .pending_votes
+        .iter()
+        .filter(|p| Some(p.group_id.as_str()) == opened.as_deref())
+        .cloned()
+        .collect();
+
+    if pending_votes.is_empty() {
+        return rsx! {};
+    }
 
     let mut do_vote = move |proposal_id: u32, choice: bool| {
         let vote = cons
@@ -948,381 +1069,428 @@ fn ConsensusSection() -> Element {
         }
     };
 
-    let opened = chat.read().opened_group.clone();
-    let pending_votes: Vec<VotePayload> = cons
-        .read()
-        .pending_votes
-        .iter()
-        .filter(|p| Some(p.group_id.as_str()) == opened.as_deref())
-        .cloned()
-        .collect();
-
-    let pending_display: Vec<(u32, String, String)> = pending_votes
-        .iter()
-        .map(|v| {
-            let (action, id) = convert_group_request_to_display(v.payload.clone());
-            (v.proposal_id, action, id)
-        })
-        .collect();
-
-    let approved_snapshot = cons.read().approved_queue.clone();
-    let rejected_snapshot = cons.read().rejected.clone();
-    let epoch_snapshot = cons.read().epoch_history.clone();
-    let epoch_count = epoch_snapshot.len();
-    let has_history = !rejected_snapshot.is_empty() || !epoch_snapshot.is_empty();
+    let count = pending_votes.len();
+    let title = if count == 1 {
+        "⚡ Active vote".to_string()
+    } else {
+        format!("⚡ {count} active votes")
+    };
 
     rsx! {
-        div { class: "panel consensus",
-            h2 { "Consensus" }
-
-            if let Some(_group) = opened {
-                // Steward, Members, State status
-                div { class: "status-row",
-                    div { class: "status",
-                        span { class: "muted", "You are " }
-                        if cons.read().is_steward {
-                            span { class: "good", "a steward" }
-                        } else {
-                            span { class: "bad", "not a steward" }
-                        }
-                    }
-                    div { class: "status",
-                        span { class: "muted", "Members: " }
-                        {
-                            let count = chat.read().members.len();
-                            rsx! { span { class: "value", "{count}" } }
-                        }
-                    }
-                }
-                div { class: "status-row",
-                    div { class: "status",
-                        span { class: "muted", "State: " }
-                        {
-                            let state = cons.read().group_state.clone();
-                            let (class, label) = match state.as_str() {
-                                "Working" => ("good", "Working"),
-                                "Freezing" => ("warn", "Collecting commits"),
-                                "Selection" => ("warn", "Applying commit"),
-                                "Reelection" => ("bad", "Reelection"),
-                                "PendingJoin" => ("warn", "Pending join"),
-                                "Leaving" => ("bad", "Leaving"),
-                                "" => ("muted", "Unknown"),
-                                other => ("muted", other),
-                            };
-                            rsx! { span { class: "{class}", "{label}" } }
-                        }
-                    }
-                }
-
-                // State context — content depends on state and role
-                div { class: "consensus-section",
+        div { class: "active-votes-banner",
+            div { class: "votes-header", "{title}" }
+            div { class: "votes-list",
+                for vp in pending_votes.iter() {
                     {
-                        let state = cons.read().group_state.clone();
-                        let is_steward = cons.read().is_steward;
-                        let n = approved_snapshot.len();
-                        match state.as_str() {
-                            "Working" => {
-                                if is_steward {
-                                    rsx! {
-                                        div { class: "state-context",
-                                            span { class: "state-context-header",
-                                                "Approved for next commit ({n}):"
-                                            }
-                                            if n > 0 {
-                                                div { class: "proposals-window",
-                                                    for (action, address) in approved_snapshot.iter() {
-                                                        {
-                                                            let item_class = if action.contains("Emergency") {
-                                                                "proposal-item emergency"
-                                                            } else {
-                                                                "proposal-item"
-                                                            };
-                                                            let short = fmt_addr(address);
-                                                            rsx! {
-                                                                div { class: "{item_class}",
-                                                                    span { class: "action", "{action}:" }
-                                                                    span { class: "value", "{short}" }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            } else {
-                                                div { class: "no-data", "No proposals pending." }
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    let suffix = if n == 1 { "" } else { "s" };
-                                    rsx! {
-                                        div { class: "state-context",
-                                            if n > 0 {
-                                                span { class: "state-context-header",
-                                                    "Waiting for steward to commit {n} proposal{suffix}:"
-                                                }
-                                                div { class: "proposals-window",
-                                                    for (action, address) in approved_snapshot.iter() {
-                                                        {
-                                                            let item_class = if action.contains("Emergency") {
-                                                                "proposal-item emergency"
-                                                            } else {
-                                                                "proposal-item"
-                                                            };
-                                                            let short = fmt_addr(address);
-                                                            rsx! {
-                                                                div { class: "{item_class}",
-                                                                    span { class: "action", "{action}:" }
-                                                                    span { class: "value", "{short}" }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            } else {
-                                                span { class: "muted", "No pending proposals." }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            "Freezing" => {
-                                let (received, expected) = cons.read().freeze_candidates;
-                                rsx! {
-                                    div { class: "state-context warn",
-                                        span { "⏳ Collecting commit candidates: {received}/{expected}" }
-                                    }
-                                }
-                            },
-                            "Selection" => rsx! {
-                                div { class: "state-context warn",
-                                    span { "⚙ Applying selected commit to the group." }
-                                }
-                            },
-                            "Reelection" => rsx! {
-                                div { class: "state-context bad",
-                                    span { "⚠ Steward fault detected. Regular proposals are blocked until the emergency vote resolves." }
-                                }
-                            },
-                            "PendingJoin" => rsx! {
-                                div { class: "state-context warn",
-                                    span { "⌛ Waiting for welcome message..." }
-                                }
-                            },
-                            "Leaving" => rsx! {
-                                div { class: "state-context warn",
-                                    span { "⌛ Waiting for removal commit..." }
-                                }
-                            },
-                            _ => rsx! {},
-                        }
-                    }
-                }
+                        let proposal_id = vp.proposal_id;
+                        let (action, id) = GroupUpdateRequest::decode(vp.payload.as_slice())
+                            .map(|req| format_group_request(&req))
+                            .unwrap_or_else(|_| (
+                                "Invalid".to_string(),
+                                "malformed payload".to_string(),
+                            ));
+                        let is_emergency = action.starts_with("Emergency: ");
+                        let is_election = action.starts_with("Steward Election");
+                        let card_class = if is_emergency {
+                            "vote-card emergency"
+                        } else if is_election {
+                            "vote-card election"
+                        } else {
+                            "vote-card"
+                        };
+                        let badge = if is_emergency {
+                            let violation = action.strip_prefix("Emergency: ").unwrap_or("");
+                            format!("⚠ Emergency · {violation}")
+                        } else if is_election {
+                            "⚡ Steward Election".to_string()
+                        } else {
+                            action.clone()
+                        };
 
-                // Active Votes
-                div { class: "consensus-section",
-                    h3 { "Active Vote" }
-                    if pending_display.is_empty() {
-                        div { class: "no-data", "No active vote" }
-                    } else {
-                        for (pid, action, id) in pending_display.iter() {
-                            {
-                                let proposal_id = *pid;
-                                let is_emergency = action.starts_with("Emergency: ");
-                                let is_election = action.starts_with("Steward Election");
-                                let short_id = fmt_addr(id);
-                                if is_emergency {
-                                    let violation_type = action.strip_prefix("Emergency: ").unwrap_or("").to_string();
-                                    rsx! {
-                                        div { class: "proposal-row",
-                                            div { class: "proposals-window emergency",
-                                                div { class: "emergency-header",
-                                                    span { class: "bad", "⚠ Emergency Proposal #{proposal_id}" }
-                                                }
-                                                div { class: "proposal-item",
-                                                    span { class: "action", "Violation:" }
-                                                    span { class: "value bad", "{violation_type}" }
-                                                }
-                                                div { class: "proposal-item",
-                                                    span { class: "action", "Accused steward:" }
-                                                    span { class: "value", "{short_id}" }
+                        rsx! {
+                            div { key: "{proposal_id}", class: "{card_class}",
+                                div { class: "vote-card-head",
+                                    span { class: "vote-badge", "{badge}" }
+                                    span { class: "vote-id mono muted", "#{proposal_id}" }
+                                }
+                                {
+                                    if is_election {
+                                        let (meta, stewards) = parse_election_details(&id);
+                                        rsx! {
+                                            div { class: "vote-meta", "{meta}" }
+                                            span { class: "vote-label", "Proposed stewards" }
+                                            div { class: "vote-stewards-list",
+                                                for s in stewards.iter() {
+                                                    div { key: "{s}", class: "vote-steward mono", "{s}" }
                                                 }
                                             }
-                                            div { class: "vote-actions",
-                                                button { class: "primary", onclick: move |_| do_vote(proposal_id, true), "YES" }
-                                                button { class: "ghost",   onclick: move |_| do_vote(proposal_id, false),  "NO"  }
+                                        }
+                                    } else if is_emergency {
+                                        let target = fmt_addr(&id);
+                                        rsx! {
+                                            div { class: "vote-body-row",
+                                                span { class: "vote-label", "Accused steward" }
+                                                span { class: "vote-value mono", "{target}" }
+                                            }
+                                        }
+                                    } else {
+                                        let target = fmt_addr(&id);
+                                        rsx! {
+                                            div { class: "vote-body-row",
+                                                span { class: "vote-label", "Target" }
+                                                span { class: "vote-value mono", "{target}" }
                                             }
                                         }
                                     }
-                                } else if is_election {
-                                    rsx! {
-                                        div { class: "proposal-row",
-                                            div { class: "proposals-window",
-                                                div { class: "proposal-item proposal-id",
-                                                    span { class: "action", "Steward Election #{proposal_id}" }
-                                                }
-                                                div { class: "proposal-item",
-                                                    span { class: "action", "Proposed stewards:" }
-                                                    span { class: "value", "{id}" }
-                                                }
-                                            }
-                                            div { class: "vote-actions",
-                                                button { class: "primary", onclick: move |_| do_vote(proposal_id, true), "YES" }
-                                                button { class: "ghost",   onclick: move |_| do_vote(proposal_id, false),  "NO"  }
-                                            }
-                                        }
+                                }
+                                div { class: "vote-actions",
+                                    button {
+                                        class: "primary",
+                                        onclick: move |_| do_vote(proposal_id, true),
+                                        "YES"
                                     }
-                                } else {
-                                    rsx! {
-                                        div { class: "proposal-row",
-                                            div { class: "proposals-window",
-                                                div { class: "proposal-item proposal-id",
-                                                    span { class: "action", "Proposal #{proposal_id}" }
-                                                }
-                                                div { class: "proposal-item",
-                                                    span { class: "action", "{action}:" }
-                                                    span { class: "value", "{short_id}" }
-                                                }
-                                            }
-                                            div { class: "vote-actions",
-                                                button { class: "primary", onclick: move |_| do_vote(proposal_id, true), "YES" }
-                                                button { class: "ghost",   onclick: move |_| do_vote(proposal_id, false),  "NO"  }
-                                            }
-                                        }
+                                    button {
+                                        class: "ghost",
+                                        onclick: move |_| do_vote(proposal_id, false),
+                                        "NO"
                                     }
                                 }
                             }
                         }
                     }
                 }
-
-                // Epoch History
-                div { class: "consensus-section",
-                    h3 { "Epoch History" }
-                    if has_history {
-                        div { class: "history-window",
-                            // Rejected proposals
-                            if !rejected_snapshot.is_empty() {
-                                div { class: "history-group",
-                                    span { class: "history-label rejected-label", "Rejected" }
-                                    for rp in rejected_snapshot.iter().rev() {
-                                        {
-                                            let short = fmt_addr(&rp.address);
-                                            let reason = rp.reason;
-                                            rsx! {
-                                                div { class: "history-entry rejected",
-                                                    span { class: "action", "{rp.action}:" }
-                                                    span { class: "value", "{short}" }
-                                                    span { class: "muted", " ({reason})" }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Past epochs
-                            if !epoch_snapshot.is_empty() {
-                                div { class: "history-group",
-                                    span { class: "history-label", "Past Epochs" }
-                                    for (i, batch) in epoch_snapshot.iter().rev().enumerate() {
-                                        div { class: "epoch-group",
-                                            span { class: "epoch-label",
-                                                "Epoch {epoch_count - i}"
-                                            }
-                                            for (action, address) in batch.iter() {
-                                                {
-                                                    let is_emerg = action.contains("Emergency");
-                                                    let display_action = if is_emerg {
-                                                        format!("⚠ {}", action)
-                                                    } else {
-                                                        action.clone()
-                                                    };
-                                                    let entry_class = if is_emerg {
-                                                        "history-entry emergency"
-                                                    } else {
-                                                        "history-entry"
-                                                    };
-                                                    let short = fmt_addr(address);
-                                                    rsx! {
-                                                        div { class: "{entry_class}",
-                                                            span { class: "action", "{display_action}:" }
-                                                            span { class: "value", "{short}" }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        div { class: "no-data", "No history yet" }
-                    }
-                }
-            } else {
-                div { class: "hint", "Open a group to see proposals & voting." }
             }
         }
     }
 }
 
-// ─────────────────────────── Members Panel ───────────────────────────
+// ─────────────────────────── State context strip ───────────────────────────
 
-fn MembersSection() -> Element {
+fn StateContextStrip() -> Element {
     let chat = use_context::<Signal<ChatState>>();
-    let opened = chat.read().opened_group.clone();
-    let members_snapshot = chat.read().members.clone();
-    let removal_threshold = 0_i64; // matches ScoringConfig default
+    let cons = use_context::<Signal<ConsensusState>>();
+
+    if chat.read().opened_group.is_none() {
+        return rsx! {};
+    }
+
+    let state = cons.read().group_state.clone();
+    let (recv, exp) = cons.read().freeze_candidates;
+
+    let (tone, message) = match state.as_str() {
+        "Freezing" => (
+            "warn",
+            format!("⏳ Collecting commit candidates {recv}/{exp} — chat paused"),
+        ),
+        "Selection" => (
+            "warn",
+            "⚙ Applying selected commit — chat paused".to_string(),
+        ),
+        "Reelection" => (
+            "bad",
+            "⚠ Steward fault detected — waiting for emergency vote to resolve".to_string(),
+        ),
+        "PendingJoin" => (
+            "warn",
+            "⌛ Waiting for welcome message — chat disabled".to_string(),
+        ),
+        "Leaving" => (
+            "warn",
+            "⌛ Leave requested — waiting for removal commit".to_string(),
+        ),
+        _ => return rsx! {},
+    };
 
     rsx! {
-        div { class: "panel members",
-            h2 { "Members" }
-            if opened.is_some() {
-                if members_snapshot.is_empty() {
-                    div { class: "no-data", "No members loaded." }
-                } else {
-                    div { class: "member-table",
-                        div { class: "member-row header",
-                            span { class: "col-addr", "Address" }
-                            span { class: "col-role", "Role" }
-                            span { class: "col-score", "Score" }
-                        }
-                        for member in members_snapshot.iter() {
-                            {
-                                let role_class = match member.role.as_str() {
-                                    "epoch_steward" => "role-badge epoch",
-                                    "backup_steward" => "role-badge backup",
-                                    "steward" => "role-badge steward",
-                                    _ => "role-badge member",
-                                };
-                                let role_label = match member.role.as_str() {
-                                    "epoch_steward" => "Epoch Steward",
-                                    "backup_steward" => "Backup Steward",
-                                    "steward" => "Steward",
-                                    _ => "Member",
-                                };
-                                let score_class = if member.score <= removal_threshold {
-                                    "score bad"
-                                } else if member.score <= removal_threshold + 30 {
-                                    "score warn"
-                                } else {
-                                    "score"
-                                };
-                                let short = fmt_addr(&member.address);
-                                rsx! {
-                                    div { class: "member-row",
-                                        span { class: "col-addr mono", "{short}" }
-                                        span { class: "col-role {role_class}", "{role_label}" }
-                                        span { class: "col-score {score_class}", "{member.score}" }
+        div { class: "state-context-strip {tone}",
+            span { "{message}" }
+        }
+    }
+}
+
+// ─────────────────────────── Right rail ───────────────────────────
+
+fn RightRail() -> Element {
+    let chat = use_context::<Signal<ChatState>>();
+    let cons = use_context::<Signal<ConsensusState>>();
+    let mut tab = use_context::<Signal<RailTab>>();
+
+    if chat.read().opened_group.is_none() {
+        return rsx! {
+            div { class: "panel right-rail empty",
+                div { class: "hint", "Open a group to see details." }
+            }
+        };
+    }
+
+    let current = *tab.read();
+    let member_count = chat.read().members.len();
+    let proposal_count = cons.read().approved_queue.len();
+
+    let btn_class = |t: RailTab| {
+        if current == t {
+            "rail-tab active"
+        } else {
+            "rail-tab"
+        }
+    };
+
+    rsx! {
+        div { class: "panel right-rail",
+            div { class: "rail-tabs",
+                button {
+                    class: btn_class(RailTab::Members),
+                    onclick: move |_| tab.set(RailTab::Members),
+                    span { "Members" }
+                    if member_count > 0 {
+                        span { class: "tab-count", "{member_count}" }
+                    }
+                }
+                button {
+                    class: btn_class(RailTab::Proposals),
+                    onclick: move |_| tab.set(RailTab::Proposals),
+                    span { "Proposals" }
+                    if proposal_count > 0 {
+                        span { class: "tab-count pending", "{proposal_count}" }
+                    }
+                }
+                button {
+                    class: btn_class(RailTab::History),
+                    onclick: move |_| tab.set(RailTab::History),
+                    span { "History" }
+                }
+            }
+            div { class: "rail-content",
+                {
+                    match current {
+                        RailTab::Members => rsx! { MembersTab {} },
+                        RailTab::Proposals => rsx! { ProposalsTab {} },
+                        RailTab::History => rsx! { HistoryTab {} },
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn MembersTab() -> Element {
+    let chat = use_context::<Signal<ChatState>>();
+    let members_snapshot = chat.read().members.clone();
+    let removal_threshold = 0_i64;
+
+    if members_snapshot.is_empty() {
+        return rsx! { div { class: "no-data", "No members loaded." } };
+    }
+
+    rsx! {
+        div { class: "tab-pane members-tab",
+            div { class: "member-table",
+                div { class: "member-row header",
+                    span { class: "col-addr", "Address" }
+                    span { class: "col-role", "Role" }
+                    span { class: "col-score", "Score" }
+                }
+                div { class: "member-rows",
+                    for member in members_snapshot.iter() {
+                        {
+                            let (role_cls, role_txt) = role_for(member.role.as_str());
+                            let score_class = if member.score <= removal_threshold {
+                                "col-score score bad"
+                            } else if member.score <= removal_threshold + 30 {
+                                "col-score score warn"
+                            } else {
+                                "col-score score"
+                            };
+                            let short = fmt_addr(&member.address);
+                            let row_class = if member.pending_leave {
+                                "member-row leaving"
+                            } else {
+                                "member-row"
+                            };
+                            rsx! {
+                                div { class: "{row_class}",
+                                    span { class: "col-addr mono", "{short}" }
+                                    span { class: "col-role {role_cls}", "{role_txt}" }
+                                    span { class: "{score_class}", "{member.score}" }
+                                    if member.pending_leave {
+                                        span { class: "leave-badge", title: "Leaving next epoch", "⤴ leaving" }
                                     }
                                 }
                             }
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+fn ProposalsTab() -> Element {
+    let cons = use_context::<Signal<ConsensusState>>();
+    let state = cons.read().group_state.clone();
+    let is_steward = cons.read().is_steward;
+    let approved = cons.read().approved_queue.clone();
+    let n = approved.len();
+
+    let header = if state == "Working" {
+        if is_steward {
+            format!("Approved for next commit ({n})")
+        } else if n > 0 {
+            let suffix = if n == 1 { "" } else { "s" };
+            format!("Waiting for steward to commit {n} proposal{suffix}")
+        } else {
+            "No pending proposals".to_string()
+        }
+    } else {
+        format!("Approved queue ({n})")
+    };
+
+    rsx! {
+        div { class: "tab-pane proposals-tab",
+            div { class: "tab-header", "{header}" }
+            if n == 0 {
+                div { class: "no-data", "Nothing queued" }
             } else {
-                div { class: "hint", "Open a group to see members." }
+                div { class: "proposal-list",
+                    for (action, address) in approved.iter() {
+                        {
+                            let is_emerg = action.contains("Emergency");
+                            let card_class = if is_emerg {
+                                "proposal-card emergency"
+                            } else {
+                                "proposal-card"
+                            };
+                            let short = fmt_addr(address);
+                            rsx! {
+                                div { class: "{card_class}",
+                                    span { class: "proposal-action", "{action}" }
+                                    span { class: "proposal-target mono", "{short}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn HistoryTab() -> Element {
+    let cons = use_context::<Signal<ConsensusState>>();
+    let rejected_snapshot = cons.read().rejected.clone();
+    let epoch_snapshot = cons.read().epoch_history.clone();
+    let elections_snapshot = cons.read().elections.clone();
+    let epoch_count = epoch_snapshot.len();
+
+    let any = !rejected_snapshot.is_empty()
+        || !epoch_snapshot.is_empty()
+        || !elections_snapshot.is_empty();
+    if !any {
+        return rsx! { div { class: "no-data", "No history yet" } };
+    }
+
+    rsx! {
+        div { class: "tab-pane history-tab",
+            if !elections_snapshot.is_empty() {
+                div { class: "history-group",
+                    span { class: "history-label", "Steward Elections" }
+                    for er in elections_snapshot.iter().rev() {
+                        {
+                            let (entry_class, outcome_label, outcome_class) = if er.accepted {
+                                ("history-card applied election", "applied", "good")
+                            } else {
+                                ("history-card rejected election", "rejected", "bad")
+                            };
+                            let show_reason = er.reason.is_some_and(|r| r != "Rejected");
+                            let (header_part, stewards_part) = er
+                                .details
+                                .split_once(" | ")
+                                .unwrap_or((er.details.as_str(), ""));
+                            rsx! {
+                                div { class: "{entry_class}",
+                                    div { class: "history-card-head",
+                                        span { class: "history-card-title", "Election" }
+                                        span { class: "history-outcome {outcome_class}", "{outcome_label}" }
+                                        if let Some(reason) = er.reason {
+                                            if show_reason {
+                                                span { class: "history-reason muted", "({reason})" }
+                                            }
+                                        }
+                                    }
+                                    div { class: "history-card-body",
+                                        span { class: "value mono", "{header_part}" }
+                                        if !stewards_part.is_empty() {
+                                            span { class: "election-stewards mono muted", "{stewards_part}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !rejected_snapshot.is_empty() {
+                div { class: "history-group",
+                    span { class: "history-label", "Rejected" }
+                    for rp in rejected_snapshot.iter().rev() {
+                        {
+                            let short = fmt_addr(&rp.address);
+                            let reason = rp.reason;
+                            let show_reason = reason != "Rejected";
+                            rsx! {
+                                div { class: "history-card rejected",
+                                    div { class: "history-card-head",
+                                        span { class: "history-card-title", "{rp.action}" }
+                                        span { class: "history-outcome bad", "rejected" }
+                                        if show_reason {
+                                            span { class: "history-reason muted", "({reason})" }
+                                        }
+                                    }
+                                    div { class: "history-card-body",
+                                        span { class: "value mono", "{short}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !epoch_snapshot.is_empty() {
+                div { class: "history-group",
+                    span { class: "history-label", "Past Epochs" }
+                    for (i, batch) in epoch_snapshot.iter().rev().enumerate() {
+                        div { class: "epoch-group",
+                            span { class: "epoch-label", "Epoch {epoch_count - i}" }
+                            for (action, address) in batch.iter() {
+                                {
+                                    let is_emerg = action.contains("Emergency");
+                                    let entry_class = if is_emerg {
+                                        "history-card applied emergency"
+                                    } else {
+                                        "history-card applied"
+                                    };
+                                    let display_action = if is_emerg {
+                                        format!("⚠ {}", action)
+                                    } else {
+                                        action.clone()
+                                    };
+                                    let short = fmt_addr(address);
+                                    rsx! {
+                                        div { class: "{entry_class}",
+                                            div { class: "history-card-head",
+                                                span { class: "history-card-title", "{display_action}" }
+                                                span { class: "history-outcome good", "applied" }
+                                            }
+                                            div { class: "history-card-body",
+                                                span { class: "value mono", "{short}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

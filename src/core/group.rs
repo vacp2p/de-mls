@@ -1,68 +1,73 @@
-//! Per-group state container for app-level operations.
-//!
-//! This module provides [`Group`], which holds app-level state for
-//! a single group: proposal tracking, steward status, and freeze-round candidate buffer.
-//!
-//! **Note**: MLS cryptographic state is managed by `MlsService` internally.
-//! This handle only tracks application-layer concerns.
-//!
-//! # Architecture
-//!
-//! ```text
-//! ┌──────────────────────────────────────────────────────────────┐
-//! │                        Group                                 │
-//! ├──────────────────────────────────────────────────────────────┤
-//! │  group_name      │  Human-readable group identifier          │
-//! │  steward_list    │  Active steward list for epoch rotation   │
-//! │  proposals       │  Voting + approved proposal queues        │
-//! │  freeze_round    │  Candidate buffer for commit selection    │
-//! └──────────────────────────────────────────────────────────────┘
-//! ```
-//!
-//! # Lifecycle
-//!
-//! **Creating a group (as steward):**
-//! ```ignore
-//! mls_service.create_group(group_name)?;
-//! let config = ProtocolConfig::new(1, 5).unwrap();
-//! let group = Group::new_as_creator(group_name, mls_service.wallet_bytes(), config);
-//! // group.is_steward() == true
-//! ```
-//!
-//! **Joining a group (as member):**
-//! ```ignore
-//! let config = ProtocolConfig::new(1, 5).unwrap();
-//! let group = Group::new_as_joiner(group_name, self_identity, config);
-//! // group.is_steward() == false
-//!
-//! // Later, when welcome is received:
-//! mls_service.join_group(&welcome)?;
-//! // MLS state now exists — check via mls_service.has_group(group_name)
-//! ```
-//!
-//! # Proposal Flow
-//!
-//! The group tracks proposals through their lifecycle:
-//!
-//! ```text
-//! 1. store_voting_proposal()   →  Proposal created, waiting for votes
-//! 2. mark_proposal_as_approved()  →  Consensus reached, ready for commit
-//!    OR mark_proposal_as_rejected()  →  Consensus rejected, discard
-//! 3. approved_proposals()      →  Steward reads approved proposals
-//! 4. clear_approved_proposals()  →  After commit, archive to history
-//! ```
-//!
-//! Non-owners (members who didn't create the proposal) use:
-//! - `insert_approved_proposal()` - Add proposal directly to approved queue
+//! Per-group app-level state: proposal queues, steward list, freeze-round
+//! candidate buffer, pending-update buffer, ECP dedup. MLS crypto state
+//! lives in `MlsService` alongside this.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::core::CoreError;
-use crate::core::proposals::{CurrentEpochProposals, ProposalId};
+use crate::core::proposal_kind::ProposalKind;
 use crate::core::steward_list::{ProtocolConfig, StewardList};
 use crate::protos::de_mls::messages::v1::{
-    CommitCandidate, GroupUpdateRequest, group_update_request,
+    CommitCandidate, GroupUpdateRequest, ViolationEvidence, group_update_request,
 };
+
+/// Consensus proposal identifier (assigned by the consensus service).
+pub type ProposalId = u32;
+
+/// How many past approved-proposal batches to retain for UI display.
+///
+/// RFC §"Creating Voting Proposal" requires retaining finalized proposals for
+/// at least `threshold_duration`; this count-based cap is a placeholder until
+/// that becomes a first-class config value (see `docs/ROADMAP.md`).
+const MAX_EPOCH_HISTORY: usize = 10;
+
+/// Canonical fingerprint for a violation so the same event detected
+/// independently by multiple members collapses to one key.
+///
+/// Intentionally narrower than the full evidence: `creator_member_id` and
+/// evidence data (hashes etc.) can legitimately differ between detectors
+/// while still describing the same violation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EcpFingerprint {
+    pub violation_type: i32,
+    pub target_member_id: Vec<u8>,
+    pub violation_epoch: u64,
+}
+
+impl EcpFingerprint {
+    pub fn from_evidence(ev: &ViolationEvidence) -> Self {
+        Self {
+            violation_type: ev.violation_type,
+            target_member_id: ev.target_member_id.clone(),
+            violation_epoch: ev.epoch,
+        }
+    }
+}
+
+/// Derive a deterministic proposal ID for an auto-approved self-leave,
+/// keyed on the leaver's identity. Every node computes the same ID, so
+/// `approved_proposals` stays consistent across the group without
+/// running a consensus round.
+///
+/// This ID doubles as the "auto-approved" signature — an approved entry
+/// whose ID matches this formula for its own target is known to be a
+/// self-leave (not a consensus-approved Remove).
+pub fn auto_approved_leave_proposal_id(identity: &[u8]) -> u32 {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(identity);
+    u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
+}
+
+/// True iff the `(proposal_id, request)` pair is an auto-approved self-leave
+/// (identified by the deterministic ID signature).
+pub fn is_auto_approved_entry(proposal_id: u32, request: &GroupUpdateRequest) -> bool {
+    match request.payload.as_ref() {
+        Some(group_update_request::Payload::RemoveMember(r)) => {
+            proposal_id == auto_approved_leave_proposal_id(&r.identity)
+        }
+        _ => false,
+    }
+}
 
 /// Return the target identity of a membership-changing `GroupUpdateRequest`.
 ///
@@ -91,7 +96,6 @@ pub struct PendingUpdate {
     pub first_seen_epoch: u64,
 }
 
-/// Maximum number of committed batch hashes to remember for dedup.
 const MAX_COMMITTED_HASHES: usize = 10;
 
 /// A commit candidate buffered during freeze for later selection.
@@ -111,34 +115,22 @@ pub(crate) struct FreezeRound {
     pub candidates: Vec<BufferedCommitCandidate>,
 }
 
-/// Handle for a single MLS group's app-level state.
-///
-/// Contains state needed for group operations:
-/// - Steward flag indicating whether this user batches commits
-/// - Proposal queues for tracking voting and approved proposals
-///
-/// **Note**: MLS cryptographic state (encryption keys, group members) is
-/// managed by `MlsService`. Use `mls_service.encrypt()`, `mls_service.decrypt()`,
-/// etc. for MLS operations.
-///
-/// # Thread Safety
-///
-/// The `Group` should be wrapped in `RwLock` or similar by the
-/// application layer (see `User.groups` in the app module).
-///
-/// # Steward vs Member
-///
-/// - **Steward**: Creates proposals, collects votes, batches approved proposals
-///   into MLS commits. Created via `new_as_creator()`.
-/// - **Member**: Votes on proposals, receives commits. Created via `new_as_joiner()`.
+/// Per-group app-level state. Wrap in `RwLock` at the app layer — DE-MLS
+/// holds this across async contexts. Stewards batch commits; members vote.
+/// Construct with [`Self::new_as_creator`] or [`Self::new_as_joiner`].
 #[derive(Clone, Debug)]
 pub struct Group {
     /// The name of the group.
     group_name: String,
     /// This user's wallet identity (for deriving steward status from the list).
     self_identity: Vec<u8>,
-    /// Proposal lifecycle tracking (voting → approved → archived).
-    proposals: CurrentEpochProposals,
+    /// Proposals that passed consensus, waiting for steward to commit.
+    approved_proposals: HashMap<ProposalId, GroupUpdateRequest>,
+    /// Proposals waiting on consensus voting (created by this user).
+    voting_proposals: HashMap<ProposalId, GroupUpdateRequest>,
+    /// History of previously-committed batches (most recent last), capped
+    /// at [`MAX_EPOCH_HISTORY`] entries.
+    epoch_history: VecDeque<HashMap<ProposalId, GroupUpdateRequest>>,
     /// Active steward list for the current epoch window.
     /// `Some` after bootstrap (creator) or sync (joiner). `None` only for joiners pre-sync.
     steward_list: Option<StewardList>,
@@ -157,6 +149,22 @@ pub struct Group {
     /// future epoch steward can retry them if the current one fails to commit.
     /// Keyed by target identity so duplicates don't stack.
     pending_updates: HashMap<Vec<u8>, PendingUpdate>,
+    /// Current steward-election retry round. Starts at 0, increments
+    /// every time an election proposal is rejected within the same MLS
+    /// epoch, reset to 0 when an election is accepted. Threaded into
+    /// [`StewardList::generate`] so each retry proposes a different
+    /// list composition.
+    reelection_round: u32,
+    /// Buffer of detected violations observed locally but deferred because
+    /// this node isn't the responsible ECP proposer. Keyed by violation
+    /// fingerprint so repeat detections of the same event don't stack.
+    /// Entries are cleared when the corresponding ECP is observed in the
+    /// voting queue or resolved via consensus.
+    pending_ecps: HashMap<EcpFingerprint, ViolationEvidence>,
+    /// Proposal IDs already dispatched through `apply_consensus_outcome`.
+    /// The consensus library can re-emit `ConsensusReached` (timeout-path
+    /// race); this guards against re-applying state and double-firing events.
+    consensus_outcomes_applied: HashSet<ProposalId>,
 }
 
 impl Group {
@@ -164,7 +172,9 @@ impl Group {
         Self {
             group_name: group_name.to_string(),
             self_identity,
-            proposals: CurrentEpochProposals::new(),
+            approved_proposals: HashMap::new(),
+            voting_proposals: HashMap::new(),
+            epoch_history: VecDeque::new(),
             steward_list: None,
             protocol_config,
             active_emergency_ids: HashSet::new(),
@@ -172,7 +182,18 @@ impl Group {
             committed_batch_hashes: VecDeque::new(),
             freeze_round: None,
             pending_updates: HashMap::new(),
+            reelection_round: 0,
+            pending_ecps: HashMap::new(),
+            consensus_outcomes_applied: HashSet::new(),
         }
+    }
+
+    pub fn is_consensus_outcome_applied(&self, proposal_id: ProposalId) -> bool {
+        self.consensus_outcomes_applied.contains(&proposal_id)
+    }
+
+    pub fn mark_consensus_outcome_applied(&mut self, proposal_id: ProposalId) {
+        self.consensus_outcomes_applied.insert(proposal_id);
     }
 
     /// Create a new group handle for a joining member (not yet steward).
@@ -201,140 +222,204 @@ impl Group {
             &[creator_identity],
             1,
             protocol_config,
+            0,
         )?;
         group.steward_list = Some(list);
 
         Ok(group)
     }
 
-    /// Get the group name.
     pub fn group_name(&self) -> &str {
         &self.group_name
     }
 
-    /// Get the group name as bytes.
     pub fn group_name_bytes(&self) -> &[u8] {
         self.group_name.as_bytes()
     }
 
-    /// Whether subset commit candidates are allowed during selection.
     pub fn allow_subset_candidates(&self) -> bool {
         self.protocol_config.allow_subset_candidates
     }
 
-    /// Update the `allow_subset_candidates` flag (used when receiving GroupSync).
+    /// Overwritten when the handle receives a `GroupSync` from the steward.
     pub fn set_allow_subset_candidates(&mut self, allow: bool) {
         self.protocol_config.allow_subset_candidates = allow;
     }
 
-    /// Derived from `steward_list.contains(self_identity)`. Returns `false`
-    /// for joiners before they receive the list via sync.
+    /// Derived from `steward_list.contains(self_identity)` — `false` for
+    /// joiners that haven't received the list yet.
     pub fn is_steward(&self) -> bool {
         self.steward_list
             .as_ref()
             .is_some_and(|l| l.contains(&self.self_identity))
     }
 
-    /// Check if this node is the epoch steward for the given epoch.
     pub fn is_epoch_steward(&self, epoch: u64) -> bool {
         self.epoch_steward(epoch)
             .is_some_and(|es| es == self.self_identity)
     }
 
-    /// Check if this node is the *live* epoch steward — i.e. the epoch-steward
-    /// slot after dead (non-member) stewards are skipped in rotation order.
+    /// Like [`Self::is_epoch_steward`] but via [`Self::live_epoch_steward`]
+    /// (skips members no longer in the group or pending a self-leave).
     pub fn is_live_epoch_steward(&self, epoch: u64, members: &[Vec<u8>]) -> bool {
         self.live_epoch_steward(epoch, members)
             .is_some_and(|es| es == self.self_identity)
     }
 
-    /// Resolve the live epoch steward by skipping stewards that are no longer
-    /// members of the group. See [`StewardList::live_epoch_steward`].
+    /// Resolve the live epoch steward. Skips stewards no longer in the group
+    /// and stewards that have buffered an auto-approved self-leave.
     pub fn live_epoch_steward<'a>(&'a self, epoch: u64, members: &[Vec<u8>]) -> Option<&'a [u8]> {
-        self.steward_list
-            .as_ref()
-            .and_then(|l| l.live_epoch_steward(epoch, members))
+        self.steward_list.as_ref().and_then(|l| {
+            l.live_epoch_steward(epoch, |candidate| {
+                self.is_steward_eligible(candidate, members)
+            })
+        })
     }
 
-    /// Resolve the live backup steward. See [`StewardList::live_backup_steward`].
-    pub fn live_backup_steward<'a>(&'a self, epoch: u64, members: &[Vec<u8>]) -> Option<&'a [u8]> {
-        self.steward_list
-            .as_ref()
-            .and_then(|l| l.live_backup_steward(epoch, members))
+    /// Epoch + backup stewards, filtered by steward-eligibility and
+    /// guaranteed distinct when ≥2 are eligible.
+    pub fn live_epoch_and_backup<'a>(
+        &'a self,
+        epoch: u64,
+        members: &[Vec<u8>],
+    ) -> (Option<&'a [u8]>, Option<&'a [u8]>) {
+        match self.steward_list.as_ref() {
+            Some(l) => l.live_epoch_and_backup(epoch, |c| self.is_steward_eligible(c, members)),
+            None => (None, None),
+        }
     }
 
-    // ─────────────────────────── Proposal Handle Operations ───────────────────────────
+    /// Identity authorized to submit an ECP for the given violation.
+    ///
+    /// Deterministic: all members computing this against the same steward
+    /// list + MLS member set + target agree on a single proposer, so only
+    /// one ECP per violation reaches consensus. Skips the target itself
+    /// (no self-accusation) and stewards pending a self-leave.
+    ///
+    /// Returns `None` if the list is exhausted at `violation_epoch` or no
+    /// steward passes the predicate (e.g., the only eligible stewards are
+    /// all targeted by the violation).
+    pub fn responsible_ecp_proposer<'a>(
+        &'a self,
+        violation_epoch: u64,
+        target: &[u8],
+        members: &[Vec<u8>],
+    ) -> Option<&'a [u8]> {
+        self.steward_list.as_ref().and_then(|l| {
+            l.responsible_ecp_proposer(violation_epoch, target, |candidate| {
+                self.is_steward_eligible(candidate, members)
+            })
+        })
+    }
 
-    /// Check if this user owns (created) the given proposal.
+    /// Buffer a locally-detected violation. Idempotent per fingerprint —
+    /// re-detecting the same event doesn't add a second entry. Returns
+    /// `true` if the entry was newly inserted, `false` if it already existed.
+    pub fn buffer_pending_ecp(&mut self, evidence: ViolationEvidence) -> bool {
+        let key = EcpFingerprint::from_evidence(&evidence);
+        self.pending_ecps.insert(key, evidence).is_none()
+    }
+
+    /// Drop a pending ECP matching this evidence's fingerprint. Called when
+    /// a peer-authored ECP is observed in the voting queue or the emergency
+    /// resolves via consensus — either way we no longer need to track it.
+    pub fn resolve_pending_ecp(&mut self, evidence: &ViolationEvidence) -> bool {
+        let key = EcpFingerprint::from_evidence(evidence);
+        self.pending_ecps.remove(&key).is_some()
+    }
+
+    /// Number of locally-buffered ECPs waiting for the responsible proposer
+    /// to submit.
+    pub fn pending_ecp_count(&self) -> usize {
+        self.pending_ecps.len()
+    }
+
+    /// Read access to buffered ECPs. Used by the app layer to decide whether
+    /// to take over submission when the responsible proposer is ineligible.
+    pub fn pending_ecps(&self) -> &HashMap<EcpFingerprint, ViolationEvidence> {
+        &self.pending_ecps
+    }
+
+    fn is_steward_eligible(&self, candidate: &[u8], members: &[Vec<u8>]) -> bool {
+        !self.is_pending_self_leave(candidate) && members.iter().any(|m| m == candidate)
+    }
+
+    // ─────────────────────────── Proposal Queues ───────────────────────────
+
+    /// True when this user created `proposal_id` (it's still in the voting queue).
     pub fn is_owner_of_proposal(&self, proposal_id: ProposalId) -> bool {
-        self.proposals.is_owner_of_proposal(proposal_id)
+        self.voting_proposals.contains_key(&proposal_id)
     }
 
-    /// Get the count of approved proposals waiting to be committed.
     pub fn approved_proposals_count(&self) -> usize {
-        self.proposals.approved_proposals_count()
+        self.approved_proposals.len()
     }
 
-    /// Get a copy of all approved proposals.
-    pub fn approved_proposals(&self) -> HashMap<ProposalId, GroupUpdateRequest> {
-        self.proposals.approved_proposals()
+    pub fn approved_proposals(&self) -> &HashMap<ProposalId, GroupUpdateRequest> {
+        &self.approved_proposals
     }
 
-    /// Move a proposal from voting to approved queue.
+    /// Move a proposal from the voting queue into the approved queue.
     pub fn mark_proposal_as_approved(&mut self, proposal_id: ProposalId) {
-        self.proposals.move_proposal_to_approved(proposal_id);
+        if let Some(proposal) = self.voting_proposals.remove(&proposal_id) {
+            self.approved_proposals.insert(proposal_id, proposal);
+        }
     }
 
-    /// Remove a proposal from the voting queue (rejected or failed).
+    /// Drop a proposal from the voting queue (rejected or failed consensus).
     pub fn mark_proposal_as_rejected(&mut self, proposal_id: ProposalId) {
-        self.proposals.remove_voting_proposal(proposal_id);
+        self.voting_proposals.remove(&proposal_id);
     }
 
-    /// Store a newly created proposal in the voting queue.
+    /// Add a newly-created proposal to the voting queue.
     pub fn store_voting_proposal(&mut self, proposal_id: ProposalId, proposal: GroupUpdateRequest) {
-        self.proposals.add_voting_proposal(proposal_id, proposal);
+        self.voting_proposals.insert(proposal_id, proposal);
     }
 
-    /// Insert a proposal directly into the approved queue.
+    /// Insert a proposal straight into the approved queue (non-owner path).
     pub fn insert_approved_proposal(
         &mut self,
         proposal_id: ProposalId,
         proposal: GroupUpdateRequest,
     ) {
-        self.proposals.add_proposal(proposal_id, proposal);
+        self.approved_proposals.insert(proposal_id, proposal);
     }
 
-    /// Remove a single proposal from the approved queue.
+    /// Drop a single proposal from the approved queue without archiving.
     pub fn remove_approved_proposal(&mut self, proposal_id: ProposalId) {
-        self.proposals.remove_approved_proposal(proposal_id);
+        self.approved_proposals.remove(&proposal_id);
     }
 
-    /// Clear approved proposals after a commit, archiving to history.
+    /// Archive the approved batch to epoch history and clear the queue.
     ///
-    /// The MLS epoch advances automatically when the commit is merged by OpenMLS,
-    /// so no manual epoch increment is needed here.
+    /// MLS advances the epoch itself on commit merge, so no counter bump here.
     pub fn clear_approved_proposals(&mut self) {
-        self.proposals.clear_approved_proposals();
+        if self.approved_proposals.is_empty() {
+            return;
+        }
+        let snapshot = std::mem::take(&mut self.approved_proposals);
+        if self.epoch_history.len() >= MAX_EPOCH_HISTORY {
+            self.epoch_history.pop_front();
+        }
+        self.epoch_history.push_back(snapshot);
     }
 
-    /// Reject all currently approved proposals without advancing epoch.
-    ///
-    /// Used when freeze times out with no valid candidate selected.
+    /// Discard the approved queue on freeze failure. Auto-approved self-leaves
+    /// are preserved — they have a known YES outcome and must survive so the
+    /// next epoch steward can commit them.
     pub fn reject_all_approved_proposals(&mut self) {
-        self.proposals.discard_approved_proposals();
+        self.approved_proposals
+            .retain(|pid, req| is_auto_approved_entry(*pid, req));
     }
 
-    /// Reject all currently voting proposals without advancing epoch.
-    ///
-    /// Used alongside `reject_all_approved_proposals()` when freeze times out
-    /// with no valid candidate selected.
+    /// Drop every entry in the voting queue.
     pub fn reject_all_voting_proposals(&mut self) {
-        self.proposals.clear_voting_proposals();
+        self.voting_proposals.clear();
     }
 
-    /// Get the epoch history (past batches of approved proposals).
+    /// Past committed batches, most recent last.
     pub fn epoch_history(&self) -> &VecDeque<HashMap<ProposalId, GroupUpdateRequest>> {
-        self.proposals.epoch_history()
+        &self.epoch_history
     }
 
     // ─────────────────────────── Partial Freeze (RFC §Partial Freeze Semantics) ───────────────────────────
@@ -352,6 +437,13 @@ impl Group {
     /// Check if any emergency criteria proposal is active (partial freeze).
     pub fn has_active_emergency(&self) -> bool {
         !self.active_emergency_ids.is_empty()
+    }
+
+    /// RFC §Partial Freeze: while an emergency is active, proposals of
+    /// strictly lower priority MUST be blocked. Returns `true` when `kind`
+    /// should be rejected under the current freeze state.
+    pub fn partial_freeze_blocks(&self, kind: ProposalKind) -> bool {
+        self.has_active_emergency() && kind < ProposalKind::Emergency
     }
 
     // ─────────────────────────── Removal Dedup ───────────────────────────
@@ -373,21 +465,26 @@ impl Group {
 
     // ─────────────────────────── Steward List Operations ───────────────────────────
 
-    /// Get the active steward list, if any.
     pub fn steward_list(&self) -> Option<&StewardList> {
         self.steward_list.as_ref()
     }
 
-    /// Get the protocol config.
     pub fn protocol_config(&self) -> &ProtocolConfig {
         &self.protocol_config
     }
 
-    /// Get the epoch steward identity from the list, if available.
     pub fn epoch_steward(&self, epoch: u64) -> Option<&[u8]> {
         self.steward_list
             .as_ref()
             .and_then(|l| l.epoch_steward(epoch))
+    }
+
+    /// Cheap idempotence check for auto-retry: don't submit a second election
+    /// while the previous one is still being voted on.
+    pub fn has_election_in_flight(&self) -> bool {
+        self.voting_proposals
+            .values()
+            .any(|req| ProposalKind::of(req).is_steward_election())
     }
 
     /// Check if the steward list is exhausted at the given epoch.
@@ -406,9 +503,31 @@ impl Group {
     ) -> Result<(), CoreError> {
         let config = self.protocol_config.clone();
         let list =
-            StewardList::generate(epoch, self.group_name.as_bytes(), member_ids, sn, config)?;
+            StewardList::generate(epoch, self.group_name.as_bytes(), member_ids, sn, config, 0)?;
         self.steward_list = Some(list);
         Ok(())
+    }
+
+    /// Check whether a proposed steward list matches what this group would
+    /// deterministically generate for the given epoch, member set, and
+    /// retry round. App layer calls this before applying an election
+    /// result; `apply_consensus_result` can't do it itself because it
+    /// has no access to the MLS member list.
+    pub fn validate_steward_list_proposal(
+        &self,
+        proposed_stewards: &[Vec<u8>],
+        election_epoch: u64,
+        member_ids: &[Vec<u8>],
+        retry_round: u32,
+    ) -> Result<bool, CoreError> {
+        StewardList::validate(
+            proposed_stewards,
+            election_epoch,
+            self.group_name.as_bytes(),
+            member_ids,
+            &self.protocol_config,
+            retry_round,
+        )
     }
 
     // ─────────────────────────── Freeze Round Operations ───────────────────────────
@@ -523,6 +642,11 @@ impl Group {
     /// Keyed by target identity — a second insertion for the same identity
     /// keeps the original `first_seen_epoch` so it can still expire on schedule.
     /// Returns `true` if this is a new entry, `false` if already buffered.
+    ///
+    /// For auto-approved updates (self-leave) use
+    /// [`Self::accept_auto_approved_leave`] instead — those have a known
+    /// result and go straight to `approved_proposals`, never through
+    /// `pending_updates`.
     pub fn buffer_pending_update(
         &mut self,
         request: GroupUpdateRequest,
@@ -543,6 +667,96 @@ impl Group {
             },
         );
         true
+    }
+
+    /// Whether the identity has an auto-approved self-leave currently in
+    /// `approved_proposals`. Used by live rotation to skip the leaver.
+    pub fn is_pending_self_leave(&self, identity: &[u8]) -> bool {
+        let pid = auto_approved_leave_proposal_id(identity);
+        self.approved_proposals
+            .get(&pid)
+            .is_some_and(|req| is_auto_approved_entry(pid, req))
+    }
+
+    /// Accept an auto-approved self-leave.
+    ///
+    /// Inserts `RemoveMember(identity)` directly into `approved_proposals`
+    /// with a deterministic proposal ID so every node's approved set agrees
+    /// without running a consensus round. The deterministic ID doubles as
+    /// the "auto-approved" signature — [`Self::reject_all_approved_proposals`]
+    /// uses it to preserve the entry across a freeze failure, and
+    /// [`Self::is_pending_self_leave`] uses it for rotation skip.
+    ///
+    /// Caller must have verified that the originator of the request matches
+    /// `identity` (e.g., via the MLS-authenticated sender on the app subtopic).
+    ///
+    /// Returns `true` if this is a new leave, `false` if already recorded or
+    /// a `RemoveMember` for this identity is already pending via another
+    /// path (ban, ECP). Dedup prevents duplicate Remove entries from landing
+    /// in the same commit batch.
+    pub fn accept_auto_approved_leave(&mut self, identity: Vec<u8>) -> bool {
+        // Dedup against any existing Remove for this identity — approved
+        // queue (ban that already passed consensus), pending_updates (ban or
+        // ECP still in flight), or a prior self-leave.
+        if self.has_any_remove_for(&identity) {
+            return false;
+        }
+        let remove = GroupUpdateRequest {
+            payload: Some(group_update_request::Payload::RemoveMember(
+                crate::protos::de_mls::messages::v1::RemoveMember {
+                    identity: identity.clone(),
+                },
+            )),
+        };
+        let proposal_id = auto_approved_leave_proposal_id(&identity);
+        self.approved_proposals.insert(proposal_id, remove);
+        true
+    }
+
+    /// True if any Remove targeting `identity` is in flight — approved queue
+    /// (consensus-approved ban or prior self-leave) or pending_updates (ban
+    /// still voting, ECP-derived). Used to dedup before an auto-approved
+    /// insertion.
+    fn has_any_remove_for(&self, identity: &[u8]) -> bool {
+        self.has_pending_remove(identity) || self.has_approved_remove(identity)
+    }
+
+    fn has_approved_remove(&self, identity: &[u8]) -> bool {
+        self.approved_proposals.values().any(|req| {
+            matches!(
+                req.payload.as_ref(),
+                Some(group_update_request::Payload::RemoveMember(r)) if r.identity == identity
+            )
+        })
+    }
+
+    /// Current steward-election retry round (0 for fresh elections).
+    pub fn reelection_round(&self) -> u32 {
+        self.reelection_round
+    }
+
+    /// Increment the retry round. Called on rejected election; the next
+    /// election proposal uses the bumped round so its list composition
+    /// differs.
+    pub fn bump_reelection_round(&mut self) {
+        self.reelection_round = self.reelection_round.saturating_add(1);
+    }
+
+    /// Reset the retry round. Called on accepted election.
+    pub fn reset_reelection_round(&mut self) {
+        self.reelection_round = 0;
+    }
+
+    fn has_pending_remove(&self, identity: &[u8]) -> bool {
+        self.pending_updates
+            .get(identity)
+            .map(|p| {
+                matches!(
+                    p.request.payload.as_ref(),
+                    Some(group_update_request::Payload::RemoveMember(_))
+                )
+            })
+            .unwrap_or(false)
     }
 
     /// Drop a buffered update by target identity.
@@ -586,6 +800,12 @@ impl Group {
 
     /// Drop Add entries whose target is now a group member, and Remove entries
     /// whose target is no longer a group member. Call after a commit has merged.
+    ///
+    /// Also drops any auto-approved self-leave in `approved_proposals` whose
+    /// target is no longer a group member (the leave has been applied).
+    /// Regular approved entries are normally drained by
+    /// `clear_approved_proposals` on the same commit path; this is an extra
+    /// sweep to catch auto-approved entries that survived freeze failures.
     pub fn prune_pending_updates_for_members(&mut self, current_members: &[Vec<u8>]) {
         let in_group: HashSet<&Vec<u8>> = current_members.iter().collect();
         self.pending_updates.retain(|identity, entry| {
@@ -597,6 +817,19 @@ impl Group {
                 group_update_request::Payload::InviteMember(_) => !in_group.contains(identity),
                 group_update_request::Payload::RemoveMember(_) => in_group.contains(identity),
                 _ => false,
+            }
+        });
+
+        // Sweep orphaned auto-approved leaves (target no longer in group).
+        self.approved_proposals.retain(|pid, req| {
+            if !is_auto_approved_entry(*pid, req) {
+                return true;
+            }
+            match req.payload.as_ref() {
+                Some(group_update_request::Payload::RemoveMember(r)) => {
+                    in_group.contains(&r.identity)
+                }
+                _ => true,
             }
         });
     }
@@ -645,61 +878,17 @@ mod tests {
         assert_eq!(group.steward_list().unwrap().len(), 3);
     }
 
-    #[test]
-    fn test_epoch_steward() {
-        let config = ProtocolConfig::new(3, 3).unwrap();
-        let mems = members(&[1, 2, 3]);
-        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
-
-        group.generate_and_set_steward_list(0, &mems, 3).unwrap();
-
-        // epoch_steward should delegate to the list
-        for epoch in 0..3 {
-            assert_eq!(
-                group.epoch_steward(epoch),
-                group.steward_list().unwrap().epoch_steward(epoch)
-            );
-        }
-
-        // Exhausted epoch returns None
-        assert!(group.epoch_steward(3).is_none());
-    }
-
+    /// Joiner pre-sync: no list yet → no epoch steward at any epoch.
     #[test]
     fn test_epoch_steward_no_list() {
-        // Joiner pre-sync: has config but no list yet
         let group = Group::new_as_joiner("test-group", member(1), default_config());
-
-        // No list means None for any epoch
         assert!(group.epoch_steward(0).is_none());
     }
 
-    #[test]
-    fn test_is_steward_list_exhausted_boundary() {
-        let config = ProtocolConfig::new(3, 3).unwrap();
-        let mems = members(&[1, 2, 3]);
-
-        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
-        group.generate_and_set_steward_list(5, &mems, 3).unwrap();
-
-        // List covers epochs 5, 6, 7
-        assert!(!group.is_steward_list_exhausted(5));
-        assert!(!group.is_steward_list_exhausted(6));
-        assert!(!group.is_steward_list_exhausted(7));
-
-        // Epoch 8 is beyond the list
-        assert!(group.is_steward_list_exhausted(8));
-
-        // Before start is also exhausted
-        assert!(group.is_steward_list_exhausted(4));
-    }
-
+    /// Joiner pre-sync: no list yet → not "exhausted" either.
     #[test]
     fn test_is_steward_list_exhausted_no_list() {
-        // Joiner pre-sync: has config but no list yet
         let group = Group::new_as_joiner("test-group", member(1), default_config());
-
-        // No list means not exhausted
         assert!(!group.is_steward_list_exhausted(0));
     }
 
@@ -717,29 +906,138 @@ mod tests {
         assert_eq!(list.start_epoch(), 1);
     }
 
-    #[test]
-    fn test_generate_and_set_caps_at_sn_max() {
-        let config = ProtocolConfig::new(2, 3).unwrap();
-        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
-
-        // sn=3 capped by config.sn_max=3
-        let mems = members(&[1, 2, 3, 4, 5]);
-        assert!(group.generate_and_set_steward_list(0, &mems, 3).is_ok());
-        assert_eq!(group.steward_list().unwrap().len(), 3);
-    }
-
+    /// `is_steward()` flips to true only once the list has been generated
+    /// and the node's identity sits in it.
     #[test]
     fn test_steward_flag_derived_from_list() {
         let mut group = Group::new_as_joiner("test-group", member(1), default_config());
         assert!(!group.is_steward());
 
-        // After generating a steward list that includes member(1), is_steward should be true
         let mems = members(&[1, 2, 3]);
         group.generate_and_set_steward_list(0, &mems, 3).unwrap();
         assert!(group.is_steward());
 
-        // A joiner whose identity is not in the list should not be steward
-        let handle2 = Group::new_as_joiner("test-group", member(99), default_config());
-        assert!(!handle2.is_steward());
+        let outsider = Group::new_as_joiner("test-group", member(99), default_config());
+        assert!(!outsider.is_steward());
+    }
+
+    #[test]
+    fn test_accept_auto_approved_leave_goes_directly_to_approved() {
+        let config = ProtocolConfig::new(1, 3).unwrap();
+        let mems = members(&[1, 2, 3]);
+        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        group.generate_and_set_steward_list(0, &mems, 3).unwrap();
+
+        let leaver = member(2);
+        assert_eq!(group.approved_proposals_count(), 0);
+        assert_eq!(group.pending_update_count(), 0);
+        assert!(!group.is_pending_self_leave(&leaver));
+
+        assert!(group.accept_auto_approved_leave(leaver.clone()));
+
+        // Auto-approved leaves land in `approved_proposals` directly,
+        // keyed by the deterministic proposal id, and don't touch pending_updates.
+        assert_eq!(group.pending_update_count(), 0);
+        assert_eq!(group.approved_proposals_count(), 1);
+        assert!(group.is_pending_self_leave(&leaver));
+        let expected_id = auto_approved_leave_proposal_id(&leaver);
+        assert!(group.approved_proposals().contains_key(&expected_id));
+
+        // Idempotent: second accept for the same identity is a no-op.
+        assert!(!group.accept_auto_approved_leave(leaver.clone()));
+        assert_eq!(group.approved_proposals_count(), 1);
+    }
+
+    #[test]
+    fn test_reject_all_approved_preserves_auto_approved_leaves() {
+        let config = ProtocolConfig::new(1, 3).unwrap();
+        let mems = members(&[1, 2, 3]);
+        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        group.generate_and_set_steward_list(0, &mems, 3).unwrap();
+
+        // One auto-approved leave + one consensus-approved proposal.
+        let leaver = member(2);
+        group.accept_auto_approved_leave(leaver.clone());
+        let ban_id: ProposalId = 0xdead_beef;
+        let ban = GroupUpdateRequest {
+            payload: Some(group_update_request::Payload::InviteMember(
+                crate::protos::de_mls::messages::v1::InviteMember {
+                    key_package_bytes: vec![0; 8],
+                    identity: member(99),
+                },
+            )),
+        };
+        group.insert_approved_proposal(ban_id, ban);
+        assert_eq!(group.approved_proposals_count(), 2);
+
+        // Simulate freeze failure.
+        group.reject_all_approved_proposals();
+
+        // Auto-approved leave survives; the consensus-approved ban is gone.
+        assert_eq!(group.approved_proposals_count(), 1);
+        let leave_id = auto_approved_leave_proposal_id(&leaver);
+        assert!(group.approved_proposals().contains_key(&leave_id));
+        assert!(!group.approved_proposals().contains_key(&ban_id));
+    }
+
+    #[test]
+    fn test_prune_clears_auto_approved_leave_when_member_gone() {
+        let config = ProtocolConfig::new(1, 3).unwrap();
+        let mems = members(&[1, 2, 3]);
+        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        group.generate_and_set_steward_list(0, &mems, 3).unwrap();
+
+        let leaver = member(2);
+        group.accept_auto_approved_leave(leaver.clone());
+        assert_eq!(group.approved_proposals_count(), 1);
+        assert!(group.is_pending_self_leave(&leaver));
+
+        // Commit merged — leaver is no longer a member.
+        let after = members(&[1, 3]);
+        group.prune_pending_updates_for_members(&after);
+
+        assert_eq!(group.approved_proposals_count(), 0);
+        assert!(!group.is_pending_self_leave(&leaver));
+    }
+
+    /// A pending ban on the target dedupes a subsequent self-leave —
+    /// avoids two `RemoveMember` entries for the same identity in one batch.
+    #[test]
+    fn test_accept_auto_approved_leave_deduped_when_ban_pending() {
+        let config = ProtocolConfig::new(1, 3).unwrap();
+        let mems = members(&[1, 2, 3]);
+        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        group.generate_and_set_steward_list(0, &mems, 3).unwrap();
+
+        let target = member(2);
+        let ban_remove = GroupUpdateRequest {
+            payload: Some(group_update_request::Payload::RemoveMember(
+                crate::protos::de_mls::messages::v1::RemoveMember {
+                    identity: target.clone(),
+                },
+            )),
+        };
+        assert!(group.buffer_pending_update(ban_remove, 0));
+
+        assert!(!group.accept_auto_approved_leave(target.clone()));
+        assert_eq!(group.approved_proposals_count(), 0);
+        assert!(!group.is_pending_self_leave(&target));
+    }
+
+    /// Live rotation skips a nominal steward who has submitted a self-leave.
+    #[test]
+    fn test_live_rotation_skips_pending_self_leave() {
+        let config = ProtocolConfig::new(3, 3).unwrap();
+        let mems = members(&[1, 2, 3]);
+        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        group.generate_and_set_steward_list(0, &mems, 3).unwrap();
+
+        let nominal = group.epoch_steward(0).unwrap().to_vec();
+        assert_eq!(group.live_epoch_steward(0, &mems), Some(nominal.as_slice()));
+
+        group.accept_auto_approved_leave(nominal.clone());
+        let live = group.live_epoch_steward(0, &mems).unwrap();
+        assert_ne!(live, nominal.as_slice());
+        assert!(mems.iter().any(|m| m == live));
     }
 }

@@ -1,15 +1,28 @@
-//! Steward list housekeeping and scoring operations.
+//! Post-epoch-advance steward housekeeping: list generation/election,
+//! pending-update drain, scoring sync, group-sync broadcast.
 
-use super::*;
+use tracing::{error, info};
+
+use crate::{
+    app::{StateChangeHandler, User, UserError},
+    core::{
+        DeMlsProvider, Group, GroupEventHandler, StewardList, build_message, group_members,
+        target_identity_of,
+    },
+    mls_crypto::ShortId,
+    protos::de_mls::messages::v1::{
+        AppMessage, GroupSync, GroupUpdateRequest, PeerScore, StewardElectionProposal,
+        TimingConfig, ViolationEvidence, group_update_request,
+    },
+};
 
 impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
     User<P, H, SCH>
 {
-    /// Sync the scoring service's member list with the MLS group's actual members.
-    ///
-    /// Adds any MLS members not yet tracked and removes scored members no longer in MLS.
+    /// Add any MLS members not yet tracked in scoring, and drop scored
+    /// entries for identities no longer in MLS.
     pub fn sync_scoring_members(&self, group_name: &str, group: &Group) {
-        let mls_members = match core::group_members(group, &self.mls_service) {
+        let mls_members = match group_members(group, &self.mls_service) {
             Ok(m) => m,
             Err(_) => return,
         };
@@ -32,18 +45,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
     }
 
-    /// Try to auto-fill the steward list when member count is below `sn_min`.
-    ///
-    /// After any commit that changes membership, the group may have fewer members
-    /// than `sn_min`. Per RFC, when `member_count < sn_min` all members become
-    /// stewards deterministically. This helper checks the condition and regenerates
-    /// the steward list if needed.
+    /// RFC rule: when `member_count < sn_min`, every member is a steward.
+    /// Re-derive the list to cover that case after a membership-changing commit.
     async fn try_auto_fill_steward_list(&self, group_name: &str) -> Result<(), UserError> {
-        // Phase 1: read lock -- gather member list and check sn_min threshold.
         let (needs_fill, members) = {
             let groups = self.groups.read().await;
             let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-            let members = core::group_members(&entry.group, &self.mls_service)?;
+            let members = group_members(&entry.group, &self.mls_service)?;
             let needs = members.len() < entry.group.protocol_config().sn_min;
             (needs, members)
         };
@@ -52,7 +60,6 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             return Ok(());
         }
 
-        // Phase 2: write lock -- generate and set new list.
         let epoch = self.mls_service.current_epoch(group_name)?;
         {
             let mut groups = self.groups.write().await;
@@ -69,32 +76,52 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         Ok(())
     }
 
-    /// Check if the steward list is exhausted and initiate an election if needed.
-    ///
-    /// Called after epoch advance. If the list is exhausted for the current epoch,
-    /// generates a deterministic proposed steward list and submits an election
-    /// proposal for consensus.
-    async fn try_initiate_steward_election(&self, group_name: &str) -> Result<(), UserError> {
-        let (members, election_epoch, config) = {
+    /// Submit a steward-election proposal if the list is exhausted at the
+    /// current epoch. Only the deterministic responsible proposer (first
+    /// live member of the previous list) actually submits; others no-op, so
+    /// this is safe to call from every poll tick without double-proposing.
+    /// `retry_round` comes from `Group::reelection_round` (bumps on reject).
+    pub(super) async fn try_initiate_steward_election(
+        &self,
+        group_name: &str,
+    ) -> Result<(), UserError> {
+        let (members, election_epoch, config, retry_round) = {
             let groups = self.groups.read().await;
             let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
             let epoch = self.mls_service.current_epoch(group_name)?;
             if !entry.group.is_steward_list_exhausted(epoch) {
                 return Ok(());
             }
-            let members = core::group_members(&entry.group, &self.mls_service)?;
+            if entry.group.has_election_in_flight() {
+                return Ok(());
+            }
+            let members = group_members(&entry.group, &self.mls_service)?;
+
+            let self_identity = self.mls_service.wallet_bytes();
+            let is_authorized = entry
+                .group
+                .steward_list()
+                .and_then(|list| {
+                    list.responsible_election_proposer(|c| members.iter().any(|m| m == c))
+                })
+                .is_some_and(|proposer| proposer == self_identity);
+            if !is_authorized {
+                return Ok(());
+            }
+
             let config = entry.group.protocol_config().clone();
-            (members, epoch, config)
+            let retry_round = entry.group.reelection_round();
+            (members, epoch, config, retry_round)
         };
 
-        // Generate the proposed list deterministically
         let sn = config.compute_list_size(members.len());
-        let proposed_list = crate::core::StewardList::generate(
+        let proposed_list = StewardList::generate(
             election_epoch,
             group_name.as_bytes(),
             &members,
             sn,
             config,
+            retry_round,
         )?;
 
         let request = GroupUpdateRequest {
@@ -102,14 +129,17 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 StewardElectionProposal {
                     proposed_stewards: proposed_list.members().to_vec(),
                     election_epoch,
+                    retry_round,
                 },
             )),
         };
 
         info!(
-            "Steward list exhausted at epoch {election_epoch} for group {group_name}, \
-             initiating election with {} stewards",
-            proposed_list.len()
+            group = group_name,
+            epoch = election_epoch,
+            retry_round,
+            stewards = proposed_list.len(),
+            "initiating steward election"
         );
 
         self.initiate_proposal(group_name.to_string(), request)
@@ -118,32 +148,27 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         Ok(())
     }
 
-    /// Post-epoch-advance steward list housekeeping.
-    ///
-    /// Runs the post-epoch sequence after any commit that advances the epoch:
-    /// 1. Auto-fill steward list if membership dropped below sn_min
-    /// 2. Initiate steward election if the list is exhausted
-    ///
-    /// Steward flag is derived automatically from `steward_list.contains(self_identity)`.
+    /// Post-epoch-advance sequence: (1) auto-fill if membership dropped
+    /// below `sn_min`, (2) kick off an election if the list is exhausted.
+    /// Election-initiate failures are logged, not surfaced — group state
+    /// may legitimately reject a new proposal right now.
     pub async fn steward_list_housekeeping(&self, group_name: &str) -> Result<(), UserError> {
         self.try_auto_fill_steward_list(group_name).await?;
-        // Election initiation may legitimately fail (e.g., group state doesn't
-        // allow new proposals yet). Log and continue -- don't block the caller.
         if let Err(e) = self.try_initiate_steward_election(group_name).await {
-            info!("[steward_list_housekeeping] Election initiation deferred: {e}");
+            info!(group = group_name, error = %e, "election initiation deferred");
         }
         Ok(())
     }
 
-    /// Regenerate the steward list at the current MLS epoch using the group's
-    /// current member set. Equivalent to what a successful steward election
-    /// would apply. Intended for tests and administrative tooling.
+    /// Regenerate the steward list at the current epoch against the current
+    /// MLS member set — same effect as a successful election. Intended for
+    /// tests and administrative tooling.
     pub async fn regenerate_steward_list(&self, group_name: &str) -> Result<(), UserError> {
         let current_epoch = self.mls_service.current_epoch(group_name)?;
         let members = {
             let groups = self.groups.read().await;
             let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-            core::group_members(&entry.group, &self.mls_service)?
+            group_members(&entry.group, &self.mls_service)?
         };
 
         let mut groups = self.groups.write().await;
@@ -158,16 +183,14 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         Ok(())
     }
 
-    /// Prune the pending-update buffer after a commit has merged.
-    ///
-    /// Drops entries whose target identity has now joined (for Add) or left
-    /// (for Remove) the group, and expires stale entries older than
+    /// Drop Add entries whose target is now a member and Remove entries
+    /// whose target is now gone, then expire entries older than
     /// `pending_update_max_epochs`.
     pub async fn prune_pending_updates_after_commit(
         &self,
         group_name: &str,
     ) -> Result<(), UserError> {
-        let current_epoch = self.mls_service.current_epoch(group_name).unwrap_or(0);
+        let current_epoch = self.mls_service.current_epoch(group_name)?;
         let max_age = self.default_group_config.pending_update_max_epochs;
 
         let members = {
@@ -176,7 +199,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             if !self.mls_service.has_group(entry.group.group_name()) {
                 return Ok(());
             }
-            core::group_members(&entry.group, &self.mls_service)?
+            group_members(&entry.group, &self.mls_service)?
         };
 
         let mut groups = self.groups.write().await;
@@ -187,28 +210,28 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let after = entry.group.pending_update_count();
         if before != after {
             info!(
-                "[prune_pending_updates_after_commit] group {group_name}: \
-                 {before} → {after} (expired={})",
-                expired.len()
+                group = group_name,
+                before,
+                after,
+                expired = expired.len(),
+                "pruned pending updates after commit"
             );
         }
         Ok(())
     }
 
-    /// Drain the pending-update buffer and initiate proposals if this node is
-    /// the current epoch steward. Invoked on every epoch advance.
-    ///
-    /// Skips entries that are already reflected in the current voting/approved
-    /// queues to avoid duplicate proposals.
+    /// On epoch advance, the new live epoch steward drains the pending-update
+    /// buffer into voting proposals. Skips entries already covered by the
+    /// current voting/approved queues so we don't double-propose.
     pub async fn process_buffered_updates(&self, group_name: &str) -> Result<(), UserError> {
-        let current_epoch = self.mls_service.current_epoch(group_name).unwrap_or(0);
+        let current_epoch = self.mls_service.current_epoch(group_name)?;
 
         let to_propose: Vec<GroupUpdateRequest> = {
             let groups = self.groups.read().await;
             let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
 
             let members = if self.mls_service.has_group(entry.group.group_name()) {
-                core::group_members(&entry.group, &self.mls_service).unwrap_or_default()
+                group_members(&entry.group, &self.mls_service)?
             } else {
                 Vec::new()
             };
@@ -221,14 +244,24 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let approved = entry.group.approved_proposals();
             let approved_targets: std::collections::HashSet<Vec<u8>> = approved
                 .values()
-                .filter_map(|req| crate::core::target_identity_of(req).map(|id| id.to_vec()))
+                .filter_map(|req| target_identity_of(req).map(|id| id.to_vec()))
                 .collect();
+            let members_set: std::collections::HashSet<Vec<u8>> = members.iter().cloned().collect();
 
             entry
                 .group
                 .pending_updates()
                 .iter()
                 .filter(|(id, _)| !approved_targets.contains(*id))
+                .filter(|(id, p)| {
+                    // Drop Add for already-member and Remove for non-member.
+                    let is_member = members_set.contains(*id);
+                    match p.request.payload.as_ref() {
+                        Some(group_update_request::Payload::InviteMember(_)) => !is_member,
+                        Some(group_update_request::Payload::RemoveMember(_)) => is_member,
+                        _ => false,
+                    }
+                })
                 .map(|(_, p)| p.request.clone())
                 .collect()
         };
@@ -238,9 +271,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
 
         info!(
-            "[process_buffered_updates] group {group_name}: promoting {} buffered \
-             update(s) to voting proposals (epoch={current_epoch})",
-            to_propose.len()
+            group = group_name,
+            epoch = current_epoch,
+            count = to_propose.len(),
+            "promoting buffered updates to proposals"
         );
 
         for request in to_propose {
@@ -248,23 +282,18 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 .initiate_proposal(group_name.to_string(), request)
                 .await
             {
-                info!(
-                    "[process_buffered_updates] group {group_name}: initiate_proposal \
-                     deferred: {e}"
-                );
+                info!(group = group_name, error = %e, "buffered proposal deferred");
             }
         }
         Ok(())
     }
 
-    /// Send group state to the group as an encrypted app message.
-    ///
-    /// Called by the steward after committing an Add that brings new members into
-    /// the group. Carries steward list, protocol config, peer scores, and timing
-    /// so new joiners can fully participate. Existing members who already have a
-    /// steward list will ignore it (idempotent).
+    /// Broadcast steward list + protocol config + peer scores + timing as
+    /// an encrypted `GroupSync`. Steward calls this after an Add-bearing
+    /// commit so new joiners can fully participate. Idempotent for members
+    /// who already have a steward list.
     pub async fn send_group_sync(&self, group_name: &str) -> Result<(), UserError> {
-        // Read scores under Mutex first (sync lock, no await).
+        // Read scores under the sync Mutex first — no `.await` held across it.
         let scores: Vec<PeerScore> = {
             let scoring = self.scoring();
             scoring
@@ -303,21 +332,21 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 allow_subset_candidates: entry.group.allow_subset_candidates(),
                 peer_scores: scores,
                 timing: Some(timing),
+                retry_round: entry.group.reelection_round(),
             };
 
             let app_msg: AppMessage = sync.into();
-            core::build_message(&entry.group, &self.mls_service, &app_msg, &self.app_id)?
+            build_message(&entry.group, &self.mls_service, &app_msg, &self.app_id)?
         };
 
         self.handler.on_outbound(group_name, packet).await?;
-        info!("[send_group_sync] Sent group sync for group {group_name}");
+        info!(group = group_name, "group sync sent");
         Ok(())
     }
 
-    /// Check if any members are below the removal threshold and initiate ECPs.
-    ///
-    /// Only the steward initiates score-based removals. Skips self and any
-    /// member for which a removal ECP is already pending.
+    /// Steward-only: file `ScoreBelowThreshold` ECPs for any member whose
+    /// score fell at or below the removal threshold. Skips self and any
+    /// target already covered by a pending removal.
     pub async fn check_and_initiate_score_removals(
         &self,
         group_name: &str,
@@ -341,7 +370,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             scoring
                 .members_below_threshold(group_name)
                 .into_iter()
-                .filter(|id| *id != self_id) // skip self (deferred to M2)
+                .filter(|id| *id != self_id) // self-removal handled separately
                 .map(|id| {
                     let score = scoring.score_for(group_name, &id).unwrap_or(0);
                     (id, score)
@@ -349,7 +378,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 .collect()
         };
 
-        // Batch: filter already-pending targets and mark new ones under a single lock.
+        // Mark all targets pending under a single write-lock, then submit
+        // proposals outside the lock to avoid holding it across `.await`.
         let mut to_remove = Vec::new();
         {
             let mut groups = self.groups.write().await;
@@ -371,9 +401,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let request = evidence.into_update_request()?;
 
             info!(
-                "Steward initiating SCORE_BELOW_THRESHOLD removal for member {:?} \
-                 (score={current_score}) in group {group_name}",
-                target_id
+                group = group_name,
+                target = %ShortId(&target_id),
+                score = current_score,
+                "initiating SCORE_BELOW_THRESHOLD removal"
             );
             if let Err(e) = self
                 .initiate_proposal(group_name.to_string(), request)
@@ -384,8 +415,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     entry.group.resolve_pending_removal(&target_id);
                 }
                 error!(
-                    "Failed to start SCORE_BELOW_THRESHOLD vote for {:?}: {e}",
-                    target_id
+                    group = group_name,
+                    target = %ShortId(&target_id),
+                    error = %e,
+                    "SCORE_BELOW_THRESHOLD vote failed to start"
                 );
             }
         }

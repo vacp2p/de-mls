@@ -6,52 +6,19 @@
 //! This test operates at the core + scoring service level, without the async
 //! User layer, to keep the test focused and synchronous.
 
-use std::collections::HashMap;
-
 use prost::Message;
 
-use de_mls::app::{FixedScoringProvider, InMemoryPeerScoreStorage, PeerScoringService};
+use de_mls::app::PeerScoringService;
 use de_mls::core::{
-    FreezeFinalizeResult, Group, ProcessResult, ProtocolConfig, ScoreEvent, ScoringConfig,
-    apply_consensus_result, build_key_package_message, create_commit_candidate, create_group,
-    finalize_freeze_round, group_members, prepare_to_join, process_inbound,
+    Group, ProcessResult, ProtocolConfig, ScoreEvent, apply_consensus_result,
+    build_key_package_message, create_group, group_members, prepare_to_join, process_inbound,
 };
-use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
-use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService, parse_wallet_address};
+use de_mls::ds::WELCOME_SUBTOPIC;
+use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService};
 use de_mls::protos::de_mls::messages::v1::ViolationEvidence;
 
-// ─────────────────────────── Helpers ───────────────────────────
-
-const DEFAULT_SCORE: i64 = 100;
-const REMOVAL_THRESHOLD: i64 = 0;
-
-fn setup_mls(wallet_hex: &str) -> MlsService<MemoryDeMlsStorage> {
-    let storage = MemoryDeMlsStorage::new();
-    let mls = MlsService::new(storage);
-    let wallet = parse_wallet_address(wallet_hex).unwrap();
-    mls.init(wallet).unwrap();
-    mls
-}
-
-fn default_scoring_service() -> PeerScoringService<InMemoryPeerScoreStorage, FixedScoringProvider> {
-    let deltas = HashMap::from([
-        (ScoreEvent::SuccessfulCommit, 10),
-        (ScoreEvent::BrokenCommit, -50),
-        (ScoreEvent::BrokenMlsProposal, -30),
-        (ScoreEvent::CensorshipInactivity, -40),
-        (ScoreEvent::EmergencyYesCreator, 20),
-        (ScoreEvent::EmergencyNoCreator, -50),
-        (ScoreEvent::NonFinalizedProposalCommit, -30),
-    ]);
-    PeerScoringService::new(
-        InMemoryPeerScoreStorage::new(),
-        FixedScoringProvider::new(deltas),
-        ScoringConfig {
-            default_score: DEFAULT_SCORE,
-            removal_threshold: REMOVAL_THRESHOLD,
-        },
-    )
-}
+mod common;
+use common::{DEFAULT_SCORE, make_scoring, setup_mls, steward_add_joiner};
 
 /// Sync the scoring service's member list with the MLS group's actual members.
 /// Mirrors `User::sync_scoring_members`.
@@ -79,55 +46,6 @@ fn sync_scoring_members<S: de_mls::core::PeerScoreStorage, P: de_mls::core::Scor
     }
 }
 
-/// Steward processes joiner's key package and creates a commit that adds them.
-/// Returns (welcome_packet, batch_packet).
-fn steward_add_joiner(
-    steward_mls: &MlsService<MemoryDeMlsStorage>,
-    steward_handle: &mut Group,
-    joiner_kp_packet: &OutboundPacket,
-) -> (OutboundPacket, OutboundPacket) {
-    let result = process_inbound(
-        steward_handle,
-        &joiner_kp_packet.payload,
-        WELCOME_SUBTOPIC,
-        steward_mls,
-    )
-    .unwrap();
-
-    let gur = match result {
-        ProcessResult::MembershipChangeReceived(gur) => gur,
-        other => panic!("Expected MembershipChangeReceived, got {:?}", other),
-    };
-
-    steward_handle.insert_approved_proposal(1, gur);
-    let packets = create_commit_candidate(steward_handle, steward_mls, b"test-app-id").unwrap();
-
-    let finalize =
-        finalize_freeze_round(steward_handle, steward_mls, false, b"test-app-id").unwrap();
-    let welcome_packet = match finalize {
-        FreezeFinalizeResult::Applied { result, outbound } => {
-            assert!(
-                matches!(result, ProcessResult::GroupUpdated),
-                "Expected GroupUpdated, got {:?}",
-                result
-            );
-            outbound
-                .into_iter()
-                .find(|p| p.subtopic == WELCOME_SUBTOPIC)
-                .expect("Expected welcome packet")
-        }
-        other => panic!("Expected Applied, got {:?}", other),
-    };
-
-    let batch_packet = packets
-        .iter()
-        .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
-        .expect("Expected batch packet")
-        .clone();
-
-    (welcome_packet, batch_packet)
-}
-
 // ─────────────────────────── Tests ───────────────────────────
 
 /// Full pipeline: create group → steward in scoring → add joiner →
@@ -144,7 +62,7 @@ fn test_scoring_pipeline_create_join_emergency() {
         create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
     let alice_id = alice_mls.wallet_bytes();
 
-    let mut scoring = default_scoring_service();
+    let mut scoring = make_scoring();
 
     // Register creator in scoring (mirrors User::create_group)
     scoring.add_member(group_name, &alice_id);
@@ -188,7 +106,7 @@ fn test_scoring_pipeline_create_join_emergency() {
     assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
 
     // Bob's scoring: sync from MLS group members (mirrors User::dispatch_inbound_result JoinedGroup)
-    let mut bob_scoring = default_scoring_service();
+    let mut bob_scoring = make_scoring();
     sync_scoring_members(&mut bob_scoring, group_name, &bob_handle, &bob_mls);
 
     // Bob should see both members with default scores
@@ -277,10 +195,10 @@ fn test_scoring_pipeline_emergency_rejected() {
     .unwrap();
 
     // Set up scoring on both nodes
-    let mut alice_scoring = default_scoring_service();
+    let mut alice_scoring = make_scoring();
     sync_scoring_members(&mut alice_scoring, group_name, &alice_handle, &alice_mls);
 
-    let mut bob_scoring = default_scoring_service();
+    let mut bob_scoring = make_scoring();
     sync_scoring_members(&mut bob_scoring, group_name, &bob_handle, &bob_mls);
 
     // Bob creates a false accusation against Alice
@@ -371,9 +289,13 @@ fn test_scoring_no_ops_for_regular_proposal() {
     assert_eq!(alice_handle.approved_proposals_count(), 1);
 }
 
-/// Known gap: new joiners start with default scores, not the group's actual scores.
-/// This test documents the gap — once score sync messages are implemented (M4),
-/// this test should be updated to verify synced scores.
+/// Core-level behavior: `sync_scoring_members` (which uses MLS members as
+/// the source of truth) cannot reconstruct a joiner's prior scores — that
+/// data lives in-memory on other nodes. The app/gateway layer closes this
+/// gap via the `GroupSync` app message (see
+/// `async_scoring_removal::test_ecp_scores_applied_on_all_nodes`). This
+/// test pins the core-level contract: after a sync, new joiners see
+/// members at the default score.
 #[test]
 fn test_new_joiner_starts_with_default_scores() {
     let group_name = "scoring-join-gap";
@@ -386,7 +308,7 @@ fn test_new_joiner_starts_with_default_scores() {
     let alice_id = alice_mls.wallet_bytes();
 
     // Alice's scoring has her at a non-default score (simulating prior events)
-    let mut alice_scoring = default_scoring_service();
+    let mut alice_scoring = make_scoring();
     alice_scoring.add_member(group_name, &alice_id);
     alice_scoring.apply_event(group_name, &alice_id, ScoreEvent::EmergencyYesCreator);
     assert_eq!(
@@ -413,13 +335,14 @@ fn test_new_joiner_starts_with_default_scores() {
     .unwrap();
 
     // Bob creates his scoring from MLS members — gets defaults
-    let mut bob_scoring = default_scoring_service();
+    let mut bob_scoring = make_scoring();
     sync_scoring_members(&mut bob_scoring, group_name, &bob_handle, &bob_mls);
 
-    // GAP: Bob sees Alice at default, not her actual score (120)
+    // At the core level, Bob sees Alice at the default score — real
+    // scores arrive via the User-layer `GroupSync` message.
     assert_eq!(
         bob_scoring.score_for(group_name, &alice_id),
-        Some(DEFAULT_SCORE), // Should be 120 once score sync is implemented
+        Some(DEFAULT_SCORE),
     );
 }
 
@@ -445,7 +368,7 @@ fn test_violation_type_specific_penalties() {
     let result = apply_consensus_result(&mut group, 1, true, &payload).unwrap();
     assert_eq!(result.score_ops[0].event, ScoreEvent::BrokenCommit);
 
-    let mut scoring = default_scoring_service();
+    let mut scoring = make_scoring();
     scoring.add_member(group_name, &target_id);
     scoring.apply_event(group_name, &target_id, result.score_ops[0].event);
     assert_eq!(

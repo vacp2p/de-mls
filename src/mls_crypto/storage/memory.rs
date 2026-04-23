@@ -1,12 +1,9 @@
 //! In-memory storage implementation.
 
-use std::collections::HashSet;
-use std::sync::RwLock;
-
 use openmls_rust_crypto::MemoryStorage;
+use std::{collections::HashSet, sync::RwLock};
 
-use super::DeMlsStorage;
-use crate::mls_crypto::error::StorageError;
+use crate::mls_crypto::{DeMlsStorage, error::StorageError};
 
 /// In-memory storage for development and testing.
 ///

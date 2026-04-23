@@ -5,7 +5,6 @@
 //!
 //! It ensures there is a Tokio runtime (desktop app may not have one yet).
 
-// crates/ui_bridge/src/lib.rs
 use futures::{
     StreamExt,
     channel::mpsc::{UnboundedReceiver, unbounded},
@@ -68,7 +67,10 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
             }
 
             AppCmd::CreateGroup { group_id: name } => {
-                GATEWAY.create_group(name.clone()).await?;
+                if let Err(e) = GATEWAY.create_group(name.clone()).await {
+                    GATEWAY.push_event(AppEvent::Error(format!("Create group failed: {e}")));
+                    continue;
+                }
 
                 let groups = GATEWAY.group_list().await;
                 GATEWAY.push_event(AppEvent::Groups(groups));
@@ -83,7 +85,10 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
             }
 
             AppCmd::JoinGroup { group_id } => {
-                GATEWAY.join_group(group_id.clone()).await?;
+                if let Err(e) = GATEWAY.join_group(group_id.clone()).await {
+                    GATEWAY.push_event(AppEvent::Error(format!("Join group failed: {e}")));
+                    continue;
+                }
 
                 let groups = GATEWAY.group_list().await;
                 GATEWAY.push_event(AppEvent::Groups(groups));
@@ -144,14 +149,25 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
             }
 
             // ───────────── Chat ─────────────
+            // The local echo is deferred until the send succeeds: echoing
+            // first would leave a "sent" message in the transcript that
+            // never actually reached peers (e.g. during Freezing/Selection
+            // when sends are blocked). A send failure is surfaced as an
+            // Error alert and must NOT tear down `ui_loop` — the UI stays
+            // responsive for every other command.
             AppCmd::SendMessage { group_id, body } => {
-                GATEWAY.push_event(AppEvent::ChatMessage(ConversationMessage {
-                    message: body.as_bytes().to_vec(),
-                    sender: "me".to_string(),
-                    group_name: group_id.clone(),
-                }));
-
-                GATEWAY.send_message(group_id, body).await?;
+                match GATEWAY.send_message(group_id.clone(), body.clone()).await {
+                    Ok(()) => {
+                        GATEWAY.push_event(AppEvent::ChatMessage(ConversationMessage {
+                            message: body.into_bytes(),
+                            sender: "me".to_string(),
+                            group_name: group_id,
+                        }));
+                    }
+                    Err(e) => {
+                        GATEWAY.push_event(AppEvent::Error(format!("Message not sent: {e}")));
+                    }
+                }
             }
 
             AppCmd::LoadHistory { group_id } => {
@@ -169,12 +185,22 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 proposal_id,
                 choice,
             } => {
-                // Process the user vote:
-                // if it come from the user, send the vote result to Waku
-                // if it come from the steward, just process it and return None
-                GATEWAY
+                // "User already voted" is benign — the creator auto-YES timer
+                // fired before the user clicked. Surface as a UI notice, don't
+                // crash the UI loop.
+                if let Err(e) = GATEWAY
                     .process_user_vote(group_id.clone(), proposal_id, choice)
-                    .await?;
+                    .await
+                {
+                    let msg = e.to_string();
+                    if msg.contains("already voted") {
+                        GATEWAY.push_event(AppEvent::Error(format!(
+                            "Already voted on proposal {proposal_id}"
+                        )));
+                        continue;
+                    }
+                    return Err(e);
+                }
 
                 GATEWAY.push_event(AppEvent::ChatMessage(ConversationMessage {
                     message: format!(

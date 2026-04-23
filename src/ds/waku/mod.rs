@@ -11,12 +11,10 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use tracing::{debug, error, info};
 
 use crate::ds::{
-    DeliveryServiceError,
+    DeliveryServiceError, GROUP_VERSION, SUBTOPICS,
     transport::{DeliveryService, InboundPacket, OutboundPacket},
 };
 use wrapper::WakuNodeCtx;
-
-use super::{GROUP_VERSION, SUBTOPICS};
 
 /// The pubsub topic for the Waku Node.
 pub fn pubsub_topic() -> String {
