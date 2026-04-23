@@ -276,8 +276,8 @@ impl Group {
         })
     }
 
-    /// Epoch + backup stewards, filtered by [`Self::is_steward_eligible`]
-    /// and guaranteed distinct when ≥2 are eligible.
+    /// Epoch + backup stewards, filtered by steward-eligibility and
+    /// guaranteed distinct when ≥2 are eligible.
     pub fn live_epoch_and_backup<'a>(
         &'a self,
         epoch: u64,
