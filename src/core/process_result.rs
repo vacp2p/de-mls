@@ -42,10 +42,6 @@ pub enum ProcessResult {
     /// MLS state advanced (batch commit applied).
     GroupUpdated,
 
-    /// Commit-validation caught a steward violation — file an emergency
-    /// criteria proposal with this evidence.
-    ViolationDetected(ViolationEvidence),
-
     /// Remote commit candidate was buffered in the active freeze round.
     CommitCandidateReceived,
 

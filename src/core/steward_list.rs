@@ -150,19 +150,6 @@ impl StewardList {
         self.live_epoch_steward(self.start_epoch, eligible)
     }
 
-    /// Deterministic ECP proposer for a violation. Walks rotation from the
-    /// epoch-steward slot at `violation_epoch`, skipping the target and any
-    /// ineligible member. `None` when the list is exhausted or no candidate
-    /// passes the predicate.
-    pub fn responsible_ecp_proposer<F: Fn(&[u8]) -> bool>(
-        &self,
-        violation_epoch: u64,
-        target: &[u8],
-        eligible: F,
-    ) -> Option<&[u8]> {
-        self.live_steward_from(violation_epoch, 0, |c| c != target && eligible(c))
-    }
-
     /// Epoch steward with the nominal rotation advanced past any steward for
     /// whom `eligible` returns `false` (typically: removed members or those
     /// pending a self-leave).
@@ -636,55 +623,6 @@ mod tests {
         for steward in list.members() {
             assert!(mems.contains(steward));
         }
-    }
-
-    /// The target of a violation must not be selected as its own proposer,
-    /// even if rotation would otherwise land on them.
-    #[test]
-    fn test_responsible_ecp_proposer_skips_target() {
-        let config = ProtocolConfig::new(3, 3).unwrap();
-        let mems = members(&[1, 2, 3]);
-        let list = StewardList::generate(0, b"group", &mems, 3, config, 0).unwrap();
-
-        let epoch0_steward = list.epoch_steward(0).unwrap().to_vec();
-        let always_eligible = |_: &[u8]| true;
-
-        let proposer = list
-            .responsible_ecp_proposer(0, &epoch0_steward, always_eligible)
-            .unwrap()
-            .to_vec();
-
-        assert_ne!(proposer, epoch0_steward, "must not propose against self");
-        assert!(mems.iter().any(|m| m == &proposer));
-    }
-
-    #[test]
-    fn test_responsible_ecp_proposer_deterministic() {
-        let config = ProtocolConfig::new(3, 5).unwrap();
-        let mems = members(&[1, 2, 3, 4, 5]);
-        let list = StewardList::generate(0, b"group", &mems, 3, config, 0).unwrap();
-        let target = member(2);
-        let always = |_: &[u8]| true;
-
-        let a = list.responsible_ecp_proposer(1, &target, always);
-        let b = list.responsible_ecp_proposer(1, &target, always);
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn test_responsible_ecp_proposer_none_when_only_target_eligible() {
-        let config = ProtocolConfig::new(2, 2).unwrap();
-        let mems = members(&[1, 2]);
-        let list = StewardList::generate(0, b"group", &mems, 2, config, 0).unwrap();
-
-        let target = list.members()[0].clone();
-        let target_cloned = target.clone();
-        let only_target = move |c: &[u8]| c == target_cloned.as_slice();
-
-        assert!(
-            list.responsible_ecp_proposer(0, &target, only_target)
-                .is_none()
-        );
     }
 
     /// With 4 members and sn=2, different retry_round values MUST produce at

@@ -29,13 +29,6 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         Ok(entry.group.pending_update_count())
     }
 
-    /// Count of locally-buffered ECPs waiting for the responsible proposer.
-    pub async fn get_pending_ecp_count(&self, group_name: &str) -> Result<usize, UserError> {
-        let groups = self.groups.read().await;
-        let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-        Ok(entry.group.pending_ecp_count())
-    }
-
     /// Freeze round progress: `(received, expected)`. Returns `(0, 0)` if not
     /// in freeze or no steward list is known.
     pub async fn get_freeze_candidate_count(

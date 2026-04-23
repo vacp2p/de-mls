@@ -228,7 +228,6 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let mut groups = self.groups.write().await;
             if let Some(entry) = groups.get_mut(group_name) {
                 entry.group.resolve_pending_removal(&ev.target_member_id);
-                entry.group.resolve_pending_ecp(ev);
             }
         }
 
