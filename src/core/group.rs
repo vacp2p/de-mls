@@ -132,11 +132,22 @@ pub struct Group {
     /// [`StewardList::generate`] so each retry proposes a different
     /// list composition.
     reelection_round: u32,
+    /// Group-configured ceiling on steward-election retries before the
+    /// "stuck" error surfaces. Every member in the group holds the same
+    /// value — joiners pick it up from `GroupSync` — so the error path
+    /// triggers consistently across the group. Overridden at group
+    /// creation from `GroupConfig`; defaults to [`DEFAULT_MAX_REELECTION_RETRIES`].
+    max_reelection_retries: u32,
     /// Proposal IDs already dispatched through `apply_consensus_outcome`.
     /// The consensus library can re-emit `ConsensusReached` (timeout-path
     /// race); this guards against re-applying state and double-firing events.
     consensus_outcomes_applied: HashSet<ProposalId>,
 }
+
+/// Fallback ceiling on steward-election retries. One retry gives the
+/// responsible proposer a second shot with a different list composition;
+/// beyond that human/policy intervention is expected.
+pub const DEFAULT_MAX_REELECTION_RETRIES: u32 = 1;
 
 impl Group {
     fn new_base(group_name: &str, self_identity: Vec<u8>, protocol_config: ProtocolConfig) -> Self {
@@ -154,6 +165,7 @@ impl Group {
             freeze_round: None,
             pending_updates: HashMap::new(),
             reelection_round: 0,
+            max_reelection_retries: DEFAULT_MAX_REELECTION_RETRIES,
             consensus_outcomes_applied: HashSet::new(),
         }
     }
@@ -192,7 +204,7 @@ impl Group {
             &[creator_identity],
             1,
             protocol_config,
-            0,
+            0, // initial list — no election, no retries
         )?;
         group.steward_list = Some(list);
 
@@ -414,15 +426,27 @@ impl Group {
     }
 
     /// Generate a steward list and set it on the group.
+    ///
+    /// `retry_round` is the seed fed into the SHA256 sort and stored on the
+    /// resulting list as its historical tag. Pass the round from the
+    /// accepted election proposal; use 0 for the creator's initial list and
+    /// for `sn_min` auto-fills, where no election happened.
     pub fn generate_and_set_steward_list(
         &mut self,
         epoch: u64,
         member_ids: &[Vec<u8>],
         sn: usize,
+        retry_round: u32,
     ) -> Result<(), CoreError> {
         let config = self.protocol_config.clone();
-        let list =
-            StewardList::generate(epoch, self.group_name.as_bytes(), member_ids, sn, config, 0)?;
+        let list = StewardList::generate(
+            epoch,
+            self.group_name.as_bytes(),
+            member_ids,
+            sn,
+            config,
+            retry_round,
+        )?;
         self.steward_list = Some(list);
         Ok(())
     }
@@ -666,6 +690,18 @@ impl Group {
         self.reelection_round = 0;
     }
 
+    /// Group-configured ceiling on retries before the stuck-election error
+    /// surfaces. Shared across the group via `GroupSync`.
+    pub fn max_reelection_retries(&self) -> u32 {
+        self.max_reelection_retries
+    }
+
+    /// Overwrite the retry ceiling. Called from group-creation (from
+    /// `GroupConfig`) and on joiner sync (from `GroupSync.max_reelection_retries`).
+    pub fn set_max_reelection_retries(&mut self, max: u32) {
+        self.max_reelection_retries = max;
+    }
+
     fn has_pending_remove(&self, identity: &[u8]) -> bool {
         self.pending_updates
             .get(identity)
@@ -791,7 +827,7 @@ mod tests {
         assert!(group.steward_list().is_none());
 
         let mems = members(&[1, 2, 3]);
-        group.generate_and_set_steward_list(0, &mems, 3).unwrap();
+        group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
 
         assert!(group.steward_list().is_some());
         assert_eq!(group.steward_list().unwrap().len(), 3);
@@ -818,7 +854,7 @@ mod tests {
         assert_eq!(group.steward_list().unwrap().len(), 1);
 
         let mems = members(&[1, 2, 3, 4]);
-        assert!(group.generate_and_set_steward_list(1, &mems, 4).is_ok());
+        assert!(group.generate_and_set_steward_list(1, &mems, 4, 0).is_ok());
 
         let list = group.steward_list().unwrap();
         assert_eq!(list.len(), 4);
@@ -833,7 +869,7 @@ mod tests {
         assert!(!group.is_steward());
 
         let mems = members(&[1, 2, 3]);
-        group.generate_and_set_steward_list(0, &mems, 3).unwrap();
+        group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
         assert!(group.is_steward());
 
         let outsider = Group::new_as_joiner("test-group", member(99), default_config());
@@ -845,7 +881,7 @@ mod tests {
         let config = ProtocolConfig::new(1, 3).unwrap();
         let mems = members(&[1, 2, 3]);
         let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
-        group.generate_and_set_steward_list(0, &mems, 3).unwrap();
+        group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
 
         let leaver = member(2);
         assert_eq!(group.approved_proposals_count(), 0);
@@ -872,7 +908,7 @@ mod tests {
         let config = ProtocolConfig::new(1, 3).unwrap();
         let mems = members(&[1, 2, 3]);
         let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
-        group.generate_and_set_steward_list(0, &mems, 3).unwrap();
+        group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
 
         // One auto-approved leave + one consensus-approved proposal.
         let leaver = member(2);
@@ -904,7 +940,7 @@ mod tests {
         let config = ProtocolConfig::new(1, 3).unwrap();
         let mems = members(&[1, 2, 3]);
         let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
-        group.generate_and_set_steward_list(0, &mems, 3).unwrap();
+        group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
 
         let leaver = member(2);
         group.accept_auto_approved_leave(leaver.clone());
@@ -926,7 +962,7 @@ mod tests {
         let config = ProtocolConfig::new(1, 3).unwrap();
         let mems = members(&[1, 2, 3]);
         let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
-        group.generate_and_set_steward_list(0, &mems, 3).unwrap();
+        group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
 
         let target = member(2);
         let ban_remove = GroupUpdateRequest {
@@ -949,7 +985,7 @@ mod tests {
         let config = ProtocolConfig::new(3, 3).unwrap();
         let mems = members(&[1, 2, 3]);
         let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
-        group.generate_and_set_steward_list(0, &mems, 3).unwrap();
+        group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
 
         let nominal = group.epoch_steward(0).unwrap().to_vec();
         assert_eq!(group.live_epoch_steward(0, &mems), Some(nominal.as_slice()));

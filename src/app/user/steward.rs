@@ -68,9 +68,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 .group
                 .protocol_config()
                 .compute_list_size(members.len());
+            // sn_min auto-fill isn't an election outcome — no retry seed.
             entry
                 .group
-                .generate_and_set_steward_list(epoch, &members, sn)?;
+                .generate_and_set_steward_list(epoch, &members, sn, 0)?;
         }
 
         Ok(())
@@ -179,9 +180,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             .group
             .protocol_config()
             .compute_list_size(members.len());
+        // Test/admin regenerate — no election, no retry seed.
         entry
             .group
-            .generate_and_set_steward_list(current_epoch, &members, sn)?;
+            .generate_and_set_steward_list(current_epoch, &members, sn, 0)?;
         Ok(())
     }
 
@@ -328,6 +330,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     as u64,
             };
 
+            // `retry_round` is the seed that produced the *stored* list —
+            // a frozen tag on `StewardList`, not `Group::reelection_round`
+            // (the dynamic counter for the next attempt, which resets to 0
+            // on accept). Joiners re-derive the ordering from this seed.
             let sync = GroupSync {
                 steward_members: list.members().to_vec(),
                 start_epoch: list.start_epoch(),
@@ -336,7 +342,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 allow_subset_candidates: entry.group.allow_subset_candidates(),
                 peer_scores: scores,
                 timing: Some(timing),
-                retry_round: entry.group.reelection_round(),
+                retry_round: list.retry_round(),
+                max_reelection_retries: entry.group.max_reelection_retries(),
             };
 
             let app_msg: AppMessage = sync.into();

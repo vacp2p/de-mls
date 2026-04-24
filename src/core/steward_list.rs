@@ -72,6 +72,11 @@ pub struct StewardList {
     config: ProtocolConfig,
     /// The epoch at which this steward list became active.
     start_epoch: u64,
+    /// The retry-round seed fed into the SHA256 sort that produced this list.
+    /// Historical tag — frozen once the list is accepted. Distinct from
+    /// `Group::reelection_round`, which is the dynamic counter for the
+    /// *next* election attempt.
+    retry_round: u32,
 }
 
 impl StewardList {
@@ -97,6 +102,7 @@ impl StewardList {
             members,
             config,
             start_epoch: election_epoch,
+            retry_round,
         })
     }
 
@@ -228,6 +234,13 @@ impl StewardList {
 
     pub fn start_epoch(&self) -> u64 {
         self.start_epoch
+    }
+
+    /// Historical tag — the retry-round seed that was fed into the SHA256
+    /// sort when this list was accepted. Joiners carry this value in
+    /// `GroupSync` so they can re-derive the same ordering.
+    pub fn retry_round(&self) -> u32 {
+        self.retry_round
     }
 }
 

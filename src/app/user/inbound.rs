@@ -313,10 +313,14 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     sync.start_epoch,
                     &sync.steward_members,
                     sn,
+                    sync.retry_round,
                 )?;
                 entry
                     .group
                     .set_allow_subset_candidates(sync.allow_subset_candidates);
+                entry
+                    .group
+                    .set_max_reelection_retries(sync.max_reelection_retries);
                 if let Some(timing) = &sync.timing {
                     let epoch_dur = std::time::Duration::from_millis(timing.epoch_duration_ms);
                     let freeze_dur = std::time::Duration::from_millis(timing.freeze_duration_ms);

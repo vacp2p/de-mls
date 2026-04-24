@@ -38,7 +38,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             return Err(UserError::GroupAlreadyExists);
         }
 
-        let (group, state_machine) = if is_creation {
+        let max_reelection_retries = config.max_reelection_retries;
+        let (mut group, state_machine) = if is_creation {
             let group = create_group(group_name, &self.mls_service, config.protocol.clone())?;
             let state_machine = GroupStateMachine::new_as_member_with_config(config);
             (group, state_machine)
@@ -51,6 +52,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let state_machine = GroupStateMachine::new_as_pending_join_with_config(config);
             (group, state_machine)
         };
+        group.set_max_reelection_retries(max_reelection_retries);
 
         let initial_state = state_machine.current_state();
         if initial_state == GroupState::PendingJoin {

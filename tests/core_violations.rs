@@ -457,10 +457,10 @@ fn test_backup_commit_scores_absent_steward() {
     let epoch = alice_mls.current_epoch(group_name).unwrap();
     let members = vec![alice_id.clone(), bob_id.clone()];
     alice_group
-        .generate_and_set_steward_list(epoch, &members, 2)
+        .generate_and_set_steward_list(epoch, &members, 2, 0)
         .unwrap();
     bob_group
-        .generate_and_set_steward_list(epoch, &members, 2)
+        .generate_and_set_steward_list(epoch, &members, 2, 0)
         .unwrap();
 
     // Produce an approved proposal (invite Charlie) on both sides.

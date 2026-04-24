@@ -116,6 +116,10 @@ message GroupSync {
   // Retry round the accepted steward list was generated with. Joiners
   // need this to reproduce the deterministic sort when validating.
   uint32 retry_round = 8;
+  // Group's configured ceiling on election retries. Joiners apply this
+  // value so the stuck-election error path triggers consistently across
+  // the group.
+  uint32 max_reelection_retries = 9;
 }
 
 message PeerScore {
