@@ -241,12 +241,13 @@ mod tests {
 
     #[test]
     fn test_pending_join_timeout() {
-        let mut state_machine =
-            GroupStateMachine::new_as_pending_join_with_config(GroupConfig::default());
+        let config = GroupConfig::default();
+        let mut state_machine = GroupStateMachine::new_as_pending_join_with_config(config.clone());
         assert!(!state_machine.is_pending_join_expired());
 
-        // Backdate past 2× epoch_duration threshold.
-        state_machine.phase_timer = Some(Instant::now() - Duration::from_secs(120));
+        // Backdate past the 3× epoch_duration expiration threshold.
+        let past = config.epoch_duration * 3 + Duration::from_secs(1);
+        state_machine.phase_timer = Some(Instant::now() - past);
         assert!(state_machine.is_pending_join_expired());
     }
 

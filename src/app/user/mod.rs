@@ -16,7 +16,7 @@ use std::{
     str::FromStr,
     sync::{Arc, Mutex},
 };
-use tokio::sync::RwLock;
+use tokio::{sync::RwLock, task::JoinHandle};
 
 use crate::{
     app::{
@@ -44,6 +44,11 @@ struct GroupEntry {
     state_machine: GroupStateMachine,
 }
 
+/// Registry of outstanding auto-vote timers, keyed by
+/// `(group_name, proposal_id)`. Cancelled on manual vote, consensus
+/// resolution, or group leave.
+type AutoVoteTimers = Arc<Mutex<HashMap<(String, u32), JoinHandle<()>>>>;
+
 pub struct User<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler> {
     mls_service: Arc<MlsService<P::Storage>>,
     groups: Arc<RwLock<HashMap<String, GroupEntry>>>,
@@ -56,6 +61,10 @@ pub struct User<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler>
     /// carrying our `app_id` are self-echoes and silently dropped.
     app_id: Vec<u8>,
     scoring_service: Arc<Mutex<PeerScoringService<InMemoryPeerScoreStorage, FixedScoringProvider>>>,
+    /// Per-proposal auto-vote timers. Spawned when a proposal first becomes
+    /// visible locally (own submit or peer inbound); cancelled on manual
+    /// vote, consensus resolution, or group leave.
+    auto_vote_timers: AutoVoteTimers,
 }
 
 impl<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler> Clone for User<P, H, SCH> {
@@ -70,6 +79,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler> Clone for 
             default_group_config: self.default_group_config.clone(),
             app_id: self.app_id.clone(),
             scoring_service: Arc::clone(&self.scoring_service),
+            auto_vote_timers: Arc::clone(&self.auto_vote_timers),
         }
     }
 }
@@ -103,6 +113,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 scoring_config,
             ))),
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
+            auto_vote_timers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -122,9 +133,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     }
 
     /// Drop all proposals / votes / sessions for this group from the
-    /// consensus service. Called on leave, pending-join timeout, and
-    /// re-creation.
+    /// consensus service and abort every auto-vote timer belonging to it.
+    /// Called on leave, pending-join timeout, and re-creation.
     async fn cleanup_consensus_scope(&self, group_name: &str) -> Result<(), UserError> {
+        self.cancel_group_auto_votes(group_name);
         let scope = P::Scope::from(group_name.to_string());
         self.consensus_service
             .storage()

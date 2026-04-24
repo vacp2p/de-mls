@@ -4,14 +4,16 @@ use std::time::Duration;
 
 use crate::core::ProtocolConfig;
 
-pub const DEFAULT_EPOCH_DURATION: Duration = Duration::from_secs(30);
+pub const DEFAULT_EPOCH_DURATION: Duration = Duration::from_secs(60);
 pub const DEFAULT_PROPOSAL_EXPIRATION: Duration = Duration::from_secs(3600);
-pub const DEFAULT_CONSENSUS_TIMEOUT: Duration = Duration::from_secs(15);
+pub const DEFAULT_CONSENSUS_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
 
-/// Fires 10s into the 15s consensus window — leaves room for a manual NO
-/// to land first.
-pub const DEFAULT_CREATOR_AUTO_VOTE_DELAY: Duration = Duration::from_secs(10);
+/// How long each member has to cast a manual vote before the app casts an
+/// auto-vote on their behalf using `liveness_criteria_yes`. Must be
+/// strictly less than `consensus_timeout` so the auto-vote has time to
+/// propagate and land in every peer's session before the library deadline.
+pub const DEFAULT_VOTING_DELAY: Duration = Duration::from_secs(10);
 
 /// One retry gives the responsible proposer a second shot with a different
 /// list composition; beyond that human/policy intervention is expected.
@@ -49,15 +51,17 @@ pub struct GroupConfig {
     /// steward fails to commit a buffered Add/Remove for this many
     /// consecutive epochs, the entry is dropped.
     pub pending_update_max_epochs: u32,
-    /// Delay after proposal creation at which the creator auto-casts YES.
-    /// `None` disables — the creator must vote manually. Keep below
-    /// `consensus_timeout` so the auto-vote still affects the outcome.
-    pub creator_auto_vote_delay: Option<Duration>,
     /// Max steward-election retries within one MLS epoch before the app
     /// surfaces "reelection stuck". `0` disables retry entirely.
     pub max_reelection_retries: u32,
+    /// Per-member window to cast a manual vote before the app auto-casts
+    /// using `liveness_criteria_yes`. Relationship invariant:
+    /// `voting_delay < consensus_timeout < epoch_duration`. See
+    /// [`DEFAULT_VOTING_DELAY`].
+    pub voting_delay: Duration,
     /// Whether silent voters count as YES at `consensus_timeout` (RFC
     /// §Creating Voting Proposal). See [`DEFAULT_LIVENESS_CRITERIA_YES`].
+    /// Also used by the auto-vote timer as the cast value.
     pub liveness_criteria_yes: bool,
     /// RFC §Peer Scoring `default_peer_score`. See [`DEFAULT_PEER_SCORE`].
     pub default_peer_score: i64,
@@ -74,8 +78,8 @@ impl Default for GroupConfig {
             proposal_expiration: DEFAULT_PROPOSAL_EXPIRATION,
             consensus_timeout: DEFAULT_CONSENSUS_TIMEOUT,
             pending_update_max_epochs: DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
-            creator_auto_vote_delay: Some(DEFAULT_CREATOR_AUTO_VOTE_DELAY),
             max_reelection_retries: DEFAULT_MAX_REELECTION_RETRIES,
+            voting_delay: DEFAULT_VOTING_DELAY,
             liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,
             default_peer_score: DEFAULT_PEER_SCORE,
             threshold_peer_score: DEFAULT_THRESHOLD_PEER_SCORE,

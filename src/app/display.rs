@@ -111,7 +111,8 @@ impl ViolationEvidence {
 // ─────────────────────────── Request Display ───────────────────────────
 
 /// Wallet address for membership / emergency-evidence targets, or
-/// `"epoch E, retry R | s1, s2, ..."` for elections. `"unknown"` otherwise.
+/// `"epoch E | s1, s2, ..."` for elections (with `, retry R` appended
+/// when `R > 0`). `"unknown"` otherwise.
 pub fn format_group_request_target(request: &GroupUpdateRequest) -> String {
     match &request.payload {
         Some(group_update_request::Payload::InviteMember(im)) => {
@@ -131,12 +132,12 @@ pub fn format_group_request_target(request: &GroupUpdateRequest) -> String {
                 .iter()
                 .map(|s| format_wallet_address(s))
                 .collect();
-            format!(
-                "epoch {}, retry {} | {}",
-                se.election_epoch,
-                se.retry_round,
-                stewards.join(", ")
-            )
+            let meta = if se.retry_round == 0 {
+                format!("epoch {}", se.election_epoch)
+            } else {
+                format!("epoch {}, retry {}", se.election_epoch, se.retry_round)
+            };
+            format!("{} | {}", meta, stewards.join(", "))
         }
         _ => "unknown".to_string(),
     }

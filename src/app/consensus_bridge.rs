@@ -26,11 +26,18 @@ pub struct ProposalParams {
     pub liveness_criteria_yes: bool,
 }
 
-/// Submit a proposal to consensus. Returns `(proposal_id, vote_notification)`.
+/// Open a consensus session for `request`; return its `proposal_id` and the
+/// unbundled `Proposal` wire message.
 ///
-/// **Caller contract:** store ownership (`Group::store_voting_proposal`)
-/// *before* emitting the notification via `on_app_message` — otherwise a
-/// consensus result arriving immediately can see `is_owner=false`.
+/// No vote is cast here. The caller decides whether to:
+/// - bundle their vote by calling [`cast_vote`] (owner path returns the
+///   proposal with the creator's vote attached), or
+/// - broadcast the unbundled message as-is and let the creator vote later
+///   like any other member.
+///
+/// In both cases the caller must record ownership in the group *before*
+/// casting, so a single-voter consensus transition can't fire before
+/// `Group::is_owner_of_proposal` is true.
 pub async fn submit_proposal<P: DeMlsProvider>(
     group_name: &str,
     request: &GroupUpdateRequest,
@@ -41,7 +48,7 @@ pub async fn submit_proposal<P: DeMlsProvider>(
     let payload = request.encode_to_vec();
     let create_request = CreateProposalRequest::new(
         uuid::Uuid::new_v4().to_string(),
-        payload.clone(),
+        payload,
         identity_string.into(),
         params.expected_voters,
         params.proposal_expiration.as_secs(),
@@ -64,20 +71,22 @@ pub async fn submit_proposal<P: DeMlsProvider>(
         "proposal opened"
     );
 
-    let vote_notification: AppMessage = VotePayload {
-        group_id: group_name.to_string(),
-        proposal_id: proposal.proposal_id,
-        payload,
-        timestamp: proposal.timestamp,
-    }
-    .into();
-
-    Ok((proposal.proposal_id, vote_notification))
+    let proposal_id = proposal.proposal_id;
+    Ok((proposal_id, proposal.into()))
 }
 
-/// Cast a vote and return the `AppMessage` to broadcast. Owners broadcast
-/// the full `Proposal` (so peers see it for the first time); non-owners
-/// broadcast just the `Vote`.
+/// Cast a vote and return the Vote-only `AppMessage` to broadcast.
+///
+/// Always returns a `Vote` wire message — never a full `Proposal`. Every
+/// peer already has the proposal registered in their session (either from
+/// the initial unbundled broadcast or from the bundled-at-submit proposal
+/// both land before anyone votes). Re-broadcasting the full proposal would
+/// get rejected peer-side as `ProposalAlreadyExist`, dropping the vote.
+///
+/// The bundled-at-submit path in `register_new_proposal` calls
+/// `consensus.cast_vote_and_get_proposal` directly — not this helper —
+/// because that is the only legitimate case for broadcasting proposal +
+/// vote atomically as a single wire message.
 pub async fn cast_vote<P, SN>(
     group: &Group,
     proposal_id: u32,
@@ -96,19 +105,11 @@ where
     let choice = if vote { "YES" } else { "NO" };
     let actor = if is_owner { "owner" } else { "member" };
     info!(group = group_name, proposal_id, choice, actor, "vote cast");
-    let app_message: AppMessage = if is_owner {
-        let proposal = consensus
-            .cast_vote_and_get_proposal(&scope, proposal_id, vote, signer)
-            .await?;
-        proposal.into()
-    } else {
-        let vote_msg = consensus
-            .cast_vote(&scope, proposal_id, vote, signer)
-            .await?;
-        vote_msg.into()
-    };
 
-    Ok(app_message)
+    let vote_msg = consensus
+        .cast_vote(&scope, proposal_id, vote, signer)
+        .await?;
+    Ok(vote_msg.into())
 }
 
 /// Forward a peer's proposal into the local consensus service and emit a

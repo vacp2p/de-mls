@@ -58,6 +58,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     }
 
     /// Start a `RemoveMember` consensus round targeting `ban_request.user_to_ban`.
+    /// The requester's click means "I want this person removed" → the
+    /// creator's vote is bundled as YES at submit; no banner is shown to
+    /// the requester.
     pub async fn process_ban_request(
         &mut self,
         ban_request: BanRequest,
@@ -79,6 +82,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     identity: parse_wallet_to_bytes(ban_request.user_to_ban.as_str())?,
                 })),
             },
+            Some(true),
         )
         .await?;
 

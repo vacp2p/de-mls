@@ -102,8 +102,26 @@ pub mod v1 {
             group_id: String,
             state: String,
         },
+        /// Current MLS epoch + reelection retry round. Pushed alongside
+        /// other consensus-state refreshes so the UI can display live
+        /// epoch/retry for debugging.
+        GroupEpoch {
+            group_id: String,
+            epoch: u64,
+            retry_round: u32,
+        },
 
         VoteRequested(VotePayload),
+        /// Our own proposal was just submitted to the group. The creator's
+        /// vote is already bundled in the outbound wire message, so the UI
+        /// records the proposal for history but must not offer a "please
+        /// vote" banner for it.
+        OwnProposalSubmitted {
+            group_id: String,
+            proposal_id: u32,
+            action: String,
+            address: String,
+        },
         ProposalDecided(String, ConsensusEvent),
         CurrentEpochProposals {
             group_id: String,

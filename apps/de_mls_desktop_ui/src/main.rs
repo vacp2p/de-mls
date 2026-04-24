@@ -65,6 +65,8 @@ struct ElectionRecord {
 struct ConsensusState {
     is_steward: bool,
     group_state: String,
+    epoch: u64,
+    retry_round: u32,
     pending_votes: Vec<VotePayload>,
     approved_queue: Vec<(String, String)>,
     rejected: Vec<RejectedProposal>,
@@ -146,10 +148,10 @@ fn role_for(role: &str) -> (&'static str, &'static str) {
     }
 }
 
-/// Split the steward-election composite string `"epoch N, retry R | addr, addr"`
-/// into a human-readable meta line and a list of steward addresses. Used by
-/// the active-vote banner to render stewards vertically instead of wrapping
-/// one long line of commas.
+/// Split the steward-election composite string `"epoch N | addr, addr"`
+/// (with `, retry R` appended when `R > 0`) into a human-readable meta line
+/// and a list of steward addresses. Used by the active-vote banner to render
+/// stewards vertically instead of wrapping one long line of commas.
 fn parse_election_details(raw: &str) -> (String, Vec<String>) {
     let (meta_raw, list_raw) = raw.split_once(" | ").unwrap_or((raw, ""));
     let meta = meta_raw
@@ -408,6 +410,17 @@ fn Home() -> Element {
                             cons.write().epoch_history = epochs;
                         }
                     }
+                    Some(AppEvent::GroupEpoch {
+                        group_id,
+                        epoch,
+                        retry_round,
+                    }) => {
+                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
+                            let mut c = cons.write();
+                            c.epoch = epoch;
+                            c.retry_round = retry_round;
+                        }
+                    }
                     Some(AppEvent::ProposalAdded {
                         group_id,
                         action,
@@ -465,6 +478,20 @@ fn Home() -> Element {
                             {
                                 c.pending_votes.push(vp);
                             }
+                        }
+                    }
+                    Some(AppEvent::OwnProposalSubmitted {
+                        group_id,
+                        proposal_id,
+                        action,
+                        address,
+                    }) => {
+                        let is_current =
+                            chat.read().opened_group.as_deref() == Some(group_id.as_str());
+                        if is_current {
+                            cons.write()
+                                .proposal_cache
+                                .insert(proposal_id, (action, address));
                         }
                     }
                     Some(AppEvent::ProposalDecided(group_id, consensus_event)) => {
@@ -597,6 +624,8 @@ fn StatusStrip() -> Element {
     let members = chat.read().members.clone();
     let my_addr = session.read().address.clone();
     let state = cons.read().group_state.clone();
+    let epoch = cons.read().epoch;
+    let retry_round = cons.read().retry_round;
     let (state_cls, state_text) = state_label(&state);
     let (role_cls, role_text) = members
         .iter()
@@ -604,6 +633,11 @@ fn StatusStrip() -> Element {
         .map(|m| role_for(m.role.as_str()))
         .unwrap_or(("role-badge member", "Member"));
     let member_count = members.len();
+    let epoch_label = if retry_round == 0 {
+        format!("{epoch}")
+    } else {
+        format!("{epoch} · retry {retry_round}")
+    };
 
     rsx! {
         div { class: "status-strip",
@@ -611,6 +645,9 @@ fn StatusStrip() -> Element {
             span { class: "status-sep" }
             span { class: "status-label", "State" }
             span { class: "state-pill {state_cls}", "{state_text}" }
+            span { class: "status-sep" }
+            span { class: "status-label", "Epoch" }
+            span { class: "status-value mono", "{epoch_label}" }
             span { class: "status-sep" }
             span { class: "status-label", "You" }
             span { class: "{role_cls}", "{role_text}" }
