@@ -59,6 +59,54 @@ pub fn target_identity_of(request: &GroupUpdateRequest) -> Option<&[u8]> {
     }
 }
 
+/// Bounded FIFO of proposal IDs for which a local consensus outcome has been
+/// observed (`ConsensusReached` or timeout-path resolution). Oldest entries
+/// are evicted once `capacity` is reached.
+///
+/// Serves two callers: (a) duplicate-drop guard in `apply_consensus_outcome`
+/// against consensus-library re-emissions, and (b) late-packet classifier in
+/// `forward_incoming_vote` — a `SessionNotFound` for an id in this cache is
+/// a benign late vote (session was trimmed after we resolved it), while the
+/// same error for an id we never saw is suspicious and warrants a warn-log.
+///
+/// `CAPACITY` is sized well above the consensus library's
+/// `max_sessions_per_scope` (default 10) so a late vote arriving within any
+/// plausible peer-lag window still finds its id cached.
+#[derive(Clone, Debug)]
+struct ResolvedProposalCache {
+    ids: HashSet<ProposalId>,
+    order: VecDeque<ProposalId>,
+    capacity: usize,
+}
+
+const RESOLVED_PROPOSAL_CACHE_CAPACITY: usize = 256;
+
+impl ResolvedProposalCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            ids: HashSet::new(),
+            order: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    fn contains(&self, id: ProposalId) -> bool {
+        self.ids.contains(&id)
+    }
+
+    fn record(&mut self, id: ProposalId) {
+        if !self.ids.insert(id) {
+            return;
+        }
+        self.order.push_back(id);
+        while self.order.len() > self.capacity
+            && let Some(old) = self.order.pop_front()
+        {
+            self.ids.remove(&old);
+        }
+    }
+}
+
 /// A membership update that has been observed but may not yet have been committed.
 ///
 /// Every member buffers these so that, if the epoch steward fails to commit the
@@ -138,10 +186,11 @@ pub struct Group {
     /// triggers consistently across the group. Overridden at group
     /// creation from `GroupConfig`; defaults to [`DEFAULT_MAX_REELECTION_RETRIES`].
     max_reelection_retries: u32,
-    /// Proposal IDs already dispatched through `apply_consensus_outcome`.
-    /// The consensus library can re-emit `ConsensusReached` (timeout-path
-    /// race); this guards against re-applying state and double-firing events.
-    consensus_outcomes_applied: HashSet<ProposalId>,
+    /// Bounded FIFO of proposal IDs with a locally-observed consensus outcome.
+    /// Used by `apply_consensus_outcome` to drop library re-emissions and by
+    /// `forward_incoming_vote` to distinguish benign late peer votes (session
+    /// was trimmed after resolution) from votes for unknown proposal IDs.
+    resolved_proposals: ResolvedProposalCache,
 }
 
 /// Fallback ceiling on steward-election retries. One retry gives the
@@ -166,16 +215,16 @@ impl Group {
             pending_updates: HashMap::new(),
             reelection_round: 0,
             max_reelection_retries: DEFAULT_MAX_REELECTION_RETRIES,
-            consensus_outcomes_applied: HashSet::new(),
+            resolved_proposals: ResolvedProposalCache::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
         }
     }
 
     pub fn is_consensus_outcome_applied(&self, proposal_id: ProposalId) -> bool {
-        self.consensus_outcomes_applied.contains(&proposal_id)
+        self.resolved_proposals.contains(proposal_id)
     }
 
     pub fn mark_consensus_outcome_applied(&mut self, proposal_id: ProposalId) {
-        self.consensus_outcomes_applied.insert(proposal_id);
+        self.resolved_proposals.record(proposal_id);
     }
 
     /// Create a new group handle for a joining member (not yet steward).
@@ -977,6 +1026,50 @@ mod tests {
         assert!(!group.accept_auto_approved_leave(target.clone()));
         assert_eq!(group.approved_proposals_count(), 0);
         assert!(!group.is_pending_self_leave(&target));
+    }
+
+    #[test]
+    fn resolved_cache_records_and_evicts_fifo() {
+        let mut cache = ResolvedProposalCache::new(3);
+        cache.record(1);
+        cache.record(2);
+        cache.record(3);
+        assert!(cache.contains(1));
+        assert!(cache.contains(2));
+        assert!(cache.contains(3));
+
+        cache.record(4);
+        assert!(!cache.contains(1), "oldest entry must be evicted");
+        assert!(cache.contains(2));
+        assert!(cache.contains(3));
+        assert!(cache.contains(4));
+    }
+
+    #[test]
+    fn resolved_cache_dedupes_and_does_not_bump_position() {
+        let mut cache = ResolvedProposalCache::new(3);
+        cache.record(1);
+        cache.record(2);
+        cache.record(1); // no-op: 1 stays in its original slot
+        cache.record(3);
+        assert!(cache.contains(1));
+        assert!(cache.contains(2));
+        assert!(cache.contains(3));
+
+        // Fourth distinct id evicts the oldest (1), not a later entry.
+        cache.record(4);
+        assert!(!cache.contains(1));
+        assert!(cache.contains(2));
+        assert!(cache.contains(3));
+        assert!(cache.contains(4));
+    }
+
+    #[test]
+    fn mark_consensus_outcome_persists_in_resolved_cache() {
+        let mut group = Group::new_as_creator("g", member(1), default_config()).unwrap();
+        assert!(!group.is_consensus_outcome_applied(42));
+        group.mark_consensus_outcome_applied(42);
+        assert!(group.is_consensus_outcome_applied(42));
     }
 
     /// Live rotation skips a nominal steward who has submitted a self-leave.

@@ -39,7 +39,16 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 self.on_incoming_proposal(group_name, proposal).await
             }
             ProcessResult::Vote(vote) => {
-                forward_incoming_vote::<P>(group_name, vote, &*self.consensus_service).await?;
+                let group = {
+                    let groups = self.groups.read().await;
+                    groups
+                        .get(group_name)
+                        .ok_or(UserError::GroupNotFound)?
+                        .group
+                        .clone()
+                };
+                forward_incoming_vote::<P>(group_name, &group, vote, &*self.consensus_service)
+                    .await?;
                 Ok(())
             }
             ProcessResult::MembershipChangeReceived(request) => {

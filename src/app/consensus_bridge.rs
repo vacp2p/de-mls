@@ -143,24 +143,50 @@ pub async fn forward_incoming_proposal<P: DeMlsProvider>(
 
 /// Forward a peer's vote into the local consensus service.
 ///
-/// A late vote may arrive after our local session has been timeout-reaped
-/// (`SessionNotActive`). That's a benign race — consensus concluded locally —
-/// and we downgrade it to a debug log. Other consensus errors propagate.
+/// Late-arrival classification uses the `Group::is_consensus_outcome_applied`
+/// cache to tell benign late packets from suspicious unknowns:
+/// - `SessionNotActive` — session exists but already resolved. Benign, debug.
+/// - `SessionNotFound` with id in the resolved-proposals cache — session
+///   was trimmed after local resolution. Benign, debug.
+/// - `SessionNotFound` with id NOT in the cache — we never saw this
+///   proposal. Suspicious (spurious packet or lost proposal). Warn-log,
+///   swallow the error so inbound dispatch keeps draining.
+///
+/// Other consensus errors propagate.
 pub async fn forward_incoming_vote<P: DeMlsProvider>(
     group_name: &str,
+    group: &Group,
     vote: Vote,
     consensus: &ProviderConsensus<P>,
 ) -> Result<(), CoreError> {
     use hashgraph_like_consensus::error::ConsensusError;
 
+    let proposal_id = vote.proposal_id;
     let scope = P::Scope::from(group_name.to_string());
     match consensus.process_incoming_vote(&scope, vote).await {
         Ok(()) => Ok(()),
         Err(ConsensusError::SessionNotActive) => {
             tracing::debug!(
                 group = group_name,
+                proposal_id,
                 "late vote dropped: consensus session already resolved"
             );
+            Ok(())
+        }
+        Err(ConsensusError::SessionNotFound) => {
+            if group.is_consensus_outcome_applied(proposal_id) {
+                tracing::debug!(
+                    group = group_name,
+                    proposal_id,
+                    "late vote dropped: session trimmed after local resolution"
+                );
+            } else {
+                tracing::warn!(
+                    group = group_name,
+                    proposal_id,
+                    "vote for unknown proposal id dropped: no local session and not in resolved cache"
+                );
+            }
             Ok(())
         }
         Err(e) => Err(e.into()),
