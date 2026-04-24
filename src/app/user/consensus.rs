@@ -1,9 +1,10 @@
 //! Proposal submission + voting.
 //!
-//! Outgoing proposals run as a background task: submit to consensus, register
-//! ownership, cast the creator's auto-YES, resolve on timeout. Since `User`
-//! is `Clone` (every field is `Arc` or cheap `Clone`), each spawn just owns
-//! its own handle — no ctx struct per task kind.
+//! Outgoing proposals run as a background task: submit to consensus with the
+//! creator's vote bundled, register ownership, broadcast the bundle, resolve
+//! on timeout. Since `User` is `Clone` (every field is `Arc` or cheap
+//! `Clone`), each spawn just owns its own handle — no ctx struct per task
+//! kind.
 
 use hashgraph_like_consensus::storage::ConsensusStorage;
 use tracing::{error, info};
@@ -26,6 +27,7 @@ struct NewProposal {
     request: GroupUpdateRequest,
     expected_voters: u32,
     kind: ProposalKind,
+    creator_vote: bool,
 }
 
 impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
@@ -68,12 +70,18 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
     /// Start a consensus vote for a group update request.
     ///
+    /// `creator_vote` is the submitter's vote on their own proposal — bundled
+    /// with the outbound wire message. UI-initiated paths pass the user's
+    /// choice; steward auto-propose paths pass `liveness_criteria_yes` so the
+    /// default matches the group's silent-voter policy.
+    ///
     /// Validates the group state synchronously, then spawns a task that
     /// drives the proposal through its lifecycle.
     pub async fn initiate_proposal(
         &self,
         group_name: String,
         request: GroupUpdateRequest,
+        creator_vote: bool,
     ) -> Result<(), UserError> {
         let kind = ProposalKind::of(&request);
         let expected_voters = self.check_proposal_allowed(&group_name, kind).await?;
@@ -82,6 +90,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             request,
             expected_voters,
             kind,
+            creator_vote,
         });
         Ok(())
     }
@@ -91,20 +100,21 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         tokio::spawn(async move { user.run_proposal_lifecycle(np).await });
     }
 
-    /// Proposal background task: register → optional creator auto-YES →
-    /// resolve on timeout. Never returns an error — submission failures are
-    /// surfaced through `GroupEventHandler::on_error` and everything after
-    /// that is best-effort.
+    /// Proposal background task: register (which broadcasts proposal +
+    /// creator's vote in one bundle) → sleep `consensus_timeout` → resolve.
+    /// Never returns an error — submission failures are surfaced through
+    /// `GroupEventHandler::on_error` and everything after that is best-effort.
     async fn run_proposal_lifecycle(self, np: NewProposal) {
         let NewProposal {
             group_name,
             request,
             expected_voters,
             kind,
+            creator_vote,
         } = np;
 
         let proposal_id = match self
-            .register_new_proposal(&group_name, request, expected_voters, kind)
+            .register_new_proposal(&group_name, request, expected_voters, kind, creator_vote)
             .await
         {
             Ok(pid) => pid,
@@ -118,44 +128,26 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         };
 
         let scope = P::Scope::from(group_name.clone());
-        let timeout = self.default_group_config.consensus_timeout;
-        let (auto_yes_delay, post_delay) = match self.default_group_config.creator_auto_vote_delay {
-            Some(d) if d < timeout => (Some(d), timeout - d),
-            // `delay >= timeout` is nonsensical → skip auto-vote.
-            _ => (None, timeout),
-        };
-
-        if let Some(delay) = auto_yes_delay {
-            tokio::time::sleep(delay).await;
-            if let Err(e) = self
-                .cast_creator_auto_yes(&group_name, proposal_id, &scope)
-                .await
-            {
-                info!(
-                    group = %group_name,
-                    proposal_id,
-                    error = %e,
-                    "creator auto-YES skipped"
-                );
-            }
-        }
-        tokio::time::sleep(post_delay).await;
+        tokio::time::sleep(self.default_group_config.consensus_timeout).await;
         self.resolve_on_timeout(proposal_id, &scope).await;
     }
 
-    /// Submit the proposal to consensus, move ownership into the voting
-    /// queue, mark any emergency, and emit the UI vote notification.
+    /// Open the consensus session, record ownership, cast the creator's
+    /// vote (bundled into the outbound proposal), broadcast to peers, and
+    /// notify our own UI that the proposal was submitted.
     ///
-    /// Ownership is stored *before* the notification so a consensus result
-    /// arriving immediately can't race `is_owner=false` at apply time.
+    /// Ownership is stored *before* the vote is cast, so a single-voter
+    /// consensus transition can't race `is_owner=false` when the event
+    /// forwarder picks it up.
     async fn register_new_proposal(
         &self,
         group_name: &str,
         request: GroupUpdateRequest,
         expected_voters: u32,
         kind: ProposalKind,
+        creator_vote: bool,
     ) -> Result<u32, UserError> {
-        let (proposal_id, vote_notification) = submit_proposal::<P>(
+        let proposal_id = submit_proposal::<P>(
             group_name,
             &request,
             self.mls_service.wallet_hex(),
@@ -169,64 +161,37 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         )
         .await?;
 
-        {
+        let group = {
             let mut groups = self.groups.write().await;
             let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
-            entry.group.store_voting_proposal(proposal_id, request);
+            entry
+                .group
+                .store_voting_proposal(proposal_id, request.clone());
             if kind.is_emergency() {
                 entry.group.observe_emergency(proposal_id);
             }
-        }
-        self.handler
-            .on_app_message(group_name, vote_notification)
-            .await?;
-        Ok(proposal_id)
-    }
-
-    /// Cast a YES on behalf of the creator. No-op if the proposal already
-    /// resolved or the creator already voted.
-    async fn cast_creator_auto_yes(
-        &self,
-        group_name: &str,
-        proposal_id: u32,
-        scope: &P::Scope,
-    ) -> Result<(), UserError> {
-        let storage = self.consensus_service.storage();
-        let still_active = storage
-            .get_active_proposals(scope)
-            .await
-            .map(|active| active.iter().any(|p| p.proposal_id == proposal_id))
-            .unwrap_or(false);
-        if !still_active {
-            return Ok(());
-        }
-        if let Ok(p) = storage.get_proposal(scope, proposal_id).await {
-            let already_voted = p
-                .votes
-                .iter()
-                .any(|v| v.vote_owner == self.mls_service.wallet_bytes());
-            if already_voted {
-                return Ok(());
-            }
-        }
-
-        let group = {
-            let g = self.groups.read().await;
-            let entry = g.get(group_name).ok_or(UserError::GroupNotFound)?;
             entry.group.clone()
         };
+
+        // With ownership stored, `cast_vote` takes the owner path and returns
+        // the proposal bundled with our vote, ready to gossip.
         let app_message = cast_vote::<P, _>(
             &group,
             proposal_id,
-            true,
+            creator_vote,
             &self.consensus_service,
             self.eth_signer.clone(),
         )
         .await?;
+
         let packet = build_message(&group, &self.mls_service, &app_message, &self.app_id)?;
         self.handler.on_outbound(group_name, packet).await?;
-        info!(group = group_name, proposal_id, "creator auto-YES cast");
-        Ok(())
+
+        self.handler
+            .on_own_proposal_submitted(group_name, proposal_id, &request)
+            .await?;
+
+        Ok(proposal_id)
     }
 
     /// Resolve the proposal via the consensus library's timeout path if it's
@@ -325,8 +290,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         if should_propose {
             // `check_proposal_allowed` may still reject (active emergency etc.) —
             // leave the entry in the buffer so the next rotation picks it up.
+            let creator_vote = self.default_group_config.liveness_criteria_yes;
             if let Err(e) = self
-                .initiate_proposal(group_name.to_string(), request)
+                .initiate_proposal(group_name.to_string(), request, creator_vote)
                 .await
             {
                 info!(group = group_name, error = %e, "proposal deferred");

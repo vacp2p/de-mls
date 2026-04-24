@@ -26,22 +26,23 @@ pub struct ProposalParams {
     pub liveness_criteria_yes: bool,
 }
 
-/// Submit a proposal to consensus. Returns `(proposal_id, vote_notification)`.
+/// Open a consensus session for `request` and return its `proposal_id`.
 ///
-/// **Caller contract:** store ownership (`Group::store_voting_proposal`)
-/// *before* emitting the notification via `on_app_message` — otherwise a
-/// consensus result arriving immediately can see `is_owner=false`.
+/// This only creates the session — no vote is cast and nothing is broadcast.
+/// The creator's vote is cast by the caller via [`cast_vote`] *after*
+/// recording ownership in the group, so a single-voter consensus transition
+/// can't fire before `Group::is_owner_of_proposal` is true.
 pub async fn submit_proposal<P: DeMlsProvider>(
     group_name: &str,
     request: &GroupUpdateRequest,
     identity_string: String,
     consensus: &ProviderConsensus<P>,
     params: ProposalParams,
-) -> Result<(u32, AppMessage), CoreError> {
+) -> Result<u32, CoreError> {
     let payload = request.encode_to_vec();
     let create_request = CreateProposalRequest::new(
         uuid::Uuid::new_v4().to_string(),
-        payload.clone(),
+        payload,
         identity_string.into(),
         params.expected_voters,
         params.proposal_expiration.as_secs(),
@@ -64,15 +65,7 @@ pub async fn submit_proposal<P: DeMlsProvider>(
         "proposal opened"
     );
 
-    let vote_notification: AppMessage = VotePayload {
-        group_id: group_name.to_string(),
-        proposal_id: proposal.proposal_id,
-        payload,
-        timestamp: proposal.timestamp,
-    }
-    .into();
-
-    Ok((proposal.proposal_id, vote_notification))
+    Ok(proposal.proposal_id)
 }
 
 /// Cast a vote and return the `AppMessage` to broadcast. Owners broadcast

@@ -88,6 +88,14 @@ pub(crate) async fn push_consensus_state(
             epochs,
         });
     }
+
+    if let Ok((epoch, retry_round)) = user.read().await.get_epoch_and_retry(group_name).await {
+        let _ = evt_tx.unbounded_send(AppEvent::GroupEpoch {
+            group_id: group_name.to_string(),
+            epoch,
+            retry_round,
+        });
+    }
 }
 
 /// Push refreshed member scores and steward status to the UI.

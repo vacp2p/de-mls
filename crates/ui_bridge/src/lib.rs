@@ -131,9 +131,10 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
             AppCmd::SendBanRequest {
                 group_id,
                 user_to_ban,
+                creator_vote,
             } => {
                 if let Err(e) = GATEWAY
-                    .send_ban_request(group_id.clone(), user_to_ban.clone())
+                    .send_ban_request(group_id.clone(), user_to_ban.clone(), creator_vote)
                     .await
                 {
                     GATEWAY.push_event(AppEvent::Error(format!("Send ban request failed: {e}")));
@@ -185,9 +186,9 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 proposal_id,
                 choice,
             } => {
-                // "User already voted" is benign — the creator auto-YES timer
-                // fired before the user clicked. Surface as a UI notice, don't
-                // crash the UI loop.
+                // "User already voted" is benign — a UI race (double-click
+                // before the banner closed, or the session resolved mid-click).
+                // Surface as a notice, don't crash the UI loop.
                 if let Err(e) = GATEWAY
                     .process_user_vote(group_id.clone(), proposal_id, choice)
                     .await

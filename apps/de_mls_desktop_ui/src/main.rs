@@ -65,6 +65,8 @@ struct ElectionRecord {
 struct ConsensusState {
     is_steward: bool,
     group_state: String,
+    epoch: u64,
+    retry_round: u32,
     pending_votes: Vec<VotePayload>,
     approved_queue: Vec<(String, String)>,
     rejected: Vec<RejectedProposal>,
@@ -408,6 +410,17 @@ fn Home() -> Element {
                             cons.write().epoch_history = epochs;
                         }
                     }
+                    Some(AppEvent::GroupEpoch {
+                        group_id,
+                        epoch,
+                        retry_round,
+                    }) => {
+                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
+                            let mut c = cons.write();
+                            c.epoch = epoch;
+                            c.retry_round = retry_round;
+                        }
+                    }
                     Some(AppEvent::ProposalAdded {
                         group_id,
                         action,
@@ -465,6 +478,20 @@ fn Home() -> Element {
                             {
                                 c.pending_votes.push(vp);
                             }
+                        }
+                    }
+                    Some(AppEvent::OwnProposalSubmitted {
+                        group_id,
+                        proposal_id,
+                        action,
+                        address,
+                    }) => {
+                        let is_current =
+                            chat.read().opened_group.as_deref() == Some(group_id.as_str());
+                        if is_current {
+                            cons.write()
+                                .proposal_cache
+                                .insert(proposal_id, (action, address));
                         }
                     }
                     Some(AppEvent::ProposalDecided(group_id, consensus_event)) => {
@@ -597,6 +624,8 @@ fn StatusStrip() -> Element {
     let members = chat.read().members.clone();
     let my_addr = session.read().address.clone();
     let state = cons.read().group_state.clone();
+    let epoch = cons.read().epoch;
+    let retry_round = cons.read().retry_round;
     let (state_cls, state_text) = state_label(&state);
     let (role_cls, role_text) = members
         .iter()
@@ -604,6 +633,11 @@ fn StatusStrip() -> Element {
         .map(|m| role_for(m.role.as_str()))
         .unwrap_or(("role-badge member", "Member"));
     let member_count = members.len();
+    let epoch_label = if retry_round == 0 {
+        format!("{epoch}")
+    } else {
+        format!("{epoch} · retry {retry_round}")
+    };
 
     rsx! {
         div { class: "status-strip",
@@ -611,6 +645,9 @@ fn StatusStrip() -> Element {
             span { class: "status-sep" }
             span { class: "status-label", "State" }
             span { class: "state-pill {state_cls}", "{state_text}" }
+            span { class: "status-sep" }
+            span { class: "status-label", "Epoch" }
+            span { class: "status-value mono", "{epoch_label}" }
             span { class: "status-sep" }
             span { class: "status-label", "You" }
             span { class: "{role_cls}", "{role_text}" }
@@ -774,6 +811,10 @@ fn ChatSection() -> Element {
     let mut show_ban_modal = use_signal(|| false);
     let mut ban_address = use_signal(String::new);
     let mut ban_error = use_signal(|| Option::<String>::None);
+    // Creator's own vote on the ban proposal — bundled into the outbound
+    // wire message at submit time. Default YES; toggle to NO if submitting
+    // out of duty without endorsement.
+    let mut ban_vote = use_signal(|| true);
 
     // States where `send_app_message` refuses (matches the core guard in
     // `src/app/user/messaging.rs`). Keep these two lists in sync.
@@ -839,9 +880,11 @@ fn ChatSection() -> Element {
                 return;
             };
 
+            let creator_vote = *ban_vote.read();
             ban_error.set(None);
             show_ban_modal.set(false);
             ban_address.set(String::new());
+            ban_vote.set(true);
 
             let addr_to_ban = target.clone();
             spawn(async move {
@@ -849,6 +892,7 @@ fn ChatSection() -> Element {
                     .send(AppCmd::SendBanRequest {
                         group_id: group_id.clone(),
                         user_to_ban: addr_to_ban,
+                        creator_vote,
                     })
                     .await;
             });
@@ -866,6 +910,7 @@ fn ChatSection() -> Element {
         move || {
             ban_address.set(String::new());
             ban_error.set(None);
+            ban_vote.set(true);
             show_ban_modal.set(false);
         }
     };
@@ -874,6 +919,7 @@ fn ChatSection() -> Element {
         move |_| {
             ban_address.set(String::new());
             ban_error.set(None);
+            ban_vote.set(true);
             show_ban_modal.set(false);
         }
     };
@@ -1011,6 +1057,21 @@ fn ChatSection() -> Element {
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+                div { class: "form-row",
+                    label { "Your vote" }
+                    div { class: "vote-choice",
+                        button {
+                            class: if *ban_vote.read() { "vote-toggle yes active" } else { "vote-toggle yes" },
+                            onclick: move |_| ban_vote.set(true),
+                            "YES"
+                        }
+                        button {
+                            class: if !*ban_vote.read() { "vote-toggle no active" } else { "vote-toggle no" },
+                            onclick: move |_| ban_vote.set(false),
+                            "NO"
                         }
                     }
                 }

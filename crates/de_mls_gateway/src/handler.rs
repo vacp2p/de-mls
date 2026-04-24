@@ -9,10 +9,12 @@ use std::sync::Arc;
 use tokio::task::spawn_blocking;
 
 use de_mls::{
-    app::{MessageType, message_types},
+    app::{MessageType, format_group_request, message_types},
     core::{CallbackError, GroupEventHandler},
     ds::{DeliveryService, OutboundPacket, TopicFilter},
-    protos::de_mls::messages::v1::{AppMessage, ConversationMessage, app_message},
+    protos::de_mls::messages::v1::{
+        AppMessage, ConversationMessage, GroupUpdateRequest, app_message,
+    },
 };
 use de_mls_ui_protocol::v1::AppEvent;
 
@@ -77,6 +79,22 @@ impl<DS: DeliveryService> GroupEventHandler for GatewayEventHandler<DS> {
         let _ = self.evt_tx.unbounded_send(AppEvent::Error(format!(
             "{operation} failed for group {group_name}: {error}"
         )));
+    }
+
+    async fn on_own_proposal_submitted(
+        &self,
+        group_name: &str,
+        proposal_id: u32,
+        request: &GroupUpdateRequest,
+    ) -> Result<(), CallbackError> {
+        let (action, address) = format_group_request(request);
+        let _ = self.evt_tx.unbounded_send(AppEvent::OwnProposalSubmitted {
+            group_id: group_name.to_string(),
+            proposal_id,
+            action,
+            address,
+        });
+        Ok(())
     }
 }
 

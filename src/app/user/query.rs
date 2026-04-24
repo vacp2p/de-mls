@@ -16,6 +16,19 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         Ok(entry.state_machine.current_state())
     }
 
+    /// Current MLS epoch + reelection retry round. `(0, 0)` if the group has
+    /// no MLS state yet (pending join). Intended for UI status display.
+    pub async fn get_epoch_and_retry(&self, group_name: &str) -> Result<(u64, u32), UserError> {
+        let groups = self.groups.read().await;
+        let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+        let epoch = if self.mls_service.has_group(entry.group.group_name()) {
+            self.mls_service.current_epoch(group_name)?
+        } else {
+            0
+        };
+        Ok((epoch, entry.group.reelection_round()))
+    }
+
     pub async fn list_groups(&self) -> Vec<String> {
         self.groups.read().await.keys().cloned().collect()
     }

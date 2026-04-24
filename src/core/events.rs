@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 
 use crate::ds::OutboundPacket;
-use crate::protos::de_mls::messages::v1::AppMessage;
+use crate::protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest};
 
 /// Error wrapper returned by [`GroupEventHandler`] callbacks. Integrators
 /// convert their transport/UI errors into this via `CallbackError(e.to_string())`.
@@ -48,4 +48,18 @@ pub trait GroupEventHandler: Send + Sync {
     /// A background operation (e.g., vote submission) failed. Log and
     /// optionally surface to the UI.
     async fn on_error(&self, group_name: &str, operation: &str, error: &str);
+
+    /// The local wallet just submitted `request` as a new proposal. The
+    /// creator's vote is bundled with the outbound proposal and has already
+    /// reached peers — the local UI should record the proposal for history
+    /// rendering but must **not** surface a "please vote" affordance.
+    /// Default impl is a no-op for integrators without a voting UI.
+    async fn on_own_proposal_submitted(
+        &self,
+        _group_name: &str,
+        _proposal_id: u32,
+        _request: &GroupUpdateRequest,
+    ) -> Result<(), CallbackError> {
+        Ok(())
+    }
 }

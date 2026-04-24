@@ -58,10 +58,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     }
 
     /// Start a `RemoveMember` consensus round targeting `ban_request.user_to_ban`.
+    /// `creator_vote` is the submitter's own vote on their request (bundled
+    /// with the outbound proposal); the UI collects it from the submit modal.
     pub async fn process_ban_request(
         &mut self,
         ban_request: BanRequest,
         group_name: &str,
+        creator_vote: bool,
     ) -> Result<(), UserError> {
         {
             let groups = self.groups.read().await;
@@ -79,6 +82,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     identity: parse_wallet_to_bytes(ban_request.user_to_ban.as_str())?,
                 })),
             },
+            creator_vote,
         )
         .await?;
 

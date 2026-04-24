@@ -142,7 +142,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             "initiating steward election"
         );
 
-        self.initiate_proposal(group_name.to_string(), request)
+        let creator_vote = self.default_group_config.liveness_criteria_yes;
+        self.initiate_proposal(group_name.to_string(), request, creator_vote)
             .await?;
 
         Ok(())
@@ -277,9 +278,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             "promoting buffered updates to proposals"
         );
 
+        let creator_vote = self.default_group_config.liveness_criteria_yes;
         for request in to_propose {
             if let Err(e) = self
-                .initiate_proposal(group_name.to_string(), request)
+                .initiate_proposal(group_name.to_string(), request, creator_vote)
                 .await
             {
                 info!(group = group_name, error = %e, "buffered proposal deferred");
@@ -406,8 +408,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 score = current_score,
                 "initiating SCORE_BELOW_THRESHOLD removal"
             );
+            let creator_vote = self.default_group_config.liveness_criteria_yes;
             if let Err(e) = self
-                .initiate_proposal(group_name.to_string(), request)
+                .initiate_proposal(group_name.to_string(), request, creator_vote)
                 .await
             {
                 let mut groups = self.groups.write().await;
