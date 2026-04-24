@@ -131,10 +131,9 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
             AppCmd::SendBanRequest {
                 group_id,
                 user_to_ban,
-                creator_vote,
             } => {
                 if let Err(e) = GATEWAY
-                    .send_ban_request(group_id.clone(), user_to_ban.clone(), creator_vote)
+                    .send_ban_request(group_id.clone(), user_to_ban.clone())
                     .await
                 {
                     GATEWAY.push_event(AppEvent::Error(format!("Send ban request failed: {e}")));

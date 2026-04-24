@@ -142,8 +142,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             "initiating steward election"
         );
 
-        let creator_vote = self.default_group_config.liveness_criteria_yes;
-        self.initiate_proposal(group_name.to_string(), request, creator_vote)
+        // Elections are group decisions — broadcast unbundled so the
+        // responsible proposer still votes via the banner.
+        self.initiate_proposal(group_name.to_string(), request, None)
             .await?;
 
         Ok(())
@@ -278,10 +279,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             "promoting buffered updates to proposals"
         );
 
-        let creator_vote = self.default_group_config.liveness_criteria_yes;
+        // Buffered updates inherit the same banner path as fresh
+        // steward-auto-propose — the steward still decides per proposal.
         for request in to_propose {
             if let Err(e) = self
-                .initiate_proposal(group_name.to_string(), request, creator_vote)
+                .initiate_proposal(group_name.to_string(), request, None)
                 .await
             {
                 info!(group = group_name, error = %e, "buffered proposal deferred");
@@ -408,9 +410,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 score = current_score,
                 "initiating SCORE_BELOW_THRESHOLD removal"
             );
-            let creator_vote = self.default_group_config.liveness_criteria_yes;
+            // SCORE_BELOW_THRESHOLD is self-executing: threshold crossed ⇒
+            // member must be removed. The steward's vote is YES by
+            // protocol, so we bundle it at submit and skip the banner.
             if let Err(e) = self
-                .initiate_proposal(group_name.to_string(), request, creator_vote)
+                .initiate_proposal(group_name.to_string(), request, Some(true))
                 .await
             {
                 let mut groups = self.groups.write().await;

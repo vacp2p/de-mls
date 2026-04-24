@@ -166,7 +166,6 @@ impl Gateway<WakuDeliveryService> {
         &self,
         group_name: String,
         user_to_ban: String,
-        creator_vote: bool,
     ) -> anyhow::Result<()> {
         let user_ref = self.user()?;
 
@@ -178,7 +177,7 @@ impl Gateway<WakuDeliveryService> {
         user_ref
             .write()
             .await
-            .process_ban_request(ban_request, &group_name, creator_vote)
+            .process_ban_request(ban_request, &group_name)
             .await?;
 
         Ok(())

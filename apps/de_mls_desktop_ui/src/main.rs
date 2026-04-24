@@ -811,10 +811,6 @@ fn ChatSection() -> Element {
     let mut show_ban_modal = use_signal(|| false);
     let mut ban_address = use_signal(String::new);
     let mut ban_error = use_signal(|| Option::<String>::None);
-    // Creator's own vote on the ban proposal — bundled into the outbound
-    // wire message at submit time. Default YES; toggle to NO if submitting
-    // out of duty without endorsement.
-    let mut ban_vote = use_signal(|| true);
 
     // States where `send_app_message` refuses (matches the core guard in
     // `src/app/user/messaging.rs`). Keep these two lists in sync.
@@ -880,11 +876,9 @@ fn ChatSection() -> Element {
                 return;
             };
 
-            let creator_vote = *ban_vote.read();
             ban_error.set(None);
             show_ban_modal.set(false);
             ban_address.set(String::new());
-            ban_vote.set(true);
 
             let addr_to_ban = target.clone();
             spawn(async move {
@@ -892,7 +886,6 @@ fn ChatSection() -> Element {
                     .send(AppCmd::SendBanRequest {
                         group_id: group_id.clone(),
                         user_to_ban: addr_to_ban,
-                        creator_vote,
                     })
                     .await;
             });
@@ -910,7 +903,6 @@ fn ChatSection() -> Element {
         move || {
             ban_address.set(String::new());
             ban_error.set(None);
-            ban_vote.set(true);
             show_ban_modal.set(false);
         }
     };
@@ -919,7 +911,6 @@ fn ChatSection() -> Element {
         move |_| {
             ban_address.set(String::new());
             ban_error.set(None);
-            ban_vote.set(true);
             show_ban_modal.set(false);
         }
     };
@@ -1057,21 +1048,6 @@ fn ChatSection() -> Element {
                                     }
                                 }
                             }
-                        }
-                    }
-                }
-                div { class: "form-row",
-                    label { "Your vote" }
-                    div { class: "vote-choice",
-                        button {
-                            class: if *ban_vote.read() { "vote-toggle yes active" } else { "vote-toggle yes" },
-                            onclick: move |_| ban_vote.set(true),
-                            "YES"
-                        }
-                        button {
-                            class: if !*ban_vote.read() { "vote-toggle no active" } else { "vote-toggle no" },
-                            onclick: move |_| ban_vote.set(false),
-                            "NO"
                         }
                     }
                 }

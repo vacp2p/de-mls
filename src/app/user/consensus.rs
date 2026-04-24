@@ -1,12 +1,12 @@
 //! Proposal submission + voting.
 //!
-//! Outgoing proposals run as a background task: submit to consensus with the
-//! creator's vote bundled, register ownership, broadcast the bundle, resolve
-//! on timeout. Since `User` is `Clone` (every field is `Arc` or cheap
-//! `Clone`), each spawn just owns its own handle — no ctx struct per task
-//! kind.
+//! Outgoing proposals run as a background task: submit to consensus, register
+//! ownership, broadcast (bundled or unbundled per `creator_vote`), resolve on
+//! timeout. Since `User` is `Clone` (every field is `Arc` or cheap `Clone`),
+//! each spawn just owns its own handle — no ctx struct per task kind.
 
 use hashgraph_like_consensus::storage::ConsensusStorage;
+use prost::Message;
 use tracing::{error, info};
 
 use crate::{
@@ -17,17 +17,24 @@ use crate::{
         DeMlsProvider, GroupEventHandler, ProposalKind, build_message, group_members,
         target_identity_of,
     },
-    protos::de_mls::messages::v1::GroupUpdateRequest,
+    protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest, VotePayload},
 };
 
 /// Per-call arguments for a new outgoing proposal. Bundled so the spawned
-/// task has one typed payload instead of four captures.
+/// task has one typed payload instead of five captures.
+///
+/// `creator_vote` is `Some(v)` when the creator's vote is known up front
+/// (user-initiated path where the user picked, or self-executing protocol
+/// action) and should be bundled into the outbound proposal. `None` means
+/// "broadcast the unbundled proposal and let the creator vote via the
+/// normal banner like any other member" — used for steward auto-propose
+/// paths where the steward still holds a judgement call.
 struct NewProposal {
     group_name: String,
     request: GroupUpdateRequest,
     expected_voters: u32,
     kind: ProposalKind,
-    creator_vote: bool,
+    creator_vote: Option<bool>,
 }
 
 impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
@@ -70,10 +77,17 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
     /// Start a consensus vote for a group update request.
     ///
-    /// `creator_vote` is the submitter's vote on their own proposal — bundled
-    /// with the outbound wire message. UI-initiated paths pass the user's
-    /// choice; steward auto-propose paths pass `liveness_criteria_yes` so the
-    /// default matches the group's silent-voter policy.
+    /// `creator_vote` captures the creator's intent:
+    /// - `Some(v)` — bundle `v` into the outbound proposal at submit time.
+    ///   Used when the intent is unambiguous: user clicked a button that
+    ///   means YES (ban request), or the action is self-executing
+    ///   (`SCORE_BELOW_THRESHOLD` removal).
+    /// - `None` — broadcast the proposal unbundled; the creator's UI
+    ///   shows the usual vote banner and the creator votes like any
+    ///   other member. Silence is tallied per `liveness_criteria_yes`
+    ///   at consensus timeout, same as for peer silence. Used for
+    ///   steward auto-propose paths (election, incoming KP, buffered
+    ///   update) where the creator still exercises judgement.
     ///
     /// Validates the group state synchronously, then spawns a task that
     /// drives the proposal through its lifecycle.
@@ -81,7 +95,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         &self,
         group_name: String,
         request: GroupUpdateRequest,
-        creator_vote: bool,
+        creator_vote: Option<bool>,
     ) -> Result<(), UserError> {
         let kind = ProposalKind::of(&request);
         let expected_voters = self.check_proposal_allowed(&group_name, kind).await?;
@@ -132,9 +146,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         self.resolve_on_timeout(proposal_id, &scope).await;
     }
 
-    /// Open the consensus session, record ownership, cast the creator's
-    /// vote (bundled into the outbound proposal), broadcast to peers, and
-    /// notify our own UI that the proposal was submitted.
+    /// Open the consensus session, record ownership, then either bundle
+    /// the creator's vote or broadcast unbundled depending on
+    /// `creator_vote`. Always notifies our own UI — via
+    /// `on_own_proposal_submitted` when bundled (no banner, history
+    /// cache only) or via `on_app_message(VotePayload)` when unbundled
+    /// (banner shows, same path peers use).
     ///
     /// Ownership is stored *before* the vote is cast, so a single-voter
     /// consensus transition can't race `is_owner=false` when the event
@@ -145,9 +162,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         request: GroupUpdateRequest,
         expected_voters: u32,
         kind: ProposalKind,
-        creator_vote: bool,
+        creator_vote: Option<bool>,
     ) -> Result<u32, UserError> {
-        let proposal_id = submit_proposal::<P>(
+        let (proposal_id, unbundled) = submit_proposal::<P>(
             group_name,
             &request,
             self.mls_service.wallet_hex(),
@@ -173,23 +190,50 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             entry.group.clone()
         };
 
-        // With ownership stored, `cast_vote` takes the owner path and returns
-        // the proposal bundled with our vote, ready to gossip.
-        let app_message = cast_vote::<P, _>(
-            &group,
-            proposal_id,
-            creator_vote,
-            &self.consensus_service,
-            self.eth_signer.clone(),
-        )
-        .await?;
+        let outbound = match creator_vote {
+            Some(vote) => {
+                // Bundled path: cast the creator's vote; `cast_vote`'s owner
+                // branch returns the Proposal with our vote attached.
+                cast_vote::<P, _>(
+                    &group,
+                    proposal_id,
+                    vote,
+                    &self.consensus_service,
+                    self.eth_signer.clone(),
+                )
+                .await?
+            }
+            None => unbundled,
+        };
 
-        let packet = build_message(&group, &self.mls_service, &app_message, &self.app_id)?;
+        let packet = build_message(&group, &self.mls_service, &outbound, &self.app_id)?;
         self.handler.on_outbound(group_name, packet).await?;
 
-        self.handler
-            .on_own_proposal_submitted(group_name, proposal_id, &request)
-            .await?;
+        match creator_vote {
+            Some(_) => {
+                // Creator already voted — populate history cache, no banner.
+                self.handler
+                    .on_own_proposal_submitted(group_name, proposal_id, &request)
+                    .await?;
+            }
+            None => {
+                // Creator hasn't voted — show them the banner like peers.
+                let payload = request.encode_to_vec();
+                let vote_notification: AppMessage = VotePayload {
+                    group_id: group_name.to_string(),
+                    proposal_id,
+                    payload,
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                }
+                .into();
+                self.handler
+                    .on_app_message(group_name, vote_notification)
+                    .await?;
+            }
+        }
 
         Ok(proposal_id)
     }
@@ -288,11 +332,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         );
 
         if should_propose {
-            // `check_proposal_allowed` may still reject (active emergency etc.) —
-            // leave the entry in the buffer so the next rotation picks it up.
-            let creator_vote = self.default_group_config.liveness_criteria_yes;
+            // Steward auto-propose: the steward forwards peer intent and
+            // still holds a judgement call, so we broadcast unbundled and
+            // let the banner drive the steward's vote like any other member.
+            // `check_proposal_allowed` may still reject (active emergency
+            // etc.) — leave the entry in the buffer for next rotation.
             if let Err(e) = self
-                .initiate_proposal(group_name.to_string(), request, creator_vote)
+                .initiate_proposal(group_name.to_string(), request, None)
                 .await
             {
                 info!(group = group_name, error = %e, "proposal deferred");

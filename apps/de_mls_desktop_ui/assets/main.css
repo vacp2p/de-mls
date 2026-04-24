@@ -1138,35 +1138,3 @@ button.mini {
     justify-content: flex-end;
     margin-top: 6px;
 }
-
-.vote-choice {
-    display: flex;
-    gap: 8px;
-}
-
-.vote-toggle {
-    padding: 6px 14px;
-    border-radius: 6px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-    font-weight: 600;
-    transition: background 0.1s ease, border-color 0.1s ease;
-}
-
-.vote-toggle:hover {
-    border-color: var(--accent);
-}
-
-.vote-toggle.yes.active {
-    background: rgba(46, 160, 67, 0.2);
-    border-color: rgba(46, 160, 67, 0.8);
-    color: #7ee787;
-}
-
-.vote-toggle.no.active {
-    background: rgba(248, 81, 73, 0.2);
-    border-color: rgba(248, 81, 73, 0.8);
-    color: #ff9a90;
-}

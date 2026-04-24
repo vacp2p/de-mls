@@ -69,9 +69,6 @@ pub mod v1 {
         SendBanRequest {
             group_id: String,
             user_to_ban: String,
-            /// Creator's vote on their own ban proposal (bundled with the
-            /// outbound wire message). Collected from the submit modal.
-            creator_vote: bool,
         },
         GetGroupMembers {
             group_id: String,

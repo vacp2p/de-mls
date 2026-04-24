@@ -26,19 +26,25 @@ pub struct ProposalParams {
     pub liveness_criteria_yes: bool,
 }
 
-/// Open a consensus session for `request` and return its `proposal_id`.
+/// Open a consensus session for `request`; return its `proposal_id` and the
+/// unbundled `Proposal` wire message.
 ///
-/// This only creates the session — no vote is cast and nothing is broadcast.
-/// The creator's vote is cast by the caller via [`cast_vote`] *after*
-/// recording ownership in the group, so a single-voter consensus transition
-/// can't fire before `Group::is_owner_of_proposal` is true.
+/// No vote is cast here. The caller decides whether to:
+/// - bundle their vote by calling [`cast_vote`] (owner path returns the
+///   proposal with the creator's vote attached), or
+/// - broadcast the unbundled message as-is and let the creator vote later
+///   like any other member.
+///
+/// In both cases the caller must record ownership in the group *before*
+/// casting, so a single-voter consensus transition can't fire before
+/// `Group::is_owner_of_proposal` is true.
 pub async fn submit_proposal<P: DeMlsProvider>(
     group_name: &str,
     request: &GroupUpdateRequest,
     identity_string: String,
     consensus: &ProviderConsensus<P>,
     params: ProposalParams,
-) -> Result<u32, CoreError> {
+) -> Result<(u32, AppMessage), CoreError> {
     let payload = request.encode_to_vec();
     let create_request = CreateProposalRequest::new(
         uuid::Uuid::new_v4().to_string(),
@@ -65,7 +71,8 @@ pub async fn submit_proposal<P: DeMlsProvider>(
         "proposal opened"
     );
 
-    Ok(proposal.proposal_id)
+    let proposal_id = proposal.proposal_id;
+    Ok((proposal_id, proposal.into()))
 }
 
 /// Cast a vote and return the `AppMessage` to broadcast. Owners broadcast
