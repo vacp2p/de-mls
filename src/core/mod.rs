@@ -43,7 +43,8 @@ pub use events::{CallbackError, GroupEventHandler};
 
 // ── Group state ──
 pub use group::{
-    DEFAULT_MAX_REELECTION_RETRIES, Group, PendingUpdate, ProposalId, target_identity_of,
+    DEFAULT_MAX_REELECTION_RETRIES, Group, PendingUpdate, ProposalId,
+    auto_approved_leave_proposal_id, target_identity_of,
 };
 
 // ── Proposal classification ──

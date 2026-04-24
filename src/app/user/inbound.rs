@@ -14,10 +14,8 @@ use crate::{
         build_message, create_commit_candidate, group_members, process_inbound,
     },
     ds::InboundPacket,
-    mls_crypto::ShortId,
     protos::de_mls::messages::v1::{
-        AppMessage, ConversationMessage, GroupSync, GroupUpdateRequest, LeaveRequest,
-        group_update_request,
+        AppMessage, ConversationMessage, GroupSync, GroupUpdateRequest, group_update_request,
     },
 };
 
@@ -62,9 +60,6 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 self.on_commit_candidate_received(group_name).await
             }
             ProcessResult::GroupSyncReceived(sync) => self.on_group_sync(group_name, sync).await,
-            ProcessResult::LeaveRequestReceived(leave) => {
-                self.on_leave_request(group_name, leave).await
-            }
             ProcessResult::Noop => Ok(()),
         }
     }
@@ -353,43 +348,6 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             timing = sync.timing.is_some(),
             "group sync applied"
         );
-        Ok(())
-    }
-
-    /// Signer/identity match has already been verified at the MLS decrypt
-    /// layer (see `process_app_subtopic`). We just need to confirm the
-    /// identity is a current group member before accepting the auto-removal.
-    async fn on_leave_request(
-        &self,
-        group_name: &str,
-        leave: LeaveRequest,
-    ) -> Result<(), UserError> {
-        let accepted = {
-            let mut groups = self.groups.write().await;
-            let Some(entry) = groups.get_mut(group_name) else {
-                return Ok(());
-            };
-            let members = group_members(&entry.group, &self.mls_service)?;
-            if !members.iter().any(|m| m == &leave.identity) {
-                tracing::warn!(
-                    group = group_name,
-                    sender = %ShortId(&leave.identity),
-                    "leave request ignored: sender not a current member"
-                );
-                false
-            } else {
-                entry
-                    .group
-                    .accept_auto_approved_leave(leave.identity.clone())
-            }
-        };
-        if accepted {
-            info!(
-                group = group_name,
-                identity = %ShortId(&leave.identity),
-                "leave accepted (auto-approved)"
-            );
-        }
         Ok(())
     }
 

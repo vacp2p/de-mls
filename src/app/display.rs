@@ -44,7 +44,6 @@ pub mod message_types {
     pub const PROPOSAL_ADDED: &str = "ProposalAdded";
     pub const COMMIT_CANDIDATE: &str = "CommitCandidate";
     pub const GROUP_SYNC: &str = "GroupSync";
-    pub const LEAVE_REQUEST: &str = "LeaveRequest";
     pub const UNKNOWN: &str = "Unknown";
 }
 
@@ -66,7 +65,6 @@ impl MessageType for app_message::Payload {
             app_message::Payload::ProposalAdded(_) => PROPOSAL_ADDED,
             app_message::Payload::CommitCandidate(_) => COMMIT_CANDIDATE,
             app_message::Payload::GroupSync(_) => GROUP_SYNC,
-            app_message::Payload::LeaveRequest(_) => LEAVE_REQUEST,
         }
     }
 }

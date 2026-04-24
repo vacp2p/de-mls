@@ -203,9 +203,6 @@ impl Gateway<WakuDeliveryService> {
                 }
 
                 // Push refreshed approved queue + epoch history + members.
-                // Members refresh keeps the pending-leave badge visible
-                // without waiting for an explicit poll when a peer receives
-                // a LeaveRequest (or a commit that changes membership).
                 push_consensus_state(&user, &evt_tx, &group_id).await;
                 push_member_scores(&user, &evt_tx, &group_id).await;
             }

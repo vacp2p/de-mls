@@ -4,18 +4,25 @@
 
 use alloy::signers::Signer;
 use prost::Message;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::info;
 
 use hashgraph_like_consensus::{
+    error::ConsensusError,
     protos::consensus::v1::{Proposal, Vote},
     session::ConsensusConfig,
     types::CreateProposalRequest,
+    utils::build_vote,
 };
 
 use crate::app::error::UserError;
-use crate::core::{CoreError, DeMlsProvider, Group, GroupEventHandler, ProviderConsensus};
-use crate::protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest, VotePayload};
+use crate::core::{
+    CoreError, DeMlsProvider, Group, GroupEventHandler, ProviderConsensus,
+    auto_approved_leave_proposal_id,
+};
+use crate::protos::de_mls::messages::v1::{
+    AppMessage, GroupUpdateRequest, RemoveMember, VotePayload, group_update_request,
+};
 
 /// Consensus-session parameters that come from `GroupConfig`. Grouped so
 /// [`submit_proposal`]'s argument list stays readable.
@@ -159,8 +166,6 @@ pub async fn forward_incoming_vote<P: DeMlsProvider>(
     vote: Vote,
     consensus: &ProviderConsensus<P>,
 ) -> Result<(), CoreError> {
-    use hashgraph_like_consensus::error::ConsensusError;
-
     let proposal_id = vote.proposal_id;
     let scope = P::Scope::from(group_name.to_string());
     match consensus.process_incoming_vote(&scope, vote).await {
@@ -190,5 +195,89 @@ pub async fn forward_incoming_vote<P: DeMlsProvider>(
             Ok(())
         }
         Err(e) => Err(e.into()),
+    }
+}
+
+/// Open a self-leave consensus session with the leaver's YES vote bundled
+/// and `expected_voters_count = 1`.
+///
+/// Unlike [`submit_proposal`], this hand-crafts the `Proposal` so it carries
+/// the deterministic `auto_approved_leave_proposal_id(identity)`. Every node
+/// derives the same id from the MLS-authenticated sender, so a
+/// retransmitted self-leave dedupes natively via `ProposalAlreadyExist` and
+/// every node's `approved_proposals` entry ends up under the same key.
+///
+/// On the leaver's side the bundled YES vote (+ `expected_voters=1`) makes
+/// `from_proposal` fire `ConsensusReached(true)` synchronously, so the
+/// normal `apply_consensus_outcome` path can place `RemoveMember(self)` in
+/// `approved_proposals` with the deterministic id.
+///
+/// Returns `Ok(Some(...))` if the proposal was newly opened (caller must
+/// broadcast the `AppMessage`). Returns `Ok(None)` if the session already
+/// exists (e.g. the user double-clicked Leave and the dedup fired) — no
+/// broadcast needed. Other consensus errors propagate.
+pub async fn submit_self_leave_proposal<P, SN>(
+    group_name: &str,
+    self_identity: &[u8],
+    consensus: &ProviderConsensus<P>,
+    signer: SN,
+    params: ProposalParams,
+) -> Result<Option<(u32, AppMessage)>, UserError>
+where
+    P: DeMlsProvider,
+    SN: Signer + Send + Sync,
+{
+    let request = GroupUpdateRequest {
+        payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
+            identity: self_identity.to_vec(),
+        })),
+    };
+    let payload = request.encode_to_vec();
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(CoreError::from)?
+        .as_secs();
+    let expiration = now.saturating_add(params.proposal_expiration.as_secs());
+
+    let proposal_id = auto_approved_leave_proposal_id(self_identity);
+    let mut proposal = Proposal {
+        name: format!("self-leave:{proposal_id}"),
+        payload,
+        proposal_id,
+        proposal_owner: self_identity.to_vec(),
+        votes: Vec::new(),
+        expected_voters_count: params.expected_voters,
+        round: 1,
+        timestamp: now,
+        expiration_timestamp: expiration,
+        liveness_criteria_yes: params.liveness_criteria_yes,
+    };
+
+    let yes_vote = build_vote(&proposal, true, signer)
+        .await
+        .map_err(CoreError::from)?;
+    proposal.votes.push(yes_vote);
+
+    let scope = P::Scope::from(group_name.to_string());
+    match consensus
+        .process_incoming_proposal(&scope, proposal.clone())
+        .await
+    {
+        Ok(()) => {
+            info!(
+                group = group_name,
+                proposal_id, "self-leave proposal opened (expected_voters=1, bundled YES)"
+            );
+            Ok(Some((proposal_id, proposal.into())))
+        }
+        Err(ConsensusError::ProposalAlreadyExist) => {
+            info!(
+                group = group_name,
+                proposal_id, "self-leave already in flight, skipping retransmit"
+            );
+            Ok(None)
+        }
+        Err(e) => Err(CoreError::from(e).into()),
     }
 }

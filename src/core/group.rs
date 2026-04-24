@@ -21,14 +21,12 @@ pub type ProposalId = u32;
 /// that becomes a first-class config value (see `docs/ROADMAP.md`).
 const MAX_EPOCH_HISTORY: usize = 10;
 
-/// Derive a deterministic proposal ID for an auto-approved self-leave,
-/// keyed on the leaver's identity. Every node computes the same ID, so
-/// `approved_proposals` stays consistent across the group without
-/// running a consensus round.
-///
-/// This ID doubles as the "auto-approved" signature — an approved entry
-/// whose ID matches this formula for its own target is known to be a
-/// self-leave (not a consensus-approved Remove).
+/// Deterministic proposal ID for a self-leave, derived from the leaver's
+/// identity. Pinning the ID is what makes a leaver's crash-retry dedupe
+/// against an in-flight session (`ProposalAlreadyExist`) instead of opening
+/// a second session that would land a duplicate `RemoveMember` in the next
+/// commit batch. It also doubles as the self-leave signature used by
+/// `is_auto_approved_entry` and `reject_all_approved_proposals`.
 pub fn auto_approved_leave_proposal_id(identity: &[u8]) -> u32 {
     use sha2::{Digest, Sha256};
     let hash = Sha256::digest(identity);
@@ -634,11 +632,6 @@ impl Group {
     /// Keyed by target identity — a second insertion for the same identity
     /// keeps the original `first_seen_epoch` so it can still expire on schedule.
     /// Returns `true` if this is a new entry, `false` if already buffered.
-    ///
-    /// For auto-approved updates (self-leave) use
-    /// [`Self::accept_auto_approved_leave`] instead — those have a known
-    /// result and go straight to `approved_proposals`, never through
-    /// `pending_updates`.
     pub fn buffer_pending_update(
         &mut self,
         request: GroupUpdateRequest,
@@ -661,65 +654,14 @@ impl Group {
         true
     }
 
-    /// Whether the identity has an auto-approved self-leave currently in
-    /// `approved_proposals`. Used by live rotation to skip the leaver.
+    /// True if `identity` has a self-leave waiting for the next commit —
+    /// an approved `RemoveMember(identity)` under the deterministic
+    /// self-leave ID. Used by live rotation to skip the leaver.
     pub fn is_pending_self_leave(&self, identity: &[u8]) -> bool {
         let pid = auto_approved_leave_proposal_id(identity);
         self.approved_proposals
             .get(&pid)
             .is_some_and(|req| is_auto_approved_entry(pid, req))
-    }
-
-    /// Accept an auto-approved self-leave.
-    ///
-    /// Inserts `RemoveMember(identity)` directly into `approved_proposals`
-    /// with a deterministic proposal ID so every node's approved set agrees
-    /// without running a consensus round. The deterministic ID doubles as
-    /// the "auto-approved" signature — [`Self::reject_all_approved_proposals`]
-    /// uses it to preserve the entry across a freeze failure, and
-    /// [`Self::is_pending_self_leave`] uses it for rotation skip.
-    ///
-    /// Caller must have verified that the originator of the request matches
-    /// `identity` (e.g., via the MLS-authenticated sender on the app subtopic).
-    ///
-    /// Returns `true` if this is a new leave, `false` if already recorded or
-    /// a `RemoveMember` for this identity is already pending via another
-    /// path (ban, ECP). Dedup prevents duplicate Remove entries from landing
-    /// in the same commit batch.
-    pub fn accept_auto_approved_leave(&mut self, identity: Vec<u8>) -> bool {
-        // Dedup against any existing Remove for this identity — approved
-        // queue (ban that already passed consensus), pending_updates (ban or
-        // ECP still in flight), or a prior self-leave.
-        if self.has_any_remove_for(&identity) {
-            return false;
-        }
-        let remove = GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::RemoveMember(
-                crate::protos::de_mls::messages::v1::RemoveMember {
-                    identity: identity.clone(),
-                },
-            )),
-        };
-        let proposal_id = auto_approved_leave_proposal_id(&identity);
-        self.approved_proposals.insert(proposal_id, remove);
-        true
-    }
-
-    /// True if any Remove targeting `identity` is in flight — approved queue
-    /// (consensus-approved ban or prior self-leave) or pending_updates (ban
-    /// still voting, ECP-derived). Used to dedup before an auto-approved
-    /// insertion.
-    fn has_any_remove_for(&self, identity: &[u8]) -> bool {
-        self.has_pending_remove(identity) || self.has_approved_remove(identity)
-    }
-
-    fn has_approved_remove(&self, identity: &[u8]) -> bool {
-        self.approved_proposals.values().any(|req| {
-            matches!(
-                req.payload.as_ref(),
-                Some(group_update_request::Payload::RemoveMember(r)) if r.identity == identity
-            )
-        })
     }
 
     /// Current steward-election retry round (0 for fresh elections).
@@ -749,18 +691,6 @@ impl Group {
     /// `GroupConfig`) and on joiner sync (from `GroupSync.max_reelection_retries`).
     pub fn set_max_reelection_retries(&mut self, max: u32) {
         self.max_reelection_retries = max;
-    }
-
-    fn has_pending_remove(&self, identity: &[u8]) -> bool {
-        self.pending_updates
-            .get(identity)
-            .map(|p| {
-                matches!(
-                    p.request.payload.as_ref(),
-                    Some(group_update_request::Payload::RemoveMember(_))
-                )
-            })
-            .unwrap_or(false)
     }
 
     /// Drop a buffered update by target identity.
@@ -925,43 +855,26 @@ mod tests {
         assert!(!outsider.is_steward());
     }
 
-    #[test]
-    fn test_accept_auto_approved_leave_goes_directly_to_approved() {
-        let config = ProtocolConfig::new(1, 3).unwrap();
-        let mems = members(&[1, 2, 3]);
-        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
-        group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
-
-        let leaver = member(2);
-        assert_eq!(group.approved_proposals_count(), 0);
-        assert_eq!(group.pending_update_count(), 0);
-        assert!(!group.is_pending_self_leave(&leaver));
-
-        assert!(group.accept_auto_approved_leave(leaver.clone()));
-
-        // Auto-approved leaves land in `approved_proposals` directly,
-        // keyed by the deterministic proposal id, and don't touch pending_updates.
-        assert_eq!(group.pending_update_count(), 0);
-        assert_eq!(group.approved_proposals_count(), 1);
-        assert!(group.is_pending_self_leave(&leaver));
-        let expected_id = auto_approved_leave_proposal_id(&leaver);
-        assert!(group.approved_proposals().contains_key(&expected_id));
-
-        // Idempotent: second accept for the same identity is a no-op.
-        assert!(!group.accept_auto_approved_leave(leaver.clone()));
-        assert_eq!(group.approved_proposals_count(), 1);
+    fn insert_self_leave(group: &mut Group, identity: &[u8]) {
+        let remove = GroupUpdateRequest {
+            payload: Some(group_update_request::Payload::RemoveMember(
+                crate::protos::de_mls::messages::v1::RemoveMember {
+                    identity: identity.to_vec(),
+                },
+            )),
+        };
+        group.insert_approved_proposal(auto_approved_leave_proposal_id(identity), remove);
     }
 
     #[test]
-    fn test_reject_all_approved_preserves_auto_approved_leaves() {
+    fn test_reject_all_approved_preserves_self_leave_entry() {
         let config = ProtocolConfig::new(1, 3).unwrap();
         let mems = members(&[1, 2, 3]);
         let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
         group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
 
-        // One auto-approved leave + one consensus-approved proposal.
         let leaver = member(2);
-        group.accept_auto_approved_leave(leaver.clone());
+        insert_self_leave(&mut group, &leaver);
         let ban_id: ProposalId = 0xdead_beef;
         let ban = GroupUpdateRequest {
             payload: Some(group_update_request::Payload::InviteMember(
@@ -977,7 +890,7 @@ mod tests {
         // Simulate freeze failure.
         group.reject_all_approved_proposals();
 
-        // Auto-approved leave survives; the consensus-approved ban is gone.
+        // Self-leave entry (deterministic id) survives; unrelated approvals drop.
         assert_eq!(group.approved_proposals_count(), 1);
         let leave_id = auto_approved_leave_proposal_id(&leaver);
         assert!(group.approved_proposals().contains_key(&leave_id));
@@ -985,14 +898,14 @@ mod tests {
     }
 
     #[test]
-    fn test_prune_clears_auto_approved_leave_when_member_gone() {
+    fn test_prune_clears_self_leave_entry_when_member_gone() {
         let config = ProtocolConfig::new(1, 3).unwrap();
         let mems = members(&[1, 2, 3]);
         let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
         group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
 
         let leaver = member(2);
-        group.accept_auto_approved_leave(leaver.clone());
+        insert_self_leave(&mut group, &leaver);
         assert_eq!(group.approved_proposals_count(), 1);
         assert!(group.is_pending_self_leave(&leaver));
 
@@ -1002,30 +915,6 @@ mod tests {
 
         assert_eq!(group.approved_proposals_count(), 0);
         assert!(!group.is_pending_self_leave(&leaver));
-    }
-
-    /// A pending ban on the target dedupes a subsequent self-leave —
-    /// avoids two `RemoveMember` entries for the same identity in one batch.
-    #[test]
-    fn test_accept_auto_approved_leave_deduped_when_ban_pending() {
-        let config = ProtocolConfig::new(1, 3).unwrap();
-        let mems = members(&[1, 2, 3]);
-        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
-        group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
-
-        let target = member(2);
-        let ban_remove = GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::RemoveMember(
-                crate::protos::de_mls::messages::v1::RemoveMember {
-                    identity: target.clone(),
-                },
-            )),
-        };
-        assert!(group.buffer_pending_update(ban_remove, 0));
-
-        assert!(!group.accept_auto_approved_leave(target.clone()));
-        assert_eq!(group.approved_proposals_count(), 0);
-        assert!(!group.is_pending_self_leave(&target));
     }
 
     #[test]
@@ -1083,7 +972,7 @@ mod tests {
         let nominal = group.epoch_steward(0).unwrap().to_vec();
         assert_eq!(group.live_epoch_steward(0, &mems), Some(nominal.as_slice()));
 
-        group.accept_auto_approved_leave(nominal.clone());
+        insert_self_leave(&mut group, &nominal);
         let live = group.live_epoch_steward(0, &mems).unwrap();
         assert_ne!(live, nominal.as_slice());
         assert!(mems.iter().any(|m| m == live));

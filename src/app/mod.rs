@@ -28,6 +28,7 @@ pub use config::{
 };
 pub use consensus_bridge::{
     ProposalParams, cast_vote, forward_incoming_proposal, forward_incoming_vote, submit_proposal,
+    submit_self_leave_proposal,
 };
 pub use display::{
     MemberRole, MessageType, format_group_request, format_group_request_target, message_types,

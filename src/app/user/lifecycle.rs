@@ -4,12 +4,12 @@ use tracing::info;
 
 use crate::{
     app::{
-        GroupConfig, GroupState, GroupStateMachine, StateChangeHandler, User, UserError,
-        user::GroupEntry,
+        GroupConfig, GroupState, GroupStateMachine, ProposalParams, StateChangeHandler, User,
+        UserError, submit_self_leave_proposal, user::GroupEntry,
     },
     core::{DeMlsProvider, GroupEventHandler, build_message, create_group, prepare_to_join},
     mls_crypto::parse_wallet_to_bytes,
-    protos::de_mls::messages::v1::{AppMessage, LeaveRequest},
+    protos::de_mls::messages::v1::GroupUpdateRequest,
 };
 
 impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
@@ -84,16 +84,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         Ok(())
     }
 
-    /// Broadcast a signed `LeaveRequest` and locally accept it (deterministic
-    /// proposal id → approved queue, no consensus round). The next live
-    /// steward's commit includes the self-remove.
-    ///
-    /// The leaver stays fully active until that commit actually merges; at
-    /// that point `ProcessResult::LeaveGroup` fires and the UI closes the
-    /// view. This avoids a half-leave state — if the commit fails we just
-    /// stay a member and a later commit picks the leave up.
-    ///
-    /// `PendingJoin` short-circuits: nothing to leave, just tear down local state.
+    /// Submit `RemoveMember(self)` as an `expected_voters = 1` proposal with
+    /// the leaver's YES bundled, so the session resolves on submit. We stay
+    /// active until the next steward commit merges the removal; on that
+    /// commit `ProcessResult::LeaveGroup` fires. A failed commit leaves us
+    /// a member and a later one picks the leave up.
+    /// `PendingJoin` short-circuits to local teardown.
     pub async fn leave_group(&mut self, group_name: &str) -> Result<(), UserError> {
         info!(group = group_name, "leaving group");
 
@@ -113,7 +109,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
         let self_identity = parse_wallet_to_bytes(&self.identity_string())?;
 
-        // Idempotent: second click after a broadcast is a no-op.
+        // Idempotent: a second click after a successful submit finds the
+        // approved entry and short-circuits.
         {
             let groups = self.groups.read().await;
             let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
@@ -126,25 +123,52 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             }
         }
 
-        // Build + MLS-encrypt + broadcast on the app subtopic.
+        let request = {
+            use crate::protos::de_mls::messages::v1::{RemoveMember, group_update_request};
+            GroupUpdateRequest {
+                payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
+                    identity: self_identity.clone(),
+                })),
+            }
+        };
+
+        // Register ownership BEFORE the session opens — the bundled YES
+        // fires `ConsensusReached` on submit, and `apply_consensus_result`
+        // needs `is_owner_of_proposal` to be true by then.
+        let proposal_id = crate::core::auto_approved_leave_proposal_id(&self_identity);
+        {
+            let mut groups = self.groups.write().await;
+            let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
+            entry.group.store_voting_proposal(proposal_id, request);
+        }
+
+        let config = &self.default_group_config;
+        let submitted = submit_self_leave_proposal::<P, _>(
+            group_name,
+            &self_identity,
+            &self.consensus_service,
+            self.eth_signer.clone(),
+            ProposalParams {
+                expected_voters: 1,
+                proposal_expiration: config.proposal_expiration,
+                consensus_timeout: config.consensus_timeout,
+                liveness_criteria_yes: true,
+            },
+        )
+        .await?;
+
+        // Dedup (`ProposalAlreadyExist`) — another submit is already driving
+        // this proposal_id. Our voting entry resolves on that session.
+        let Some((_proposal_id, app_msg)) = submitted else {
+            return Ok(());
+        };
+
         let packet = {
             let groups = self.groups.read().await;
             let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-            let app_msg: AppMessage = LeaveRequest {
-                identity: self_identity.clone(),
-            }
-            .into();
             build_message(&entry.group, &self.mls_service, &app_msg, &self.app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
-
-        // The inactivity timer self-starts on the next `check_steward_inactivity` poll.
-        {
-            let mut groups = self.groups.write().await;
-            if let Some(entry) = groups.get_mut(group_name) {
-                entry.group.accept_auto_approved_leave(self_identity);
-            }
-        }
 
         Ok(())
     }
