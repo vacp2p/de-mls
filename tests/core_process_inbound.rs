@@ -364,7 +364,7 @@ fn test_auto_fill_steward_list_triggers_below_sn_min() {
     let sn = members_2.len().min(config.sn_max);
     assert!(
         steward_handle
-            .generate_and_set_steward_list(epoch, &members_2, sn)
+            .generate_and_set_steward_list(epoch, &members_2, sn, 0)
             .is_ok()
     );
 
@@ -458,6 +458,7 @@ fn test_group_sync_roundtrip() {
         peer_scores: vec![],
         timing: None,
         retry_round: 0,
+        max_reelection_retries: 1,
     };
     let app_msg: AppMessage = sync.clone().into();
     let sync_packet =
@@ -515,7 +516,12 @@ fn test_group_sync_roundtrip() {
         let sn = sync.steward_members.len();
         assert!(
             joiner_handle
-                .generate_and_set_steward_list(sync.start_epoch, &sync.steward_members, sn,)
+                .generate_and_set_steward_list(
+                    sync.start_epoch,
+                    &sync.steward_members,
+                    sn,
+                    sync.retry_round,
+                )
                 .is_ok()
         );
     }
@@ -560,7 +566,7 @@ fn test_group_sync_idempotent_for_existing_members() {
     let members = group_members(&joiner_handle, &joiner_mls).unwrap();
     assert!(
         joiner_handle
-            .generate_and_set_steward_list(0, &members, 1)
+            .generate_and_set_steward_list(0, &members, 1, 0)
             .is_ok()
     );
     assert!(joiner_handle.steward_list().is_some());
@@ -576,6 +582,7 @@ fn test_group_sync_idempotent_for_existing_members() {
         peer_scores: vec![],
         timing: None,
         retry_round: 0,
+        max_reelection_retries: 1,
     };
     let app_msg: AppMessage = sync.into();
     let sync_packet =
@@ -600,5 +607,110 @@ fn test_group_sync_idempotent_for_existing_members() {
         joiner_handle.steward_list().unwrap().len(),
         1,
         "Existing list should be preserved (1 member), not overwritten by sync"
+    );
+}
+
+/// A list accepted at `retry_round > 0` must ship its generation seed
+/// on `GroupSync` so the joiner re-derives the same ordering. The seed
+/// lives on `StewardList` as a frozen tag, distinct from
+/// `Group::reelection_round` (the dynamic counter, which resets to 0
+/// on accept). Sourcing the wire `retry_round` from the list keeps the
+/// two values from diverging after an accept.
+#[test]
+fn test_group_sync_carries_list_retry_round_not_group_counter() {
+    let group_name = "sync-retry-tag-group";
+    let steward_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+    let joiner_hex = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+    let extra1_hex = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
+    let extra2_hex = "0x90F79bf6EB2c4f870365E785982E1f101E93b906";
+
+    // sn=4 over 4 members: retry_round affects ordering, not membership.
+    let config = ProtocolConfig::new(2, 4).unwrap();
+    let (steward_mls, mut steward_handle) =
+        setup_steward_with_config(group_name, steward_hex, config.clone());
+
+    // Pull three joiners into the MLS group so we have a four-member set
+    // for a meaningful hash-sorted list.
+    for hex in [joiner_hex, extra1_hex, extra2_hex] {
+        let (_, _, kp) = setup_joiner_with_config(group_name, hex, config.clone());
+        steward_add_joiner(&steward_mls, &mut steward_handle, &kp);
+    }
+    let members = group_members(&steward_handle, &steward_mls).unwrap();
+    assert_eq!(members.len(), 4);
+
+    // Simulate an election accepted after two rejections: the resulting
+    // list is generated at retry_round=2 and stored with that tag.
+    let epoch = steward_mls.current_epoch(group_name).unwrap();
+    let accepted_round: u32 = 2;
+    steward_handle
+        .generate_and_set_steward_list(epoch, &members, 4, accepted_round)
+        .unwrap();
+    // Accept-side bookkeeping: the dynamic counter clears; the list's
+    // seed is unaffected.
+    steward_handle.reset_reelection_round();
+
+    let list = steward_handle.steward_list().expect("list set above");
+    assert_eq!(list.retry_round(), accepted_round, "list keeps its seed");
+    assert_eq!(
+        steward_handle.reelection_round(),
+        0,
+        "counter was reset on accept — distinct from the list tag"
+    );
+
+    // The round-2 ordering must differ from round 0 for the assertion
+    // below to be meaningful — if they happened to match, the seed
+    // wouldn't be load-bearing.
+    let round0 =
+        StewardList::generate(epoch, group_name.as_bytes(), &members, 4, config.clone(), 0)
+            .unwrap();
+    assert_ne!(
+        list.members(),
+        round0.members(),
+        "test assumption: retry_round must shuffle the ordering"
+    );
+
+    // Build a GroupSync the way `send_group_sync` does — seed sourced
+    // from the list's `retry_round`.
+    use de_mls::protos::de_mls::messages::v1::GroupSync;
+    let sync = GroupSync {
+        steward_members: list.members().to_vec(),
+        start_epoch: list.start_epoch(),
+        sn_min: list.config().sn_min as u32,
+        sn_max: list.config().sn_max as u32,
+        allow_subset_candidates: false,
+        peer_scores: vec![],
+        timing: None,
+        retry_round: list.retry_round(),
+        max_reelection_retries: steward_handle.max_reelection_retries(),
+    };
+
+    // Joiner re-derives the ordering using the wire seed — should match.
+    assert!(
+        StewardList::validate(
+            &sync.steward_members,
+            sync.start_epoch,
+            group_name.as_bytes(),
+            &sync.steward_members,
+            &config,
+            sync.retry_round,
+        )
+        .unwrap(),
+        "joiner validates when the wire retry_round matches the list's seed"
+    );
+
+    // The counter's current value (0) regenerates a different ordering —
+    // confirms `retry_round`-on-list is load-bearing, not redundant with
+    // the counter.
+    assert!(
+        !StewardList::validate(
+            &sync.steward_members,
+            sync.start_epoch,
+            group_name.as_bytes(),
+            &sync.steward_members,
+            &config,
+            steward_handle.reelection_round(),
+        )
+        .unwrap(),
+        "the post-accept counter value (0) regenerates a different ordering"
     );
 }

@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+pub use crate::core::DEFAULT_MAX_REELECTION_RETRIES;
 use crate::core::ProtocolConfig;
 
 pub const DEFAULT_EPOCH_DURATION: Duration = Duration::from_secs(60);
@@ -14,10 +15,6 @@ pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
 /// strictly less than `consensus_timeout` so the auto-vote has time to
 /// propagate and land in every peer's session before the library deadline.
 pub const DEFAULT_VOTING_DELAY: Duration = Duration::from_secs(10);
-
-/// One retry gives the responsible proposer a second shot with a different
-/// list composition; beyond that human/policy intervention is expected.
-pub const DEFAULT_MAX_REELECTION_RETRIES: u32 = 1;
 
 /// Under the Δ-synchrony assumption every honest voter reaches a decision
 /// within `consensus_timeout`; counting silent voters as YES keeps small

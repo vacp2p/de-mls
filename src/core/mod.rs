@@ -42,7 +42,9 @@ pub use error::CoreError;
 pub use events::{CallbackError, GroupEventHandler};
 
 // ── Group state ──
-pub use group::{Group, PendingUpdate, ProposalId, target_identity_of};
+pub use group::{
+    DEFAULT_MAX_REELECTION_RETRIES, Group, PendingUpdate, ProposalId, target_identity_of,
+};
 
 // ── Proposal classification ──
 pub use proposal_kind::ProposalKind;

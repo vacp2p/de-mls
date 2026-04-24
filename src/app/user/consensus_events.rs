@@ -143,6 +143,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 election.election_epoch,
                 &election.proposed_stewards,
                 election.proposed_stewards.len(),
+                election.retry_round,
             )?;
             entry.group.reset_reelection_round();
             if entry.state_machine.current_state() == GroupState::Reelection {
@@ -178,9 +179,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 return;
             };
             entry.group.bump_reelection_round();
+            // Read the ceiling from the group, not the user-level default:
+            // joiners honor the group's configured policy via `GroupSync`.
             (
                 entry.group.reelection_round(),
-                self.default_group_config.max_reelection_retries,
+                entry.group.max_reelection_retries(),
             )
         };
         if round > max {
