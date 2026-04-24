@@ -217,7 +217,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     .await?;
             }
             None => {
-                // Creator hasn't voted — show them the banner like peers.
+                // Creator hasn't voted — show them the banner like peers
+                // and start their own auto-vote timer. Peers receive the
+                // proposal via wire and run their own timers locally.
                 let payload = request.encode_to_vec();
                 let vote_notification: AppMessage = VotePayload {
                     group_id: group_name.to_string(),
@@ -232,6 +234,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 self.handler
                     .on_app_message(group_name, vote_notification)
                     .await?;
+                self.spawn_auto_vote(group_name.to_string(), proposal_id);
             }
         }
 
@@ -363,6 +366,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let app_id = self.app_id.clone();
         drop(groups);
 
+        // Manual vote takes precedence over the pending auto-vote timer.
+        self.cancel_auto_vote(group_name, proposal_id);
+
         let app_message = cast_vote::<P, _>(
             &group,
             proposal_id,
@@ -372,6 +378,102 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         )
         .await?;
         let packet = build_message(&group, &self.mls_service, &app_message, &app_id)?;
+        self.handler.on_outbound(group_name, packet).await?;
+        Ok(())
+    }
+
+    /// Spawn an auto-vote timer for `(group_name, proposal_id)`. After
+    /// `voting_delay`, the timer casts the local member's vote using
+    /// `liveness_criteria_yes` and broadcasts it. Idempotent — an existing
+    /// handle for the same key is aborted and replaced.
+    ///
+    /// If the member has already voted or the session has resolved by the
+    /// time the timer fires, `cast_vote` returns a benign error
+    /// (`UserAlreadyVoted` / `SessionNotActive`); we log at debug and exit.
+    pub(crate) fn spawn_auto_vote(&self, group_name: String, proposal_id: u32) {
+        self.cancel_auto_vote(&group_name, proposal_id);
+
+        let user = self.clone();
+        let delay = self.default_group_config.voting_delay;
+        let vote = self.default_group_config.liveness_criteria_yes;
+        let key = (group_name.clone(), proposal_id);
+
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            if let Err(e) = user.cast_auto_vote(&group_name, proposal_id, vote).await {
+                tracing::debug!(
+                    group = %group_name,
+                    proposal_id,
+                    error = %e,
+                    "auto-vote skipped (already voted or session resolved)"
+                );
+            } else {
+                info!(
+                    group = %group_name,
+                    proposal_id,
+                    vote,
+                    "auto-vote cast on timer"
+                );
+            }
+            // Remove the handle when the task completes so repeated manual
+            // votes after the timer fires don't try to abort a dead handle.
+            if let Ok(mut timers) = user.auto_vote_timers.lock() {
+                timers.remove(&(group_name, proposal_id));
+            }
+        });
+
+        if let Ok(mut timers) = self.auto_vote_timers.lock() {
+            timers.insert(key, handle);
+        }
+    }
+
+    /// Abort the auto-vote timer for `(group_name, proposal_id)` if one is
+    /// registered. No-op otherwise.
+    pub(crate) fn cancel_auto_vote(&self, group_name: &str, proposal_id: u32) {
+        if let Ok(mut timers) = self.auto_vote_timers.lock()
+            && let Some(handle) = timers.remove(&(group_name.to_string(), proposal_id))
+        {
+            handle.abort();
+        }
+    }
+
+    /// Abort every auto-vote timer belonging to `group_name`. Called on
+    /// group leave so no stale timers fire against a group we've left.
+    pub(crate) fn cancel_group_auto_votes(&self, group_name: &str) {
+        if let Ok(mut timers) = self.auto_vote_timers.lock() {
+            timers.retain(|(g, _), handle| {
+                if g == group_name {
+                    handle.abort();
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+    }
+
+    /// Cast the auto-vote on behalf of the local member. Same broadcast
+    /// path as a manual vote — the library sees the two identically.
+    async fn cast_auto_vote(
+        &self,
+        group_name: &str,
+        proposal_id: u32,
+        vote: bool,
+    ) -> Result<(), UserError> {
+        let group = {
+            let groups = self.groups.read().await;
+            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            entry.group.clone()
+        };
+        let app_message = cast_vote::<P, _>(
+            &group,
+            proposal_id,
+            vote,
+            &self.consensus_service,
+            self.eth_signer.clone(),
+        )
+        .await?;
+        let packet = build_message(&group, &self.mls_service, &app_message, &self.app_id)?;
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
     }

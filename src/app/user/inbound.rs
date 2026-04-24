@@ -94,6 +94,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 }
             }
         }
+        let proposal_id = proposal.proposal_id;
         forward_incoming_proposal::<P>(
             group_name,
             proposal,
@@ -101,6 +102,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             &*self.handler,
         )
         .await?;
+        // Start this member's auto-vote timer. Fires `voting_delay` after
+        // the proposal becomes visible; cancelled on manual vote or
+        // ProposalDecided.
+        self.spawn_auto_vote(group_name.to_string(), proposal_id);
         Ok(())
     }
 

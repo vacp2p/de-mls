@@ -185,18 +185,21 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 proposal_id,
                 choice,
             } => {
-                // "User already voted" is benign — a UI race (double-click
-                // before the banner closed, or the session resolved mid-click).
-                // Surface as a notice, don't crash the UI loop.
+                // "User already voted" is benign — a UI race (double-click,
+                // or click arrives just after the auto-vote timer fired).
+                // Silently drop so the user doesn't see a surprising error
+                // popup; their vote is on record regardless.
                 if let Err(e) = GATEWAY
                     .process_user_vote(group_id.clone(), proposal_id, choice)
                     .await
                 {
                     let msg = e.to_string();
                     if msg.contains("already voted") {
-                        GATEWAY.push_event(AppEvent::Error(format!(
-                            "Already voted on proposal {proposal_id}"
-                        )));
+                        tracing::debug!(
+                            group = %group_id,
+                            proposal_id,
+                            "manual vote ignored: already voted (auto-vote won the race)"
+                        );
                         continue;
                     }
                     return Err(e);

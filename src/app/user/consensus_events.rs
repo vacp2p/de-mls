@@ -39,6 +39,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             ConsensusEvent::ConsensusFailed { proposal_id, .. } => (*proposal_id, false),
         };
 
+        // Proposal resolved — any pending auto-vote timer for it is moot.
+        self.cancel_auto_vote(group_name, proposal_id);
+
         // Drop re-emissions from the consensus library (timeout-path race)
         // so we don't re-apply state or double-fire UI events.
         {
