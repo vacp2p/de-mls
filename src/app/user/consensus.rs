@@ -192,16 +192,24 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
         let outbound = match creator_vote {
             Some(vote) => {
-                // Bundled path: cast the creator's vote; `cast_vote`'s owner
-                // branch returns the Proposal with our vote attached.
-                cast_vote::<P, _>(
-                    &group,
+                // Bundled path: the creator's vote goes on the wire with the
+                // proposal as one atomic broadcast. Use the consensus
+                // library's owner-bundling API directly — the normal
+                // `cast_vote` helper sends Vote-only messages, which would
+                // leave peers without the proposal.
+                let scope = P::Scope::from(group_name.to_string());
+                let proposal = self
+                    .consensus_service
+                    .cast_vote_and_get_proposal(&scope, proposal_id, vote, self.eth_signer.clone())
+                    .await?;
+                info!(
+                    group = group_name,
                     proposal_id,
-                    vote,
-                    &self.consensus_service,
-                    self.eth_signer.clone(),
-                )
-                .await?
+                    choice = if vote { "YES" } else { "NO" },
+                    actor = "owner",
+                    "vote cast (bundled at submit)"
+                );
+                proposal.into()
             }
             None => unbundled,
         };

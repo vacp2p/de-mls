@@ -75,9 +75,18 @@ pub async fn submit_proposal<P: DeMlsProvider>(
     Ok((proposal_id, proposal.into()))
 }
 
-/// Cast a vote and return the `AppMessage` to broadcast. Owners broadcast
-/// the full `Proposal` (so peers see it for the first time); non-owners
-/// broadcast just the `Vote`.
+/// Cast a vote and return the Vote-only `AppMessage` to broadcast.
+///
+/// Always returns a `Vote` wire message — never a full `Proposal`. Every
+/// peer already has the proposal registered in their session (either from
+/// the initial unbundled broadcast or from the bundled-at-submit proposal
+/// both land before anyone votes). Re-broadcasting the full proposal would
+/// get rejected peer-side as `ProposalAlreadyExist`, dropping the vote.
+///
+/// The bundled-at-submit path in `register_new_proposal` calls
+/// `consensus.cast_vote_and_get_proposal` directly — not this helper —
+/// because that is the only legitimate case for broadcasting proposal +
+/// vote atomically as a single wire message.
 pub async fn cast_vote<P, SN>(
     group: &Group,
     proposal_id: u32,
@@ -96,19 +105,11 @@ where
     let choice = if vote { "YES" } else { "NO" };
     let actor = if is_owner { "owner" } else { "member" };
     info!(group = group_name, proposal_id, choice, actor, "vote cast");
-    let app_message: AppMessage = if is_owner {
-        let proposal = consensus
-            .cast_vote_and_get_proposal(&scope, proposal_id, vote, signer)
-            .await?;
-        proposal.into()
-    } else {
-        let vote_msg = consensus
-            .cast_vote(&scope, proposal_id, vote, signer)
-            .await?;
-        vote_msg.into()
-    };
 
-    Ok(app_message)
+    let vote_msg = consensus
+        .cast_vote(&scope, proposal_id, vote, signer)
+        .await?;
+    Ok(vote_msg.into())
 }
 
 /// Forward a peer's proposal into the local consensus service and emit a
