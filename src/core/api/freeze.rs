@@ -276,8 +276,15 @@ fn rank_applicable_candidates(
 
 /// Result of trying to apply one candidate. `Terminal` ends the round;
 /// `Drop` records a local score penalty and the caller tries the next.
+///
+/// `committer` is the MLS-verified sender (incoming) or our own identity
+/// (local). Scoring keys off this so a forged wire claim cannot redirect
+/// the `SuccessfulCommit` reward.
 enum CandidateOutcome {
-    Terminal(FreezeOutcome),
+    Terminal {
+        outcome: FreezeOutcome,
+        committer: Vec<u8>,
+    },
     Drop(ScoreOp),
 }
 
@@ -305,7 +312,6 @@ where
 
     let mut remaining = sorted.into_iter();
     while let Some(chosen) = remaining.next() {
-        let author_id = chosen.candidate_msg.steward_identity.clone();
         let apply_result = if chosen.is_local_candidate {
             if own_commit_discarded {
                 tracing::debug!(
@@ -327,17 +333,20 @@ where
         };
 
         match apply_result {
-            CandidateOutcome::Terminal(outcome) => {
+            CandidateOutcome::Terminal { outcome, committer } => {
                 score_ops.push(ScoreOp {
-                    member_id: author_id.clone(),
+                    member_id: committer.clone(),
                     event: ScoreEvent::SuccessfulCommit,
                 });
                 // If a backup committed in place of the epoch steward,
                 // penalise the absent steward (RFC §Steward violation
                 // list: censorship/inactivity). Skip self-accusation —
-                // we know our own liveness directly.
+                // we know our own liveness directly. The walk in
+                // `live_epoch_steward_id` already filters out
+                // queued-removal targets, so a draining named steward
+                // never appears here as `expected`.
                 if let Some(expected) = ctx.live_epoch_steward_id.as_deref() {
-                    if expected != author_id.as_slice() && expected != ctx.self_identity.as_slice()
+                    if expected != committer.as_slice() && expected != ctx.self_identity.as_slice()
                     {
                         score_ops.push(ScoreOp {
                             member_id: expected.to_vec(),
@@ -348,12 +357,23 @@ where
                 // Unpicked candidates that passed the count filter are
                 // honest competitors under Δ-synchrony (same approved set,
                 // different MLS entropy). RFC §Commit Validation: "MUST
-                // NOT be classified as misbehaviour."
+                // NOT be classified as misbehaviour." Score only when the
+                // wire-claimed identity sits on the steward list — a forged
+                // claim from a non-steward earns no credit.
                 for loser in remaining {
-                    score_ops.push(ScoreOp {
-                        member_id: loser.candidate_msg.steward_identity,
-                        event: ScoreEvent::HonestCommitAttempt,
-                    });
+                    let claimed = loser.candidate_msg.steward_identity;
+                    let on_list = group.steward_list().is_some_and(|l| l.contains(&claimed));
+                    if on_list {
+                        score_ops.push(ScoreOp {
+                            member_id: claimed,
+                            event: ScoreEvent::HonestCommitAttempt,
+                        });
+                    } else {
+                        tracing::debug!(
+                            group = %group_name,
+                            "dropping HonestCommitAttempt: claimed identity not on steward list"
+                        );
+                    }
                 }
                 return Ok(FreezeFinalizeResult { outcome, score_ops });
             }
@@ -432,6 +452,10 @@ fn apply_local_candidate<S>(
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
+    // Local candidate: we wrote the message, so the wire-claimed identity
+    // is our own and is trusted by definition.
+    let committer = chosen.candidate_msg.steward_identity.clone();
+
     mls.merge_own_commit(group.group_name())?;
 
     // Welcomes go out only after our merge — joiners must not race ahead of the steward's epoch.
@@ -446,10 +470,13 @@ where
     } else {
         ProcessResult::GroupUpdated
     };
-    Ok(CandidateOutcome::Terminal(FreezeOutcome::Applied {
-        result: Box::new(result),
-        outbound,
-    }))
+    Ok(CandidateOutcome::Terminal {
+        outcome: FreezeOutcome::Applied {
+            result: Box::new(result),
+            outbound,
+        },
+        committer,
+    })
 }
 
 /// Stage, validate, and merge a candidate authored by another steward.
@@ -520,10 +547,13 @@ where
     } else {
         ProcessResult::GroupUpdated
     };
-    Ok(CandidateOutcome::Terminal(FreezeOutcome::Applied {
-        result: Box::new(result),
-        outbound: None,
-    }))
+    Ok(CandidateOutcome::Terminal {
+        outcome: FreezeOutcome::Applied {
+            result: Box::new(result),
+            outbound: None,
+        },
+        committer: commit_sender,
+    })
 }
 
 // ─────────────────────────── MLS Staging ───────────────────────────

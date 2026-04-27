@@ -319,7 +319,23 @@ impl Group {
     }
 
     fn is_steward_eligible(&self, candidate: &[u8], members: &[Vec<u8>]) -> bool {
-        !self.is_pending_self_leave(candidate) && members.iter().any(|m| m == candidate)
+        !self.is_pending_removal(candidate) && members.iter().any(|m| m == candidate)
+    }
+
+    /// True iff `approved_proposals` carries any `RemoveMember(identity)` —
+    /// regardless of source (self-leave, ban, ECP-derived). Used by the
+    /// steward-eligibility predicate to skip a member whose removal is queued
+    /// for the next commit: MLS forbids them from committing it themselves,
+    /// so the rotation walk would have to fall back anyway. Broader than
+    /// [`Self::is_pending_self_leave`] (which only matches the deterministic
+    /// self-leave id).
+    pub fn is_pending_removal(&self, identity: &[u8]) -> bool {
+        self.approved_proposals.values().any(|req| {
+            matches!(
+                req.payload.as_ref(),
+                Some(group_update_request::Payload::RemoveMember(r)) if r.identity == identity
+            )
+        })
     }
 
     // ─────────────────────────── Proposal Queues ───────────────────────────
@@ -455,6 +471,22 @@ impl Group {
         self.steward_list
             .as_ref()
             .and_then(|l| l.epoch_steward(epoch))
+    }
+
+    /// Steward identities filtered by the steward-eligibility predicate
+    /// (MLS-present and not queued for removal). Joiners receive this view
+    /// via `GroupSync` so they don't inherit ghosts or members whose
+    /// removal is queued. Order is preserved from the canonical list.
+    /// Returns an empty `Vec` if no list is set.
+    pub fn live_steward_members(&self, members: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        let Some(list) = self.steward_list.as_ref() else {
+            return Vec::new();
+        };
+        list.members()
+            .iter()
+            .filter(|m| self.is_steward_eligible(m, members))
+            .cloned()
+            .collect()
     }
 
     /// Cheap idempotence check for auto-retry: don't submit a second election
@@ -976,5 +1008,69 @@ mod tests {
         let live = group.live_epoch_steward(0, &mems).unwrap();
         assert_ne!(live, nominal.as_slice());
         assert!(mems.iter().any(|m| m == live));
+    }
+
+    fn insert_remove_member(group: &mut Group, target: &[u8], proposal_id: ProposalId) {
+        let remove = GroupUpdateRequest {
+            payload: Some(group_update_request::Payload::RemoveMember(
+                crate::protos::de_mls::messages::v1::RemoveMember {
+                    identity: target.to_vec(),
+                },
+            )),
+        };
+        group.insert_approved_proposal(proposal_id, remove);
+    }
+
+    /// Live rotation skips a nominal steward whose removal is queued under a
+    /// non-self-leave proposal id (ban / ECP-derived).
+    #[test]
+    fn test_live_rotation_skips_ban_pending_removal() {
+        let config = ProtocolConfig::new(3, 3).unwrap();
+        let mems = members(&[1, 2, 3]);
+        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
+
+        let nominal = group.epoch_steward(0).unwrap().to_vec();
+        assert_eq!(group.live_epoch_steward(0, &mems), Some(nominal.as_slice()));
+
+        // Removal under an arbitrary proposal id (not the deterministic
+        // self-leave id) — the narrower self-leave predicate would miss it.
+        insert_remove_member(&mut group, &nominal, 0xdead_beef);
+        assert!(!group.is_pending_self_leave(&nominal));
+        assert!(group.is_pending_removal(&nominal));
+
+        let live = group.live_epoch_steward(0, &mems).unwrap();
+        assert_ne!(live, nominal.as_slice());
+        assert!(mems.iter().any(|m| m == live));
+    }
+
+    /// `live_epoch_and_backup` skips a draining nominal *and* a draining
+    /// backup, returning the next two eligible distinct stewards.
+    #[test]
+    fn test_live_epoch_and_backup_skips_draining_pair() {
+        let config = ProtocolConfig::new(4, 4).unwrap();
+        let mems = members(&[1, 2, 3, 4]);
+        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        group.generate_and_set_steward_list(0, &mems, 4, 0).unwrap();
+
+        let nominal = group.epoch_steward(0).unwrap().to_vec();
+        let backup = group
+            .steward_list()
+            .unwrap()
+            .backup_steward(0)
+            .unwrap()
+            .to_vec();
+
+        insert_remove_member(&mut group, &nominal, 1);
+        insert_remove_member(&mut group, &backup, 2);
+
+        let (live_epoch, live_backup) = group.live_epoch_and_backup(0, &mems);
+        let live_epoch = live_epoch.expect("eligible epoch steward").to_vec();
+        let live_backup = live_backup.expect("eligible backup steward").to_vec();
+        assert_ne!(live_epoch, nominal);
+        assert_ne!(live_epoch, backup);
+        assert_ne!(live_backup, nominal);
+        assert_ne!(live_backup, backup);
+        assert_ne!(live_epoch, live_backup);
     }
 }
