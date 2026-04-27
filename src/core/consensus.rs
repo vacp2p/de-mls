@@ -59,6 +59,32 @@ fn removal_request_for(evidence: &ViolationEvidence) -> GroupUpdateRequest {
     }
 }
 
+/// Identity this approval would queue for removal in `approved_proposals`,
+/// if any. Covers a direct `RemoveMember` request and a score-below-threshold
+/// ECP that transforms into one. Returns `None` for elections, non-removal
+/// emergencies, non-removal regular proposals, and rejections.
+fn pending_removal_target(
+    request: &GroupUpdateRequest,
+    evidence: Option<&ViolationEvidence>,
+    approved: bool,
+    is_emergency: bool,
+    transforms_to_removal: bool,
+) -> Option<Vec<u8>> {
+    if !approved {
+        return None;
+    }
+    if transforms_to_removal {
+        return evidence.map(|ev| ev.target_member_id.clone());
+    }
+    if is_emergency {
+        return None;
+    }
+    match request.payload.as_ref() {
+        Some(group_update_request::Payload::RemoveMember(r)) => Some(r.identity.clone()),
+        _ => None,
+    }
+}
+
 /// Apply a consensus result to the group's proposal queues.
 ///
 /// Routes by proposal kind:
@@ -118,6 +144,29 @@ pub fn apply_consensus_result(
     // Should the approved ECP transform into a RemoveMember?
     let transforms_to_removal =
         approved && is_emergency && evidence.as_ref().is_some_and(is_score_below_threshold);
+
+    // Target-keyed dedup. Two approvals from independent paths (self-leave +
+    // ban, ECP + ban, …) can each carry `RemoveMember(target)` under
+    // different proposal ids. MLS rejects a duplicate removal at commit
+    // time, so keep the first entry and drop the second.
+    if let Some(target) = pending_removal_target(
+        &request,
+        evidence.as_ref(),
+        approved,
+        is_emergency,
+        transforms_to_removal,
+    ) && group.is_pending_removal(&target)
+    {
+        if is_owner {
+            group.mark_proposal_as_rejected(proposal_id);
+        }
+        info!(
+            proposal_id,
+            target = %ShortId(&target),
+            "removal proposal deduped — target already queued for removal"
+        );
+        return Ok(ConsensusApplyResult::default());
+    }
 
     if approved {
         if is_owner {
@@ -251,5 +300,74 @@ mod tests {
         assert_eq!(outcome.election_epoch, 5);
         assert_eq!(outcome.proposed_stewards.len(), 3);
         assert_eq!(group.approved_proposals_count(), 0);
+    }
+
+    fn remove_request(target: Vec<u8>) -> GroupUpdateRequest {
+        GroupUpdateRequest {
+            payload: Some(group_update_request::Payload::RemoveMember(
+                crate::protos::de_mls::messages::v1::RemoveMember { identity: target },
+            )),
+        }
+    }
+
+    /// A second `RemoveMember(target)` arriving via consensus is dropped
+    /// when an entry for the same target is already in `approved_proposals`.
+    #[test]
+    fn removal_deduped_when_target_already_pending() {
+        let config = ProtocolConfig::new(2, 5).unwrap();
+        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        let target = member(7);
+
+        // First removal — non-owner path inserts straight into approved.
+        let first_id = 10;
+        let request = remove_request(target.clone());
+        apply_consensus_result(&mut group, first_id, true, &request.encode_to_vec()).unwrap();
+        assert_eq!(group.approved_proposals_count(), 1);
+
+        // Second removal for the same target arrives under a different id.
+        let second_id = 11;
+        let request = remove_request(target.clone());
+        let result =
+            apply_consensus_result(&mut group, second_id, true, &request.encode_to_vec()).unwrap();
+
+        assert!(result.election.is_none());
+        assert_eq!(
+            group.approved_proposals_count(),
+            1,
+            "duplicate removal must not stack a second entry"
+        );
+        assert!(group.approved_proposals().contains_key(&first_id));
+        assert!(!group.approved_proposals().contains_key(&second_id));
+    }
+
+    /// Owner-side dedup: the duplicate clears its voting-queue entry so the
+    /// queue does not retain an outcome we deliberately discarded.
+    #[test]
+    fn removal_dedup_clears_owner_voting_entry() {
+        let config = ProtocolConfig::new(2, 5).unwrap();
+        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        let target = member(7);
+
+        // Pre-existing approved removal from an unrelated path.
+        let pending_id = 20;
+        let pending = remove_request(target.clone());
+        group.insert_approved_proposal(pending_id, pending);
+
+        // This user submits their own removal and it passes consensus.
+        let owner_id = 21;
+        let owner_request = remove_request(target.clone());
+        group.store_voting_proposal(owner_id, owner_request.clone());
+
+        let result =
+            apply_consensus_result(&mut group, owner_id, true, &owner_request.encode_to_vec())
+                .unwrap();
+
+        assert!(result.election.is_none());
+        assert_eq!(group.approved_proposals_count(), 1);
+        assert!(group.approved_proposals().contains_key(&pending_id));
+        assert!(
+            !group.is_owner_of_proposal(owner_id),
+            "duplicate must be cleared from voting queue"
+        );
     }
 }

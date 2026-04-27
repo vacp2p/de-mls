@@ -330,12 +330,18 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     as u64,
             };
 
+            // Filter ghosts and queued-removal targets so joiners don't
+            // inherit stewards they would have to walk past on the very
+            // first epoch.
+            let mls_members = group_members(&entry.group, &self.mls_service)?;
+            let steward_members = entry.group.live_steward_members(&mls_members);
+
             // `retry_round` is the seed that produced the *stored* list —
             // a frozen tag on `StewardList`, not `Group::reelection_round`
             // (the dynamic counter for the next attempt, which resets to 0
             // on accept). Joiners re-derive the ordering from this seed.
             let sync = GroupSync {
-                steward_members: list.members().to_vec(),
+                steward_members,
                 start_epoch: list.start_epoch(),
                 sn_min: list.config().sn_min as u32,
                 sn_max: list.config().sn_max as u32,
