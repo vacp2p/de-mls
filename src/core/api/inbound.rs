@@ -15,6 +15,30 @@ use crate::protos::de_mls::messages::v1::{
     AppMessage, GroupUpdateRequest, InviteMember, WelcomeMessage, app_message,
     group_update_request, welcome_message,
 };
+use hashgraph_like_consensus::protos::consensus::v1::Proposal;
+
+/// Fast-path proposals (`expected_voters_count == 1`) bypass peer voting, so
+/// we restrict them to self-removal. Enforcing that the MLS-authenticated
+/// sender matches the `RemoveMember` target closes the unilateral-removal
+/// vector that an otherwise-free `expected_voters == 1` opens.
+///
+/// Returns `true` when the proposal is allowed. A mismatch (different
+/// target, wrong payload variant, or undecodable) produces `false`.
+fn authorize_fast_path_proposal(proposal: &Proposal, mls_sender: &[u8]) -> bool {
+    if proposal.expected_voters_count != 1 {
+        return true;
+    }
+    if proposal.proposal_owner != mls_sender {
+        return false;
+    }
+    let Ok(request) = GroupUpdateRequest::decode(proposal.payload.as_slice()) else {
+        return false;
+    };
+    matches!(
+        request.payload,
+        Some(group_update_request::Payload::RemoveMember(ref r)) if r.identity == mls_sender
+    )
+}
 
 /// Process an inbound packet and determine what action is needed.
 pub fn process_inbound<S>(
@@ -114,20 +138,17 @@ where
     match res {
         DecryptResult::Application(app_bytes, sender) => {
             let app_msg = AppMessage::decode(app_bytes.as_ref())?;
-            // LeaveRequest is auto-approved — the MLS-authenticated sender
-            // MUST equal the identity being removed. Reject mismatches here
-            // so the app layer can trust the pair downstream.
-            if let Some(app_message::Payload::LeaveRequest(leave)) = &app_msg.payload {
-                if leave.identity != sender {
-                    warn!(
-                        group = group.group_name(),
-                        claimed = %ShortId(&leave.identity),
-                        sender = %ShortId(&sender),
-                        "leave request signer mismatch"
-                    );
-                    return Ok(ProcessResult::Noop);
-                }
-                return Ok(ProcessResult::LeaveRequestReceived(leave.clone()));
+            if let Some(app_message::Payload::Proposal(proposal)) = &app_msg.payload
+                && !authorize_fast_path_proposal(proposal, &sender)
+            {
+                warn!(
+                    group = group.group_name(),
+                    proposal_id = proposal.proposal_id,
+                    sender = %ShortId(&sender),
+                    owner = %ShortId(&proposal.proposal_owner),
+                    "fast-path proposal rejected: sender is not the self-removal target"
+                );
+                return Ok(ProcessResult::Noop);
             }
             // Drop BanRequests whose target isn't in the group — saves a
             // useless consensus round. Mirrors the already-a-member check
@@ -160,5 +181,84 @@ where
             );
             Ok(ProcessResult::Noop)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::group::auto_approved_leave_proposal_id;
+    use crate::protos::de_mls::messages::v1::RemoveMember;
+
+    fn member(id: u8) -> Vec<u8> {
+        vec![id; 20]
+    }
+
+    fn remove_payload(identity: &[u8]) -> Vec<u8> {
+        GroupUpdateRequest {
+            payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
+                identity: identity.to_vec(),
+            })),
+        }
+        .encode_to_vec()
+    }
+
+    fn proposal_for_self_remove(sender: &[u8], expected_voters: u32) -> Proposal {
+        Proposal {
+            name: "test".into(),
+            payload: remove_payload(sender),
+            proposal_id: auto_approved_leave_proposal_id(sender),
+            proposal_owner: sender.to_vec(),
+            votes: Vec::new(),
+            expected_voters_count: expected_voters,
+            round: 1,
+            timestamp: 0,
+            expiration_timestamp: u64::MAX,
+            liveness_criteria_yes: true,
+        }
+    }
+
+    #[test]
+    fn fast_path_allows_self_removal_matching_sender() {
+        let sender = member(1);
+        let proposal = proposal_for_self_remove(&sender, 1);
+        assert!(authorize_fast_path_proposal(&proposal, &sender));
+    }
+
+    #[test]
+    fn fast_path_rejects_target_other_than_sender() {
+        let sender = member(1);
+        let victim = member(2);
+        let mut proposal = proposal_for_self_remove(&victim, 1);
+        proposal.proposal_owner = sender.clone();
+        assert!(!authorize_fast_path_proposal(&proposal, &sender));
+    }
+
+    #[test]
+    fn fast_path_rejects_owner_mismatch() {
+        let sender = member(1);
+        let imposter = member(3);
+        let mut proposal = proposal_for_self_remove(&sender, 1);
+        proposal.proposal_owner = imposter;
+        assert!(!authorize_fast_path_proposal(&proposal, &sender));
+    }
+
+    #[test]
+    fn fast_path_rejects_non_remove_payload() {
+        let sender = member(1);
+        let mut proposal = proposal_for_self_remove(&sender, 1);
+        proposal.payload = vec![0xff; 8]; // garbage
+        assert!(!authorize_fast_path_proposal(&proposal, &sender));
+    }
+
+    #[test]
+    fn expected_voters_gt_one_bypasses_authz() {
+        let sender = member(1);
+        let victim = member(2);
+        let mut proposal = proposal_for_self_remove(&victim, 5);
+        proposal.proposal_owner = sender.clone();
+        // Regular proposals (voters > 1) aren't gated by this check — peer
+        // voting provides the authorization instead.
+        assert!(authorize_fast_path_proposal(&proposal, &sender));
     }
 }

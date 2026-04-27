@@ -17,14 +17,7 @@ message AppMessage {
     ProposalAdded proposal_added = 7;
     CommitCandidate commit_candidate = 8;
     GroupSync group_sync = 9;
-    LeaveRequest leave_request = 10;
   }
-}
-
-// Self-leave intent. Auto-approved — no consensus vote.
-// Signer must equal `identity`.
-message LeaveRequest {
-  bytes identity = 1;
 }
 
 message BanRequest {

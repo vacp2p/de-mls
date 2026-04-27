@@ -11,9 +11,9 @@ use crate::{
     mls_crypto::parse_wallet_to_bytes,
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, CommitCandidate, ConversationMessage, EmergencyCriteriaProposal,
-        GroupSync, GroupUpdateRequest, InvitationToJoin, LeaveRequest, Outcome, ProposalAdded,
-        RemoveMember, UserKeyPackage, UserVote, ViolationEvidence, ViolationType, VotePayload,
-        WelcomeMessage, app_message, group_update_request, welcome_message,
+        GroupSync, GroupUpdateRequest, InvitationToJoin, Outcome, ProposalAdded, RemoveMember,
+        UserKeyPackage, UserVote, ViolationEvidence, ViolationType, VotePayload, WelcomeMessage,
+        app_message, group_update_request, welcome_message,
     },
 };
 
@@ -48,11 +48,6 @@ pub enum ProcessResult {
     /// Group-sync message from the steward (steward list, scores, timing,
     /// protocol flags). Meaningful only for joiners with no steward list yet.
     GroupSyncReceived(GroupSync),
-
-    /// Authenticated self-leave from a member. Auto-approved — the app layer
-    /// verifies the signer matches `identity` and inserts `RemoveMember`
-    /// directly into the approved queue.
-    LeaveRequestReceived(LeaveRequest),
 
     /// Nothing to do (not for us, duplicate, or already handled).
     Noop,
@@ -178,7 +173,6 @@ impl_payload_from!(
     ConversationMessage => app_message::Payload::ConversationMessage,
     CommitCandidate     => app_message::Payload::CommitCandidate,
     BanRequest          => app_message::Payload::BanRequest,
-    LeaveRequest        => app_message::Payload::LeaveRequest,
     Proposal            => app_message::Payload::Proposal,
     Vote                => app_message::Payload::Vote,
     GroupSync           => app_message::Payload::GroupSync,
@@ -216,12 +210,6 @@ impl TryFrom<AppMessage> for ProcessResult {
             Some(app_message::Payload::GroupSync(sync)) => {
                 Ok(ProcessResult::GroupSyncReceived(sync.clone()))
             }
-            // LeaveRequest is NOT handled here: the authenticated path
-            // (`process_app_subtopic`) is the sole producer of
-            // `LeaveRequestReceived` — it verifies the MLS sender matches
-            // `leave.identity` before emitting the variant. Treating it as
-            // Noop here prevents any caller from bypassing that check via
-            // a generic `AppMessage::try_into()`.
             _ => Ok(ProcessResult::Noop),
         }
     }

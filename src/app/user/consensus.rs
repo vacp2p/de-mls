@@ -141,9 +141,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             }
         };
 
-        let scope = P::Scope::from(group_name.clone());
         tokio::time::sleep(self.default_group_config.consensus_timeout).await;
-        self.resolve_on_timeout(proposal_id, &scope).await;
+        self.resolve_on_timeout(&group_name, proposal_id).await;
     }
 
     /// Open the consensus session, record ownership, then either bundle
@@ -251,23 +250,58 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
     /// Resolve the proposal via the consensus library's timeout path if it's
     /// still in the active set.
-    async fn resolve_on_timeout(&self, proposal_id: u32, scope: &P::Scope) {
+    ///
+    /// The `still_active` guard eliminates the normal case where the session
+    /// has already resolved by the time the timer fires. A race can still slip
+    /// through (session resolved between the guard and the call); a
+    /// `SessionNotFound`/`SessionNotActive` in that window is benign as long
+    /// as the proposal is in our resolved-proposals cache — we downgrade the
+    /// log accordingly and warn only for truly unknown IDs (indicates a logic
+    /// bug, not a race).
+    async fn resolve_on_timeout(&self, group_name: &str, proposal_id: u32) {
+        use hashgraph_like_consensus::error::ConsensusError;
+
+        let scope = P::Scope::from(group_name.to_string());
         let still_active = self
             .consensus_service
             .storage()
-            .get_active_proposals(scope)
+            .get_active_proposals(&scope)
             .await
             .map(|active| active.iter().any(|p| p.proposal_id == proposal_id))
             .unwrap_or(false);
         if !still_active {
             return;
         }
-        if let Err(e) = self
+        match self
             .consensus_service
-            .handle_consensus_timeout(scope, proposal_id)
+            .handle_consensus_timeout(&scope, proposal_id)
             .await
         {
-            info!(proposal_id, error = %e, "timeout resolution skipped");
+            Ok(_) => {}
+            Err(ConsensusError::SessionNotFound) | Err(ConsensusError::SessionNotActive) => {
+                let resolved_locally = {
+                    let groups = self.groups.read().await;
+                    groups
+                        .get(group_name)
+                        .is_some_and(|entry| entry.group.is_consensus_outcome_applied(proposal_id))
+                };
+                if resolved_locally {
+                    tracing::debug!(
+                        group = group_name,
+                        proposal_id,
+                        "timeout fired for already-resolved proposal: ignoring"
+                    );
+                } else {
+                    tracing::warn!(
+                        group = group_name,
+                        proposal_id,
+                        "timeout fired for unknown proposal id: no session and not in resolved cache"
+                    );
+                }
+            }
+            Err(e) => {
+                info!(proposal_id, error = %e, "timeout resolution skipped");
+            }
         }
     }
 
