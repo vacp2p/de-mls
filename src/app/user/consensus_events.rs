@@ -84,6 +84,24 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             return self.handle_election_accepted(group_name, election).await;
         }
 
+        if consensus_apply.force_freezing {
+            // ECP YES (currently `ScoreBelowThreshold`) — bypass the
+            // inactivity timer and fire Freezing now so the urgent commit
+            // goes out in seconds rather than the next epoch cycle.
+            let transitioned = {
+                let mut groups = self.groups.write().await;
+                groups
+                    .get_mut(group_name)
+                    .map(|entry| entry.state_machine.force_freezing())
+                    .unwrap_or(false)
+            };
+            if transitioned {
+                self.state_handler
+                    .on_state_changed(group_name, GroupState::Freezing)
+                    .await;
+            }
+        }
+
         if !approved && let Ok(req) = GroupUpdateRequest::decode(payload.as_slice()) {
             if ProposalKind::of(&req).is_steward_election() {
                 self.handle_election_rejected(group_name).await;

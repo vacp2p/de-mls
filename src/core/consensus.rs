@@ -19,14 +19,20 @@ use crate::protos::de_mls::messages::v1::{
     group_update_request,
 };
 
-/// Result of applying a consensus outcome: the accepted election proposal
-/// (if any) for the app to validate and install as a new steward list.
+/// Result of applying a consensus outcome.
+///
+/// `election`: accepted election proposal for the app to validate and install
+/// as a new steward list. `force_freezing`: an ECP YES (currently
+/// `ScoreBelowThreshold`) wants to bypass the inactivity timer — the app
+/// should call `GroupStateMachine::force_freezing` so the urgent commit
+/// fires now instead of next inactivity tick.
 ///
 /// Score ops for emergency outcomes are produced separately by
 /// `crate::app::user::emergency`.
 #[derive(Debug, Clone, Default)]
 pub struct ConsensusApplyResult {
     pub election: Option<StewardElectionProposal>,
+    pub force_freezing: bool,
 }
 
 /// Extract emergency evidence from a `GroupUpdateRequest`, if present.
@@ -129,6 +135,7 @@ pub fn apply_consensus_result(
             );
             return Ok(ConsensusApplyResult {
                 election: Some(election),
+                force_freezing: false,
             });
         } else {
             if is_owner {
@@ -168,6 +175,8 @@ pub fn apply_consensus_result(
         return Ok(ConsensusApplyResult::default());
     }
 
+    let mut force_freezing = false;
+
     if approved {
         if is_owner {
             group.mark_proposal_as_approved(proposal_id);
@@ -187,6 +196,16 @@ pub fn apply_consensus_result(
         } else if !is_emergency {
             // Regular proposal: add to approved queue for the next commit.
             group.insert_approved_proposal(proposal_id, request);
+        }
+
+        if transforms_to_removal {
+            // Fast removal: queue is now restricted to this target for the
+            // next freeze cycle so the urgent commit doesn't drag along
+            // unrelated approved work. Caller force-Freezes to skip the
+            // inactivity wait.
+            let target = evidence.as_ref().unwrap().target_member_id.clone();
+            group.set_urgent_commit_target(target);
+            force_freezing = true;
         }
     } else if is_owner {
         group.mark_proposal_as_rejected(proposal_id);
@@ -209,7 +228,10 @@ pub fn apply_consensus_result(
         }
     }
 
-    Ok(ConsensusApplyResult::default())
+    Ok(ConsensusApplyResult {
+        election: None,
+        force_freezing,
+    })
 }
 
 #[cfg(test)]
@@ -369,5 +391,52 @@ mod tests {
             !group.is_owner_of_proposal(owner_id),
             "duplicate must be cleared from voting queue"
         );
+    }
+
+    fn score_below_threshold_request(target: Vec<u8>, creator: Vec<u8>) -> GroupUpdateRequest {
+        use crate::protos::de_mls::messages::v1::ViolationEvidence;
+        ViolationEvidence::score_below_threshold(target, 0, -10)
+            .with_creator(creator)
+            .into_update_request()
+            .unwrap()
+    }
+
+    /// `ScoreBelowThreshold` ECP YES sets the urgent-commit target on the
+    /// group, returns `force_freezing = true`, and queues `RemoveMember`
+    /// for the next freeze cycle.
+    #[test]
+    fn ecp_score_below_threshold_yes_marks_urgent_and_force_freezes() {
+        let config = ProtocolConfig::new(1, 5).unwrap();
+        let mut group = Group::new_as_creator("urgent-yes", member(1), config).unwrap();
+        let target = member(7);
+
+        let request = score_below_threshold_request(target.clone(), member(1));
+        let payload = request.encode_to_vec();
+
+        let result = apply_consensus_result(&mut group, 100, true, &payload).unwrap();
+
+        assert!(result.force_freezing, "ECP YES must signal force-Freezing");
+        assert!(result.election.is_none());
+        assert_eq!(
+            group.urgent_commit_target(),
+            Some(target.as_slice()),
+            "urgent-commit target must be set on the group"
+        );
+        assert_eq!(group.approved_proposals_count(), 1, "RemoveMember queued");
+    }
+
+    /// `ScoreBelowThreshold` ECP NO does not mark urgent or force-Freeze.
+    #[test]
+    fn ecp_score_below_threshold_no_does_not_mark_urgent() {
+        let config = ProtocolConfig::new(1, 5).unwrap();
+        let mut group = Group::new_as_creator("urgent-no", member(1), config).unwrap();
+        let request = score_below_threshold_request(member(7), member(1));
+        let payload = request.encode_to_vec();
+
+        let result = apply_consensus_result(&mut group, 101, false, &payload).unwrap();
+
+        assert!(!result.force_freezing);
+        assert!(group.urgent_commit_target().is_none());
+        assert_eq!(group.approved_proposals_count(), 0);
     }
 }

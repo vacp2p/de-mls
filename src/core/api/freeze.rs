@@ -723,7 +723,13 @@ fn check_commit_sender_authorized(
 
 fn record_applied_commit(group: &mut Group, commit_hash: Vec<u8>) {
     group.record_committed_batch(commit_hash);
-    group.clear_approved_proposals();
+    if let Some(target) = group.take_urgent_commit_target() {
+        // Urgent ECP-driven commit: drop only the target's RemoveMember
+        // entry, leave the rest of the queue for the next normal cycle.
+        group.drop_approved_removals_for(&target);
+    } else {
+        group.clear_approved_proposals();
+    }
     group.clear_freeze_round();
 }
 

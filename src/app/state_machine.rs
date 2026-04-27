@@ -134,6 +134,22 @@ impl GroupStateMachine {
         info!(state = "Freezing", "state transition");
     }
 
+    /// Bypass the inactivity timer and enter Freezing immediately. Used by
+    /// ECP-YES dispatch when an emergency (e.g. fast steward removal) needs
+    /// to commit ASAP. Only fires from `Working` — other states are either
+    /// already mid-cycle (`Freezing`, `Selection`) or in recovery
+    /// (`Reelection`, `Leaving`, `PendingJoin`) where a separate path is
+    /// driving the next transition. Returns `true` if the transition
+    /// happened, so the caller knows whether to dispatch `on_state_changed`.
+    pub fn force_freezing(&mut self) -> bool {
+        if self.state == GroupState::Working {
+            self.start_freezing();
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn start_selection(&mut self) {
         self.state = GroupState::Selection;
         info!(state = "Selection", "state transition");
@@ -332,6 +348,31 @@ mod tests {
 
         assert!(sm.check_steward_inactivity(1));
         assert_eq!(sm.current_state(), GroupState::Freezing);
+    }
+
+    #[test]
+    fn test_force_freezing_from_working() {
+        let mut sm = GroupStateMachine::new_as_member();
+        assert_eq!(sm.current_state(), GroupState::Working);
+        assert!(sm.force_freezing());
+        assert_eq!(sm.current_state(), GroupState::Freezing);
+        assert!(sm.phase_timer.is_some());
+    }
+
+    #[test]
+    fn test_force_freezing_noop_outside_working() {
+        for state_setup in [
+            |sm: &mut GroupStateMachine| sm.start_freezing(),
+            |sm: &mut GroupStateMachine| sm.start_selection(),
+            |sm: &mut GroupStateMachine| sm.start_reelection(),
+            |sm: &mut GroupStateMachine| sm.start_leaving(),
+        ] {
+            let mut sm = GroupStateMachine::new_as_member();
+            state_setup(&mut sm);
+            let before = sm.current_state();
+            assert!(!sm.force_freezing());
+            assert_eq!(sm.current_state(), before);
+        }
     }
 
     #[test]

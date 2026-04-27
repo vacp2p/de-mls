@@ -189,6 +189,13 @@ pub struct Group {
     /// `forward_incoming_vote` to distinguish benign late peer votes (session
     /// was trimmed after resolution) from votes for unknown proposal IDs.
     resolved_proposals: ResolvedProposalCache,
+    /// When `Some(target)`, the next freeze cycle commits **only** the
+    /// `RemoveMember(target)` entry from `approved_proposals` — the rest
+    /// of the queue stays for the next normal cycle. Set by an ECP-YES
+    /// dispatch (`ScoreBelowThreshold`); consumed when the urgent commit
+    /// applies. Other proposals piggybacking the same urgent commit
+    /// would dilute the "fast removal" intent, so they wait.
+    urgent_commit_target: Option<Vec<u8>>,
 }
 
 /// Fallback ceiling on steward-election retries. One retry gives the
@@ -214,6 +221,7 @@ impl Group {
             reelection_round: 0,
             max_reelection_retries: DEFAULT_MAX_REELECTION_RETRIES,
             resolved_proposals: ResolvedProposalCache::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
+            urgent_commit_target: None,
         }
     }
 
@@ -455,6 +463,39 @@ impl Group {
     /// Mark a removal ECP as finalized (resolved regardless of outcome).
     pub fn resolve_pending_removal(&mut self, member_id: &[u8]) {
         self.pending_removal_targets.remove(member_id);
+    }
+
+    // ─────────────────────────── Urgent (ECP-driven) Commit ───────────────────────────
+
+    /// Mark the next freeze cycle as urgent and committed-only-for `target`.
+    /// Set by `apply_consensus_result` on `ScoreBelowThreshold` ECP YES.
+    pub fn set_urgent_commit_target(&mut self, target: Vec<u8>) {
+        self.urgent_commit_target = Some(target);
+    }
+
+    /// Read the urgent target without consuming. `create_commit_candidate`
+    /// uses this to decide whether to restrict the batch.
+    pub fn urgent_commit_target(&self) -> Option<&[u8]> {
+        self.urgent_commit_target.as_deref()
+    }
+
+    /// Take the urgent target, clearing the marker. `record_applied_commit`
+    /// calls this after the urgent commit lands.
+    pub fn take_urgent_commit_target(&mut self) -> Option<Vec<u8>> {
+        self.urgent_commit_target.take()
+    }
+
+    /// Drop every `RemoveMember(target)` entry from `approved_proposals`,
+    /// regardless of source. Used after an urgent (ECP-driven) commit
+    /// applies — only the target's removal needs clearing; other approved
+    /// proposals stay queued for the next normal cycle.
+    pub fn drop_approved_removals_for(&mut self, target: &[u8]) {
+        self.approved_proposals.retain(|_pid, req| {
+            !matches!(
+                req.payload.as_ref(),
+                Some(group_update_request::Payload::RemoveMember(r)) if r.identity == target
+            )
+        });
     }
 
     // ─────────────────────────── Steward List Operations ───────────────────────────
@@ -1072,5 +1113,40 @@ mod tests {
         assert_ne!(live_backup, nominal);
         assert_ne!(live_backup, backup);
         assert_ne!(live_epoch, live_backup);
+    }
+
+    #[test]
+    fn test_urgent_commit_target_set_take_clears() {
+        let mut group = Group::new_as_creator("g", member(1), default_config()).unwrap();
+        assert!(group.urgent_commit_target().is_none());
+
+        let target = member(7);
+        group.set_urgent_commit_target(target.clone());
+        assert_eq!(group.urgent_commit_target(), Some(target.as_slice()));
+
+        let taken = group.take_urgent_commit_target().unwrap();
+        assert_eq!(taken, target);
+        assert!(group.urgent_commit_target().is_none());
+    }
+
+    #[test]
+    fn test_drop_approved_removals_for_target() {
+        let mut group = Group::new_as_creator("g", member(1), default_config()).unwrap();
+        let victim = member(7);
+        let bystander = member(9);
+
+        // Two RemoveMember entries for the victim under different ids
+        // (e.g. score-driven + ban) plus an unrelated RemoveMember.
+        insert_remove_member(&mut group, &victim, 100);
+        insert_remove_member(&mut group, &victim, 101);
+        insert_remove_member(&mut group, &bystander, 200);
+        assert_eq!(group.approved_proposals_count(), 3);
+
+        group.drop_approved_removals_for(&victim);
+
+        assert_eq!(group.approved_proposals_count(), 1);
+        assert!(group.approved_proposals().contains_key(&200));
+        assert!(!group.approved_proposals().contains_key(&100));
+        assert!(!group.approved_proposals().contains_key(&101));
     }
 }
