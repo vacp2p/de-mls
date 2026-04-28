@@ -149,6 +149,11 @@ pub struct Group {
     self_identity: Vec<u8>,
     /// Proposals that passed consensus, waiting for steward to commit.
     approved_proposals: HashMap<ProposalId, GroupUpdateRequest>,
+    /// Insertion order of `approved_proposals`. New entries push to the back;
+    /// `create_commit_candidate` iterates in this order so the `k_max` cap
+    /// selects the oldest proposals first (FIFO). Library proposal IDs are
+    /// content-derived hashes — sorting by ID would not be temporal.
+    approved_order: Vec<ProposalId>,
     /// Proposals waiting on consensus voting (created by this user).
     voting_proposals: HashMap<ProposalId, GroupUpdateRequest>,
     /// History of previously-committed batches (most recent last), capped
@@ -215,6 +220,7 @@ impl Group {
             group_name: group_name.to_string(),
             self_identity,
             approved_proposals: HashMap::new(),
+            approved_order: Vec::new(),
             voting_proposals: HashMap::new(),
             epoch_history: VecDeque::new(),
             steward_list: None,
@@ -368,10 +374,28 @@ impl Group {
         &self.approved_proposals
     }
 
+    /// Insertion order of `approved_proposals` (oldest first). Used by
+    /// `create_commit_candidate` to drive FIFO `k_max` selection.
+    pub fn approved_order(&self) -> &[ProposalId] {
+        &self.approved_order
+    }
+
+    /// Insert into the approved queue and append to the insertion order if new.
+    /// Re-inserting an existing id preserves the original position.
+    fn push_approved(&mut self, proposal_id: ProposalId, proposal: GroupUpdateRequest) {
+        if self
+            .approved_proposals
+            .insert(proposal_id, proposal)
+            .is_none()
+        {
+            self.approved_order.push(proposal_id);
+        }
+    }
+
     /// Move a proposal from the voting queue into the approved queue.
     pub fn mark_proposal_as_approved(&mut self, proposal_id: ProposalId) {
         if let Some(proposal) = self.voting_proposals.remove(&proposal_id) {
-            self.approved_proposals.insert(proposal_id, proposal);
+            self.push_approved(proposal_id, proposal);
         }
     }
 
@@ -391,12 +415,14 @@ impl Group {
         proposal_id: ProposalId,
         proposal: GroupUpdateRequest,
     ) {
-        self.approved_proposals.insert(proposal_id, proposal);
+        self.push_approved(proposal_id, proposal);
     }
 
     /// Drop a single proposal from the approved queue without archiving.
     pub fn remove_approved_proposal(&mut self, proposal_id: ProposalId) {
-        self.approved_proposals.remove(&proposal_id);
+        if self.approved_proposals.remove(&proposal_id).is_some() {
+            self.approved_order.retain(|pid| *pid != proposal_id);
+        }
     }
 
     /// Archive the approved batch to epoch history and clear the queue.
@@ -407,6 +433,7 @@ impl Group {
             return;
         }
         let snapshot = std::mem::take(&mut self.approved_proposals);
+        self.approved_order.clear();
         if self.epoch_history.len() >= MAX_EPOCH_HISTORY {
             self.epoch_history.pop_front();
         }
@@ -424,6 +451,8 @@ impl Group {
                 Some(group_update_request::Payload::RemoveMember(_))
             )
         });
+        self.approved_order
+            .retain(|pid| self.approved_proposals.contains_key(pid));
     }
 
     /// Drop every entry in the voting queue.
@@ -508,6 +537,8 @@ impl Group {
                 Some(group_update_request::Payload::RemoveMember(r)) if r.identity == target
             )
         });
+        self.approved_order
+            .retain(|pid| self.approved_proposals.contains_key(pid));
     }
 
     // ─────────────────────────── Layer 3 Recovery Mode ───────────────────────────
@@ -869,6 +900,8 @@ impl Group {
                 _ => true,
             }
         });
+        self.approved_order
+            .retain(|pid| self.approved_proposals.contains_key(pid));
     }
 }
 
@@ -1177,6 +1210,31 @@ mod tests {
         assert!(group.approved_proposals().contains_key(&ban_id));
         assert!(group.approved_proposals().contains_key(&ecp_id));
         assert!(!group.approved_proposals().contains_key(&add_id));
+    }
+
+    /// `approved_order` tracks insertion order so the `k_max` cap selects
+    /// oldest entries first. Library proposal IDs are content-derived hashes
+    /// — sort-by-id would not be temporal.
+    #[test]
+    fn test_approved_order_preserves_fifo_across_mutations() {
+        let mut group = Group::new_as_creator("g", member(1), default_config()).unwrap();
+
+        // Out-of-order ids: 500 inserted first, then 100, then 300.
+        insert_remove_member(&mut group, &member(2), 500);
+        insert_remove_member(&mut group, &member(3), 100);
+        insert_remove_member(&mut group, &member(4), 300);
+        assert_eq!(group.approved_order(), &[500, 100, 300]);
+
+        // Removing a middle entry preserves the relative order of the rest.
+        group.remove_approved_proposal(100);
+        assert_eq!(group.approved_order(), &[500, 300]);
+
+        // Re-inserting an existing id does not duplicate or reorder.
+        insert_remove_member(&mut group, &member(2), 500);
+        assert_eq!(group.approved_order(), &[500, 300]);
+
+        group.clear_approved_proposals();
+        assert!(group.approved_order().is_empty());
     }
 
     #[test]

@@ -94,9 +94,21 @@ where
     // normal cycle — see `Group::urgent_commit_target`.
     let urgent_target = group.urgent_commit_target().map(|t| t.to_vec());
 
-    let proposals = group.approved_proposals();
-    let mut updates = Vec::with_capacity(proposals.len());
-    for proposal in proposals.values() {
+    // Cap the batch at `k_max` so a recovery-preserved queue can't pile
+    // arbitrarily many proposals into a single MLS commit. Excess entries
+    // stay in `approved_proposals` for the next cycle. Iterate proposals
+    // in insertion order (FIFO) so the cap selects the oldest approved
+    // entries first; library proposal IDs are content-derived hashes, so
+    // sort-by-id is not temporal.
+    let k_max = group.protocol_config().k_max;
+    let mut updates = Vec::with_capacity(group.approved_order().len().min(k_max));
+    for pid in group.approved_order() {
+        if updates.len() >= k_max {
+            break;
+        }
+        let Some(proposal) = group.approved_proposals().get(pid) else {
+            continue;
+        };
         match proposal.payload.as_ref() {
             Some(group_update_request::Payload::InviteMember(im)) => {
                 if urgent_target.is_some() {

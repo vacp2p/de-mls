@@ -8,6 +8,12 @@ use sha2::{Digest, Sha256};
 
 use crate::core::CoreError;
 
+/// Default ceiling on the number of MLS proposals included in a single
+/// commit batch. Approved proposals beyond this cap stay queued for the
+/// next normal cycle. Defends against runaway batch growth when freeze
+/// recovery preserves work across multiple failed cycles.
+pub const DEFAULT_K_MAX: usize = 50;
+
 /// Protocol configuration set at group creation.
 ///
 /// Contains steward list size bounds and protocol-level flags that govern
@@ -20,13 +26,18 @@ pub struct ProtocolConfig {
     pub sn_max: usize,
     /// Whether subset commit candidates are allowed during deterministic selection.
     pub allow_subset_candidates: bool,
+    /// Ceiling on the number of MLS proposals included in a single commit
+    /// batch. Approved proposals beyond this cap stay queued for the next
+    /// cycle.
+    pub k_max: usize,
 }
 
 impl ProtocolConfig {
     /// Create a new config with the given bounds.
     ///
     /// Returns `Err` if `sn_min` is 0 or `sn_min > sn_max`.
-    /// Sets `allow_subset_candidates` to `false` by default.
+    /// `allow_subset_candidates` defaults to `false` and `k_max` to a
+    /// sensible upper bound.
     pub fn new(sn_min: usize, sn_max: usize) -> Result<Self, CoreError> {
         if sn_min < 1 || sn_min > sn_max {
             return Err(CoreError::InvalidConfigSize);
@@ -35,6 +46,7 @@ impl ProtocolConfig {
             sn_min,
             sn_max,
             allow_subset_candidates: false,
+            k_max: DEFAULT_K_MAX,
         })
     }
 

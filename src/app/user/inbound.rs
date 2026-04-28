@@ -10,7 +10,7 @@ use crate::{
         forward_incoming_vote,
     },
     core::{
-        DeMlsProvider, GroupEventHandler, ProcessResult, ProtocolConfig, StewardList,
+        DeMlsProvider, GroupEventHandler, ProcessResult, ProposalKind, ProtocolConfig, StewardList,
         build_message, create_commit_candidate, group_members, process_inbound,
     },
     ds::InboundPacket,
@@ -80,7 +80,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         group_name: &str,
         proposal: Proposal,
     ) -> Result<(), UserError> {
-        if let Ok(req) = GroupUpdateRequest::decode(proposal.payload.as_slice()) {
+        let decoded = GroupUpdateRequest::decode(proposal.payload.as_slice()).ok();
+        if let Some(req) = decoded.as_ref() {
             let current_epoch = self.mls_service.current_epoch(group_name)?;
             let mut groups = self.groups.write().await;
             if let Some(entry) = groups.get_mut(group_name) {
@@ -100,6 +101,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
         let proposal_id = proposal.proposal_id;
         let expected_voters = proposal.expected_voters_count;
+        let kind = decoded
+            .as_ref()
+            .map(ProposalKind::of)
+            .unwrap_or(ProposalKind::Commit);
         forward_incoming_proposal::<P>(
             group_name,
             proposal,
@@ -107,13 +112,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             &*self.handler,
         )
         .await?;
-        // Start this member's auto-vote timer. Fires `voting_delay` after
-        // the proposal becomes visible; cancelled on manual vote or
-        // ProposalDecided. Skip for fast-path proposals — the creator's
-        // bundled YES already resolved the session, so an auto-vote would
-        // hit a closed session.
+        // Auto-vote timer: fires after the kind's `voting_delay` and casts
+        // the configured `liveness_criteria_yes` choice. Skipped for
+        // fast-path proposals — the creator's bundled YES already resolved
+        // the session, so the timer would hit a closed session.
         if expected_voters > 1 {
-            self.spawn_auto_vote(group_name.to_string(), proposal_id);
+            let delay = self.default_group_config.voting_delay_for(kind);
+            self.spawn_auto_vote(group_name.to_string(), proposal_id, delay);
         }
         Ok(())
     }

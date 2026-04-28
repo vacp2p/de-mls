@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 pub use crate::core::DEFAULT_MAX_REELECTION_RETRIES;
-use crate::core::ProtocolConfig;
+use crate::core::{ProposalKind, ProtocolConfig};
 
 pub const DEFAULT_EPOCH_DURATION: Duration = Duration::from_secs(60);
 pub const DEFAULT_PROPOSAL_EXPIRATION: Duration = Duration::from_secs(3600);
@@ -22,6 +22,12 @@ pub const DEFAULT_RETRY_INACTIVITY_DURATION: Duration = Duration::from_secs(5);
 /// strictly less than `consensus_timeout` so the auto-vote has time to
 /// propagate and land in every peer's session before the library deadline.
 pub const DEFAULT_VOTING_DELAY: Duration = Duration::from_secs(10);
+
+/// Steward-election proposals carry a deterministic list — members can
+/// validate it locally without deliberation. A short auto-vote delay lets
+/// the election reach consensus in seconds, important for recovery cycles
+/// where the election gates the next commit.
+pub const DEFAULT_ELECTION_VOTING_DELAY: Duration = Duration::from_secs(1);
 
 /// Under the Δ-synchrony assumption every honest voter reaches a decision
 /// within `consensus_timeout`; counting silent voters as YES keeps small
@@ -67,6 +73,10 @@ pub struct GroupConfig {
     /// `voting_delay < consensus_timeout < epoch_duration`. See
     /// [`DEFAULT_VOTING_DELAY`].
     pub voting_delay: Duration,
+    /// Override of `voting_delay` for steward-election proposals (see
+    /// [`DEFAULT_ELECTION_VOTING_DELAY`]). Picked by
+    /// [`Self::voting_delay_for`] so recovery elections converge fast.
+    pub election_voting_delay: Duration,
     /// Whether silent voters count as YES at `consensus_timeout` (RFC
     /// §Creating Voting Proposal). See [`DEFAULT_LIVENESS_CRITERIA_YES`].
     /// Also used by the auto-vote timer as the cast value.
@@ -89,6 +99,7 @@ impl Default for GroupConfig {
             pending_update_max_epochs: DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
             max_reelection_retries: DEFAULT_MAX_REELECTION_RETRIES,
             voting_delay: DEFAULT_VOTING_DELAY,
+            election_voting_delay: DEFAULT_ELECTION_VOTING_DELAY,
             liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,
             default_peer_score: DEFAULT_PEER_SCORE,
             threshold_peer_score: DEFAULT_THRESHOLD_PEER_SCORE,
@@ -104,6 +115,17 @@ impl GroupConfig {
             epoch_duration,
             freeze_duration: epoch_duration / 2,
             ..Self::default()
+        }
+    }
+
+    /// Auto-vote delay for the given proposal kind. Steward elections use
+    /// the shorter `election_voting_delay`; everything else uses
+    /// `voting_delay`.
+    pub fn voting_delay_for(&self, kind: ProposalKind) -> Duration {
+        if kind.is_steward_election() {
+            self.election_voting_delay
+        } else {
+            self.voting_delay
         }
     }
 }

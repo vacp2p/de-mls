@@ -5,6 +5,8 @@
 //! timeout. Since `User` is `Clone` (every field is `Arc` or cheap `Clone`),
 //! each spawn just owns its own handle — no ctx struct per task kind.
 
+use std::time::Duration;
+
 use hashgraph_like_consensus::storage::ConsensusStorage;
 use prost::Message;
 use tracing::{error, info};
@@ -252,7 +254,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 self.handler
                     .on_app_message(group_name, vote_notification)
                     .await?;
-                self.spawn_auto_vote(group_name.to_string(), proposal_id);
+                let delay = self.default_group_config.voting_delay_for(kind);
+                self.spawn_auto_vote(group_name.to_string(), proposal_id, delay);
             }
         }
 
@@ -436,18 +439,20 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     }
 
     /// Spawn an auto-vote timer for `(group_name, proposal_id)`. After
-    /// `voting_delay`, the timer casts the local member's vote using
+    /// `delay`, the timer casts the local member's vote using
     /// `liveness_criteria_yes` and broadcasts it. Idempotent — an existing
     /// handle for the same key is aborted and replaced.
+    ///
+    /// Caller picks `delay` via `GroupConfig::voting_delay_for(kind)` so
+    /// elections use a shorter window than regular proposals.
     ///
     /// If the member has already voted or the session has resolved by the
     /// time the timer fires, `cast_vote` returns a benign error
     /// (`UserAlreadyVoted` / `SessionNotActive`); we log at debug and exit.
-    pub(crate) fn spawn_auto_vote(&self, group_name: String, proposal_id: u32) {
+    pub(crate) fn spawn_auto_vote(&self, group_name: String, proposal_id: u32, delay: Duration) {
         self.cancel_auto_vote(&group_name, proposal_id);
 
         let user = self.clone();
-        let delay = self.default_group_config.voting_delay;
         let vote = self.default_group_config.liveness_criteria_yes;
         let key = (group_name.clone(), proposal_id);
 
