@@ -202,6 +202,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
         self.steward_list_housekeeping(group_name).await?;
         self.process_buffered_updates(group_name).await?;
+        self.maybe_close_recovery_window(group_name).await;
 
         if transitioned {
             self.state_handler
@@ -209,6 +210,31 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 .await;
         }
         Ok(())
+    }
+
+    /// Fire a steward election while `recovery_mode` is set so the next
+    /// list installs and closes the window opened by a deadlock ECP YES.
+    /// The election landing restores the normal steward gate.
+    async fn maybe_close_recovery_window(&self, group_name: &str) {
+        let in_recovery_mode = {
+            let groups = self.groups.read().await;
+            groups
+                .get(group_name)
+                .is_some_and(|entry| entry.group.is_in_recovery_mode())
+        };
+        if !in_recovery_mode {
+            return;
+        }
+        if let Err(e) = self
+            .try_initiate_steward_election(group_name, true, None)
+            .await
+        {
+            info!(
+                group = group_name,
+                error = %e,
+                "post-recovery election deferred"
+            );
+        }
     }
 
     async fn on_leave_group(&self, group_name: &str) -> Result<(), UserError> {

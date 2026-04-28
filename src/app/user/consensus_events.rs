@@ -85,56 +85,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
 
         if consensus_apply.force_freezing {
-            // ECP YES (currently `ScoreBelowThreshold`) — bypass the
-            // inactivity timer and fire Freezing now so the urgent commit
-            // goes out in seconds rather than the next epoch cycle.
-            let transitioned = {
-                let mut groups = self.groups.write().await;
-                groups
-                    .get_mut(group_name)
-                    .map(|entry| entry.state_machine.force_freezing())
-                    .unwrap_or(false)
-            };
-            if transitioned {
-                self.state_handler
-                    .on_state_changed(group_name, GroupState::Freezing)
-                    .await;
-            }
+            self.force_freezing_for_urgent_commit(group_name).await;
         }
 
-        // Steward-affecting removal: regenerate the steward list now (in
-        // parallel with the natural commit cycle) so the next epoch starts
-        // with a proper ES + BS instead of dropping to one live steward.
-        // Skips the ECP path (the EmergencyCriteria payload doesn't decode
-        // as a direct RemoveMember) — Layer 1 + ECP fast-removal handle
-        // those cases via their own urgency. `has_election_in_flight`
-        // dedupes against Layer 2 firing in parallel.
-        if approved
-            && let Ok(req) = GroupUpdateRequest::decode(payload.as_slice())
-            && let Some(group_update_request::Payload::RemoveMember(rm)) = req.payload.as_ref()
-        {
-            let target = rm.identity.clone();
-            let target_was_steward = {
-                let groups = self.groups.read().await;
-                groups.get(group_name).is_some_and(|entry| {
-                    entry
-                        .group
-                        .steward_list()
-                        .is_some_and(|l| l.contains(&target))
-                })
-            };
-            if target_was_steward {
-                if let Err(e) = self
-                    .try_initiate_steward_election(group_name, true, Some(&target))
-                    .await
-                {
-                    info!(
-                        group = group_name,
-                        error = %e,
-                        "post-removal regeneration deferred"
-                    );
-                }
-            }
+        if let Some(target) = &consensus_apply.queued_remove_target {
+            self.refresh_stewards_after_removal(group_name, target)
+                .await;
         }
 
         if !approved && let Ok(req) = GroupUpdateRequest::decode(payload.as_slice()) {
@@ -162,9 +118,59 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         Ok(())
     }
 
-    /// Accepted election: validate the proposed list, apply it, reset the
-    /// retry counter, exit Reelection if we were in it, and drain buffered
-    /// updates so the fresh epoch steward picks them up.
+    /// ECP YES side-effect: bypass the inactivity timer so the urgent
+    /// commit fires now rather than the next epoch cycle.
+    async fn force_freezing_for_urgent_commit(&self, group_name: &str) {
+        let transitioned = {
+            let mut groups = self.groups.write().await;
+            groups
+                .get_mut(group_name)
+                .map(|entry| entry.state_machine.force_freezing())
+                .unwrap_or(false)
+        };
+        if transitioned {
+            self.state_handler
+                .on_state_changed(group_name, GroupState::Freezing)
+                .await;
+        }
+    }
+
+    /// Approved removal of a current steward fires a steward election in
+    /// parallel with the natural commit cycle so the next epoch starts
+    /// with a healthy ES + BS rather than dropping to one live steward.
+    /// `has_election_in_flight` dedupes against a Layer-2 election firing
+    /// from another path.
+    async fn refresh_stewards_after_removal(&self, group_name: &str, target: &[u8]) {
+        let target_was_steward = {
+            let groups = self.groups.read().await;
+            groups.get(group_name).is_some_and(|entry| {
+                entry
+                    .group
+                    .steward_list()
+                    .is_some_and(|l| l.contains(target))
+            })
+        };
+        if !target_was_steward {
+            return;
+        }
+        if let Err(e) = self
+            .try_initiate_steward_election(group_name, true, Some(target))
+            .await
+        {
+            info!(
+                group = group_name,
+                error = %e,
+                "post-removal steward-list refresh deferred"
+            );
+        }
+    }
+
+    /// Accepted election: validate the proposed list, install it, exit
+    /// Reelection if we were in it, close any open recovery window, and
+    /// drain buffered updates so the fresh epoch steward picks them up.
+    /// `reelection_round` stays > 0 until the next successful commit so
+    /// the immediate post-election inactivity check uses the short retry
+    /// window.
     async fn handle_election_accepted(
         &self,
         group_name: &str,
@@ -198,15 +204,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 election.proposed_stewards.len(),
                 election.retry_round,
             )?;
-            // Note: `reelection_round` is intentionally NOT reset here.
-            // It stays > 0 until the next successful commit, so the
-            // post-recovery inactivity check uses the short
-            // `retry_inactivity_duration` and the new steward commits
-            // the still-pending RemoveMember in seconds, not after another
-            // full epoch. `on_group_updated` clears it after commit.
-            // Layer 3: a fresh steward list closes the recovery window
-            // opened by a prior `Deadlock` ECP YES — the steward gate is
-            // back in force.
+            // `reelection_round` stays > 0 here; cleared on next successful
+            // commit by `on_group_updated`. A fresh steward list also closes
+            // any recovery window opened by a deadlock ECP.
             entry.group.exit_recovery_mode();
             if entry.state_machine.current_state() == GroupState::Reelection {
                 entry.state_machine.start_working();

@@ -22,10 +22,14 @@ use crate::protos::de_mls::messages::v1::{
 /// Result of applying a consensus outcome.
 ///
 /// `election`: accepted election proposal for the app to validate and install
-/// as a new steward list. `force_freezing`: an ECP YES (currently
-/// `ScoreBelowThreshold`) wants to bypass the inactivity timer — the app
-/// should call `GroupStateMachine::force_freezing` so the urgent commit
-/// fires now instead of next inactivity tick.
+/// as a new steward list. `force_freezing`: an ECP YES wants to bypass the
+/// inactivity timer — the app should call `GroupStateMachine::force_freezing`
+/// so the urgent commit fires now instead of next inactivity tick.
+/// `queued_remove_target`: identity now queued for removal as a result of
+/// this approval — set whether the source was a direct `RemoveMember` or an
+/// `EmergencyCriteria` ECP that transformed into one. The app uses this to
+/// fire a steward-list refresh when the target is on the current list, so
+/// the next epoch starts with a healthy ES + BS.
 ///
 /// Score ops for emergency outcomes are produced separately by
 /// `crate::app::user::emergency`.
@@ -33,6 +37,7 @@ use crate::protos::de_mls::messages::v1::{
 pub struct ConsensusApplyResult {
     pub election: Option<StewardElectionProposal>,
     pub force_freezing: bool,
+    pub queued_remove_target: Option<Vec<u8>>,
 }
 
 /// Extract emergency evidence from a `GroupUpdateRequest`, if present.
@@ -96,17 +101,54 @@ fn pending_removal_target(
     }
 }
 
+/// Election outcome — purely consensus-tracking, no MLS operation. YES
+/// hands the proposed list back to the app for validation and install;
+/// NO drops the owner's voting-queue entry.
+fn apply_election_outcome(
+    group: &mut Group,
+    proposal_id: u32,
+    approved: bool,
+    election: StewardElectionProposal,
+    is_owner: bool,
+) -> ConsensusApplyResult {
+    if approved {
+        if is_owner {
+            group.mark_proposal_as_approved(proposal_id);
+            group.remove_approved_proposal(proposal_id);
+        }
+        info!(
+            proposal_id,
+            epoch = election.election_epoch,
+            stewards = election.proposed_stewards.len(),
+            "steward election proposal accepted"
+        );
+        ConsensusApplyResult {
+            election: Some(election),
+            ..Default::default()
+        }
+    } else {
+        if is_owner {
+            group.mark_proposal_as_rejected(proposal_id);
+        }
+        info!(proposal_id, "steward election proposal rejected");
+        ConsensusApplyResult::default()
+    }
+}
+
 /// Apply a consensus result to the group's proposal queues.
 ///
 /// Routes by proposal kind:
 /// - **Election (accepted)** — returned via `election` for the app to
 ///   validate and install.
-/// - **`SCORE_BELOW_THRESHOLD` (accepted)** — replaced in the approved
-///   queue with a `RemoveMember` request targeting the threshold-crossed
-///   member.
+/// - **`ScoreBelowThreshold` ECP (accepted)** — queues `RemoveMember(target)`
+///   in the approved queue, sets the urgent-commit target, and signals
+///   `force_freezing` so the urgent commit fires now.
+/// - **`Deadlock` ECP (accepted)** — opens `recovery_mode` (any-member
+///   commit) and signals `force_freezing`.
 /// - **Other emergency (accepted)** — transient in the approved queue:
 ///   briefly marked approved then removed. No MLS op to commit.
 /// - **Regular proposal (accepted)** — moved to the approved queue.
+///   `RemoveMember` for an already-queued target is deduped at insertion.
 /// - **Rejected (any kind)** — dropped from the voting queue if we
 ///   owned it.
 pub fn apply_consensus_result(
@@ -118,37 +160,16 @@ pub fn apply_consensus_result(
     let is_owner = group.is_owner_of_proposal(proposal_id);
     let request = GroupUpdateRequest::decode(payload)?;
     let evidence = extract_emergency_evidence(&request).cloned();
-    let election = extract_election_proposal(&request).cloned();
     let is_emergency = evidence.is_some();
-    let is_election = election.is_some();
 
-    // ── Election proposals: no MLS operation ──
-    if is_election {
-        if approved {
-            if is_owner {
-                // Move from voting to approved, then immediately remove (no MLS op).
-                group.mark_proposal_as_approved(proposal_id);
-                group.remove_approved_proposal(proposal_id);
-            }
-            // Non-owner: nothing to store — election proposals don't produce MLS ops.
-            let election = election.unwrap();
-            info!(
-                proposal_id,
-                epoch = election.election_epoch,
-                stewards = election.proposed_stewards.len(),
-                "steward election proposal accepted"
-            );
-            return Ok(ConsensusApplyResult {
-                election: Some(election),
-                force_freezing: false,
-            });
-        } else {
-            if is_owner {
-                group.mark_proposal_as_rejected(proposal_id);
-            }
-            info!(proposal_id, "steward election proposal rejected");
-            return Ok(ConsensusApplyResult::default());
-        }
+    if let Some(election) = extract_election_proposal(&request).cloned() {
+        return Ok(apply_election_outcome(
+            group,
+            proposal_id,
+            approved,
+            election,
+            is_owner,
+        ));
     }
 
     // ── Emergency and regular proposals ──
@@ -157,24 +178,31 @@ pub fn apply_consensus_result(
     let transforms_to_removal =
         approved && is_emergency && evidence.as_ref().is_some_and(is_score_below_threshold);
 
-    // Target-keyed dedup. Two approvals from independent paths (self-leave +
-    // ban, ECP + ban, …) can each carry `RemoveMember(target)` under
-    // different proposal ids. MLS rejects a duplicate removal at commit
-    // time, so keep the first entry and drop the second.
-    if let Some(target) = pending_removal_target(
+    // Identity this approval would queue for removal — set whether the
+    // source is a direct `RemoveMember` or an ECP that transforms into one.
+    // Used both for target-keyed dedup below and reported back in the
+    // result so the app layer can fire a steward-list refresh.
+    let removal_target = pending_removal_target(
         &request,
         evidence.as_ref(),
         approved,
         is_emergency,
         transforms_to_removal,
-    ) && group.is_pending_removal(&target)
+    );
+
+    // Two approvals from independent paths (self-leave + ban, ECP + ban, …)
+    // can each carry `RemoveMember(target)` under different proposal ids.
+    // MLS rejects a duplicate removal at commit time, so keep the first
+    // entry and drop the second.
+    if let Some(target) = &removal_target
+        && group.is_pending_removal(target)
     {
         if is_owner {
             group.mark_proposal_as_rejected(proposal_id);
         }
         info!(
             proposal_id,
-            target = %ShortId(&target),
+            target = %ShortId(target),
             "removal proposal deduped — target already queued for removal"
         );
         return Ok(ConsensusApplyResult::default());
@@ -242,6 +270,7 @@ pub fn apply_consensus_result(
     Ok(ConsensusApplyResult {
         election: None,
         force_freezing,
+        queued_remove_target: removal_target,
     })
 }
 
