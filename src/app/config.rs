@@ -10,6 +10,13 @@ pub const DEFAULT_PROPOSAL_EXPIRATION: Duration = Duration::from_secs(3600);
 pub const DEFAULT_CONSENSUS_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
 
+/// Inactivity window when the group is recovering — `reelection_round > 0`
+/// or `recovery_mode` is set. Much shorter than `epoch_duration` so retries
+/// don't burn another full epoch waiting for the steward to commit. Reset
+/// to the long `epoch_duration` after a successful commit clears the
+/// recovery state.
+pub const DEFAULT_RETRY_INACTIVITY_DURATION: Duration = Duration::from_secs(5);
+
 /// How long each member has to cast a manual vote before the app casts an
 /// auto-vote on their behalf using `liveness_criteria_yes`. Must be
 /// strictly less than `consensus_timeout` so the auto-vote has time to
@@ -41,6 +48,10 @@ pub struct GroupConfig {
     pub epoch_duration: Duration,
     /// Freeze window before deterministic selection. Defaults to `epoch_duration / 2`.
     pub freeze_duration: Duration,
+    /// Inactivity window during recovery (Layer 2 retry / Layer 3
+    /// `recovery_mode`). Much shorter than `epoch_duration` so retries
+    /// don't burn another full epoch.
+    pub retry_inactivity_duration: Duration,
     /// How long a proposal stays active before expiring (RFC §Creating Voting Proposal).
     pub proposal_expiration: Duration,
     pub consensus_timeout: Duration,
@@ -72,6 +83,7 @@ impl Default for GroupConfig {
         Self {
             epoch_duration: DEFAULT_EPOCH_DURATION,
             freeze_duration: DEFAULT_EPOCH_DURATION / 2,
+            retry_inactivity_duration: DEFAULT_RETRY_INACTIVITY_DURATION,
             proposal_expiration: DEFAULT_PROPOSAL_EXPIRATION,
             consensus_timeout: DEFAULT_CONSENSUS_TIMEOUT,
             pending_update_max_epochs: DEFAULT_PENDING_UPDATE_MAX_EPOCHS,

@@ -73,6 +73,10 @@ pub struct GroupStateMachine {
     phase_timer: Option<Instant>,
     epoch_duration: Duration,
     freeze_duration: Duration,
+    /// Short inactivity window used during recovery (Layer 2 retry,
+    /// Layer 3 `recovery_mode`). Caller of `check_steward_inactivity`
+    /// picks between `epoch_duration` (fresh) and this (in-recovery).
+    retry_inactivity_duration: Duration,
 }
 
 impl Default for GroupStateMachine {
@@ -92,6 +96,7 @@ impl GroupStateMachine {
             phase_timer: None,
             epoch_duration: config.epoch_duration,
             freeze_duration: config.freeze_duration,
+            retry_inactivity_duration: config.retry_inactivity_duration,
         }
     }
 
@@ -101,6 +106,7 @@ impl GroupStateMachine {
             phase_timer: Some(Instant::now()),
             epoch_duration: config.epoch_duration,
             freeze_duration: config.freeze_duration,
+            retry_inactivity_duration: config.retry_inactivity_duration,
         }
     }
 
@@ -116,10 +122,20 @@ impl GroupStateMachine {
         self.freeze_duration
     }
 
+    pub fn retry_inactivity_duration(&self) -> Duration {
+        self.retry_inactivity_duration
+    }
+
     /// Overwritten when the handle receives a `GroupSync` from the steward.
-    pub fn update_timing(&mut self, epoch_duration: Duration, freeze_duration: Duration) {
+    pub fn update_timing(
+        &mut self,
+        epoch_duration: Duration,
+        freeze_duration: Duration,
+        retry_inactivity_duration: Duration,
+    ) {
         self.epoch_duration = epoch_duration;
         self.freeze_duration = freeze_duration;
+        self.retry_inactivity_duration = retry_inactivity_duration;
     }
 
     pub fn start_working(&mut self) {
@@ -135,18 +151,23 @@ impl GroupStateMachine {
     }
 
     /// Bypass the inactivity timer and enter Freezing immediately. Used by
-    /// ECP-YES dispatch when an emergency (e.g. fast steward removal) needs
-    /// to commit ASAP. Only fires from `Working` — other states are either
-    /// already mid-cycle (`Freezing`, `Selection`) or in recovery
-    /// (`Reelection`, `Leaving`, `PendingJoin`) where a separate path is
-    /// driving the next transition. Returns `true` if the transition
-    /// happened, so the caller knows whether to dispatch `on_state_changed`.
+    /// ECP-YES dispatch when an emergency needs to commit ASAP. Fires from:
+    /// - `Working` — fast removal (`ScoreBelowThreshold` ECP YES) skipping
+    ///   the inactivity wait.
+    /// - `Reelection` — Layer 3 (`Deadlock` ECP YES) opening the recovery
+    ///   window after Layer 2's re-election retries exhausted.
+    ///
+    /// No-op in `Freezing` / `Selection` (already mid-cycle) and in
+    /// `PendingJoin` / `Leaving` (separate paths drive those). Returns
+    /// `true` if the transition happened, so the caller knows whether to
+    /// dispatch `on_state_changed`.
     pub fn force_freezing(&mut self) -> bool {
-        if self.state == GroupState::Working {
-            self.start_freezing();
-            true
-        } else {
-            false
+        match self.state {
+            GroupState::Working | GroupState::Reelection => {
+                self.start_freezing();
+                true
+            }
+            _ => false,
         }
     }
 
@@ -218,8 +239,16 @@ impl GroupStateMachine {
     /// - `start_working` clears the timer, so the next tick with leftover
     ///   approved work starts a fresh window (matters for auto-approved
     ///   self-leaves that survive a reelection round).
+    /// - `inactivity_duration` is selected by the caller: `epoch_duration`
+    ///   for fresh state, `retry_inactivity_duration` while the group is
+    ///   recovering. Pass the right one based on `Group::reelection_round`
+    ///   and `Group::is_in_recovery_mode()`.
     /// - No-op outside `Working`.
-    pub fn check_steward_inactivity(&mut self, approved_proposals_count: usize) -> bool {
+    pub fn check_steward_inactivity(
+        &mut self,
+        approved_proposals_count: usize,
+        inactivity_duration: Duration,
+    ) -> bool {
         if self.state != GroupState::Working || approved_proposals_count == 0 {
             return false;
         }
@@ -230,21 +259,22 @@ impl GroupStateMachine {
                 self.phase_timer = Some(Instant::now());
                 info!(
                     approved = approved_proposals_count,
+                    inactivity_ms = inactivity_duration.as_millis() as u64,
                     "inactivity timer started"
                 );
                 return false;
             }
         };
 
-        if Instant::now() < first_approved + self.epoch_duration {
+        if Instant::now() < first_approved + inactivity_duration {
             return false;
         }
 
         self.start_freezing();
         info!(
-            epoch_duration_ms = self.epoch_duration.as_millis() as u64,
+            inactivity_ms = inactivity_duration.as_millis() as u64,
             approved = approved_proposals_count,
-            "epoch commit window elapsed, entering freeze"
+            "inactivity window elapsed, entering freeze"
         );
         true
     }
@@ -253,7 +283,6 @@ impl GroupStateMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::ProtocolConfig;
 
     #[test]
     fn test_pending_join_timeout() {
@@ -311,43 +340,75 @@ mod tests {
 
     // ─────────────────────────── Proposal Timer Tests ───────────────────────────
 
+    fn long_inactivity() -> Duration {
+        Duration::from_secs(60)
+    }
+
+    fn short_inactivity() -> Duration {
+        Duration::from_secs(5)
+    }
+
     #[test]
     fn test_inactivity_timer_self_starts_on_first_check_with_approved() {
         let mut sm = GroupStateMachine::new_as_member();
         assert!(sm.phase_timer.is_none());
 
         // First call with approved work: timer starts, no transition yet.
-        assert!(!sm.check_steward_inactivity(1));
+        assert!(!sm.check_steward_inactivity(1, long_inactivity()));
         assert!(sm.phase_timer.is_some());
     }
 
     #[test]
     fn test_inactivity_timer_not_restarted_while_running() {
         let mut sm = GroupStateMachine::new_as_member();
-        sm.check_steward_inactivity(1);
+        sm.check_steward_inactivity(1, long_inactivity());
         let first_time = sm.phase_timer.unwrap();
 
         std::thread::sleep(Duration::from_millis(5));
 
         // Same-or-more approved → same timer.
-        sm.check_steward_inactivity(2);
+        sm.check_steward_inactivity(2, long_inactivity());
         assert_eq!(sm.phase_timer.unwrap(), first_time);
     }
 
     #[test]
     fn test_steward_inactivity_triggers_freezing() {
-        let config = GroupConfig {
-            epoch_duration: Duration::from_millis(50),
-            freeze_duration: Duration::from_millis(25),
-            protocol: ProtocolConfig::new(1, 5).unwrap(),
-            ..GroupConfig::default()
-        };
-        let mut sm = GroupStateMachine::new_as_member_with_config(config);
-        // Backdate the first proposal approval to well past epoch_duration
+        let mut sm = GroupStateMachine::new_as_member();
+        // Backdate the first proposal approval to well past the chosen
+        // inactivity window.
         sm.phase_timer = Some(Instant::now() - Duration::from_secs(1));
 
-        assert!(sm.check_steward_inactivity(1));
+        assert!(sm.check_steward_inactivity(1, Duration::from_millis(50)));
         assert_eq!(sm.current_state(), GroupState::Freezing);
+    }
+
+    /// Caller picks the duration: a long window doesn't fire even when the
+    /// short window would have.
+    #[test]
+    fn test_check_inactivity_uses_caller_supplied_duration() {
+        let mut sm = GroupStateMachine::new_as_member();
+        // 100 ms since first approval — long enough for `short_inactivity`
+        // (5 s) to NOT have elapsed, but we deliberately pass long below.
+        sm.phase_timer = Some(Instant::now() - Duration::from_millis(100));
+        assert!(!sm.check_steward_inactivity(1, long_inactivity()));
+        assert_eq!(sm.current_state(), GroupState::Working);
+
+        // Same timer state, different (very short) duration → fires.
+        assert!(sm.check_steward_inactivity(1, Duration::from_millis(50)));
+        assert_eq!(sm.current_state(), GroupState::Freezing);
+    }
+
+    /// Recovery uses the short retry duration via the config knob.
+    #[test]
+    fn test_retry_inactivity_duration_threaded_from_config() {
+        let config = GroupConfig {
+            epoch_duration: long_inactivity(),
+            retry_inactivity_duration: short_inactivity(),
+            ..GroupConfig::default()
+        };
+        let sm = GroupStateMachine::new_as_member_with_config(config);
+        assert_eq!(sm.epoch_duration(), long_inactivity());
+        assert_eq!(sm.retry_inactivity_duration(), short_inactivity());
     }
 
     #[test]
@@ -360,11 +421,18 @@ mod tests {
     }
 
     #[test]
-    fn test_force_freezing_noop_outside_working() {
+    fn test_force_freezing_from_reelection() {
+        let mut sm = GroupStateMachine::new_as_member();
+        sm.start_reelection();
+        assert!(sm.force_freezing());
+        assert_eq!(sm.current_state(), GroupState::Freezing);
+    }
+
+    #[test]
+    fn test_force_freezing_noop_in_mid_cycle_or_terminal_states() {
         for state_setup in [
             |sm: &mut GroupStateMachine| sm.start_freezing(),
             |sm: &mut GroupStateMachine| sm.start_selection(),
-            |sm: &mut GroupStateMachine| sm.start_reelection(),
             |sm: &mut GroupStateMachine| sm.start_leaving(),
         ] {
             let mut sm = GroupStateMachine::new_as_member();
@@ -377,18 +445,12 @@ mod tests {
 
     #[test]
     fn test_steward_inactivity_skips_if_already_freezing() {
-        let config = GroupConfig {
-            epoch_duration: Duration::from_millis(50),
-            freeze_duration: Duration::from_millis(25),
-            protocol: ProtocolConfig::new(1, 5).unwrap(),
-            ..GroupConfig::default()
-        };
-        let mut sm = GroupStateMachine::new_as_member_with_config(config);
+        let mut sm = GroupStateMachine::new_as_member();
         sm.phase_timer = Some(Instant::now() - Duration::from_secs(1));
         sm.start_freezing();
 
         // Already in Freezing — should not re-trigger
-        assert!(!sm.check_steward_inactivity(1));
+        assert!(!sm.check_steward_inactivity(1, Duration::from_millis(50)));
         assert_eq!(sm.current_state(), GroupState::Freezing);
     }
 }

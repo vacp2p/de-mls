@@ -43,9 +43,17 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// Check that the group state allows creating a proposal of this kind and
     /// return the expected voter count.
     ///
-    /// Freezing / Selection → always blocked. Reelection → emergency only.
-    /// Otherwise the RFC partial-freeze rule applies (see
-    /// `Group::partial_freeze_blocks`).
+    /// Layered partial-freeze model:
+    /// - **Working, no active ECP:** everything allowed.
+    /// - **Working, active ECP (phase 3 — ECP being voted):** only the
+    ///   active ECP allowed; Election + Commit blocked via
+    ///   `partial_freeze_blocks`.
+    /// - **Reelection, no active ECP (phase 2 — Layer 2 recovery):** ECP
+    ///   and StewardElection allowed (the recovery itself); new Commit
+    ///   proposals blocked.
+    /// - **Reelection, active ECP (phase 3 escalation):** only the active
+    ///   ECP allowed; Election blocked via `partial_freeze_blocks`.
+    /// - **Freezing / Selection:** all proposals blocked (transient).
     async fn check_proposal_allowed(
         &self,
         group_name: &str,
@@ -57,8 +65,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
         match state {
             GroupState::Reelection => {
-                if !kind.is_emergency() {
+                if !kind.is_emergency() && !kind.is_steward_election() {
                     return Err(UserError::GroupBlocked(state.to_string()));
+                }
+                if entry.group.partial_freeze_blocks(kind) {
+                    return Err(UserError::PartialFreeze);
                 }
             }
             GroupState::Freezing | GroupState::Selection => {

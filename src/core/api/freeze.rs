@@ -161,10 +161,17 @@ where
 
     let candidates = match group.freeze_round() {
         Some(round) if round.epoch == current_epoch => round.candidates.clone(),
-        _ => return Ok(FreezeFinalizeResult::default()),
+        _ => {
+            // Steward may have built a local pending commit before the
+            // round emptied — drop it so the next attempt's MLS encrypt
+            // doesn't trip on "pending proposal exists".
+            let _ = mls.discard_own_commit(group.group_name());
+            return Ok(FreezeFinalizeResult::default());
+        }
     };
 
     if candidates.is_empty() {
+        let _ = mls.discard_own_commit(group.group_name());
         return Ok(FreezeFinalizeResult::default());
     }
 
@@ -173,6 +180,7 @@ where
 
     if sorted.is_empty() {
         group.clear_freeze_round();
+        let _ = mls.discard_own_commit(group.group_name());
         return Ok(FreezeFinalizeResult::default());
     }
 
@@ -381,6 +389,13 @@ where
         }
     }
 
+    // No candidate applied. If the local steward built one and we never
+    // merged or discarded it (no incoming-wins path fired), drop it now —
+    // otherwise MLS state holds a pending commit that breaks the next
+    // encrypt (e.g., the recovery election proposal).
+    if !own_commit_discarded {
+        let _ = mls.discard_own_commit(&group_name);
+    }
     group.clear_freeze_round();
     Ok(FreezeFinalizeResult {
         outcome: FreezeOutcome::NoCandidate,

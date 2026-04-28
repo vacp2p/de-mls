@@ -328,7 +328,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 if let Some(timing) = &sync.timing {
                     let epoch_dur = std::time::Duration::from_millis(timing.epoch_duration_ms);
                     let freeze_dur = std::time::Duration::from_millis(timing.freeze_duration_ms);
-                    entry.state_machine.update_timing(epoch_dur, freeze_dur);
+                    let retry_dur =
+                        std::time::Duration::from_millis(timing.retry_inactivity_duration_ms);
+                    entry
+                        .state_machine
+                        .update_timing(epoch_dur, freeze_dur, retry_dur);
                 }
             }
         }

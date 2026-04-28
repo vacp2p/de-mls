@@ -77,42 +77,77 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         Ok(())
     }
 
-    /// Submit a steward-election proposal if the list is exhausted at the
-    /// current epoch. Only the deterministic responsible proposer (first
-    /// live member of the previous list) actually submits; others no-op, so
-    /// this is safe to call from every poll tick without double-proposing.
-    /// `retry_round` comes from `Group::reelection_round` (bumps on reject).
+    /// Submit a steward-election proposal. Only the deterministic responsible
+    /// proposer (first live member of the previous list) actually submits;
+    /// others no-op, so this is safe to call from every poll tick without
+    /// double-proposing. `retry_round` comes from `Group::reelection_round`
+    /// (bumps on reject).
+    ///
+    /// `recovery` switches the call between the two trigger modes:
+    /// - `false` (housekeeping): only fires when the steward list is exhausted
+    ///   at the current epoch. Candidate pool is the full MLS member set.
+    /// - `true` (Layer 2 recovery): bypasses the exhaustion gate so we can
+    ///   regenerate the list when the live walk has yielded nothing. Members
+    ///   with a queued `RemoveMember` are filtered out of the candidate pool
+    ///   so the new list doesn't re-include them.
+    ///
+    /// `extra_exclude` adds one more identity to drop from the candidate pool
+    /// — used by proactive callers (banner / leaver) whose target isn't in
+    /// `approved_proposals` yet at submission time.
     pub(super) async fn try_initiate_steward_election(
         &self,
         group_name: &str,
+        recovery: bool,
+        extra_exclude: Option<&[u8]>,
     ) -> Result<(), UserError> {
         let (members, election_epoch, config, retry_round) = {
             let groups = self.groups.read().await;
             let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
             let epoch = self.mls_service.current_epoch(group_name)?;
-            if !entry.group.is_steward_list_exhausted(epoch) {
+            if !recovery && !entry.group.is_steward_list_exhausted(epoch) {
                 return Ok(());
             }
             if entry.group.has_election_in_flight() {
                 return Ok(());
             }
-            let members = group_members(&entry.group, &self.mls_service)?;
+            let mls_members = group_members(&entry.group, &self.mls_service)?;
 
             let self_identity = self.mls_service.wallet_bytes();
             let is_authorized = entry
                 .group
                 .steward_list()
                 .and_then(|list| {
-                    list.responsible_election_proposer(|c| members.iter().any(|m| m == c))
+                    list.responsible_election_proposer(|c| mls_members.iter().any(|m| m == c))
                 })
                 .is_some_and(|proposer| proposer == self_identity);
             if !is_authorized {
                 return Ok(());
             }
 
+            let candidate_pool: Vec<Vec<u8>> = mls_members
+                .into_iter()
+                .filter(|m| {
+                    if extra_exclude.is_some_and(|x| x == m.as_slice()) {
+                        return false;
+                    }
+                    if recovery && entry.group.is_pending_removal(m) {
+                        return false;
+                    }
+                    true
+                })
+                .collect();
+
+            if candidate_pool.is_empty() {
+                info!(
+                    group = group_name,
+                    "skipping election: no eligible candidates after filter"
+                );
+                return Ok(());
+            }
+
             let config = entry.group.protocol_config().clone();
             let retry_round = entry.group.reelection_round();
-            (members, epoch, config, retry_round)
+            (candidate_pool, epoch, config, retry_round)
         };
 
         let sn = config.compute_list_size(members.len());
@@ -140,6 +175,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             epoch = election_epoch,
             retry_round,
             stewards = proposed_list.len(),
+            recovery,
             "initiating steward election"
         );
 
@@ -151,13 +187,62 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         Ok(())
     }
 
+    /// Layer 3 escalation: file a `Deadlock` ECP after Layer 2's
+    /// re-election retries are exhausted. Only the deterministic
+    /// responsible proposer (first eligible member of the previous
+    /// steward list) actually submits — others no-op, so it's safe to
+    /// call from every member's `handle_election_rejected`. On YES the
+    /// ECP opens `recovery_mode` (any-member commit) until a fresh
+    /// election lands.
+    pub(super) async fn try_initiate_deadlock_ecp(
+        &self,
+        group_name: &str,
+    ) -> Result<(), UserError> {
+        let (is_authorized, self_id, epoch) = {
+            let groups = self.groups.read().await;
+            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            let mls_members = group_members(&entry.group, &self.mls_service)?;
+            let self_id = self.mls_service.wallet_bytes();
+            let is_authorized = entry
+                .group
+                .steward_list()
+                .and_then(|list| {
+                    list.responsible_election_proposer(|c| {
+                        mls_members.iter().any(|m| m == c) && !entry.group.is_pending_removal(c)
+                    })
+                })
+                .is_some_and(|proposer| proposer == self_id);
+            let epoch = self.mls_service.current_epoch(group_name)?;
+            (is_authorized, self_id, epoch)
+        };
+
+        if !is_authorized {
+            return Ok(());
+        }
+
+        let request = ViolationEvidence::deadlock(epoch)
+            .with_creator(self_id)
+            .into_update_request()?;
+
+        info!(group = group_name, epoch, "initiating Deadlock ECP");
+
+        // Bundle the YES vote at submit — the proposer's observation that
+        // the deadlock is real *is* their YES.
+        self.initiate_proposal(group_name.to_string(), request, Some(true))
+            .await?;
+        Ok(())
+    }
+
     /// Post-epoch-advance sequence: (1) auto-fill if membership dropped
     /// below `sn_min`, (2) kick off an election if the list is exhausted.
     /// Election-initiate failures are logged, not surfaced — group state
     /// may legitimately reject a new proposal right now.
     pub async fn steward_list_housekeeping(&self, group_name: &str) -> Result<(), UserError> {
         self.try_auto_fill_steward_list(group_name).await?;
-        if let Err(e) = self.try_initiate_steward_election(group_name).await {
+        if let Err(e) = self
+            .try_initiate_steward_election(group_name, false, None)
+            .await
+        {
             info!(group = group_name, error = %e, "election initiation deferred");
         }
         Ok(())
@@ -328,6 +413,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     as u64,
                 consensus_timeout_ms: self.default_group_config.consensus_timeout.as_millis()
                     as u64,
+                retry_inactivity_duration_ms: entry
+                    .state_machine
+                    .retry_inactivity_duration()
+                    .as_millis() as u64,
             };
 
             // Filter ghosts and queued-removal targets so joiners don't

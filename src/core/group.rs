@@ -196,6 +196,12 @@ pub struct Group {
     /// applies. Other proposals piggybacking the same urgent commit
     /// would dilute the "fast removal" intent, so they wait.
     urgent_commit_target: Option<Vec<u8>>,
+    /// Layer 3 recovery: set by a `Deadlock` ECP YES, cleared once a
+    /// fresh steward election lands. While set, `create_commit_candidate`
+    /// bypasses the `is_steward()` gate so any member can produce the
+    /// recovery commit. Layer 2 has already failed `max_reelection_retries`
+    /// times by the time this trips.
+    recovery_mode: bool,
 }
 
 /// Fallback ceiling on steward-election retries. One retry gives the
@@ -222,6 +228,7 @@ impl Group {
             max_reelection_retries: DEFAULT_MAX_REELECTION_RETRIES,
             resolved_proposals: ResolvedProposalCache::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
             urgent_commit_target: None,
+            recovery_mode: false,
         }
     }
 
@@ -406,12 +413,17 @@ impl Group {
         self.epoch_history.push_back(snapshot);
     }
 
-    /// Discard the approved queue on freeze failure. Auto-approved self-leaves
-    /// are preserved — they have a known YES outcome and must survive so the
-    /// next epoch steward can commit them.
+    /// Discard the approved queue on freeze failure. `RemoveMember` proposals
+    /// (any source — self-leave, ban, ECP-derived) are preserved: they carry
+    /// settled YES outcomes that must survive so a recovered steward can
+    /// commit them. Other approvals (Add) are dropped — the inviter resends.
     pub fn reject_all_approved_proposals(&mut self) {
-        self.approved_proposals
-            .retain(|pid, req| is_auto_approved_entry(*pid, req));
+        self.approved_proposals.retain(|_pid, req| {
+            matches!(
+                req.payload.as_ref(),
+                Some(group_update_request::Payload::RemoveMember(_))
+            )
+        });
     }
 
     /// Drop every entry in the voting queue.
@@ -496,6 +508,24 @@ impl Group {
                 Some(group_update_request::Payload::RemoveMember(r)) if r.identity == target
             )
         });
+    }
+
+    // ─────────────────────────── Layer 3 Recovery Mode ───────────────────────────
+
+    /// Set by a `Deadlock` ECP YES (Layer 3). While set,
+    /// `create_commit_candidate` bypasses the `is_steward()` gate so any
+    /// member can produce the recovery commit. Cleared once a fresh
+    /// steward election lands.
+    pub fn enter_recovery_mode(&mut self) {
+        self.recovery_mode = true;
+    }
+
+    pub fn is_in_recovery_mode(&self) -> bool {
+        self.recovery_mode
+    }
+
+    pub fn exit_recovery_mode(&mut self) {
+        self.recovery_mode = false;
     }
 
     // ─────────────────────────── Steward List Operations ───────────────────────────
@@ -1113,6 +1143,40 @@ mod tests {
         assert_ne!(live_backup, nominal);
         assert_ne!(live_backup, backup);
         assert_ne!(live_epoch, live_backup);
+    }
+
+    /// Ban-induced and ECP-derived `RemoveMember` proposals survive a freeze
+    /// failure so the recovered steward can still commit them. Only Add
+    /// proposals are dropped.
+    #[test]
+    fn test_reject_all_approved_preserves_all_remove_member() {
+        let config = ProtocolConfig::new(1, 3).unwrap();
+        let mems = members(&[1, 2, 3, 4]);
+        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
+
+        let ban_id: ProposalId = 0x1111_2222;
+        let ecp_id: ProposalId = 0x3333_4444;
+        let add_id: ProposalId = 0x5555_6666;
+        insert_remove_member(&mut group, &member(2), ban_id);
+        insert_remove_member(&mut group, &member(3), ecp_id);
+        let add = GroupUpdateRequest {
+            payload: Some(group_update_request::Payload::InviteMember(
+                crate::protos::de_mls::messages::v1::InviteMember {
+                    key_package_bytes: vec![0; 8],
+                    identity: member(99),
+                },
+            )),
+        };
+        group.insert_approved_proposal(add_id, add);
+        assert_eq!(group.approved_proposals_count(), 3);
+
+        group.reject_all_approved_proposals();
+
+        assert_eq!(group.approved_proposals_count(), 2);
+        assert!(group.approved_proposals().contains_key(&ban_id));
+        assert!(group.approved_proposals().contains_key(&ecp_id));
+        assert!(!group.approved_proposals().contains_key(&add_id));
     }
 
     #[test]

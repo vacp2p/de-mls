@@ -56,6 +56,11 @@ fn is_score_below_threshold(evidence: &ViolationEvidence) -> bool {
     ViolationType::try_from(evidence.violation_type) == Ok(ViolationType::ScoreBelowThreshold)
 }
 
+/// Check whether evidence is the `DEADLOCK` (Layer 3 anti-deadlock) signal.
+fn is_deadlock(evidence: &ViolationEvidence) -> bool {
+    ViolationType::try_from(evidence.violation_type) == Ok(ViolationType::Deadlock)
+}
+
 /// Build a `RemoveMember` `GroupUpdateRequest` for the target in score-below-threshold evidence.
 fn removal_request_for(evidence: &ViolationEvidence) -> GroupUpdateRequest {
     GroupUpdateRequest {
@@ -205,6 +210,12 @@ pub fn apply_consensus_result(
             // inactivity wait.
             let target = evidence.as_ref().unwrap().target_member_id.clone();
             group.set_urgent_commit_target(target);
+            force_freezing = true;
+        } else if evidence.as_ref().is_some_and(is_deadlock) {
+            // Layer 3: relax the steward gate so any member can produce
+            // the next commit. Cleared when a fresh steward election
+            // lands. Force-Freezing so the recovery commit fires now.
+            group.enter_recovery_mode();
             force_freezing = true;
         }
     } else if is_owner {
@@ -438,5 +449,52 @@ mod tests {
         assert!(!result.force_freezing);
         assert!(group.urgent_commit_target().is_none());
         assert_eq!(group.approved_proposals_count(), 0);
+    }
+
+    fn deadlock_request(creator: Vec<u8>) -> GroupUpdateRequest {
+        use crate::protos::de_mls::messages::v1::ViolationEvidence;
+        ViolationEvidence::deadlock(0)
+            .with_creator(creator)
+            .into_update_request()
+            .unwrap()
+    }
+
+    /// `Deadlock` ECP YES opens recovery_mode and signals force-Freezing.
+    /// No queued RemoveMember (no specific target).
+    #[test]
+    fn ecp_deadlock_yes_opens_recovery_mode_and_force_freezes() {
+        let config = ProtocolConfig::new(1, 5).unwrap();
+        let mut group = Group::new_as_creator("deadlock-yes", member(1), config).unwrap();
+        assert!(!group.is_in_recovery_mode());
+
+        let request = deadlock_request(member(1));
+        let payload = request.encode_to_vec();
+        let result = apply_consensus_result(&mut group, 200, true, &payload).unwrap();
+
+        assert!(
+            result.force_freezing,
+            "Deadlock YES must signal force-Freezing"
+        );
+        assert!(group.is_in_recovery_mode(), "recovery_mode must be open");
+        assert_eq!(
+            group.approved_proposals_count(),
+            0,
+            "Deadlock has no specific target — no RemoveMember queued"
+        );
+        assert!(group.urgent_commit_target().is_none());
+    }
+
+    /// `Deadlock` ECP NO does not open recovery_mode.
+    #[test]
+    fn ecp_deadlock_no_does_not_open_recovery_mode() {
+        let config = ProtocolConfig::new(1, 5).unwrap();
+        let mut group = Group::new_as_creator("deadlock-no", member(1), config).unwrap();
+
+        let request = deadlock_request(member(1));
+        let payload = request.encode_to_vec();
+        let result = apply_consensus_result(&mut group, 201, false, &payload).unwrap();
+
+        assert!(!result.force_freezing);
+        assert!(!group.is_in_recovery_mode());
     }
 }

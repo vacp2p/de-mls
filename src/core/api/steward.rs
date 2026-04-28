@@ -24,8 +24,11 @@ use crate::protos::de_mls::messages::v1::{AppMessage, CommitCandidate, group_upd
 /// `is_live_epoch_steward` or a list-exhaustion check. If an election fails
 /// its retries and the list exhausts, members of the *previous* list can
 /// still commit recovery actions (e.g. a leave) to advance the epoch and
-/// trigger a fresh election. Without that escape hatch a stuck group is
-/// permanently frozen.
+/// trigger a fresh election.
+///
+/// Layer 3 exception: when `Group::is_in_recovery_mode()` is true (a
+/// `Deadlock` ECP just opened the recovery window), the steward gate is
+/// bypassed entirely so any member can produce the recovery commit.
 pub fn create_commit_candidate<S>(
     group: &mut Group,
     mls: &MlsService<S>,
@@ -34,7 +37,7 @@ pub fn create_commit_candidate<S>(
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
-    if !group.is_steward() {
+    if !group.is_steward() && !group.is_in_recovery_mode() {
         return Err(CoreError::NotASteward);
     }
 

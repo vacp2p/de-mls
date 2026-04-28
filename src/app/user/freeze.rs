@@ -163,6 +163,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     }
                 };
 
+                let entered_reelection = next_state == GroupState::Reelection;
                 self.state_handler
                     .on_state_changed(group_name, next_state)
                     .await;
@@ -179,6 +180,20 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                             event: ScoreEvent::CensorshipInactivity,
                         },
                     );
+                }
+
+                // Layer 2 recovery: fire a steward election so the
+                // deterministic responsible proposer regenerates the list
+                // (with draining members filtered out) and the next epoch
+                // can commit. Only the responsible proposer's call actually
+                // submits — others no-op, so safe to call from every
+                // member's freeze handler.
+                if entered_reelection
+                    && let Err(e) = self
+                        .try_initiate_steward_election(group_name, true, None)
+                        .await
+                {
+                    info!(group = group_name, error = %e, "recovery election deferred");
                 }
             }
         }
@@ -199,7 +214,19 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
 
         let proposal_count = entry.group.approved_proposals_count();
-        let entered_freezing = entry.state_machine.check_steward_inactivity(proposal_count);
+        // Recovery state (Layer 2 retry or Layer 3 recovery_mode) uses the
+        // shorter retry inactivity duration so we don't waste another full
+        // epoch waiting for a steward to commit. Reset to the long
+        // `epoch_duration` once a successful commit clears recovery state.
+        let in_recovery = entry.group.is_in_recovery_mode() || entry.group.reelection_round() > 0;
+        let inactivity = if in_recovery {
+            entry.state_machine.retry_inactivity_duration()
+        } else {
+            entry.state_machine.epoch_duration()
+        };
+        let entered_freezing = entry
+            .state_machine
+            .check_steward_inactivity(proposal_count, inactivity);
         if entered_freezing {
             let epoch = self.mls_service.current_epoch(group_name)?;
             entry.group.ensure_freeze_round(epoch);
