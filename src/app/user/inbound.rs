@@ -99,6 +99,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             }
         }
         let proposal_id = proposal.proposal_id;
+        let expected_voters = proposal.expected_voters_count;
         forward_incoming_proposal::<P>(
             group_name,
             proposal,
@@ -108,8 +109,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         .await?;
         // Start this member's auto-vote timer. Fires `voting_delay` after
         // the proposal becomes visible; cancelled on manual vote or
-        // ProposalDecided.
-        self.spawn_auto_vote(group_name.to_string(), proposal_id);
+        // ProposalDecided. Skip for fast-path proposals — the creator's
+        // bundled YES already resolved the session, so an auto-vote would
+        // hit a closed session.
+        if expected_voters > 1 {
+            self.spawn_auto_vote(group_name.to_string(), proposal_id);
+        }
         Ok(())
     }
 
