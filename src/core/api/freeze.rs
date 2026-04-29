@@ -256,9 +256,9 @@ impl RoundContext {
 /// Filter candidates by action count (Phase 1) and sort survivors by the
 /// RFC priority comparator (Phase 2). Result is ordered best-first.
 ///
-/// Priority tiering uses the *nominal* epoch steward from the steward
-/// list, so selection order stays deterministic across nodes even when
-/// the live steward has rotated past someone.
+/// Priority tiering uses the *live* epoch steward — eligibility-filtered
+/// in `RoundContext::snapshot`, so a draining or already-removed nominal
+/// steward never wins the tier.
 fn rank_applicable_candidates(
     candidates: Vec<BufferedCommitCandidate>,
     ctx: &RoundContext,
