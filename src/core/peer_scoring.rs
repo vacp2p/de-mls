@@ -83,4 +83,10 @@ pub trait PeerScoreStorage {
     fn set(&mut self, group_id: &str, member_id: &[u8], score: i64);
     fn remove(&mut self, group_id: &str, member_id: &[u8]);
     fn all_scores(&self, group_id: &str) -> Vec<(Vec<u8>, i64)>;
+
+    /// Drop every score entry for `group_id`. Called on leave so a future
+    /// rejoin starts from a clean per-group table populated by the new
+    /// `GroupSync` rather than carrying stale entries from the prior
+    /// session.
+    fn remove_group(&mut self, group_id: &str);
 }

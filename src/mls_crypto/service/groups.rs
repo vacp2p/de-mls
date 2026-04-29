@@ -3,6 +3,7 @@ use openmls::{
     prelude::{DeserializeBytes, MlsMessageBodyIn, MlsMessageIn},
 };
 use openmls_rust_crypto::MemoryStorage;
+use openmls_traits::OpenMlsProvider;
 
 use crate::mls_crypto::{
     DeMlsStorage, IdentityError, MlsError, MlsService, MlsServiceError, Result, StorageError,
@@ -95,6 +96,26 @@ where
             .insert(group_id.clone(), group);
 
         Ok(group_id)
+    }
+
+    /// Drop the local MLS group state, both in-memory and from the
+    /// storage backend. After this call, a subsequent `join_group` for
+    /// the same `group_id` starts from a clean handle (RFC §Membership:
+    /// an evicted member that is later re-invited rejoins as a new leaf).
+    ///
+    /// Idempotent — `Ok(())` when the group isn't present locally.
+    pub fn delete_group(&self, group_id: &str) -> Result<()> {
+        let provider = self.make_provider();
+        let mut groups = self
+            .groups
+            .write()
+            .map_err(|e| StorageError::Lock(e.to_string()))?;
+        if let Some(mut group) = groups.remove(group_id) {
+            group
+                .delete(provider.storage())
+                .map_err(MlsServiceError::StorePendingProposal)?;
+        }
+        Ok(())
     }
 
     /// Check if a welcome message is for us (without joining).

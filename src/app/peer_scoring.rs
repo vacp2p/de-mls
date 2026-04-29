@@ -47,6 +47,10 @@ impl PeerScoreStorage for InMemoryPeerScoreStorage {
             .map(|members| members.iter().map(|(k, v)| (k.clone(), *v)).collect())
             .unwrap_or_default()
     }
+
+    fn remove_group(&mut self, group_id: &str) {
+        self.scores.remove(group_id);
+    }
 }
 
 // ── Default provider ───────────────────────────────────────────────
@@ -123,6 +127,11 @@ impl<S: PeerScoreStorage, P: ScoringProvider> PeerScoringService<S, P> {
 
     pub fn remove_member(&mut self, group_id: &str, member_id: &[u8]) {
         self.storage.remove(group_id, member_id);
+    }
+
+    /// Drop every score entry for `group_id`. Called on leave.
+    pub fn remove_group(&mut self, group_id: &str) {
+        self.storage.remove_group(group_id);
     }
 
     /// Apply a single [`ScoreOp`] and return the target's new score, or
@@ -223,6 +232,31 @@ mod tests {
         svc.remove_member(GROUP, member);
 
         assert_eq!(svc.score_for(GROUP, member), None);
+    }
+
+    /// `remove_group` drops every score in the target group while leaving
+    /// other groups untouched. Idempotent on an unknown group_id.
+    #[test]
+    fn test_remove_group_clears_only_target_group() {
+        let mut svc = make_service();
+        let other_group = "other-group";
+
+        svc.add_member(GROUP, b"alice");
+        svc.add_member(GROUP, b"bob");
+        svc.add_member(other_group, b"carol");
+
+        svc.remove_group(GROUP);
+
+        assert_eq!(svc.score_for(GROUP, b"alice"), None);
+        assert_eq!(svc.score_for(GROUP, b"bob"), None);
+        assert!(svc.all_members_with_scores(GROUP).is_empty());
+        assert_eq!(
+            svc.score_for(other_group, b"carol"),
+            Some(default_config().default_score)
+        );
+
+        // Idempotent on a group that was never tracked.
+        svc.remove_group("never-existed");
     }
 
     #[test]
