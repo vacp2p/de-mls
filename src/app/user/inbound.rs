@@ -311,12 +311,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         };
 
         let current_epoch = self.mls_service.current_epoch(group_name)?;
-        if sync.start_epoch > current_epoch {
+        if sync.election_epoch > current_epoch {
             info!(
                 group = group_name,
-                start_epoch = sync.start_epoch,
+                election_epoch = sync.election_epoch,
                 current_epoch,
-                "group sync rejected: start_epoch > current_epoch"
+                "group sync rejected: election_epoch > current_epoch"
             );
             return Ok(());
         }
@@ -329,7 +329,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let any_present = sync.steward_members.iter().any(|s| members.contains(s));
         let ordering_valid = StewardList::validate(
             &sync.steward_members,
-            sync.start_epoch,
+            sync.election_epoch,
             group_name.as_bytes(),
             &sync.steward_members,
             &ProtocolConfig::new(sync.sn_min as usize, sync.sn_max as usize)?,
@@ -350,7 +350,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let mut groups = self.groups.write().await;
             if let Some(entry) = groups.get_mut(group_name) {
                 entry.group.generate_and_set_steward_list(
-                    sync.start_epoch,
+                    sync.election_epoch,
                     &sync.steward_members,
                     sn,
                     sync.retry_round,
@@ -382,7 +382,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
         info!(
             group = group_name,
-            start_epoch = sync.start_epoch,
+            election_epoch = sync.election_epoch,
             stewards = sn,
             scores = sync.peer_scores.len(),
             timing = sync.timing.is_some(),

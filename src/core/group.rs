@@ -973,7 +973,7 @@ mod tests {
 
         let list = group.steward_list().unwrap();
         assert_eq!(list.len(), 4);
-        assert_eq!(list.start_epoch(), 1);
+        assert_eq!(list.election_epoch(), 1);
     }
 
     /// `is_steward()` flips to true only once the list has been generated

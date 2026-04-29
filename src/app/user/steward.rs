@@ -431,7 +431,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             // on accept). Joiners re-derive the ordering from this seed.
             let sync = GroupSync {
                 steward_members,
-                start_epoch: list.start_epoch(),
+                election_epoch: list.election_epoch(),
                 sn_min: list.config().sn_min as u32,
                 sn_max: list.config().sn_max as u32,
                 allow_subset_candidates: entry.group.allow_subset_candidates(),

@@ -5,45 +5,48 @@ use std::time::Duration;
 pub use crate::core::DEFAULT_MAX_REELECTION_RETRIES;
 use crate::core::{ProposalKind, ProtocolConfig};
 
+/// Wall-clock window the steward waits before batching approved proposals
+/// into a commit.
 pub const DEFAULT_EPOCH_DURATION: Duration = Duration::from_secs(60);
+
+/// Lifetime of a voting proposal before it expires unvoted
+/// (RFC §Creating Voting Proposal).
 pub const DEFAULT_PROPOSAL_EXPIRATION: Duration = Duration::from_secs(3600);
+
+/// Library deadline for a single consensus session — bounds how long a
+/// vote can stay open. MUST be `> voting_delay`.
 pub const DEFAULT_CONSENSUS_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Drop a buffered membership update if the steward fails to commit it
+/// for this many consecutive epochs.
 pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
 
-/// Inactivity window when the group is recovering — `reelection_round > 0`
-/// or `recovery_mode` is set. Much shorter than `epoch_duration` so retries
-/// don't burn another full epoch waiting for the steward to commit. Reset
-/// to the long `epoch_duration` after a successful commit clears the
-/// recovery state.
+/// Inactivity window during recovery (`reelection_round > 0` or
+/// `recovery_mode`). Reset to `epoch_duration` after a successful commit.
 pub const DEFAULT_RETRY_INACTIVITY_DURATION: Duration = Duration::from_secs(5);
 
-/// How long each member has to cast a manual vote before the app casts an
-/// auto-vote on their behalf using `liveness_criteria_yes`. Must be
-/// strictly less than `consensus_timeout` so the auto-vote has time to
-/// propagate and land in every peer's session before the library deadline.
+/// Per-member window to cast a manual vote before the app auto-votes
+/// using `liveness_criteria_yes`. MUST be `< consensus_timeout`.
 pub const DEFAULT_VOTING_DELAY: Duration = Duration::from_secs(10);
 
-/// Steward-election proposals carry a deterministic list — members can
-/// validate it locally without deliberation. A short auto-vote delay lets
-/// the election reach consensus in seconds, important for recovery cycles
-/// where the election gates the next commit.
-pub const DEFAULT_ELECTION_VOTING_DELAY: Duration = Duration::from_secs(1);
+/// Auto-vote delay for steward-election proposals. Shorter than
+/// `DEFAULT_VOTING_DELAY` since the deterministic list needs only
+/// acknowledgement, not deliberation, so recovery elections converge fast.
+pub const DEFAULT_ELECTION_VOTING_DELAY: Duration = Duration::from_secs(5);
 
-/// Under the Δ-synchrony assumption every honest voter reaches a decision
-/// within `consensus_timeout`; counting silent voters as YES keeps small
-/// groups responsive when a participant is briefly slow. Set to `false`
-/// for stricter policies that require explicit YES votes.
+/// Whether silent voters count as YES at `consensus_timeout`
+/// (RFC §Creating Voting Proposal). Also used as the auto-vote value.
 pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
 
-/// RFC §Peer Scoring `default_peer_score`: score assigned to a newly added member.
+/// RFC §Peer Scoring `default_peer_score`: starting score for a new member.
 pub const DEFAULT_PEER_SCORE: i64 = 100;
 
-/// RFC §Peer Scoring `threshold_peer_score`: a member at or below this
-/// score is eligible for removal via a `SCORE_BELOW_THRESHOLD` ECP.
+/// RFC §Peer Scoring `threshold_peer_score`: at or below this, a member
+/// becomes eligible for `SCORE_BELOW_THRESHOLD` ECP removal.
 pub const DEFAULT_THRESHOLD_PEER_SCORE: i64 = 0;
 
 /// Fallback [`ProtocolConfig`] for a group created without explicit bounds —
-/// tiny groups with `sn ∈ [1, 2]`. Real deployments override.
+/// tiny groups with `sn ∈ [1, 2]`.
 fn default_protocol_config() -> ProtocolConfig {
     ProtocolConfig::new(1, 2).expect("1..=2 is always a valid ProtocolConfig range")
 }

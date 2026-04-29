@@ -101,7 +101,7 @@ message RemoveMember {
 
 message GroupSync {
   repeated bytes steward_members = 1;
-  uint64 start_epoch = 2;
+  uint64 election_epoch = 2;
   uint32 sn_min = 3;
   uint32 sn_max = 4;
   bool allow_subset_candidates = 5;
