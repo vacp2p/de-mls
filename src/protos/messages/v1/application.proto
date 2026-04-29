@@ -114,6 +114,10 @@ message GroupSync {
   // value so the stuck-election error path triggers consistently across
   // the group.
   uint32 max_reelection_attempts = 9;
+  // Whether silent voters count as YES at consensus_timeout (RFC §Creating
+  // Voting Proposal). Joiners adopt this so auto-votes and tie-breaks
+  // match the rest of the group.
+  bool liveness_criteria_yes = 10;
 }
 
 message PeerScore {

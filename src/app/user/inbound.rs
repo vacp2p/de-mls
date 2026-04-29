@@ -359,6 +359,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 entry
                     .group
                     .set_max_reelection_attempts(sync.max_reelection_attempts);
+                entry
+                    .state_machine
+                    .set_liveness_criteria_yes(sync.liveness_criteria_yes);
                 if let Some(timing) = &sync.timing {
                     let epoch_dur = std::time::Duration::from_millis(timing.epoch_duration_ms);
                     let freeze_dur = std::time::Duration::from_millis(timing.freeze_duration_ms);

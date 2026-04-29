@@ -175,12 +175,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         kind: ProposalKind,
         creator_vote: Option<bool>,
     ) -> Result<u32, UserError> {
-        let (proposal_expiration, consensus_timeout) = {
+        let (proposal_expiration, consensus_timeout, liveness_criteria_yes) = {
             let groups = self.groups.read().await;
             let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
             (
                 entry.state_machine.proposal_expiration(),
                 entry.state_machine.consensus_timeout(),
+                entry.state_machine.liveness_criteria_yes(),
             )
         };
 
@@ -193,7 +194,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 expected_voters,
                 proposal_expiration,
                 consensus_timeout,
-                liveness_criteria_yes: self.default_group_config.liveness_criteria_yes,
+                liveness_criteria_yes,
             },
         )
         .await?;
@@ -458,11 +459,17 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         self.cancel_auto_vote(&group_name, proposal_id);
 
         let user = self.clone();
-        let vote = self.default_group_config.liveness_criteria_yes;
         let key = (group_name.clone(), proposal_id);
 
         let handle = tokio::spawn(async move {
             tokio::time::sleep(delay).await;
+            let vote = {
+                let groups = user.groups.read().await;
+                let Some(entry) = groups.get(&group_name) else {
+                    return;
+                };
+                entry.state_machine.liveness_criteria_yes()
+            };
             if let Err(e) = user.cast_auto_vote(&group_name, proposal_id, vote).await {
                 tracing::debug!(
                     group = %group_name,

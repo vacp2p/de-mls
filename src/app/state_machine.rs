@@ -84,6 +84,11 @@ pub struct GroupStateMachine {
     /// across nodes cause split outcomes (see consensus-timeout-divergence
     /// follow-up), so this is per-group and synced via `GroupSync`.
     consensus_timeout: Duration,
+    /// Whether silent voters count as YES at `consensus_timeout` (RFC
+    /// §Creating Voting Proposal). Used both as the auto-vote value and
+    /// as the library's tie-break rule. Per-group so a joiner picks up
+    /// the steward's value rather than diverging on its local default.
+    liveness_criteria_yes: bool,
 }
 
 impl Default for GroupStateMachine {
@@ -106,6 +111,7 @@ impl GroupStateMachine {
             retry_inactivity_duration: config.retry_inactivity_duration,
             proposal_expiration: config.proposal_expiration,
             consensus_timeout: config.consensus_timeout,
+            liveness_criteria_yes: config.liveness_criteria_yes,
         }
     }
 
@@ -118,6 +124,7 @@ impl GroupStateMachine {
             retry_inactivity_duration: config.retry_inactivity_duration,
             proposal_expiration: config.proposal_expiration,
             consensus_timeout: config.consensus_timeout,
+            liveness_criteria_yes: config.liveness_criteria_yes,
         }
     }
 
@@ -143,6 +150,15 @@ impl GroupStateMachine {
 
     pub fn consensus_timeout(&self) -> Duration {
         self.consensus_timeout
+    }
+
+    pub fn liveness_criteria_yes(&self) -> bool {
+        self.liveness_criteria_yes
+    }
+
+    /// Overwritten when the handle receives a `GroupSync` from the steward.
+    pub fn set_liveness_criteria_yes(&mut self, value: bool) {
+        self.liveness_criteria_yes = value;
     }
 
     /// Overwritten when the handle receives a `GroupSync` from the steward.
@@ -413,6 +429,22 @@ mod tests {
         let sm = GroupStateMachine::new_as_member_with_config(config);
         assert_eq!(sm.epoch_duration(), long_inactivity());
         assert_eq!(sm.retry_inactivity_duration(), short_inactivity());
+    }
+
+    /// `liveness_criteria_yes` is threaded from `GroupConfig` and updated
+    /// independently of the timing block (joiner's `GroupSync` path
+    /// applies it via a separate setter).
+    #[test]
+    fn test_liveness_criteria_yes_threaded_and_updated() {
+        let config = GroupConfig {
+            liveness_criteria_yes: false,
+            ..GroupConfig::default()
+        };
+        let mut sm = GroupStateMachine::new_as_member_with_config(config);
+        assert!(!sm.liveness_criteria_yes());
+
+        sm.set_liveness_criteria_yes(true);
+        assert!(sm.liveness_criteria_yes());
     }
 
     /// `proposal_expiration` and `consensus_timeout` carry their own

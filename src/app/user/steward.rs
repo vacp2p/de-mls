@@ -425,6 +425,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 timing: Some(timing),
                 retry_round: list.retry_round(),
                 max_reelection_attempts: entry.group.max_reelection_attempts(),
+                liveness_criteria_yes: entry.state_machine.liveness_criteria_yes(),
             };
 
             let app_msg: AppMessage = sync.into();
