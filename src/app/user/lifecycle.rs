@@ -136,13 +136,16 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         // fires `ConsensusReached` on submit, and `apply_consensus_result`
         // needs `is_owner_of_proposal` to be true by then.
         let proposal_id = crate::core::auto_approved_leave_proposal_id(&self_identity);
-        {
+        let (proposal_expiration, consensus_timeout) = {
             let mut groups = self.groups.write().await;
             let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
             entry.group.store_voting_proposal(proposal_id, request);
-        }
+            (
+                entry.state_machine.proposal_expiration(),
+                entry.state_machine.consensus_timeout(),
+            )
+        };
 
-        let config = &self.default_group_config;
         let submitted = submit_self_leave_proposal::<P, _>(
             group_name,
             &self_identity,
@@ -150,8 +153,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             self.eth_signer.clone(),
             ProposalParams {
                 expected_voters: 1,
-                proposal_expiration: config.proposal_expiration,
-                consensus_timeout: config.consensus_timeout,
+                proposal_expiration,
+                consensus_timeout,
                 liveness_criteria_yes: true,
             },
         )

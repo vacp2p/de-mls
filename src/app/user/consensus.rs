@@ -146,7 +146,14 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             }
         };
 
-        tokio::time::sleep(self.default_group_config.consensus_timeout).await;
+        let consensus_timeout = {
+            let groups = self.groups.read().await;
+            groups
+                .get(&group_name)
+                .map(|e| e.state_machine.consensus_timeout())
+                .unwrap_or(self.default_group_config.consensus_timeout)
+        };
+        tokio::time::sleep(consensus_timeout).await;
         self.resolve_on_timeout(&group_name, proposal_id).await;
     }
 
@@ -168,6 +175,15 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         kind: ProposalKind,
         creator_vote: Option<bool>,
     ) -> Result<u32, UserError> {
+        let (proposal_expiration, consensus_timeout) = {
+            let groups = self.groups.read().await;
+            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            (
+                entry.state_machine.proposal_expiration(),
+                entry.state_machine.consensus_timeout(),
+            )
+        };
+
         let (proposal_id, unbundled) = submit_proposal::<P>(
             group_name,
             &request,
@@ -175,8 +191,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             &self.consensus_service,
             ProposalParams {
                 expected_voters,
-                proposal_expiration: self.default_group_config.proposal_expiration,
-                consensus_timeout: self.default_group_config.consensus_timeout,
+                proposal_expiration,
+                consensus_timeout,
                 liveness_criteria_yes: self.default_group_config.liveness_criteria_yes,
             },
         )

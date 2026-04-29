@@ -364,9 +364,17 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     let freeze_dur = std::time::Duration::from_millis(timing.freeze_duration_ms);
                     let retry_dur =
                         std::time::Duration::from_millis(timing.retry_inactivity_duration_ms);
-                    entry
-                        .state_machine
-                        .update_timing(epoch_dur, freeze_dur, retry_dur);
+                    let proposal_exp =
+                        std::time::Duration::from_millis(timing.proposal_expiration_ms);
+                    let consensus_to =
+                        std::time::Duration::from_millis(timing.consensus_timeout_ms);
+                    entry.state_machine.update_timing(
+                        epoch_dur,
+                        freeze_dur,
+                        retry_dur,
+                        proposal_exp,
+                        consensus_to,
+                    );
                 }
             }
         }

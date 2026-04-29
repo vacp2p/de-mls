@@ -76,6 +76,14 @@ pub struct GroupStateMachine {
     /// Short inactivity window used during recovery; caller of
     /// `check_steward_inactivity` picks which duration to apply.
     retry_inactivity_duration: Duration,
+    /// How long a voting proposal stays valid before expiring (RFC §Creating
+    /// Voting Proposal). Per-group so a joiner picks up the steward's value
+    /// from `GroupSync` rather than diverging on its local default.
+    proposal_expiration: Duration,
+    /// Library deadline for a single consensus session. Mismatched values
+    /// across nodes cause split outcomes (see consensus-timeout-divergence
+    /// follow-up), so this is per-group and synced via `GroupSync`.
+    consensus_timeout: Duration,
 }
 
 impl Default for GroupStateMachine {
@@ -96,6 +104,8 @@ impl GroupStateMachine {
             epoch_duration: config.epoch_duration,
             freeze_duration: config.freeze_duration,
             retry_inactivity_duration: config.retry_inactivity_duration,
+            proposal_expiration: config.proposal_expiration,
+            consensus_timeout: config.consensus_timeout,
         }
     }
 
@@ -106,6 +116,8 @@ impl GroupStateMachine {
             epoch_duration: config.epoch_duration,
             freeze_duration: config.freeze_duration,
             retry_inactivity_duration: config.retry_inactivity_duration,
+            proposal_expiration: config.proposal_expiration,
+            consensus_timeout: config.consensus_timeout,
         }
     }
 
@@ -125,16 +137,28 @@ impl GroupStateMachine {
         self.retry_inactivity_duration
     }
 
+    pub fn proposal_expiration(&self) -> Duration {
+        self.proposal_expiration
+    }
+
+    pub fn consensus_timeout(&self) -> Duration {
+        self.consensus_timeout
+    }
+
     /// Overwritten when the handle receives a `GroupSync` from the steward.
     pub fn update_timing(
         &mut self,
         epoch_duration: Duration,
         freeze_duration: Duration,
         retry_inactivity_duration: Duration,
+        proposal_expiration: Duration,
+        consensus_timeout: Duration,
     ) {
         self.epoch_duration = epoch_duration;
         self.freeze_duration = freeze_duration;
         self.retry_inactivity_duration = retry_inactivity_duration;
+        self.proposal_expiration = proposal_expiration;
+        self.consensus_timeout = consensus_timeout;
     }
 
     pub fn start_working(&mut self) {
@@ -389,6 +413,31 @@ mod tests {
         let sm = GroupStateMachine::new_as_member_with_config(config);
         assert_eq!(sm.epoch_duration(), long_inactivity());
         assert_eq!(sm.retry_inactivity_duration(), short_inactivity());
+    }
+
+    /// `proposal_expiration` and `consensus_timeout` carry their own
+    /// per-group values from `GroupConfig` and survive an `update_timing`
+    /// call (the joiner's path when applying a `GroupSync`).
+    #[test]
+    fn test_proposal_expiration_and_consensus_timeout_threaded_and_updated() {
+        let config = GroupConfig {
+            proposal_expiration: Duration::from_secs(7),
+            consensus_timeout: Duration::from_secs(11),
+            ..GroupConfig::default()
+        };
+        let mut sm = GroupStateMachine::new_as_member_with_config(config);
+        assert_eq!(sm.proposal_expiration(), Duration::from_secs(7));
+        assert_eq!(sm.consensus_timeout(), Duration::from_secs(11));
+
+        sm.update_timing(
+            long_inactivity(),
+            long_inactivity(),
+            short_inactivity(),
+            Duration::from_secs(99),
+            Duration::from_secs(123),
+        );
+        assert_eq!(sm.proposal_expiration(), Duration::from_secs(99));
+        assert_eq!(sm.consensus_timeout(), Duration::from_secs(123));
     }
 
     #[test]
