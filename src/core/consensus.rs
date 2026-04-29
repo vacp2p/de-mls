@@ -19,20 +19,10 @@ use crate::protos::de_mls::messages::v1::{
     group_update_request,
 };
 
-/// Result of applying a consensus outcome.
-///
-/// `election`: accepted election proposal for the app to validate and install
-/// as a new steward list. `force_freezing`: an ECP YES wants to bypass the
-/// inactivity timer — the app should call `GroupStateMachine::force_freezing`
-/// so the urgent commit fires now instead of next inactivity tick.
-/// `queued_remove_target`: identity now queued for removal as a result of
-/// this approval — set whether the source was a direct `RemoveMember` or an
-/// `EmergencyCriteria` ECP that transformed into one. The app uses this to
-/// fire a steward-list refresh when the target is on the current list, so
-/// the next epoch starts with a healthy ES + BS.
-///
-/// Score ops for emergency outcomes are produced separately by
-/// `crate::app::user::emergency`.
+/// Result of applying a consensus outcome. `force_freezing` signals
+/// the app to skip the inactivity timer; `queued_remove_target` lets
+/// the app refresh the steward list when the target is on it. Score
+/// ops for emergency outcomes live in `crate::app::user::emergency`.
 #[derive(Debug, Clone, Default)]
 pub struct ConsensusApplyResult {
     pub election: Option<StewardElectionProposal>,
@@ -101,9 +91,9 @@ fn pending_removal_target(
     }
 }
 
-/// Election outcome — purely consensus-tracking, no MLS operation. YES
-/// hands the proposed list back to the app for validation and install;
-/// NO drops the owner's voting-queue entry.
+/// Election outcome — no MLS operation. YES hands the proposed list
+/// back to the app for validation and install; NO drops the owner's
+/// voting-queue entry.
 fn apply_election_outcome(
     group: &mut Group,
     proposal_id: u32,
@@ -178,10 +168,8 @@ pub fn apply_consensus_result(
     let transforms_to_removal =
         approved && is_emergency && evidence.as_ref().is_some_and(is_score_below_threshold);
 
-    // Identity this approval would queue for removal — set whether the
-    // source is a direct `RemoveMember` or an ECP that transforms into one.
-    // Used both for target-keyed dedup below and reported back in the
-    // result so the app layer can fire a steward-list refresh.
+    // Used for target-keyed dedup below and reported back so the app
+    // layer can fire a steward-list refresh.
     let removal_target = pending_removal_target(
         &request,
         evidence.as_ref(),
@@ -232,17 +220,14 @@ pub fn apply_consensus_result(
         }
 
         if transforms_to_removal {
-            // Fast removal: queue is now restricted to this target for the
-            // next freeze cycle so the urgent commit doesn't drag along
-            // unrelated approved work. Caller force-Freezes to skip the
-            // inactivity wait.
+            // Fast removal: restrict the next commit to this target so it
+            // doesn't drag along unrelated approved work.
             let target = evidence.as_ref().unwrap().target_member_id.clone();
             group.set_urgent_commit_target(target);
             force_freezing = true;
         } else if evidence.as_ref().is_some_and(is_deadlock) {
             // Layer 3: relax the steward gate so any member can produce
-            // the next commit. Cleared when a fresh steward election
-            // lands. Force-Freezing so the recovery commit fires now.
+            // the next commit. Cleared when a fresh election lands.
             group.enter_recovery_mode();
             force_freezing = true;
         }
@@ -441,9 +426,6 @@ mod tests {
             .unwrap()
     }
 
-    /// `ScoreBelowThreshold` ECP YES sets the urgent-commit target on the
-    /// group, returns `force_freezing = true`, and queues `RemoveMember`
-    /// for the next freeze cycle.
     #[test]
     fn ecp_score_below_threshold_yes_marks_urgent_and_force_freezes() {
         let config = ProtocolConfig::new(1, 5).unwrap();
@@ -465,7 +447,6 @@ mod tests {
         assert_eq!(group.approved_proposals_count(), 1, "RemoveMember queued");
     }
 
-    /// `ScoreBelowThreshold` ECP NO does not mark urgent or force-Freeze.
     #[test]
     fn ecp_score_below_threshold_no_does_not_mark_urgent() {
         let config = ProtocolConfig::new(1, 5).unwrap();
@@ -488,8 +469,6 @@ mod tests {
             .unwrap()
     }
 
-    /// `Deadlock` ECP YES opens recovery_mode and signals force-Freezing.
-    /// No queued RemoveMember (no specific target).
     #[test]
     fn ecp_deadlock_yes_opens_recovery_mode_and_force_freezes() {
         let config = ProtocolConfig::new(1, 5).unwrap();
@@ -513,7 +492,6 @@ mod tests {
         assert!(group.urgent_commit_target().is_none());
     }
 
-    /// `Deadlock` ECP NO does not open recovery_mode.
     #[test]
     fn ecp_deadlock_no_does_not_open_recovery_mode() {
         let config = ProtocolConfig::new(1, 5).unwrap();

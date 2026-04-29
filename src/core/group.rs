@@ -149,10 +149,8 @@ pub struct Group {
     self_identity: Vec<u8>,
     /// Proposals that passed consensus, waiting for steward to commit.
     approved_proposals: HashMap<ProposalId, GroupUpdateRequest>,
-    /// Insertion order of `approved_proposals`. New entries push to the back;
-    /// `create_commit_candidate` iterates in this order so the `k_max` cap
-    /// selects the oldest proposals first (FIFO). Library proposal IDs are
-    /// content-derived hashes — sorting by ID would not be temporal.
+    /// Insertion order of `approved_proposals` (FIFO). Library proposal
+    /// IDs are content-derived hashes, so sort-by-id is not temporal.
     approved_order: Vec<ProposalId>,
     /// Proposals waiting on consensus voting (created by this user).
     voting_proposals: HashMap<ProposalId, GroupUpdateRequest>,
@@ -194,18 +192,12 @@ pub struct Group {
     /// `forward_incoming_vote` to distinguish benign late peer votes (session
     /// was trimmed after resolution) from votes for unknown proposal IDs.
     resolved_proposals: ResolvedProposalCache,
-    /// When `Some(target)`, the next freeze cycle commits **only** the
-    /// `RemoveMember(target)` entry from `approved_proposals` — the rest
-    /// of the queue stays for the next normal cycle. Set by an ECP-YES
-    /// dispatch (`ScoreBelowThreshold`); consumed when the urgent commit
-    /// applies. Other proposals piggybacking the same urgent commit
-    /// would dilute the "fast removal" intent, so they wait.
+    /// When `Some(target)`, the next freeze cycle commits only the
+    /// `RemoveMember(target)` entry; other approvals wait so they don't
+    /// dilute the fast-removal intent.
     urgent_commit_target: Option<Vec<u8>>,
-    /// Layer 3 recovery: set by a `Deadlock` ECP YES, cleared once a
-    /// fresh steward election lands. While set, `create_commit_candidate`
-    /// bypasses the `is_steward()` gate so any member can produce the
-    /// recovery commit. Layer 2 has already failed `max_reelection_attempts`
-    /// times by the time this trips.
+    /// While `true`, `create_commit_candidate` bypasses the `is_steward()`
+    /// gate so any member can produce the recovery commit.
     recovery_mode: bool,
 }
 
@@ -374,13 +366,11 @@ impl Group {
         &self.approved_proposals
     }
 
-    /// Insertion order of `approved_proposals` (oldest first). Used by
-    /// `create_commit_candidate` to drive FIFO `k_max` selection.
+    /// Insertion order of `approved_proposals` (oldest first).
     pub fn approved_order(&self) -> &[ProposalId] {
         &self.approved_order
     }
 
-    /// Insert into the approved queue and append to the insertion order if new.
     /// Re-inserting an existing id preserves the original position.
     fn push_approved(&mut self, proposal_id: ProposalId, proposal: GroupUpdateRequest) {
         if self
@@ -440,10 +430,9 @@ impl Group {
         self.epoch_history.push_back(snapshot);
     }
 
-    /// Discard the approved queue on freeze failure. `RemoveMember` proposals
-    /// (any source — self-leave, ban, ECP-derived) are preserved: they carry
-    /// settled YES outcomes that must survive so a recovered steward can
-    /// commit them. Other approvals (Add) are dropped — the inviter resends.
+    /// Discard the approved queue on freeze failure. `RemoveMember`
+    /// proposals carry settled YES outcomes and survive so a recovered
+    /// steward can commit them; other approvals (Add) are dropped.
     pub fn reject_all_approved_proposals(&mut self) {
         self.approved_proposals.retain(|_pid, req| {
             matches!(
@@ -509,27 +498,20 @@ impl Group {
     // ─────────────────────────── Urgent (ECP-driven) Commit ───────────────────────────
 
     /// Mark the next freeze cycle as urgent and committed-only-for `target`.
-    /// Set by `apply_consensus_result` on `ScoreBelowThreshold` ECP YES.
     pub fn set_urgent_commit_target(&mut self, target: Vec<u8>) {
         self.urgent_commit_target = Some(target);
     }
 
-    /// Read the urgent target without consuming. `create_commit_candidate`
-    /// uses this to decide whether to restrict the batch.
     pub fn urgent_commit_target(&self) -> Option<&[u8]> {
         self.urgent_commit_target.as_deref()
     }
 
-    /// Take the urgent target, clearing the marker. `record_applied_commit`
-    /// calls this after the urgent commit lands.
     pub fn take_urgent_commit_target(&mut self) -> Option<Vec<u8>> {
         self.urgent_commit_target.take()
     }
 
-    /// Drop every `RemoveMember(target)` entry from `approved_proposals`,
-    /// regardless of source. Used after an urgent (ECP-driven) commit
-    /// applies — only the target's removal needs clearing; other approved
-    /// proposals stay queued for the next normal cycle.
+    /// Drop every `RemoveMember(target)` entry; other approvals stay
+    /// queued for the next normal cycle.
     pub fn drop_approved_removals_for(&mut self, target: &[u8]) {
         self.approved_proposals.retain(|_pid, req| {
             !matches!(
@@ -543,10 +525,8 @@ impl Group {
 
     // ─────────────────────────── Layer 3 Recovery Mode ───────────────────────────
 
-    /// Set by a `Deadlock` ECP YES (Layer 3). While set,
-    /// `create_commit_candidate` bypasses the `is_steward()` gate so any
-    /// member can produce the recovery commit. Cleared once a fresh
-    /// steward election lands.
+    /// While set, `create_commit_candidate` bypasses the `is_steward()`
+    /// gate so any member can produce the recovery commit.
     pub fn enter_recovery_mode(&mut self) {
         self.recovery_mode = true;
     }
@@ -1178,9 +1158,8 @@ mod tests {
         assert_ne!(live_epoch, live_backup);
     }
 
-    /// Ban-induced and ECP-derived `RemoveMember` proposals survive a freeze
-    /// failure so the recovered steward can still commit them. Only Add
-    /// proposals are dropped.
+    /// `RemoveMember` proposals survive a freeze failure regardless of
+    /// source; Add proposals are dropped.
     #[test]
     fn test_reject_all_approved_preserves_all_remove_member() {
         let config = ProtocolConfig::new(1, 3).unwrap();
@@ -1212,20 +1191,16 @@ mod tests {
         assert!(!group.approved_proposals().contains_key(&add_id));
     }
 
-    /// `approved_order` tracks insertion order so the `k_max` cap selects
-    /// oldest entries first. Library proposal IDs are content-derived hashes
-    /// — sort-by-id would not be temporal.
+    /// `approved_order` is FIFO regardless of proposal-id ordering.
     #[test]
     fn test_approved_order_preserves_fifo_across_mutations() {
         let mut group = Group::new_as_creator("g", member(1), default_config()).unwrap();
 
-        // Out-of-order ids: 500 inserted first, then 100, then 300.
         insert_remove_member(&mut group, &member(2), 500);
         insert_remove_member(&mut group, &member(3), 100);
         insert_remove_member(&mut group, &member(4), 300);
         assert_eq!(group.approved_order(), &[500, 100, 300]);
 
-        // Removing a middle entry preserves the relative order of the rest.
         group.remove_approved_proposal(100);
         assert_eq!(group.approved_order(), &[500, 300]);
 
@@ -1257,8 +1232,6 @@ mod tests {
         let victim = member(7);
         let bystander = member(9);
 
-        // Two RemoveMember entries for the victim under different ids
-        // (e.g. score-driven + ban) plus an unrelated RemoveMember.
         insert_remove_member(&mut group, &victim, 100);
         insert_remove_member(&mut group, &victim, 101);
         insert_remove_member(&mut group, &bystander, 200);

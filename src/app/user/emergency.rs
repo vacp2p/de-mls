@@ -2,13 +2,9 @@
 //!
 //! Given a finalised ECP outcome, derives the peer-score deltas that the
 //! app should apply:
-//! - accepted target-bearing emergency (e.g. broken commit) → target
-//!   penalty + creator reward.
-//! - accepted `SCORE_BELOW_THRESHOLD` → creator reward only (target is
-//!   already being removed via the urgent commit).
-//! - accepted `DEADLOCK` (Layer 3) → creator reward only (no target;
-//!   the recovery itself is the action).
-//! - rejected emergency → creator penalty (anti-abuse).
+//! - accepted target-bearing emergency → target penalty + creator reward.
+//! - accepted `SCORE_BELOW_THRESHOLD` or `DEADLOCK` → creator reward only.
+//! - rejected emergency → creator penalty.
 //!
 //! Consensus (`crate::core::consensus`) handles the queue-level state
 //! transition; this module owns the scoring policy that follows.
@@ -35,8 +31,6 @@ pub fn emergency_score_ops(payload: &[u8], approved: bool) -> Vec<ScoreOp> {
 
     if approved {
         if is_targetless_or_self_executing(&evidence) {
-            // ScoreBelowThreshold: target is being removed via urgent commit.
-            // Deadlock: no target; recovery is its own action.
             vec![creator_reward(&evidence)]
         } else {
             vec![evidence.target_score_op(), creator_reward(&evidence)]

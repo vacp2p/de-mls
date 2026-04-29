@@ -121,9 +121,8 @@ where
 
 /// Forward a peer's proposal into the local consensus service and, for
 /// regular proposals, emit a `VotePayload` so the UI can surface the
-/// pending vote. Fast-path proposals (`expected_voters_count == 1`) carry
-/// the creator's bundled YES and self-resolve immediately on arrival, so
-/// peers must not show a vote banner — there's nothing to vote on.
+/// pending vote. Fast-path proposals (`expected_voters_count == 1`)
+/// self-resolve on arrival and skip the banner.
 pub async fn forward_incoming_proposal<P: DeMlsProvider>(
     group_name: &str,
     proposal: Proposal,

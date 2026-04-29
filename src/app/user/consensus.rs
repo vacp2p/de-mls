@@ -45,17 +45,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// Check that the group state allows creating a proposal of this kind and
     /// return the expected voter count.
     ///
-    /// Layered partial-freeze model:
-    /// - **Working, no active ECP:** everything allowed.
-    /// - **Working, active ECP (phase 3 — ECP being voted):** only the
-    ///   active ECP allowed; Election + Commit blocked via
-    ///   `partial_freeze_blocks`.
-    /// - **Reelection, no active ECP (phase 2 — Layer 2 recovery):** ECP
-    ///   and StewardElection allowed (the recovery itself); new Commit
-    ///   proposals blocked.
-    /// - **Reelection, active ECP (phase 3 escalation):** only the active
-    ///   ECP allowed; Election blocked via `partial_freeze_blocks`.
-    /// - **Freezing / Selection:** all proposals blocked (transient).
+    /// `Reelection` allows only ECP + StewardElection (the recovery itself),
+    /// further filtered by `partial_freeze_blocks`. `Freezing` / `Selection`
+    /// block everything. Other states defer to `partial_freeze_blocks`.
     async fn check_proposal_allowed(
         &self,
         group_name: &str,
@@ -442,9 +434,6 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// `delay`, the timer casts the local member's vote using
     /// `liveness_criteria_yes` and broadcasts it. Idempotent — an existing
     /// handle for the same key is aborted and replaced.
-    ///
-    /// Caller picks `delay` via `GroupConfig::voting_delay_for(kind)` so
-    /// elections use a shorter window than regular proposals.
     ///
     /// If the member has already voted or the session has resolved by the
     /// time the timer fires, `cast_vote` returns a benign error

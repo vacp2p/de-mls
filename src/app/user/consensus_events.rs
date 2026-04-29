@@ -118,8 +118,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         Ok(())
     }
 
-    /// ECP YES side-effect: bypass the inactivity timer so the urgent
-    /// commit fires now rather than the next epoch cycle.
+    /// Bypass the inactivity timer so the urgent commit fires now.
     async fn force_freezing_for_urgent_commit(&self, group_name: &str) {
         let transitioned = {
             let mut groups = self.groups.write().await;
@@ -135,11 +134,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
     }
 
-    /// Approved removal of a current steward fires a steward election in
-    /// parallel with the natural commit cycle so the next epoch starts
-    /// with a healthy ES + BS rather than dropping to one live steward.
-    /// `has_election_in_flight` dedupes against a Layer-2 election firing
-    /// from another path.
+    /// When the removal target is a current steward, fire a fresh election
+    /// in parallel so the next epoch keeps a healthy ES + BS.
     async fn refresh_stewards_after_removal(&self, group_name: &str, target: &[u8]) {
         let target_was_steward = {
             let groups = self.groups.read().await;
@@ -165,12 +161,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
     }
 
-    /// Accepted election: validate the proposed list, install it, exit
-    /// Reelection if we were in it, close any open recovery window, and
-    /// drain buffered updates so the fresh epoch steward picks them up.
-    /// `reelection_round` stays > 0 until the next successful commit so
-    /// the immediate post-election inactivity check uses the short retry
-    /// window.
+    /// Accepted election: validate, install the new list, exit Reelection
+    /// if we were in it, close any open recovery window, and drain
+    /// buffered updates so the fresh epoch steward picks them up.
     async fn handle_election_accepted(
         &self,
         group_name: &str,
@@ -204,9 +197,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 election.proposed_stewards.len(),
                 election.retry_round,
             )?;
-            // `reelection_round` stays > 0 here; cleared on next successful
-            // commit by `on_group_updated`. A fresh steward list also closes
-            // any recovery window opened by a deadlock ECP.
+            // `reelection_round` stays > 0 until the next successful
+            // commit so the immediate post-election inactivity check uses
+            // the short retry window.
             entry.group.exit_recovery_mode();
             if entry.state_machine.current_state() == GroupState::Reelection {
                 entry.state_machine.start_working();
@@ -231,10 +224,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         self.process_buffered_updates(group_name).await
     }
 
-    /// Rejected election: bump the retry round and, under the max, retry
-    /// immediately (idempotent — only the responsible proposer actually
-    /// submits). Over the max, escalate to Layer 3 by filing a `Deadlock`
-    /// ECP — the responsible proposer submits, others no-op.
+    /// Rejected election: bump the retry round and retry under the max
+    /// (idempotent), or escalate to a `Deadlock` ECP once exhausted.
     async fn handle_election_rejected(&self, group_name: &str) {
         let (round, max) = {
             let mut groups = self.groups.write().await;

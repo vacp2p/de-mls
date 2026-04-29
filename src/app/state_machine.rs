@@ -73,9 +73,8 @@ pub struct GroupStateMachine {
     phase_timer: Option<Instant>,
     epoch_duration: Duration,
     freeze_duration: Duration,
-    /// Short inactivity window used during recovery (Layer 2 retry,
-    /// Layer 3 `recovery_mode`). Caller of `check_steward_inactivity`
-    /// picks between `epoch_duration` (fresh) and this (in-recovery).
+    /// Short inactivity window used during recovery; caller of
+    /// `check_steward_inactivity` picks which duration to apply.
     retry_inactivity_duration: Duration,
 }
 
@@ -150,17 +149,8 @@ impl GroupStateMachine {
         info!(state = "Freezing", "state transition");
     }
 
-    /// Bypass the inactivity timer and enter Freezing immediately. Used by
-    /// ECP-YES dispatch when an emergency needs to commit ASAP. Fires from:
-    /// - `Working` — fast removal (`ScoreBelowThreshold` ECP YES) skipping
-    ///   the inactivity wait.
-    /// - `Reelection` — Layer 3 (`Deadlock` ECP YES) opening the recovery
-    ///   window after Layer 2's re-election retries exhausted.
-    ///
-    /// No-op in `Freezing` / `Selection` (already mid-cycle) and in
-    /// `PendingJoin` / `Leaving` (separate paths drive those). Returns
-    /// `true` if the transition happened, so the caller knows whether to
-    /// dispatch `on_state_changed`.
+    /// Bypass the inactivity timer and enter Freezing immediately. Returns
+    /// `true` on transition (only fires from `Working` or `Reelection`).
     pub fn force_freezing(&mut self) -> bool {
         match self.state {
             GroupState::Working | GroupState::Reelection => {
@@ -239,10 +229,8 @@ impl GroupStateMachine {
     /// - `start_working` clears the timer, so the next tick with leftover
     ///   approved work starts a fresh window (matters for auto-approved
     ///   self-leaves that survive a reelection round).
-    /// - `inactivity_duration` is selected by the caller: `epoch_duration`
-    ///   for fresh state, `retry_inactivity_duration` while the group is
-    ///   recovering. Pass the right one based on `Group::reelection_round`
-    ///   and `Group::is_in_recovery_mode()`.
+    /// - `inactivity_duration` is supplied by the caller (long during
+    ///   normal operation, short during recovery).
     /// - No-op outside `Working`.
     pub fn check_steward_inactivity(
         &mut self,
@@ -374,31 +362,23 @@ mod tests {
     #[test]
     fn test_steward_inactivity_triggers_freezing() {
         let mut sm = GroupStateMachine::new_as_member();
-        // Backdate the first proposal approval to well past the chosen
-        // inactivity window.
         sm.phase_timer = Some(Instant::now() - Duration::from_secs(1));
 
         assert!(sm.check_steward_inactivity(1, Duration::from_millis(50)));
         assert_eq!(sm.current_state(), GroupState::Freezing);
     }
 
-    /// Caller picks the duration: a long window doesn't fire even when the
-    /// short window would have.
     #[test]
     fn test_check_inactivity_uses_caller_supplied_duration() {
         let mut sm = GroupStateMachine::new_as_member();
-        // 100 ms since first approval — long enough for `short_inactivity`
-        // (5 s) to NOT have elapsed, but we deliberately pass long below.
         sm.phase_timer = Some(Instant::now() - Duration::from_millis(100));
         assert!(!sm.check_steward_inactivity(1, long_inactivity()));
         assert_eq!(sm.current_state(), GroupState::Working);
 
-        // Same timer state, different (very short) duration → fires.
         assert!(sm.check_steward_inactivity(1, Duration::from_millis(50)));
         assert_eq!(sm.current_state(), GroupState::Freezing);
     }
 
-    /// Recovery uses the short retry duration via the config knob.
     #[test]
     fn test_retry_inactivity_duration_threaded_from_config() {
         let config = GroupConfig {

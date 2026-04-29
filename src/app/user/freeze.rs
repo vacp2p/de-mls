@@ -141,11 +141,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
 
                     if has_proposals {
-                        // Approved batch (and in-flight votes) survive a
-                        // failed freeze — the recovered steward commits
-                        // exactly the same proposals once the next election
-                        // installs a usable list. New proposals are blocked
-                        // by the Reelection-state guard while we recover.
+                        // Approved batch (and in-flight votes) survive so
+                        // the recovered steward commits the same proposals
+                        // once the next election lands.
                         entry.state_machine.clear_proposal_timer();
                         entry.state_machine.start_reelection();
 
@@ -185,12 +183,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     );
                 }
 
-                // Layer 2 recovery: fire a steward election so the
-                // deterministic responsible proposer regenerates the list
-                // (with draining members filtered out) and the next epoch
-                // can commit. Only the responsible proposer's call actually
-                // submits — others no-op, so safe to call from every
-                // member's freeze handler.
+                // Layer 2 recovery: regenerate the steward list. Only the
+                // responsible proposer's call actually submits.
                 if entered_reelection
                     && let Err(e) = self
                         .try_initiate_steward_election(group_name, true, None)
@@ -217,17 +211,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
 
         let proposal_count = entry.group.approved_proposals_count();
-        // Hold the inactivity-driven freeze while a steward election is in
-        // flight: starting a freeze with the current (already-known-stale)
-        // list would just produce a NoCandidate. Wait for the election to
-        // land — the next tick fires freeze with the fresh list.
+        // Hold the freeze while an election is in flight — committing on
+        // the known-stale list would just produce a NoCandidate.
         if entry.group.has_election_in_flight() {
             return Ok(false);
         }
-        // Recovery state (post-NoCandidate retry or recovery_mode) uses the
-        // shorter retry inactivity duration so we don't waste another full
-        // epoch waiting for a steward to commit. Reset to the long
-        // `epoch_duration` once a successful commit clears recovery state.
+        // Recovery uses the shorter retry inactivity window so we don't
+        // burn another full epoch waiting for a steward to commit.
         let in_recovery = entry.group.is_in_recovery_mode() || entry.group.reelection_round() > 0;
         let inactivity = if in_recovery {
             entry.state_machine.retry_inactivity_duration()

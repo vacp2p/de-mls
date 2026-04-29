@@ -21,14 +21,9 @@ use crate::protos::de_mls::messages::v1::{AppMessage, CommitCandidate, group_upd
 /// Build a commit candidate and buffer it for [`crate::core::finalize_freeze_round`].
 ///
 /// The gate is plain `is_steward()` (list membership) — intentionally **not**
-/// `is_live_epoch_steward` or a list-exhaustion check. If an election fails
-/// its retries and the list exhausts, members of the *previous* list can
-/// still commit recovery actions (e.g. a leave) to advance the epoch and
-/// trigger a fresh election.
-///
-/// Layer 3 exception: when `Group::is_in_recovery_mode()` is true (a
-/// `Deadlock` ECP just opened the recovery window), the steward gate is
-/// bypassed entirely so any member can produce the recovery commit.
+/// `is_live_epoch_steward` or a list-exhaustion check, so members of the
+/// *previous* list can commit recovery actions when an election fails.
+/// `Group::is_in_recovery_mode()` (Layer 3) bypasses the gate entirely.
 pub fn create_commit_candidate<S>(
     group: &mut Group,
     mls: &MlsService<S>,
@@ -90,16 +85,11 @@ where
     let is_member = |id: &[u8]| current_members.iter().any(|m| m == id);
 
     // Urgent (ECP-driven) freeze: restrict the batch to just the target's
-    // RemoveMember. Other approved proposals stay queued for the next
-    // normal cycle — see `Group::urgent_commit_target`.
+    // RemoveMember. See `Group::urgent_commit_target`.
     let urgent_target = group.urgent_commit_target().map(|t| t.to_vec());
 
-    // Cap the batch at `k_max` so a recovery-preserved queue can't pile
-    // arbitrarily many proposals into a single MLS commit. Excess entries
-    // stay in `approved_proposals` for the next cycle. Iterate proposals
-    // in insertion order (FIFO) so the cap selects the oldest approved
-    // entries first; library proposal IDs are content-derived hashes, so
-    // sort-by-id is not temporal.
+    // Iterate in insertion order (FIFO): library proposal IDs are
+    // content-derived hashes, so sort-by-id is not temporal.
     let k_max = group.protocol_config().k_max;
     let mut updates = Vec::with_capacity(group.approved_order().len().min(k_max));
     for pid in group.approved_order() {

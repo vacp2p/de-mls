@@ -21,8 +21,8 @@ pub const DEFAULT_CONSENSUS_TIMEOUT: Duration = Duration::from_secs(30);
 /// for this many consecutive epochs.
 pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
 
-/// Inactivity window during recovery (`reelection_round > 0` or
-/// `recovery_mode`). Reset to `epoch_duration` after a successful commit.
+/// Inactivity window during recovery. Reset to `epoch_duration` after a
+/// successful commit.
 pub const DEFAULT_RETRY_INACTIVITY_DURATION: Duration = Duration::from_secs(5);
 
 /// Per-member window to cast a manual vote before the app auto-votes
@@ -30,8 +30,7 @@ pub const DEFAULT_RETRY_INACTIVITY_DURATION: Duration = Duration::from_secs(5);
 pub const DEFAULT_VOTING_DELAY: Duration = Duration::from_secs(10);
 
 /// Auto-vote delay for steward-election proposals. Shorter than
-/// `DEFAULT_VOTING_DELAY` since the deterministic list needs only
-/// acknowledgement, not deliberation, so recovery elections converge fast.
+/// `DEFAULT_VOTING_DELAY` so recovery elections converge fast.
 pub const DEFAULT_ELECTION_VOTING_DELAY: Duration = Duration::from_secs(5);
 
 /// Whether silent voters count as YES at `consensus_timeout`
@@ -57,9 +56,8 @@ pub struct GroupConfig {
     pub epoch_duration: Duration,
     /// Freeze window before deterministic selection. Defaults to `epoch_duration / 2`.
     pub freeze_duration: Duration,
-    /// Inactivity window during recovery (Layer 2 retry / Layer 3
-    /// `recovery_mode`). Much shorter than `epoch_duration` so retries
-    /// don't burn another full epoch.
+    /// Inactivity window during recovery. Much shorter than
+    /// `epoch_duration` so retries don't burn another full epoch.
     pub retry_inactivity_duration: Duration,
     /// How long a proposal stays active before expiring (RFC §Creating Voting Proposal).
     pub proposal_expiration: Duration,
@@ -76,9 +74,8 @@ pub struct GroupConfig {
     /// `voting_delay < consensus_timeout < epoch_duration`. See
     /// [`DEFAULT_VOTING_DELAY`].
     pub voting_delay: Duration,
-    /// Override of `voting_delay` for steward-election proposals (see
-    /// [`DEFAULT_ELECTION_VOTING_DELAY`]). Picked by
-    /// [`Self::voting_delay_for`] so recovery elections converge fast.
+    /// Auto-vote delay for steward-election proposals (see
+    /// [`DEFAULT_ELECTION_VOTING_DELAY`]).
     pub election_voting_delay: Duration,
     /// Whether silent voters count as YES at `consensus_timeout` (RFC
     /// §Creating Voting Proposal). See [`DEFAULT_LIVENESS_CRITERIA_YES`].
@@ -121,9 +118,7 @@ impl GroupConfig {
         }
     }
 
-    /// Auto-vote delay for the given proposal kind. Steward elections use
-    /// the shorter `election_voting_delay`; everything else uses
-    /// `voting_delay`.
+    /// Auto-vote delay for the given proposal kind.
     pub fn voting_delay_for(&self, kind: ProposalKind) -> Duration {
         if kind.is_steward_election() {
             self.election_voting_delay

@@ -162,8 +162,7 @@ where
     let candidates = match group.freeze_round() {
         Some(round) if round.epoch == current_epoch => round.candidates.clone(),
         _ => {
-            // Steward may have built a local pending commit before the
-            // round emptied — drop it so the next attempt's MLS encrypt
+            // Drop any local pending commit so the next MLS encrypt
             // doesn't trip on "pending proposal exists".
             let _ = mls.discard_own_commit(group.group_name());
             return Ok(FreezeFinalizeResult::default());
@@ -389,10 +388,9 @@ where
         }
     }
 
-    // No candidate applied. If the local steward built one and we never
-    // merged or discarded it (no incoming-wins path fired), drop it now —
-    // otherwise MLS state holds a pending commit that breaks the next
-    // encrypt (e.g., the recovery election proposal).
+    // No candidate applied. Drop any local pending commit that wasn't
+    // merged or discarded along an incoming-wins path — leaving it
+    // behind would break the next MLS encrypt.
     if !own_commit_discarded {
         let _ = mls.discard_own_commit(&group_name);
     }
@@ -739,8 +737,7 @@ fn check_commit_sender_authorized(
 fn record_applied_commit(group: &mut Group, commit_hash: Vec<u8>) {
     group.record_committed_batch(commit_hash);
     if let Some(target) = group.take_urgent_commit_target() {
-        // Urgent ECP-driven commit: drop only the target's RemoveMember
-        // entry, leave the rest of the queue for the next normal cycle.
+        // Urgent commit: leave the rest of the queue for the next cycle.
         group.drop_approved_removals_for(&target);
     } else {
         group.clear_approved_proposals();

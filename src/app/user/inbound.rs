@@ -112,10 +112,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             &*self.handler,
         )
         .await?;
-        // Auto-vote timer: fires after the kind's `voting_delay` and casts
-        // the configured `liveness_criteria_yes` choice. Skipped for
-        // fast-path proposals — the creator's bundled YES already resolved
-        // the session, so the timer would hit a closed session.
+        // Skip auto-vote for fast-path proposals: the creator's bundled
+        // YES already resolved the session, so the timer would hit a
+        // closed session.
         if expected_voters > 1 {
             let delay = self.default_group_config.voting_delay_for(kind);
             self.spawn_auto_vote(group_name.to_string(), proposal_id, delay);
@@ -218,8 +217,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     }
 
     /// Fire a steward election while `recovery_mode` is set so the next
-    /// list installs and closes the window opened by a deadlock ECP YES.
-    /// The election landing restores the normal steward gate.
+    /// list installs and closes the window.
     async fn maybe_close_recovery_window(&self, group_name: &str) {
         let in_recovery_mode = {
             let groups = self.groups.read().await;

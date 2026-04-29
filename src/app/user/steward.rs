@@ -78,22 +78,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     }
 
     /// Submit a steward-election proposal. Only the deterministic responsible
-    /// proposer (first live member of the previous list) actually submits;
-    /// others no-op, so this is safe to call from every poll tick without
-    /// double-proposing. `retry_round` comes from `Group::reelection_round`
-    /// (bumps on reject).
+    /// proposer actually submits; others no-op, so this is safe to call from
+    /// every poll tick without double-proposing.
     ///
-    /// `recovery` switches the call between the two trigger modes:
-    /// - `false` (housekeeping): only fires when the steward list is exhausted
-    ///   at the current epoch. Candidate pool is the full MLS member set.
-    /// - `true` (Layer 2 recovery): bypasses the exhaustion gate so we can
-    ///   regenerate the list when the live walk has yielded nothing. Members
-    ///   with a queued `RemoveMember` are filtered out of the candidate pool
-    ///   so the new list doesn't re-include them.
-    ///
-    /// `extra_exclude` adds one more identity to drop from the candidate pool
-    /// — used by proactive callers (banner / leaver) whose target isn't in
-    /// `approved_proposals` yet at submission time.
+    /// `recovery = true` bypasses the list-exhaustion gate and filters
+    /// queued-removal targets out of the candidate pool. `extra_exclude`
+    /// drops one more identity not yet in `approved_proposals`.
     pub(super) async fn try_initiate_steward_election(
         &self,
         group_name: &str,
@@ -187,13 +177,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         Ok(())
     }
 
-    /// Layer 3 escalation: file a `Deadlock` ECP after Layer 2's
-    /// re-election retries are exhausted. Only the deterministic
-    /// responsible proposer (first eligible member of the previous
-    /// steward list) actually submits — others no-op, so it's safe to
-    /// call from every member's `handle_election_rejected`. On YES the
-    /// ECP opens `recovery_mode` (any-member commit) until a fresh
-    /// election lands.
+    /// Layer 3 escalation: file a `Deadlock` ECP after re-election retries
+    /// exhaust. Only the deterministic responsible proposer submits;
+    /// others no-op. On YES the ECP opens `recovery_mode`.
     pub(super) async fn try_initiate_deadlock_ecp(
         &self,
         group_name: &str,
@@ -226,8 +212,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
         info!(group = group_name, epoch, "initiating Deadlock ECP");
 
-        // Bundle the YES vote at submit — the proposer's observation that
-        // the deadlock is real *is* their YES.
+        // Bundle YES — the proposer's observation that the deadlock is
+        // real is their vote.
         self.initiate_proposal(group_name.to_string(), request, Some(true))
             .await?;
         Ok(())
