@@ -634,6 +634,21 @@ where
         StagedCommitResult::Ignored => return Ok(StagingOutcome::Abort),
     };
 
+    // Wire-claimed `steward_identity` must match the MLS-verified
+    // `commit_sender`; mismatch is a broken commit (RFC §Steward
+    // violation list) and is attributed to the actual signer.
+    if candidate.steward_identity != commit_sender {
+        tracing::warn!(
+            group = group_name,
+            "violation: wire steward_identity doesn't match MLS commit_sender"
+        );
+        return Ok(StagingOutcome::Violation(ViolationEvidence::broken_commit(
+            commit_sender,
+            current_epoch,
+            "commit candidate's steward_identity doesn't match MLS commit sender",
+        )));
+    }
+
     // Every bundled proposal must come from the committer — catches both
     // "proposals signed by a third party" and "proposals don't all agree
     // on a sender". Attribution always lands on the committer (RFC

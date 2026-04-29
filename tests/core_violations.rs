@@ -7,8 +7,10 @@ use de_mls::core::{
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 use de_mls::protos::de_mls::messages::v1::{
-    GroupUpdateRequest, ViolationEvidence, ViolationType, group_update_request,
+    AppMessage, GroupUpdateRequest, ViolationEvidence, ViolationType, app_message,
+    group_update_request,
 };
+use prost::Message;
 
 mod common;
 use common::{setup_joiner, setup_steward, steward_add_joiner};
@@ -547,6 +549,112 @@ fn test_reject_all_voting_proposals_clears_queue() {
     // Voting queue should be empty
     assert!(!group.is_owner_of_proposal(1));
     assert!(!group.is_owner_of_proposal(2));
+}
+
+/// Test: a candidate whose wire `steward_identity` doesn't match the
+/// MLS-verified commit sender is dropped as `BrokenCommit`. Score is
+/// attributed to the actual MLS sender, not the forged wire claim.
+#[test]
+fn test_forged_steward_identity_scores_mls_sender() {
+    let group_name = "forged-steward-id";
+
+    let steward_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+    let joiner_hex = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+    let third_hex = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
+
+    let (steward_mls, mut steward_handle) = setup_steward(group_name, steward_hex);
+    let (joiner_mls, mut joiner_handle, kp_packet) = setup_joiner(group_name, joiner_hex);
+
+    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
+    let join_result = process_inbound(
+        &mut joiner_handle,
+        &welcome_packet.payload,
+        WELCOME_SUBTOPIC,
+        &joiner_mls,
+    )
+    .unwrap();
+    assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
+
+    let (_third_mls, _third_handle, kp3_packet) = setup_joiner(group_name, third_hex);
+    let result = process_inbound(
+        &mut steward_handle,
+        &kp3_packet.payload,
+        WELCOME_SUBTOPIC,
+        &steward_mls,
+    )
+    .unwrap();
+    let gur = match result {
+        ProcessResult::MembershipChangeReceived(gur) => gur,
+        other => panic!("Expected MembershipChangeReceived, got {:?}", other),
+    };
+
+    let proposal_id: ProposalId = 91;
+    steward_handle.insert_approved_proposal(proposal_id, gur.clone());
+    joiner_handle.insert_approved_proposal(proposal_id, gur);
+
+    let packets =
+        create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id").unwrap();
+    let batch_packet = packets
+        .iter()
+        .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
+        .expect("Expected batch proposals packet");
+
+    // Forge `steward_identity` to impersonate a different identity. The
+    // MLS commit message is still signed by the real steward, so staging
+    // succeeds and the cross-check fires.
+    let mut app_msg = AppMessage::decode(batch_packet.payload.as_slice()).unwrap();
+    let real_steward_id = steward_mls.wallet_bytes();
+    let forged_id = vec![0xCC; real_steward_id.len()];
+    match &mut app_msg.payload {
+        Some(app_message::Payload::CommitCandidate(c)) => {
+            assert_eq!(
+                c.steward_identity, real_steward_id,
+                "fixture: steward_identity should start equal to MLS sender"
+            );
+            c.steward_identity = forged_id.clone();
+        }
+        other => panic!("Expected CommitCandidate, got {:?}", other),
+    }
+    let mut forged_payload = Vec::with_capacity(app_msg.encoded_len());
+    app_msg.encode(&mut forged_payload).unwrap();
+
+    let result = process_inbound(
+        &mut joiner_handle,
+        &forged_payload,
+        APP_MSG_SUBTOPIC,
+        &joiner_mls,
+    )
+    .unwrap();
+    assert!(
+        matches!(result, ProcessResult::CommitCandidateReceived),
+        "Expected CommitCandidateReceived after wire forgery, got {:?}",
+        result
+    );
+
+    let finalize =
+        finalize_freeze_round(&mut joiner_handle, &joiner_mls, false, b"test-app-id").unwrap();
+    assert!(
+        matches!(finalize.outcome, FreezeOutcome::NoCandidate),
+        "Expected NoCandidate after dropping the forged candidate, got {:?}",
+        finalize.outcome
+    );
+
+    let broken = finalize
+        .score_ops
+        .iter()
+        .find(|op| matches!(op.event, ScoreEvent::BrokenCommit))
+        .expect("Expected a BrokenCommit score op");
+    assert_eq!(
+        broken.member_id, real_steward_id,
+        "score should target the MLS-verified commit sender, not the forged claim"
+    );
+    assert!(
+        finalize
+            .score_ops
+            .iter()
+            .all(|op| op.member_id != forged_id),
+        "no score op should target the forged identity"
+    );
 }
 
 /// Test: no valid candidate triggers NoCandidate result.
