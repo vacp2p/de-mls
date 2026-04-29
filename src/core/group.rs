@@ -187,8 +187,8 @@ pub struct Group {
     /// "stuck" error surfaces. Every member in the group holds the same
     /// value — joiners pick it up from `GroupSync` — so the error path
     /// triggers consistently across the group. Overridden at group
-    /// creation from `GroupConfig`; defaults to [`DEFAULT_MAX_REELECTION_RETRIES`].
-    max_reelection_retries: u32,
+    /// creation from `GroupConfig`; defaults to [`DEFAULT_MAX_REELECTION_ATTEMPTS`].
+    max_reelection_attempts: u32,
     /// Bounded FIFO of proposal IDs with a locally-observed consensus outcome.
     /// Used by `apply_consensus_outcome` to drop library re-emissions and by
     /// `forward_incoming_vote` to distinguish benign late peer votes (session
@@ -204,7 +204,7 @@ pub struct Group {
     /// Layer 3 recovery: set by a `Deadlock` ECP YES, cleared once a
     /// fresh steward election lands. While set, `create_commit_candidate`
     /// bypasses the `is_steward()` gate so any member can produce the
-    /// recovery commit. Layer 2 has already failed `max_reelection_retries`
+    /// recovery commit. Layer 2 has already failed `max_reelection_attempts`
     /// times by the time this trips.
     recovery_mode: bool,
 }
@@ -212,7 +212,7 @@ pub struct Group {
 /// Fallback ceiling on steward-election retries. One retry gives the
 /// responsible proposer a second shot with a different list composition;
 /// beyond that human/policy intervention is expected.
-pub const DEFAULT_MAX_REELECTION_RETRIES: u32 = 1;
+pub const DEFAULT_MAX_REELECTION_ATTEMPTS: u32 = 1;
 
 impl Group {
     fn new_base(group_name: &str, self_identity: Vec<u8>, protocol_config: ProtocolConfig) -> Self {
@@ -231,7 +231,7 @@ impl Group {
             freeze_round: None,
             pending_updates: HashMap::new(),
             reelection_round: 0,
-            max_reelection_retries: DEFAULT_MAX_REELECTION_RETRIES,
+            max_reelection_attempts: DEFAULT_MAX_REELECTION_ATTEMPTS,
             resolved_proposals: ResolvedProposalCache::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
             urgent_commit_target: None,
             recovery_mode: false,
@@ -817,14 +817,14 @@ impl Group {
 
     /// Group-configured ceiling on retries before the stuck-election error
     /// surfaces. Shared across the group via `GroupSync`.
-    pub fn max_reelection_retries(&self) -> u32 {
-        self.max_reelection_retries
+    pub fn max_reelection_attempts(&self) -> u32 {
+        self.max_reelection_attempts
     }
 
     /// Overwrite the retry ceiling. Called from group-creation (from
-    /// `GroupConfig`) and on joiner sync (from `GroupSync.max_reelection_retries`).
-    pub fn set_max_reelection_retries(&mut self, max: u32) {
-        self.max_reelection_retries = max;
+    /// `GroupConfig`) and on joiner sync (from `GroupSync.max_reelection_attempts`).
+    pub fn set_max_reelection_attempts(&mut self, max: u32) {
+        self.max_reelection_attempts = max;
     }
 
     /// Drop a buffered update by target identity.

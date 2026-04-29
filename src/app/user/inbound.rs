@@ -360,7 +360,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     .set_allow_subset_candidates(sync.allow_subset_candidates);
                 entry
                     .group
-                    .set_max_reelection_retries(sync.max_reelection_retries);
+                    .set_max_reelection_attempts(sync.max_reelection_attempts);
                 if let Some(timing) = &sync.timing {
                     let epoch_dur = std::time::Duration::from_millis(timing.epoch_duration_ms);
                     let freeze_dur = std::time::Duration::from_millis(timing.freeze_duration_ms);

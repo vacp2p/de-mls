@@ -113,7 +113,7 @@ message GroupSync {
   // Group's configured ceiling on election retries. Joiners apply this
   // value so the stuck-election error path triggers consistently across
   // the group.
-  uint32 max_reelection_retries = 9;
+  uint32 max_reelection_attempts = 9;
 }
 
 message PeerScore {

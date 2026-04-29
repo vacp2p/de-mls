@@ -246,7 +246,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             // joiners honor the group's configured policy via `GroupSync`.
             (
                 entry.group.reelection_round(),
-                entry.group.max_reelection_retries(),
+                entry.group.max_reelection_attempts(),
             )
         };
         if round > max {

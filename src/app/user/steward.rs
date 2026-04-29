@@ -438,7 +438,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 peer_scores: scores,
                 timing: Some(timing),
                 retry_round: list.retry_round(),
-                max_reelection_retries: entry.group.max_reelection_retries(),
+                max_reelection_attempts: entry.group.max_reelection_attempts(),
             };
 
             let app_msg: AppMessage = sync.into();

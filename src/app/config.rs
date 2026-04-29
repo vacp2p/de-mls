@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-pub use crate::core::DEFAULT_MAX_REELECTION_RETRIES;
+pub use crate::core::DEFAULT_MAX_REELECTION_ATTEMPTS;
 use crate::core::{ProposalKind, ProtocolConfig};
 
 /// Wall-clock window the steward waits before batching approved proposals
@@ -70,7 +70,7 @@ pub struct GroupConfig {
     pub pending_update_max_epochs: u32,
     /// Max steward-election retries within one MLS epoch before the app
     /// surfaces "reelection stuck". `0` disables retry entirely.
-    pub max_reelection_retries: u32,
+    pub max_reelection_attempts: u32,
     /// Per-member window to cast a manual vote before the app auto-casts
     /// using `liveness_criteria_yes`. Relationship invariant:
     /// `voting_delay < consensus_timeout < epoch_duration`. See
@@ -100,7 +100,7 @@ impl Default for GroupConfig {
             proposal_expiration: DEFAULT_PROPOSAL_EXPIRATION,
             consensus_timeout: DEFAULT_CONSENSUS_TIMEOUT,
             pending_update_max_epochs: DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
-            max_reelection_retries: DEFAULT_MAX_REELECTION_RETRIES,
+            max_reelection_attempts: DEFAULT_MAX_REELECTION_ATTEMPTS,
             voting_delay: DEFAULT_VOTING_DELAY,
             election_voting_delay: DEFAULT_ELECTION_VOTING_DELAY,
             liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,
