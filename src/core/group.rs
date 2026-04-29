@@ -149,6 +149,9 @@ pub struct Group {
     self_identity: Vec<u8>,
     /// Proposals that passed consensus, waiting for steward to commit.
     approved_proposals: HashMap<ProposalId, GroupUpdateRequest>,
+    /// Insertion order of `approved_proposals` (FIFO). Library proposal
+    /// IDs are content-derived hashes, so sort-by-id is not temporal.
+    approved_order: Vec<ProposalId>,
     /// Proposals waiting on consensus voting (created by this user).
     voting_proposals: HashMap<ProposalId, GroupUpdateRequest>,
     /// History of previously-committed batches (most recent last), capped
@@ -182,19 +185,26 @@ pub struct Group {
     /// "stuck" error surfaces. Every member in the group holds the same
     /// value — joiners pick it up from `GroupSync` — so the error path
     /// triggers consistently across the group. Overridden at group
-    /// creation from `GroupConfig`; defaults to [`DEFAULT_MAX_REELECTION_RETRIES`].
-    max_reelection_retries: u32,
+    /// creation from `GroupConfig`; defaults to [`DEFAULT_MAX_REELECTION_ATTEMPTS`].
+    max_reelection_attempts: u32,
     /// Bounded FIFO of proposal IDs with a locally-observed consensus outcome.
     /// Used by `apply_consensus_outcome` to drop library re-emissions and by
     /// `forward_incoming_vote` to distinguish benign late peer votes (session
     /// was trimmed after resolution) from votes for unknown proposal IDs.
     resolved_proposals: ResolvedProposalCache,
+    /// When `Some(target)`, the next freeze cycle commits only the
+    /// `RemoveMember(target)` entry; other approvals wait so they don't
+    /// dilute the fast-removal intent.
+    urgent_commit_target: Option<Vec<u8>>,
+    /// While `true`, `create_commit_candidate` bypasses the `is_steward()`
+    /// gate so any member can produce the recovery commit.
+    recovery_mode: bool,
 }
 
 /// Fallback ceiling on steward-election retries. One retry gives the
 /// responsible proposer a second shot with a different list composition;
 /// beyond that human/policy intervention is expected.
-pub const DEFAULT_MAX_REELECTION_RETRIES: u32 = 1;
+pub const DEFAULT_MAX_REELECTION_ATTEMPTS: u32 = 1;
 
 impl Group {
     fn new_base(group_name: &str, self_identity: Vec<u8>, protocol_config: ProtocolConfig) -> Self {
@@ -202,6 +212,7 @@ impl Group {
             group_name: group_name.to_string(),
             self_identity,
             approved_proposals: HashMap::new(),
+            approved_order: Vec::new(),
             voting_proposals: HashMap::new(),
             epoch_history: VecDeque::new(),
             steward_list: None,
@@ -212,8 +223,10 @@ impl Group {
             freeze_round: None,
             pending_updates: HashMap::new(),
             reelection_round: 0,
-            max_reelection_retries: DEFAULT_MAX_REELECTION_RETRIES,
+            max_reelection_attempts: DEFAULT_MAX_REELECTION_ATTEMPTS,
             resolved_proposals: ResolvedProposalCache::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
+            urgent_commit_target: None,
+            recovery_mode: false,
         }
     }
 
@@ -353,10 +366,26 @@ impl Group {
         &self.approved_proposals
     }
 
+    /// Insertion order of `approved_proposals` (oldest first).
+    pub fn approved_order(&self) -> &[ProposalId] {
+        &self.approved_order
+    }
+
+    /// Re-inserting an existing id preserves the original position.
+    fn push_approved(&mut self, proposal_id: ProposalId, proposal: GroupUpdateRequest) {
+        if self
+            .approved_proposals
+            .insert(proposal_id, proposal)
+            .is_none()
+        {
+            self.approved_order.push(proposal_id);
+        }
+    }
+
     /// Move a proposal from the voting queue into the approved queue.
     pub fn mark_proposal_as_approved(&mut self, proposal_id: ProposalId) {
         if let Some(proposal) = self.voting_proposals.remove(&proposal_id) {
-            self.approved_proposals.insert(proposal_id, proposal);
+            self.push_approved(proposal_id, proposal);
         }
     }
 
@@ -376,12 +405,14 @@ impl Group {
         proposal_id: ProposalId,
         proposal: GroupUpdateRequest,
     ) {
-        self.approved_proposals.insert(proposal_id, proposal);
+        self.push_approved(proposal_id, proposal);
     }
 
     /// Drop a single proposal from the approved queue without archiving.
     pub fn remove_approved_proposal(&mut self, proposal_id: ProposalId) {
-        self.approved_proposals.remove(&proposal_id);
+        if self.approved_proposals.remove(&proposal_id).is_some() {
+            self.approved_order.retain(|pid| *pid != proposal_id);
+        }
     }
 
     /// Archive the approved batch to epoch history and clear the queue.
@@ -392,18 +423,25 @@ impl Group {
             return;
         }
         let snapshot = std::mem::take(&mut self.approved_proposals);
+        self.approved_order.clear();
         if self.epoch_history.len() >= MAX_EPOCH_HISTORY {
             self.epoch_history.pop_front();
         }
         self.epoch_history.push_back(snapshot);
     }
 
-    /// Discard the approved queue on freeze failure. Auto-approved self-leaves
-    /// are preserved — they have a known YES outcome and must survive so the
-    /// next epoch steward can commit them.
+    /// Discard the approved queue on freeze failure. `RemoveMember`
+    /// proposals carry settled YES outcomes and survive so a recovered
+    /// steward can commit them; other approvals (Add) are dropped.
     pub fn reject_all_approved_proposals(&mut self) {
-        self.approved_proposals
-            .retain(|pid, req| is_auto_approved_entry(*pid, req));
+        self.approved_proposals.retain(|_pid, req| {
+            matches!(
+                req.payload.as_ref(),
+                Some(group_update_request::Payload::RemoveMember(_))
+            )
+        });
+        self.approved_order
+            .retain(|pid| self.approved_proposals.contains_key(pid));
     }
 
     /// Drop every entry in the voting queue.
@@ -455,6 +493,50 @@ impl Group {
     /// Mark a removal ECP as finalized (resolved regardless of outcome).
     pub fn resolve_pending_removal(&mut self, member_id: &[u8]) {
         self.pending_removal_targets.remove(member_id);
+    }
+
+    // ─────────────────────────── Urgent (ECP-driven) Commit ───────────────────────────
+
+    /// Mark the next freeze cycle as urgent and committed-only-for `target`.
+    pub fn set_urgent_commit_target(&mut self, target: Vec<u8>) {
+        self.urgent_commit_target = Some(target);
+    }
+
+    pub fn urgent_commit_target(&self) -> Option<&[u8]> {
+        self.urgent_commit_target.as_deref()
+    }
+
+    pub fn take_urgent_commit_target(&mut self) -> Option<Vec<u8>> {
+        self.urgent_commit_target.take()
+    }
+
+    /// Drop every `RemoveMember(target)` entry; other approvals stay
+    /// queued for the next normal cycle.
+    pub fn drop_approved_removals_for(&mut self, target: &[u8]) {
+        self.approved_proposals.retain(|_pid, req| {
+            !matches!(
+                req.payload.as_ref(),
+                Some(group_update_request::Payload::RemoveMember(r)) if r.identity == target
+            )
+        });
+        self.approved_order
+            .retain(|pid| self.approved_proposals.contains_key(pid));
+    }
+
+    // ─────────────────────────── Layer 3 Recovery Mode ───────────────────────────
+
+    /// While set, `create_commit_candidate` bypasses the `is_steward()`
+    /// gate so any member can produce the recovery commit.
+    pub fn enter_recovery_mode(&mut self) {
+        self.recovery_mode = true;
+    }
+
+    pub fn is_in_recovery_mode(&self) -> bool {
+        self.recovery_mode
+    }
+
+    pub fn exit_recovery_mode(&mut self) {
+        self.recovery_mode = false;
     }
 
     // ─────────────────────────── Steward List Operations ───────────────────────────
@@ -715,14 +797,14 @@ impl Group {
 
     /// Group-configured ceiling on retries before the stuck-election error
     /// surfaces. Shared across the group via `GroupSync`.
-    pub fn max_reelection_retries(&self) -> u32 {
-        self.max_reelection_retries
+    pub fn max_reelection_attempts(&self) -> u32 {
+        self.max_reelection_attempts
     }
 
     /// Overwrite the retry ceiling. Called from group-creation (from
-    /// `GroupConfig`) and on joiner sync (from `GroupSync.max_reelection_retries`).
-    pub fn set_max_reelection_retries(&mut self, max: u32) {
-        self.max_reelection_retries = max;
+    /// `GroupConfig`) and on joiner sync (from `GroupSync.max_reelection_attempts`).
+    pub fn set_max_reelection_attempts(&mut self, max: u32) {
+        self.max_reelection_attempts = max;
     }
 
     /// Drop a buffered update by target identity.
@@ -798,6 +880,8 @@ impl Group {
                 _ => true,
             }
         });
+        self.approved_order
+            .retain(|pid| self.approved_proposals.contains_key(pid));
     }
 }
 
@@ -869,7 +953,7 @@ mod tests {
 
         let list = group.steward_list().unwrap();
         assert_eq!(list.len(), 4);
-        assert_eq!(list.start_epoch(), 1);
+        assert_eq!(list.election_epoch(), 1);
     }
 
     /// `is_steward()` flips to true only once the list has been generated
@@ -1072,5 +1156,92 @@ mod tests {
         assert_ne!(live_backup, nominal);
         assert_ne!(live_backup, backup);
         assert_ne!(live_epoch, live_backup);
+    }
+
+    /// `RemoveMember` proposals survive a freeze failure regardless of
+    /// source; Add proposals are dropped.
+    #[test]
+    fn test_reject_all_approved_preserves_all_remove_member() {
+        let config = ProtocolConfig::new(1, 3).unwrap();
+        let mems = members(&[1, 2, 3, 4]);
+        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
+
+        let ban_id: ProposalId = 0x1111_2222;
+        let ecp_id: ProposalId = 0x3333_4444;
+        let add_id: ProposalId = 0x5555_6666;
+        insert_remove_member(&mut group, &member(2), ban_id);
+        insert_remove_member(&mut group, &member(3), ecp_id);
+        let add = GroupUpdateRequest {
+            payload: Some(group_update_request::Payload::InviteMember(
+                crate::protos::de_mls::messages::v1::InviteMember {
+                    key_package_bytes: vec![0; 8],
+                    identity: member(99),
+                },
+            )),
+        };
+        group.insert_approved_proposal(add_id, add);
+        assert_eq!(group.approved_proposals_count(), 3);
+
+        group.reject_all_approved_proposals();
+
+        assert_eq!(group.approved_proposals_count(), 2);
+        assert!(group.approved_proposals().contains_key(&ban_id));
+        assert!(group.approved_proposals().contains_key(&ecp_id));
+        assert!(!group.approved_proposals().contains_key(&add_id));
+    }
+
+    /// `approved_order` is FIFO regardless of proposal-id ordering.
+    #[test]
+    fn test_approved_order_preserves_fifo_across_mutations() {
+        let mut group = Group::new_as_creator("g", member(1), default_config()).unwrap();
+
+        insert_remove_member(&mut group, &member(2), 500);
+        insert_remove_member(&mut group, &member(3), 100);
+        insert_remove_member(&mut group, &member(4), 300);
+        assert_eq!(group.approved_order(), &[500, 100, 300]);
+
+        group.remove_approved_proposal(100);
+        assert_eq!(group.approved_order(), &[500, 300]);
+
+        // Re-inserting an existing id does not duplicate or reorder.
+        insert_remove_member(&mut group, &member(2), 500);
+        assert_eq!(group.approved_order(), &[500, 300]);
+
+        group.clear_approved_proposals();
+        assert!(group.approved_order().is_empty());
+    }
+
+    #[test]
+    fn test_urgent_commit_target_set_take_clears() {
+        let mut group = Group::new_as_creator("g", member(1), default_config()).unwrap();
+        assert!(group.urgent_commit_target().is_none());
+
+        let target = member(7);
+        group.set_urgent_commit_target(target.clone());
+        assert_eq!(group.urgent_commit_target(), Some(target.as_slice()));
+
+        let taken = group.take_urgent_commit_target().unwrap();
+        assert_eq!(taken, target);
+        assert!(group.urgent_commit_target().is_none());
+    }
+
+    #[test]
+    fn test_drop_approved_removals_for_target() {
+        let mut group = Group::new_as_creator("g", member(1), default_config()).unwrap();
+        let victim = member(7);
+        let bystander = member(9);
+
+        insert_remove_member(&mut group, &victim, 100);
+        insert_remove_member(&mut group, &victim, 101);
+        insert_remove_member(&mut group, &bystander, 200);
+        assert_eq!(group.approved_proposals_count(), 3);
+
+        group.drop_approved_removals_for(&victim);
+
+        assert_eq!(group.approved_proposals_count(), 1);
+        assert!(group.approved_proposals().contains_key(&200));
+        assert!(!group.approved_proposals().contains_key(&100));
+        assert!(!group.approved_proposals().contains_key(&101));
     }
 }

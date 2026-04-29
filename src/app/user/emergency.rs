@@ -2,9 +2,9 @@
 //!
 //! Given a finalised ECP outcome, derives the peer-score deltas that the
 //! app should apply:
-//! - accepted non-`SCORE_BELOW_THRESHOLD` emergency → target penalty + creator reward
-//! - accepted `SCORE_BELOW_THRESHOLD` → creator reward only (target is being removed)
-//! - rejected emergency → creator penalty (false accusation)
+//! - accepted target-bearing emergency → target penalty + creator reward.
+//! - accepted `SCORE_BELOW_THRESHOLD` or `DEADLOCK` → creator reward only.
+//! - rejected emergency → creator penalty.
 //!
 //! Consensus (`crate::core::consensus`) handles the queue-level state
 //! transition; this module owns the scoring policy that follows.
@@ -30,8 +30,7 @@ pub fn emergency_score_ops(payload: &[u8], approved: bool) -> Vec<ScoreOp> {
     };
 
     if approved {
-        if is_score_below_threshold(&evidence) {
-            // Target is already being removed — skip redundant penalty.
+        if is_targetless_or_self_executing(&evidence) {
             vec![creator_reward(&evidence)]
         } else {
             vec![evidence.target_score_op(), creator_reward(&evidence)]
@@ -41,8 +40,11 @@ pub fn emergency_score_ops(payload: &[u8], approved: bool) -> Vec<ScoreOp> {
     }
 }
 
-fn is_score_below_threshold(ev: &ViolationEvidence) -> bool {
-    ViolationType::try_from(ev.violation_type) == Ok(ViolationType::ScoreBelowThreshold)
+fn is_targetless_or_self_executing(ev: &ViolationEvidence) -> bool {
+    matches!(
+        ViolationType::try_from(ev.violation_type),
+        Ok(ViolationType::ScoreBelowThreshold) | Ok(ViolationType::Deadlock)
+    )
 }
 
 fn creator_reward(ev: &ViolationEvidence) -> ScoreOp {

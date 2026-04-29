@@ -21,11 +21,9 @@ use crate::protos::de_mls::messages::v1::{AppMessage, CommitCandidate, group_upd
 /// Build a commit candidate and buffer it for [`crate::core::finalize_freeze_round`].
 ///
 /// The gate is plain `is_steward()` (list membership) — intentionally **not**
-/// `is_live_epoch_steward` or a list-exhaustion check. If an election fails
-/// its retries and the list exhausts, members of the *previous* list can
-/// still commit recovery actions (e.g. a leave) to advance the epoch and
-/// trigger a fresh election. Without that escape hatch a stuck group is
-/// permanently frozen.
+/// `is_live_epoch_steward` or a list-exhaustion check, so members of the
+/// *previous* list can commit recovery actions when an election fails.
+/// `Group::is_in_recovery_mode()` (Layer 3) bypasses the gate entirely.
 pub fn create_commit_candidate<S>(
     group: &mut Group,
     mls: &MlsService<S>,
@@ -34,7 +32,7 @@ pub fn create_commit_candidate<S>(
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
-    if !group.is_steward() {
+    if !group.is_steward() && !group.is_in_recovery_mode() {
         return Err(CoreError::NotASteward);
     }
 
@@ -86,11 +84,26 @@ where
     let current_members = mls.members(group.group_name())?;
     let is_member = |id: &[u8]| current_members.iter().any(|m| m == id);
 
-    let proposals = group.approved_proposals();
-    let mut updates = Vec::with_capacity(proposals.len());
-    for proposal in proposals.values() {
+    // Urgent (ECP-driven) freeze: restrict the batch to just the target's
+    // RemoveMember. See `Group::urgent_commit_target`.
+    let urgent_target = group.urgent_commit_target().map(|t| t.to_vec());
+
+    // Iterate in insertion order (FIFO): library proposal IDs are
+    // content-derived hashes, so sort-by-id is not temporal.
+    let k_max = group.protocol_config().k_max;
+    let mut updates = Vec::with_capacity(group.approved_order().len().min(k_max));
+    for pid in group.approved_order() {
+        if updates.len() >= k_max {
+            break;
+        }
+        let Some(proposal) = group.approved_proposals().get(pid) else {
+            continue;
+        };
         match proposal.payload.as_ref() {
             Some(group_update_request::Payload::InviteMember(im)) => {
+                if urgent_target.is_some() {
+                    continue;
+                }
                 if is_member(&im.identity) {
                     continue;
                 }
@@ -100,6 +113,11 @@ where
                 )));
             }
             Some(group_update_request::Payload::RemoveMember(rm)) => {
+                if let Some(target) = urgent_target.as_deref()
+                    && rm.identity != target
+                {
+                    continue;
+                }
                 if !is_member(&rm.identity) {
                     continue;
                 }

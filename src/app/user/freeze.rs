@@ -141,8 +141,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
 
                     if has_proposals {
-                        entry.group.reject_all_approved_proposals();
-                        entry.group.reject_all_voting_proposals();
+                        // Approved batch (and in-flight votes) survive so
+                        // the recovered steward commits the same proposals
+                        // once the next election lands.
                         entry.state_machine.clear_proposal_timer();
                         entry.state_machine.start_reelection();
 
@@ -163,6 +164,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     }
                 };
 
+                let entered_reelection = next_state == GroupState::Reelection;
                 self.state_handler
                     .on_state_changed(group_name, next_state)
                     .await;
@@ -179,6 +181,16 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                             event: ScoreEvent::CensorshipInactivity,
                         },
                     );
+                }
+
+                // Layer 2 recovery: regenerate the steward list. Only the
+                // responsible proposer's call actually submits.
+                if entered_reelection
+                    && let Err(e) = self
+                        .try_initiate_steward_election(group_name, true, None)
+                        .await
+                {
+                    info!(group = group_name, error = %e, "recovery election deferred");
                 }
             }
         }
@@ -199,7 +211,22 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
 
         let proposal_count = entry.group.approved_proposals_count();
-        let entered_freezing = entry.state_machine.check_steward_inactivity(proposal_count);
+        // Hold the freeze while an election is in flight — committing on
+        // the known-stale list would just produce a NoCandidate.
+        if entry.group.has_election_in_flight() {
+            return Ok(false);
+        }
+        // Recovery uses the shorter retry inactivity window so we don't
+        // burn another full epoch waiting for a steward to commit.
+        let in_recovery = entry.group.is_in_recovery_mode() || entry.group.reelection_round() > 0;
+        let inactivity = if in_recovery {
+            entry.state_machine.retry_inactivity_duration()
+        } else {
+            entry.state_machine.epoch_duration()
+        };
+        let entered_freezing = entry
+            .state_machine
+            .check_steward_inactivity(proposal_count, inactivity);
         if entered_freezing {
             let epoch = self.mls_service.current_epoch(group_name)?;
             entry.group.ensure_freeze_round(epoch);

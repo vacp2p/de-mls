@@ -451,14 +451,14 @@ fn test_group_sync_roundtrip() {
         .expect("steward should have a list");
     let sync = GroupSync {
         steward_members: steward_list.members().to_vec(),
-        start_epoch: steward_list.start_epoch(),
+        election_epoch: steward_list.election_epoch(),
         sn_min: steward_list.config().sn_min as u32,
         sn_max: steward_list.config().sn_max as u32,
         allow_subset_candidates: false,
         peer_scores: vec![],
         timing: None,
         retry_round: 0,
-        max_reelection_retries: 1,
+        max_reelection_attempts: 1,
     };
     let app_msg: AppMessage = sync.clone().into();
     let sync_packet =
@@ -477,7 +477,7 @@ fn test_group_sync_roundtrip() {
     match &result {
         ProcessResult::GroupSyncReceived(received_sync) => {
             assert_eq!(received_sync.steward_members, sync.steward_members);
-            assert_eq!(received_sync.start_epoch, sync.start_epoch);
+            assert_eq!(received_sync.election_epoch, sync.election_epoch);
             assert_eq!(received_sync.sn_min, sync.sn_min);
             assert_eq!(received_sync.sn_max, sync.sn_max);
         }
@@ -503,7 +503,7 @@ fn test_group_sync_roundtrip() {
         assert!(
             StewardList::validate(
                 &sync.steward_members,
-                sync.start_epoch,
+                sync.election_epoch,
                 group_name.as_bytes(),
                 &sync.steward_members,
                 &config,
@@ -517,7 +517,7 @@ fn test_group_sync_roundtrip() {
         assert!(
             joiner_handle
                 .generate_and_set_steward_list(
-                    sync.start_epoch,
+                    sync.election_epoch,
                     &sync.steward_members,
                     sn,
                     sync.retry_round,
@@ -534,7 +534,7 @@ fn test_group_sync_roundtrip() {
         .steward_list()
         .expect("steward should have a list");
     assert_eq!(joiner_list.members(), steward_list.members());
-    assert_eq!(joiner_list.start_epoch(), steward_list.start_epoch());
+    assert_eq!(joiner_list.election_epoch(), steward_list.election_epoch());
 }
 
 /// If a member already has a steward list, receiving a sync message is a no-op.
@@ -575,14 +575,14 @@ fn test_group_sync_idempotent_for_existing_members() {
     let steward_list = steward_handle.steward_list().unwrap();
     let sync = GroupSync {
         steward_members: steward_list.members().to_vec(),
-        start_epoch: steward_list.start_epoch(),
+        election_epoch: steward_list.election_epoch(),
         sn_min: steward_list.config().sn_min as u32,
         sn_max: steward_list.config().sn_max as u32,
         allow_subset_candidates: false,
         peer_scores: vec![],
         timing: None,
         retry_round: 0,
-        max_reelection_retries: 1,
+        max_reelection_attempts: 1,
     };
     let app_msg: AppMessage = sync.into();
     let sync_packet =
@@ -674,21 +674,21 @@ fn test_group_sync_carries_list_retry_round_not_group_counter() {
     use de_mls::protos::de_mls::messages::v1::GroupSync;
     let sync = GroupSync {
         steward_members: list.members().to_vec(),
-        start_epoch: list.start_epoch(),
+        election_epoch: list.election_epoch(),
         sn_min: list.config().sn_min as u32,
         sn_max: list.config().sn_max as u32,
         allow_subset_candidates: false,
         peer_scores: vec![],
         timing: None,
         retry_round: list.retry_round(),
-        max_reelection_retries: steward_handle.max_reelection_retries(),
+        max_reelection_attempts: steward_handle.max_reelection_attempts(),
     };
 
     // Joiner re-derives the ordering using the wire seed — should match.
     assert!(
         StewardList::validate(
             &sync.steward_members,
-            sync.start_epoch,
+            sync.election_epoch,
             group_name.as_bytes(),
             &sync.steward_members,
             &config,
@@ -704,7 +704,7 @@ fn test_group_sync_carries_list_retry_round_not_group_counter() {
     assert!(
         !StewardList::validate(
             &sync.steward_members,
-            sync.start_epoch,
+            sync.election_epoch,
             group_name.as_bytes(),
             &sync.steward_members,
             &config,

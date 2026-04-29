@@ -75,6 +75,7 @@ enum ViolationType {
   BROKEN_MLS_PROPOSAL = 2;  // MLS proposal doesn't match voting proposal
   CENSORSHIP_INACTIVITY = 3; // Steward didn't commit within threshold_duration
   SCORE_BELOW_THRESHOLD = 4; // Member's peer score dropped to/below removal threshold
+  DEADLOCK = 5;              // Layer 3: re-election retries exhausted; any member may commit
 }
 
 message ViolationEvidence {
@@ -100,7 +101,7 @@ message RemoveMember {
 
 message GroupSync {
   repeated bytes steward_members = 1;
-  uint64 start_epoch = 2;
+  uint64 election_epoch = 2;
   uint32 sn_min = 3;
   uint32 sn_max = 4;
   bool allow_subset_candidates = 5;
@@ -112,7 +113,7 @@ message GroupSync {
   // Group's configured ceiling on election retries. Joiners apply this
   // value so the stuck-election error path triggers consistently across
   // the group.
-  uint32 max_reelection_retries = 9;
+  uint32 max_reelection_attempts = 9;
 }
 
 message PeerScore {
@@ -125,6 +126,7 @@ message TimingConfig {
   uint64 freeze_duration_ms = 2;
   uint64 proposal_expiration_ms = 3;
   uint64 consensus_timeout_ms = 4;
+  uint64 retry_inactivity_duration_ms = 5; // Inactivity window during recovery
 }
 
 enum Outcome {

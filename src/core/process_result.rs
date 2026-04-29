@@ -102,6 +102,18 @@ impl ViolationEvidence {
         }
     }
 
+    /// Layer 3 anti-deadlock signal — on YES the steward gate relaxes so
+    /// any member can produce the recovery commit. No specific target.
+    pub fn deadlock(epoch: u64) -> Self {
+        Self {
+            violation_type: ViolationType::Deadlock as i32,
+            target_member_id: Vec::new(),
+            evidence_payload: Vec::new(),
+            epoch,
+            creator_member_id: Vec::new(),
+        }
+    }
+
     /// Set the creator identity on this evidence (called by app layer before voting).
     pub fn with_creator(mut self, creator: Vec<u8>) -> Self {
         self.creator_member_id = creator;

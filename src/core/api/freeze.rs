@@ -161,10 +161,16 @@ where
 
     let candidates = match group.freeze_round() {
         Some(round) if round.epoch == current_epoch => round.candidates.clone(),
-        _ => return Ok(FreezeFinalizeResult::default()),
+        _ => {
+            // Drop any local pending commit so the next MLS encrypt
+            // doesn't trip on "pending proposal exists".
+            let _ = mls.discard_own_commit(group.group_name());
+            return Ok(FreezeFinalizeResult::default());
+        }
     };
 
     if candidates.is_empty() {
+        let _ = mls.discard_own_commit(group.group_name());
         return Ok(FreezeFinalizeResult::default());
     }
 
@@ -173,6 +179,7 @@ where
 
     if sorted.is_empty() {
         group.clear_freeze_round();
+        let _ = mls.discard_own_commit(group.group_name());
         return Ok(FreezeFinalizeResult::default());
     }
 
@@ -381,6 +388,12 @@ where
         }
     }
 
+    // No candidate applied. Drop any local pending commit that wasn't
+    // merged or discarded along an incoming-wins path — leaving it
+    // behind would break the next MLS encrypt.
+    if !own_commit_discarded {
+        let _ = mls.discard_own_commit(&group_name);
+    }
     group.clear_freeze_round();
     Ok(FreezeFinalizeResult {
         outcome: FreezeOutcome::NoCandidate,
@@ -723,7 +736,12 @@ fn check_commit_sender_authorized(
 
 fn record_applied_commit(group: &mut Group, commit_hash: Vec<u8>) {
     group.record_committed_batch(commit_hash);
-    group.clear_approved_proposals();
+    if let Some(target) = group.take_urgent_commit_target() {
+        // Urgent commit: leave the rest of the queue for the next cycle.
+        group.drop_approved_removals_for(&target);
+    } else {
+        group.clear_approved_proposals();
+    }
     group.clear_freeze_round();
 }
 

@@ -84,6 +84,15 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             return self.handle_election_accepted(group_name, election).await;
         }
 
+        if consensus_apply.force_freezing {
+            self.force_freezing_for_urgent_commit(group_name).await;
+        }
+
+        if let Some(target) = &consensus_apply.queued_remove_target {
+            self.refresh_stewards_after_removal(group_name, target)
+                .await;
+        }
+
         if !approved && let Ok(req) = GroupUpdateRequest::decode(payload.as_slice()) {
             if ProposalKind::of(&req).is_steward_election() {
                 self.handle_election_rejected(group_name).await;
@@ -109,9 +118,52 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         Ok(())
     }
 
-    /// Accepted election: validate the proposed list, apply it, reset the
-    /// retry counter, exit Reelection if we were in it, and drain buffered
-    /// updates so the fresh epoch steward picks them up.
+    /// Bypass the inactivity timer so the urgent commit fires now.
+    async fn force_freezing_for_urgent_commit(&self, group_name: &str) {
+        let transitioned = {
+            let mut groups = self.groups.write().await;
+            groups
+                .get_mut(group_name)
+                .map(|entry| entry.state_machine.force_freezing())
+                .unwrap_or(false)
+        };
+        if transitioned {
+            self.state_handler
+                .on_state_changed(group_name, GroupState::Freezing)
+                .await;
+        }
+    }
+
+    /// When the removal target is a current steward, fire a fresh election
+    /// in parallel so the next epoch keeps a healthy ES + BS.
+    async fn refresh_stewards_after_removal(&self, group_name: &str, target: &[u8]) {
+        let target_was_steward = {
+            let groups = self.groups.read().await;
+            groups.get(group_name).is_some_and(|entry| {
+                entry
+                    .group
+                    .steward_list()
+                    .is_some_and(|l| l.contains(target))
+            })
+        };
+        if !target_was_steward {
+            return;
+        }
+        if let Err(e) = self
+            .try_initiate_steward_election(group_name, true, Some(target))
+            .await
+        {
+            info!(
+                group = group_name,
+                error = %e,
+                "post-removal steward-list refresh deferred"
+            );
+        }
+    }
+
+    /// Accepted election: validate, install the new list, exit Reelection
+    /// if we were in it, close any open recovery window, and drain
+    /// buffered updates so the fresh epoch steward picks them up.
     async fn handle_election_accepted(
         &self,
         group_name: &str,
@@ -145,7 +197,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 election.proposed_stewards.len(),
                 election.retry_round,
             )?;
-            entry.group.reset_reelection_round();
+            // `reelection_round` stays > 0 until the next successful
+            // commit so the immediate post-election inactivity check uses
+            // the short retry window.
+            entry.group.exit_recovery_mode();
             if entry.state_machine.current_state() == GroupState::Reelection {
                 entry.state_machine.start_working();
                 true
@@ -169,9 +224,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         self.process_buffered_updates(group_name).await
     }
 
-    /// Rejected election: bump the retry round and, under the max, retry
-    /// immediately (idempotent — only the responsible proposer actually
-    /// submits). Over the max, surface the stuck state to the UI.
+    /// Rejected election: bump the retry round and retry under the max
+    /// (idempotent), or escalate to a `Deadlock` ECP once exhausted.
     async fn handle_election_rejected(&self, group_name: &str) {
         let (round, max) = {
             let mut groups = self.groups.write().await;
@@ -183,25 +237,30 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             // joiners honor the group's configured policy via `GroupSync`.
             (
                 entry.group.reelection_round(),
-                entry.group.max_reelection_retries(),
+                entry.group.max_reelection_attempts(),
             )
         };
         if round > max {
-            let msg = format!(
-                "Steward election stuck after {max} retry(ies) — group {group_name} \
-                 needs manual intervention"
+            info!(
+                group = group_name,
+                round, max, "election retries exhausted; escalating to Layer 3"
             );
-            error!(group = group_name, round, max, "steward election stuck");
-            self.handler
-                .on_error(group_name, "Reelection stuck", &msg)
-                .await;
+            if let Err(e) = self.try_initiate_deadlock_ecp(group_name).await {
+                error!(group = group_name, error = %e, "Deadlock ECP filing failed");
+                self.handler
+                    .on_error(group_name, "Reelection stuck", &e.to_string())
+                    .await;
+            }
             return;
         }
         info!(
             group = group_name,
             round, max, "steward election rejected, retrying"
         );
-        if let Err(e) = self.try_initiate_steward_election(group_name).await {
+        if let Err(e) = self
+            .try_initiate_steward_election(group_name, true, None)
+            .await
+        {
             info!(group = group_name, error = %e, "election retry deferred");
         }
     }

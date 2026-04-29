@@ -5,6 +5,8 @@
 //! timeout. Since `User` is `Clone` (every field is `Arc` or cheap `Clone`),
 //! each spawn just owns its own handle — no ctx struct per task kind.
 
+use std::time::Duration;
+
 use hashgraph_like_consensus::storage::ConsensusStorage;
 use prost::Message;
 use tracing::{error, info};
@@ -43,9 +45,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// Check that the group state allows creating a proposal of this kind and
     /// return the expected voter count.
     ///
-    /// Freezing / Selection → always blocked. Reelection → emergency only.
-    /// Otherwise the RFC partial-freeze rule applies (see
-    /// `Group::partial_freeze_blocks`).
+    /// `Reelection` allows only ECP + StewardElection (the recovery itself),
+    /// further filtered by `partial_freeze_blocks`. `Freezing` / `Selection`
+    /// block everything. Other states defer to `partial_freeze_blocks`.
     async fn check_proposal_allowed(
         &self,
         group_name: &str,
@@ -57,8 +59,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
         match state {
             GroupState::Reelection => {
-                if !kind.is_emergency() {
+                if !kind.is_emergency() && !kind.is_steward_election() {
                     return Err(UserError::GroupBlocked(state.to_string()));
+                }
+                if entry.group.partial_freeze_blocks(kind) {
+                    return Err(UserError::PartialFreeze);
                 }
             }
             GroupState::Freezing | GroupState::Selection => {
@@ -241,7 +246,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 self.handler
                     .on_app_message(group_name, vote_notification)
                     .await?;
-                self.spawn_auto_vote(group_name.to_string(), proposal_id);
+                let delay = self.default_group_config.voting_delay_for(kind);
+                self.spawn_auto_vote(group_name.to_string(), proposal_id, delay);
             }
         }
 
@@ -425,18 +431,17 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     }
 
     /// Spawn an auto-vote timer for `(group_name, proposal_id)`. After
-    /// `voting_delay`, the timer casts the local member's vote using
+    /// `delay`, the timer casts the local member's vote using
     /// `liveness_criteria_yes` and broadcasts it. Idempotent — an existing
     /// handle for the same key is aborted and replaced.
     ///
     /// If the member has already voted or the session has resolved by the
     /// time the timer fires, `cast_vote` returns a benign error
     /// (`UserAlreadyVoted` / `SessionNotActive`); we log at debug and exit.
-    pub(crate) fn spawn_auto_vote(&self, group_name: String, proposal_id: u32) {
+    pub(crate) fn spawn_auto_vote(&self, group_name: String, proposal_id: u32, delay: Duration) {
         self.cancel_auto_vote(&group_name, proposal_id);
 
         let user = self.clone();
-        let delay = self.default_group_config.voting_delay;
         let vote = self.default_group_config.liveness_criteria_yes;
         let key = (group_name.clone(), proposal_id);
 

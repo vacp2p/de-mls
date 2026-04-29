@@ -119,8 +119,10 @@ where
     Ok(vote_msg.into())
 }
 
-/// Forward a peer's proposal into the local consensus service and emit a
-/// `VotePayload` so the UI can surface the pending vote.
+/// Forward a peer's proposal into the local consensus service and, for
+/// regular proposals, emit a `VotePayload` so the UI can surface the
+/// pending vote. Fast-path proposals (`expected_voters_count == 1`)
+/// self-resolve on arrival and skip the banner.
 pub async fn forward_incoming_proposal<P: DeMlsProvider>(
     group_name: &str,
     proposal: Proposal,
@@ -128,9 +130,14 @@ pub async fn forward_incoming_proposal<P: DeMlsProvider>(
     handler: &dyn GroupEventHandler,
 ) -> Result<(), UserError> {
     let scope = P::Scope::from(group_name.to_string());
+    let expected_voters = proposal.expected_voters_count;
     consensus
         .process_incoming_proposal(&scope, proposal.clone())
         .await?;
+
+    if expected_voters <= 1 {
+        return Ok(());
+    }
 
     let vote_notification: AppMessage = VotePayload {
         group_id: group_name.to_string(),

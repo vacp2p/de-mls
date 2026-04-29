@@ -10,7 +10,7 @@ use crate::{
         forward_incoming_vote,
     },
     core::{
-        DeMlsProvider, GroupEventHandler, ProcessResult, ProtocolConfig, StewardList,
+        DeMlsProvider, GroupEventHandler, ProcessResult, ProposalKind, ProtocolConfig, StewardList,
         build_message, create_commit_candidate, group_members, process_inbound,
     },
     ds::InboundPacket,
@@ -80,7 +80,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         group_name: &str,
         proposal: Proposal,
     ) -> Result<(), UserError> {
-        if let Ok(req) = GroupUpdateRequest::decode(proposal.payload.as_slice()) {
+        let decoded = GroupUpdateRequest::decode(proposal.payload.as_slice()).ok();
+        if let Some(req) = decoded.as_ref() {
             let current_epoch = self.mls_service.current_epoch(group_name)?;
             let mut groups = self.groups.write().await;
             if let Some(entry) = groups.get_mut(group_name) {
@@ -99,6 +100,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             }
         }
         let proposal_id = proposal.proposal_id;
+        let expected_voters = proposal.expected_voters_count;
+        let kind = decoded
+            .as_ref()
+            .map(ProposalKind::of)
+            .unwrap_or(ProposalKind::Commit);
         forward_incoming_proposal::<P>(
             group_name,
             proposal,
@@ -106,10 +112,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             &*self.handler,
         )
         .await?;
-        // Start this member's auto-vote timer. Fires `voting_delay` after
-        // the proposal becomes visible; cancelled on manual vote or
-        // ProposalDecided.
-        self.spawn_auto_vote(group_name.to_string(), proposal_id);
+        // Skip auto-vote for fast-path proposals: the creator's bundled
+        // YES already resolved the session, so the timer would hit a
+        // closed session.
+        if expected_voters > 1 {
+            let delay = self.default_group_config.voting_delay_for(kind);
+            self.spawn_auto_vote(group_name.to_string(), proposal_id, delay);
+        }
         Ok(())
     }
 
@@ -197,6 +206,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
         self.steward_list_housekeeping(group_name).await?;
         self.process_buffered_updates(group_name).await?;
+        self.maybe_close_recovery_window(group_name).await;
 
         if transitioned {
             self.state_handler
@@ -204,6 +214,30 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 .await;
         }
         Ok(())
+    }
+
+    /// Fire a steward election while `recovery_mode` is set so the next
+    /// list installs and closes the window.
+    async fn maybe_close_recovery_window(&self, group_name: &str) {
+        let in_recovery_mode = {
+            let groups = self.groups.read().await;
+            groups
+                .get(group_name)
+                .is_some_and(|entry| entry.group.is_in_recovery_mode())
+        };
+        if !in_recovery_mode {
+            return;
+        }
+        if let Err(e) = self
+            .try_initiate_steward_election(group_name, true, None)
+            .await
+        {
+            info!(
+                group = group_name,
+                error = %e,
+                "post-recovery election deferred"
+            );
+        }
     }
 
     async fn on_leave_group(&self, group_name: &str) -> Result<(), UserError> {
@@ -275,12 +309,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         };
 
         let current_epoch = self.mls_service.current_epoch(group_name)?;
-        if sync.start_epoch > current_epoch {
+        if sync.election_epoch > current_epoch {
             info!(
                 group = group_name,
-                start_epoch = sync.start_epoch,
+                election_epoch = sync.election_epoch,
                 current_epoch,
-                "group sync rejected: start_epoch > current_epoch"
+                "group sync rejected: election_epoch > current_epoch"
             );
             return Ok(());
         }
@@ -293,7 +327,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let any_present = sync.steward_members.iter().any(|s| members.contains(s));
         let ordering_valid = StewardList::validate(
             &sync.steward_members,
-            sync.start_epoch,
+            sync.election_epoch,
             group_name.as_bytes(),
             &sync.steward_members,
             &ProtocolConfig::new(sync.sn_min as usize, sync.sn_max as usize)?,
@@ -314,7 +348,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let mut groups = self.groups.write().await;
             if let Some(entry) = groups.get_mut(group_name) {
                 entry.group.generate_and_set_steward_list(
-                    sync.start_epoch,
+                    sync.election_epoch,
                     &sync.steward_members,
                     sn,
                     sync.retry_round,
@@ -324,11 +358,15 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     .set_allow_subset_candidates(sync.allow_subset_candidates);
                 entry
                     .group
-                    .set_max_reelection_retries(sync.max_reelection_retries);
+                    .set_max_reelection_attempts(sync.max_reelection_attempts);
                 if let Some(timing) = &sync.timing {
                     let epoch_dur = std::time::Duration::from_millis(timing.epoch_duration_ms);
                     let freeze_dur = std::time::Duration::from_millis(timing.freeze_duration_ms);
-                    entry.state_machine.update_timing(epoch_dur, freeze_dur);
+                    let retry_dur =
+                        std::time::Duration::from_millis(timing.retry_inactivity_duration_ms);
+                    entry
+                        .state_machine
+                        .update_timing(epoch_dur, freeze_dur, retry_dur);
                 }
             }
         }
@@ -342,7 +380,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
         info!(
             group = group_name,
-            start_epoch = sync.start_epoch,
+            election_epoch = sync.election_epoch,
             stewards = sn,
             scores = sync.peer_scores.len(),
             timing = sync.timing.is_some(),

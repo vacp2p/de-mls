@@ -1,12 +1,17 @@
 //! Deterministic steward list — who commits each epoch, derived identically
 //! on every member. See [`StewardList::generate`] for the hash-sort algorithm
 //! and [`StewardList::epoch_steward`] / [`StewardList::backup_steward`] for
-//! rotation. When `epoch >= start_epoch + len` the list is exhausted and a
+//! rotation. When `epoch >= election_epoch + len` the list is exhausted and a
 //! new election MUST follow (RFC §Steward list creation).
 
 use sha2::{Digest, Sha256};
 
 use crate::core::CoreError;
+
+/// Default ceiling on MLS proposals per commit batch. Defends against
+/// runaway batch growth when freeze recovery preserves work across
+/// multiple failed cycles.
+pub const DEFAULT_K_MAX: usize = 50;
 
 /// Protocol configuration set at group creation.
 ///
@@ -20,13 +25,15 @@ pub struct ProtocolConfig {
     pub sn_max: usize,
     /// Whether subset commit candidates are allowed during deterministic selection.
     pub allow_subset_candidates: bool,
+    /// Ceiling on MLS proposals per commit batch. Excess approvals stay
+    /// queued for the next cycle.
+    pub k_max: usize,
 }
 
 impl ProtocolConfig {
     /// Create a new config with the given bounds.
     ///
     /// Returns `Err` if `sn_min` is 0 or `sn_min > sn_max`.
-    /// Sets `allow_subset_candidates` to `false` by default.
     pub fn new(sn_min: usize, sn_max: usize) -> Result<Self, CoreError> {
         if sn_min < 1 || sn_min > sn_max {
             return Err(CoreError::InvalidConfigSize);
@@ -35,6 +42,7 @@ impl ProtocolConfig {
             sn_min,
             sn_max,
             allow_subset_candidates: false,
+            k_max: DEFAULT_K_MAX,
         })
     }
 
@@ -63,7 +71,7 @@ impl ProtocolConfig {
 /// An ordered list of steward identities for a range of epochs.
 ///
 /// Generated deterministically so all group members arrive at the same list.
-/// The list covers epochs `[start_epoch, start_epoch + len)`.
+/// The list covers epochs `[election_epoch, election_epoch + len)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StewardList {
     /// Ordered steward identities (sorted by deterministic hash).
@@ -71,7 +79,7 @@ pub struct StewardList {
     /// Configuration bounds.
     config: ProtocolConfig,
     /// The epoch at which this steward list became active.
-    start_epoch: u64,
+    election_epoch: u64,
     /// The retry-round seed fed into the SHA256 sort that produced this list.
     /// Historical tag — frozen once the list is accepted. Distinct from
     /// `Group::reelection_round`, which is the dynamic counter for the
@@ -101,7 +109,7 @@ impl StewardList {
         Ok(Self {
             members,
             config,
-            start_epoch: election_epoch,
+            election_epoch,
             retry_round,
         })
     }
@@ -127,22 +135,22 @@ impl StewardList {
             .all(|(&i, want)| &member_ids[i] == want))
     }
 
-    /// Nominal epoch steward at index `(epoch - start_epoch) % len`. Use
+    /// Nominal epoch steward at index `(epoch - election_epoch) % len`. Use
     /// [`Self::live_epoch_steward`] to skip stewards no longer in the group.
     pub fn epoch_steward(&self, epoch: u64) -> Option<&[u8]> {
         if self.is_exhausted(epoch) {
             return None;
         }
-        let index = ((epoch - self.start_epoch) as usize) % self.members.len();
+        let index = ((epoch - self.election_epoch) as usize) % self.members.len();
         Some(&self.members[index])
     }
 
-    /// Nominal backup steward at index `(epoch - start_epoch + 1) % len`.
+    /// Nominal backup steward at index `(epoch - election_epoch + 1) % len`.
     pub fn backup_steward(&self, epoch: u64) -> Option<&[u8]> {
         if self.is_exhausted(epoch) {
             return None;
         }
-        let index = ((epoch - self.start_epoch) as usize + 1) % self.members.len();
+        let index = ((epoch - self.election_epoch) as usize + 1) % self.members.len();
         Some(&self.members[index])
     }
 
@@ -152,8 +160,8 @@ impl StewardList {
         &self,
         eligible: F,
     ) -> Option<&[u8]> {
-        // Passing `start_epoch` makes live_epoch_steward start at index 0.
-        self.live_epoch_steward(self.start_epoch, eligible)
+        // Passing `election_epoch` makes the rotation start at index 0.
+        self.live_epoch_steward(self.election_epoch, eligible)
     }
 
     /// Epoch steward with the nominal rotation advanced past any steward for
@@ -192,7 +200,7 @@ impl StewardList {
             return None;
         }
         let len = self.members.len();
-        let start = ((epoch - self.start_epoch) as usize + offset) % len;
+        let start = ((epoch - self.election_epoch) as usize + offset) % len;
         for step in 0..len {
             let idx = (start + step) % len;
             let candidate = &self.members[idx];
@@ -204,12 +212,12 @@ impl StewardList {
     }
 
     /// `true` once every steward has served — the list covers
-    /// `[start_epoch, start_epoch + len)`. A new election MUST follow.
+    /// `[election_epoch, election_epoch + len)`. A new election MUST follow.
     pub fn is_exhausted(&self, epoch: u64) -> bool {
-        if epoch < self.start_epoch {
+        if epoch < self.election_epoch {
             return true;
         }
-        (epoch - self.start_epoch) >= self.members.len() as u64
+        (epoch - self.election_epoch) >= self.members.len() as u64
     }
 
     pub fn contains(&self, member_id: &[u8]) -> bool {
@@ -232,8 +240,8 @@ impl StewardList {
         &self.config
     }
 
-    pub fn start_epoch(&self) -> u64 {
-        self.start_epoch
+    pub fn election_epoch(&self) -> u64 {
+        self.election_epoch
     }
 
     /// Historical tag — the retry-round seed that was fed into the SHA256
@@ -437,13 +445,16 @@ mod tests {
         let mems = members(&[1, 2, 3]);
 
         let list = StewardList::generate(5, b"group", &mems, 3, config, 0).unwrap();
-        assert_eq!(list.start_epoch(), 5);
+        assert_eq!(list.election_epoch(), 5);
 
         // Covered epochs: [5, 8)
         assert!(!list.is_exhausted(5));
         assert!(!list.is_exhausted(7));
         assert!(list.is_exhausted(8));
-        assert!(list.is_exhausted(4), "before start_epoch is exhausted");
+        assert!(
+            list.is_exhausted(4),
+            "epochs before election_epoch are exhausted"
+        );
 
         // Exhausted epochs return None from both rotation slots.
         assert!(list.epoch_steward(8).is_none());
