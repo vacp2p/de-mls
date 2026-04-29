@@ -256,9 +256,9 @@ impl RoundContext {
 /// Filter candidates by action count (Phase 1) and sort survivors by the
 /// RFC priority comparator (Phase 2). Result is ordered best-first.
 ///
-/// Priority tiering uses the *nominal* epoch steward from the steward
-/// list, so selection order stays deterministic across nodes even when
-/// the live steward has rotated past someone.
+/// Priority tiering uses the *live* epoch steward — eligibility-filtered
+/// in `RoundContext::snapshot`, so a draining or already-removed nominal
+/// steward never wins the tier.
 fn rank_applicable_candidates(
     candidates: Vec<BufferedCommitCandidate>,
     ctx: &RoundContext,
@@ -633,6 +633,21 @@ where
         } => (sender_identity, self_removed, actions),
         StagedCommitResult::Ignored => return Ok(StagingOutcome::Abort),
     };
+
+    // Wire-claimed `steward_identity` must match the MLS-verified
+    // `commit_sender`; mismatch is a broken commit (RFC §Steward
+    // violation list) and is attributed to the actual signer.
+    if candidate.steward_identity != commit_sender {
+        tracing::warn!(
+            group = group_name,
+            "violation: wire steward_identity doesn't match MLS commit_sender"
+        );
+        return Ok(StagingOutcome::Violation(ViolationEvidence::broken_commit(
+            commit_sender,
+            current_epoch,
+            "commit candidate's steward_identity doesn't match MLS commit sender",
+        )));
+    }
 
     // Every bundled proposal must come from the committer — catches both
     // "proposals signed by a third party" and "proposals don't all agree
