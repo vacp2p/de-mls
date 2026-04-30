@@ -177,14 +177,14 @@ impl WakuDeliveryService {
         let waku = match WakuNodeCtx::new(&config_json) {
             Ok(w) => w,
             Err(e) => {
-                let _ = ready_tx.send(Err(DeliveryServiceError::WakuNodeAlreadyInitialized(e)));
+                let _ = ready_tx.send(Err(DeliveryServiceError::WakuStartup(e)));
                 return;
             }
         };
 
         // Start node
         if let Err(e) = waku.start() {
-            let _ = ready_tx.send(Err(DeliveryServiceError::WakuNodeAlreadyInitialized(e)));
+            let _ = ready_tx.send(Err(DeliveryServiceError::WakuStartup(e)));
             return;
         }
         info!("Waku node started");
@@ -278,7 +278,7 @@ impl WakuDeliveryService {
         waku.relay_publish(pubsub_topic, &msg_json, 10_000)
             .map_err(|e| {
                 error!("Failed to relay publish: {e}");
-                DeliveryServiceError::WakuPublishMessageError(e)
+                DeliveryServiceError::WakuPublish(e)
             })
     }
 
