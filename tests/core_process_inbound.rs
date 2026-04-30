@@ -540,12 +540,10 @@ fn test_group_sync_roundtrip() {
     assert_eq!(joiner_list.election_epoch(), steward_list.election_epoch());
 }
 
-/// `GroupSync` propagates the per-group config that lives on `Group`
-/// (threshold, liveness flag, pending-update max age) end-to-end across
-/// the wire. Steward sets non-default values; joiner receives the sync
-/// and reads the steward's values back via the same getters production
-/// code uses. Also exercises a behaviour assertion: the synced
-/// threshold drives `members_below_threshold` selection.
+/// `GroupSync` carries per-group config from steward to joiner: the
+/// joiner adopts the steward's values via the same getters production
+/// code uses, and `members_below_threshold` selects on the synced
+/// threshold.
 #[test]
 fn test_group_sync_propagates_divergent_per_group_config() {
     use de_mls::app::{InMemoryPeerScoreStorage, PeerScoringService};
@@ -555,13 +553,18 @@ fn test_group_sync_propagates_divergent_per_group_config() {
     const STEWARD_THRESHOLD: i64 = -50;
     const STEWARD_LIVENESS_YES: bool = false;
     const STEWARD_PENDING_MAX_EPOCHS: u32 = 11;
+    const STEWARD_SN_MIN: usize = 2;
+    const STEWARD_SN_MAX: usize = 8;
 
     let group_name = "sync-divergent-config";
     let steward_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
     let joiner_hex = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 
-    let (steward_mls, mut steward_handle) = setup_steward(group_name, steward_hex);
-    let (joiner_mls, mut joiner_handle, kp_packet) = setup_joiner(group_name, joiner_hex);
+    let steward_protocol = ProtocolConfig::new(STEWARD_SN_MIN, STEWARD_SN_MAX).unwrap();
+    let (steward_mls, mut steward_handle) =
+        setup_steward_with_config(group_name, steward_hex, steward_protocol);
+    let (joiner_mls, mut joiner_handle, kp_packet) =
+        setup_joiner_with_config(group_name, joiner_hex, default_steward_config());
 
     // Steward configures the group with non-default per-group state.
     steward_handle.set_threshold_peer_score(STEWARD_THRESHOLD);
@@ -575,6 +578,8 @@ fn test_group_sync_propagates_divergent_per_group_config() {
         joiner_handle.pending_update_max_epochs(),
         STEWARD_PENDING_MAX_EPOCHS
     );
+    assert_ne!(joiner_handle.protocol_config().sn_min, STEWARD_SN_MIN);
+    assert_ne!(joiner_handle.protocol_config().sn_max, STEWARD_SN_MAX);
 
     // Steward adds joiner so a Welcome path exists.
     let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
@@ -639,21 +644,28 @@ fn test_group_sync_propagates_divergent_per_group_config() {
         received.pending_update_max_epochs,
         STEWARD_PENDING_MAX_EPOCHS
     );
+    assert_eq!(received.sn_min as usize, STEWARD_SN_MIN);
+    assert_eq!(received.sn_max as usize, STEWARD_SN_MAX);
 
     // App-layer application — same setters `User::on_group_sync` uses.
+    let mut applied_protocol =
+        ProtocolConfig::new(received.sn_min as usize, received.sn_max as usize).unwrap();
+    applied_protocol.allow_subset_candidates = received.allow_subset_candidates;
+    joiner_handle.set_protocol_config(applied_protocol);
     joiner_handle.set_threshold_peer_score(received.threshold_peer_score);
     joiner_handle.set_liveness_criteria_yes(received.liveness_criteria_yes);
     joiner_handle.set_pending_update_max_epochs(received.pending_update_max_epochs);
 
-    // Joiner now reads the steward's values via the same getters
-    // production code uses (steward.rs::check_and_initiate_score_removals,
-    // consensus.rs::register_new_proposal, steward.rs::prune_pending_updates_after_commit).
+    // Joiner now reads the steward's values via the same getters production
+    // code consults.
     assert_eq!(joiner_handle.threshold_peer_score(), STEWARD_THRESHOLD);
     assert_eq!(joiner_handle.liveness_criteria_yes(), STEWARD_LIVENESS_YES);
     assert_eq!(
         joiner_handle.pending_update_max_epochs(),
         STEWARD_PENDING_MAX_EPOCHS
     );
+    assert_eq!(joiner_handle.protocol_config().sn_min, STEWARD_SN_MIN);
+    assert_eq!(joiner_handle.protocol_config().sn_max, STEWARD_SN_MAX);
 
     // Behaviour assertion: a scoring lookup at the synced threshold
     // returns members at or below it.

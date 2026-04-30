@@ -349,6 +349,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         group_name: &str,
         sync: &GroupSync,
     ) -> Result<(), UserError> {
+        let mut protocol_config = ProtocolConfig::new(sync.sn_min as usize, sync.sn_max as usize)?;
+        protocol_config.allow_subset_candidates = sync.allow_subset_candidates;
+
         let mut groups = self.groups.write().await;
         let Some(entry) = groups.get_mut(group_name) else {
             return Ok(());
@@ -360,9 +363,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             sn,
             sync.retry_round,
         )?;
-        entry
-            .group
-            .set_allow_subset_candidates(sync.allow_subset_candidates);
+        entry.group.set_protocol_config(protocol_config);
         entry
             .group
             .set_max_reelection_attempts(sync.max_reelection_attempts);

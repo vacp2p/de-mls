@@ -567,6 +567,10 @@ impl Group {
         &self.protocol_config
     }
 
+    pub fn set_protocol_config(&mut self, config: ProtocolConfig) {
+        self.protocol_config = config;
+    }
+
     pub fn epoch_steward(&self, epoch: u64) -> Option<&[u8]> {
         self.steward_list
             .as_ref()

@@ -280,11 +280,8 @@ fn test_steward_skips_self_for_removal() {
     assert_eq!(targets[0], other_id);
 }
 
-/// `members_below_threshold` selects members against the per-group
-/// threshold the caller passes in (held on `Group::threshold_peer_score`),
-/// not against any global default. Drives the steward removal trigger
-/// in `User::check_and_initiate_score_removals` after a `GroupSync` may
-/// have updated the group's threshold.
+/// `members_below_threshold` selects against the threshold passed in,
+/// not a global default.
 #[test]
 fn test_members_below_threshold_uses_per_group_value() {
     let group_name = "per-group-threshold";
