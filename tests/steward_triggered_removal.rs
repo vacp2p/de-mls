@@ -13,7 +13,7 @@ use de_mls::protos::de_mls::messages::v1::{
 };
 
 mod common;
-use common::{REMOVAL_THRESHOLD, make_scoring, setup_mls};
+use common::{make_scoring, setup_mls};
 
 // ─────────────────────────── Tests ───────────────────────────
 
@@ -142,6 +142,7 @@ fn test_full_pipeline_penalties_to_removal() {
     let steward_id = alice_mls.wallet_bytes();
     let target_id = vec![0xDD];
 
+    let threshold = group.threshold_peer_score();
     let mut scoring = make_scoring();
     scoring.add_member(group_name, &steward_id);
     scoring.add_member(group_name, &target_id);
@@ -155,7 +156,7 @@ fn test_full_pipeline_penalties_to_removal() {
             event: ScoreEvent::BrokenCommit,
         },
     );
-    assert!(!scoring.is_below_threshold(group_name, &target_id, REMOVAL_THRESHOLD));
+    assert!(!scoring.is_below_threshold(group_name, &target_id, threshold));
 
     // 50 - 50 = 0 (EmergencyNoCreator)
     scoring.apply_op(
@@ -165,10 +166,10 @@ fn test_full_pipeline_penalties_to_removal() {
             event: ScoreEvent::EmergencyNoCreator,
         },
     );
-    assert!(scoring.is_below_threshold(group_name, &target_id, REMOVAL_THRESHOLD));
+    assert!(scoring.is_below_threshold(group_name, &target_id, threshold));
 
     // Now steward creates SCORE_BELOW_THRESHOLD ECP
-    let below = scoring.members_below_threshold(group_name, REMOVAL_THRESHOLD);
+    let below = scoring.members_below_threshold(group_name, threshold);
     assert!(below.contains(&target_id));
 
     let current_score = scoring.score_for(group_name, &target_id).unwrap();
@@ -228,6 +229,11 @@ fn test_dedup_pending_removal_targets() {
 #[test]
 fn test_steward_skips_self_for_removal() {
     let group_name = "removal-self-guard";
+    let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+    let alice_mls = setup_mls(alice_hex);
+    let group = create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
+    let threshold = group.threshold_peer_score();
+
     let mut scoring = make_scoring();
 
     let steward_id = vec![0x01];
@@ -266,12 +272,12 @@ fn test_steward_skips_self_for_removal() {
         },
     );
 
-    assert!(scoring.is_below_threshold(group_name, &steward_id, REMOVAL_THRESHOLD));
-    assert!(scoring.is_below_threshold(group_name, &other_id, REMOVAL_THRESHOLD));
+    assert!(scoring.is_below_threshold(group_name, &steward_id, threshold));
+    assert!(scoring.is_below_threshold(group_name, &other_id, threshold));
 
     // Filter as the steward would
     let targets: Vec<Vec<u8>> = scoring
-        .members_below_threshold(group_name, REMOVAL_THRESHOLD)
+        .members_below_threshold(group_name, threshold)
         .into_iter()
         .filter(|id| *id != steward_id)
         .collect();
