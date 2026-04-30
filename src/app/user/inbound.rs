@@ -242,6 +242,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
     async fn on_leave_group(&self, group_name: &str) -> Result<(), UserError> {
         self.groups.write().await.remove(group_name);
+        self.mls_service.delete_group(group_name)?;
+        self.scoring().remove_group(group_name);
         self.cleanup_consensus_scope(group_name).await?;
         self.handler.on_leave_group(group_name).await?;
         Ok(())

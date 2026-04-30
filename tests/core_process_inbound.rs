@@ -3,9 +3,9 @@
 use prost::Message;
 
 use de_mls::core::{
-    CoreError, FreezeOutcome, ProcessResult, ProtocolConfig, StewardList, build_message,
-    create_commit_candidate, finalize_freeze_round, group_members, prepare_to_join,
-    process_inbound,
+    CoreError, FreezeOutcome, ProcessResult, ProtocolConfig, StewardList,
+    build_key_package_message, build_message, create_commit_candidate, finalize_freeze_round,
+    group_members, prepare_to_join, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 use de_mls::mls_crypto::parse_wallet_address;
@@ -272,6 +272,123 @@ fn test_process_inbound_leave_group() {
         matched,
         "Expected LeaveGroup after finalize, got {finalize:?}"
     );
+}
+
+/// Test: an evicted member can rejoin the same group_id in the same
+/// session. The steward commits a removal, the joiner finalizes it as
+/// `LeaveGroup`, then `MlsService::delete_group` clears storage so the
+/// next welcome creates a fresh handle without colliding with the dead
+/// post-eviction state.
+#[test]
+fn test_rejoin_after_eviction() {
+    let group_name = "rejoin-after-eviction";
+    let steward_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+    let joiner_hex = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+    let joiner_id = parse_wallet_address(joiner_hex)
+        .unwrap()
+        .as_slice()
+        .to_vec();
+
+    // Phase 1: joiner joins.
+    let (steward_mls, mut steward_handle) = setup_steward(group_name, steward_hex);
+    let (joiner_mls, mut joiner_handle, kp_packet) = setup_joiner(group_name, joiner_hex);
+    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
+    let join_result = process_inbound(
+        &mut joiner_handle,
+        &welcome_packet.payload,
+        WELCOME_SUBTOPIC,
+        &joiner_mls,
+    )
+    .unwrap();
+    assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
+    assert!(joiner_mls.has_group(group_name));
+
+    // Phase 2: steward commits a removal of the joiner. Both sides apply
+    // the commit; the joiner's finalize emits `LeaveGroup`.
+    let remove_req = GroupUpdateRequest {
+        payload: Some(
+            de_mls::protos::de_mls::messages::v1::group_update_request::Payload::RemoveMember(
+                de_mls::protos::de_mls::messages::v1::RemoveMember {
+                    identity: joiner_id.clone(),
+                },
+            ),
+        ),
+    };
+    steward_handle.insert_approved_proposal(2, remove_req.clone());
+    joiner_handle.insert_approved_proposal(2, remove_req);
+    let packets =
+        create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id").unwrap();
+    let batch_packet = packets
+        .iter()
+        .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
+        .expect("Expected batch proposals packet");
+
+    let epoch_before_remove = joiner_mls.current_epoch(group_name).unwrap();
+    joiner_handle.start_freeze_round(epoch_before_remove);
+
+    process_inbound(
+        &mut joiner_handle,
+        &batch_packet.payload,
+        APP_MSG_SUBTOPIC,
+        &joiner_mls,
+    )
+    .unwrap();
+    let finalize_joiner =
+        finalize_freeze_round(&mut joiner_handle, &joiner_mls, false, b"test-app-id").unwrap();
+    assert!(
+        matches!(
+            &finalize_joiner.outcome,
+            FreezeOutcome::Applied { result, .. } if matches!(**result, ProcessResult::LeaveGroup)
+        ),
+        "Expected LeaveGroup on joiner finalize, got {finalize_joiner:?}"
+    );
+    let finalize_steward =
+        finalize_freeze_round(&mut steward_handle, &steward_mls, false, b"test-app-id").unwrap();
+    assert!(matches!(
+        &finalize_steward.outcome,
+        FreezeOutcome::Applied { result, .. } if matches!(**result, ProcessResult::GroupUpdated)
+    ));
+    assert!(!steward_mls.is_member(group_name, &joiner_id));
+
+    // Phase 3: app-layer cleanup that follows `ProcessResult::LeaveGroup`.
+    joiner_mls.delete_group(group_name).unwrap();
+    assert!(
+        !joiner_mls.has_group(group_name),
+        "MLS state should be gone after delete_group"
+    );
+    // Idempotent: a second cleanup attempt is safe.
+    joiner_mls.delete_group(group_name).unwrap();
+
+    // Phase 4: joiner rebuilds the app-layer handle and a fresh key package,
+    // steward re-adds.
+    let mut joiner_handle = prepare_to_join(
+        group_name,
+        joiner_mls.wallet_bytes(),
+        default_steward_config(),
+    );
+    let kp_packet = build_key_package_message(&joiner_handle, &joiner_mls, b"test-app-id").unwrap();
+    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
+    let rejoin_result = process_inbound(
+        &mut joiner_handle,
+        &welcome_packet.payload,
+        WELCOME_SUBTOPIC,
+        &joiner_mls,
+    )
+    .unwrap();
+    assert!(
+        matches!(rejoin_result, ProcessResult::JoinedGroup(_)),
+        "Expected JoinedGroup after rejoin, got {rejoin_result:?}"
+    );
+
+    // Phase 5: both sides see the rejoined member at a strictly-later epoch.
+    let epoch_after_rejoin = joiner_mls.current_epoch(group_name).unwrap();
+    assert!(
+        epoch_after_rejoin > epoch_before_remove,
+        "Rejoin should land at a later epoch ({epoch_after_rejoin} > {epoch_before_remove})"
+    );
+    assert!(steward_mls.is_member(group_name, &joiner_id));
+    assert!(joiner_mls.is_member(group_name, &joiner_id));
+    assert!(joiner_mls.is_member(group_name, &steward_mls.wallet_bytes()));
 }
 
 #[test]
