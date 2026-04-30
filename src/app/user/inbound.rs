@@ -152,10 +152,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         self.handler.on_outbound(name, packet).await?;
         self.handler.on_joined_group(name).await?;
 
-        {
+        let mls_members = {
             let entry = entry_arc.read().await;
-            self.sync_scoring_members(name, &entry.group);
-        }
+            group_members(&entry.group, &self.mls_service).unwrap_or_default()
+        };
+        self.sync_scoring_members(name, &mls_members);
 
         let state = {
             let mut entry = entry_arc.write().await;
@@ -172,8 +173,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// reward is emitted by `finalize_freeze_round`, not here.
     async fn on_group_updated(&self, group_name: &str) -> Result<(), UserError> {
         if let Some(entry_arc) = self.lookup_entry(group_name).await {
-            let entry = entry_arc.read().await;
-            self.sync_scoring_members(group_name, &entry.group);
+            let mls_members = {
+                let entry = entry_arc.read().await;
+                group_members(&entry.group, &self.mls_service).unwrap_or_default()
+            };
+            self.sync_scoring_members(group_name, &mls_members);
         }
         self.prune_pending_updates_after_commit(group_name).await?;
 

@@ -6,7 +6,7 @@ use tracing::{error, info};
 use crate::{
     app::{StateChangeHandler, User, UserError},
     core::{
-        DeMlsProvider, Group, GroupEventHandler, StewardList, build_message, group_members,
+        DeMlsProvider, GroupEventHandler, StewardList, build_message, group_members,
         target_identity_of,
     },
     mls_crypto::ShortId,
@@ -20,13 +20,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     User<P, H, SCH>
 {
     /// Add any MLS members not yet tracked in scoring, and drop scored
-    /// entries for identities no longer in MLS.
-    pub fn sync_scoring_members(&self, group_name: &str, group: &Group) {
-        let mls_members = match group_members(group, &self.mls_service) {
-            Ok(m) => m,
-            Err(_) => return,
-        };
-
+    /// entries for identities no longer in MLS. Takes `mls_members`
+    /// pre-fetched so the caller can release any group-entry guard
+    /// before the scoring mutex is acquired.
+    pub fn sync_scoring_members(&self, group_name: &str, mls_members: &[Vec<u8>]) {
         let mut scoring = self.scoring();
         let scored = scoring.all_members_with_scores(group_name);
         let scored_ids: std::collections::HashSet<Vec<u8>> =

@@ -177,12 +177,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         kind: ProposalKind,
         creator_vote: Option<bool>,
     ) -> Result<u32, UserError> {
-        let (proposal_expiration, consensus_timeout, liveness_criteria_yes) = self
+        let (proposal_expiration, consensus_timeout, liveness_criteria_yes, voting_delay) = self
             .with_entry(group_name, |e| {
                 (
                     e.state_machine.proposal_expiration(),
                     e.state_machine.consensus_timeout(),
                     e.group.liveness_criteria_yes(),
+                    e.state_machine.voting_delay_for(kind),
                 )
             })
             .await
@@ -269,10 +270,6 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 self.handler
                     .on_app_message(group_name, vote_notification)
                     .await?;
-                let voting_delay = self
-                    .with_entry(group_name, |e| e.state_machine.voting_delay_for(kind))
-                    .await
-                    .ok_or(UserError::GroupNotFound)?;
                 self.spawn_auto_vote(
                     group_name.to_string(),
                     proposal_id,
@@ -362,24 +359,21 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             .await
             .ok_or(UserError::GroupNotFound)?;
 
-        let pending_join = {
+        let (pending_join, members_for_rotation) = {
             let entry = entry_arc.read().await;
-            entry.state_machine.current_state() == GroupState::PendingJoin
+            let pending = entry.state_machine.current_state() == GroupState::PendingJoin;
+            let members = if !pending && self.mls_service.has_group(entry.group.group_name()) {
+                group_members(&entry.group, &self.mls_service)?
+            } else {
+                Vec::new()
+            };
+            (pending, members)
         };
         if pending_join {
             return Ok(());
         }
 
         let current_epoch = self.mls_service.current_epoch(group_name)?;
-
-        let members_for_rotation = {
-            let entry = entry_arc.read().await;
-            if self.mls_service.has_group(entry.group.group_name()) {
-                group_members(&entry.group, &self.mls_service)?
-            } else {
-                Vec::new()
-            }
-        };
 
         let (inserted, is_epoch_steward, state, buffer_total, should_propose) = {
             let mut entry = entry_arc.write().await;
