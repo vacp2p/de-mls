@@ -3,8 +3,10 @@
 use alloy::signers::local::LocalSignerError;
 use hashgraph_like_consensus::error::ConsensusError;
 
-use crate::core::{CallbackError, CoreError};
-use crate::mls_crypto::{IdentityError, MlsError};
+use crate::{
+    core::{CallbackError, CoreError},
+    mls_crypto::{IdentityError, MlsError},
+};
 
 /// Errors from User operations.
 #[derive(Debug, thiserror::Error)]

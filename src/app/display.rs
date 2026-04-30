@@ -1,8 +1,10 @@
 //! Display helpers for rendering protobuf types in the UI.
 
-use crate::mls_crypto::format_wallet_address;
-use crate::protos::de_mls::messages::v1::{
-    GroupUpdateRequest, ViolationEvidence, ViolationType, app_message, group_update_request,
+use crate::{
+    mls_crypto::format_wallet_address,
+    protos::de_mls::messages::v1::{
+        GroupUpdateRequest, ViolationEvidence, ViolationType, app_message, group_update_request,
+    },
 };
 
 // ─────────────────────────── Member Role ───────────────────────────
@@ -54,17 +56,16 @@ pub trait MessageType {
 
 impl MessageType for app_message::Payload {
     fn message_type(&self) -> &'static str {
-        use message_types::*;
         match self {
-            app_message::Payload::ConversationMessage(_) => CONVERSATION_MESSAGE,
-            app_message::Payload::BanRequest(_) => BAN_REQUEST,
-            app_message::Payload::Proposal(_) => PROPOSAL,
-            app_message::Payload::Vote(_) => VOTE,
-            app_message::Payload::VotePayload(_) => VOTE_PAYLOAD,
-            app_message::Payload::UserVote(_) => USER_VOTE,
-            app_message::Payload::ProposalAdded(_) => PROPOSAL_ADDED,
-            app_message::Payload::CommitCandidate(_) => COMMIT_CANDIDATE,
-            app_message::Payload::GroupSync(_) => GROUP_SYNC,
+            app_message::Payload::ConversationMessage(_) => message_types::CONVERSATION_MESSAGE,
+            app_message::Payload::BanRequest(_) => message_types::BAN_REQUEST,
+            app_message::Payload::Proposal(_) => message_types::PROPOSAL,
+            app_message::Payload::Vote(_) => message_types::VOTE,
+            app_message::Payload::VotePayload(_) => message_types::VOTE_PAYLOAD,
+            app_message::Payload::UserVote(_) => message_types::USER_VOTE,
+            app_message::Payload::ProposalAdded(_) => message_types::PROPOSAL_ADDED,
+            app_message::Payload::CommitCandidate(_) => message_types::COMMIT_CANDIDATE,
+            app_message::Payload::GroupSync(_) => message_types::GROUP_SYNC,
         }
     }
 }

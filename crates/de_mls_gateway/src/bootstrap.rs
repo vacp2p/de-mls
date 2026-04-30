@@ -1,13 +1,15 @@
-use std::{env::VarError, num::ParseIntError, sync::Arc};
+use std::{env::VarError, num::ParseIntError, sync::Arc, time::Duration};
+
+use de_mls::{
+    core::{DefaultProvider, ProviderConsensus},
+    ds::{
+        DeliveryService, DeliveryServiceError, InboundPacket, TopicFilter, WakuConfig,
+        WakuDeliveryService, WakuStartResult,
+    },
+};
 use tokio::sync::{broadcast, broadcast::Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
-
-use de_mls::core::{DefaultProvider, ProviderConsensus};
-use de_mls::ds::{
-    DeliveryService, DeliveryServiceError, InboundPacket, TopicFilter, WakuConfig,
-    WakuDeliveryService, WakuStartResult,
-};
 
 pub struct AppState<DS: DeliveryService> {
     pub delivery: DS,
@@ -83,7 +85,6 @@ pub async fn bootstrap_core(
         std::thread::Builder::new()
             .name("ds-forwarder".into())
             .spawn(move || {
-                use std::time::Duration;
                 info!("delivery forwarder started");
                 loop {
                     if forward_cancel.is_cancelled() {

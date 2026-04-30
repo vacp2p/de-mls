@@ -1,5 +1,3 @@
-use futures::channel::mpsc::UnboundedSender;
-use hashgraph_like_consensus::events::ConsensusEventBus;
 use std::sync::{Arc, atomic::Ordering};
 
 use de_mls::{
@@ -7,6 +5,8 @@ use de_mls::{
     protos::de_mls::messages::v1::GroupUpdateRequest,
 };
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
+use futures::channel::mpsc::UnboundedSender;
+use hashgraph_like_consensus::events::ConsensusEventBus;
 
 use crate::{CoreCtx, Gateway, UserRef};
 

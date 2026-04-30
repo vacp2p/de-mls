@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use hashgraph_like_consensus::storage::ConsensusStorage;
+use hashgraph_like_consensus::{error::ConsensusError, storage::ConsensusStorage};
 use prost::Message;
 use tracing::{error, info};
 
@@ -293,8 +293,6 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// log accordingly and warn only for truly unknown IDs (indicates a logic
     /// bug, not a race).
     async fn resolve_on_timeout(&self, group_name: &str, proposal_id: u32) {
-        use hashgraph_like_consensus::error::ConsensusError;
-
         let scope = P::Scope::from(group_name.to_string());
         let still_active = self
             .consensus_service

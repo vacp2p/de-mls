@@ -2,11 +2,9 @@
 //! casting, and forwarding peer messages in. Not protocol invariants — they
 //! decide how consensus events reach the UI and the transport.
 
-use alloy::signers::Signer;
-use prost::Message;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tracing::info;
 
+use alloy::signers::Signer;
 use hashgraph_like_consensus::{
     error::ConsensusError,
     protos::consensus::v1::{Proposal, Vote},
@@ -14,14 +12,18 @@ use hashgraph_like_consensus::{
     types::CreateProposalRequest,
     utils::build_vote,
 };
+use prost::Message;
+use tracing::info;
 
-use crate::app::error::UserError;
-use crate::core::{
-    CoreError, DeMlsProvider, Group, GroupEventHandler, ProviderConsensus,
-    auto_approved_leave_proposal_id,
-};
-use crate::protos::de_mls::messages::v1::{
-    AppMessage, GroupUpdateRequest, RemoveMember, VotePayload, group_update_request,
+use crate::{
+    app::error::UserError,
+    core::{
+        CoreError, DeMlsProvider, Group, GroupEventHandler, ProviderConsensus,
+        auto_approved_leave_proposal_id,
+    },
+    protos::de_mls::messages::v1::{
+        AppMessage, GroupUpdateRequest, RemoveMember, VotePayload, group_update_request,
+    },
 };
 
 /// Consensus-session parameters that come from `GroupConfig`. Grouped so

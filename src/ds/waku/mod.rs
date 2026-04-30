@@ -3,9 +3,11 @@
 pub(crate) mod sys;
 pub(crate) mod wrapper;
 
-use std::sync::{Arc, Mutex, mpsc};
-use std::thread;
-use std::time::Duration;
+use std::{
+    sync::{Arc, Mutex, mpsc},
+    thread,
+    time::Duration,
+};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use tracing::{debug, error, info};
@@ -13,8 +15,8 @@ use tracing::{debug, error, info};
 use crate::ds::{
     DeliveryServiceError, GROUP_VERSION, SUBTOPICS,
     transport::{DeliveryService, InboundPacket, OutboundPacket},
+    waku::wrapper::WakuNodeCtx,
 };
-use wrapper::WakuNodeCtx;
 
 /// The pubsub topic for the Waku Node.
 pub fn pubsub_topic() -> String {

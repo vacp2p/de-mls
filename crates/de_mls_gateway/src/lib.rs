@@ -5,14 +5,13 @@
 //! - Provide a command entrypoint UI -> gateway (`send(AppCmd)`)
 //! - Hold references to the core context (`CoreCtx`) and current user
 //! - Offer small helper methods (login_with_private_key, etc.)
-use futures::{
-    StreamExt,
-    channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded},
-};
-use once_cell::sync::Lazy;
-use parking_lot::RwLock;
+
+mod bootstrap;
+pub(crate) mod forwarder;
+mod group;
+pub mod handler;
+
 use std::sync::{Arc, atomic::AtomicBool};
-use tokio::sync::Mutex;
 
 use de_mls::{
     app::User,
@@ -20,18 +19,20 @@ use de_mls::{
     ds::{DeliveryService, WakuDeliveryService},
 };
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
+use futures::{
+    StreamExt,
+    channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded},
+};
+use once_cell::sync::Lazy;
+use parking_lot::RwLock;
+use tokio::sync::Mutex;
 
-mod bootstrap;
-pub(crate) mod forwarder;
-mod group;
-pub mod handler;
+use crate::handler::GatewayEventHandler;
 
-pub use bootstrap::{
+pub use crate::bootstrap::{
     AppState, Bootstrap, BootstrapConfig, BootstrapError, CoreCtx, bootstrap_core,
     bootstrap_core_from_env,
 };
-
-use handler::GatewayEventHandler;
 
 /// Type alias for the user reference stored in the gateway.
 type UserRef = Arc<

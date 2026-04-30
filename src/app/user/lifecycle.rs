@@ -10,7 +10,10 @@ use crate::{
         GroupConfig, GroupState, GroupStateMachine, ProposalParams, StateChangeHandler, User,
         UserError, submit_self_leave_proposal, user::GroupEntry,
     },
-    core::{DeMlsProvider, GroupEventHandler, build_message, create_group, prepare_to_join},
+    core::{
+        DeMlsProvider, GroupEventHandler, auto_approved_leave_proposal_id, build_message,
+        create_group, prepare_to_join,
+    },
     mls_crypto::parse_wallet_to_bytes,
     protos::de_mls::messages::v1::{GroupUpdateRequest, RemoveMember, group_update_request},
 };
@@ -142,7 +145,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         // Register ownership BEFORE the session opens — the bundled YES
         // fires `ConsensusReached` on submit, and `apply_consensus_result`
         // needs `is_owner_of_proposal` to be true by then.
-        let proposal_id = crate::core::auto_approved_leave_proposal_id(&self_identity);
+        let proposal_id = auto_approved_leave_proposal_id(&self_identity);
         let (proposal_expiration, consensus_timeout) = {
             let entry_arc = self
                 .lookup_entry(group_name)

@@ -1,9 +1,10 @@
 //! Ethereum wallet-based identity for DE-MLS.
 
+use std::str::FromStr;
+
 use alloy::{hex, primitives::Address};
 use openmls::credentials::CredentialWithKey;
 use openmls_basic_credential::SignatureKeyPair;
-use std::str::FromStr;
 
 use crate::mls_crypto::IdentityError;
 

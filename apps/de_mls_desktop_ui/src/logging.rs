@@ -1,5 +1,6 @@
-use once_cell::sync::OnceCell;
 use std::{fmt, sync::Mutex};
+
+use once_cell::sync::OnceCell;
 use tracing::{
     Event, Level, Subscriber,
     field::{Field, Visit},

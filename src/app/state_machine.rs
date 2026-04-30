@@ -1,13 +1,14 @@
 //! Per-group FSM: PendingJoin → Working → Freezing → Selection → Reelection → Leaving.
-use async_trait::async_trait;
+
 use std::{
     fmt::Display,
     time::{Duration, Instant},
 };
+
+use async_trait::async_trait;
 use tracing::info;
 
-use crate::app::config::GroupConfig;
-use crate::core::ProposalKind;
+use crate::{app::config::GroupConfig, core::ProposalKind};
 
 /// Notifies the integrator when a group transitions between [`GroupState`]
 /// variants. Fires from the app layer only — core never calls it.
@@ -443,8 +444,6 @@ mod tests {
     /// `voting_delay`.
     #[test]
     fn test_voting_delay_dispatch_on_proposal_kind() {
-        use crate::core::ProposalKind;
-
         let config = GroupConfig {
             voting_delay: Duration::from_secs(7),
             election_voting_delay: Duration::from_secs(3),

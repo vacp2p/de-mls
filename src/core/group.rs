@@ -6,11 +6,13 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use sha2::{Digest, Sha256};
 
-use crate::core::CoreError;
-use crate::core::proposal_kind::ProposalKind;
-use crate::core::steward_list::{ProtocolConfig, StewardList};
-use crate::protos::de_mls::messages::v1::{
-    CommitCandidate, GroupUpdateRequest, group_update_request,
+use crate::{
+    core::{
+        CoreError,
+        proposal_kind::ProposalKind,
+        steward_list::{ProtocolConfig, StewardList},
+    },
+    protos::de_mls::messages::v1::{CommitCandidate, GroupUpdateRequest, group_update_request},
 };
 
 /// Consensus proposal identifier (assigned by the consensus service).
@@ -931,6 +933,7 @@ impl ResolvedProposalCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protos::de_mls::messages::v1::{InviteMember, RemoveMember};
 
     fn member(id: u8) -> Vec<u8> {
         vec![id; 20]
@@ -1016,11 +1019,9 @@ mod tests {
 
     fn insert_self_leave(group: &mut Group, identity: &[u8]) {
         let remove = GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::RemoveMember(
-                crate::protos::de_mls::messages::v1::RemoveMember {
-                    identity: identity.to_vec(),
-                },
-            )),
+            payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
+                identity: identity.to_vec(),
+            })),
         };
         group.insert_approved_proposal(auto_approved_leave_proposal_id(identity), remove);
     }
@@ -1036,12 +1037,10 @@ mod tests {
         insert_self_leave(&mut group, &leaver);
         let ban_id: ProposalId = 0xdead_beef;
         let ban = GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::InviteMember(
-                crate::protos::de_mls::messages::v1::InviteMember {
-                    key_package_bytes: vec![0; 8],
-                    identity: member(99),
-                },
-            )),
+            payload: Some(group_update_request::Payload::InviteMember(InviteMember {
+                key_package_bytes: vec![0; 8],
+                identity: member(99),
+            })),
         };
         group.insert_approved_proposal(ban_id, ban);
         assert_eq!(group.approved_proposals_count(), 2);
@@ -1139,11 +1138,9 @@ mod tests {
 
     fn insert_remove_member(group: &mut Group, target: &[u8], proposal_id: ProposalId) {
         let remove = GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::RemoveMember(
-                crate::protos::de_mls::messages::v1::RemoveMember {
-                    identity: target.to_vec(),
-                },
-            )),
+            payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
+                identity: target.to_vec(),
+            })),
         };
         group.insert_approved_proposal(proposal_id, remove);
     }
@@ -1216,12 +1213,10 @@ mod tests {
         insert_remove_member(&mut group, &member(2), ban_id);
         insert_remove_member(&mut group, &member(3), ecp_id);
         let add = GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::InviteMember(
-                crate::protos::de_mls::messages::v1::InviteMember {
-                    key_package_bytes: vec![0; 8],
-                    identity: member(99),
-                },
-            )),
+            payload: Some(group_update_request::Payload::InviteMember(InviteMember {
+                key_package_bytes: vec![0; 8],
+                identity: member(99),
+            })),
         };
         group.insert_approved_proposal(add_id, add);
         assert_eq!(group.approved_proposals_count(), 3);
@@ -1290,11 +1285,9 @@ mod tests {
 
     fn buffer_remove_at(group: &mut Group, target: &[u8], epoch: u64) {
         let request = GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::RemoveMember(
-                crate::protos::de_mls::messages::v1::RemoveMember {
-                    identity: target.to_vec(),
-                },
-            )),
+            payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
+                identity: target.to_vec(),
+            })),
         };
         assert!(group.buffer_pending_update(request, epoch));
     }

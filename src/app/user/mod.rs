@@ -9,13 +9,14 @@
 //! `User` is `Clone` — all fields are `Arc` or cheap `Clone` — so background
 //! tasks just take their own handle via `self.clone()`.
 
-use alloy::signers::local::PrivateKeySigner;
-use hashgraph_like_consensus::storage::ConsensusStorage;
 use std::{
     collections::HashMap,
     str::FromStr,
     sync::{Arc, Mutex},
 };
+
+use alloy::signers::local::PrivateKeySigner;
+use hashgraph_like_consensus::storage::ConsensusStorage;
 use tokio::{sync::RwLock, task::JoinHandle};
 
 use crate::{
