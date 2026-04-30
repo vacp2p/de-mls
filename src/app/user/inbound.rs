@@ -321,7 +321,14 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         };
 
         let current_epoch = self.mls_service.current_epoch(group_name)?;
-        if !validate_group_sync(group_name, &sync, current_epoch, &members)? {
+        let local_default_peer_score = self.default_group_config.default_peer_score;
+        if !validate_group_sync(
+            group_name,
+            &sync,
+            current_epoch,
+            &members,
+            local_default_peer_score,
+        )? {
             return Ok(());
         }
 
@@ -437,11 +444,17 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 /// `members` is the joiner's current MLS member set; ghost stewards
 /// (removed since the list was elected) are tolerated as long as at
 /// least one listed steward is still present.
+///
+/// `local_default_peer_score` is the joiner's configured starting score
+/// for new members (not synced; per-node). Rejecting when it sits at
+/// or below the synced threshold prevents a misconfiguration where every
+/// new member added by this joiner starts already eligible for removal.
 fn validate_group_sync(
     group_name: &str,
     sync: &GroupSync,
     current_epoch: u64,
     members: &[Vec<u8>],
+    local_default_peer_score: i64,
 ) -> Result<bool, UserError> {
     if sync.election_epoch > current_epoch {
         info!(
@@ -479,6 +492,16 @@ fn validate_group_sync(
             group = group_name,
             field = zero_field,
             "group sync rejected: zero-valued timing field"
+        );
+        return Ok(false);
+    }
+
+    if local_default_peer_score <= sync.threshold_peer_score {
+        info!(
+            group = group_name,
+            local_default_peer_score,
+            threshold_peer_score = sync.threshold_peer_score,
+            "group sync rejected: default_peer_score at or below threshold would mark new members removable on add"
         );
         return Ok(false);
     }
@@ -525,6 +548,48 @@ mod tests {
     #[test]
     fn nonzero_timing_passes() {
         assert!(first_zero_timing_field(&nonzero_timing()).is_none());
+    }
+
+    fn valid_sync_with(threshold: i64) -> GroupSync {
+        GroupSync {
+            steward_members: vec![b"alice".to_vec()],
+            election_epoch: 0,
+            sn_min: 1,
+            sn_max: 5,
+            allow_subset_candidates: false,
+            peer_scores: vec![],
+            timing: Some(nonzero_timing()),
+            retry_round: 0,
+            max_reelection_attempts: 1,
+            liveness_criteria_yes: true,
+            threshold_peer_score: threshold,
+            pending_update_max_epochs: 3,
+        }
+    }
+
+    /// Joiner's `default_peer_score` strictly above the synced threshold
+    /// — new members added by this joiner start safely above the bar.
+    #[test]
+    fn validate_accepts_default_above_threshold() {
+        let sync = valid_sync_with(0);
+        assert!(validate_group_sync("g", &sync, 0, &[b"alice".to_vec()], 100).unwrap());
+    }
+
+    /// Joiner's `default_peer_score` equal to the threshold — new members
+    /// would start at threshold and `score <= threshold` already qualifies
+    /// them for removal.
+    #[test]
+    fn validate_rejects_default_equal_to_threshold() {
+        let sync = valid_sync_with(50);
+        assert!(!validate_group_sync("g", &sync, 0, &[b"alice".to_vec()], 50).unwrap());
+    }
+
+    /// Joiner's `default_peer_score` below the threshold — every new
+    /// member added by this joiner starts removable.
+    #[test]
+    fn validate_rejects_default_below_threshold() {
+        let sync = valid_sync_with(100);
+        assert!(!validate_group_sync("g", &sync, 0, &[b"alice".to_vec()], 50).unwrap());
     }
 
     #[test]
