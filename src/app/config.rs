@@ -14,7 +14,7 @@ pub const DEFAULT_EPOCH_DURATION: Duration = Duration::from_secs(60);
 
 /// Lifetime of a voting proposal before it expires unvoted
 /// (RFC §Creating Voting Proposal).
-pub const DEFAULT_PROPOSAL_EXPIRATION: Duration = Duration::from_secs(3600);
+pub const DEFAULT_PROPOSAL_EXPIRATION: Duration = Duration::from_secs(600);
 
 /// Library deadline for a single consensus session — bounds how long a
 /// vote can stay open. MUST be `> voting_delay`.
