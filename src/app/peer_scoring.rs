@@ -68,8 +68,6 @@ impl FixedScoringProvider {
 
     /// Default delta for each [`ScoreEvent`]. Values are placeholders
     /// pending an empirical tuning pass (see `docs/ROADMAP.md`).
-    /// `FreezeViolation` is reserved vocabulary with no producer yet and
-    /// is deliberately omitted.
     pub fn default_deltas() -> HashMap<ScoreEvent, i64> {
         HashMap::from([
             // ECP target penalties (violation-type-specific)
@@ -83,8 +81,6 @@ impl FixedScoringProvider {
             (ScoreEvent::SuccessfulCommit, 10),
             (ScoreEvent::HonestCommitAttempt, 5),
             (ScoreEvent::MisbehavingCommit, -30),
-            // Not yet wired
-            (ScoreEvent::NonFinalizedProposalCommit, -30),
         ])
     }
 
@@ -324,7 +320,7 @@ mod tests {
             GROUP,
             &ScoreOp {
                 member_id: member.to_vec(),
-                event: ScoreEvent::NonFinalizedProposalCommit,
+                event: ScoreEvent::MisbehavingCommit,
             },
         );
         svc.apply_op(
