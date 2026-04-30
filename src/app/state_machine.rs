@@ -7,6 +7,7 @@ use std::{
 use tracing::info;
 
 use crate::app::config::GroupConfig;
+use crate::core::ProposalKind;
 
 /// Notifies the integrator when a group transitions between [`GroupState`]
 /// variants. Fires from the app layer only — core never calls it.
@@ -89,6 +90,18 @@ pub struct GroupStateMachine {
     /// as the library's tie-break rule. Per-group so a joiner picks up
     /// the steward's value rather than diverging on its local default.
     liveness_criteria_yes: bool,
+    /// Per-member window to cast a manual vote before the auto-vote
+    /// fires. Held per-group (seeded from `GroupConfig` at creation)
+    /// for consistency with the other temporal config — not synced via
+    /// `GroupSync` since each node may tolerate a different window.
+    voting_delay: Duration,
+    /// Auto-vote delay for steward-election proposals; same per-group
+    /// rationale as `voting_delay`.
+    election_voting_delay: Duration,
+    /// Max age (in epochs) of a buffered membership update before it
+    /// gets dropped. Per-group so the policy can be tuned per group;
+    /// not synced via `GroupSync`.
+    pending_update_max_epochs: u32,
 }
 
 impl Default for GroupStateMachine {
@@ -112,6 +125,9 @@ impl GroupStateMachine {
             proposal_expiration: config.proposal_expiration,
             consensus_timeout: config.consensus_timeout,
             liveness_criteria_yes: config.liveness_criteria_yes,
+            voting_delay: config.voting_delay,
+            election_voting_delay: config.election_voting_delay,
+            pending_update_max_epochs: config.pending_update_max_epochs,
         }
     }
 
@@ -125,6 +141,9 @@ impl GroupStateMachine {
             proposal_expiration: config.proposal_expiration,
             consensus_timeout: config.consensus_timeout,
             liveness_criteria_yes: config.liveness_criteria_yes,
+            voting_delay: config.voting_delay,
+            election_voting_delay: config.election_voting_delay,
+            pending_update_max_epochs: config.pending_update_max_epochs,
         }
     }
 
@@ -159,6 +178,21 @@ impl GroupStateMachine {
     /// Overwritten when the handle receives a `GroupSync` from the steward.
     pub fn set_liveness_criteria_yes(&mut self, value: bool) {
         self.liveness_criteria_yes = value;
+    }
+
+    pub fn pending_update_max_epochs(&self) -> u32 {
+        self.pending_update_max_epochs
+    }
+
+    /// Auto-vote delay for the given proposal kind. Steward-election
+    /// proposals use the shorter `election_voting_delay` so recovery
+    /// elections converge fast.
+    pub fn voting_delay_for(&self, kind: ProposalKind) -> Duration {
+        if kind.is_steward_election() {
+            self.election_voting_delay
+        } else {
+            self.voting_delay
+        }
     }
 
     /// Overwritten when the handle receives a `GroupSync` from the steward.
@@ -429,6 +463,32 @@ mod tests {
         let sm = GroupStateMachine::new_as_member_with_config(config);
         assert_eq!(sm.epoch_duration(), long_inactivity());
         assert_eq!(sm.retry_inactivity_duration(), short_inactivity());
+    }
+
+    /// `voting_delay`, `election_voting_delay`, and
+    /// `pending_update_max_epochs` are threaded per-group from `GroupConfig`
+    /// at construction. They aren't synced via `GroupSync`, so no setter
+    /// is exposed — each node tunes them locally.
+    #[test]
+    fn test_voting_delay_and_pending_update_max_epochs_threaded() {
+        use crate::core::ProposalKind;
+
+        let config = GroupConfig {
+            voting_delay: Duration::from_secs(7),
+            election_voting_delay: Duration::from_secs(3),
+            pending_update_max_epochs: 9,
+            ..GroupConfig::default()
+        };
+        let sm = GroupStateMachine::new_as_member_with_config(config);
+        assert_eq!(
+            sm.voting_delay_for(ProposalKind::Commit),
+            Duration::from_secs(7)
+        );
+        assert_eq!(
+            sm.voting_delay_for(ProposalKind::StewardElection),
+            Duration::from_secs(3)
+        );
+        assert_eq!(sm.pending_update_max_epochs(), 9);
     }
 
     /// `liveness_criteria_yes` is threaded from `GroupConfig` and updated

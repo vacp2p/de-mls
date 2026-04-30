@@ -148,10 +148,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
         let consensus_timeout = {
             let groups = self.groups.read().await;
-            groups
-                .get(&group_name)
-                .map(|e| e.state_machine.consensus_timeout())
-                .unwrap_or(self.default_group_config.consensus_timeout)
+            let Some(entry) = groups.get(&group_name) else {
+                return;
+            };
+            entry.state_machine.consensus_timeout()
         };
         tokio::time::sleep(consensus_timeout).await;
         self.resolve_on_timeout(&group_name, proposal_id).await;
@@ -175,13 +175,14 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         kind: ProposalKind,
         creator_vote: Option<bool>,
     ) -> Result<u32, UserError> {
-        let (proposal_expiration, consensus_timeout, liveness_criteria_yes) = {
+        let (proposal_expiration, consensus_timeout, liveness_criteria_yes, voting_delay) = {
             let groups = self.groups.read().await;
             let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
             (
                 entry.state_machine.proposal_expiration(),
                 entry.state_machine.consensus_timeout(),
                 entry.state_machine.liveness_criteria_yes(),
+                entry.state_machine.voting_delay_for(kind),
             )
         };
 
@@ -263,8 +264,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 self.handler
                     .on_app_message(group_name, vote_notification)
                     .await?;
-                let delay = self.default_group_config.voting_delay_for(kind);
-                self.spawn_auto_vote(group_name.to_string(), proposal_id, delay);
+                self.spawn_auto_vote(group_name.to_string(), proposal_id, voting_delay);
             }
         }
 

@@ -266,15 +266,17 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         group_name: &str,
     ) -> Result<(), UserError> {
         let current_epoch = self.mls_service.current_epoch(group_name)?;
-        let max_age = self.default_group_config.pending_update_max_epochs;
 
-        let members = {
+        let (members, max_age) = {
             let groups = self.groups.read().await;
             let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
             if !self.mls_service.has_group(entry.group.group_name()) {
                 return Ok(());
             }
-            group_members(&entry.group, &self.mls_service)?
+            (
+                group_members(&entry.group, &self.mls_service)?,
+                entry.state_machine.pending_update_max_epochs(),
+            )
         };
 
         let mut groups = self.groups.write().await;
@@ -395,10 +397,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let timing = TimingConfig {
                 epoch_duration_ms: entry.state_machine.epoch_duration().as_millis() as u64,
                 freeze_duration_ms: entry.state_machine.freeze_duration().as_millis() as u64,
-                proposal_expiration_ms: self.default_group_config.proposal_expiration.as_millis()
+                proposal_expiration_ms: entry.state_machine.proposal_expiration().as_millis()
                     as u64,
-                consensus_timeout_ms: self.default_group_config.consensus_timeout.as_millis()
-                    as u64,
+                consensus_timeout_ms: entry.state_machine.consensus_timeout().as_millis() as u64,
                 retry_inactivity_duration_ms: entry
                     .state_machine
                     .retry_inactivity_duration()
