@@ -2,7 +2,10 @@
 
 use std::time::Duration;
 
-pub use crate::core::DEFAULT_MAX_REELECTION_ATTEMPTS;
+pub use crate::core::{
+    DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_MAX_REELECTION_ATTEMPTS,
+    DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_THRESHOLD_PEER_SCORE,
+};
 use crate::core::{ProposalKind, ProtocolConfig};
 
 /// Wall-clock window the steward waits before batching approved proposals
@@ -17,10 +20,6 @@ pub const DEFAULT_PROPOSAL_EXPIRATION: Duration = Duration::from_secs(3600);
 /// vote can stay open. MUST be `> voting_delay`.
 pub const DEFAULT_CONSENSUS_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Drop a buffered membership update if the steward fails to commit it
-/// for this many consecutive epochs.
-pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
-
 /// Inactivity window during recovery. Reset to `epoch_duration` after a
 /// successful commit.
 pub const DEFAULT_RETRY_INACTIVITY_DURATION: Duration = Duration::from_secs(5);
@@ -33,16 +32,8 @@ pub const DEFAULT_VOTING_DELAY: Duration = Duration::from_secs(10);
 /// `DEFAULT_VOTING_DELAY` so recovery elections converge fast.
 pub const DEFAULT_ELECTION_VOTING_DELAY: Duration = Duration::from_secs(5);
 
-/// Whether silent voters count as YES at `consensus_timeout`
-/// (RFC §Creating Voting Proposal). Also used as the auto-vote value.
-pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
-
 /// RFC §Peer Scoring `default_peer_score`: starting score for a new member.
 pub const DEFAULT_PEER_SCORE: i64 = 100;
-
-/// RFC §Peer Scoring `threshold_peer_score`: at or below this, a member
-/// becomes eligible for `SCORE_BELOW_THRESHOLD` ECP removal.
-pub const DEFAULT_THRESHOLD_PEER_SCORE: i64 = 0;
 
 /// Fallback [`ProtocolConfig`] for a group created without explicit bounds —
 /// tiny groups with `sn ∈ [1, 2]`.
