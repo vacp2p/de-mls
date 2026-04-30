@@ -471,5 +471,107 @@ fn validate_group_sync(
         );
         return Ok(false);
     }
+
+    if let Some(timing) = &sync.timing
+        && let Some(zero_field) = first_zero_timing_field(timing)
+    {
+        info!(
+            group = group_name,
+            field = zero_field,
+            "group sync rejected: zero-valued timing field"
+        );
+        return Ok(false);
+    }
     Ok(true)
+}
+
+/// Name of the first zero-valued field in `timing`, or `None` if all
+/// fields are non-zero. Zero in any timing field would short-circuit the
+/// timer it drives (consensus_timeout firing immediately, epoch_duration
+/// breaking the inactivity tracker, etc.).
+fn first_zero_timing_field(
+    timing: &crate::protos::de_mls::messages::v1::TimingConfig,
+) -> Option<&'static str> {
+    if timing.epoch_duration_ms == 0 {
+        Some("epoch_duration_ms")
+    } else if timing.freeze_duration_ms == 0 {
+        Some("freeze_duration_ms")
+    } else if timing.proposal_expiration_ms == 0 {
+        Some("proposal_expiration_ms")
+    } else if timing.consensus_timeout_ms == 0 {
+        Some("consensus_timeout_ms")
+    } else if timing.retry_inactivity_duration_ms == 0 {
+        Some("retry_inactivity_duration_ms")
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protos::de_mls::messages::v1::TimingConfig;
+
+    fn nonzero_timing() -> TimingConfig {
+        TimingConfig {
+            epoch_duration_ms: 60_000,
+            freeze_duration_ms: 30_000,
+            proposal_expiration_ms: 3_600_000,
+            consensus_timeout_ms: 30_000,
+            retry_inactivity_duration_ms: 5_000,
+        }
+    }
+
+    #[test]
+    fn nonzero_timing_passes() {
+        assert!(first_zero_timing_field(&nonzero_timing()).is_none());
+    }
+
+    #[test]
+    fn each_zero_field_is_detected() {
+        let cases = [
+            (
+                "epoch_duration_ms",
+                TimingConfig {
+                    epoch_duration_ms: 0,
+                    ..nonzero_timing()
+                },
+            ),
+            (
+                "freeze_duration_ms",
+                TimingConfig {
+                    freeze_duration_ms: 0,
+                    ..nonzero_timing()
+                },
+            ),
+            (
+                "proposal_expiration_ms",
+                TimingConfig {
+                    proposal_expiration_ms: 0,
+                    ..nonzero_timing()
+                },
+            ),
+            (
+                "consensus_timeout_ms",
+                TimingConfig {
+                    consensus_timeout_ms: 0,
+                    ..nonzero_timing()
+                },
+            ),
+            (
+                "retry_inactivity_duration_ms",
+                TimingConfig {
+                    retry_inactivity_duration_ms: 0,
+                    ..nonzero_timing()
+                },
+            ),
+        ];
+        for (name, timing) in cases {
+            assert_eq!(
+                first_zero_timing_field(&timing),
+                Some(name),
+                "expected field {name} to be detected as zero"
+            );
+        }
+    }
 }
