@@ -3,8 +3,10 @@ use de_mls::{
 };
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
 
-use crate::forwarder::{display_batch, load_member_info};
-use crate::{Gateway, UserRef};
+use crate::{
+    Gateway, UserRef,
+    forwarder::{display_batch, load_member_info},
+};
 
 impl Gateway<WakuDeliveryService> {
     pub async fn create_group(&self, group_name: String) -> anyhow::Result<()> {

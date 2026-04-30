@@ -12,11 +12,13 @@
 use prost::Message;
 use tracing::info;
 
-use crate::core::{CoreError, Group};
-use crate::mls_crypto::ShortId;
-use crate::protos::de_mls::messages::v1::{
-    GroupUpdateRequest, RemoveMember, StewardElectionProposal, ViolationEvidence, ViolationType,
-    group_update_request,
+use crate::{
+    core::{CoreError, Group},
+    mls_crypto::ShortId,
+    protos::de_mls::messages::v1::{
+        GroupUpdateRequest, RemoveMember, StewardElectionProposal, ViolationEvidence,
+        ViolationType, group_update_request,
+    },
 };
 
 /// Result of applying a consensus outcome. `force_freezing` signals
@@ -351,9 +353,9 @@ mod tests {
 
     fn remove_request(target: Vec<u8>) -> GroupUpdateRequest {
         GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::RemoveMember(
-                crate::protos::de_mls::messages::v1::RemoveMember { identity: target },
-            )),
+            payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
+                identity: target,
+            })),
         }
     }
 
@@ -419,7 +421,6 @@ mod tests {
     }
 
     fn score_below_threshold_request(target: Vec<u8>, creator: Vec<u8>) -> GroupUpdateRequest {
-        use crate::protos::de_mls::messages::v1::ViolationEvidence;
         ViolationEvidence::score_below_threshold(target, 0, -10)
             .with_creator(creator)
             .into_update_request()
@@ -462,7 +463,6 @@ mod tests {
     }
 
     fn deadlock_request(creator: Vec<u8>) -> GroupUpdateRequest {
-        use crate::protos::de_mls::messages::v1::ViolationEvidence;
         ViolationEvidence::deadlock(0)
             .with_creator(creator)
             .into_update_request()

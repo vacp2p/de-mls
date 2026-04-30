@@ -4,11 +4,15 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::core::CoreError;
-use crate::core::proposal_kind::ProposalKind;
-use crate::core::steward_list::{ProtocolConfig, StewardList};
-use crate::protos::de_mls::messages::v1::{
-    CommitCandidate, GroupUpdateRequest, group_update_request,
+use sha2::{Digest, Sha256};
+
+use crate::{
+    core::{
+        CoreError,
+        proposal_kind::ProposalKind,
+        steward_list::{ProtocolConfig, StewardList},
+    },
+    protos::de_mls::messages::v1::{CommitCandidate, GroupUpdateRequest, group_update_request},
 };
 
 /// Consensus proposal identifier (assigned by the consensus service).
@@ -28,7 +32,6 @@ const MAX_EPOCH_HISTORY: usize = 10;
 /// commit batch. It also doubles as the self-leave signature used by
 /// `is_auto_approved_entry` and `reject_all_approved_proposals`.
 pub fn auto_approved_leave_proposal_id(identity: &[u8]) -> u32 {
-    use sha2::{Digest, Sha256};
     let hash = Sha256::digest(identity);
     u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
 }
@@ -54,54 +57,6 @@ pub fn target_identity_of(request: &GroupUpdateRequest) -> Option<&[u8]> {
         group_update_request::Payload::InviteMember(m) => Some(&m.identity),
         group_update_request::Payload::RemoveMember(m) => Some(&m.identity),
         _ => None,
-    }
-}
-
-/// Bounded FIFO of proposal IDs for which a local consensus outcome has been
-/// observed (`ConsensusReached` or timeout-path resolution). Oldest entries
-/// are evicted once `capacity` is reached.
-///
-/// Serves two callers: (a) duplicate-drop guard in `apply_consensus_outcome`
-/// against consensus-library re-emissions, and (b) late-packet classifier in
-/// `forward_incoming_vote` — a `SessionNotFound` for an id in this cache is
-/// a benign late vote (session was trimmed after we resolved it), while the
-/// same error for an id we never saw is suspicious and warrants a warn-log.
-///
-/// `CAPACITY` is sized well above the consensus library's
-/// `max_sessions_per_scope` (default 10) so a late vote arriving within any
-/// plausible peer-lag window still finds its id cached.
-#[derive(Clone, Debug)]
-struct ResolvedProposalCache {
-    ids: HashSet<ProposalId>,
-    order: VecDeque<ProposalId>,
-    capacity: usize,
-}
-
-const RESOLVED_PROPOSAL_CACHE_CAPACITY: usize = 256;
-
-impl ResolvedProposalCache {
-    fn new(capacity: usize) -> Self {
-        Self {
-            ids: HashSet::new(),
-            order: VecDeque::with_capacity(capacity),
-            capacity,
-        }
-    }
-
-    fn contains(&self, id: ProposalId) -> bool {
-        self.ids.contains(&id)
-    }
-
-    fn record(&mut self, id: ProposalId) {
-        if !self.ids.insert(id) {
-            return;
-        }
-        self.order.push_back(id);
-        while self.order.len() > self.capacity
-            && let Some(old) = self.order.pop_front()
-        {
-            self.ids.remove(&old);
-        }
     }
 }
 
@@ -248,11 +203,11 @@ impl Group {
         }
     }
 
-    pub fn is_consensus_outcome_applied(&self, proposal_id: ProposalId) -> bool {
+    pub(crate) fn is_consensus_outcome_applied(&self, proposal_id: ProposalId) -> bool {
         self.resolved_proposals.contains(proposal_id)
     }
 
-    pub fn mark_consensus_outcome_applied(&mut self, proposal_id: ProposalId) {
+    pub(crate) fn mark_consensus_outcome_applied(&mut self, proposal_id: ProposalId) {
         self.resolved_proposals.record(proposal_id);
     }
 
@@ -516,7 +471,7 @@ impl Group {
     // ─────────────────────────── Urgent (ECP-driven) Commit ───────────────────────────
 
     /// Mark the next freeze cycle as urgent and committed-only-for `target`.
-    pub fn set_urgent_commit_target(&mut self, target: Vec<u8>) {
+    pub(crate) fn set_urgent_commit_target(&mut self, target: Vec<u8>) {
         self.urgent_commit_target = Some(target);
     }
 
@@ -524,7 +479,7 @@ impl Group {
         self.urgent_commit_target.as_deref()
     }
 
-    pub fn take_urgent_commit_target(&mut self) -> Option<Vec<u8>> {
+    pub(crate) fn take_urgent_commit_target(&mut self) -> Option<Vec<u8>> {
         self.urgent_commit_target.take()
     }
 
@@ -582,7 +537,7 @@ impl Group {
     /// via `GroupSync` so they don't inherit ghosts or members whose
     /// removal is queued. Order is preserved from the canonical list.
     /// Returns an empty `Vec` if no list is set.
-    pub fn live_steward_members(&self, members: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    pub(crate) fn live_steward_members(&self, members: &[Vec<u8>]) -> Vec<Vec<u8>> {
         let Some(list) = self.steward_list.as_ref() else {
             return Vec::new();
         };
@@ -927,9 +882,58 @@ impl Group {
     }
 }
 
+const RESOLVED_PROPOSAL_CACHE_CAPACITY: usize = 256;
+
+/// Bounded FIFO of proposal IDs for which a local consensus outcome has been
+/// observed (`ConsensusReached` or timeout-path resolution). Oldest entries
+/// are evicted once `capacity` is reached.
+///
+/// Serves two callers: (a) duplicate-drop guard in `apply_consensus_outcome`
+/// against consensus-library re-emissions, and (b) late-packet classifier in
+/// `forward_incoming_vote` — a `SessionNotFound` for an id in this cache is
+/// a benign late vote (session was trimmed after we resolved it), while the
+/// same error for an id we never saw is suspicious and warrants a warn-log.
+///
+/// `CAPACITY` is sized well above the consensus library's
+/// `max_sessions_per_scope` (default 10) so a late vote arriving within any
+/// plausible peer-lag window still finds its id cached.
+#[derive(Clone, Debug)]
+struct ResolvedProposalCache {
+    ids: HashSet<ProposalId>,
+    order: VecDeque<ProposalId>,
+    capacity: usize,
+}
+
+impl ResolvedProposalCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            ids: HashSet::new(),
+            order: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    fn contains(&self, id: ProposalId) -> bool {
+        self.ids.contains(&id)
+    }
+
+    fn record(&mut self, id: ProposalId) {
+        if !self.ids.insert(id) {
+            return;
+        }
+        self.order.push_back(id);
+        while self.order.len() > self.capacity
+            && let Some(old) = self.order.pop_front()
+        {
+            self.ids.remove(&old);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protos::de_mls::messages::v1::{InviteMember, RemoveMember};
 
     fn member(id: u8) -> Vec<u8> {
         vec![id; 20]
@@ -1015,11 +1019,9 @@ mod tests {
 
     fn insert_self_leave(group: &mut Group, identity: &[u8]) {
         let remove = GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::RemoveMember(
-                crate::protos::de_mls::messages::v1::RemoveMember {
-                    identity: identity.to_vec(),
-                },
-            )),
+            payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
+                identity: identity.to_vec(),
+            })),
         };
         group.insert_approved_proposal(auto_approved_leave_proposal_id(identity), remove);
     }
@@ -1035,12 +1037,10 @@ mod tests {
         insert_self_leave(&mut group, &leaver);
         let ban_id: ProposalId = 0xdead_beef;
         let ban = GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::InviteMember(
-                crate::protos::de_mls::messages::v1::InviteMember {
-                    key_package_bytes: vec![0; 8],
-                    identity: member(99),
-                },
-            )),
+            payload: Some(group_update_request::Payload::InviteMember(InviteMember {
+                key_package_bytes: vec![0; 8],
+                identity: member(99),
+            })),
         };
         group.insert_approved_proposal(ban_id, ban);
         assert_eq!(group.approved_proposals_count(), 2);
@@ -1138,11 +1138,9 @@ mod tests {
 
     fn insert_remove_member(group: &mut Group, target: &[u8], proposal_id: ProposalId) {
         let remove = GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::RemoveMember(
-                crate::protos::de_mls::messages::v1::RemoveMember {
-                    identity: target.to_vec(),
-                },
-            )),
+            payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
+                identity: target.to_vec(),
+            })),
         };
         group.insert_approved_proposal(proposal_id, remove);
     }
@@ -1215,12 +1213,10 @@ mod tests {
         insert_remove_member(&mut group, &member(2), ban_id);
         insert_remove_member(&mut group, &member(3), ecp_id);
         let add = GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::InviteMember(
-                crate::protos::de_mls::messages::v1::InviteMember {
-                    key_package_bytes: vec![0; 8],
-                    identity: member(99),
-                },
-            )),
+            payload: Some(group_update_request::Payload::InviteMember(InviteMember {
+                key_package_bytes: vec![0; 8],
+                identity: member(99),
+            })),
         };
         group.insert_approved_proposal(add_id, add);
         assert_eq!(group.approved_proposals_count(), 3);
@@ -1289,11 +1285,9 @@ mod tests {
 
     fn buffer_remove_at(group: &mut Group, target: &[u8], epoch: u64) {
         let request = GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::RemoveMember(
-                crate::protos::de_mls::messages::v1::RemoveMember {
-                    identity: target.to_vec(),
-                },
-            )),
+            payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
+                identity: target.to_vec(),
+            })),
         };
         assert!(group.buffer_pending_update(request, epoch));
     }

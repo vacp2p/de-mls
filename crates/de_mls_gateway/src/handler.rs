@@ -3,9 +3,10 @@
 //! Bridges output events from the User to the gateway's event pipe
 //! (delivery service for outbound, AppEvent for UI notifications).
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use futures::channel::mpsc::UnboundedSender;
-use std::sync::Arc;
 use tokio::task::spawn_blocking;
 
 use de_mls::{

@@ -4,8 +4,10 @@
 
 use async_trait::async_trait;
 
-use crate::ds::OutboundPacket;
-use crate::protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest};
+use crate::{
+    ds::OutboundPacket,
+    protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest},
+};
 
 /// Error wrapper returned by [`GroupEventHandler`] callbacks. Integrators
 /// convert their transport/UI errors into this via `CallbackError(e.to_string())`.

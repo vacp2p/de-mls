@@ -1,8 +1,35 @@
 //! Safe synchronous wrapper around the raw libwaku FFI.
+//!
+//! Some methods are intentionally unused today (kept for future bring-up of
+//! discv5/peer-id/version exposure); the `#![allow(unused)]` covers them.
 #![allow(unused)]
 use std::{cell::OnceCell, ffi::CString, os::raw::c_void};
 
 use crate::ds::waku::sys::{self as waku_sys, RET_OK, get_trampoline};
+
+/// Structured error from a libwaku FFI call. The `op` carries the C symbol
+/// name so logs and `Display` output identify which call failed.
+#[derive(Debug, thiserror::Error)]
+pub enum WakuFfiError {
+    #[error("invalid C string for {arg}: {source}")]
+    InvalidCString {
+        arg: &'static str,
+        #[source]
+        source: std::ffi::NulError,
+    },
+    #[error("{op} failed (code {code}): {msg}")]
+    Call {
+        op: &'static str,
+        code: i32,
+        msg: String,
+    },
+    #[error("{op} returned no data")]
+    NoData { op: &'static str },
+}
+
+fn invalid_cstring(arg: &'static str) -> impl FnOnce(std::ffi::NulError) -> WakuFfiError {
+    move |source| WakuFfiError::InvalidCString { arg, source }
+}
 /// Opaque handle to a libwaku node context.
 pub struct WakuNodeCtx {
     ctx: *mut c_void,
@@ -14,8 +41,8 @@ unsafe impl Sync for WakuNodeCtx {}
 
 impl WakuNodeCtx {
     /// Create a new waku node. `config_json` is the JSON string for node configuration.
-    pub fn new(config_json: &str) -> Result<Self, String> {
-        let config_cstr = CString::new(config_json).map_err(|e| e.to_string())?;
+    pub fn new(config_json: &str) -> Result<Self, WakuFfiError> {
+        let config_cstr = CString::new(config_json).map_err(invalid_cstring("config_json"))?;
 
         let mut err: Option<String> = None;
         let mut closure = |ret: i32, data: &str| {
@@ -34,14 +61,18 @@ impl WakuNodeCtx {
         };
 
         if ctx.is_null() || err.is_some() {
-            return Err(err.unwrap_or_else(|| "waku_new returned null".into()));
+            return Err(WakuFfiError::Call {
+                op: "waku_new",
+                code: RET_OK, // null ctx surfaces with no code; report 0 as sentinel
+                msg: err.unwrap_or_else(|| "returned null".into()),
+            });
         }
 
         Ok(Self { ctx })
     }
 
     /// Start the node.
-    pub fn start(&self) -> Result<(), String> {
+    pub fn start(&self) -> Result<(), WakuFfiError> {
         let mut err: Option<String> = None;
         let mut closure = |ret: i32, data: &str| {
             if ret != RET_OK {
@@ -54,13 +85,17 @@ impl WakuNodeCtx {
             unsafe { waku_sys::waku_start(self.ctx, cb, &mut closure as *mut _ as *const c_void) };
 
         if ret != RET_OK || err.is_some() {
-            return Err(err.unwrap_or_else(|| format!("waku_start returned {ret}")));
+            return Err(WakuFfiError::Call {
+                op: "waku_start",
+                code: ret,
+                msg: err.unwrap_or_default(),
+            });
         }
         Ok(())
     }
 
     /// Get the node version string.
-    pub fn version(&self) -> Result<String, String> {
+    pub fn version(&self) -> Result<String, WakuFfiError> {
         let version: OnceCell<String> = OnceCell::new();
         let mut closure = |ret: i32, data: &str| {
             if ret == RET_OK {
@@ -74,15 +109,19 @@ impl WakuNodeCtx {
         };
 
         if ret != RET_OK {
-            return Err(format!("waku_version returned {ret}"));
+            return Err(WakuFfiError::Call {
+                op: "waku_version",
+                code: ret,
+                msg: String::new(),
+            });
         }
         version
             .into_inner()
-            .ok_or_else(|| "no version returned".into())
+            .ok_or(WakuFfiError::NoData { op: "waku_version" })
     }
 
     /// Get the local peer ID.
-    pub fn get_peer_id(&self) -> Result<String, String> {
+    pub fn get_peer_id(&self) -> Result<String, WakuFfiError> {
         let peer_id: OnceCell<String> = OnceCell::new();
         let mut closure = |ret: i32, data: &str| {
             if ret == RET_OK {
@@ -96,16 +135,21 @@ impl WakuNodeCtx {
         };
 
         if ret != RET_OK {
-            return Err(format!("waku_get_my_peerid returned {ret}"));
+            return Err(WakuFfiError::Call {
+                op: "waku_get_my_peerid",
+                code: ret,
+                msg: String::new(),
+            });
         }
-        peer_id
-            .into_inner()
-            .ok_or_else(|| "no peer id returned".into())
+        peer_id.into_inner().ok_or(WakuFfiError::NoData {
+            op: "waku_get_my_peerid",
+        })
     }
 
     /// Connect to a peer by multiaddr.
-    pub fn connect(&self, peer_multi_addr: &str, timeout_ms: u32) -> Result<(), String> {
-        let addr_cstr = CString::new(peer_multi_addr).map_err(|e| e.to_string())?;
+    pub fn connect(&self, peer_multi_addr: &str, timeout_ms: u32) -> Result<(), WakuFfiError> {
+        let addr_cstr =
+            CString::new(peer_multi_addr).map_err(invalid_cstring("peer_multi_addr"))?;
 
         let mut err: Option<String> = None;
         let mut closure = |ret: i32, data: &str| {
@@ -126,7 +170,11 @@ impl WakuNodeCtx {
         };
 
         if ret != RET_OK || err.is_some() {
-            return Err(err.unwrap_or_else(|| format!("waku_connect returned {ret}")));
+            return Err(WakuFfiError::Call {
+                op: "waku_connect",
+                code: ret,
+                msg: err.unwrap_or_default(),
+            });
         }
         Ok(())
     }
@@ -137,9 +185,9 @@ impl WakuNodeCtx {
         pubsub_topic: &str,
         json_message: &str,
         timeout_ms: u32,
-    ) -> Result<String, String> {
-        let topic_cstr = CString::new(pubsub_topic).map_err(|e| e.to_string())?;
-        let msg_cstr = CString::new(json_message).map_err(|e| e.to_string())?;
+    ) -> Result<String, WakuFfiError> {
+        let topic_cstr = CString::new(pubsub_topic).map_err(invalid_cstring("pubsub_topic"))?;
+        let msg_cstr = CString::new(json_message).map_err(invalid_cstring("json_message"))?;
 
         let result: OnceCell<String> = OnceCell::new();
         let mut err: Option<String> = None;
@@ -164,14 +212,18 @@ impl WakuNodeCtx {
         };
 
         if ret != RET_OK || err.is_some() {
-            return Err(err.unwrap_or_else(|| format!("waku_relay_publish returned {ret}")));
+            return Err(WakuFfiError::Call {
+                op: "waku_relay_publish",
+                code: ret,
+                msg: err.unwrap_or_default(),
+            });
         }
         Ok(result.into_inner().unwrap_or_default())
     }
 
     /// Subscribe to a relay pubsub topic.
-    pub fn relay_subscribe(&self, pubsub_topic: &str) -> Result<(), String> {
-        let topic_cstr = CString::new(pubsub_topic).map_err(|e| e.to_string())?;
+    pub fn relay_subscribe(&self, pubsub_topic: &str) -> Result<(), WakuFfiError> {
+        let topic_cstr = CString::new(pubsub_topic).map_err(invalid_cstring("pubsub_topic"))?;
 
         let mut err: Option<String> = None;
         let mut closure = |ret: i32, data: &str| {
@@ -191,7 +243,11 @@ impl WakuNodeCtx {
         };
 
         if ret != RET_OK || err.is_some() {
-            return Err(err.unwrap_or_else(|| format!("waku_relay_subscribe returned {ret}")));
+            return Err(WakuFfiError::Call {
+                op: "waku_relay_subscribe",
+                code: ret,
+                msg: err.unwrap_or_default(),
+            });
         }
         Ok(())
     }
@@ -211,7 +267,7 @@ impl WakuNodeCtx {
     }
 
     /// Stop the node. Should be called before dropping to cleanly release resources.
-    pub fn stop(&self) -> Result<(), String> {
+    pub fn stop(&self) -> Result<(), WakuFfiError> {
         let mut err: Option<String> = None;
         let mut closure = |ret: i32, data: &str| {
             if ret != RET_OK {
@@ -224,13 +280,17 @@ impl WakuNodeCtx {
             unsafe { waku_sys::waku_stop(self.ctx, cb, &mut closure as *mut _ as *const c_void) };
 
         if ret != RET_OK || err.is_some() {
-            return Err(err.unwrap_or_else(|| format!("waku_stop returned {ret}")));
+            return Err(WakuFfiError::Call {
+                op: "waku_stop",
+                code: ret,
+                msg: err.unwrap_or_default(),
+            });
         }
         Ok(())
     }
 
     /// Start the discv5 discovery service.
-    pub fn start_discv5(&self) -> Result<(), String> {
+    pub fn start_discv5(&self) -> Result<(), WakuFfiError> {
         let mut err: Option<String> = None;
         let mut closure = |ret: i32, data: &str| {
             if ret != RET_OK {
@@ -244,13 +304,17 @@ impl WakuNodeCtx {
         };
 
         if ret != RET_OK || err.is_some() {
-            return Err(err.unwrap_or_else(|| format!("waku_start_discv5 returned {ret}")));
+            return Err(WakuFfiError::Call {
+                op: "waku_start_discv5",
+                code: ret,
+                msg: err.unwrap_or_default(),
+            });
         }
         Ok(())
     }
 
     /// Get the local ENR (Ethereum Node Record) string.
-    pub fn get_enr(&self) -> Result<String, String> {
+    pub fn get_enr(&self) -> Result<String, WakuFfiError> {
         let enr: OnceCell<String> = OnceCell::new();
         let mut closure = |ret: i32, data: &str| {
             if ret == RET_OK {
@@ -264,9 +328,15 @@ impl WakuNodeCtx {
         };
 
         if ret != RET_OK {
-            return Err(format!("waku_get_my_enr returned {ret}"));
+            return Err(WakuFfiError::Call {
+                op: "waku_get_my_enr",
+                code: ret,
+                msg: String::new(),
+            });
         }
-        enr.into_inner().ok_or_else(|| "no ENR returned".into())
+        enr.into_inner().ok_or(WakuFfiError::NoData {
+            op: "waku_get_my_enr",
+        })
     }
 }
 

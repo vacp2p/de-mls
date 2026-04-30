@@ -5,15 +5,15 @@
 //!
 //! It ensures there is a Tokio runtime (desktop app may not have one yet).
 
-use futures::{
-    StreamExt,
-    channel::mpsc::{UnboundedReceiver, unbounded},
-};
 use std::sync::Arc;
 
 use de_mls::{ds::WakuDeliveryService, protos::de_mls::messages::v1::ConversationMessage};
 use de_mls_gateway::{CoreCtx, GATEWAY, init_core};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
+use futures::{
+    StreamExt,
+    channel::mpsc::{UnboundedReceiver, unbounded},
+};
 
 /// Call once during process startup (before launching the Dioxus UI).
 pub fn start_ui_bridge(core: Arc<CoreCtx<WakuDeliveryService>>) {

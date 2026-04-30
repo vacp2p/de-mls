@@ -11,9 +11,11 @@
 
 use prost::Message;
 
-use crate::core::{ScoreEvent, ScoreOp};
-use crate::protos::de_mls::messages::v1::{
-    GroupUpdateRequest, ViolationEvidence, group_update_request::Payload,
+use crate::{
+    core::{ScoreEvent, ScoreOp},
+    protos::de_mls::messages::v1::{
+        GroupUpdateRequest, ViolationEvidence, group_update_request::Payload,
+    },
 };
 
 /// Score ops to apply when an emergency proposal resolves. Returns an

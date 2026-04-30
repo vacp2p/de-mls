@@ -1,16 +1,20 @@
+#[cfg(feature = "waku")]
+use crate::ds::waku::wrapper::WakuFfiError;
+
 /// Errors originating from the delivery service layer.
-///
-/// String payloads carry the underlying libwaku error message. These are
-/// human-readable but not structured — callers should treat them as opaque
-/// diagnostic text, not match on their content.
 #[derive(Debug, thiserror::Error)]
 pub enum DeliveryServiceError {
-    #[error("Waku publish message error: {0}")]
-    WakuPublishMessageError(String),
-    #[error("Waku node already initialized: {0}")]
-    WakuNodeAlreadyInitialized(String),
-    #[error("Waku connect peer error: {0}")]
-    WakuConnectPeerError(String),
+    #[cfg(feature = "waku")]
+    #[error("Waku publish failed: {0}")]
+    WakuPublish(#[source] WakuFfiError),
+
+    #[cfg(feature = "waku")]
+    #[error("Waku node startup failed: {0}")]
+    WakuStartup(#[source] WakuFfiError),
+
+    #[cfg(feature = "waku")]
+    #[error("Waku connect peer failed: {0}")]
+    WakuConnectPeer(#[source] WakuFfiError),
 
     #[error("An unknown error occurred: {0}")]
     Other(anyhow::Error),

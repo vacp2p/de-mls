@@ -1,10 +1,13 @@
 #![allow(non_snake_case)]
-use dioxus::prelude::*;
-use dioxus_desktop::{Config, LogicalSize, WindowBuilder, launch::launch as desktop_launch};
-use std::collections::HashMap;
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
+
+mod logging;
+
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use de_mls::{
@@ -14,10 +17,10 @@ use de_mls::{
 };
 use de_mls_gateway::{GATEWAY, bootstrap_core_from_env};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent, MemberInfo};
+use dioxus::prelude::*;
+use dioxus_desktop::{Config, LogicalSize, WindowBuilder, launch::launch as desktop_launch};
 use hashgraph_like_consensus::types::ConsensusEvent;
 use prost::Message;
-
-mod logging;
 
 static CSS: Asset = asset!("/assets/main.css");
 static NEXT_ALERT_ID: AtomicU64 = AtomicU64::new(1);

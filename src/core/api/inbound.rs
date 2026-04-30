@@ -1,21 +1,25 @@
 //! Inbound message routing and processing.
 
+use hashgraph_like_consensus::protos::consensus::v1::Proposal;
 use openmls_rust_crypto::MemoryStorage;
 use prost::Message;
 use tracing::{info, warn};
 
-use crate::core::api::process_commit_candidate;
-use crate::core::{error::CoreError, group::Group, process_result::ProcessResult};
-use crate::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
-use crate::mls_crypto::{
-    DeMlsStorage, DecryptResult, MlsService, ShortId, key_package_bytes_from_json,
-    parse_wallet_to_bytes,
+use crate::{
+    core::{
+        api::process_commit_candidate, error::CoreError, group::Group,
+        process_result::ProcessResult,
+    },
+    ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC},
+    mls_crypto::{
+        DeMlsStorage, DecryptResult, MlsService, ShortId, key_package_bytes_from_json,
+        parse_wallet_to_bytes,
+    },
+    protos::de_mls::messages::v1::{
+        AppMessage, GroupUpdateRequest, InviteMember, WelcomeMessage, app_message,
+        group_update_request, welcome_message,
+    },
 };
-use crate::protos::de_mls::messages::v1::{
-    AppMessage, GroupUpdateRequest, InviteMember, WelcomeMessage, app_message,
-    group_update_request, welcome_message,
-};
-use hashgraph_like_consensus::protos::consensus::v1::Proposal;
 
 /// Fast-path proposals (`expected_voters_count == 1`) bypass peer voting, so
 /// we restrict them to self-removal. Enforcing that the MLS-authenticated

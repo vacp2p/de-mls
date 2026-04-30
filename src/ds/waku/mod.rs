@@ -3,9 +3,11 @@
 pub(crate) mod sys;
 pub(crate) mod wrapper;
 
-use std::sync::{Arc, Mutex, mpsc};
-use std::thread;
-use std::time::Duration;
+use std::{
+    sync::{Arc, Mutex, mpsc},
+    thread,
+    time::Duration,
+};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use tracing::{debug, error, info};
@@ -13,8 +15,8 @@ use tracing::{debug, error, info};
 use crate::ds::{
     DeliveryServiceError, GROUP_VERSION, SUBTOPICS,
     transport::{DeliveryService, InboundPacket, OutboundPacket},
+    waku::wrapper::WakuNodeCtx,
 };
-use wrapper::WakuNodeCtx;
 
 /// The pubsub topic for the Waku Node.
 pub fn pubsub_topic() -> String {
@@ -177,14 +179,14 @@ impl WakuDeliveryService {
         let waku = match WakuNodeCtx::new(&config_json) {
             Ok(w) => w,
             Err(e) => {
-                let _ = ready_tx.send(Err(DeliveryServiceError::WakuNodeAlreadyInitialized(e)));
+                let _ = ready_tx.send(Err(DeliveryServiceError::WakuStartup(e)));
                 return;
             }
         };
 
         // Start node
         if let Err(e) = waku.start() {
-            let _ = ready_tx.send(Err(DeliveryServiceError::WakuNodeAlreadyInitialized(e)));
+            let _ = ready_tx.send(Err(DeliveryServiceError::WakuStartup(e)));
             return;
         }
         info!("Waku node started");
@@ -278,7 +280,7 @@ impl WakuDeliveryService {
         waku.relay_publish(pubsub_topic, &msg_json, 10_000)
             .map_err(|e| {
                 error!("Failed to relay publish: {e}");
-                DeliveryServiceError::WakuPublishMessageError(e)
+                DeliveryServiceError::WakuPublish(e)
             })
     }
 

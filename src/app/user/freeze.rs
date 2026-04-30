@@ -8,6 +8,7 @@ use crate::{
         DeMlsProvider, FreezeFinalizeResult, FreezeOutcome, GroupEventHandler, ScoreEvent, ScoreOp,
         create_commit_candidate, finalize_freeze_round, group_members,
     },
+    ds::WELCOME_SUBTOPIC,
 };
 
 impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
@@ -114,7 +115,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 // epoch ahead of the steward.
                 let has_welcome = outbound
                     .as_ref()
-                    .is_some_and(|p| p.subtopic == crate::ds::WELCOME_SUBTOPIC);
+                    .is_some_and(|p| p.subtopic == WELCOME_SUBTOPIC);
                 if let Some(packet) = outbound {
                     if let Err(e) = self.handler.on_outbound(group_name, packet).await {
                         error!(group = group_name, error = %e, "deferred welcome send failed");

@@ -4,17 +4,20 @@ use openmls_rust_crypto::MemoryStorage;
 use prost::Message;
 use tracing::info;
 
-use crate::core::api::compute_commit_hash;
-use crate::core::proposal_kind::ProposalKind;
-use crate::core::{
-    error::CoreError,
-    group::{BufferedCommitCandidate, Group},
+use crate::{
+    core::{
+        api::compute_commit_hash,
+        error::CoreError,
+        group::{BufferedCommitCandidate, Group},
+        proposal_kind::ProposalKind,
+    },
+    ds::{APP_MSG_SUBTOPIC, OutboundPacket},
+    mls_crypto::{
+        CommitCandidate as MlsCommitCandidate, DeMlsStorage, GroupUpdate, KeyPackageBytes,
+        MlsService,
+    },
+    protos::de_mls::messages::v1::{AppMessage, CommitCandidate, group_update_request},
 };
-use crate::ds::{APP_MSG_SUBTOPIC, OutboundPacket};
-use crate::mls_crypto::{
-    CommitCandidate as MlsCommitCandidate, DeMlsStorage, GroupUpdate, KeyPackageBytes, MlsService,
-};
-use crate::protos::de_mls::messages::v1::{AppMessage, CommitCandidate, group_update_request};
 
 // ─────────────────────────── Steward Operations ───────────────────────────
 
