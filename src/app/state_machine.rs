@@ -196,19 +196,28 @@ impl GroupStateMachine {
     }
 
     /// Overwritten when the handle receives a `GroupSync` from the steward.
-    pub fn update_timing(
-        &mut self,
-        epoch_duration: Duration,
-        freeze_duration: Duration,
-        retry_inactivity_duration: Duration,
-        proposal_expiration: Duration,
-        consensus_timeout: Duration,
-    ) {
-        self.epoch_duration = epoch_duration;
-        self.freeze_duration = freeze_duration;
-        self.retry_inactivity_duration = retry_inactivity_duration;
-        self.proposal_expiration = proposal_expiration;
-        self.consensus_timeout = consensus_timeout;
+    pub fn set_epoch_duration(&mut self, value: Duration) {
+        self.epoch_duration = value;
+    }
+
+    /// Overwritten when the handle receives a `GroupSync` from the steward.
+    pub fn set_freeze_duration(&mut self, value: Duration) {
+        self.freeze_duration = value;
+    }
+
+    /// Overwritten when the handle receives a `GroupSync` from the steward.
+    pub fn set_retry_inactivity_duration(&mut self, value: Duration) {
+        self.retry_inactivity_duration = value;
+    }
+
+    /// Overwritten when the handle receives a `GroupSync` from the steward.
+    pub fn set_proposal_expiration(&mut self, value: Duration) {
+        self.proposal_expiration = value;
+    }
+
+    /// Overwritten when the handle receives a `GroupSync` from the steward.
+    pub fn set_consensus_timeout(&mut self, value: Duration) {
+        self.consensus_timeout = value;
     }
 
     pub fn start_working(&mut self) {
@@ -508,8 +517,8 @@ mod tests {
     }
 
     /// `proposal_expiration` and `consensus_timeout` carry their own
-    /// per-group values from `GroupConfig` and survive an `update_timing`
-    /// call (the joiner's path when applying a `GroupSync`).
+    /// per-group values from `GroupConfig` and respond to per-field
+    /// setters (the joiner's path when applying a `GroupSync`).
     #[test]
     fn test_proposal_expiration_and_consensus_timeout_threaded_and_updated() {
         let config = GroupConfig {
@@ -521,13 +530,8 @@ mod tests {
         assert_eq!(sm.proposal_expiration(), Duration::from_secs(7));
         assert_eq!(sm.consensus_timeout(), Duration::from_secs(11));
 
-        sm.update_timing(
-            long_inactivity(),
-            long_inactivity(),
-            short_inactivity(),
-            Duration::from_secs(99),
-            Duration::from_secs(123),
-        );
+        sm.set_proposal_expiration(Duration::from_secs(99));
+        sm.set_consensus_timeout(Duration::from_secs(123));
         assert_eq!(sm.proposal_expiration(), Duration::from_secs(99));
         assert_eq!(sm.consensus_timeout(), Duration::from_secs(123));
     }
