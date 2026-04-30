@@ -42,6 +42,7 @@ pub use error::CoreError;
 pub use events::{CallbackError, GroupEventHandler};
 
 // ── Group state ──
+pub(crate) use group::member_set;
 pub use group::{
     DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_MAX_REELECTION_ATTEMPTS,
     DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_THRESHOLD_PEER_SCORE, Group, PendingUpdate,

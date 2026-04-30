@@ -37,7 +37,11 @@ fn test_process_inbound_invalid_subtopic() {
 #[test]
 fn test_process_inbound_app_msg_before_mls_init() {
     let mls = setup_mls("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let mut group = prepare_to_join("test-group", mls.wallet_bytes(), default_steward_config());
+    let mut group = prepare_to_join(
+        "test-group",
+        mls.wallet_bytes().to_vec(),
+        default_steward_config(),
+    );
 
     let result = process_inbound(&mut group, b"some payload", APP_MSG_SUBTOPIC, &mls).unwrap();
     assert!(matches!(result, ProcessResult::Noop));
@@ -69,7 +73,13 @@ fn test_process_inbound_conversation_message_roundtrip() {
         group_name: group_name.to_string(),
     };
     let app_msg: AppMessage = conv.into();
-    let outbound = build_message(&steward_handle, &steward_mls, &app_msg, b"test-app-id").unwrap();
+    let outbound = build_message(
+        steward_handle.group_name(),
+        &steward_mls,
+        &app_msg,
+        b"test-app-id",
+    )
+    .unwrap();
 
     let result = process_inbound(
         &mut joiner_handle,
@@ -124,7 +134,11 @@ fn test_process_inbound_welcome_non_steward_buffers_key_package() {
     let group_name = "non-steward-kp";
 
     let mls = setup_mls("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let mut group = prepare_to_join(group_name, mls.wallet_bytes(), default_steward_config());
+    let mut group = prepare_to_join(
+        group_name,
+        mls.wallet_bytes().to_vec(),
+        default_steward_config(),
+    );
 
     let (_joiner_mls, _joiner_handle, kp_packet) =
         setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
@@ -363,7 +377,7 @@ fn test_rejoin_after_eviction() {
     // steward re-adds.
     let mut joiner_handle = prepare_to_join(
         group_name,
-        joiner_mls.wallet_bytes(),
+        joiner_mls.wallet_bytes().to_vec(),
         default_steward_config(),
     );
     let kp_packet = build_key_package_message(&joiner_handle, &joiner_mls, b"test-app-id").unwrap();
@@ -388,7 +402,7 @@ fn test_rejoin_after_eviction() {
     );
     assert!(steward_mls.is_member(group_name, &joiner_id));
     assert!(joiner_mls.is_member(group_name, &joiner_id));
-    assert!(joiner_mls.is_member(group_name, &steward_mls.wallet_bytes()));
+    assert!(joiner_mls.is_member(group_name, steward_mls.wallet_bytes()));
 }
 
 #[test]
@@ -581,8 +595,13 @@ fn test_group_sync_roundtrip() {
         pending_update_max_epochs: 3,
     };
     let app_msg: AppMessage = sync.clone().into();
-    let sync_packet =
-        build_message(&steward_handle, &steward_mls, &app_msg, b"test-app-id").unwrap();
+    let sync_packet = build_message(
+        steward_handle.group_name(),
+        &steward_mls,
+        &app_msg,
+        b"test-app-id",
+    )
+    .unwrap();
 
     // Joiner processes the encrypted sync message
     let result = process_inbound(
@@ -738,8 +757,13 @@ fn test_group_sync_propagates_divergent_per_group_config() {
         pending_update_max_epochs: steward_handle.pending_update_max_epochs(),
     };
     let app_msg: AppMessage = sync.clone().into();
-    let sync_packet =
-        build_message(&steward_handle, &steward_mls, &app_msg, b"test-app-id").unwrap();
+    let sync_packet = build_message(
+        steward_handle.group_name(),
+        &steward_mls,
+        &app_msg,
+        b"test-app-id",
+    )
+    .unwrap();
 
     // Joiner processes the encrypted sync.
     let result = process_inbound(
@@ -868,8 +892,13 @@ fn test_group_sync_idempotent_for_existing_members() {
         pending_update_max_epochs: 3,
     };
     let app_msg: AppMessage = sync.into();
-    let sync_packet =
-        build_message(&steward_handle, &steward_mls, &app_msg, b"test-app-id").unwrap();
+    let sync_packet = build_message(
+        steward_handle.group_name(),
+        &steward_mls,
+        &app_msg,
+        b"test-app-id",
+    )
+    .unwrap();
 
     // Joiner processes sync — should get GroupSyncReceived at the core level
     let result = process_inbound(

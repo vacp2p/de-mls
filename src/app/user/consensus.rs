@@ -5,7 +5,7 @@
 //! timeout. Since `User` is `Clone` (every field is `Arc` or cheap `Clone`),
 //! each spawn just owns its own handle — no ctx struct per task kind.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use hashgraph_like_consensus::{error::ConsensusError, storage::ConsensusStorage};
 use prost::Message;
@@ -192,7 +192,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let (proposal_id, unbundled) = submit_proposal::<P>(
             group_name,
             &request,
-            self.mls_service.wallet_hex(),
+            self.mls_service.wallet_bytes(),
             &self.consensus_service,
             ProposalParams {
                 expected_voters,
@@ -203,7 +203,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         )
         .await?;
 
-        let group = {
+        {
             let entry_arc = self
                 .lookup_entry(group_name)
                 .await
@@ -215,8 +215,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             if kind.is_emergency() {
                 entry.group.observe_emergency(proposal_id);
             }
-            entry.group.clone()
-        };
+        }
 
         let outbound = match creator_vote {
             Some(vote) => {
@@ -242,7 +241,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             None => unbundled,
         };
 
-        let packet = build_message(&group, &self.mls_service, &outbound, &self.app_id)?;
+        let packet = build_message(group_name, &self.mls_service, &outbound, &self.app_id)?;
         self.handler.on_outbound(group_name, packet).await?;
 
         match creator_vote {
@@ -270,12 +269,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 self.handler
                     .on_app_message(group_name, vote_notification)
                     .await?;
-                self.spawn_auto_vote(
-                    group_name.to_string(),
-                    proposal_id,
-                    voting_delay,
-                    liveness_criteria_yes,
-                );
+                self.spawn_auto_vote(group_name, proposal_id, voting_delay, liveness_criteria_yes);
             }
         }
 
@@ -433,28 +427,27 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             .lookup_entry(group_name)
             .await
             .ok_or(UserError::GroupNotFound)?;
-        let group = {
+        {
             let entry = entry_arc.read().await;
             let state = entry.state_machine.current_state();
             if state == GroupState::Freezing || state == GroupState::Selection {
                 return Err(UserError::GroupBlocked(state.to_string()));
             }
-            entry.group.clone()
-        };
+        }
         let app_id = self.app_id.clone();
 
         // Manual vote takes precedence over the pending auto-vote timer.
         self.cancel_auto_vote(group_name, proposal_id);
 
         let app_message = cast_vote::<P, _>(
-            &group,
+            group_name,
             proposal_id,
             vote,
             &self.consensus_service,
             self.eth_signer.clone(),
         )
         .await?;
-        let packet = build_message(&group, &self.mls_service, &app_message, &app_id)?;
+        let packet = build_message(group_name, &self.mls_service, &app_message, &app_id)?;
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
     }
@@ -465,28 +458,32 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// delay can't change it.
     pub(crate) fn spawn_auto_vote(
         &self,
-        group_name: String,
+        group_name: &str,
         proposal_id: u32,
         delay: Duration,
         vote: bool,
     ) {
-        self.cancel_auto_vote(&group_name, proposal_id);
+        self.cancel_auto_vote(group_name, proposal_id);
 
         let user = self.clone();
-        let key = (group_name.clone(), proposal_id);
+        let group_key: Arc<str> = Arc::from(group_name);
+        let group_key_for_task = Arc::clone(&group_key);
 
         let handle = tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            if let Err(e) = user.cast_auto_vote(&group_name, proposal_id, vote).await {
+            if let Err(e) = user
+                .cast_auto_vote(&group_key_for_task, proposal_id, vote)
+                .await
+            {
                 tracing::debug!(
-                    group = %group_name,
+                    group = %group_key_for_task,
                     proposal_id,
                     error = %e,
                     "auto-vote skipped (already voted or session resolved)"
                 );
             } else {
                 info!(
-                    group = %group_name,
+                    group = %group_key_for_task,
                     proposal_id,
                     vote,
                     "auto-vote cast on timer"
@@ -494,13 +491,21 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             }
             // Remove the handle when the task completes so repeated manual
             // votes after the timer fires don't try to abort a dead handle.
-            if let Ok(mut timers) = user.auto_vote_timers.lock() {
-                timers.remove(&(group_name, proposal_id));
+            if let Ok(mut timers) = user.auto_vote_timers.lock()
+                && let Some(per_group) = timers.get_mut(&*group_key_for_task)
+            {
+                per_group.remove(&proposal_id);
+                if per_group.is_empty() {
+                    timers.remove(&*group_key_for_task);
+                }
             }
         });
 
         if let Ok(mut timers) = self.auto_vote_timers.lock() {
-            timers.insert(key, handle);
+            timers
+                .entry(group_key)
+                .or_default()
+                .insert(proposal_id, handle);
         }
     }
 
@@ -508,24 +513,26 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// registered. No-op otherwise.
     pub(crate) fn cancel_auto_vote(&self, group_name: &str, proposal_id: u32) {
         if let Ok(mut timers) = self.auto_vote_timers.lock()
-            && let Some(handle) = timers.remove(&(group_name.to_string(), proposal_id))
+            && let Some(per_group) = timers.get_mut(group_name)
         {
-            handle.abort();
+            if let Some(handle) = per_group.remove(&proposal_id) {
+                handle.abort();
+            }
+            if per_group.is_empty() {
+                timers.remove(group_name);
+            }
         }
     }
 
     /// Abort every auto-vote timer belonging to `group_name`. Called on
     /// group leave so no stale timers fire against a group we've left.
     pub(crate) fn cancel_group_auto_votes(&self, group_name: &str) {
-        if let Ok(mut timers) = self.auto_vote_timers.lock() {
-            timers.retain(|(g, _), handle| {
-                if g == group_name {
-                    handle.abort();
-                    false
-                } else {
-                    true
-                }
-            });
+        if let Ok(mut timers) = self.auto_vote_timers.lock()
+            && let Some(per_group) = timers.remove(group_name)
+        {
+            for handle in per_group.into_values() {
+                handle.abort();
+            }
         }
     }
 
@@ -537,19 +544,18 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         proposal_id: u32,
         vote: bool,
     ) -> Result<(), UserError> {
-        let group = self
-            .with_entry(group_name, |e| e.group.clone())
-            .await
-            .ok_or(UserError::GroupNotFound)?;
+        if self.lookup_entry(group_name).await.is_none() {
+            return Err(UserError::GroupNotFound);
+        }
         let app_message = cast_vote::<P, _>(
-            &group,
+            group_name,
             proposal_id,
             vote,
             &self.consensus_service,
             self.eth_signer.clone(),
         )
         .await?;
-        let packet = build_message(&group, &self.mls_service, &app_message, &self.app_id)?;
+        let packet = build_message(group_name, &self.mls_service, &app_message, &self.app_id)?;
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
     }

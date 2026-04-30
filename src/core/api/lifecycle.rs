@@ -24,7 +24,7 @@ where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
     mls.create_group(name)?;
-    Group::new_as_creator(name, mls.wallet_bytes(), protocol_config)
+    Group::new_as_creator(name, mls.wallet_bytes().to_vec(), protocol_config)
 }
 
 /// Prepare a handle for joining an existing group.
@@ -43,7 +43,7 @@ pub fn prepare_to_join(
 
 /// Build an MLS-encrypted application message.
 pub fn build_message<S>(
-    group: &Group,
+    group_name: &str,
     mls: &MlsService<S>,
     app_msg: &AppMessage,
     app_id: &[u8],
@@ -51,16 +51,16 @@ pub fn build_message<S>(
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
-    if !mls.has_group(group.group_name()) {
+    if !mls.has_group(group_name) {
         return Err(CoreError::MlsGroupNotInitialized);
     }
 
-    let message_out = mls.encrypt(group.group_name(), &app_msg.encode_to_vec())?;
+    let message_out = mls.encrypt(group_name, &app_msg.encode_to_vec())?;
 
     Ok(OutboundPacket::new(
         message_out,
         APP_MSG_SUBTOPIC,
-        group.group_name(),
+        group_name,
         app_id,
     ))
 }

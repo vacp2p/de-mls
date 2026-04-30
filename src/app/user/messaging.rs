@@ -57,7 +57,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             }
             .into();
 
-            build_message(&entry.group, &self.mls_service, &app_msg, &self.app_id)?
+            build_message(group_name, &self.mls_service, &app_msg, &self.app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())

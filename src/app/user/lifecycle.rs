@@ -55,7 +55,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         } else {
             let group = prepare_to_join(
                 group_name,
-                self.mls_service.wallet_bytes(),
+                self.mls_service.wallet_bytes().to_vec(),
                 config.protocol.clone(),
             );
             let state_machine = GroupStateMachine::new_as_pending_join_with_config(config);
@@ -86,7 +86,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         // Joiners start tracked at `JoinedGroup` time (once members are known).
         if is_creation {
             self.scoring()
-                .add_member(group_name, &self.mls_service.wallet_bytes());
+                .add_member(group_name, self.mls_service.wallet_bytes());
         }
 
         self.state_handler
@@ -179,14 +179,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             return Ok(());
         };
 
-        let packet = {
-            let entry_arc = self
-                .lookup_entry(group_name)
-                .await
-                .ok_or(UserError::GroupNotFound)?;
-            let entry = entry_arc.read().await;
-            build_message(&entry.group, &self.mls_service, &app_msg, &self.app_id)?
-        };
+        let packet = build_message(group_name, &self.mls_service, &app_msg, &self.app_id)?;
         self.handler.on_outbound(group_name, packet).await?;
 
         Ok(())

@@ -1,6 +1,9 @@
 //! Main MLS service providing all cryptographic operations.
 
-use std::{collections::HashMap, sync::RwLock};
+use std::{
+    collections::HashMap,
+    sync::{OnceLock, RwLock},
+};
 
 use openmls::{
     group::{MlsGroup, StagedCommit},
@@ -57,6 +60,10 @@ impl<'a> OpenMlsProvider for MlsProvider<'a> {
 pub struct MlsService<S: DeMlsStorage> {
     storage: S,
     crypto: RustCrypto,
+    /// Wallet bytes, populated by `init()`. Empty slice before init.
+    wallet_bytes: OnceLock<Vec<u8>>,
+    /// Checksummed wallet hex, same lifecycle as `wallet_bytes`.
+    wallet_hex: OnceLock<String>,
     identity: RwLock<Option<IdentityData>>,
     groups: RwLock<HashMap<String, MlsGroup>>,
     pending_staged_commits: RwLock<HashMap<String, StagedCommit>>,
@@ -71,6 +78,8 @@ where
         Self {
             storage,
             crypto: RustCrypto::default(),
+            wallet_bytes: OnceLock::new(),
+            wallet_hex: OnceLock::new(),
             identity: RwLock::new(None),
             groups: RwLock::new(HashMap::new()),
             pending_staged_commits: RwLock::new(HashMap::new()),

@@ -8,7 +8,7 @@ use crate::{
     core::{
         api::compute_commit_hash,
         error::CoreError,
-        group::{BufferedCommitCandidate, Group},
+        group::{BufferedCommitCandidate, Group, member_set},
         proposal_kind::ProposalKind,
     },
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
@@ -85,7 +85,8 @@ where
     // rebroadcast KPs, duplicate removes) — without this MLS would reject
     // the whole batch with "Duplicate signature key in proposals and group".
     let current_members = mls.members(group.group_name())?;
-    let is_member = |id: &[u8]| current_members.iter().any(|m| m == id);
+    let current_members_set = member_set(&current_members);
+    let is_member = |id: &[u8]| current_members_set.contains(id);
 
     // Urgent (ECP-driven) freeze: restrict the batch to just the target's
     // RemoveMember. See `Group::urgent_commit_target`.
@@ -144,7 +145,7 @@ where
         group_name: group.group_name_bytes().to_vec(),
         mls_proposals,
         commit_message: commit,
-        steward_identity: mls.wallet_bytes(),
+        steward_identity: mls.wallet_bytes().to_vec(),
     };
 
     // Welcome bytes are deferred: sent from finalize_freeze_round after the

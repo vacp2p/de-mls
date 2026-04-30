@@ -158,7 +158,7 @@ pub fn setup_joiner_with_config(
     config: ProtocolConfig,
 ) -> (MlsService<MemoryDeMlsStorage>, Group, OutboundPacket) {
     let mls = setup_mls(wallet_hex);
-    let group = prepare_to_join(group_name, mls.wallet_bytes(), config);
+    let group = prepare_to_join(group_name, mls.wallet_bytes().to_vec(), config);
     let kp_packet = build_key_package_message(&group, &mls, b"test-app-id").unwrap();
     (mls, group, kp_packet)
 }

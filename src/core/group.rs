@@ -47,6 +47,12 @@ pub fn is_auto_approved_entry(proposal_id: u32, request: &GroupUpdateRequest) ->
     }
 }
 
+/// Borrow-only `HashSet` view over a slice of identity blobs, for O(1)
+/// membership lookups against `Vec<Vec<u8>>`.
+pub(crate) fn member_set(members: &[Vec<u8>]) -> HashSet<&[u8]> {
+    members.iter().map(|m| m.as_slice()).collect()
+}
+
 /// Return the target identity of a membership-changing `GroupUpdateRequest`.
 ///
 /// Used as the stable key for buffering pending updates so duplicates don't
@@ -284,9 +290,10 @@ impl Group {
     /// Resolve the live epoch steward. Skips stewards no longer in the group
     /// and stewards that have buffered an auto-approved self-leave.
     pub fn live_epoch_steward<'a>(&'a self, epoch: u64, members: &[Vec<u8>]) -> Option<&'a [u8]> {
+        let member_set = member_set(members);
         self.steward_list.as_ref().and_then(|l| {
             l.live_epoch_steward(epoch, |candidate| {
-                self.is_steward_eligible(candidate, members)
+                self.is_steward_eligible_in(candidate, &member_set)
             })
         })
     }
@@ -299,13 +306,16 @@ impl Group {
         members: &[Vec<u8>],
     ) -> (Option<&'a [u8]>, Option<&'a [u8]>) {
         match self.steward_list.as_ref() {
-            Some(l) => l.live_epoch_and_backup(epoch, |c| self.is_steward_eligible(c, members)),
+            Some(l) => {
+                let member_set = member_set(members);
+                l.live_epoch_and_backup(epoch, |c| self.is_steward_eligible_in(c, &member_set))
+            }
             None => (None, None),
         }
     }
 
-    fn is_steward_eligible(&self, candidate: &[u8], members: &[Vec<u8>]) -> bool {
-        !self.is_pending_removal(candidate) && members.iter().any(|m| m == candidate)
+    fn is_steward_eligible_in(&self, candidate: &[u8], member_set: &HashSet<&[u8]>) -> bool {
+        !self.is_pending_removal(candidate) && member_set.contains(candidate)
     }
 
     /// True iff `approved_proposals` carries any `RemoveMember(identity)` —
@@ -541,9 +551,10 @@ impl Group {
         let Some(list) = self.steward_list.as_ref() else {
             return Vec::new();
         };
+        let member_set = member_set(members);
         list.members()
             .iter()
-            .filter(|m| self.is_steward_eligible(m, members))
+            .filter(|m| self.is_steward_eligible_in(m, &member_set))
             .cloned()
             .collect()
     }
@@ -695,6 +706,20 @@ impl Group {
     /// Clear freeze-round state.
     pub(crate) fn clear_freeze_round(&mut self) {
         self.freeze_round = None;
+    }
+
+    /// Move the active round's candidates out and clear the round.
+    /// Returns `None` when no round is active or its epoch doesn't match.
+    pub(crate) fn take_round_candidates(
+        &mut self,
+        epoch: u64,
+    ) -> Option<Vec<BufferedCommitCandidate>> {
+        let round = self.freeze_round.take()?;
+        if round.epoch != epoch {
+            self.freeze_round = Some(round);
+            return None;
+        }
+        Some(round.candidates)
     }
 
     // ─────────────────────────── Dedup Operations ───────────────────────────

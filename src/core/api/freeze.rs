@@ -159,14 +159,11 @@ where
     let current_epoch = mls.current_epoch(group.group_name())?;
     group.lock_freeze_round_selection(current_epoch);
 
-    let candidates = match group.freeze_round() {
-        Some(round) if round.epoch == current_epoch => round.candidates.clone(),
-        _ => {
-            // Drop any local pending commit so the next MLS encrypt
-            // doesn't trip on "pending proposal exists".
-            let _ = mls.discard_own_commit(group.group_name());
-            return Ok(FreezeFinalizeResult::default());
-        }
+    let Some(candidates) = group.take_round_candidates(current_epoch) else {
+        // Drop any local pending commit so the next MLS encrypt
+        // doesn't trip on "pending proposal exists".
+        let _ = mls.discard_own_commit(group.group_name());
+        return Ok(FreezeFinalizeResult::default());
     };
 
     if candidates.is_empty() {
@@ -178,7 +175,6 @@ where
     let sorted = rank_applicable_candidates(candidates, &ctx, allow_subset_candidates);
 
     if sorted.is_empty() {
-        group.clear_freeze_round();
         let _ = mls.discard_own_commit(group.group_name());
         return Ok(FreezeFinalizeResult::default());
     }
@@ -220,7 +216,7 @@ impl RoundContext {
     where
         S: DeMlsStorage<MlsStorage = MemoryStorage>,
     {
-        let self_identity = mls.wallet_bytes();
+        let self_identity = mls.wallet_bytes().to_vec();
 
         let mut mls_actions: Vec<MlsProposalAction> = Vec::new();
         let mut self_remove_pending = false;

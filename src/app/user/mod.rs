@@ -47,8 +47,9 @@ pub(crate) struct GroupEntry {
 
 /// Registry of outstanding auto-vote timers, keyed by
 /// `(group_name, proposal_id)`. Cancelled on manual vote, consensus
-/// resolution, or group leave.
-type AutoVoteTimers = Arc<Mutex<HashMap<(String, u32), JoinHandle<()>>>>;
+/// resolution, or group leave. Outer key is the group name (`Arc<str>` so
+/// `&str` lookups don't allocate); inner key is the proposal id.
+type AutoVoteTimers = Arc<Mutex<HashMap<Arc<str>, HashMap<u32, JoinHandle<()>>>>>;
 
 pub struct User<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler> {
     mls_service: Arc<MlsService<P::Storage>>,
@@ -156,7 +157,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
     /// Wallet address as checksummed hex.
     pub fn identity_string(&self) -> String {
-        self.mls_service.wallet_hex()
+        self.mls_service.wallet_hex().to_string()
     }
 
     /// Drop all proposals / votes / sessions for this group from the
