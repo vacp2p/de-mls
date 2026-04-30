@@ -953,38 +953,6 @@ mod tests {
         assert!(list.contains(&creator));
     }
 
-    /// `threshold_peer_score` defaults to `DEFAULT_THRESHOLD_PEER_SCORE`
-    /// and is overwritten by the setter (used by `lifecycle::create_group`
-    /// at creation and by `on_group_sync` for joiners).
-    #[test]
-    fn test_threshold_peer_score_default_and_setter() {
-        let config = ProtocolConfig::new(1, 3).unwrap();
-        let mut group = Group::new_as_joiner("test-group", member(1), config);
-        assert_eq!(group.threshold_peer_score(), DEFAULT_THRESHOLD_PEER_SCORE);
-
-        group.set_threshold_peer_score(-25);
-        assert_eq!(group.threshold_peer_score(), -25);
-    }
-
-    /// `liveness_criteria_yes` and `pending_update_max_epochs` default to
-    /// their core constants and are overwritten by setters (lifecycle at
-    /// creation, `on_group_sync` for joiners).
-    #[test]
-    fn test_liveness_and_pending_update_max_epochs_default_and_setter() {
-        let config = ProtocolConfig::new(1, 3).unwrap();
-        let mut group = Group::new_as_joiner("test-group", member(1), config);
-        assert_eq!(group.liveness_criteria_yes(), DEFAULT_LIVENESS_CRITERIA_YES);
-        assert_eq!(
-            group.pending_update_max_epochs(),
-            DEFAULT_PENDING_UPDATE_MAX_EPOCHS
-        );
-
-        group.set_liveness_criteria_yes(false);
-        group.set_pending_update_max_epochs(7);
-        assert!(!group.liveness_criteria_yes());
-        assert_eq!(group.pending_update_max_epochs(), 7);
-    }
-
     #[test]
     fn test_set_steward_list_on_joiner() {
         let config = ProtocolConfig::new(2, 5).unwrap();

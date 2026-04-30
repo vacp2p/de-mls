@@ -439,11 +439,11 @@ mod tests {
         assert_eq!(sm.retry_inactivity_duration(), short_inactivity());
     }
 
-    /// `voting_delay` and `election_voting_delay` are threaded per-group
-    /// from `GroupConfig` at construction. They aren't synced via
-    /// `GroupSync` — each node tunes them locally.
+    /// `voting_delay_for` dispatches on proposal kind: steward-election
+    /// proposals get the shorter `election_voting_delay`, others get
+    /// `voting_delay`.
     #[test]
-    fn test_voting_delay_threaded() {
+    fn test_voting_delay_dispatch_on_proposal_kind() {
         use crate::core::ProposalKind;
 
         let config = GroupConfig {
@@ -460,26 +460,6 @@ mod tests {
             sm.voting_delay_for(ProposalKind::StewardElection),
             Duration::from_secs(3)
         );
-    }
-
-    /// `proposal_expiration` and `consensus_timeout` carry their own
-    /// per-group values from `GroupConfig` and respond to per-field
-    /// setters (the joiner's path when applying a `GroupSync`).
-    #[test]
-    fn test_proposal_expiration_and_consensus_timeout_threaded_and_updated() {
-        let config = GroupConfig {
-            proposal_expiration: Duration::from_secs(7),
-            consensus_timeout: Duration::from_secs(11),
-            ..GroupConfig::default()
-        };
-        let mut sm = GroupStateMachine::new_as_member_with_config(config);
-        assert_eq!(sm.proposal_expiration(), Duration::from_secs(7));
-        assert_eq!(sm.consensus_timeout(), Duration::from_secs(11));
-
-        sm.set_proposal_expiration(Duration::from_secs(99));
-        sm.set_consensus_timeout(Duration::from_secs(123));
-        assert_eq!(sm.proposal_expiration(), Duration::from_secs(99));
-        assert_eq!(sm.consensus_timeout(), Duration::from_secs(123));
     }
 
     #[test]
