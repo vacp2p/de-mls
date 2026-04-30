@@ -43,8 +43,9 @@ pub use events::{CallbackError, GroupEventHandler};
 
 // ── Group state ──
 pub use group::{
-    DEFAULT_MAX_REELECTION_ATTEMPTS, Group, PendingUpdate, ProposalId,
-    auto_approved_leave_proposal_id, target_identity_of,
+    DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_MAX_REELECTION_ATTEMPTS,
+    DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_THRESHOLD_PEER_SCORE, Group, PendingUpdate,
+    ProposalId, auto_approved_leave_proposal_id, target_identity_of,
 };
 
 // ── Proposal classification ──

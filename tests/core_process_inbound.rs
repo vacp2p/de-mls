@@ -576,6 +576,9 @@ fn test_group_sync_roundtrip() {
         timing: None,
         retry_round: 0,
         max_reelection_attempts: 1,
+        liveness_criteria_yes: true,
+        threshold_peer_score: 0,
+        pending_update_max_epochs: 3,
     };
     let app_msg: AppMessage = sync.clone().into();
     let sync_packet =
@@ -654,6 +657,166 @@ fn test_group_sync_roundtrip() {
     assert_eq!(joiner_list.election_epoch(), steward_list.election_epoch());
 }
 
+/// `GroupSync` carries per-group config from steward to joiner: the
+/// joiner adopts the steward's values via the same getters production
+/// code uses, and `members_below_threshold` selects on the synced
+/// threshold.
+#[test]
+fn test_group_sync_propagates_divergent_per_group_config() {
+    use de_mls::app::{InMemoryPeerScoreStorage, PeerScoringService};
+    use de_mls::core::{ScoreEvent, ScoreOp, ScoringConfig};
+    use de_mls::protos::de_mls::messages::v1::{GroupSync, PeerScore};
+
+    const STEWARD_THRESHOLD: i64 = -50;
+    const STEWARD_LIVENESS_YES: bool = false;
+    const STEWARD_PENDING_MAX_EPOCHS: u32 = 11;
+    const STEWARD_SN_MIN: usize = 2;
+    const STEWARD_SN_MAX: usize = 8;
+
+    let group_name = "sync-divergent-config";
+    let steward_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+    let joiner_hex = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+
+    let steward_protocol = ProtocolConfig::new(STEWARD_SN_MIN, STEWARD_SN_MAX).unwrap();
+    let (steward_mls, mut steward_handle) =
+        setup_steward_with_config(group_name, steward_hex, steward_protocol);
+    let (joiner_mls, mut joiner_handle, kp_packet) =
+        setup_joiner_with_config(group_name, joiner_hex, default_steward_config());
+
+    // Steward configures the group with non-default per-group state.
+    steward_handle.set_threshold_peer_score(STEWARD_THRESHOLD);
+    steward_handle.set_liveness_criteria_yes(STEWARD_LIVENESS_YES);
+    steward_handle.set_pending_update_max_epochs(STEWARD_PENDING_MAX_EPOCHS);
+
+    // Joiner starts with the core defaults — different from the steward's.
+    assert_ne!(joiner_handle.threshold_peer_score(), STEWARD_THRESHOLD);
+    assert_ne!(joiner_handle.liveness_criteria_yes(), STEWARD_LIVENESS_YES);
+    assert_ne!(
+        joiner_handle.pending_update_max_epochs(),
+        STEWARD_PENDING_MAX_EPOCHS
+    );
+    assert_ne!(joiner_handle.protocol_config().sn_min, STEWARD_SN_MIN);
+    assert_ne!(joiner_handle.protocol_config().sn_max, STEWARD_SN_MAX);
+
+    // Steward adds joiner so a Welcome path exists.
+    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
+    process_inbound(
+        &mut joiner_handle,
+        &welcome_packet.payload,
+        WELCOME_SUBTOPIC,
+        &joiner_mls,
+    )
+    .unwrap();
+
+    // Steward builds a GroupSync from per-group state. Two members are
+    // included with peer scores below STEWARD_THRESHOLD so the synced
+    // threshold has something to assert on.
+    let alice = b"alice".to_vec();
+    let bob = b"bob".to_vec();
+    let steward_list = steward_handle.steward_list().unwrap();
+    let sync = GroupSync {
+        steward_members: steward_list.members().to_vec(),
+        election_epoch: steward_list.election_epoch(),
+        sn_min: steward_list.config().sn_min as u32,
+        sn_max: steward_list.config().sn_max as u32,
+        allow_subset_candidates: steward_handle.allow_subset_candidates(),
+        peer_scores: vec![
+            PeerScore {
+                member_id: alice.clone(),
+                score: STEWARD_THRESHOLD - 10,
+            },
+            PeerScore {
+                member_id: bob.clone(),
+                score: STEWARD_THRESHOLD + 10,
+            },
+        ],
+        timing: None,
+        retry_round: steward_list.retry_round(),
+        max_reelection_attempts: steward_handle.max_reelection_attempts(),
+        liveness_criteria_yes: steward_handle.liveness_criteria_yes(),
+        threshold_peer_score: steward_handle.threshold_peer_score(),
+        pending_update_max_epochs: steward_handle.pending_update_max_epochs(),
+    };
+    let app_msg: AppMessage = sync.clone().into();
+    let sync_packet =
+        build_message(&steward_handle, &steward_mls, &app_msg, b"test-app-id").unwrap();
+
+    // Joiner processes the encrypted sync.
+    let result = process_inbound(
+        &mut joiner_handle,
+        &sync_packet.payload,
+        APP_MSG_SUBTOPIC,
+        &joiner_mls,
+    )
+    .unwrap();
+    let received = match result {
+        ProcessResult::GroupSyncReceived(s) => s,
+        other => panic!("Expected GroupSyncReceived, got {:?}", other),
+    };
+
+    // The new fields survive the wire.
+    assert_eq!(received.threshold_peer_score, STEWARD_THRESHOLD);
+    assert_eq!(received.liveness_criteria_yes, STEWARD_LIVENESS_YES);
+    assert_eq!(
+        received.pending_update_max_epochs,
+        STEWARD_PENDING_MAX_EPOCHS
+    );
+    assert_eq!(received.sn_min as usize, STEWARD_SN_MIN);
+    assert_eq!(received.sn_max as usize, STEWARD_SN_MAX);
+
+    // App-layer application — same setters `User::on_group_sync` uses.
+    let mut applied_protocol =
+        ProtocolConfig::new(received.sn_min as usize, received.sn_max as usize).unwrap();
+    applied_protocol.allow_subset_candidates = received.allow_subset_candidates;
+    joiner_handle.set_protocol_config(applied_protocol);
+    joiner_handle.set_threshold_peer_score(received.threshold_peer_score);
+    joiner_handle.set_liveness_criteria_yes(received.liveness_criteria_yes);
+    joiner_handle.set_pending_update_max_epochs(received.pending_update_max_epochs);
+
+    // Joiner now reads the steward's values via the same getters production
+    // code consults.
+    assert_eq!(joiner_handle.threshold_peer_score(), STEWARD_THRESHOLD);
+    assert_eq!(joiner_handle.liveness_criteria_yes(), STEWARD_LIVENESS_YES);
+    assert_eq!(
+        joiner_handle.pending_update_max_epochs(),
+        STEWARD_PENDING_MAX_EPOCHS
+    );
+    assert_eq!(joiner_handle.protocol_config().sn_min, STEWARD_SN_MIN);
+    assert_eq!(joiner_handle.protocol_config().sn_max, STEWARD_SN_MAX);
+
+    // Behaviour assertion: a scoring lookup at the synced threshold
+    // returns members at or below it.
+    let mut scoring = PeerScoringService::new(
+        InMemoryPeerScoreStorage::new(),
+        de_mls::app::FixedScoringProvider::with_default_deltas(),
+        ScoringConfig { default_score: 100 },
+    );
+    for ps in &received.peer_scores {
+        scoring.set_score(group_name, &ps.member_id, ps.score);
+    }
+    // Apply a single op so the score-mutation path is also exercised.
+    scoring.apply_op(
+        group_name,
+        &ScoreOp {
+            member_id: alice.clone(),
+            event: ScoreEvent::SuccessfulCommit,
+        },
+    );
+    let below = scoring.members_below_threshold(group_name, joiner_handle.threshold_peer_score());
+    assert!(
+        below.contains(&alice),
+        "alice (score {}) is below the synced threshold {}",
+        STEWARD_THRESHOLD - 10 + 10,
+        joiner_handle.threshold_peer_score()
+    );
+    assert!(
+        !below.contains(&bob),
+        "bob (score {}) is above the synced threshold {}",
+        STEWARD_THRESHOLD + 10,
+        joiner_handle.threshold_peer_score()
+    );
+}
+
 /// If a member already has a steward list, receiving a sync message is a no-op.
 #[test]
 fn test_group_sync_idempotent_for_existing_members() {
@@ -700,6 +863,9 @@ fn test_group_sync_idempotent_for_existing_members() {
         timing: None,
         retry_round: 0,
         max_reelection_attempts: 1,
+        liveness_criteria_yes: true,
+        threshold_peer_score: 0,
+        pending_update_max_epochs: 3,
     };
     let app_msg: AppMessage = sync.into();
     let sync_packet =
@@ -799,6 +965,9 @@ fn test_group_sync_carries_list_retry_round_not_group_counter() {
         timing: None,
         retry_round: list.retry_round(),
         max_reelection_attempts: steward_handle.max_reelection_attempts(),
+        liveness_criteria_yes: true,
+        threshold_peer_score: 0,
+        pending_update_max_epochs: 3,
     };
 
     // Joiner re-derives the ordering using the wire seed — should match.

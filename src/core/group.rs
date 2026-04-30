@@ -199,12 +199,27 @@ pub struct Group {
     /// While `true`, `create_commit_candidate` bypasses the `is_steward()`
     /// gate so any member can produce the recovery commit.
     recovery_mode: bool,
+    /// At or below this score, a member is eligible for
+    /// `SCORE_BELOW_THRESHOLD` ECP removal (RFC §Peer Scoring).
+    threshold_peer_score: i64,
+    /// Auto-vote default and consensus tie-break rule (RFC §Creating
+    /// Voting Proposal).
+    liveness_criteria_yes: bool,
+    /// Max age (in epochs) of a buffered membership update before the
+    /// epoch steward drops it.
+    pending_update_max_epochs: u32,
 }
 
 /// Fallback ceiling on steward-election retries. One retry gives the
 /// responsible proposer a second shot with a different list composition;
 /// beyond that human/policy intervention is expected.
 pub const DEFAULT_MAX_REELECTION_ATTEMPTS: u32 = 1;
+
+pub const DEFAULT_THRESHOLD_PEER_SCORE: i64 = 0;
+
+pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
+
+pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
 
 impl Group {
     fn new_base(group_name: &str, self_identity: Vec<u8>, protocol_config: ProtocolConfig) -> Self {
@@ -227,6 +242,9 @@ impl Group {
             resolved_proposals: ResolvedProposalCache::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
             urgent_commit_target: None,
             recovery_mode: false,
+            threshold_peer_score: DEFAULT_THRESHOLD_PEER_SCORE,
+            liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,
+            pending_update_max_epochs: DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
         }
     }
 
@@ -549,6 +567,10 @@ impl Group {
         &self.protocol_config
     }
 
+    pub fn set_protocol_config(&mut self, config: ProtocolConfig) {
+        self.protocol_config = config;
+    }
+
     pub fn epoch_steward(&self, epoch: u64) -> Option<&[u8]> {
         self.steward_list
             .as_ref()
@@ -795,16 +817,36 @@ impl Group {
         self.reelection_round = 0;
     }
 
-    /// Group-configured ceiling on retries before the stuck-election error
-    /// surfaces. Shared across the group via `GroupSync`.
     pub fn max_reelection_attempts(&self) -> u32 {
         self.max_reelection_attempts
     }
 
-    /// Overwrite the retry ceiling. Called from group-creation (from
-    /// `GroupConfig`) and on joiner sync (from `GroupSync.max_reelection_attempts`).
     pub fn set_max_reelection_attempts(&mut self, max: u32) {
         self.max_reelection_attempts = max;
+    }
+
+    pub fn threshold_peer_score(&self) -> i64 {
+        self.threshold_peer_score
+    }
+
+    pub fn set_threshold_peer_score(&mut self, threshold: i64) {
+        self.threshold_peer_score = threshold;
+    }
+
+    pub fn liveness_criteria_yes(&self) -> bool {
+        self.liveness_criteria_yes
+    }
+
+    pub fn set_liveness_criteria_yes(&mut self, value: bool) {
+        self.liveness_criteria_yes = value;
+    }
+
+    pub fn pending_update_max_epochs(&self) -> u32 {
+        self.pending_update_max_epochs
+    }
+
+    pub fn set_pending_update_max_epochs(&mut self, value: u32) {
+        self.pending_update_max_epochs = value;
     }
 
     /// Drop a buffered update by target identity.
@@ -1243,5 +1285,56 @@ mod tests {
         assert!(group.approved_proposals().contains_key(&200));
         assert!(!group.approved_proposals().contains_key(&100));
         assert!(!group.approved_proposals().contains_key(&101));
+    }
+
+    fn buffer_remove_at(group: &mut Group, target: &[u8], epoch: u64) {
+        let request = GroupUpdateRequest {
+            payload: Some(group_update_request::Payload::RemoveMember(
+                crate::protos::de_mls::messages::v1::RemoveMember {
+                    identity: target.to_vec(),
+                },
+            )),
+        };
+        assert!(group.buffer_pending_update(request, epoch));
+    }
+
+    /// Reducing `pending_update_max_epochs` (e.g. via a tightened
+    /// `GroupSync`) must expire entries whose age now exceeds the new max.
+    /// Cutoff math: `current_epoch - max_age`; entries with
+    /// `first_seen_epoch < cutoff` are dropped.
+    #[test]
+    fn test_expire_pending_updates_drops_entries_older_than_max_age() {
+        let mut group = Group::new_as_creator("g", member(1), default_config()).unwrap();
+        let stale = member(7);
+        let fresh = member(9);
+
+        buffer_remove_at(&mut group, &stale, 0);
+        buffer_remove_at(&mut group, &fresh, 4);
+        assert_eq!(group.pending_update_count(), 2);
+
+        let expired = group.expire_pending_updates(5, 1);
+
+        assert_eq!(expired, vec![stale.clone()]);
+        assert_eq!(group.pending_update_count(), 1);
+        assert!(group.has_pending_update(&fresh));
+        assert!(!group.has_pending_update(&stale));
+    }
+
+    /// `max_age = 0` keeps only entries from the current epoch — the
+    /// boundary case a tightened sync hits when shrinking the window.
+    #[test]
+    fn test_expire_pending_updates_max_age_zero_keeps_only_current_epoch() {
+        let mut group = Group::new_as_creator("g", member(1), default_config()).unwrap();
+        let prior = member(7);
+        let current = member(9);
+
+        buffer_remove_at(&mut group, &prior, 4);
+        buffer_remove_at(&mut group, &current, 5);
+
+        let expired = group.expire_pending_updates(5, 0);
+
+        assert_eq!(expired, vec![prior.clone()]);
+        assert!(group.has_pending_update(&current));
+        assert!(!group.has_pending_update(&prior));
     }
 }

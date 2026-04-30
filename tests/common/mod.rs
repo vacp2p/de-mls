@@ -24,7 +24,6 @@ use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService, parse_wallet_address};
 use de_mls::protos::de_mls::messages::v1::AppMessage;
 
 pub const DEFAULT_SCORE: i64 = 100;
-pub const REMOVAL_THRESHOLD: i64 = 0;
 
 // ─────────────────────────── Mock handler ───────────────────────────
 
@@ -229,7 +228,6 @@ pub fn make_scoring() -> PeerScoringService<InMemoryPeerScoreStorage, FixedScori
         FixedScoringProvider::with_default_deltas(),
         ScoringConfig {
             default_score: DEFAULT_SCORE,
-            removal_threshold: REMOVAL_THRESHOLD,
         },
     )
 }

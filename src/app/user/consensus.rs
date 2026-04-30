@@ -146,7 +146,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             }
         };
 
-        tokio::time::sleep(self.default_group_config.consensus_timeout).await;
+        let Some(consensus_timeout) = self
+            .with_entry(&group_name, |e| e.state_machine.consensus_timeout())
+            .await
+        else {
+            return;
+        };
+        tokio::time::sleep(consensus_timeout).await;
         self.resolve_on_timeout(&group_name, proposal_id).await;
     }
 
@@ -168,6 +174,17 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         kind: ProposalKind,
         creator_vote: Option<bool>,
     ) -> Result<u32, UserError> {
+        let (proposal_expiration, consensus_timeout, liveness_criteria_yes) = self
+            .with_entry(group_name, |e| {
+                (
+                    e.state_machine.proposal_expiration(),
+                    e.state_machine.consensus_timeout(),
+                    e.group.liveness_criteria_yes(),
+                )
+            })
+            .await
+            .ok_or(UserError::GroupNotFound)?;
+
         let (proposal_id, unbundled) = submit_proposal::<P>(
             group_name,
             &request,
@@ -175,9 +192,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             &self.consensus_service,
             ProposalParams {
                 expected_voters,
-                proposal_expiration: self.default_group_config.proposal_expiration,
-                consensus_timeout: self.default_group_config.consensus_timeout,
-                liveness_criteria_yes: self.default_group_config.liveness_criteria_yes,
+                proposal_expiration,
+                consensus_timeout,
+                liveness_criteria_yes,
             },
         )
         .await?;
@@ -246,8 +263,16 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 self.handler
                     .on_app_message(group_name, vote_notification)
                     .await?;
-                let delay = self.default_group_config.voting_delay_for(kind);
-                self.spawn_auto_vote(group_name.to_string(), proposal_id, delay);
+                let voting_delay = self
+                    .with_entry(group_name, |e| e.state_machine.voting_delay_for(kind))
+                    .await
+                    .ok_or(UserError::GroupNotFound)?;
+                self.spawn_auto_vote(
+                    group_name.to_string(),
+                    proposal_id,
+                    voting_delay,
+                    liveness_criteria_yes,
+                );
             }
         }
 
@@ -430,19 +455,20 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         Ok(())
     }
 
-    /// Spawn an auto-vote timer for `(group_name, proposal_id)`. After
-    /// `delay`, the timer casts the local member's vote using
-    /// `liveness_criteria_yes` and broadcasts it. Idempotent — an existing
-    /// handle for the same key is aborted and replaced.
-    ///
-    /// If the member has already voted or the session has resolved by the
-    /// time the timer fires, `cast_vote` returns a benign error
-    /// (`UserAlreadyVoted` / `SessionNotActive`); we log at debug and exit.
-    pub(crate) fn spawn_auto_vote(&self, group_name: String, proposal_id: u32, delay: Duration) {
+    /// Spawn an auto-vote timer for `(group_name, proposal_id)`. Idempotent
+    /// — an existing handle for the same key is aborted and replaced.
+    /// `vote` is captured before the sleep so a `GroupSync` during the
+    /// delay can't change it.
+    pub(crate) fn spawn_auto_vote(
+        &self,
+        group_name: String,
+        proposal_id: u32,
+        delay: Duration,
+        vote: bool,
+    ) {
         self.cancel_auto_vote(&group_name, proposal_id);
 
         let user = self.clone();
-        let vote = self.default_group_config.liveness_criteria_yes;
         let key = (group_name.clone(), proposal_id);
 
         let handle = tokio::spawn(async move {

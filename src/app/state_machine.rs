@@ -7,6 +7,7 @@ use std::{
 use tracing::info;
 
 use crate::app::config::GroupConfig;
+use crate::core::ProposalKind;
 
 /// Notifies the integrator when a group transitions between [`GroupState`]
 /// variants. Fires from the app layer only — core never calls it.
@@ -76,6 +77,15 @@ pub struct GroupStateMachine {
     /// Short inactivity window used during recovery; caller of
     /// `check_steward_inactivity` picks which duration to apply.
     retry_inactivity_duration: Duration,
+    /// Voting-proposal lifetime (RFC §Creating Voting Proposal).
+    proposal_expiration: Duration,
+    /// Library deadline per consensus session. Mismatched values across
+    /// nodes split outcomes.
+    consensus_timeout: Duration,
+    /// Per-member window before auto-vote fires. Local-only.
+    voting_delay: Duration,
+    /// Auto-vote delay for steward-election proposals. Local-only.
+    election_voting_delay: Duration,
 }
 
 impl Default for GroupStateMachine {
@@ -96,6 +106,10 @@ impl GroupStateMachine {
             epoch_duration: config.epoch_duration,
             freeze_duration: config.freeze_duration,
             retry_inactivity_duration: config.retry_inactivity_duration,
+            proposal_expiration: config.proposal_expiration,
+            consensus_timeout: config.consensus_timeout,
+            voting_delay: config.voting_delay,
+            election_voting_delay: config.election_voting_delay,
         }
     }
 
@@ -106,6 +120,10 @@ impl GroupStateMachine {
             epoch_duration: config.epoch_duration,
             freeze_duration: config.freeze_duration,
             retry_inactivity_duration: config.retry_inactivity_duration,
+            proposal_expiration: config.proposal_expiration,
+            consensus_timeout: config.consensus_timeout,
+            voting_delay: config.voting_delay,
+            election_voting_delay: config.election_voting_delay,
         }
     }
 
@@ -125,16 +143,45 @@ impl GroupStateMachine {
         self.retry_inactivity_duration
     }
 
-    /// Overwritten when the handle receives a `GroupSync` from the steward.
-    pub fn update_timing(
-        &mut self,
-        epoch_duration: Duration,
-        freeze_duration: Duration,
-        retry_inactivity_duration: Duration,
-    ) {
-        self.epoch_duration = epoch_duration;
-        self.freeze_duration = freeze_duration;
-        self.retry_inactivity_duration = retry_inactivity_duration;
+    pub fn proposal_expiration(&self) -> Duration {
+        self.proposal_expiration
+    }
+
+    pub fn consensus_timeout(&self) -> Duration {
+        self.consensus_timeout
+    }
+
+    /// Steward-election proposals use the shorter `election_voting_delay`
+    /// for fast recovery convergence.
+    pub fn voting_delay_for(&self, kind: ProposalKind) -> Duration {
+        if kind.is_steward_election() {
+            self.election_voting_delay
+        } else {
+            self.voting_delay
+        }
+    }
+
+    // Setters below are called by `User::on_group_sync` to apply the
+    // steward's `TimingConfig`.
+
+    pub fn set_epoch_duration(&mut self, value: Duration) {
+        self.epoch_duration = value;
+    }
+
+    pub fn set_freeze_duration(&mut self, value: Duration) {
+        self.freeze_duration = value;
+    }
+
+    pub fn set_retry_inactivity_duration(&mut self, value: Duration) {
+        self.retry_inactivity_duration = value;
+    }
+
+    pub fn set_proposal_expiration(&mut self, value: Duration) {
+        self.proposal_expiration = value;
+    }
+
+    pub fn set_consensus_timeout(&mut self, value: Duration) {
+        self.consensus_timeout = value;
     }
 
     pub fn start_working(&mut self) {
@@ -389,6 +436,29 @@ mod tests {
         let sm = GroupStateMachine::new_as_member_with_config(config);
         assert_eq!(sm.epoch_duration(), long_inactivity());
         assert_eq!(sm.retry_inactivity_duration(), short_inactivity());
+    }
+
+    /// `voting_delay_for` dispatches on proposal kind: steward-election
+    /// proposals get the shorter `election_voting_delay`, others get
+    /// `voting_delay`.
+    #[test]
+    fn test_voting_delay_dispatch_on_proposal_kind() {
+        use crate::core::ProposalKind;
+
+        let config = GroupConfig {
+            voting_delay: Duration::from_secs(7),
+            election_voting_delay: Duration::from_secs(3),
+            ..GroupConfig::default()
+        };
+        let sm = GroupStateMachine::new_as_member_with_config(config);
+        assert_eq!(
+            sm.voting_delay_for(ProposalKind::Commit),
+            Duration::from_secs(7)
+        );
+        assert_eq!(
+            sm.voting_delay_for(ProposalKind::StewardElection),
+            Duration::from_secs(3)
+        );
     }
 
     #[test]

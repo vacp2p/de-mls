@@ -39,6 +39,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
 
         let max_reelection_attempts = config.max_reelection_attempts;
+        let threshold_peer_score = config.threshold_peer_score;
+        let liveness_criteria_yes = config.liveness_criteria_yes;
+        let pending_update_max_epochs = config.pending_update_max_epochs;
         let (mut group, state_machine) = if is_creation {
             let group = create_group(group_name, &self.mls_service, config.protocol.clone())?;
             let state_machine = GroupStateMachine::new_as_member_with_config(config);
@@ -53,6 +56,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             (group, state_machine)
         };
         group.set_max_reelection_attempts(max_reelection_attempts);
+        group.set_threshold_peer_score(threshold_peer_score);
+        group.set_liveness_criteria_yes(liveness_criteria_yes);
+        group.set_pending_update_max_epochs(pending_update_max_epochs);
 
         let initial_state = state_machine.current_state();
         if initial_state == GroupState::PendingJoin {
@@ -136,13 +142,16 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         // fires `ConsensusReached` on submit, and `apply_consensus_result`
         // needs `is_owner_of_proposal` to be true by then.
         let proposal_id = crate::core::auto_approved_leave_proposal_id(&self_identity);
-        {
+        let (proposal_expiration, consensus_timeout) = {
             let mut groups = self.groups.write().await;
             let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
             entry.group.store_voting_proposal(proposal_id, request);
-        }
+            (
+                entry.state_machine.proposal_expiration(),
+                entry.state_machine.consensus_timeout(),
+            )
+        };
 
-        let config = &self.default_group_config;
         let submitted = submit_self_leave_proposal::<P, _>(
             group_name,
             &self_identity,
@@ -150,8 +159,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             self.eth_signer.clone(),
             ProposalParams {
                 expected_voters: 1,
-                proposal_expiration: config.proposal_expiration,
-                consensus_timeout: config.consensus_timeout,
+                proposal_expiration,
+                consensus_timeout,
                 liveness_criteria_yes: true,
             },
         )

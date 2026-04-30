@@ -39,7 +39,7 @@ mod messaging;
 mod query;
 mod steward;
 
-struct GroupEntry {
+pub(crate) struct GroupEntry {
     group: Group,
     state_machine: GroupStateMachine,
 }
@@ -97,7 +97,6 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     ) -> Self {
         let scoring_config = ScoringConfig {
             default_score: default_group_config.default_peer_score,
-            removal_threshold: default_group_config.threshold_peer_score,
         };
         Self {
             mls_service: Arc::new(mls_service),
@@ -125,6 +124,17 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         self.scoring_service
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Run `f` under the groups read lock. Returns `None` if the entry
+    /// isn't present.
+    pub(crate) async fn with_entry<R>(
+        &self,
+        group_name: &str,
+        f: impl FnOnce(&GroupEntry) -> R,
+    ) -> Option<R> {
+        let groups = self.groups.read().await;
+        groups.get(group_name).map(f)
     }
 
     /// Wallet address as checksummed hex.

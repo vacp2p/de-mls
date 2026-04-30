@@ -266,15 +266,17 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         group_name: &str,
     ) -> Result<(), UserError> {
         let current_epoch = self.mls_service.current_epoch(group_name)?;
-        let max_age = self.default_group_config.pending_update_max_epochs;
 
-        let members = {
+        let (members, max_age) = {
             let groups = self.groups.read().await;
             let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
             if !self.mls_service.has_group(entry.group.group_name()) {
                 return Ok(());
             }
-            group_members(&entry.group, &self.mls_service)?
+            (
+                group_members(&entry.group, &self.mls_service)?,
+                entry.group.pending_update_max_epochs(),
+            )
         };
 
         let mut groups = self.groups.write().await;
@@ -395,10 +397,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let timing = TimingConfig {
                 epoch_duration_ms: entry.state_machine.epoch_duration().as_millis() as u64,
                 freeze_duration_ms: entry.state_machine.freeze_duration().as_millis() as u64,
-                proposal_expiration_ms: self.default_group_config.proposal_expiration.as_millis()
+                proposal_expiration_ms: entry.state_machine.proposal_expiration().as_millis()
                     as u64,
-                consensus_timeout_ms: self.default_group_config.consensus_timeout.as_millis()
-                    as u64,
+                consensus_timeout_ms: entry.state_machine.consensus_timeout().as_millis() as u64,
                 retry_inactivity_duration_ms: entry
                     .state_machine
                     .retry_inactivity_duration()
@@ -425,6 +426,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 timing: Some(timing),
                 retry_round: list.retry_round(),
                 max_reelection_attempts: entry.group.max_reelection_attempts(),
+                liveness_criteria_yes: entry.group.liveness_criteria_yes(),
+                threshold_peer_score: entry.group.threshold_peer_score(),
+                pending_update_max_epochs: entry.group.pending_update_max_epochs(),
             };
 
             let app_msg: AppMessage = sync.into();
@@ -443,15 +447,14 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         &self,
         group_name: &str,
     ) -> Result<(), UserError> {
-        let (is_steward, epoch, self_id) = {
-            let groups = self.groups.read().await;
-            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-            (
-                entry.group.is_steward(),
-                self.mls_service.current_epoch(group_name)?,
-                self.mls_service.wallet_bytes(),
-            )
-        };
+        let epoch = self.mls_service.current_epoch(group_name)?;
+        let self_id = self.mls_service.wallet_bytes();
+        let (is_steward, threshold) = self
+            .with_entry(group_name, |e| {
+                (e.group.is_steward(), e.group.threshold_peer_score())
+            })
+            .await
+            .ok_or(UserError::GroupNotFound)?;
 
         if !is_steward {
             return Ok(());
@@ -460,7 +463,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let targets: Vec<(Vec<u8>, i64)> = {
             let scoring = self.scoring();
             scoring
-                .members_below_threshold(group_name)
+                .members_below_threshold(group_name, threshold)
                 .into_iter()
                 .filter(|id| *id != self_id) // self-removal handled separately
                 .map(|id| {

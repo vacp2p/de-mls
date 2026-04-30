@@ -72,8 +72,6 @@ pub trait ScoringProvider {
 pub struct ScoringConfig {
     /// Score assigned to newly added members.
     pub default_score: i64,
-    /// Members at or below this score are candidates for removal.
-    pub removal_threshold: i64,
 }
 
 /// Per-(group, member) score persistence. Default impl:
