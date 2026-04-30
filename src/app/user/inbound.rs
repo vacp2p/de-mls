@@ -360,6 +360,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     .group
                     .set_max_reelection_attempts(sync.max_reelection_attempts);
                 entry
+                    .group
+                    .set_threshold_peer_score(sync.threshold_peer_score);
+                entry
                     .state_machine
                     .set_liveness_criteria_yes(sync.liveness_criteria_yes);
                 if let Some(timing) = &sync.timing {

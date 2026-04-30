@@ -13,7 +13,7 @@ use de_mls::protos::de_mls::messages::v1::{
 };
 
 mod common;
-use common::{make_scoring, setup_mls};
+use common::{REMOVAL_THRESHOLD, make_scoring, setup_mls};
 
 // ─────────────────────────── Tests ───────────────────────────
 
@@ -155,7 +155,7 @@ fn test_full_pipeline_penalties_to_removal() {
             event: ScoreEvent::BrokenCommit,
         },
     );
-    assert!(!scoring.is_below_threshold(group_name, &target_id));
+    assert!(!scoring.is_below_threshold(group_name, &target_id, REMOVAL_THRESHOLD));
 
     // 50 - 50 = 0 (EmergencyNoCreator)
     scoring.apply_op(
@@ -165,10 +165,10 @@ fn test_full_pipeline_penalties_to_removal() {
             event: ScoreEvent::EmergencyNoCreator,
         },
     );
-    assert!(scoring.is_below_threshold(group_name, &target_id));
+    assert!(scoring.is_below_threshold(group_name, &target_id, REMOVAL_THRESHOLD));
 
     // Now steward creates SCORE_BELOW_THRESHOLD ECP
-    let below = scoring.members_below_threshold(group_name);
+    let below = scoring.members_below_threshold(group_name, REMOVAL_THRESHOLD);
     assert!(below.contains(&target_id));
 
     let current_score = scoring.score_for(group_name, &target_id).unwrap();
@@ -266,12 +266,12 @@ fn test_steward_skips_self_for_removal() {
         },
     );
 
-    assert!(scoring.is_below_threshold(group_name, &steward_id));
-    assert!(scoring.is_below_threshold(group_name, &other_id));
+    assert!(scoring.is_below_threshold(group_name, &steward_id, REMOVAL_THRESHOLD));
+    assert!(scoring.is_below_threshold(group_name, &other_id, REMOVAL_THRESHOLD));
 
     // Filter as the steward would
     let targets: Vec<Vec<u8>> = scoring
-        .members_below_threshold(group_name)
+        .members_below_threshold(group_name, REMOVAL_THRESHOLD)
         .into_iter()
         .filter(|id| *id != steward_id)
         .collect();

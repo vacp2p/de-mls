@@ -426,6 +426,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 retry_round: list.retry_round(),
                 max_reelection_attempts: entry.group.max_reelection_attempts(),
                 liveness_criteria_yes: entry.state_machine.liveness_criteria_yes(),
+                threshold_peer_score: entry.group.threshold_peer_score(),
             };
 
             let app_msg: AppMessage = sync.into();
@@ -444,13 +445,14 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         &self,
         group_name: &str,
     ) -> Result<(), UserError> {
-        let (is_steward, epoch, self_id) = {
+        let (is_steward, epoch, self_id, threshold) = {
             let groups = self.groups.read().await;
             let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
             (
                 entry.group.is_steward(),
                 self.mls_service.current_epoch(group_name)?,
                 self.mls_service.wallet_bytes(),
+                entry.group.threshold_peer_score(),
             )
         };
 
@@ -461,7 +463,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let targets: Vec<(Vec<u8>, i64)> = {
             let scoring = self.scoring();
             scoring
-                .members_below_threshold(group_name)
+                .members_below_threshold(group_name, threshold)
                 .into_iter()
                 .filter(|id| *id != self_id) // self-removal handled separately
                 .map(|id| {

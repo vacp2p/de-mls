@@ -229,7 +229,6 @@ pub fn make_scoring() -> PeerScoringService<InMemoryPeerScoreStorage, FixedScori
         FixedScoringProvider::with_default_deltas(),
         ScoringConfig {
             default_score: DEFAULT_SCORE,
-            removal_threshold: REMOVAL_THRESHOLD,
         },
     )
 }

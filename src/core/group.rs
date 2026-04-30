@@ -199,12 +199,21 @@ pub struct Group {
     /// While `true`, `create_commit_candidate` bypasses the `is_steward()`
     /// gate so any member can produce the recovery commit.
     recovery_mode: bool,
+    /// Per-group `threshold_peer_score` (RFC §Peer Scoring). A member at
+    /// or below this score is eligible for `SCORE_BELOW_THRESHOLD` ECP
+    /// removal. Joiners pick up the steward's value via `GroupSync` so
+    /// every node raises ECPs at the same trigger.
+    threshold_peer_score: i64,
 }
 
 /// Fallback ceiling on steward-election retries. One retry gives the
 /// responsible proposer a second shot with a different list composition;
 /// beyond that human/policy intervention is expected.
 pub const DEFAULT_MAX_REELECTION_ATTEMPTS: u32 = 1;
+
+/// Fallback `threshold_peer_score` used until the group creator (or a
+/// `GroupSync` for joiners) overrides it.
+pub const DEFAULT_THRESHOLD_PEER_SCORE: i64 = 0;
 
 impl Group {
     fn new_base(group_name: &str, self_identity: Vec<u8>, protocol_config: ProtocolConfig) -> Self {
@@ -227,6 +236,7 @@ impl Group {
             resolved_proposals: ResolvedProposalCache::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
             urgent_commit_target: None,
             recovery_mode: false,
+            threshold_peer_score: DEFAULT_THRESHOLD_PEER_SCORE,
         }
     }
 
@@ -807,6 +817,19 @@ impl Group {
         self.max_reelection_attempts = max;
     }
 
+    /// Per-group `threshold_peer_score` (RFC §Peer Scoring). Below or equal
+    /// triggers a `SCORE_BELOW_THRESHOLD` ECP.
+    pub fn threshold_peer_score(&self) -> i64 {
+        self.threshold_peer_score
+    }
+
+    /// Overwrite the per-group threshold. Called from group-creation
+    /// (from `GroupConfig`) and on joiner sync (from
+    /// `GroupSync.threshold_peer_score`).
+    pub fn set_threshold_peer_score(&mut self, threshold: i64) {
+        self.threshold_peer_score = threshold;
+    }
+
     /// Drop a buffered update by target identity.
     ///
     /// Returns `true` if an entry was removed.
@@ -913,6 +936,19 @@ mod tests {
         let list = group.steward_list().unwrap();
         assert_eq!(list.len(), 1);
         assert!(list.contains(&creator));
+    }
+
+    /// `threshold_peer_score` defaults to `DEFAULT_THRESHOLD_PEER_SCORE`
+    /// and is overwritten by the setter (used by `lifecycle::create_group`
+    /// at creation and by `on_group_sync` for joiners).
+    #[test]
+    fn test_threshold_peer_score_default_and_setter() {
+        let config = ProtocolConfig::new(1, 3).unwrap();
+        let mut group = Group::new_as_joiner("test-group", member(1), config);
+        assert_eq!(group.threshold_peer_score(), DEFAULT_THRESHOLD_PEER_SCORE);
+
+        group.set_threshold_peer_score(-25);
+        assert_eq!(group.threshold_peer_score(), -25);
     }
 
     #[test]

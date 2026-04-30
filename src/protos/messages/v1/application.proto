@@ -118,6 +118,10 @@ message GroupSync {
   // Voting Proposal). Joiners adopt this so auto-votes and tie-breaks
   // match the rest of the group.
   bool liveness_criteria_yes = 10;
+  // Score at or below which a member becomes eligible for SCORE_BELOW_THRESHOLD
+  // ECP removal (RFC §Peer Scoring). Joiners adopt this so removal ECPs
+  // are raised at a consistent trigger across the group.
+  int64 threshold_peer_score = 11;
 }
 
 message PeerScore {

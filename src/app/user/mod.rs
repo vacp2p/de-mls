@@ -97,7 +97,6 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     ) -> Self {
         let scoring_config = ScoringConfig {
             default_score: default_group_config.default_peer_score,
-            removal_threshold: default_group_config.threshold_peer_score,
         };
         Self {
             mls_service: Arc::new(mls_service),
