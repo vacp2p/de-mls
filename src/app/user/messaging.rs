@@ -16,9 +16,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// Broadcast our key-package on the welcome subtopic so the steward
     /// can invite us.
     pub async fn send_kp_message(&self, group_name: &str) -> Result<(), UserError> {
-        let groups = self.groups.read().await;
-        let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
+        let entry = entry_arc.read().await;
         let packet = build_key_package_message(&entry.group, &self.mls_service, &self.app_id)?;
+        drop(entry);
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
     }
@@ -32,10 +36,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         group_name: &str,
         message: Vec<u8>,
     ) -> Result<(), UserError> {
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
         let packet = {
-            let groups = self.groups.read().await;
-            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-
+            let entry = entry_arc.read().await;
             let state = entry.state_machine.current_state();
             if matches!(
                 state,
@@ -67,8 +73,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         group_name: &str,
     ) -> Result<(), UserError> {
         {
-            let groups = self.groups.read().await;
-            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            let entry_arc = self
+                .lookup_entry(group_name)
+                .await
+                .ok_or(UserError::GroupNotFound)?;
+            let entry = entry_arc.read().await;
             let state = entry.state_machine.current_state();
             if state != GroupState::Working {
                 return Err(UserError::GroupBlocked(state.to_string()));

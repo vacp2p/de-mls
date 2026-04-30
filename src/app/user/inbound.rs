@@ -37,14 +37,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 self.on_incoming_proposal(group_name, proposal).await
             }
             ProcessResult::Vote(vote) => {
-                let group = {
-                    let groups = self.groups.read().await;
-                    groups
-                        .get(group_name)
-                        .ok_or(UserError::GroupNotFound)?
-                        .group
-                        .clone()
-                };
+                let group = self
+                    .with_entry(group_name, |e| e.group.clone())
+                    .await
+                    .ok_or(UserError::GroupNotFound)?;
                 forward_incoming_vote::<P>(group_name, &group, vote, &*self.consensus_service)
                     .await?;
                 Ok(())
@@ -83,8 +79,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let decoded = GroupUpdateRequest::decode(proposal.payload.as_slice()).ok();
         if let Some(req) = decoded.as_ref() {
             let current_epoch = self.mls_service.current_epoch(group_name)?;
-            let mut groups = self.groups.write().await;
-            if let Some(entry) = groups.get_mut(group_name) {
+            if let Some(entry_arc) = self.lookup_entry(group_name).await {
+                let mut entry = entry_arc.write().await;
                 match &req.payload {
                     Some(group_update_request::Payload::EmergencyCriteria(_)) => {
                         entry.group.observe_emergency(proposal.proposal_id);
@@ -145,33 +141,28 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             group_name: name.to_string(),
         }
         .into();
+        let entry_arc = match self.lookup_entry(name).await {
+            Some(e) => e,
+            None => return Ok(()),
+        };
         let packet = {
-            let groups = self.groups.read().await;
-            match groups.get(name) {
-                Some(entry) => build_message(&entry.group, &self.mls_service, &msg, &self.app_id)?,
-                None => return Ok(()),
-            }
+            let entry = entry_arc.read().await;
+            build_message(&entry.group, &self.mls_service, &msg, &self.app_id)?
         };
         self.handler.on_outbound(name, packet).await?;
         self.handler.on_joined_group(name).await?;
 
         {
-            let groups = self.groups.read().await;
-            if let Some(entry) = groups.get(name) {
-                self.sync_scoring_members(name, &entry.group);
-            }
+            let entry = entry_arc.read().await;
+            self.sync_scoring_members(name, &entry.group);
         }
 
         let state = {
-            let mut groups = self.groups.write().await;
-            groups.get_mut(name).map(|entry| {
-                entry.state_machine.start_working();
-                entry.state_machine.current_state()
-            })
+            let mut entry = entry_arc.write().await;
+            entry.state_machine.start_working();
+            entry.state_machine.current_state()
         };
-        if let Some(state) = state {
-            self.state_handler.on_state_changed(name, state).await;
-        }
+        self.state_handler.on_state_changed(name, state).await;
         Ok(())
     }
 
@@ -180,38 +171,34 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// buffered-update drain). The commit author's `SuccessfulCommit`
     /// reward is emitted by `finalize_freeze_round`, not here.
     async fn on_group_updated(&self, group_name: &str) -> Result<(), UserError> {
-        {
-            let groups = self.groups.read().await;
-            if let Some(entry) = groups.get(group_name) {
-                self.sync_scoring_members(group_name, &entry.group);
-            }
+        if let Some(entry_arc) = self.lookup_entry(group_name).await {
+            let entry = entry_arc.read().await;
+            self.sync_scoring_members(group_name, &entry.group);
         }
         self.prune_pending_updates_after_commit(group_name).await?;
 
         // Transition to Working BEFORE steward checks (election needs Working
         // state). Reset reelection_round: this commit advanced the epoch,
         // so whatever retry cycle we were in belongs to the previous epoch.
-        let transitioned = {
-            let mut groups = self.groups.write().await;
-            match groups.get_mut(group_name) {
-                Some(entry) => {
-                    entry.group.reset_reelection_round();
-                    let state = entry.state_machine.current_state();
-                    if matches!(
-                        state,
-                        GroupState::Working
-                            | GroupState::Freezing
-                            | GroupState::Selection
-                            | GroupState::Reelection
-                    ) {
-                        entry.state_machine.start_working();
-                        true
-                    } else {
-                        false
-                    }
+        let transitioned = match self.lookup_entry(group_name).await {
+            Some(entry_arc) => {
+                let mut entry = entry_arc.write().await;
+                entry.group.reset_reelection_round();
+                let state = entry.state_machine.current_state();
+                if matches!(
+                    state,
+                    GroupState::Working
+                        | GroupState::Freezing
+                        | GroupState::Selection
+                        | GroupState::Reelection
+                ) {
+                    entry.state_machine.start_working();
+                    true
+                } else {
+                    false
                 }
-                None => false,
             }
+            None => false,
         };
 
         self.steward_list_housekeeping(group_name).await?;
@@ -229,12 +216,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// Fire a steward election while `recovery_mode` is set so the next
     /// list installs and closes the window.
     async fn maybe_close_recovery_window(&self, group_name: &str) {
-        let in_recovery_mode = {
-            let groups = self.groups.read().await;
-            groups
-                .get(group_name)
-                .is_some_and(|entry| entry.group.is_in_recovery_mode())
-        };
+        let in_recovery_mode = self
+            .with_entry(group_name, |entry| entry.group.is_in_recovery_mode())
+            .await
+            .unwrap_or(false);
         if !in_recovery_mode {
             return;
         }
@@ -262,11 +247,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// Peer broadcast a commit candidate. If we were in Working, enter
     /// Freezing and — if we're a steward — build our own candidate too.
     async fn on_commit_candidate_received(&self, group_name: &str) -> Result<(), UserError> {
+        let entry_arc = match self.lookup_entry(group_name).await {
+            Some(e) => e,
+            None => return Ok(()),
+        };
         let (transitioned, outbound) = {
-            let mut groups = self.groups.write().await;
-            let Some(entry) = groups.get_mut(group_name) else {
-                return Ok(());
-            };
+            let mut entry = entry_arc.write().await;
             if entry.state_machine.current_state() != GroupState::Working {
                 return Ok(());
             }
@@ -310,10 +296,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// existed), then applies list + protocol flags + timing + peer scores.
     async fn on_group_sync(&self, group_name: &str, sync: GroupSync) -> Result<(), UserError> {
         let members = {
-            let groups = self.groups.read().await;
-            let Some(entry) = groups.get(group_name) else {
-                return Ok(());
+            let entry_arc = match self.lookup_entry(group_name).await {
+                Some(e) => e,
+                None => return Ok(()),
             };
+            let entry = entry_arc.read().await;
             if entry.group.steward_list().is_some() {
                 return Ok(());
             }
@@ -361,10 +348,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let mut protocol_config = ProtocolConfig::new(sync.sn_min as usize, sync.sn_max as usize)?;
         protocol_config.allow_subset_candidates = sync.allow_subset_candidates;
 
-        let mut groups = self.groups.write().await;
-        let Some(entry) = groups.get_mut(group_name) else {
-            return Ok(());
+        let entry_arc = match self.lookup_entry(group_name).await {
+            Some(e) => e,
+            None => return Ok(()),
         };
+        let mut entry = entry_arc.write().await;
         let sn = sync.steward_members.len();
         entry.group.generate_and_set_steward_list(
             sync.election_epoch,
@@ -411,21 +399,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             return Ok(());
         }
 
-        // Verify group exists
-        {
-            let groups = self.groups.read().await;
-            if !groups.contains_key(&group_name) {
-                return Err(UserError::GroupNotFound);
-            }
-        }
-
-        // Process the packet
+        let entry_arc = self
+            .lookup_entry(&group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
         let result = {
-            let mut groups = self.groups.write().await;
-            let entry = groups
-                .get_mut(&group_name)
-                .ok_or(UserError::GroupNotFound)?;
-
+            let mut entry = entry_arc.write().await;
             process_inbound(
                 &mut entry.group,
                 &packet.payload,

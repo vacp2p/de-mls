@@ -53,8 +53,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         group_name: &str,
         kind: ProposalKind,
     ) -> Result<u32, UserError> {
-        let groups = self.groups.read().await;
-        let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
+        let entry = entry_arc.read().await;
         let state = entry.state_machine.current_state();
 
         match state {
@@ -200,8 +203,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         .await?;
 
         let group = {
-            let mut groups = self.groups.write().await;
-            let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
+            let entry_arc = self
+                .lookup_entry(group_name)
+                .await
+                .ok_or(UserError::GroupNotFound)?;
+            let mut entry = entry_arc.write().await;
             entry
                 .group
                 .store_voting_proposal(proposal_id, request.clone());
@@ -310,12 +316,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         {
             Ok(_) => {}
             Err(ConsensusError::SessionNotFound) | Err(ConsensusError::SessionNotActive) => {
-                let resolved_locally = {
-                    let groups = self.groups.read().await;
-                    groups
-                        .get(group_name)
-                        .is_some_and(|entry| entry.group.is_consensus_outcome_applied(proposal_id))
-                };
+                let resolved_locally = self
+                    .with_entry(group_name, |entry| {
+                        entry.group.is_consensus_outcome_applied(proposal_id)
+                    })
+                    .await
+                    .unwrap_or(false);
                 if resolved_locally {
                     tracing::debug!(
                         group = group_name,
@@ -351,9 +357,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         // because a PendingJoin member has no MLS group yet —
         // `current_epoch()` would fail with `GroupNotFound` and surface as
         // a spurious error in the gateway's inbound forwarder.
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
+
         let pending_join = {
-            let groups = self.groups.read().await;
-            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            let entry = entry_arc.read().await;
             entry.state_machine.current_state() == GroupState::PendingJoin
         };
         if pending_join {
@@ -363,8 +373,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let current_epoch = self.mls_service.current_epoch(group_name)?;
 
         let members_for_rotation = {
-            let groups = self.groups.read().await;
-            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            let entry = entry_arc.read().await;
             if self.mls_service.has_group(entry.group.group_name()) {
                 group_members(&entry.group, &self.mls_service)?
             } else {
@@ -373,8 +382,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         };
 
         let (inserted, is_epoch_steward, state, buffer_total, should_propose) = {
-            let mut groups = self.groups.write().await;
-            let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
+            let mut entry = entry_arc.write().await;
 
             // Defensive — core only emits membership changes here.
             if target_identity_of(&request).is_none() {
@@ -429,15 +437,19 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         proposal_id: u32,
         vote: bool,
     ) -> Result<(), UserError> {
-        let groups = self.groups.read().await;
-        let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-        let state = entry.state_machine.current_state();
-        if state == GroupState::Freezing || state == GroupState::Selection {
-            return Err(UserError::GroupBlocked(state.to_string()));
-        }
-        let group = entry.group.clone();
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
+        let group = {
+            let entry = entry_arc.read().await;
+            let state = entry.state_machine.current_state();
+            if state == GroupState::Freezing || state == GroupState::Selection {
+                return Err(UserError::GroupBlocked(state.to_string()));
+            }
+            entry.group.clone()
+        };
         let app_id = self.app_id.clone();
-        drop(groups);
 
         // Manual vote takes precedence over the pending auto-vote timer.
         self.cancel_auto_vote(group_name, proposal_id);
@@ -533,11 +545,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         proposal_id: u32,
         vote: bool,
     ) -> Result<(), UserError> {
-        let group = {
-            let groups = self.groups.read().await;
-            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-            entry.group.clone()
-        };
+        let group = self
+            .with_entry(group_name, |e| e.group.clone())
+            .await
+            .ok_or(UserError::GroupNotFound)?;
         let app_message = cast_vote::<P, _>(
             &group,
             proposal_id,

@@ -17,15 +17,17 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// `false` once joined or once the join attempt has been torn down
     /// after timing out.
     pub async fn check_pending_join(&self, group_name: &str) -> Result<bool, UserError> {
-        let (state, expired) = {
-            let groups = self.groups.read().await;
-            match groups.get(group_name) {
-                Some(entry) => (
+        let (state, expired) = match self
+            .with_entry(group_name, |entry| {
+                (
                     entry.state_machine.current_state(),
                     entry.state_machine.is_pending_join_expired(),
-                ),
-                None => return Ok(false),
-            }
+                )
+            })
+            .await
+        {
+            Some(v) => v,
+            None => return Ok(false),
         };
 
         if state != GroupState::PendingJoin {
@@ -49,9 +51,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         &self,
         group_name: &str,
     ) -> Result<FreezeTimeoutStatus, UserError> {
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
+
         let has_proposals = {
-            let mut groups = self.groups.write().await;
-            let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
+            let mut entry = entry_arc.write().await;
 
             let state = entry.state_machine.current_state();
             if state != GroupState::Freezing {
@@ -78,8 +84,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             .await;
 
         let finalize_result = {
-            let mut groups = self.groups.write().await;
-            let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
+            let mut entry = entry_arc.write().await;
             let allow_subset = entry.group.allow_subset_candidates();
             match finalize_freeze_round(
                 &mut entry.group,
@@ -137,8 +142,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 // node that failed to commit observes its own state directly
                 // and doesn't need to record a ScoreOp against itself.
                 let (next_state, accuse_target) = {
-                    let mut groups = self.groups.write().await;
-                    let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
+                    let mut entry = entry_arc.write().await;
 
                     if has_proposals {
                         // Approved batch (and in-flight votes) survive so
@@ -202,8 +206,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// proposals for more than `epoch_duration`. Any member polls — not
     /// just the steward — so a fault gets picked up group-wide.
     pub async fn check_member_freeze(&self, group_name: &str) -> Result<bool, UserError> {
-        let mut groups = self.groups.write().await;
-        let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
+        let mut entry = entry_arc.write().await;
 
         let state = entry.state_machine.current_state();
         if state == GroupState::PendingJoin || state == GroupState::Leaving {
@@ -259,7 +266,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             );
 
             // Drop lock before any async calls.
-            drop(groups);
+            drop(entry);
             self.state_handler
                 .on_state_changed(group_name, new_state)
                 .await;

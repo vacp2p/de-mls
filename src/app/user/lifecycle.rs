@@ -1,5 +1,8 @@
 //! Create and leave operations for a group.
 
+use std::sync::Arc;
+
+use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::{
@@ -70,10 +73,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
         groups.insert(
             group_name.to_string(),
-            GroupEntry {
+            Arc::new(RwLock::new(GroupEntry {
                 group,
                 state_machine,
-            },
+            })),
         );
         drop(groups);
 
@@ -99,13 +102,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     pub async fn leave_group(&mut self, group_name: &str) -> Result<(), UserError> {
         info!(group = group_name, "leaving group");
 
-        let is_pending_join = {
-            let groups = self.groups.read().await;
-            groups
-                .get(group_name)
-                .map(|entry| entry.state_machine.current_state() == GroupState::PendingJoin)
-                .ok_or(UserError::GroupNotFound)?
-        };
+        let is_pending_join = self
+            .with_entry(group_name, |entry| {
+                entry.state_machine.current_state() == GroupState::PendingJoin
+            })
+            .await
+            .ok_or(UserError::GroupNotFound)?;
         if is_pending_join {
             self.groups.write().await.remove(group_name);
             self.cleanup_consensus_scope(group_name).await?;
@@ -117,16 +119,18 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
         // Idempotent: a second click after a successful submit finds the
         // approved entry and short-circuits.
-        {
-            let groups = self.groups.read().await;
-            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-            if entry.group.is_pending_self_leave(&self_identity) {
-                info!(
-                    group = group_name,
-                    "self-leave already in flight, ignoring duplicate"
-                );
-                return Ok(());
-            }
+        let already_pending = self
+            .with_entry(group_name, |entry| {
+                entry.group.is_pending_self_leave(&self_identity)
+            })
+            .await
+            .ok_or(UserError::GroupNotFound)?;
+        if already_pending {
+            info!(
+                group = group_name,
+                "self-leave already in flight, ignoring duplicate"
+            );
+            return Ok(());
         }
 
         let request = {
@@ -143,8 +147,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         // needs `is_owner_of_proposal` to be true by then.
         let proposal_id = crate::core::auto_approved_leave_proposal_id(&self_identity);
         let (proposal_expiration, consensus_timeout) = {
-            let mut groups = self.groups.write().await;
-            let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
+            let entry_arc = self
+                .lookup_entry(group_name)
+                .await
+                .ok_or(UserError::GroupNotFound)?;
+            let mut entry = entry_arc.write().await;
             entry.group.store_voting_proposal(proposal_id, request);
             (
                 entry.state_machine.proposal_expiration(),
@@ -173,8 +180,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         };
 
         let packet = {
-            let groups = self.groups.read().await;
-            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            let entry_arc = self
+                .lookup_entry(group_name)
+                .await
+                .ok_or(UserError::GroupNotFound)?;
+            let entry = entry_arc.read().await;
             build_message(&entry.group, &self.mls_service, &app_msg, &self.app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
