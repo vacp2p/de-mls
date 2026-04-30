@@ -130,7 +130,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
     /// We just joined via welcome. Broadcast a system "joined" chat message,
     /// sync scoring, and transition to Working. Pending-update pruning is
-    /// defensive — PendingJoin no longer buffers, but paths may change.
+    /// defensive — PendingJoin doesn't buffer, but paths may change.
     async fn on_joined_group(&self, name: &str) -> Result<(), UserError> {
         self.prune_pending_updates_after_commit(name).await?;
 

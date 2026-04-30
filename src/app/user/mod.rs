@@ -52,8 +52,13 @@ type AutoVoteTimers = Arc<Mutex<HashMap<(String, u32), JoinHandle<()>>>>;
 pub struct User<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler> {
     mls_service: Arc<MlsService<P::Storage>>,
     /// Outer lock: map CRUD (insert / remove / iterate names).
-    /// Inner per-entry lock: per-group reads and mutations. A long write
-    /// on group A no longer blocks reads on group B.
+    /// Inner per-entry lock: per-group reads and mutations. A write on
+    /// group A doesn't block reads on group B.
+    ///
+    /// Lock-order convention with [`Self::scoring_service`]: never hold
+    /// the scoring `Mutex` guard across `lookup_entry` or any acquisition
+    /// of the inner entry `RwLock`. Acquire `scoring()` in a single
+    /// statement and let the guard drop at the semicolon.
     groups: Arc<RwLock<HashMap<String, Arc<RwLock<GroupEntry>>>>>,
     consensus_service: Arc<ProviderConsensus<P>>,
     eth_signer: PrivateKeySigner,
