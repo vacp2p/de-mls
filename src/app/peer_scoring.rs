@@ -99,7 +99,9 @@ impl ScoringProvider for FixedScoringProvider {
 // ── Service ─────────────────────────────────────────────────────────
 
 /// Per-member score tracker, parameterised over a [`PeerScoreStorage`] and
-/// a [`ScoringProvider`]. Detects members at/below `removal_threshold`.
+/// a [`ScoringProvider`]. The removal threshold lives per-group on
+/// `Group::threshold_peer_score` and is supplied by callers to
+/// [`Self::is_below_threshold`] / [`Self::members_below_threshold`].
 pub struct PeerScoringService<S: PeerScoreStorage, P: ScoringProvider> {
     storage: S,
     provider: P,
@@ -185,7 +187,7 @@ mod tests {
     const GROUP: &str = "test-group";
     /// Test threshold value, used wherever the old `ScoringConfig.removal_threshold`
     /// was. Real callers pass `Group::threshold_peer_score()`.
-    const THRESHOLD: i64 = 0;
+    const REMOVAL_THRESHOLD: i64 = 0;
 
     fn default_config() -> ScoringConfig {
         ScoringConfig { default_score: 100 }
@@ -345,7 +347,7 @@ mod tests {
             },
         );
 
-        let below = svc.members_below_threshold(GROUP, THRESHOLD);
+        let below = svc.members_below_threshold(GROUP, REMOVAL_THRESHOLD);
         assert_eq!(below.len(), 2);
         assert!(below.contains(&b"alice".to_vec()));
         assert!(below.contains(&b"charlie".to_vec()));
@@ -357,7 +359,7 @@ mod tests {
         let mut svc = make_service();
         svc.add_member(GROUP, b"alice");
 
-        assert!(!svc.is_below_threshold(GROUP, b"alice", THRESHOLD));
+        assert!(!svc.is_below_threshold(GROUP, b"alice", REMOVAL_THRESHOLD));
 
         svc.apply_op(
             GROUP,
@@ -374,14 +376,14 @@ mod tests {
             },
         );
 
-        assert!(svc.is_below_threshold(GROUP, b"alice", THRESHOLD));
+        assert!(svc.is_below_threshold(GROUP, b"alice", REMOVAL_THRESHOLD));
     }
 
     #[test]
     fn test_is_below_threshold_unknown_member() {
         let svc = make_service();
 
-        assert!(!svc.is_below_threshold(GROUP, b"unknown", THRESHOLD));
+        assert!(!svc.is_below_threshold(GROUP, b"unknown", REMOVAL_THRESHOLD));
     }
 
     #[test]
@@ -466,8 +468,8 @@ mod tests {
         );
         assert_eq!(svc1.score_for(GROUP, b"bob"), svc2.score_for(GROUP, b"bob"));
         assert_eq!(
-            svc1.members_below_threshold(GROUP, THRESHOLD).len(),
-            svc2.members_below_threshold(GROUP, THRESHOLD).len()
+            svc1.members_below_threshold(GROUP, REMOVAL_THRESHOLD).len(),
+            svc2.members_below_threshold(GROUP, REMOVAL_THRESHOLD).len()
         );
     }
 
@@ -549,8 +551,8 @@ mod tests {
             },
         );
 
-        let below_a = svc.members_below_threshold(group_a, THRESHOLD);
-        let below_b = svc.members_below_threshold(group_b, THRESHOLD);
+        let below_a = svc.members_below_threshold(group_a, REMOVAL_THRESHOLD);
+        let below_b = svc.members_below_threshold(group_b, REMOVAL_THRESHOLD);
 
         assert_eq!(below_a, vec![b"alice".to_vec()]);
         assert_eq!(below_b, vec![b"bob".to_vec()]);

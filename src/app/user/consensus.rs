@@ -175,14 +175,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         kind: ProposalKind,
         creator_vote: Option<bool>,
     ) -> Result<u32, UserError> {
-        let (proposal_expiration, consensus_timeout, liveness_criteria_yes, voting_delay) = {
+        let (proposal_expiration, consensus_timeout, liveness_criteria_yes) = {
             let groups = self.groups.read().await;
             let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
             (
                 entry.state_machine.proposal_expiration(),
                 entry.state_machine.consensus_timeout(),
                 entry.state_machine.liveness_criteria_yes(),
-                entry.state_machine.voting_delay_for(kind),
             )
         };
 
@@ -264,7 +263,17 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 self.handler
                     .on_app_message(group_name, vote_notification)
                     .await?;
-                self.spawn_auto_vote(group_name.to_string(), proposal_id, voting_delay);
+                let voting_delay = {
+                    let groups = self.groups.read().await;
+                    let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+                    entry.state_machine.voting_delay_for(kind)
+                };
+                self.spawn_auto_vote(
+                    group_name.to_string(),
+                    proposal_id,
+                    voting_delay,
+                    liveness_criteria_yes,
+                );
             }
         }
 
@@ -448,14 +457,23 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     }
 
     /// Spawn an auto-vote timer for `(group_name, proposal_id)`. After
-    /// `delay`, the timer casts the local member's vote using
-    /// `liveness_criteria_yes` and broadcasts it. Idempotent — an existing
-    /// handle for the same key is aborted and replaced.
+    /// `delay`, the timer casts `vote` for the local member and broadcasts
+    /// it. Idempotent — an existing handle for the same key is aborted
+    /// and replaced.
     ///
+    /// `vote` is captured at the caller's read of per-group
+    /// `liveness_criteria_yes` so the value is frozen at session start;
+    /// a `GroupSync` arriving during the sleep can't flip the cast.
     /// If the member has already voted or the session has resolved by the
     /// time the timer fires, `cast_vote` returns a benign error
     /// (`UserAlreadyVoted` / `SessionNotActive`); we log at debug and exit.
-    pub(crate) fn spawn_auto_vote(&self, group_name: String, proposal_id: u32, delay: Duration) {
+    pub(crate) fn spawn_auto_vote(
+        &self,
+        group_name: String,
+        proposal_id: u32,
+        delay: Duration,
+        vote: bool,
+    ) {
         self.cancel_auto_vote(&group_name, proposal_id);
 
         let user = self.clone();
@@ -463,13 +481,6 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
         let handle = tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            let vote = {
-                let groups = user.groups.read().await;
-                let Some(entry) = groups.get(&group_name) else {
-                    return;
-                };
-                entry.state_machine.liveness_criteria_yes()
-            };
             if let Err(e) = user.cast_auto_vote(&group_name, proposal_id, vote).await {
                 tracing::debug!(
                     group = %group_name,
