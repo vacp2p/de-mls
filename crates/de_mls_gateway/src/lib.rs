@@ -26,7 +26,10 @@ pub(crate) mod forwarder;
 mod group;
 pub mod handler;
 
-pub use bootstrap::*;
+pub use bootstrap::{
+    AppState, Bootstrap, BootstrapConfig, BootstrapError, CoreCtx, bootstrap_core,
+    bootstrap_core_from_env,
+};
 
 use handler::GatewayEventHandler;
 

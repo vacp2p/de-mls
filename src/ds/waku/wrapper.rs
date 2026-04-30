@@ -148,7 +148,8 @@ impl WakuNodeCtx {
 
     /// Connect to a peer by multiaddr.
     pub fn connect(&self, peer_multi_addr: &str, timeout_ms: u32) -> Result<(), WakuFfiError> {
-        let addr_cstr = CString::new(peer_multi_addr).map_err(invalid_cstring("peer_multi_addr"))?;
+        let addr_cstr =
+            CString::new(peer_multi_addr).map_err(invalid_cstring("peer_multi_addr"))?;
 
         let mut err: Option<String> = None;
         let mut closure = |ret: i32, data: &str| {

@@ -12,7 +12,7 @@ use crate::{
     },
     core::{DeMlsProvider, GroupEventHandler, build_message, create_group, prepare_to_join},
     mls_crypto::parse_wallet_to_bytes,
-    protos::de_mls::messages::v1::GroupUpdateRequest,
+    protos::de_mls::messages::v1::{GroupUpdateRequest, RemoveMember, group_update_request},
 };
 
 impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
@@ -133,13 +133,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             return Ok(());
         }
 
-        let request = {
-            use crate::protos::de_mls::messages::v1::{RemoveMember, group_update_request};
-            GroupUpdateRequest {
-                payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
-                    identity: self_identity.clone(),
-                })),
-            }
+        let request = GroupUpdateRequest {
+            payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
+                identity: self_identity.clone(),
+            })),
         };
 
         // Register ownership BEFORE the session opens — the bundled YES

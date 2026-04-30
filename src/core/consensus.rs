@@ -419,7 +419,6 @@ mod tests {
     }
 
     fn score_below_threshold_request(target: Vec<u8>, creator: Vec<u8>) -> GroupUpdateRequest {
-        use crate::protos::de_mls::messages::v1::ViolationEvidence;
         ViolationEvidence::score_below_threshold(target, 0, -10)
             .with_creator(creator)
             .into_update_request()
@@ -462,7 +461,6 @@ mod tests {
     }
 
     fn deadlock_request(creator: Vec<u8>) -> GroupUpdateRequest {
-        use crate::protos::de_mls::messages::v1::ViolationEvidence;
         ViolationEvidence::deadlock(0)
             .with_creator(creator)
             .into_update_request()
