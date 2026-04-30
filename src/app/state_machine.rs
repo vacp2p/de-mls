@@ -77,13 +77,12 @@ pub struct GroupStateMachine {
     /// Short inactivity window used during recovery; caller of
     /// `check_steward_inactivity` picks which duration to apply.
     retry_inactivity_duration: Duration,
-    /// Voting-proposal lifetime (RFC §Creating Voting Proposal). Synced
-    /// via `GroupSync`.
+    /// Voting-proposal lifetime (RFC §Creating Voting Proposal).
     proposal_expiration: Duration,
-    /// Library deadline per consensus session. Synced via `GroupSync` —
-    /// mismatched values across nodes split outcomes.
+    /// Library deadline per consensus session. Mismatched values across
+    /// nodes split outcomes.
     consensus_timeout: Duration,
-    /// Per-member window before auto-vote fires. Local-only; not synced.
+    /// Per-member window before auto-vote fires. Local-only.
     voting_delay: Duration,
     /// Auto-vote delay for steward-election proposals. Local-only.
     election_voting_delay: Duration,

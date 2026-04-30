@@ -107,24 +107,20 @@ message GroupSync {
   bool allow_subset_candidates = 5;
   repeated PeerScore peer_scores = 6;
   TimingConfig timing = 7;
-  // Retry round the accepted steward list was generated with. Joiners
-  // need this to reproduce the deterministic sort when validating.
+  // Seed for the deterministic steward-list sort; joiners reproduce the
+  // ordering when validating.
   uint32 retry_round = 8;
-  // Group's configured ceiling on election retries. Joiners apply this
-  // value so the stuck-election error path triggers consistently across
-  // the group.
+  // Ceiling on steward-election retries before the stuck-election error
+  // surfaces.
   uint32 max_reelection_attempts = 9;
-  // Whether silent voters count as YES at consensus_timeout (RFC §Creating
-  // Voting Proposal). Joiners adopt this so auto-votes and tie-breaks
-  // match the rest of the group.
+  // Auto-vote default and consensus tie-break rule
+  // (RFC §Creating Voting Proposal).
   bool liveness_criteria_yes = 10;
-  // Score at or below which a member becomes eligible for SCORE_BELOW_THRESHOLD
-  // ECP removal (RFC §Peer Scoring). Joiners adopt this so removal ECPs
-  // are raised at a consistent trigger across the group.
+  // At or below this score, a member is eligible for SCORE_BELOW_THRESHOLD
+  // ECP removal (RFC §Peer Scoring).
   int64 threshold_peer_score = 11;
   // Max age (in epochs) of a buffered membership update before the epoch
-  // steward drops it. Joiners adopt this so every node expires entries at
-  // the same point.
+  // steward drops it.
   uint32 pending_update_max_epochs = 12;
 }
 

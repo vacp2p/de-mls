@@ -200,13 +200,13 @@ pub struct Group {
     /// gate so any member can produce the recovery commit.
     recovery_mode: bool,
     /// At or below this score, a member is eligible for
-    /// `SCORE_BELOW_THRESHOLD` ECP removal (RFC §Peer Scoring). Synced.
+    /// `SCORE_BELOW_THRESHOLD` ECP removal (RFC §Peer Scoring).
     threshold_peer_score: i64,
     /// Auto-vote default and consensus tie-break rule (RFC §Creating
-    /// Voting Proposal). Synced.
+    /// Voting Proposal).
     liveness_criteria_yes: bool,
     /// Max age (in epochs) of a buffered membership update before the
-    /// epoch steward drops it. Synced.
+    /// epoch steward drops it.
     pending_update_max_epochs: u32,
 }
 
