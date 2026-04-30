@@ -319,85 +319,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         };
 
         let current_epoch = self.mls_service.current_epoch(group_name)?;
-        if sync.election_epoch > current_epoch {
-            info!(
-                group = group_name,
-                election_epoch = sync.election_epoch,
-                current_epoch,
-                "group sync rejected: election_epoch > current_epoch"
-            );
-            return Ok(());
-        }
-
-        // Ghost stewards (removed since the list was elected) are skipped at
-        // query time by the `live_*` rotation helpers, so we tolerate them
-        // here rather than rejecting the whole sync. A sync with zero live
-        // stewards is useless and still rejected. Full list pruning on
-        // member removal is tracked in the roadmap.
-        let any_present = sync.steward_members.iter().any(|s| members.contains(s));
-        let ordering_valid = StewardList::validate(
-            &sync.steward_members,
-            sync.election_epoch,
-            group_name.as_bytes(),
-            &sync.steward_members,
-            &ProtocolConfig::new(sync.sn_min as usize, sync.sn_max as usize)?,
-            sync.retry_round,
-        )?;
-        if !(any_present && ordering_valid) {
-            info!(
-                group = group_name,
-                any_present,
-                ordering = ordering_valid,
-                "group sync rejected: invalid"
-            );
+        if !validate_group_sync(group_name, &sync, current_epoch, &members)? {
             return Ok(());
         }
 
         let sn = sync.steward_members.len();
-        {
-            let mut groups = self.groups.write().await;
-            if let Some(entry) = groups.get_mut(group_name) {
-                entry.group.generate_and_set_steward_list(
-                    sync.election_epoch,
-                    &sync.steward_members,
-                    sn,
-                    sync.retry_round,
-                )?;
-                entry
-                    .group
-                    .set_allow_subset_candidates(sync.allow_subset_candidates);
-                entry
-                    .group
-                    .set_max_reelection_attempts(sync.max_reelection_attempts);
-                entry
-                    .group
-                    .set_threshold_peer_score(sync.threshold_peer_score);
-                entry
-                    .group
-                    .set_liveness_criteria_yes(sync.liveness_criteria_yes);
-                entry
-                    .group
-                    .set_pending_update_max_epochs(sync.pending_update_max_epochs);
-                if let Some(timing) = &sync.timing {
-                    let sm = &mut entry.state_machine;
-                    sm.set_epoch_duration(std::time::Duration::from_millis(
-                        timing.epoch_duration_ms,
-                    ));
-                    sm.set_freeze_duration(std::time::Duration::from_millis(
-                        timing.freeze_duration_ms,
-                    ));
-                    sm.set_retry_inactivity_duration(std::time::Duration::from_millis(
-                        timing.retry_inactivity_duration_ms,
-                    ));
-                    sm.set_proposal_expiration(std::time::Duration::from_millis(
-                        timing.proposal_expiration_ms,
-                    ));
-                    sm.set_consensus_timeout(std::time::Duration::from_millis(
-                        timing.consensus_timeout_ms,
-                    ));
-                }
-            }
-        }
+        self.apply_group_sync_to_entry(group_name, &sync).await?;
 
         if !sync.peer_scores.is_empty() {
             let mut scoring = self.scoring();
@@ -414,6 +341,54 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             timing = sync.timing.is_some(),
             "group sync applied"
         );
+        Ok(())
+    }
+
+    async fn apply_group_sync_to_entry(
+        &self,
+        group_name: &str,
+        sync: &GroupSync,
+    ) -> Result<(), UserError> {
+        let mut groups = self.groups.write().await;
+        let Some(entry) = groups.get_mut(group_name) else {
+            return Ok(());
+        };
+        let sn = sync.steward_members.len();
+        entry.group.generate_and_set_steward_list(
+            sync.election_epoch,
+            &sync.steward_members,
+            sn,
+            sync.retry_round,
+        )?;
+        entry
+            .group
+            .set_allow_subset_candidates(sync.allow_subset_candidates);
+        entry
+            .group
+            .set_max_reelection_attempts(sync.max_reelection_attempts);
+        entry
+            .group
+            .set_threshold_peer_score(sync.threshold_peer_score);
+        entry
+            .group
+            .set_liveness_criteria_yes(sync.liveness_criteria_yes);
+        entry
+            .group
+            .set_pending_update_max_epochs(sync.pending_update_max_epochs);
+        if let Some(timing) = &sync.timing {
+            let sm = &mut entry.state_machine;
+            sm.set_epoch_duration(std::time::Duration::from_millis(timing.epoch_duration_ms));
+            sm.set_freeze_duration(std::time::Duration::from_millis(timing.freeze_duration_ms));
+            sm.set_retry_inactivity_duration(std::time::Duration::from_millis(
+                timing.retry_inactivity_duration_ms,
+            ));
+            sm.set_proposal_expiration(std::time::Duration::from_millis(
+                timing.proposal_expiration_ms,
+            ));
+            sm.set_consensus_timeout(std::time::Duration::from_millis(
+                timing.consensus_timeout_ms,
+            ));
+        }
         Ok(())
     }
 
@@ -451,4 +426,47 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
         self.dispatch_inbound_result(&group_name, result).await
     }
+}
+
+/// Returns `true` when the sync is acceptable for application. Logs the
+/// rejection reason on `false`.
+///
+/// `members` is the joiner's current MLS member set; ghost stewards
+/// (removed since the list was elected) are tolerated as long as at
+/// least one listed steward is still present.
+fn validate_group_sync(
+    group_name: &str,
+    sync: &GroupSync,
+    current_epoch: u64,
+    members: &[Vec<u8>],
+) -> Result<bool, UserError> {
+    if sync.election_epoch > current_epoch {
+        info!(
+            group = group_name,
+            election_epoch = sync.election_epoch,
+            current_epoch,
+            "group sync rejected: election_epoch > current_epoch"
+        );
+        return Ok(false);
+    }
+
+    let any_present = sync.steward_members.iter().any(|s| members.contains(s));
+    let ordering_valid = StewardList::validate(
+        &sync.steward_members,
+        sync.election_epoch,
+        group_name.as_bytes(),
+        &sync.steward_members,
+        &ProtocolConfig::new(sync.sn_min as usize, sync.sn_max as usize)?,
+        sync.retry_round,
+    )?;
+    if !(any_present && ordering_valid) {
+        info!(
+            group = group_name,
+            any_present,
+            ordering = ordering_valid,
+            "group sync rejected: invalid"
+        );
+        return Ok(false);
+    }
+    Ok(true)
 }
