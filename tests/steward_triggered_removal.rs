@@ -280,6 +280,48 @@ fn test_steward_skips_self_for_removal() {
     assert_eq!(targets[0], other_id);
 }
 
+/// `members_below_threshold` selects members against the per-group
+/// threshold the caller passes in (held on `Group::threshold_peer_score`),
+/// not against any global default. Drives the steward removal trigger
+/// in `User::check_and_initiate_score_removals` after a `GroupSync` may
+/// have updated the group's threshold.
+#[test]
+fn test_members_below_threshold_uses_per_group_value() {
+    let group_name = "per-group-threshold";
+    let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+    let alice_mls = setup_mls(alice_hex);
+    let group = create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
+    assert_eq!(
+        group.threshold_peer_score(),
+        de_mls::core::DEFAULT_THRESHOLD_PEER_SCORE
+    );
+
+    let alice = vec![0xAA];
+    let bob = vec![0xBB];
+    let carol = vec![0xCC];
+
+    let mut scoring = make_scoring();
+    scoring.add_member(group_name, &alice);
+    scoring.add_member(group_name, &bob);
+    scoring.add_member(group_name, &carol);
+    scoring.set_score(group_name, &alice, -10);
+    scoring.set_score(group_name, &bob, -30);
+    scoring.set_score(group_name, &carol, -60);
+
+    // Strict threshold (-50): only Carol qualifies for removal.
+    let strict = scoring.members_below_threshold(group_name, -50);
+    assert!(strict.contains(&carol));
+    assert!(!strict.contains(&bob));
+    assert!(!strict.contains(&alice));
+
+    // Loose threshold (-25, e.g. after a GroupSync reduced strictness):
+    // both Bob and Carol qualify; Alice still safe.
+    let loose = scoring.members_below_threshold(group_name, -25);
+    assert!(loose.contains(&bob));
+    assert!(loose.contains(&carol));
+    assert!(!loose.contains(&alice));
+}
+
 /// ViolationEvidence::score_below_threshold constructor correctness.
 #[test]
 fn test_violation_evidence_score_below_threshold_constructor() {
