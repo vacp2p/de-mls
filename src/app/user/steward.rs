@@ -6,7 +6,7 @@ use tracing::{error, info};
 use crate::{
     app::{StateChangeHandler, User, UserError},
     core::{
-        DeMlsProvider, Group, GroupEventHandler, StewardList, build_message, group_members,
+        DeMlsProvider, GroupEventHandler, StewardList, build_message, group_members,
         target_identity_of,
     },
     mls_crypto::ShortId,
@@ -20,13 +20,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     User<P, H, SCH>
 {
     /// Add any MLS members not yet tracked in scoring, and drop scored
-    /// entries for identities no longer in MLS.
-    pub fn sync_scoring_members(&self, group_name: &str, group: &Group) {
-        let mls_members = match group_members(group, &self.mls_service) {
-            Ok(m) => m,
-            Err(_) => return,
-        };
-
+    /// entries for identities no longer in MLS. Takes `mls_members`
+    /// pre-fetched so the caller can release any group-entry guard
+    /// before the scoring mutex is acquired.
+    pub fn sync_scoring_members(&self, group_name: &str, mls_members: &[Vec<u8>]) {
         let mut scoring = self.scoring();
         let scored = scoring.all_members_with_scores(group_name);
         let scored_ids: std::collections::HashSet<Vec<u8>> =
@@ -48,9 +45,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// RFC rule: when `member_count < sn_min`, every member is a steward.
     /// Re-derive the list to cover that case after a membership-changing commit.
     async fn try_auto_fill_steward_list(&self, group_name: &str) -> Result<(), UserError> {
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
         let (needs_fill, members) = {
-            let groups = self.groups.read().await;
-            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            let entry = entry_arc.read().await;
             let members = group_members(&entry.group, &self.mls_service)?;
             let needs = members.len() < entry.group.protocol_config().sn_min;
             (needs, members)
@@ -62,8 +62,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
         let epoch = self.mls_service.current_epoch(group_name)?;
         {
-            let mut groups = self.groups.write().await;
-            let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
+            let mut entry = entry_arc.write().await;
             let sn = entry
                 .group
                 .protocol_config()
@@ -90,9 +89,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         recovery: bool,
         extra_exclude: Option<&[u8]>,
     ) -> Result<(), UserError> {
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
         let (members, election_epoch, config, retry_round) = {
-            let groups = self.groups.read().await;
-            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            let entry = entry_arc.read().await;
             let epoch = self.mls_service.current_epoch(group_name)?;
             if !recovery && !entry.group.is_steward_list_exhausted(epoch) {
                 return Ok(());
@@ -184,9 +186,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         &self,
         group_name: &str,
     ) -> Result<(), UserError> {
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
         let (is_authorized, self_id, epoch) = {
-            let groups = self.groups.read().await;
-            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            let entry = entry_arc.read().await;
             let mls_members = group_members(&entry.group, &self.mls_service)?;
             let self_id = self.mls_service.wallet_bytes();
             let is_authorized = entry
@@ -239,14 +244,16 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// tests and administrative tooling.
     pub async fn regenerate_steward_list(&self, group_name: &str) -> Result<(), UserError> {
         let current_epoch = self.mls_service.current_epoch(group_name)?;
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
         let members = {
-            let groups = self.groups.read().await;
-            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            let entry = entry_arc.read().await;
             group_members(&entry.group, &self.mls_service)?
         };
 
-        let mut groups = self.groups.write().await;
-        let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
+        let mut entry = entry_arc.write().await;
         let sn = entry
             .group
             .protocol_config()
@@ -267,9 +274,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     ) -> Result<(), UserError> {
         let current_epoch = self.mls_service.current_epoch(group_name)?;
 
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
         let (members, max_age) = {
-            let groups = self.groups.read().await;
-            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            let entry = entry_arc.read().await;
             if !self.mls_service.has_group(entry.group.group_name()) {
                 return Ok(());
             }
@@ -279,8 +289,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             )
         };
 
-        let mut groups = self.groups.write().await;
-        let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
+        let mut entry = entry_arc.write().await;
         let before = entry.group.pending_update_count();
         entry.group.prune_pending_updates_for_members(&members);
         let expired = entry.group.expire_pending_updates(current_epoch, max_age);
@@ -303,9 +312,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     pub async fn process_buffered_updates(&self, group_name: &str) -> Result<(), UserError> {
         let current_epoch = self.mls_service.current_epoch(group_name)?;
 
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
         let to_propose: Vec<GroupUpdateRequest> = {
-            let groups = self.groups.read().await;
-            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            let entry = entry_arc.read().await;
 
             let members = if self.mls_service.has_group(entry.group.group_name()) {
                 group_members(&entry.group, &self.mls_service)?
@@ -385,9 +397,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 .collect()
         };
 
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
         let packet = {
-            let groups = self.groups.read().await;
-            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            let entry = entry_arc.read().await;
 
             let list = match entry.group.steward_list() {
                 Some(l) => l,
@@ -476,14 +491,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         // Mark all targets pending under a single write-lock, then submit
         // proposals outside the lock to avoid holding it across `.await`.
         let mut to_remove = Vec::new();
-        {
-            let mut groups = self.groups.write().await;
-            if let Some(entry) = groups.get_mut(group_name) {
-                for (target_id, current_score) in targets {
-                    if !entry.group.has_pending_removal(&target_id) {
-                        entry.group.observe_pending_removal(target_id.clone());
-                        to_remove.push((target_id, current_score));
-                    }
+        if let Some(entry_arc) = self.lookup_entry(group_name).await {
+            let mut entry = entry_arc.write().await;
+            for (target_id, current_score) in targets {
+                if !entry.group.has_pending_removal(&target_id) {
+                    entry.group.observe_pending_removal(target_id.clone());
+                    to_remove.push((target_id, current_score));
                 }
             }
         }
@@ -508,8 +521,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 .initiate_proposal(group_name.to_string(), request, Some(true))
                 .await
             {
-                let mut groups = self.groups.write().await;
-                if let Some(entry) = groups.get_mut(group_name) {
+                if let Some(entry_arc) = self.lookup_entry(group_name).await {
+                    let mut entry = entry_arc.write().await;
                     entry.group.resolve_pending_removal(&target_id);
                 }
                 error!(

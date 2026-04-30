@@ -9,11 +9,6 @@
 /// Each variant maps to a single score delta. Violation types (BrokenCommit, etc.)
 /// go through the ECP consensus path — when accepted, the target receives a
 /// violation-type-specific penalty and the creator receives a flat reward.
-///
-/// Some variants below are **reserved RFC vocabulary** — declared and wired
-/// into the scoring-delta table but not yet produced by core code (see
-/// `docs/ROADMAP.md`). They're listed here so adding the producer later is
-/// a one-line change instead of a new enum variant + migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScoreEvent {
     // ── ECP target penalties (mapped from ViolationType in evidence) ──
@@ -39,17 +34,6 @@ pub enum ScoreEvent {
     /// Competing commit with a different proposal set than the selected one
     /// (RFC: "MUST be classified as misbehavior").
     MisbehavingCommit,
-
-    // ── Partial freeze ──
-    // TODO(roadmap): produced when peer-side partial-freeze enforcement lands.
-    /// Propagated lower-priority governance traffic during an active freeze.
-    FreezeViolation,
-
-    // ── Commit validation ──
-    // TODO(roadmap): produced when local commit-validation scoring lands.
-    /// Commit referenced proposals not yet finalised by consensus. Detected
-    /// locally, not via ECP.
-    NonFinalizedProposalCommit,
 }
 
 /// A score operation produced by core logic and fed into the app's

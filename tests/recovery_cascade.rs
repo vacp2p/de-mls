@@ -1,14 +1,8 @@
-//! Integration tests for the recovery-flow rework.
+//! Recovery-flow integration tests.
 //!
-//! Exercises the bad-path scenarios observed in real-UI logs:
-//! - Concurrent joins (all pending-joiners see each others' KPs on broadcast)
-//! - Buffer must not be polluted on PendingJoin members
-//! - After commit, no member has stale buffered invites that would fail
-//!   with MLS "Duplicate signature key" when they later become steward
-//!
-//! The happy path (one-joiner-at-a-time) is already covered by
-//! `tests/async_scoring_removal.rs`. This file focuses on the specific
-//! bugs surfaced on 2026-04-22.
+//! Concurrent joins, PendingJoin buffer hygiene, and stale-buffered-invite
+//! prevention so a future-steward member doesn't propose Adds for
+//! already-joined identities.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

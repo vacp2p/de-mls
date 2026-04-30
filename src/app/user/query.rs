@@ -11,16 +11,19 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     User<P, H, SCH>
 {
     pub async fn get_group_state(&self, group_name: &str) -> Result<GroupState, UserError> {
-        let groups = self.groups.read().await;
-        let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-        Ok(entry.state_machine.current_state())
+        self.with_entry(group_name, |e| e.state_machine.current_state())
+            .await
+            .ok_or(UserError::GroupNotFound)
     }
 
     /// Current MLS epoch + reelection retry round. `(0, 0)` if the group has
     /// no MLS state yet (pending join). Intended for UI status display.
     pub async fn get_epoch_and_retry(&self, group_name: &str) -> Result<(u64, u32), UserError> {
-        let groups = self.groups.read().await;
-        let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
+        let entry = entry_arc.read().await;
         let epoch = if self.mls_service.has_group(entry.group.group_name()) {
             self.mls_service.current_epoch(group_name)?
         } else {
@@ -37,9 +40,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// to verify buffer hygiene (e.g., that a joiner's buffer is empty right
     /// after they receive the welcome).
     pub async fn get_pending_update_count(&self, group_name: &str) -> Result<usize, UserError> {
-        let groups = self.groups.read().await;
-        let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-        Ok(entry.group.pending_update_count())
+        self.with_entry(group_name, |e| e.group.pending_update_count())
+            .await
+            .ok_or(UserError::GroupNotFound)
     }
 
     /// Freeze round progress: `(received, expected)`. Returns `(0, 0)` if not
@@ -48,27 +51,30 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         &self,
         group_name: &str,
     ) -> Result<(usize, usize), UserError> {
-        let groups = self.groups.read().await;
-        let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-        let received = entry.group.freeze_candidate_count();
-        let expected = entry.group.steward_list().map(|l| l.len()).unwrap_or(0);
-        Ok((received, expected))
+        self.with_entry(group_name, |e| {
+            let received = e.group.freeze_candidate_count();
+            let expected = e.group.steward_list().map(|l| l.len()).unwrap_or(0);
+            (received, expected)
+        })
+        .await
+        .ok_or(UserError::GroupNotFound)
     }
 
     pub async fn is_steward_for_group(&self, group_name: &str) -> Result<bool, UserError> {
-        let groups = self.groups.read().await;
-        let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-        Ok(entry.group.is_steward())
+        self.with_entry(group_name, |e| e.group.is_steward())
+            .await
+            .ok_or(UserError::GroupNotFound)
     }
 
     pub async fn get_group_members(&self, group_name: &str) -> Result<Vec<String>, UserError> {
-        let groups = self.groups.read().await;
-        let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
+        let entry = entry_arc.read().await;
         if !self.mls_service.has_group(entry.group.group_name()) {
             return Ok(Vec::new());
         }
-
         let members = group_members(&entry.group, &self.mls_service)?;
         Ok(members
             .into_iter()
@@ -90,8 +96,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         &self,
         group_name: &str,
     ) -> Result<Vec<Vec<u8>>, UserError> {
-        let groups = self.groups.read().await;
-        let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
+        let entry = entry_arc.read().await;
         let members = group_members(&entry.group, &self.mls_service)?;
         Ok(members
             .into_iter()
@@ -105,8 +114,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         &self,
         group_name: &str,
     ) -> Result<Vec<(Vec<u8>, MemberRole)>, UserError> {
-        let groups = self.groups.read().await;
-        let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
+        let entry = entry_arc.read().await;
         let epoch = self.mls_service.current_epoch(group_name)?;
         let members = group_members(&entry.group, &self.mls_service)?;
 
@@ -141,22 +153,25 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         &self,
         group_name: &str,
     ) -> Result<Vec<GroupUpdateRequest>, UserError> {
-        let groups = self.groups.read().await;
-        let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-        Ok(entry.group.approved_proposals().values().cloned().collect())
+        self.with_entry(group_name, |e| {
+            e.group.approved_proposals().values().cloned().collect()
+        })
+        .await
+        .ok_or(UserError::GroupNotFound)
     }
 
     pub async fn get_epoch_history(
         &self,
         group_name: &str,
     ) -> Result<Vec<Vec<GroupUpdateRequest>>, UserError> {
-        let groups = self.groups.read().await;
-        let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-        Ok(entry
-            .group
-            .epoch_history()
-            .iter()
-            .map(|batch| batch.values().cloned().collect())
-            .collect())
+        self.with_entry(group_name, |e| {
+            e.group
+                .epoch_history()
+                .iter()
+                .map(|batch| batch.values().cloned().collect())
+                .collect()
+        })
+        .await
+        .ok_or(UserError::GroupNotFound)
     }
 }

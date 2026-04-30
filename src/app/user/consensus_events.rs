@@ -44,18 +44,19 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
         // Drop re-emissions from the consensus library (timeout-path race)
         // so we don't re-apply state or double-fire UI events.
-        {
-            let groups = self.groups.read().await;
-            if let Some(entry) = groups.get(group_name)
-                && entry.group.is_consensus_outcome_applied(proposal_id)
-            {
-                tracing::debug!(
-                    group = group_name,
-                    proposal_id,
-                    "duplicate consensus outcome dropped"
-                );
-                return Ok(());
-            }
+        let already_applied = self
+            .with_entry(group_name, |entry| {
+                entry.group.is_consensus_outcome_applied(proposal_id)
+            })
+            .await
+            .unwrap_or(false);
+        if already_applied {
+            tracing::debug!(
+                group = group_name,
+                proposal_id,
+                "duplicate consensus outcome dropped"
+            );
+            return Ok(());
         }
 
         // Fetch payload from consensus service (no group lock held).
@@ -69,9 +70,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
         // The inactivity timer is self-started by `check_steward_inactivity`
         // on the next poll — no explicit notification needed here.
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
         let consensus_apply = {
-            let mut groups = self.groups.write().await;
-            let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
+            let mut entry = entry_arc.write().await;
             info!(
                 group = group_name,
                 proposal_id, approved, "consensus reached"
@@ -102,8 +106,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 // if circumstances change. Drop the buffered entry so the
                 // next epoch steward doesn't auto-repromote it.
                 let target = target.to_vec();
-                let mut groups = self.groups.write().await;
-                if let Some(entry) = groups.get_mut(group_name) {
+                if let Some(entry_arc) = self.lookup_entry(group_name).await {
+                    let mut entry = entry_arc.write().await;
                     entry.group.remove_pending_update(&target);
                 }
             }
@@ -120,12 +124,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
     /// Bypass the inactivity timer so the urgent commit fires now.
     async fn force_freezing_for_urgent_commit(&self, group_name: &str) {
-        let transitioned = {
-            let mut groups = self.groups.write().await;
-            groups
-                .get_mut(group_name)
-                .map(|entry| entry.state_machine.force_freezing())
-                .unwrap_or(false)
+        let transitioned = match self.lookup_entry(group_name).await {
+            Some(entry_arc) => entry_arc.write().await.state_machine.force_freezing(),
+            None => false,
         };
         if transitioned {
             self.state_handler
@@ -137,15 +138,15 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// When the removal target is a current steward, fire a fresh election
     /// in parallel so the next epoch keeps a healthy ES + BS.
     async fn refresh_stewards_after_removal(&self, group_name: &str, target: &[u8]) {
-        let target_was_steward = {
-            let groups = self.groups.read().await;
-            groups.get(group_name).is_some_and(|entry| {
+        let target_was_steward = self
+            .with_entry(group_name, |entry| {
                 entry
                     .group
                     .steward_list()
                     .is_some_and(|l| l.contains(target))
             })
-        };
+            .await
+            .unwrap_or(false);
         if !target_was_steward {
             return;
         }
@@ -169,9 +170,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         group_name: &str,
         election: StewardElectionProposal,
     ) -> Result<(), UserError> {
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
+
         let is_valid = {
-            let groups = self.groups.read().await;
-            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
+            let entry = entry_arc.read().await;
             let members = group_members(&entry.group, &self.mls_service)?;
             entry.group.validate_steward_list_proposal(
                 &election.proposed_stewards,
@@ -189,8 +194,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
 
         let resumed_from_reelection = {
-            let mut groups = self.groups.write().await;
-            let entry = groups.get_mut(group_name).ok_or(UserError::GroupNotFound)?;
+            let mut entry = entry_arc.write().await;
             entry.group.generate_and_set_steward_list(
                 election.election_epoch,
                 &election.proposed_stewards,
@@ -227,18 +231,18 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// Rejected election: bump the retry round and retry under the max
     /// (idempotent), or escalate to a `Deadlock` ECP once exhausted.
     async fn handle_election_rejected(&self, group_name: &str) {
-        let (round, max) = {
-            let mut groups = self.groups.write().await;
-            let Some(entry) = groups.get_mut(group_name) else {
-                return;
-            };
-            entry.group.bump_reelection_round();
-            // Read the ceiling from the group, not the user-level default:
-            // joiners honor the group's configured policy via `GroupSync`.
-            (
-                entry.group.reelection_round(),
-                entry.group.max_reelection_attempts(),
-            )
+        let (round, max) = match self.lookup_entry(group_name).await {
+            Some(entry_arc) => {
+                let mut entry = entry_arc.write().await;
+                entry.group.bump_reelection_round();
+                // Read the ceiling from the group, not the user-level default:
+                // joiners honor the group's configured policy via `GroupSync`.
+                (
+                    entry.group.reelection_round(),
+                    entry.group.max_reelection_attempts(),
+                )
+            }
+            None => return,
         };
         if round > max {
             info!(
@@ -281,27 +285,24 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         if let Ok(req) = GroupUpdateRequest::decode(payload)
             && let Some(group_update_request::Payload::EmergencyCriteria(ec)) = &req.payload
             && let Some(ev) = &ec.evidence
+            && let Some(entry_arc) = self.lookup_entry(group_name).await
         {
-            let mut groups = self.groups.write().await;
-            if let Some(entry) = groups.get_mut(group_name) {
-                entry.group.resolve_pending_removal(&ev.target_member_id);
-            }
+            let mut entry = entry_arc.write().await;
+            entry.group.resolve_pending_removal(&ev.target_member_id);
         }
 
-        let resumed_from_reelection = {
-            let mut groups = self.groups.write().await;
-            match groups.get_mut(group_name) {
-                Some(entry) => {
-                    entry.group.resolve_emergency(proposal_id);
-                    if entry.state_machine.current_state() == GroupState::Reelection {
-                        entry.state_machine.start_working();
-                        true
-                    } else {
-                        false
-                    }
+        let resumed_from_reelection = match self.lookup_entry(group_name).await {
+            Some(entry_arc) => {
+                let mut entry = entry_arc.write().await;
+                entry.group.resolve_emergency(proposal_id);
+                if entry.state_machine.current_state() == GroupState::Reelection {
+                    entry.state_machine.start_working();
+                    true
+                } else {
+                    false
                 }
-                None => false,
             }
+            None => false,
         };
         if resumed_from_reelection {
             self.state_handler

@@ -51,7 +51,15 @@ type AutoVoteTimers = Arc<Mutex<HashMap<(String, u32), JoinHandle<()>>>>;
 
 pub struct User<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler> {
     mls_service: Arc<MlsService<P::Storage>>,
-    groups: Arc<RwLock<HashMap<String, GroupEntry>>>,
+    /// Outer lock: map CRUD (insert / remove / iterate names).
+    /// Inner per-entry lock: per-group reads and mutations. A write on
+    /// group A doesn't block reads on group B.
+    ///
+    /// Lock-order convention with [`Self::scoring_service`]: never hold
+    /// the scoring `Mutex` guard across `lookup_entry` or any acquisition
+    /// of the inner entry `RwLock`. Acquire `scoring()` in a single
+    /// statement and let the guard drop at the semicolon.
+    groups: Arc<RwLock<HashMap<String, Arc<RwLock<GroupEntry>>>>>,
     consensus_service: Arc<ProviderConsensus<P>>,
     eth_signer: PrivateKeySigner,
     handler: Arc<H>,
@@ -126,15 +134,23 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             .unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Run `f` under the groups read lock. Returns `None` if the entry
-    /// isn't present.
+    /// Look up a group entry. Returns `None` when the entry isn't present.
+    /// Takes the outer read lock briefly to clone the inner `Arc`, then
+    /// releases it before the caller acquires the entry's own lock.
+    pub(crate) async fn lookup_entry(&self, group_name: &str) -> Option<Arc<RwLock<GroupEntry>>> {
+        self.groups.read().await.get(group_name).cloned()
+    }
+
+    /// Run `f` under the entry's own read lock. Returns `None` if the
+    /// entry isn't present.
     pub(crate) async fn with_entry<R>(
         &self,
         group_name: &str,
         f: impl FnOnce(&GroupEntry) -> R,
     ) -> Option<R> {
-        let groups = self.groups.read().await;
-        groups.get(group_name).map(f)
+        let entry_arc = self.lookup_entry(group_name).await?;
+        let entry = entry_arc.read().await;
+        Some(f(&entry))
     }
 
     /// Wallet address as checksummed hex.
