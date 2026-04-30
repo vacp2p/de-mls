@@ -77,21 +77,15 @@ pub struct GroupStateMachine {
     /// Short inactivity window used during recovery; caller of
     /// `check_steward_inactivity` picks which duration to apply.
     retry_inactivity_duration: Duration,
-    /// How long a voting proposal stays valid before expiring (RFC §Creating
-    /// Voting Proposal). Per-group so a joiner picks up the steward's value
-    /// from `GroupSync` rather than diverging on its local default.
+    /// Voting-proposal lifetime (RFC §Creating Voting Proposal). Synced
+    /// via `GroupSync`.
     proposal_expiration: Duration,
-    /// Library deadline for a single consensus session. Mismatched values
-    /// across nodes cause split outcomes (see consensus-timeout-divergence
-    /// follow-up), so this is per-group and synced via `GroupSync`.
+    /// Library deadline per consensus session. Synced via `GroupSync` —
+    /// mismatched values across nodes split outcomes.
     consensus_timeout: Duration,
-    /// Per-member window to cast a manual vote before the auto-vote
-    /// fires. Held per-group (seeded from `GroupConfig` at creation)
-    /// for consistency with the other temporal config — not synced via
-    /// `GroupSync` since each node may tolerate a different window.
+    /// Per-member window before auto-vote fires. Local-only; not synced.
     voting_delay: Duration,
-    /// Auto-vote delay for steward-election proposals; same per-group
-    /// rationale as `voting_delay`.
+    /// Auto-vote delay for steward-election proposals. Local-only.
     election_voting_delay: Duration,
 }
 
@@ -158,9 +152,8 @@ impl GroupStateMachine {
         self.consensus_timeout
     }
 
-    /// Auto-vote delay for the given proposal kind. Steward-election
-    /// proposals use the shorter `election_voting_delay` so recovery
-    /// elections converge fast.
+    /// Steward-election proposals use the shorter `election_voting_delay`
+    /// for fast recovery convergence.
     pub fn voting_delay_for(&self, kind: ProposalKind) -> Duration {
         if kind.is_steward_election() {
             self.election_voting_delay
@@ -169,27 +162,25 @@ impl GroupStateMachine {
         }
     }
 
-    /// Overwritten when the handle receives a `GroupSync` from the steward.
+    // Setters below are called by `User::on_group_sync` to apply the
+    // steward's `TimingConfig`.
+
     pub fn set_epoch_duration(&mut self, value: Duration) {
         self.epoch_duration = value;
     }
 
-    /// Overwritten when the handle receives a `GroupSync` from the steward.
     pub fn set_freeze_duration(&mut self, value: Duration) {
         self.freeze_duration = value;
     }
 
-    /// Overwritten when the handle receives a `GroupSync` from the steward.
     pub fn set_retry_inactivity_duration(&mut self, value: Duration) {
         self.retry_inactivity_duration = value;
     }
 
-    /// Overwritten when the handle receives a `GroupSync` from the steward.
     pub fn set_proposal_expiration(&mut self, value: Duration) {
         self.proposal_expiration = value;
     }
 
-    /// Overwritten when the handle receives a `GroupSync` from the steward.
     pub fn set_consensus_timeout(&mut self, value: Duration) {
         self.consensus_timeout = value;
     }

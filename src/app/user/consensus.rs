@@ -455,17 +455,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         Ok(())
     }
 
-    /// Spawn an auto-vote timer for `(group_name, proposal_id)`. After
-    /// `delay`, the timer casts `vote` for the local member and broadcasts
-    /// it. Idempotent — an existing handle for the same key is aborted
-    /// and replaced.
-    ///
-    /// `vote` is captured at the caller's read of per-group
-    /// `liveness_criteria_yes` so the value is frozen at session start;
-    /// a `GroupSync` arriving during the sleep can't flip the cast.
-    /// If the member has already voted or the session has resolved by the
-    /// time the timer fires, `cast_vote` returns a benign error
-    /// (`UserAlreadyVoted` / `SessionNotActive`); we log at debug and exit.
+    /// Spawn an auto-vote timer for `(group_name, proposal_id)`. Idempotent
+    /// — an existing handle for the same key is aborted and replaced.
+    /// `vote` is captured before the sleep so a `GroupSync` during the
+    /// delay can't change it.
     pub(crate) fn spawn_auto_vote(
         &self,
         group_name: String,

@@ -126,14 +126,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             .unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Read-locked snapshot of one group's entry. Returns `None` when the
-    /// entry isn't present — caller chooses between bailing
-    /// (`let Some(x) = ... else { return; }`) or escalating
-    /// (`.ok_or(UserError::GroupNotFound)?`).
-    ///
-    /// `f` runs while the read lock is held, so its return type must own
-    /// any data taken out of the entry — typical use is a tuple of `Copy`
-    /// state-machine fields.
+    /// Run `f` under the groups read lock. Returns `None` if the entry
+    /// isn't present.
     pub(crate) async fn with_entry<R>(
         &self,
         group_name: &str,

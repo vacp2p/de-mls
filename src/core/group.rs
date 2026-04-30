@@ -199,18 +199,14 @@ pub struct Group {
     /// While `true`, `create_commit_candidate` bypasses the `is_steward()`
     /// gate so any member can produce the recovery commit.
     recovery_mode: bool,
-    /// Per-group `threshold_peer_score` (RFC §Peer Scoring). A member at
-    /// or below this score is eligible for `SCORE_BELOW_THRESHOLD` ECP
-    /// removal. Joiners pick up the steward's value via `GroupSync` so
-    /// every node raises ECPs at the same trigger.
+    /// At or below this score, a member is eligible for
+    /// `SCORE_BELOW_THRESHOLD` ECP removal (RFC §Peer Scoring). Synced.
     threshold_peer_score: i64,
-    /// Whether silent voters count as YES at `consensus_timeout` (RFC
-    /// §Creating Voting Proposal). Drives both the auto-vote default and
-    /// the consensus library's tie-break rule. Synced via `GroupSync`.
+    /// Auto-vote default and consensus tie-break rule (RFC §Creating
+    /// Voting Proposal). Synced.
     liveness_criteria_yes: bool,
     /// Max age (in epochs) of a buffered membership update before the
-    /// epoch steward drops it. Synced via `GroupSync` so every node
-    /// expires entries at the same point.
+    /// epoch steward drops it. Synced.
     pending_update_max_epochs: u32,
 }
 
@@ -219,16 +215,10 @@ pub struct Group {
 /// beyond that human/policy intervention is expected.
 pub const DEFAULT_MAX_REELECTION_ATTEMPTS: u32 = 1;
 
-/// Fallback `threshold_peer_score` used until the group creator (or a
-/// `GroupSync` for joiners) overrides it.
 pub const DEFAULT_THRESHOLD_PEER_SCORE: i64 = 0;
 
-/// Fallback `liveness_criteria_yes` (auto-vote default + tie-break rule)
-/// used until the group creator (or a `GroupSync` for joiners) overrides it.
 pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
 
-/// Fallback `pending_update_max_epochs` used until the group creator (or a
-/// `GroupSync` for joiners) overrides it.
 pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
 
 impl Group {
@@ -823,27 +813,18 @@ impl Group {
         self.reelection_round = 0;
     }
 
-    /// Group-configured ceiling on retries before the stuck-election error
-    /// surfaces. Shared across the group via `GroupSync`.
     pub fn max_reelection_attempts(&self) -> u32 {
         self.max_reelection_attempts
     }
 
-    /// Overwrite the retry ceiling. Called from group-creation (from
-    /// `GroupConfig`) and on joiner sync (from `GroupSync.max_reelection_attempts`).
     pub fn set_max_reelection_attempts(&mut self, max: u32) {
         self.max_reelection_attempts = max;
     }
 
-    /// Per-group `threshold_peer_score` (RFC §Peer Scoring). Below or equal
-    /// triggers a `SCORE_BELOW_THRESHOLD` ECP.
     pub fn threshold_peer_score(&self) -> i64 {
         self.threshold_peer_score
     }
 
-    /// Overwrite the per-group threshold. Called from group-creation
-    /// (from `GroupConfig`) and on joiner sync (from
-    /// `GroupSync.threshold_peer_score`).
     pub fn set_threshold_peer_score(&mut self, threshold: i64) {
         self.threshold_peer_score = threshold;
     }
@@ -852,9 +833,6 @@ impl Group {
         self.liveness_criteria_yes
     }
 
-    /// Overwrite the per-group auto-vote default. Called from
-    /// group-creation (from `GroupConfig`) and on joiner sync (from
-    /// `GroupSync.liveness_criteria_yes`).
     pub fn set_liveness_criteria_yes(&mut self, value: bool) {
         self.liveness_criteria_yes = value;
     }
@@ -863,9 +841,6 @@ impl Group {
         self.pending_update_max_epochs
     }
 
-    /// Overwrite the per-group buffered-update max age. Called from
-    /// group-creation (from `GroupConfig`) and on joiner sync (from
-    /// `GroupSync.pending_update_max_epochs`).
     pub fn set_pending_update_max_epochs(&mut self, value: u32) {
         self.pending_update_max_epochs = value;
     }

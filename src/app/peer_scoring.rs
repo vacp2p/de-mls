@@ -98,10 +98,8 @@ impl ScoringProvider for FixedScoringProvider {
 
 // ── Service ─────────────────────────────────────────────────────────
 
-/// Per-member score tracker, parameterised over a [`PeerScoreStorage`] and
-/// a [`ScoringProvider`]. The removal threshold lives per-group on
-/// `Group::threshold_peer_score` and is supplied by callers to
-/// [`Self::is_below_threshold`] / [`Self::members_below_threshold`].
+/// Per-member score tracker. Threshold is supplied per-call by the caller
+/// (held on `Group::threshold_peer_score`).
 pub struct PeerScoringService<S: PeerScoreStorage, P: ScoringProvider> {
     storage: S,
     provider: P,
@@ -154,8 +152,6 @@ impl<S: PeerScoreStorage, P: ScoringProvider> PeerScoringService<S, P> {
         self.storage.set(group_id, member_id, score);
     }
 
-    /// Members at or below `threshold`. Caller supplies the per-group
-    /// `threshold_peer_score` (held on `Group` core, synced via `GroupSync`).
     pub fn members_below_threshold(&self, group_id: &str, threshold: i64) -> Vec<Vec<u8>> {
         self.storage
             .all_scores(group_id)
@@ -185,8 +181,6 @@ mod tests {
     use super::*;
 
     const GROUP: &str = "test-group";
-    /// Test threshold value, used wherever the old `ScoringConfig.removal_threshold`
-    /// was. Real callers pass `Group::threshold_peer_score()`.
     const REMOVAL_THRESHOLD: i64 = 0;
 
     fn default_config() -> ScoringConfig {
