@@ -47,6 +47,7 @@ pub use group::{
     DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_THRESHOLD_PEER_SCORE, Group, PendingUpdate,
     ProposalId, auto_approved_leave_proposal_id, target_identity_of,
 };
+pub(crate) use group::member_set;
 
 // ── Proposal classification ──
 pub use proposal_kind::ProposalKind;

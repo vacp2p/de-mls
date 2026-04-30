@@ -203,7 +203,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         )
         .await?;
 
-        let group = {
+        {
             let entry_arc = self
                 .lookup_entry(group_name)
                 .await
@@ -215,8 +215,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             if kind.is_emergency() {
                 entry.group.observe_emergency(proposal_id);
             }
-            entry.group.clone()
-        };
+        }
 
         let outbound = match creator_vote {
             Some(vote) => {
@@ -242,7 +241,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             None => unbundled,
         };
 
-        let packet = build_message(&group, &self.mls_service, &outbound, &self.app_id)?;
+        let packet = build_message(group_name, &self.mls_service, &outbound, &self.app_id)?;
         self.handler.on_outbound(group_name, packet).await?;
 
         match creator_vote {
@@ -433,28 +432,27 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             .lookup_entry(group_name)
             .await
             .ok_or(UserError::GroupNotFound)?;
-        let group = {
+        {
             let entry = entry_arc.read().await;
             let state = entry.state_machine.current_state();
             if state == GroupState::Freezing || state == GroupState::Selection {
                 return Err(UserError::GroupBlocked(state.to_string()));
             }
-            entry.group.clone()
-        };
+        }
         let app_id = self.app_id.clone();
 
         // Manual vote takes precedence over the pending auto-vote timer.
         self.cancel_auto_vote(group_name, proposal_id);
 
         let app_message = cast_vote::<P, _>(
-            &group,
+            group_name,
             proposal_id,
             vote,
             &self.consensus_service,
             self.eth_signer.clone(),
         )
         .await?;
-        let packet = build_message(&group, &self.mls_service, &app_message, &app_id)?;
+        let packet = build_message(group_name, &self.mls_service, &app_message, &app_id)?;
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
     }
@@ -537,19 +535,18 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         proposal_id: u32,
         vote: bool,
     ) -> Result<(), UserError> {
-        let group = self
-            .with_entry(group_name, |e| e.group.clone())
-            .await
-            .ok_or(UserError::GroupNotFound)?;
+        if self.lookup_entry(group_name).await.is_none() {
+            return Err(UserError::GroupNotFound);
+        }
         let app_message = cast_vote::<P, _>(
-            &group,
+            group_name,
             proposal_id,
             vote,
             &self.consensus_service,
             self.eth_signer.clone(),
         )
         .await?;
-        let packet = build_message(&group, &self.mls_service, &app_message, &self.app_id)?;
+        let packet = build_message(group_name, &self.mls_service, &app_message, &self.app_id)?;
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
     }

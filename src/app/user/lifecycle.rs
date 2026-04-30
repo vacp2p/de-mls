@@ -179,14 +179,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             return Ok(());
         };
 
-        let packet = {
-            let entry_arc = self
-                .lookup_entry(group_name)
-                .await
-                .ok_or(UserError::GroupNotFound)?;
-            let entry = entry_arc.read().await;
-            build_message(&entry.group, &self.mls_service, &app_msg, &self.app_id)?
-        };
+        let packet = build_message(group_name, &self.mls_service, &app_msg, &self.app_id)?;
         self.handler.on_outbound(group_name, packet).await?;
 
         Ok(())

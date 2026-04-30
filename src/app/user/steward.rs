@@ -6,7 +6,7 @@ use tracing::{error, info};
 use crate::{
     app::{StateChangeHandler, User, UserError},
     core::{
-        DeMlsProvider, GroupEventHandler, StewardList, build_message, group_members,
+        DeMlsProvider, GroupEventHandler, StewardList, build_message, group_members, member_set,
         target_identity_of,
     },
     mls_crypto::ShortId,
@@ -103,14 +103,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 return Ok(());
             }
             let mls_members = group_members(&entry.group, &self.mls_service)?;
+            let mls_members_set = member_set(&mls_members);
 
             let self_identity = self.mls_service.wallet_bytes();
             let is_authorized = entry
                 .group
                 .steward_list()
-                .and_then(|list| {
-                    list.responsible_election_proposer(|c| mls_members.iter().any(|m| m == c))
-                })
+                .and_then(|list| list.responsible_election_proposer(|c| mls_members_set.contains(c)))
                 .is_some_and(|proposer| proposer == self_identity);
             if !is_authorized {
                 return Ok(());
@@ -193,13 +192,14 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let (is_authorized, self_id, epoch) = {
             let entry = entry_arc.read().await;
             let mls_members = group_members(&entry.group, &self.mls_service)?;
+            let mls_members_set = member_set(&mls_members);
             let self_id = self.mls_service.wallet_bytes();
             let is_authorized = entry
                 .group
                 .steward_list()
                 .and_then(|list| {
                     list.responsible_election_proposer(|c| {
-                        mls_members.iter().any(|m| m == c) && !entry.group.is_pending_removal(c)
+                        mls_members_set.contains(c) && !entry.group.is_pending_removal(c)
                     })
                 })
                 .is_some_and(|proposer| proposer == self_id);
@@ -331,20 +331,20 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             // Collect buffered updates whose target isn't already in the
             // active proposal queues. The approved queue is also in the group.
             let approved = entry.group.approved_proposals();
-            let approved_targets: std::collections::HashSet<Vec<u8>> = approved
+            let approved_targets: std::collections::HashSet<&[u8]> = approved
                 .values()
-                .filter_map(|req| target_identity_of(req).map(|id| id.to_vec()))
+                .filter_map(target_identity_of)
                 .collect();
-            let members_set: std::collections::HashSet<Vec<u8>> = members.iter().cloned().collect();
+            let members_set = member_set(&members);
 
             entry
                 .group
                 .pending_updates()
                 .iter()
-                .filter(|(id, _)| !approved_targets.contains(*id))
+                .filter(|(id, _)| !approved_targets.contains(id.as_slice()))
                 .filter(|(id, p)| {
                     // Drop Add for already-member and Remove for non-member.
-                    let is_member = members_set.contains(*id);
+                    let is_member = members_set.contains(id.as_slice());
                     match p.request.payload.as_ref() {
                         Some(group_update_request::Payload::InviteMember(_)) => !is_member,
                         Some(group_update_request::Payload::RemoveMember(_)) => is_member,
@@ -447,7 +447,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             };
 
             let app_msg: AppMessage = sync.into();
-            build_message(&entry.group, &self.mls_service, &app_msg, &self.app_id)?
+            build_message(group_name, &self.mls_service, &app_msg, &self.app_id)?
         };
 
         self.handler.on_outbound(group_name, packet).await?;

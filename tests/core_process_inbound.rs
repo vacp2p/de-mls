@@ -69,7 +69,7 @@ fn test_process_inbound_conversation_message_roundtrip() {
         group_name: group_name.to_string(),
     };
     let app_msg: AppMessage = conv.into();
-    let outbound = build_message(&steward_handle, &steward_mls, &app_msg, b"test-app-id").unwrap();
+    let outbound = build_message(steward_handle.group_name(), &steward_mls, &app_msg, b"test-app-id").unwrap();
 
     let result = process_inbound(
         &mut joiner_handle,
@@ -582,7 +582,7 @@ fn test_group_sync_roundtrip() {
     };
     let app_msg: AppMessage = sync.clone().into();
     let sync_packet =
-        build_message(&steward_handle, &steward_mls, &app_msg, b"test-app-id").unwrap();
+        build_message(steward_handle.group_name(), &steward_mls, &app_msg, b"test-app-id").unwrap();
 
     // Joiner processes the encrypted sync message
     let result = process_inbound(
@@ -739,7 +739,7 @@ fn test_group_sync_propagates_divergent_per_group_config() {
     };
     let app_msg: AppMessage = sync.clone().into();
     let sync_packet =
-        build_message(&steward_handle, &steward_mls, &app_msg, b"test-app-id").unwrap();
+        build_message(steward_handle.group_name(), &steward_mls, &app_msg, b"test-app-id").unwrap();
 
     // Joiner processes the encrypted sync.
     let result = process_inbound(
@@ -869,7 +869,7 @@ fn test_group_sync_idempotent_for_existing_members() {
     };
     let app_msg: AppMessage = sync.into();
     let sync_packet =
-        build_message(&steward_handle, &steward_mls, &app_msg, b"test-app-id").unwrap();
+        build_message(steward_handle.group_name(), &steward_mls, &app_msg, b"test-app-id").unwrap();
 
     // Joiner processes sync — should get GroupSyncReceived at the core level
     let result = process_inbound(

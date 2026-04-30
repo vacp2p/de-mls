@@ -11,7 +11,7 @@ use crate::{
     },
     core::{
         DeMlsProvider, GroupEventHandler, ProcessResult, ProposalKind, ProtocolConfig, StewardList,
-        build_message, create_commit_candidate, group_members, process_inbound,
+        build_message, create_commit_candidate, group_members, member_set, process_inbound,
     },
     ds::InboundPacket,
     protos::de_mls::messages::v1::{
@@ -37,12 +37,18 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 self.on_incoming_proposal(group_name, proposal).await
             }
             ProcessResult::Vote(vote) => {
-                let group = self
-                    .with_entry(group_name, |e| e.group.clone())
+                let entry_arc = self
+                    .lookup_entry(group_name)
                     .await
                     .ok_or(UserError::GroupNotFound)?;
-                forward_incoming_vote::<P>(group_name, &group, vote, &*self.consensus_service)
-                    .await?;
+                let entry = entry_arc.read().await;
+                forward_incoming_vote::<P>(
+                    group_name,
+                    &entry.group,
+                    vote,
+                    &*self.consensus_service,
+                )
+                .await?;
                 Ok(())
             }
             ProcessResult::MembershipChangeReceived(request) => {
@@ -141,14 +147,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             group_name: name.to_string(),
         }
         .into();
-        let entry_arc = match self.lookup_entry(name).await {
-            Some(e) => e,
-            None => return Ok(()),
+        let Some(entry_arc) = self.lookup_entry(name).await else {
+            return Ok(());
         };
-        let packet = {
-            let entry = entry_arc.read().await;
-            build_message(&entry.group, &self.mls_service, &msg, &self.app_id)?
-        };
+        let packet = build_message(name, &self.mls_service, &msg, &self.app_id)?;
         self.handler.on_outbound(name, packet).await?;
         self.handler.on_joined_group(name).await?;
 
@@ -449,7 +451,11 @@ fn validate_group_sync(
         return Ok(false);
     }
 
-    let any_present = sync.steward_members.iter().any(|s| members.contains(s));
+    let members_set = member_set(members);
+    let any_present = sync
+        .steward_members
+        .iter()
+        .any(|s| members_set.contains(s.as_slice()));
     let ordering_valid = StewardList::validate(
         &sync.steward_members,
         sync.election_epoch,

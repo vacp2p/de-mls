@@ -97,7 +97,7 @@ pub async fn submit_proposal<P: DeMlsProvider>(
 /// because that is the only legitimate case for broadcasting proposal +
 /// vote atomically as a single wire message.
 pub async fn cast_vote<P, SN>(
-    group: &Group,
+    group_name: &str,
     proposal_id: u32,
     vote: bool,
     consensus: &ProviderConsensus<P>,
@@ -107,13 +107,10 @@ where
     P: DeMlsProvider,
     SN: Signer + Send + Sync,
 {
-    let group_name = group.group_name();
-    let is_owner = group.is_owner_of_proposal(proposal_id);
     let scope = P::Scope::from(group_name.to_string());
 
     let choice = if vote { "YES" } else { "NO" };
-    let actor = if is_owner { "owner" } else { "member" };
-    info!(group = group_name, proposal_id, choice, actor, "vote cast");
+    info!(group = group_name, proposal_id, choice, "vote cast");
 
     let vote_msg = consensus
         .cast_vote(&scope, proposal_id, vote, signer)
