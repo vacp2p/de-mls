@@ -1282,4 +1282,55 @@ mod tests {
         assert!(!group.approved_proposals().contains_key(&100));
         assert!(!group.approved_proposals().contains_key(&101));
     }
+
+    fn buffer_remove_at(group: &mut Group, target: &[u8], epoch: u64) {
+        let request = GroupUpdateRequest {
+            payload: Some(group_update_request::Payload::RemoveMember(
+                crate::protos::de_mls::messages::v1::RemoveMember {
+                    identity: target.to_vec(),
+                },
+            )),
+        };
+        assert!(group.buffer_pending_update(request, epoch));
+    }
+
+    /// Reducing `pending_update_max_epochs` (e.g. via a tightened
+    /// `GroupSync`) must expire entries whose age now exceeds the new max.
+    /// Cutoff math: `current_epoch - max_age`; entries with
+    /// `first_seen_epoch < cutoff` are dropped.
+    #[test]
+    fn test_expire_pending_updates_drops_entries_older_than_max_age() {
+        let mut group = Group::new_as_creator("g", member(1), default_config()).unwrap();
+        let stale = member(7);
+        let fresh = member(9);
+
+        buffer_remove_at(&mut group, &stale, 0);
+        buffer_remove_at(&mut group, &fresh, 4);
+        assert_eq!(group.pending_update_count(), 2);
+
+        let expired = group.expire_pending_updates(5, 1);
+
+        assert_eq!(expired, vec![stale.clone()]);
+        assert_eq!(group.pending_update_count(), 1);
+        assert!(group.has_pending_update(&fresh));
+        assert!(!group.has_pending_update(&stale));
+    }
+
+    /// `max_age = 0` keeps only entries from the current epoch — the
+    /// boundary case a tightened sync hits when shrinking the window.
+    #[test]
+    fn test_expire_pending_updates_max_age_zero_keeps_only_current_epoch() {
+        let mut group = Group::new_as_creator("g", member(1), default_config()).unwrap();
+        let prior = member(7);
+        let current = member(9);
+
+        buffer_remove_at(&mut group, &prior, 4);
+        buffer_remove_at(&mut group, &current, 5);
+
+        let expired = group.expire_pending_updates(5, 0);
+
+        assert_eq!(expired, vec![prior.clone()]);
+        assert!(group.has_pending_update(&current));
+        assert!(!group.has_pending_update(&prior));
+    }
 }
