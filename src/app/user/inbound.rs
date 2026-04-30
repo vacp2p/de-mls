@@ -120,7 +120,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 .with_entry(group_name, |e| {
                     (
                         e.state_machine.voting_delay_for(kind),
-                        e.state_machine.liveness_criteria_yes(),
+                        e.group.liveness_criteria_yes(),
                     )
                 })
                 .await
@@ -373,8 +373,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     .group
                     .set_threshold_peer_score(sync.threshold_peer_score);
                 entry
-                    .state_machine
+                    .group
                     .set_liveness_criteria_yes(sync.liveness_criteria_yes);
+                entry
+                    .group
+                    .set_pending_update_max_epochs(sync.pending_update_max_epochs);
                 if let Some(timing) = &sync.timing {
                     let sm = &mut entry.state_machine;
                     sm.set_epoch_duration(std::time::Duration::from_millis(

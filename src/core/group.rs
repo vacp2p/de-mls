@@ -204,6 +204,14 @@ pub struct Group {
     /// removal. Joiners pick up the steward's value via `GroupSync` so
     /// every node raises ECPs at the same trigger.
     threshold_peer_score: i64,
+    /// Whether silent voters count as YES at `consensus_timeout` (RFC
+    /// §Creating Voting Proposal). Drives both the auto-vote default and
+    /// the consensus library's tie-break rule. Synced via `GroupSync`.
+    liveness_criteria_yes: bool,
+    /// Max age (in epochs) of a buffered membership update before the
+    /// epoch steward drops it. Synced via `GroupSync` so every node
+    /// expires entries at the same point.
+    pending_update_max_epochs: u32,
 }
 
 /// Fallback ceiling on steward-election retries. One retry gives the
@@ -214,6 +222,14 @@ pub const DEFAULT_MAX_REELECTION_ATTEMPTS: u32 = 1;
 /// Fallback `threshold_peer_score` used until the group creator (or a
 /// `GroupSync` for joiners) overrides it.
 pub const DEFAULT_THRESHOLD_PEER_SCORE: i64 = 0;
+
+/// Fallback `liveness_criteria_yes` (auto-vote default + tie-break rule)
+/// used until the group creator (or a `GroupSync` for joiners) overrides it.
+pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
+
+/// Fallback `pending_update_max_epochs` used until the group creator (or a
+/// `GroupSync` for joiners) overrides it.
+pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
 
 impl Group {
     fn new_base(group_name: &str, self_identity: Vec<u8>, protocol_config: ProtocolConfig) -> Self {
@@ -237,6 +253,8 @@ impl Group {
             urgent_commit_target: None,
             recovery_mode: false,
             threshold_peer_score: DEFAULT_THRESHOLD_PEER_SCORE,
+            liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,
+            pending_update_max_epochs: DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
         }
     }
 
@@ -830,6 +848,28 @@ impl Group {
         self.threshold_peer_score = threshold;
     }
 
+    pub fn liveness_criteria_yes(&self) -> bool {
+        self.liveness_criteria_yes
+    }
+
+    /// Overwrite the per-group auto-vote default. Called from
+    /// group-creation (from `GroupConfig`) and on joiner sync (from
+    /// `GroupSync.liveness_criteria_yes`).
+    pub fn set_liveness_criteria_yes(&mut self, value: bool) {
+        self.liveness_criteria_yes = value;
+    }
+
+    pub fn pending_update_max_epochs(&self) -> u32 {
+        self.pending_update_max_epochs
+    }
+
+    /// Overwrite the per-group buffered-update max age. Called from
+    /// group-creation (from `GroupConfig`) and on joiner sync (from
+    /// `GroupSync.pending_update_max_epochs`).
+    pub fn set_pending_update_max_epochs(&mut self, value: u32) {
+        self.pending_update_max_epochs = value;
+    }
+
     /// Drop a buffered update by target identity.
     ///
     /// Returns `true` if an entry was removed.
@@ -949,6 +989,25 @@ mod tests {
 
         group.set_threshold_peer_score(-25);
         assert_eq!(group.threshold_peer_score(), -25);
+    }
+
+    /// `liveness_criteria_yes` and `pending_update_max_epochs` default to
+    /// their core constants and are overwritten by setters (lifecycle at
+    /// creation, `on_group_sync` for joiners).
+    #[test]
+    fn test_liveness_and_pending_update_max_epochs_default_and_setter() {
+        let config = ProtocolConfig::new(1, 3).unwrap();
+        let mut group = Group::new_as_joiner("test-group", member(1), config);
+        assert_eq!(group.liveness_criteria_yes(), DEFAULT_LIVENESS_CRITERIA_YES);
+        assert_eq!(
+            group.pending_update_max_epochs(),
+            DEFAULT_PENDING_UPDATE_MAX_EPOCHS
+        );
+
+        group.set_liveness_criteria_yes(false);
+        group.set_pending_update_max_epochs(7);
+        assert!(!group.liveness_criteria_yes());
+        assert_eq!(group.pending_update_max_epochs(), 7);
     }
 
     #[test]

@@ -40,6 +40,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
         let max_reelection_attempts = config.max_reelection_attempts;
         let threshold_peer_score = config.threshold_peer_score;
+        let liveness_criteria_yes = config.liveness_criteria_yes;
+        let pending_update_max_epochs = config.pending_update_max_epochs;
         let (mut group, state_machine) = if is_creation {
             let group = create_group(group_name, &self.mls_service, config.protocol.clone())?;
             let state_machine = GroupStateMachine::new_as_member_with_config(config);
@@ -55,6 +57,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         };
         group.set_max_reelection_attempts(max_reelection_attempts);
         group.set_threshold_peer_score(threshold_peer_score);
+        group.set_liveness_criteria_yes(liveness_criteria_yes);
+        group.set_pending_update_max_epochs(pending_update_max_epochs);
 
         let initial_state = state_machine.current_state();
         if initial_state == GroupState::PendingJoin {

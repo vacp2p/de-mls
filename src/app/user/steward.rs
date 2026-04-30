@@ -275,7 +275,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             }
             (
                 group_members(&entry.group, &self.mls_service)?,
-                entry.state_machine.pending_update_max_epochs(),
+                entry.group.pending_update_max_epochs(),
             )
         };
 
@@ -426,8 +426,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 timing: Some(timing),
                 retry_round: list.retry_round(),
                 max_reelection_attempts: entry.group.max_reelection_attempts(),
-                liveness_criteria_yes: entry.state_machine.liveness_criteria_yes(),
+                liveness_criteria_yes: entry.group.liveness_criteria_yes(),
                 threshold_peer_score: entry.group.threshold_peer_score(),
+                pending_update_max_epochs: entry.group.pending_update_max_epochs(),
             };
 
             let app_msg: AppMessage = sync.into();

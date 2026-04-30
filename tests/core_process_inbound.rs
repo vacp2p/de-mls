@@ -461,6 +461,7 @@ fn test_group_sync_roundtrip() {
         max_reelection_attempts: 1,
         liveness_criteria_yes: true,
         threshold_peer_score: 0,
+        pending_update_max_epochs: 3,
     };
     let app_msg: AppMessage = sync.clone().into();
     let sync_packet =
@@ -587,6 +588,7 @@ fn test_group_sync_idempotent_for_existing_members() {
         max_reelection_attempts: 1,
         liveness_criteria_yes: true,
         threshold_peer_score: 0,
+        pending_update_max_epochs: 3,
     };
     let app_msg: AppMessage = sync.into();
     let sync_packet =
@@ -688,6 +690,7 @@ fn test_group_sync_carries_list_retry_round_not_group_counter() {
         max_reelection_attempts: steward_handle.max_reelection_attempts(),
         liveness_criteria_yes: true,
         threshold_peer_score: 0,
+        pending_update_max_epochs: 3,
     };
 
     // Joiner re-derives the ordering using the wire seed — should match.

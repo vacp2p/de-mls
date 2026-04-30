@@ -122,6 +122,10 @@ message GroupSync {
   // ECP removal (RFC §Peer Scoring). Joiners adopt this so removal ECPs
   // are raised at a consistent trigger across the group.
   int64 threshold_peer_score = 11;
+  // Max age (in epochs) of a buffered membership update before the epoch
+  // steward drops it. Joiners adopt this so every node expires entries at
+  // the same point.
+  uint32 pending_update_max_epochs = 12;
 }
 
 message PeerScore {

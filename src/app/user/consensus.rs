@@ -179,7 +179,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 (
                     e.state_machine.proposal_expiration(),
                     e.state_machine.consensus_timeout(),
-                    e.state_machine.liveness_criteria_yes(),
+                    e.group.liveness_criteria_yes(),
                 )
             })
             .await
