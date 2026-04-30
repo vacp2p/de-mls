@@ -47,8 +47,9 @@ pub(crate) struct GroupEntry {
 
 /// Registry of outstanding auto-vote timers, keyed by
 /// `(group_name, proposal_id)`. Cancelled on manual vote, consensus
-/// resolution, or group leave.
-type AutoVoteTimers = Arc<Mutex<HashMap<(String, u32), JoinHandle<()>>>>;
+/// resolution, or group leave. Keyed by group, then proposal id, so manual
+/// votes and group-leave teardown look up by `&str` without allocating.
+type AutoVoteTimers = Arc<Mutex<HashMap<Arc<str>, HashMap<u32, JoinHandle<()>>>>>;
 
 pub struct User<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler> {
     mls_service: Arc<MlsService<P::Storage>>,

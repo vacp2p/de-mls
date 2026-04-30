@@ -129,7 +129,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             else {
                 return Ok(());
             };
-            self.spawn_auto_vote(group_name.to_string(), proposal_id, delay, vote);
+            self.spawn_auto_vote(group_name, proposal_id, delay, vote);
         }
         Ok(())
     }
