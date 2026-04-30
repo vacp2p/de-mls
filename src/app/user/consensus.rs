@@ -146,12 +146,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             }
         };
 
-        let consensus_timeout = {
-            let groups = self.groups.read().await;
-            let Some(entry) = groups.get(&group_name) else {
-                return;
-            };
-            entry.state_machine.consensus_timeout()
+        let Some(consensus_timeout) = self
+            .with_entry(&group_name, |e| e.state_machine.consensus_timeout())
+            .await
+        else {
+            return;
         };
         tokio::time::sleep(consensus_timeout).await;
         self.resolve_on_timeout(&group_name, proposal_id).await;
@@ -175,15 +174,16 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         kind: ProposalKind,
         creator_vote: Option<bool>,
     ) -> Result<u32, UserError> {
-        let (proposal_expiration, consensus_timeout, liveness_criteria_yes) = {
-            let groups = self.groups.read().await;
-            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-            (
-                entry.state_machine.proposal_expiration(),
-                entry.state_machine.consensus_timeout(),
-                entry.state_machine.liveness_criteria_yes(),
-            )
-        };
+        let (proposal_expiration, consensus_timeout, liveness_criteria_yes) = self
+            .with_entry(group_name, |e| {
+                (
+                    e.state_machine.proposal_expiration(),
+                    e.state_machine.consensus_timeout(),
+                    e.state_machine.liveness_criteria_yes(),
+                )
+            })
+            .await
+            .ok_or(UserError::GroupNotFound)?;
 
         let (proposal_id, unbundled) = submit_proposal::<P>(
             group_name,
@@ -263,11 +263,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 self.handler
                     .on_app_message(group_name, vote_notification)
                     .await?;
-                let voting_delay = {
-                    let groups = self.groups.read().await;
-                    let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-                    entry.state_machine.voting_delay_for(kind)
-                };
+                let voting_delay = self
+                    .with_entry(group_name, |e| e.state_machine.voting_delay_for(kind))
+                    .await
+                    .ok_or(UserError::GroupNotFound)?;
                 self.spawn_auto_vote(
                     group_name.to_string(),
                     proposal_id,

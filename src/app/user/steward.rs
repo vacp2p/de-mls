@@ -446,16 +446,14 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         &self,
         group_name: &str,
     ) -> Result<(), UserError> {
-        let (is_steward, epoch, self_id, threshold) = {
-            let groups = self.groups.read().await;
-            let entry = groups.get(group_name).ok_or(UserError::GroupNotFound)?;
-            (
-                entry.group.is_steward(),
-                self.mls_service.current_epoch(group_name)?,
-                self.mls_service.wallet_bytes(),
-                entry.group.threshold_peer_score(),
-            )
-        };
+        let epoch = self.mls_service.current_epoch(group_name)?;
+        let self_id = self.mls_service.wallet_bytes();
+        let (is_steward, threshold) = self
+            .with_entry(group_name, |e| {
+                (e.group.is_steward(), e.group.threshold_peer_score())
+            })
+            .await
+            .ok_or(UserError::GroupNotFound)?;
 
         if !is_steward {
             return Ok(());

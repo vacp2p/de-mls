@@ -116,15 +116,16 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         // YES already resolved the session, so the timer would hit a
         // closed session.
         if expected_voters > 1 {
-            let (delay, vote) = {
-                let groups = self.groups.read().await;
-                let Some(entry) = groups.get(group_name) else {
-                    return Ok(());
-                };
-                (
-                    entry.state_machine.voting_delay_for(kind),
-                    entry.state_machine.liveness_criteria_yes(),
-                )
+            let Some((delay, vote)) = self
+                .with_entry(group_name, |e| {
+                    (
+                        e.state_machine.voting_delay_for(kind),
+                        e.state_machine.liveness_criteria_yes(),
+                    )
+                })
+                .await
+            else {
+                return Ok(());
             };
             self.spawn_auto_vote(group_name.to_string(), proposal_id, delay, vote);
         }

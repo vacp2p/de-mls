@@ -39,7 +39,7 @@ mod messaging;
 mod query;
 mod steward;
 
-struct GroupEntry {
+pub(crate) struct GroupEntry {
     group: Group,
     state_machine: GroupStateMachine,
 }
@@ -124,6 +124,23 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         self.scoring_service
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Read-locked snapshot of one group's entry. Returns `None` when the
+    /// entry isn't present — caller chooses between bailing
+    /// (`let Some(x) = ... else { return; }`) or escalating
+    /// (`.ok_or(UserError::GroupNotFound)?`).
+    ///
+    /// `f` runs while the read lock is held, so its return type must own
+    /// any data taken out of the entry — typical use is a tuple of `Copy`
+    /// state-machine fields.
+    pub(crate) async fn with_entry<R>(
+        &self,
+        group_name: &str,
+        f: impl FnOnce(&GroupEntry) -> R,
+    ) -> Option<R> {
+        let groups = self.groups.read().await;
+        groups.get(group_name).map(f)
     }
 
     /// Wallet address as checksummed hex.
