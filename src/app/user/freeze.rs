@@ -158,7 +158,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                         let target = entry
                             .group
                             .live_epoch_steward(violation_epoch, &members)
-                            .filter(|id| !id.is_empty() && *id != self_identity.as_slice())
+                            .filter(|id| !id.is_empty() && *id != self_identity)
                             .map(|id| id.to_vec());
 
                         (GroupState::Reelection, target)

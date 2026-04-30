@@ -709,6 +709,24 @@ impl Group {
         self.freeze_round = None;
     }
 
+    /// Move the active round's candidates out and discard the round itself.
+    /// Returns `None` when no round is active or its epoch doesn't match.
+    /// Used by `finalize_freeze_round` to consume candidates without cloning
+    /// the buffer (each `BufferedCommitCandidate` carries multiple `Vec<u8>`).
+    pub(crate) fn take_round_candidates(
+        &mut self,
+        epoch: u64,
+    ) -> Option<Vec<BufferedCommitCandidate>> {
+        let round = self.freeze_round.take()?;
+        if round.epoch != epoch {
+            // Wrong epoch — restore so the caller can discard it via the
+            // normal "no candidate" path without losing diagnostic state.
+            self.freeze_round = Some(round);
+            return None;
+        }
+        Some(round.candidates)
+    }
+
     // ─────────────────────────── Dedup Operations ───────────────────────────
 
     /// Check if a commit hash has already been committed (in committed history).

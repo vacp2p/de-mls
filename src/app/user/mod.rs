@@ -156,7 +156,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
     /// Wallet address as checksummed hex.
     pub fn identity_string(&self) -> String {
-        self.mls_service.wallet_hex()
+        self.mls_service.wallet_hex().to_string()
     }
 
     /// Drop all proposals / votes / sessions for this group from the

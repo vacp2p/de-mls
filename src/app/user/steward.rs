@@ -109,7 +109,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let is_authorized = entry
                 .group
                 .steward_list()
-                .and_then(|list| list.responsible_election_proposer(|c| mls_members_set.contains(c)))
+                .and_then(|list| {
+                    list.responsible_election_proposer(|c| mls_members_set.contains(c))
+                })
                 .is_some_and(|proposer| proposer == self_identity);
             if !is_authorized {
                 return Ok(());
@@ -212,7 +214,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
 
         let request = ViolationEvidence::deadlock(epoch)
-            .with_creator(self_id)
+            .with_creator(self_id.to_vec())
             .into_update_request()?;
 
         info!(group = group_name, epoch, "initiating Deadlock ECP");
@@ -331,10 +333,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             // Collect buffered updates whose target isn't already in the
             // active proposal queues. The approved queue is also in the group.
             let approved = entry.group.approved_proposals();
-            let approved_targets: std::collections::HashSet<&[u8]> = approved
-                .values()
-                .filter_map(target_identity_of)
-                .collect();
+            let approved_targets: std::collections::HashSet<&[u8]> =
+                approved.values().filter_map(target_identity_of).collect();
             let members_set = member_set(&members);
 
             entry
@@ -505,7 +505,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         for (target_id, current_score) in to_remove {
             let evidence =
                 ViolationEvidence::score_below_threshold(target_id.clone(), epoch, current_score)
-                    .with_creator(self_id.clone());
+                    .with_creator(self_id.to_vec());
             let request = evidence.into_update_request()?;
 
             info!(

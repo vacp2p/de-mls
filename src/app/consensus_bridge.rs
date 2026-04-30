@@ -50,7 +50,7 @@ pub struct ProposalParams {
 pub async fn submit_proposal<P: DeMlsProvider>(
     group_name: &str,
     request: &GroupUpdateRequest,
-    identity_string: String,
+    creator_id: &[u8],
     consensus: &ProviderConsensus<P>,
     params: ProposalParams,
 ) -> Result<(u32, AppMessage), CoreError> {
@@ -58,7 +58,7 @@ pub async fn submit_proposal<P: DeMlsProvider>(
     let create_request = CreateProposalRequest::new(
         uuid::Uuid::new_v4().to_string(),
         payload,
-        identity_string.into(),
+        creator_id.to_vec(),
         params.expected_voters,
         params.proposal_expiration.as_secs(),
         params.liveness_criteria_yes,

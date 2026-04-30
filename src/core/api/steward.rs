@@ -145,7 +145,7 @@ where
         group_name: group.group_name_bytes().to_vec(),
         mls_proposals,
         commit_message: commit,
-        steward_identity: mls.wallet_bytes(),
+        steward_identity: mls.wallet_bytes().to_vec(),
     };
 
     // Welcome bytes are deferred: sent from finalize_freeze_round after the

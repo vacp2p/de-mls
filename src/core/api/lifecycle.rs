@@ -24,7 +24,7 @@ where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {
     mls.create_group(name)?;
-    Group::new_as_creator(name, mls.wallet_bytes(), protocol_config)
+    Group::new_as_creator(name, mls.wallet_bytes().to_vec(), protocol_config)
 }
 
 /// Prepare a handle for joining an existing group.

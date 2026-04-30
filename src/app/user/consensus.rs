@@ -192,7 +192,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let (proposal_id, unbundled) = submit_proposal::<P>(
             group_name,
             &request,
-            self.mls_service.wallet_hex(),
+            self.mls_service.wallet_bytes(),
             &self.consensus_service,
             ProposalParams {
                 expected_voters,

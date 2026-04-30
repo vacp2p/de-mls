@@ -25,7 +25,7 @@ fn test_score_below_threshold_yes_transforms_to_remove_member() {
     let alice_mls = setup_mls(alice_hex);
     let mut group =
         create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
-    let steward_id = alice_mls.wallet_bytes();
+    let steward_id = alice_mls.wallet_bytes().to_vec();
 
     let target_id = vec![0xBB];
     let proposal_id = 100;
@@ -106,7 +106,7 @@ fn test_score_below_threshold_no_penalizes_creator() {
     let alice_mls = setup_mls(alice_hex);
     let mut group =
         create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
-    let steward_id = alice_mls.wallet_bytes();
+    let steward_id = alice_mls.wallet_bytes().to_vec();
 
     let target_id = vec![0xBB];
     let proposal_id = 102;
@@ -139,7 +139,7 @@ fn test_full_pipeline_penalties_to_removal() {
     let alice_mls = setup_mls(alice_hex);
     let mut group =
         create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
-    let steward_id = alice_mls.wallet_bytes();
+    let steward_id = alice_mls.wallet_bytes().to_vec();
     let target_id = vec![0xDD];
 
     let threshold = group.threshold_peer_score();
@@ -370,7 +370,7 @@ fn test_regular_emergency_yes_no_transform() {
         create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
 
     let target_id = vec![0xBB];
-    let creator_id = alice_mls.wallet_bytes();
+    let creator_id = alice_mls.wallet_bytes().to_vec();
     let proposal_id = 300;
 
     // Regular violation (not score-below-threshold)

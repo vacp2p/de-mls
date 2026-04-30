@@ -51,24 +51,21 @@ where
             .write()
             .map_err(|e| StorageError::Lock(e.to_string()))?;
         *guard = Some(data);
+
+        let _ = self.wallet_bytes.set(wallet.as_slice().to_vec());
+        let _ = self.wallet_hex.set(wallet.to_checksum(None));
         Ok(())
     }
 
-    /// Get the wallet address as a checksummed hex string ("0x...").
-    pub fn wallet_hex(&self) -> String {
-        self.identity
-            .read()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|id| id.wallet.to_checksum(None)))
-            .unwrap_or_default()
+    /// Get the wallet address as a checksummed hex string ("0x..."). Empty
+    /// string if `init()` hasn't run.
+    pub fn wallet_hex(&self) -> &str {
+        self.wallet_hex.get().map(String::as_str).unwrap_or("")
     }
 
-    /// Get the wallet address as raw bytes.
-    pub fn wallet_bytes(&self) -> Vec<u8> {
-        self.identity
-            .read()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|id| id.wallet.as_slice().to_vec()))
-            .unwrap_or_default()
+    /// Get the wallet address as raw bytes. Empty slice if `init()` hasn't
+    /// run.
+    pub fn wallet_bytes(&self) -> &[u8] {
+        self.wallet_bytes.get().map(Vec::as_slice).unwrap_or(&[])
     }
 }
