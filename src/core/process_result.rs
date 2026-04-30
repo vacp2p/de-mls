@@ -137,24 +137,29 @@ impl ViolationEvidence {
         })
     }
 
-    /// Peer-score penalty the target takes for this violation.
-    /// `ScoreBelowThreshold` is filtered upstream (target is being removed);
-    /// unknown wire values fall back to the harshest penalty.
-    pub fn target_score_event(&self) -> ScoreEvent {
+    /// Peer-score penalty the target takes for this violation, or `None`
+    /// for violation types that have no target-side score (`ScoreBelowThreshold`
+    /// drives a removal, not a penalty; `Deadlock` has no target;
+    /// `Unspecified` and unknown wire values are malformed).
+    pub fn target_score_event(&self) -> Option<ScoreEvent> {
         match ViolationType::try_from(self.violation_type) {
-            Ok(ViolationType::BrokenCommit) => ScoreEvent::BrokenCommit,
-            Ok(ViolationType::BrokenMlsProposal) => ScoreEvent::BrokenMlsProposal,
-            Ok(ViolationType::CensorshipInactivity) => ScoreEvent::CensorshipInactivity,
-            _ => ScoreEvent::BrokenCommit,
+            Ok(ViolationType::BrokenCommit) => Some(ScoreEvent::BrokenCommit),
+            Ok(ViolationType::BrokenMlsProposal) => Some(ScoreEvent::BrokenMlsProposal),
+            Ok(ViolationType::CensorshipInactivity) => Some(ScoreEvent::CensorshipInactivity),
+            Ok(ViolationType::ScoreBelowThreshold)
+            | Ok(ViolationType::Deadlock)
+            | Ok(ViolationType::ViolationUnspecified)
+            | Err(_) => None,
         }
     }
 
     /// `ScoreOp` applying [`Self::target_score_event`] to [`Self::target_member_id`].
-    pub fn target_score_op(&self) -> ScoreOp {
-        ScoreOp {
+    /// `None` when the violation type carries no target-side score.
+    pub fn target_score_op(&self) -> Option<ScoreOp> {
+        Some(ScoreOp {
             member_id: self.target_member_id.clone(),
-            event: self.target_score_event(),
-        }
+            event: self.target_score_event()?,
+        })
     }
 }
 

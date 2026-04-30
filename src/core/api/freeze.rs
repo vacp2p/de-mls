@@ -529,14 +529,21 @@ where
             }
             StagingOutcome::Violation(v) => {
                 mls.discard_staged_commit(&group_name)?;
-                return Ok(CandidateOutcome::Drop(v.target_score_op()));
+                return Ok(CandidateOutcome::Drop(
+                    v.target_score_op()
+                        .expect("staged-violation always has a target-side score"),
+                ));
             }
         };
 
     // Commit sender must be on the steward list (RFC §"Commit validation service").
     if let Some(violation) = check_commit_sender_authorized(group, &commit_sender, current_epoch) {
         mls.discard_staged_commit(&group_name)?;
-        return Ok(CandidateOutcome::Drop(violation.target_score_op()));
+        return Ok(CandidateOutcome::Drop(
+            violation
+                .target_score_op()
+                .expect("locally-built violation always has a target-side score"),
+        ));
     }
 
     // MLS actions must match the set we voted to approve.
@@ -548,7 +555,11 @@ where
         current_epoch,
     )? {
         mls.discard_staged_commit(&group_name)?;
-        return Ok(CandidateOutcome::Drop(violation.target_score_op()));
+        return Ok(CandidateOutcome::Drop(
+            violation
+                .target_score_op()
+                .expect("locally-built violation always has a target-side score"),
+        ));
     }
 
     mls.merge_staged_commit(&group_name)?;

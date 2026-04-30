@@ -13,7 +13,7 @@ use prost::Message;
 
 use crate::core::{ScoreEvent, ScoreOp};
 use crate::protos::de_mls::messages::v1::{
-    GroupUpdateRequest, ViolationEvidence, ViolationType, group_update_request::Payload,
+    GroupUpdateRequest, ViolationEvidence, group_update_request::Payload,
 };
 
 /// Score ops to apply when an emergency proposal resolves. Returns an
@@ -30,21 +30,14 @@ pub fn emergency_score_ops(payload: &[u8], approved: bool) -> Vec<ScoreOp> {
     };
 
     if approved {
-        if is_targetless_or_self_executing(&evidence) {
-            vec![creator_reward(&evidence)]
-        } else {
-            vec![evidence.target_score_op(), creator_reward(&evidence)]
+        let mut ops = vec![creator_reward(&evidence)];
+        if let Some(target_op) = evidence.target_score_op() {
+            ops.push(target_op);
         }
+        ops
     } else {
         vec![creator_penalty(&evidence)]
     }
-}
-
-fn is_targetless_or_self_executing(ev: &ViolationEvidence) -> bool {
-    matches!(
-        ViolationType::try_from(ev.violation_type),
-        Ok(ViolationType::ScoreBelowThreshold) | Ok(ViolationType::Deadlock)
-    )
 }
 
 fn creator_reward(ev: &ViolationEvidence) -> ScoreOp {
