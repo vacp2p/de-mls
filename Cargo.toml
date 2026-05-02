@@ -26,10 +26,10 @@ default = []
 waku = ["base64", "libc"]
 
 [dependencies]
-openmls = "0.7.1"
-openmls_basic_credential = "0.4.1"
-openmls_rust_crypto = "0.4.1"
-openmls_traits = "0.4.1"
+openmls = "0.8.1"
+openmls_basic_credential = "0.5.0"
+openmls_rust_crypto = "0.5.0"
+openmls_traits = "0.5.0"
 
 futures = "0.3.31"
 tower-http = { version = "0.6.6", features = ["cors"] }
