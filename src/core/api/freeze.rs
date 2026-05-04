@@ -746,13 +746,18 @@ fn expected_action_for_request(req: &GroupUpdateRequest) -> Option<MlsProposalAc
 /// RFC §"de-MLS Objects": any steward-list member may commit to preserve
 /// liveness. Epoch-steward priority is about *selection*, not authorization.
 ///
-/// `None` also covers "no list yet" (joiner pre-sync) and "list exhausted"
-/// (re-election in progress).
+/// `None` also covers "no list yet" (joiner pre-sync), "list exhausted"
+/// (re-election in progress), and "Layer-3 recovery_mode active" (RFC
+/// §Anti-Deadlock: any member MAY commit to restore liveness; mirrors
+/// the relaxed gate in `create_commit_candidate`).
 fn check_commit_sender_authorized(
     group: &Group,
     commit_sender: &[u8],
     epoch: u64,
 ) -> Option<ViolationEvidence> {
+    if group.is_in_recovery_mode() {
+        return None;
+    }
     let list = group.steward_list()?;
     if list.is_exhausted(epoch) {
         return None;
