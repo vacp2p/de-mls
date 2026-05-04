@@ -92,7 +92,7 @@ where
 }
 
 /// Wrap raw MLS welcome bytes into an `OutboundPacket` on the welcome subtopic.
-pub fn build_invitation_packet(
+pub(crate) fn build_invitation_packet(
     welcome_bytes: Vec<u8>,
     group: &Group,
     app_id: &[u8],

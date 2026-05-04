@@ -10,6 +10,7 @@ use crate::{
         error::CoreError,
         group::{BufferedCommitCandidate, Group, member_set},
         proposal_kind::ProposalKind,
+        steward_list::ProtocolConfig,
     },
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     mls_crypto::{
@@ -194,8 +195,6 @@ where
 }
 
 // ─────────────────────────── Housekeeping Decisions ───────────────────────────
-
-use crate::core::steward_list::ProtocolConfig;
 
 /// Outcome of [`evaluate_election_initiation`]. `Skip` carries a brief
 /// reason for the log; `Proposed` carries the parameters the caller uses

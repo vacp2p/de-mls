@@ -1,12 +1,14 @@
 //! Freeze round candidate processing, selection, and commit application.
 
+use std::collections::HashMap;
+
 use openmls_rust_crypto::MemoryStorage;
 use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::{
     core::{
-        CoreError, Group, ProcessResult, ScoreEvent, ScoreOp,
+        CoreError, Group, ProcessResult, ProposalId, ScoreEvent, ScoreOp,
         api::lifecycle::build_invitation_packet, group::BufferedCommitCandidate,
     },
     ds::OutboundPacket,
@@ -39,7 +41,7 @@ pub struct FreezeFinalizeResult {
     /// from `Group::approved_proposals`. Empty when no commit applied or
     /// when an urgent-target commit drops only the targeted entry. App
     /// layer typically archives this for UI history.
-    pub committed_batch: std::collections::HashMap<crate::core::ProposalId, GroupUpdateRequest>,
+    pub committed_batch: HashMap<ProposalId, GroupUpdateRequest>,
 }
 
 /// Terminal outcome of a freeze round: either a dispatchable result or no
@@ -60,7 +62,7 @@ pub enum FreezeOutcome {
 }
 
 /// Canonical commit hash used for dedup of buffered/committed candidates.
-pub fn compute_commit_hash(commit_message: &[u8]) -> Vec<u8> {
+pub(crate) fn compute_commit_hash(commit_message: &[u8]) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(commit_message);
     hasher.finalize().to_vec()
@@ -71,7 +73,7 @@ pub fn compute_commit_hash(commit_message: &[u8]) -> Vec<u8> {
 /// Enforces the invariants [`finalize_freeze_round`] assumes: non-empty
 /// proposals/commit, valid MLS wire kinds, non-empty `steward_identity`,
 /// not already committed. No MLS state is mutated here.
-pub fn process_commit_candidate<S>(
+pub(crate) fn process_commit_candidate<S>(
     group: &mut Group,
     candidate_msg: CommitCandidate,
     mls: &MlsService<S>,
@@ -292,7 +294,7 @@ enum CandidateOutcome {
     Terminal {
         outcome: FreezeOutcome,
         committer: Vec<u8>,
-        committed_batch: std::collections::HashMap<crate::core::ProposalId, GroupUpdateRequest>,
+        committed_batch: HashMap<ProposalId, GroupUpdateRequest>,
     },
     Drop(ScoreOp),
 }
@@ -408,7 +410,7 @@ where
     Ok(FreezeFinalizeResult {
         outcome: FreezeOutcome::NoCandidate,
         score_ops,
-        committed_batch: std::collections::HashMap::new(),
+        committed_batch: HashMap::new(),
     })
 }
 
@@ -785,12 +787,12 @@ fn check_commit_sender_authorized(
 fn record_applied_commit(
     group: &mut Group,
     commit_hash: Vec<u8>,
-) -> std::collections::HashMap<crate::core::ProposalId, GroupUpdateRequest> {
+) -> HashMap<ProposalId, GroupUpdateRequest> {
     group.record_committed_batch(commit_hash);
     let snapshot = if let Some(target) = group.take_urgent_commit_target() {
         // Urgent commit: leave the rest of the queue for the next cycle.
         group.drop_approved_removals_for(&target);
-        std::collections::HashMap::new()
+        HashMap::new()
     } else {
         group.clear_approved_proposals()
     };

@@ -43,8 +43,8 @@ pub enum ScoreEvent {
     MisbehavingCommit,
 }
 
-/// A score operation produced by core logic and fed into the app's
-/// [`PeerScoringService`](crate::app::PeerScoringService).
+/// A score operation produced by core logic. The app layer feeds these
+/// into its scoring service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScoreOp {
     pub member_id: Vec<u8>,
@@ -54,7 +54,7 @@ pub struct ScoreOp {
 // ── Scoring configuration ───────────────────────────────────────────
 
 /// Maps each [`ScoreEvent`] to a signed score delta (positive = reward).
-/// Default impl: [`FixedScoringProvider`](crate::app::FixedScoringProvider).
+/// The app layer ships a fixed-table default impl.
 pub trait ScoringProvider {
     fn score_delta(&self, event: ScoreEvent) -> i64;
 }
@@ -65,8 +65,8 @@ pub struct ScoringConfig {
     pub default_score: i64,
 }
 
-/// Per-(group, member) score persistence. Default impl:
-/// [`InMemoryPeerScoreStorage`](crate::app::InMemoryPeerScoreStorage).
+/// Per-(group, member) score persistence. The app layer ships an
+/// in-memory default impl.
 pub trait PeerScoreStorage {
     fn get(&self, group_id: &str, member_id: &[u8]) -> Option<i64>;
     fn set(&mut self, group_id: &str, member_id: &[u8], score: i64);

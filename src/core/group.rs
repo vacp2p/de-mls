@@ -92,8 +92,7 @@ pub(crate) struct FreezeRound {
     pub candidates: Vec<BufferedCommitCandidate>,
 }
 
-/// Per-group app-level state. Wrap in `RwLock` at the app layer — DE-MLS
-/// holds this across async contexts. Stewards batch commits; members vote.
+/// Per-group protocol state. Stewards batch commits; members vote.
 /// Construct with [`Self::new_as_creator`] or [`Self::new_as_joiner`].
 #[derive(Clone, Debug)]
 pub struct Group {
@@ -249,11 +248,6 @@ impl Group {
 
     pub fn allow_subset_candidates(&self) -> bool {
         self.protocol_config.allow_subset_candidates
-    }
-
-    /// Overwritten when the handle receives a `GroupSync` from the steward.
-    pub fn set_allow_subset_candidates(&mut self, allow: bool) {
-        self.protocol_config.allow_subset_candidates = allow;
     }
 
     /// Derived from `steward_list.contains(self_identity)` — `false` for
@@ -760,6 +754,8 @@ impl Group {
             .get(&pid)
             .is_some_and(|req| is_auto_approved_entry(pid, req))
     }
+
+    // ─────────────────────────── Reelection / GroupSync-Tunable Fields ───────────────────────────
 
     /// Current steward-election retry round (0 for fresh elections).
     pub fn reelection_round(&self) -> u32 {
