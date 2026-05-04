@@ -5289,9 +5289,9 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "openmls"
-version = "0.7.4"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6986942607b11b141468e415617fd74a56f790e8f8810fb5a77e7d173182b689"
+checksum = "dcb512bfe6a55777518853ea535c6241f069cb0e8984678c117151d2a1e7e903"
 dependencies = [
  "log",
  "openmls_traits",
@@ -5305,9 +5305,9 @@ dependencies = [
 
 [[package]]
 name = "openmls_basic_credential"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3e6454b2b1b6749fc2f142d7f74eb387f7793be88187ed372e9f5f4cf10c34c"
+checksum = "983e8be1457dd6f316f409292cec334af3b57b49a19deadc925c83c3c35e15b6"
 dependencies = [
  "ed25519-dalek",
  "openmls_traits",
@@ -5319,9 +5319,9 @@ dependencies = [
 
 [[package]]
 name = "openmls_memory_storage"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e7b071ea5573a97efaa72b7c53e81cebc644b62ef0fe992bad685cc0f7dd4ea"
+checksum = "1a52c927ddb9940acb96d51aebd54b8b9c601c7119e6609622fb3f2cbe16abe3"
 dependencies = [
  "log",
  "openmls_traits",
@@ -5332,9 +5332,9 @@ dependencies = [
 
 [[package]]
 name = "openmls_rust_crypto"
-version = "0.4.4"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e864b90d4b297b84a46ada993142a72392737248050100533ae063586c7f433f"
+checksum = "fafcc8a3552b10fbb3ab757cccaf1a34081e826ca819f49aa7e6645b1d95c00f"
 dependencies = [
  "aes-gcm",
  "chacha20poly1305",
@@ -5357,9 +5357,9 @@ dependencies = [
 
 [[package]]
 name = "openmls_traits"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e21d8877bacdbc407060df29bf59b145bb886a8fa0099b87ae8067a34b902a13"
+checksum = "4f88ccdd53448dfdbfa5b8da8ba4e527c418fdb966418172bace2e3b41eedd56"
 dependencies = [
  "serde",
  "tls_codec",
