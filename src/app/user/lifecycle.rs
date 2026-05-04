@@ -79,6 +79,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             Arc::new(RwLock::new(GroupEntry {
                 group,
                 state_machine,
+                epoch_history: std::collections::VecDeque::new(),
             })),
         );
         drop(groups);

@@ -10,7 +10,7 @@
 //! tasks just take their own handle via `self.clone()`.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     str::FromStr,
     sync::{Arc, Mutex},
 };
@@ -25,9 +25,11 @@ use crate::{
         PeerScoringService, StateChangeHandler, UserError,
     },
     core::{
-        DeMlsProvider, DefaultProvider, Group, GroupEventHandler, ProviderConsensus, ScoringConfig,
+        DeMlsProvider, DefaultProvider, Group, GroupEventHandler, ProposalId, ProviderConsensus,
+        ScoringConfig,
     },
     mls_crypto::{MemoryDeMlsStorage, MlsService},
+    protos::de_mls::messages::v1::GroupUpdateRequest,
 };
 
 mod consensus;
@@ -39,9 +41,34 @@ mod messaging;
 mod query;
 mod steward;
 
+/// Cap on the per-group UI history of committed batches. App-layer
+/// concern only; protocol logic in `core::Group` is history-agnostic.
+const MAX_EPOCH_HISTORY: usize = 10;
+
 pub(crate) struct GroupEntry {
-    group: Group,
-    state_machine: GroupStateMachine,
+    pub(crate) group: Group,
+    pub(crate) state_machine: GroupStateMachine,
+    /// Per-group rolling history of committed batches, most recent last.
+    /// Bounded at [`MAX_EPOCH_HISTORY`]. Populated whenever the caller
+    /// invokes [`GroupEntry::archive_committed_batch`] with the snapshot
+    /// returned by `Group::clear_approved_proposals`.
+    pub(crate) epoch_history: VecDeque<HashMap<ProposalId, GroupUpdateRequest>>,
+}
+
+impl GroupEntry {
+    /// Append a just-committed batch to the bounded UI history.
+    pub(crate) fn archive_committed_batch(
+        &mut self,
+        snapshot: HashMap<ProposalId, GroupUpdateRequest>,
+    ) {
+        if snapshot.is_empty() {
+            return;
+        }
+        if self.epoch_history.len() >= MAX_EPOCH_HISTORY {
+            self.epoch_history.pop_front();
+        }
+        self.epoch_history.push_back(snapshot);
+    }
 }
 
 /// Registry of outstanding auto-vote timers, keyed by

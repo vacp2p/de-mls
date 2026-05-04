@@ -165,8 +165,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         group_name: &str,
     ) -> Result<Vec<Vec<GroupUpdateRequest>>, UserError> {
         self.with_entry(group_name, |e| {
-            e.group
-                .epoch_history()
+            e.epoch_history
                 .iter()
                 .map(|batch| batch.values().cloned().collect())
                 .collect()

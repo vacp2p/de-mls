@@ -35,6 +35,11 @@ use crate::{
 pub struct FreezeFinalizeResult {
     pub outcome: FreezeOutcome,
     pub score_ops: Vec<ScoreOp>,
+    /// The approved-proposal batch that was just committed and cleared
+    /// from `Group::approved_proposals`. Empty when no commit applied or
+    /// when an urgent-target commit drops only the targeted entry. App
+    /// layer typically archives this for UI history.
+    pub committed_batch: std::collections::HashMap<crate::core::ProposalId, GroupUpdateRequest>,
 }
 
 /// Terminal outcome of a freeze round: either a dispatchable result or no
@@ -287,6 +292,7 @@ enum CandidateOutcome {
     Terminal {
         outcome: FreezeOutcome,
         committer: Vec<u8>,
+        committed_batch: std::collections::HashMap<crate::core::ProposalId, GroupUpdateRequest>,
     },
     Drop(ScoreOp),
 }
@@ -336,7 +342,11 @@ where
         };
 
         match apply_result {
-            CandidateOutcome::Terminal { outcome, committer } => {
+            CandidateOutcome::Terminal {
+                outcome,
+                committer,
+                committed_batch,
+            } => {
                 score_ops.push(ScoreOp {
                     member_id: committer.clone(),
                     event: ScoreEvent::SuccessfulCommit,
@@ -378,7 +388,11 @@ where
                         );
                     }
                 }
-                return Ok(FreezeFinalizeResult { outcome, score_ops });
+                return Ok(FreezeFinalizeResult {
+                    outcome,
+                    score_ops,
+                    committed_batch,
+                });
             }
             CandidateOutcome::Drop(op) => score_ops.push(op),
         }
@@ -394,6 +408,7 @@ where
     Ok(FreezeFinalizeResult {
         outcome: FreezeOutcome::NoCandidate,
         score_ops,
+        committed_batch: std::collections::HashMap::new(),
     })
 }
 
@@ -472,7 +487,7 @@ where
         .welcome_bytes
         .map(|bytes| build_invitation_packet(bytes, group, app_id));
 
-    record_applied_commit(group, chosen.commit_hash);
+    let committed_batch = record_applied_commit(group, chosen.commit_hash);
 
     let result = if self_removed {
         ProcessResult::LeaveGroup
@@ -485,6 +500,7 @@ where
             outbound,
         },
         committer,
+        committed_batch,
     })
 }
 
@@ -559,7 +575,7 @@ where
     }
 
     mls.merge_staged_commit(&group_name)?;
-    record_applied_commit(group, chosen.commit_hash);
+    let committed_batch = record_applied_commit(group, chosen.commit_hash);
 
     // Remote candidates never carry welcome bytes — only the author sends those.
     let result = if self_removed {
@@ -573,6 +589,7 @@ where
             outbound: None,
         },
         committer: commit_sender,
+        committed_batch,
     })
 }
 
@@ -756,15 +773,24 @@ fn check_commit_sender_authorized(
 
 // ─────────────────────────── State Utilities ───────────────────────────
 
-fn record_applied_commit(group: &mut Group, commit_hash: Vec<u8>) {
+/// Apply post-commit bookkeeping and return the cleared batch (empty when
+/// the commit was urgent-target-only and only the targeted entry was
+/// dropped). Caller surfaces the batch through `FreezeFinalizeResult` so
+/// the app layer can archive it for UI history.
+fn record_applied_commit(
+    group: &mut Group,
+    commit_hash: Vec<u8>,
+) -> std::collections::HashMap<crate::core::ProposalId, GroupUpdateRequest> {
     group.record_committed_batch(commit_hash);
-    if let Some(target) = group.take_urgent_commit_target() {
+    let snapshot = if let Some(target) = group.take_urgent_commit_target() {
         // Urgent commit: leave the rest of the queue for the next cycle.
         group.drop_approved_removals_for(&target);
+        std::collections::HashMap::new()
     } else {
-        group.clear_approved_proposals();
-    }
+        group.clear_approved_proposals()
+    };
     group.clear_freeze_round();
+    snapshot
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
