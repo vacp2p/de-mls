@@ -26,14 +26,18 @@ mod steward_list;
 
 // ── Core group operations ──
 pub use api::{
-    FreezeFinalizeResult, FreezeOutcome, build_key_package_message, build_message,
-    create_commit_candidate, create_group, finalize_freeze_round, group_members, prepare_to_join,
-    process_inbound,
+    ElectionDecision, FreezeFinalizeResult, FreezeOutcome, build_create_proposal_request,
+    build_key_package_message, build_message, create_commit_candidate, create_group,
+    evaluate_election_initiation, finalize_freeze_round, group_members, is_deadlock_ecp_proposer,
+    prepare_to_join, process_inbound,
 };
 
 // ── Consensus result application (pure, synchronous) ──
 pub use consensus::{ConsensusApplyResult, apply_consensus_result};
-pub use peer_scoring::{PeerScoreStorage, ScoreEvent, ScoreOp, ScoringConfig, ScoringProvider};
+pub use peer_scoring::{
+    PeerScoreStorage, ScoreEvent, ScoreOp, ScoringConfig, ScoringMemberDiff, ScoringProvider,
+    emergency_score_ops, scoring_member_diff,
+};
 
 // ── Error type ──
 pub use error::CoreError;

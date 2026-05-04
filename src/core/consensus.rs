@@ -1,9 +1,8 @@
 //! Pure consensus result application.
 //!
 //! Updates a [`Group`]'s proposal queues in response to a consensus
-//! outcome. No I/O, no service calls, no peer-scoring policy — score
-//! deltas for emergency outcomes are derived at the app layer in
-//! `crate::app::user::emergency`.
+//! outcome. No I/O, no service calls. Score deltas for emergency outcomes
+//! are derived alongside in [`crate::core::emergency_score_ops`].
 //!
 //! App-layer helpers that wire consensus events to the UI and transport
 //! (`submit_proposal`, `cast_vote`, `forward_incoming_proposal`,
@@ -24,7 +23,8 @@ use crate::{
 /// Result of applying a consensus outcome. `force_freezing` signals
 /// the app to skip the inactivity timer; `queued_remove_target` lets
 /// the app refresh the steward list when the target is on it. Score
-/// ops for emergency outcomes live in `crate::app::user::emergency`.
+/// ops for emergency outcomes are derived by
+/// [`emergency_score_ops`](crate::core::emergency_score_ops).
 #[derive(Debug, Clone, Default)]
 pub struct ConsensusApplyResult {
     pub election: Option<StewardElectionProposal>,

@@ -32,7 +32,6 @@ use crate::{
 
 mod consensus;
 mod consensus_events;
-pub(crate) mod emergency;
 mod freeze;
 mod inbound;
 mod lifecycle;

@@ -4,10 +4,10 @@
 
 use prost::Message;
 
-use de_mls::app::{PeerScoringService, emergency_score_ops};
+use de_mls::app::PeerScoringService;
 use de_mls::core::{
     Group, ProtocolConfig, ScoreEvent, ScoreOp, apply_consensus_result, build_key_package_message,
-    create_group, group_members, prepare_to_join, process_inbound,
+    create_group, emergency_score_ops, group_members, prepare_to_join, process_inbound,
 };
 use de_mls::ds::WELCOME_SUBTOPIC;
 use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService};
