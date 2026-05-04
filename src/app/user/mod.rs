@@ -46,21 +46,28 @@ mod steward;
 const MAX_EPOCH_HISTORY: usize = 10;
 
 pub(crate) struct GroupEntry {
-    pub(crate) group: Group,
-    pub(crate) state_machine: GroupStateMachine,
+    group: Group,
+    state_machine: GroupStateMachine,
     /// Per-group rolling history of committed batches, most recent last.
-    /// Bounded at [`MAX_EPOCH_HISTORY`]. Populated whenever the caller
-    /// invokes [`GroupEntry::archive_committed_batch`] with the snapshot
+    /// Bounded at [`MAX_EPOCH_HISTORY`]. Populated by
+    /// [`GroupEntry::archive_committed_batch`] from the snapshot
     /// returned by `Group::clear_approved_proposals`.
-    pub(crate) epoch_history: VecDeque<HashMap<ProposalId, GroupUpdateRequest>>,
+    epoch_history: VecDeque<HashMap<ProposalId, GroupUpdateRequest>>,
 }
 
 impl GroupEntry {
+    /// Build a fresh entry. Internal-only auxiliary state (epoch
+    /// history, future per-entry caches) starts empty.
+    pub(crate) fn new(group: Group, state_machine: GroupStateMachine) -> Self {
+        Self {
+            group,
+            state_machine,
+            epoch_history: VecDeque::new(),
+        }
+    }
+
     /// Append a just-committed batch to the bounded UI history.
-    pub(crate) fn archive_committed_batch(
-        &mut self,
-        snapshot: HashMap<ProposalId, GroupUpdateRequest>,
-    ) {
+    fn archive_committed_batch(&mut self, snapshot: HashMap<ProposalId, GroupUpdateRequest>) {
         if snapshot.is_empty() {
             return;
         }
