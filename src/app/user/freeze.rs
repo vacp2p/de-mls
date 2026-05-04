@@ -87,7 +87,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let finalize_result = {
             let mut entry = entry_arc.write().await;
             let allow_subset = entry.group.allow_subset_candidates();
-            match finalize_freeze_round(
+            let result = match finalize_freeze_round(
                 &mut entry.group,
                 &self.mls_service,
                 allow_subset,
@@ -98,7 +98,9 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                     error!(group = group_name, error = %e, "freeze finalize failed");
                     FreezeFinalizeResult::default()
                 }
-            }
+            };
+            entry.archive_committed_batch(result.committed_batch.clone());
+            result
         };
 
         // Apply locally-observed score events before dispatching the

@@ -1,5 +1,6 @@
 //! Group lifecycle operations: creation, joining, and message building.
 
+use hashgraph_like_consensus::types::CreateProposalRequest;
 use openmls_rust_crypto::MemoryStorage;
 use prost::Message;
 
@@ -7,7 +8,9 @@ use crate::{
     core::{error::CoreError, group::Group, steward_list::ProtocolConfig},
     ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC},
     mls_crypto::{DeMlsStorage, MlsService},
-    protos::de_mls::messages::v1::{AppMessage, InvitationToJoin, UserKeyPackage, WelcomeMessage},
+    protos::de_mls::messages::v1::{
+        AppMessage, GroupUpdateRequest, InvitationToJoin, UserKeyPackage, WelcomeMessage,
+    },
 };
 
 // ─────────────────────────── Group Lifecycle ───────────────────────────
@@ -89,7 +92,7 @@ where
 }
 
 /// Wrap raw MLS welcome bytes into an `OutboundPacket` on the welcome subtopic.
-pub fn build_invitation_packet(
+pub(crate) fn build_invitation_packet(
     welcome_bytes: Vec<u8>,
     group: &Group,
     app_id: &[u8],
@@ -104,4 +107,28 @@ pub fn build_invitation_packet(
         group.group_name(),
         app_id,
     )
+}
+
+// ─────────────────────────── Consensus Proposal Building ───────────────────────────
+
+/// Build the consensus-library `CreateProposalRequest` for a
+/// `GroupUpdateRequest`. Pure — no async, no I/O. The caller (app
+/// layer) submits the resulting request via
+/// `ProviderConsensus::create_proposal_with_config`.
+pub fn build_create_proposal_request(
+    request: &GroupUpdateRequest,
+    creator_id: &[u8],
+    expected_voters: u32,
+    proposal_expiration_secs: u64,
+    liveness_criteria_yes: bool,
+) -> Result<CreateProposalRequest, CoreError> {
+    let payload = request.encode_to_vec();
+    Ok(CreateProposalRequest::new(
+        uuid::Uuid::new_v4().to_string(),
+        payload,
+        creator_id.to_vec(),
+        expected_voters,
+        proposal_expiration_secs,
+        liveness_criteria_yes,
+    )?)
 }

@@ -9,7 +9,6 @@ use hashgraph_like_consensus::{
     error::ConsensusError,
     protos::consensus::v1::{Proposal, Vote},
     session::ConsensusConfig,
-    types::CreateProposalRequest,
     utils::build_vote,
 };
 use prost::Message;
@@ -19,7 +18,7 @@ use crate::{
     app::error::UserError,
     core::{
         CoreError, DeMlsProvider, Group, GroupEventHandler, ProviderConsensus,
-        auto_approved_leave_proposal_id,
+        auto_approved_leave_proposal_id, build_create_proposal_request,
     },
     protos::de_mls::messages::v1::{
         AppMessage, GroupUpdateRequest, RemoveMember, VotePayload, group_update_request,
@@ -54,11 +53,9 @@ pub async fn submit_proposal<P: DeMlsProvider>(
     consensus: &ProviderConsensus<P>,
     params: ProposalParams,
 ) -> Result<(u32, AppMessage), CoreError> {
-    let payload = request.encode_to_vec();
-    let create_request = CreateProposalRequest::new(
-        uuid::Uuid::new_v4().to_string(),
-        payload,
-        creator_id.to_vec(),
+    let create_request = build_create_proposal_request(
+        request,
+        creator_id,
         params.expected_voters,
         params.proposal_expiration.as_secs(),
         params.liveness_criteria_yes,

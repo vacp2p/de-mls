@@ -76,10 +76,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         }
         groups.insert(
             group_name.to_string(),
-            Arc::new(RwLock::new(GroupEntry {
-                group,
-                state_machine,
-            })),
+            Arc::new(RwLock::new(GroupEntry::new(group, state_machine))),
         );
         drop(groups);
 

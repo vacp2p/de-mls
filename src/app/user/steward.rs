@@ -6,8 +6,9 @@ use tracing::{error, info};
 use crate::{
     app::{StateChangeHandler, User, UserError},
     core::{
-        DeMlsProvider, GroupEventHandler, StewardList, build_message, group_members, member_set,
-        target_identity_of,
+        DeMlsProvider, ElectionDecision, GroupEventHandler, StewardList, build_message,
+        evaluate_election_initiation, group_members, is_deadlock_ecp_proposer, member_set,
+        scoring_member_diff, target_identity_of,
     },
     mls_crypto::ShortId,
     protos::de_mls::messages::v1::{
@@ -22,23 +23,21 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     /// Add any MLS members not yet tracked in scoring, and drop scored
     /// entries for identities no longer in MLS. Takes `mls_members`
     /// pre-fetched so the caller can release any group-entry guard
-    /// before the scoring mutex is acquired.
+    /// before the scoring mutex is acquired. Diffing is delegated to
+    /// [`scoring_member_diff`]; this method only applies the diff.
     pub fn sync_scoring_members(&self, group_name: &str, mls_members: &[Vec<u8>]) {
         let mut scoring = self.scoring();
-        let scored = scoring.all_members_with_scores(group_name);
-        let scored_ids: std::collections::HashSet<Vec<u8>> =
-            scored.iter().map(|(id, _)| id.clone()).collect();
-        let mls_ids: std::collections::HashSet<Vec<u8>> = mls_members.iter().cloned().collect();
-
-        for member_id in &mls_ids {
-            if !scored_ids.contains(member_id) {
-                scoring.add_member(group_name, member_id);
-            }
+        let scored: Vec<Vec<u8>> = scoring
+            .all_members_with_scores(group_name)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let diff = scoring_member_diff(&scored, mls_members);
+        for member_id in &diff.to_add {
+            scoring.add_member(group_name, member_id);
         }
-        for member_id in &scored_ids {
-            if !mls_ids.contains(member_id) {
-                scoring.remove_member(group_name, member_id);
-            }
+        for member_id in &diff.to_remove {
+            scoring.remove_member(group_name, member_id);
         }
     }
 
@@ -93,54 +92,32 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             .lookup_entry(group_name)
             .await
             .ok_or(UserError::GroupNotFound)?;
-        let (members, election_epoch, config, retry_round) = {
+        let (members, election_epoch, retry_round, config) = {
             let entry = entry_arc.read().await;
             let epoch = self.mls_service.current_epoch(group_name)?;
-            if !recovery && !entry.group.is_steward_list_exhausted(epoch) {
-                return Ok(());
-            }
-            if entry.group.has_election_in_flight() {
-                return Ok(());
-            }
             let mls_members = group_members(&entry.group, &self.mls_service)?;
-            let mls_members_set = member_set(&mls_members);
-
             let self_identity = self.mls_service.wallet_bytes();
-            let is_authorized = entry
-                .group
-                .steward_list()
-                .and_then(|list| {
-                    list.responsible_election_proposer(|c| mls_members_set.contains(c))
-                })
-                .is_some_and(|proposer| proposer == self_identity);
-            if !is_authorized {
-                return Ok(());
-            }
-
-            let candidate_pool: Vec<Vec<u8>> = mls_members
-                .into_iter()
-                .filter(|m| {
-                    if extra_exclude.is_some_and(|x| x == m.as_slice()) {
-                        return false;
+            match evaluate_election_initiation(
+                &entry.group,
+                &mls_members,
+                self_identity,
+                epoch,
+                recovery,
+                extra_exclude,
+            ) {
+                ElectionDecision::Skip(reason) => {
+                    if matches!(reason, "no eligible candidates after filter") {
+                        info!(group = group_name, "skipping election: {reason}");
                     }
-                    if recovery && entry.group.is_pending_removal(m) {
-                        return false;
-                    }
-                    true
-                })
-                .collect();
-
-            if candidate_pool.is_empty() {
-                info!(
-                    group = group_name,
-                    "skipping election: no eligible candidates after filter"
-                );
-                return Ok(());
+                    return Ok(());
+                }
+                ElectionDecision::Proposed {
+                    candidate_pool,
+                    election_epoch,
+                    retry_round,
+                    protocol_config,
+                } => (candidate_pool, election_epoch, retry_round, protocol_config),
             }
-
-            let config = entry.group.protocol_config().clone();
-            let retry_round = entry.group.reelection_round();
-            (candidate_pool, epoch, config, retry_round)
         };
 
         let sn = config.compute_list_size(members.len());
@@ -194,19 +171,10 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let (is_authorized, self_id, epoch) = {
             let entry = entry_arc.read().await;
             let mls_members = group_members(&entry.group, &self.mls_service)?;
-            let mls_members_set = member_set(&mls_members);
             let self_id = self.mls_service.wallet_bytes();
-            let is_authorized = entry
-                .group
-                .steward_list()
-                .and_then(|list| {
-                    list.responsible_election_proposer(|c| {
-                        mls_members_set.contains(c) && !entry.group.is_pending_removal(c)
-                    })
-                })
-                .is_some_and(|proposer| proposer == self_id);
+            let authorized = is_deadlock_ecp_proposer(&entry.group, &mls_members, self_id);
             let epoch = self.mls_service.current_epoch(group_name)?;
-            (is_authorized, self_id, epoch)
+            (authorized, self_id, epoch)
         };
 
         if !is_authorized {

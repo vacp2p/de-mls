@@ -8,11 +8,10 @@ use prost::Message;
 use tracing::{error, info};
 
 use crate::{
-    app::user::emergency::emergency_score_ops,
     app::{GroupState, StateChangeHandler, User, UserError},
     core::{
         DeMlsProvider, GroupEventHandler, ProposalKind, ScoreOp, apply_consensus_result,
-        group_members, target_identity_of,
+        emergency_score_ops, group_members, target_identity_of,
     },
     protos::de_mls::messages::v1::{
         GroupUpdateRequest, StewardElectionProposal, group_update_request,

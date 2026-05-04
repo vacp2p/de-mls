@@ -18,13 +18,6 @@ use crate::{
 /// Consensus proposal identifier (assigned by the consensus service).
 pub type ProposalId = u32;
 
-/// How many past approved-proposal batches to retain for UI display.
-///
-/// RFC §"Creating Voting Proposal" requires retaining finalized proposals for
-/// at least `threshold_duration`; this count-based cap is a placeholder until
-/// that becomes a first-class config value (see `docs/ROADMAP.md`).
-const MAX_EPOCH_HISTORY: usize = 10;
-
 /// Deterministic proposal ID for a self-leave, derived from the leaver's
 /// identity. Pinning the ID is what makes a leaver's crash-retry dedupe
 /// against an in-flight session (`ProposalAlreadyExist`) instead of opening
@@ -99,8 +92,7 @@ pub(crate) struct FreezeRound {
     pub candidates: Vec<BufferedCommitCandidate>,
 }
 
-/// Per-group app-level state. Wrap in `RwLock` at the app layer — DE-MLS
-/// holds this across async contexts. Stewards batch commits; members vote.
+/// Per-group protocol state. Stewards batch commits; members vote.
 /// Construct with [`Self::new_as_creator`] or [`Self::new_as_joiner`].
 #[derive(Clone, Debug)]
 pub struct Group {
@@ -115,9 +107,6 @@ pub struct Group {
     approved_order: Vec<ProposalId>,
     /// Proposals waiting on consensus voting (created by this user).
     voting_proposals: HashMap<ProposalId, GroupUpdateRequest>,
-    /// History of previously-committed batches (most recent last), capped
-    /// at [`MAX_EPOCH_HISTORY`] entries.
-    epoch_history: VecDeque<HashMap<ProposalId, GroupUpdateRequest>>,
     /// Active steward list for the current epoch window.
     /// `Some` after bootstrap (creator) or sync (joiner). `None` only for joiners pre-sync.
     steward_list: Option<StewardList>,
@@ -190,7 +179,6 @@ impl Group {
             approved_proposals: HashMap::new(),
             approved_order: Vec::new(),
             voting_proposals: HashMap::new(),
-            epoch_history: VecDeque::new(),
             steward_list: None,
             protocol_config,
             active_emergency_ids: HashSet::new(),
@@ -260,11 +248,6 @@ impl Group {
 
     pub fn allow_subset_candidates(&self) -> bool {
         self.protocol_config.allow_subset_candidates
-    }
-
-    /// Overwritten when the handle receives a `GroupSync` from the steward.
-    pub fn set_allow_subset_candidates(&mut self, allow: bool) {
-        self.protocol_config.allow_subset_candidates = allow;
     }
 
     /// Derived from `steward_list.contains(self_identity)` — `false` for
@@ -398,19 +381,16 @@ impl Group {
         }
     }
 
-    /// Archive the approved batch to epoch history and clear the queue.
+    /// Clear the approved-proposal queue and return the cleared batch so
+    /// callers can archive it for UI / diagnostic history. Returns an
+    /// empty `HashMap` when the queue was already empty.
     ///
-    /// MLS advances the epoch itself on commit merge, so no counter bump here.
-    pub fn clear_approved_proposals(&mut self) {
-        if self.approved_proposals.is_empty() {
-            return;
-        }
-        let snapshot = std::mem::take(&mut self.approved_proposals);
+    /// MLS advances the epoch itself on commit merge, so no counter bump
+    /// here. Per-node epoch history is an app-layer concern; this method
+    /// surfaces the snapshot but does not retain it.
+    pub fn clear_approved_proposals(&mut self) -> HashMap<ProposalId, GroupUpdateRequest> {
         self.approved_order.clear();
-        if self.epoch_history.len() >= MAX_EPOCH_HISTORY {
-            self.epoch_history.pop_front();
-        }
-        self.epoch_history.push_back(snapshot);
+        std::mem::take(&mut self.approved_proposals)
     }
 
     /// Discard the approved queue on freeze failure. `RemoveMember`
@@ -430,11 +410,6 @@ impl Group {
     /// Drop every entry in the voting queue.
     pub fn reject_all_voting_proposals(&mut self) {
         self.voting_proposals.clear();
-    }
-
-    /// Past committed batches, most recent last.
-    pub fn epoch_history(&self) -> &VecDeque<HashMap<ProposalId, GroupUpdateRequest>> {
-        &self.epoch_history
     }
 
     // ─────────────────────────── Partial Freeze (RFC §Partial Freeze Semantics) ───────────────────────────
@@ -779,6 +754,8 @@ impl Group {
             .get(&pid)
             .is_some_and(|req| is_auto_approved_entry(pid, req))
     }
+
+    // ─────────────────────────── Reelection / GroupSync-Tunable Fields ───────────────────────────
 
     /// Current steward-election retry round (0 for fresh elections).
     pub fn reelection_round(&self) -> u32 {

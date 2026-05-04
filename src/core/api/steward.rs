@@ -10,6 +10,7 @@ use crate::{
         error::CoreError,
         group::{BufferedCommitCandidate, Group, member_set},
         proposal_kind::ProposalKind,
+        steward_list::ProtocolConfig,
     },
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     mls_crypto::{
@@ -191,4 +192,96 @@ where
 
     let members = mls.members(group.group_name())?;
     Ok(members)
+}
+
+// ─────────────────────────── Housekeeping Decisions ───────────────────────────
+
+/// Outcome of [`evaluate_election_initiation`]. `Skip` carries a brief
+/// reason for the log; `Proposed` carries the parameters the caller uses
+/// to build and submit a `StewardElection` proposal.
+#[derive(Debug, Clone)]
+pub enum ElectionDecision {
+    Skip(&'static str),
+    Proposed {
+        candidate_pool: Vec<Vec<u8>>,
+        election_epoch: u64,
+        retry_round: u32,
+        protocol_config: ProtocolConfig,
+    },
+}
+
+/// Decide whether this node SHOULD file a steward-election proposal.
+///
+/// Checks (in order): (1) gate on recovery vs list-exhaustion, (2)
+/// election-already-in-flight, (3) responsible-proposer authorization,
+/// (4) eligible-candidate-pool non-empty. The async submission stays in
+/// the caller; this function performs no I/O.
+pub fn evaluate_election_initiation(
+    group: &Group,
+    mls_members: &[Vec<u8>],
+    self_identity: &[u8],
+    epoch: u64,
+    recovery: bool,
+    extra_exclude: Option<&[u8]>,
+) -> ElectionDecision {
+    if !recovery && !group.is_steward_list_exhausted(epoch) {
+        return ElectionDecision::Skip("steward list not exhausted");
+    }
+    if group.has_election_in_flight() {
+        return ElectionDecision::Skip("election already in flight");
+    }
+
+    let mls_members_set: std::collections::HashSet<&[u8]> =
+        mls_members.iter().map(Vec::as_slice).collect();
+    let is_authorized = group
+        .steward_list()
+        .and_then(|list| list.responsible_election_proposer(|c| mls_members_set.contains(c)))
+        .is_some_and(|proposer| proposer == self_identity);
+    if !is_authorized {
+        return ElectionDecision::Skip("not the responsible proposer");
+    }
+
+    let candidate_pool: Vec<Vec<u8>> = mls_members
+        .iter()
+        .filter(|m| {
+            if extra_exclude.is_some_and(|x| x == m.as_slice()) {
+                return false;
+            }
+            if recovery && group.is_pending_removal(m) {
+                return false;
+            }
+            true
+        })
+        .cloned()
+        .collect();
+    if candidate_pool.is_empty() {
+        return ElectionDecision::Skip("no eligible candidates after filter");
+    }
+
+    ElectionDecision::Proposed {
+        candidate_pool,
+        election_epoch: epoch,
+        retry_round: group.reelection_round(),
+        protocol_config: group.protocol_config().clone(),
+    }
+}
+
+/// `true` when this node is the responsible proposer for a Layer-3
+/// `Deadlock` ECP. Requires the proposer to be MLS-present and not
+/// queued for removal.
+pub fn is_deadlock_ecp_proposer(
+    group: &Group,
+    mls_members: &[Vec<u8>],
+    self_identity: &[u8],
+) -> bool {
+    let mls_members_set: std::collections::HashSet<&[u8]> =
+        mls_members.iter().map(Vec::as_slice).collect();
+    group
+        .steward_list()
+        .and_then(|list| {
+            list.responsible_election_proposer(|c| {
+                mls_members_set.contains(c) && !group.is_pending_removal(c)
+            })
+        })
+        .is_some_and(|proposer| proposer == self_identity)
 }
