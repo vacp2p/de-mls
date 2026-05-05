@@ -3,15 +3,19 @@
 use crate::{
     app::{GroupState, StateChangeHandler, User, UserError},
     core::{DeMlsProvider, GroupEventHandler, build_key_package_message, build_message},
-    mls_crypto::parse_wallet_to_bytes,
+    mls_crypto::{MlsService, parse_wallet_to_bytes},
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, ConversationMessage, GroupUpdateRequest, RemoveMember,
         group_update_request,
     },
 };
 
-impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
-    User<P, H, SCH>
+impl<
+    P: DeMlsProvider,
+    M: MlsService,
+    H: GroupEventHandler + 'static,
+    SCH: StateChangeHandler + 'static,
+> User<P, M, H, SCH>
 {
     /// Broadcast our key-package on the welcome subtopic so the steward
     /// can invite us.
@@ -21,7 +25,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        let packet = build_key_package_message(&entry.group, &self.mls_service, &self.app_id)?;
+        let packet =
+            build_key_package_message(&entry.group, self.mls_service.as_ref(), &self.app_id)?;
         drop(entry);
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
@@ -57,7 +62,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             }
             .into();
 
-            build_message(group_name, &self.mls_service, &app_msg, &self.app_id)?
+            build_message(
+                group_name,
+                self.mls_service.as_ref(),
+                &app_msg,
+                &self.app_id,
+            )?
         };
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())

@@ -11,13 +11,11 @@ use hashgraph_like_consensus::{
     storage::{ConsensusStorage, InMemoryConsensusStorage},
 };
 
-use openmls_rust_crypto::MemoryStorage;
-
 use crate::mls_crypto::{DeMlsStorage, MemoryDeMlsStorage};
 
 pub trait DeMlsProvider: 'static {
     /// MLS + DE-MLS state persistence (default: `MemoryDeMlsStorage`).
-    type Storage: DeMlsStorage<MlsStorage = MemoryStorage> + Send + Sync + 'static;
+    type Storage: DeMlsStorage + Send + Sync + 'static;
 
     /// Group-identifier type used as consensus scope (default: `String`).
     type Scope: ConsensusScope + From<String> + Send + Sync + 'static;

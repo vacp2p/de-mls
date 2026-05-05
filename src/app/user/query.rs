@@ -7,8 +7,12 @@ use crate::{
     protos::de_mls::messages::v1::GroupUpdateRequest,
 };
 
-impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
-    User<P, H, SCH>
+impl<
+    P: DeMlsProvider,
+    M: MlsService,
+    H: GroupEventHandler + 'static,
+    SCH: StateChangeHandler + 'static,
+> User<P, M, H, SCH>
 {
     pub async fn get_group_state(&self, group_name: &str) -> Result<GroupState, UserError> {
         self.with_entry(group_name, |e| e.state_machine.current_state())
@@ -75,7 +79,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         if !self.mls_service.has_group(entry.group.group_name()) {
             return Ok(Vec::new());
         }
-        let members = group_members(&entry.group, &self.mls_service)?;
+        let members = group_members(&entry.group, self.mls_service.as_ref())?;
         Ok(members
             .into_iter()
             .map(|raw| format_wallet_address(raw.as_slice()).to_string())
@@ -101,7 +105,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        let members = group_members(&entry.group, &self.mls_service)?;
+        let members = group_members(&entry.group, self.mls_service.as_ref())?;
         Ok(members
             .into_iter()
             .filter(|id| entry.group.is_pending_self_leave(id))
@@ -120,7 +124,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
         let epoch = self.mls_service.current_epoch(group_name)?;
-        let members = group_members(&entry.group, &self.mls_service)?;
+        let members = group_members(&entry.group, self.mls_service.as_ref())?;
 
         let list = entry.group.steward_list();
         let (live_epoch, live_backup) = entry.group.live_epoch_and_backup(epoch, &members);

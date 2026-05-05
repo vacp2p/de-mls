@@ -39,6 +39,7 @@ type UserRef = Arc<
     tokio::sync::RwLock<
         User<
             DefaultProvider,
+            de_mls::mls_crypto::OpenMlsService<de_mls::mls_crypto::MemoryDeMlsStorage>,
             GatewayEventHandler<WakuDeliveryService>,
             GatewayEventHandler<WakuDeliveryService>,
         >,

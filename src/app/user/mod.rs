@@ -84,8 +84,8 @@ impl GroupEntry {
 /// `&str` lookups don't allocate); inner key is the proposal id.
 type AutoVoteTimers = Arc<Mutex<HashMap<Arc<str>, HashMap<u32, JoinHandle<()>>>>>;
 
-pub struct User<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler> {
-    mls_service: Arc<OpenMlsService<P::Storage>>,
+pub struct User<P: DeMlsProvider, M: MlsService, H: GroupEventHandler, SCH: StateChangeHandler> {
+    mls_service: Arc<M>,
     /// Outer lock: map CRUD (insert / remove / iterate names).
     /// Inner per-entry lock: per-group reads and mutations. A write on
     /// group A doesn't block reads on group B.
@@ -110,7 +110,9 @@ pub struct User<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler>
     auto_vote_timers: AutoVoteTimers,
 }
 
-impl<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler> Clone for User<P, H, SCH> {
+impl<P: DeMlsProvider, M: MlsService, H: GroupEventHandler, SCH: StateChangeHandler> Clone
+    for User<P, M, H, SCH>
+{
     fn clone(&self) -> Self {
         Self {
             mls_service: Arc::clone(&self.mls_service),
@@ -127,11 +129,15 @@ impl<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler> Clone for 
     }
 }
 
-impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
-    User<P, H, SCH>
+impl<
+    P: DeMlsProvider,
+    M: MlsService,
+    H: GroupEventHandler + 'static,
+    SCH: StateChangeHandler + 'static,
+> User<P, M, H, SCH>
 {
     fn new_with_config(
-        mls_service: OpenMlsService<P::Storage>,
+        mls_service: M,
         consensus_service: Arc<ProviderConsensus<P>>,
         eth_signer: PrivateKeySigner,
         handler: Arc<H>,
@@ -210,7 +216,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 // ─────────────────────────── DefaultProvider Convenience ───────────────────────────
 
 impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
-    User<DefaultProvider, H, SCH>
+    User<DefaultProvider, OpenMlsService<MemoryDeMlsStorage>, H, SCH>
 {
     /// Construct a `User` on [`DefaultProvider`] with the default config.
     pub fn with_private_key(

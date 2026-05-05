@@ -1,6 +1,5 @@
 //! Steward commit candidate creation and group member queries.
 
-use openmls_rust_crypto::MemoryStorage;
 use prost::Message;
 use tracing::info;
 
@@ -13,10 +12,7 @@ use crate::{
         steward_list::ProtocolConfig,
     },
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
-    mls_crypto::{
-        CommitCandidate as MlsCommitCandidate, DeMlsStorage, GroupUpdate, KeyPackageBytes,
-        MlsService, OpenMlsService,
-    },
+    mls_crypto::{CommitCandidate as MlsCommitCandidate, GroupUpdate, KeyPackageBytes, MlsService},
     protos::de_mls::messages::v1::{AppMessage, CommitCandidate, group_update_request},
 };
 
@@ -28,13 +24,13 @@ use crate::{
 /// `is_live_epoch_steward` or a list-exhaustion check, so members of the
 /// *previous* list can commit recovery actions when an election fails.
 /// `Group::is_in_recovery_mode()` (Layer 3) bypasses the gate entirely.
-pub fn create_commit_candidate<S>(
+pub fn create_commit_candidate<M>(
     group: &mut Group,
-    mls: &OpenMlsService<S>,
+    mls: &M,
     app_id: &[u8],
 ) -> Result<Option<OutboundPacket>, CoreError>
 where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+    M: MlsService,
 {
     if !group.is_steward() && !group.is_in_recovery_mode() {
         return Err(CoreError::NotASteward);
@@ -182,9 +178,9 @@ where
 // ─────────────────────────── Member Queries ───────────────────────────
 
 /// Get the current members of a group.
-pub fn group_members<S>(group: &Group, mls: &OpenMlsService<S>) -> Result<Vec<Vec<u8>>, CoreError>
+pub fn group_members<M>(group: &Group, mls: &M) -> Result<Vec<Vec<u8>>, CoreError>
 where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+    M: MlsService,
 {
     if !mls.has_group(group.group_name()) {
         return Err(CoreError::MlsGroupNotInitialized);

@@ -1,7 +1,6 @@
 //! Inbound message routing and processing.
 
 use hashgraph_like_consensus::protos::consensus::v1::Proposal;
-use openmls_rust_crypto::MemoryStorage;
 use prost::Message;
 use tracing::{info, warn};
 
@@ -12,8 +11,7 @@ use crate::{
     },
     ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC},
     mls_crypto::{
-        DeMlsStorage, DecryptResult, MlsService, OpenMlsService, ShortId,
-        key_package_bytes_from_json, parse_wallet_to_bytes,
+        DecryptResult, MlsService, ShortId, key_package_bytes_from_json, parse_wallet_to_bytes,
     },
     protos::de_mls::messages::v1::{
         AppMessage, GroupUpdateRequest, InviteMember, WelcomeMessage, app_message,
@@ -45,14 +43,14 @@ fn authorize_fast_path_proposal(proposal: &Proposal, mls_sender: &[u8]) -> bool 
 }
 
 /// Process an inbound packet and determine what action is needed.
-pub fn process_inbound<S>(
+pub fn process_inbound<M>(
     group: &mut Group,
     payload: &[u8],
     subtopic: &str,
-    mls: &OpenMlsService<S>,
+    mls: &M,
 ) -> Result<ProcessResult, CoreError>
 where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+    M: MlsService,
 {
     match subtopic {
         WELCOME_SUBTOPIC => process_welcome_subtopic(group, payload, mls),
@@ -61,13 +59,13 @@ where
     }
 }
 
-fn process_welcome_subtopic<S>(
+fn process_welcome_subtopic<M>(
     group: &mut Group,
     payload: &[u8],
-    mls: &OpenMlsService<S>,
+    mls: &M,
 ) -> Result<ProcessResult, CoreError>
 where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+    M: MlsService,
 {
     let welcome_msg = WelcomeMessage::decode(payload)?;
     match welcome_msg.payload {
@@ -115,13 +113,13 @@ where
     }
 }
 
-fn process_app_subtopic<S>(
+fn process_app_subtopic<M>(
     group: &mut Group,
     payload: &[u8],
-    mls: &OpenMlsService<S>,
+    mls: &M,
 ) -> Result<ProcessResult, CoreError>
 where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+    M: MlsService,
 {
     if !mls.has_group(group.group_name()) {
         return Ok(ProcessResult::Noop);
