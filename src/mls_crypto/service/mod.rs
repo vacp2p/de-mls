@@ -7,9 +7,10 @@ use openmls_rust_crypto::RustCrypto;
 
 use crate::mls_crypto::{DeMlsStorage, IdentityProvider};
 
+mod api;
 mod backend;
 
-pub use backend::{CIPHERSUITE, MlsService};
+pub use api::{CIPHERSUITE, MlsService};
 
 /// OpenMLS-backed MLS service.
 ///
