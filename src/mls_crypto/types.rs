@@ -2,7 +2,7 @@
 
 use openmls::key_packages::KeyPackage as MlsKeyPackage;
 
-use crate::mls_crypto::{MlsError, MlsServiceError};
+use crate::mls_crypto::MlsError;
 
 /// Serialized key package for joining groups.
 ///
@@ -115,7 +115,7 @@ pub struct CommitCandidate {
 /// - `identity` is the wallet address extracted from the credential
 pub fn key_package_bytes_from_json(json_bytes: Vec<u8>) -> Result<(Vec<u8>, Vec<u8>), MlsError> {
     let kp: MlsKeyPackage =
-        serde_json::from_slice(&json_bytes).map_err(MlsServiceError::InvalidKeyPackage)?;
+        serde_json::from_slice(&json_bytes).map_err(MlsError::KeyPackageJson)?;
     let identity = kp.leaf_node().credential().serialized_content().to_vec();
     Ok((json_bytes, identity))
 }

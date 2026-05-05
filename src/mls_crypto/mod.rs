@@ -39,7 +39,7 @@ mod service;
 pub mod storage;
 mod types;
 
-pub use error::{MlsError, MlsServiceError, Result, StorageError};
+pub use error::MlsError;
 pub use identity::{
     IdentityProvider, ShortId, WalletIdentity, format_wallet_address, parse_wallet_address,
     parse_wallet_to_bytes,

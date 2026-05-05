@@ -29,8 +29,7 @@ use openmls_traits::OpenMlsProvider;
 
 use crate::mls_crypto::{
     CommitCandidate, DeMlsStorage, DecryptResult, GroupUpdate, IdentityProvider, KeyPackageBytes,
-    MlsError, MlsMessageKind, MlsProposalAction, MlsServiceError, OpenMlsService, Result,
-    StagedCommitResult, StorageError,
+    MlsError, MlsMessageKind, MlsProposalAction, OpenMlsService, StagedCommitResult,
 };
 
 /// MLS ciphersuite used by the default [`OpenMlsService`] impl.
@@ -52,29 +51,29 @@ pub trait MlsService: Send + Sync + 'static {
 
     /// Create a new MLS group with the given id. The local identity becomes
     /// the sole initial member.
-    fn create_group(&self, group_id: &str) -> Result<()>;
+    fn create_group(&self, group_id: &str) -> Result<(), MlsError>;
 
     /// Join a group from a serialized welcome. Returns the joined group id.
-    fn join_group(&self, welcome_bytes: &[u8]) -> Result<String>;
+    fn join_group(&self, welcome_bytes: &[u8]) -> Result<String, MlsError>;
 
     /// Drop local MLS state for a group. Idempotent.
-    fn delete_group(&self, group_id: &str) -> Result<()>;
+    fn delete_group(&self, group_id: &str) -> Result<(), MlsError>;
 
     /// Whether this welcome message addresses one of our key packages,
     /// without joining.
-    fn is_welcome_for_us(&self, welcome_bytes: &[u8]) -> Result<bool>;
+    fn is_welcome_for_us(&self, welcome_bytes: &[u8]) -> Result<bool, MlsError>;
 
     // ── Membership / state queries ──
 
     /// Current group members, as serialized credential bytes.
-    fn members(&self, group_id: &str) -> Result<Vec<Vec<u8>>>;
+    fn members(&self, group_id: &str) -> Result<Vec<Vec<u8>>, MlsError>;
 
     /// Whether `identity` is a current member. Returns `false` (not error)
     /// when the group is unknown locally.
     fn is_member(&self, group_id: &str, identity: &[u8]) -> bool;
 
     /// Current MLS epoch — the single source of truth.
-    fn current_epoch(&self, group_id: &str) -> Result<u64>;
+    fn current_epoch(&self, group_id: &str) -> Result<u64, MlsError>;
 
     /// Whether local MLS state for this group exists.
     fn has_group(&self, group_id: &str) -> bool;
@@ -82,7 +81,7 @@ pub trait MlsService: Send + Sync + 'static {
     // ── Key packages ──
 
     /// Generate a single-use key package for our identity.
-    fn generate_key_package(&self) -> Result<KeyPackageBytes>;
+    fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError>;
 
     // ── Local commit pipeline (steward) ──
 
@@ -93,27 +92,31 @@ pub trait MlsService: Send + Sync + 'static {
         &self,
         group_id: &str,
         updates: &[GroupUpdate],
-    ) -> Result<CommitCandidate>;
+    ) -> Result<CommitCandidate, MlsError>;
 
     /// Merge our pending commit candidate, advancing the MLS epoch.
-    fn merge_own_commit(&self, group_id: &str) -> Result<()>;
+    fn merge_own_commit(&self, group_id: &str) -> Result<(), MlsError>;
 
     /// Discard our pending commit candidate.
-    fn discard_own_commit(&self, group_id: &str) -> Result<()>;
+    fn discard_own_commit(&self, group_id: &str) -> Result<(), MlsError>;
 
     // ── Inbound commit pipeline (split: stage → merge/discard) ──
 
     /// Stage an inbound commit. Caller validates the batch, then calls
     /// [`merge_staged_commit`](Self::merge_staged_commit) or
     /// [`discard_staged_commit`](Self::discard_staged_commit).
-    fn process_commit(&self, group_id: &str, ciphertext: &[u8]) -> Result<StagedCommitResult>;
+    fn process_commit(
+        &self,
+        group_id: &str,
+        ciphertext: &[u8],
+    ) -> Result<StagedCommitResult, MlsError>;
 
     /// Merge a previously staged inbound commit, advancing the MLS epoch.
-    fn merge_staged_commit(&self, group_id: &str) -> Result<()>;
+    fn merge_staged_commit(&self, group_id: &str) -> Result<(), MlsError>;
 
     /// Discard a previously staged inbound commit and clear pending
     /// proposals.
-    fn discard_staged_commit(&self, group_id: &str) -> Result<()>;
+    fn discard_staged_commit(&self, group_id: &str) -> Result<(), MlsError>;
 
     /// Stage a candidate proposal in the MLS pending queue. Used by the
     /// freeze-round candidate pipeline before [`process_commit`](Self::process_commit).
@@ -121,25 +124,29 @@ pub trait MlsService: Send + Sync + 'static {
         &self,
         group_id: &str,
         proposal_bytes: &[u8],
-    ) -> Result<DecryptResult>;
+    ) -> Result<DecryptResult, MlsError>;
 
     // ── Application messages ──
 
     /// Encrypt an application message for the group.
-    fn encrypt(&self, group_id: &str, plaintext: &[u8]) -> Result<Vec<u8>>;
+    fn encrypt(&self, group_id: &str, plaintext: &[u8]) -> Result<Vec<u8>, MlsError>;
 
     /// Decrypt an inbound MLS message, accepting only application messages.
     /// Used on the application subtopic to avoid MLS state pollution from
     /// proposals/commits arriving on the wrong channel.
-    fn decrypt_application_only(&self, group_id: &str, ciphertext: &[u8]) -> Result<DecryptResult>;
+    fn decrypt_application_only(
+        &self,
+        group_id: &str,
+        ciphertext: &[u8],
+    ) -> Result<DecryptResult, MlsError>;
 
     /// Decrypt/process an inbound MLS message — application messages and
     /// proposals only. Commits are routed through [`process_commit`](Self::process_commit).
-    fn decrypt(&self, group_id: &str, ciphertext: &[u8]) -> Result<DecryptResult>;
+    fn decrypt(&self, group_id: &str, ciphertext: &[u8]) -> Result<DecryptResult, MlsError>;
 
     /// Inspect the untrusted outer kind of an MLS message — pre-dispatch
     /// lane check on raw bytes (no group state required).
-    fn inspect_message_kind(&self, message_bytes: &[u8]) -> Result<MlsMessageKind>;
+    fn inspect_message_kind(&self, message_bytes: &[u8]) -> Result<MlsMessageKind, MlsError>;
 }
 
 /// Internal OpenMLS provider that wraps storage. Used by
@@ -179,7 +186,10 @@ where
         }
     }
 
-    fn extract_proposal_action(group: &MlsGroup, proposal: &Proposal) -> Result<MlsProposalAction> {
+    fn extract_proposal_action(
+        group: &MlsGroup,
+        proposal: &Proposal,
+    ) -> Result<MlsProposalAction, MlsError> {
         match proposal {
             Proposal::Add(add) => {
                 let id = add
@@ -195,9 +205,7 @@ where
                 let id = group
                     .member(removed)
                     .map(|c| c.serialized_content().to_vec())
-                    .ok_or(MlsError::Service(MlsServiceError::UnknownLeafIndex(
-                        removed.u32(),
-                    )))?;
+                    .ok_or(MlsError::UnknownLeafIndex(removed.u32()))?;
                 Ok(MlsProposalAction::Remove(id))
             }
             other => Ok(MlsProposalAction::Other(format!("{other:?}"))),
@@ -220,7 +228,7 @@ where
     // Group lifecycle
     // ══════════════════════════════════════════════════════════
 
-    fn create_group(&self, group_id: &str) -> Result<()> {
+    fn create_group(&self, group_id: &str) -> Result<(), MlsError> {
         let provider = self.make_provider();
 
         let config = MlsGroupCreateConfig::builder()
@@ -237,19 +245,19 @@ where
 
         self.groups
             .write()
-            .map_err(|e| StorageError::Lock(e.to_string()))?
+            .map_err(|e| MlsError::Lock(e.to_string()))?
             .insert(group_id.to_string(), group);
 
         Ok(())
     }
 
-    fn join_group(&self, welcome_bytes: &[u8]) -> Result<String> {
+    fn join_group(&self, welcome_bytes: &[u8]) -> Result<String, MlsError> {
         let provider = self.make_provider();
 
         let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(welcome_bytes)?;
         let welcome = match mls_message.extract() {
             MlsMessageBodyIn::Welcome(w) => w,
-            _ => return Err(MlsError::Service(MlsServiceError::UnexpectedMessageType)),
+            _ => return Err(MlsError::UnexpectedMessageType),
         };
 
         let is_for_us = welcome.secrets().iter().any(|s| {
@@ -258,7 +266,7 @@ where
                 .unwrap_or(false)
         });
         if !is_for_us {
-            return Err(MlsError::Service(MlsServiceError::WelcomeNotForUs));
+            return Err(MlsError::WelcomeNotForUs);
         }
 
         for secret in welcome.secrets() {
@@ -277,27 +285,27 @@ where
 
         self.groups
             .write()
-            .map_err(|e| StorageError::Lock(e.to_string()))?
+            .map_err(|e| MlsError::Lock(e.to_string()))?
             .insert(group_id.clone(), group);
 
         Ok(group_id)
     }
 
-    fn delete_group(&self, group_id: &str) -> Result<()> {
+    fn delete_group(&self, group_id: &str) -> Result<(), MlsError> {
         let provider = self.make_provider();
         let mut groups = self
             .groups
             .write()
-            .map_err(|e| StorageError::Lock(e.to_string()))?;
+            .map_err(|e| MlsError::Lock(e.to_string()))?;
         if let Some(mut group) = groups.remove(group_id) {
             group
                 .delete(provider.storage())
-                .map_err(MlsServiceError::StorePendingProposal)?;
+                .map_err(MlsError::MlsStorage)?;
         }
         Ok(())
     }
 
-    fn is_welcome_for_us(&self, welcome_bytes: &[u8]) -> Result<bool> {
+    fn is_welcome_for_us(&self, welcome_bytes: &[u8]) -> Result<bool, MlsError> {
         let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(welcome_bytes)?;
         let welcome = match mls_message.extract() {
             MlsMessageBodyIn::Welcome(w) => w,
@@ -315,14 +323,14 @@ where
     // Membership / state queries
     // ══════════════════════════════════════════════════════════
 
-    fn members(&self, group_id: &str) -> Result<Vec<Vec<u8>>> {
+    fn members(&self, group_id: &str) -> Result<Vec<Vec<u8>>, MlsError> {
         let groups = self
             .groups
             .read()
-            .map_err(|e| StorageError::Lock(e.to_string()))?;
-        let group = groups.get(group_id).ok_or_else(|| {
-            MlsError::Service(MlsServiceError::GroupNotFound(group_id.to_string()))
-        })?;
+            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let group = groups
+            .get(group_id)
+            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
 
         Ok(group
             .members()
@@ -336,14 +344,14 @@ where
             .unwrap_or(false)
     }
 
-    fn current_epoch(&self, group_id: &str) -> Result<u64> {
+    fn current_epoch(&self, group_id: &str) -> Result<u64, MlsError> {
         let groups = self
             .groups
             .read()
-            .map_err(|e| StorageError::Lock(e.to_string()))?;
-        let group = groups.get(group_id).ok_or_else(|| {
-            MlsError::Service(MlsServiceError::GroupNotFound(group_id.to_string()))
-        })?;
+            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let group = groups
+            .get(group_id)
+            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
 
         Ok(group.epoch().as_u64())
     }
@@ -359,7 +367,7 @@ where
     // Key packages
     // ══════════════════════════════════════════════════════════
 
-    fn generate_key_package(&self) -> Result<KeyPackageBytes> {
+    fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
         let provider = self.make_provider();
 
         let kp_bundle = KeyPackage::builder().build(
@@ -389,17 +397,17 @@ where
         &self,
         group_id: &str,
         updates: &[GroupUpdate],
-    ) -> Result<CommitCandidate> {
+    ) -> Result<CommitCandidate, MlsError> {
         let provider = self.make_provider();
         let signer = self.identity.signer();
 
         let mut groups = self
             .groups
             .write()
-            .map_err(|e| StorageError::Lock(e.to_string()))?;
-        let group = groups.get_mut(group_id).ok_or_else(|| {
-            MlsError::Service(MlsServiceError::GroupNotFound(group_id.to_string()))
-        })?;
+            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let group = groups
+            .get_mut(group_id)
+            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
 
         let mut mls_proposals = Vec::new();
 
@@ -407,7 +415,7 @@ where
             match update {
                 GroupUpdate::Add(key_package) => {
                     let kp: KeyPackage = serde_json::from_slice(key_package.as_bytes())
-                        .map_err(MlsServiceError::InvalidKeyPackage)?;
+                        .map_err(MlsError::KeyPackageJson)?;
                     let (mls_message_out, _proposal_ref) =
                         group.propose_add_member(&provider, signer, &kp)?;
                     mls_proposals.push(mls_message_out.to_bytes()?);
@@ -444,31 +452,31 @@ where
         })
     }
 
-    fn merge_own_commit(&self, group_id: &str) -> Result<()> {
+    fn merge_own_commit(&self, group_id: &str) -> Result<(), MlsError> {
         let provider = self.make_provider();
 
         let mut groups = self
             .groups
             .write()
-            .map_err(|e| StorageError::Lock(e.to_string()))?;
-        let group = groups.get_mut(group_id).ok_or_else(|| {
-            MlsError::Service(MlsServiceError::GroupNotFound(group_id.to_string()))
-        })?;
+            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let group = groups
+            .get_mut(group_id)
+            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
 
         group.merge_pending_commit(&provider)?;
         Ok(())
     }
 
-    fn discard_own_commit(&self, group_id: &str) -> Result<()> {
+    fn discard_own_commit(&self, group_id: &str) -> Result<(), MlsError> {
         let provider = self.make_provider();
 
         let mut groups = self
             .groups
             .write()
-            .map_err(|e| StorageError::Lock(e.to_string()))?;
-        let group = groups.get_mut(group_id).ok_or_else(|| {
-            MlsError::Service(MlsServiceError::GroupNotFound(group_id.to_string()))
-        })?;
+            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let group = groups
+            .get_mut(group_id)
+            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
 
         let _ = group.clear_pending_commit(provider.storage());
         let _ = group.clear_pending_proposals(provider.storage());
@@ -479,7 +487,11 @@ where
     // Inbound commit pipeline (split: stage → merge/discard)
     // ══════════════════════════════════════════════════════════
 
-    fn process_commit(&self, group_id: &str, ciphertext: &[u8]) -> Result<StagedCommitResult> {
+    fn process_commit(
+        &self,
+        group_id: &str,
+        ciphertext: &[u8],
+    ) -> Result<StagedCommitResult, MlsError> {
         let provider = self.make_provider();
 
         // Phase 1: Hold only the groups lock. Do all group work (deserialize,
@@ -488,10 +500,10 @@ where
             let mut groups = self
                 .groups
                 .write()
-                .map_err(|e| StorageError::Lock(e.to_string()))?;
-            let group = groups.get_mut(group_id).ok_or_else(|| {
-                MlsError::Service(MlsServiceError::GroupNotFound(group_id.to_string()))
-            })?;
+                .map_err(|e| MlsError::Lock(e.to_string()))?;
+            let group = groups
+                .get_mut(group_id)
+                .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
 
             let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(ciphertext)?;
             let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
@@ -536,9 +548,7 @@ where
                         let id = group
                             .member(removed_index)
                             .map(|c| c.serialized_content().to_vec())
-                            .ok_or(MlsError::Service(MlsServiceError::UnknownLeafIndex(
-                                removed_index.u32(),
-                            )))?;
+                            .ok_or(MlsError::UnknownLeafIndex(removed_index.u32()))?;
                         actions.push(MlsProposalAction::Remove(id));
                     }
 
@@ -558,7 +568,7 @@ where
             Some((sender_identity, self_removed, actions, staged)) => {
                 self.pending_staged_commits
                     .write()
-                    .map_err(|e| StorageError::Lock(e.to_string()))?
+                    .map_err(|e| MlsError::Lock(e.to_string()))?
                     .insert(group_id.to_string(), staged);
 
                 Ok(StagedCommitResult::Staged {
@@ -571,41 +581,39 @@ where
         }
     }
 
-    fn merge_staged_commit(&self, group_id: &str) -> Result<()> {
+    fn merge_staged_commit(&self, group_id: &str) -> Result<(), MlsError> {
         let provider = self.make_provider();
 
         let staged = self
             .pending_staged_commits
             .write()
-            .map_err(|e| StorageError::Lock(e.to_string()))?
+            .map_err(|e| MlsError::Lock(e.to_string()))?
             .remove(group_id)
-            .ok_or_else(|| {
-                MlsError::Service(MlsServiceError::NoPendingStagedCommit(group_id.to_string()))
-            })?;
+            .ok_or_else(|| MlsError::NoPendingStagedCommit(group_id.to_string()))?;
 
         let mut groups = self
             .groups
             .write()
-            .map_err(|e| StorageError::Lock(e.to_string()))?;
-        let group = groups.get_mut(group_id).ok_or_else(|| {
-            MlsError::Service(MlsServiceError::GroupNotFound(group_id.to_string()))
-        })?;
+            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let group = groups
+            .get_mut(group_id)
+            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
 
         group.merge_staged_commit(&provider, staged)?;
         Ok(())
     }
 
-    fn discard_staged_commit(&self, group_id: &str) -> Result<()> {
+    fn discard_staged_commit(&self, group_id: &str) -> Result<(), MlsError> {
         self.pending_staged_commits
             .write()
-            .map_err(|e| StorageError::Lock(e.to_string()))?
+            .map_err(|e| MlsError::Lock(e.to_string()))?
             .remove(group_id);
 
         let provider = self.make_provider();
         let mut groups = self
             .groups
             .write()
-            .map_err(|e| StorageError::Lock(e.to_string()))?;
+            .map_err(|e| MlsError::Lock(e.to_string()))?;
         if let Some(group) = groups.get_mut(group_id) {
             let _ = group.clear_pending_proposals(provider.storage());
         }
@@ -617,16 +625,16 @@ where
         &self,
         group_id: &str,
         proposal_bytes: &[u8],
-    ) -> Result<DecryptResult> {
+    ) -> Result<DecryptResult, MlsError> {
         let provider = self.make_provider();
 
         let mut groups = self
             .groups
             .write()
-            .map_err(|e| StorageError::Lock(e.to_string()))?;
-        let group = groups.get_mut(group_id).ok_or_else(|| {
-            MlsError::Service(MlsServiceError::GroupNotFound(group_id.to_string()))
-        })?;
+            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let group = groups
+            .get_mut(group_id)
+            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
 
         let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(proposal_bytes)?;
         let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
@@ -642,7 +650,7 @@ where
                 group.store_pending_proposal(provider.storage(), proposal.as_ref().clone())?;
                 Ok(DecryptResult::ProposalStored(sender_identity, action))
             }
-            _ => Err(MlsError::Service(MlsServiceError::UnexpectedMessageType)),
+            _ => Err(MlsError::UnexpectedMessageType),
         }
     }
 
@@ -650,32 +658,36 @@ where
     // Application messages
     // ══════════════════════════════════════════════════════════
 
-    fn encrypt(&self, group_id: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
+    fn encrypt(&self, group_id: &str, plaintext: &[u8]) -> Result<Vec<u8>, MlsError> {
         let provider = self.make_provider();
         let signer = self.identity.signer();
 
         let mut groups = self
             .groups
             .write()
-            .map_err(|e| StorageError::Lock(e.to_string()))?;
-        let group = groups.get_mut(group_id).ok_or_else(|| {
-            MlsError::Service(MlsServiceError::GroupNotFound(group_id.to_string()))
-        })?;
+            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let group = groups
+            .get_mut(group_id)
+            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
 
         let message = group.create_message(&provider, signer, plaintext)?;
         Ok(message.to_bytes()?)
     }
 
-    fn decrypt_application_only(&self, group_id: &str, ciphertext: &[u8]) -> Result<DecryptResult> {
+    fn decrypt_application_only(
+        &self,
+        group_id: &str,
+        ciphertext: &[u8],
+    ) -> Result<DecryptResult, MlsError> {
         let provider = self.make_provider();
 
         let mut groups = self
             .groups
             .write()
-            .map_err(|e| StorageError::Lock(e.to_string()))?;
-        let group = groups.get_mut(group_id).ok_or_else(|| {
-            MlsError::Service(MlsServiceError::GroupNotFound(group_id.to_string()))
-        })?;
+            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let group = groups
+            .get_mut(group_id)
+            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
 
         let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(ciphertext)?;
         let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
@@ -711,16 +723,16 @@ where
         }
     }
 
-    fn decrypt(&self, group_id: &str, ciphertext: &[u8]) -> Result<DecryptResult> {
+    fn decrypt(&self, group_id: &str, ciphertext: &[u8]) -> Result<DecryptResult, MlsError> {
         let provider = self.make_provider();
 
         let mut groups = self
             .groups
             .write()
-            .map_err(|e| StorageError::Lock(e.to_string()))?;
-        let group = groups.get_mut(group_id).ok_or_else(|| {
-            MlsError::Service(MlsServiceError::GroupNotFound(group_id.to_string()))
-        })?;
+            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let group = groups
+            .get_mut(group_id)
+            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
 
         let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(ciphertext)?;
         let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
@@ -768,7 +780,7 @@ where
         }
     }
 
-    fn inspect_message_kind(&self, message_bytes: &[u8]) -> Result<MlsMessageKind> {
+    fn inspect_message_kind(&self, message_bytes: &[u8]) -> Result<MlsMessageKind, MlsError> {
         let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(message_bytes)?;
         let protocol = match mls_message.extract() {
             MlsMessageBodyIn::Welcome(_) => return Ok(MlsMessageKind::Welcome),

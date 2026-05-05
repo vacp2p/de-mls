@@ -1,4 +1,8 @@
-//! Error types for MLS operations.
+//! Error type for MLS operations.
+//!
+//! All MLS-side errors live in a single [`MlsError`] enum. Storage-, service-,
+//! and identity-flavored variants sit at the same level — readers don't have
+//! to peel back nested error types to see what failed.
 
 use openmls::{
     error::LibraryError,
@@ -11,96 +15,11 @@ use openmls::{
 use openmls_rust_crypto::MemoryStorageError;
 use openmls_traits::types::CryptoError;
 
-/// Result type alias for MLS operations.
-pub type Result<T> = std::result::Result<T, MlsError>;
-
-/// Storage operation errors.
-#[derive(Debug, thiserror::Error)]
-pub enum StorageError {
-    #[error("Storage I/O error: {0}")]
-    Io(String),
-
-    #[error("Storage serialization error: {0}")]
-    Serialization(String),
-
-    #[error("Storage lock error: {0}")]
-    Lock(String),
-
-    #[error("Storage backend error: {0}")]
-    Backend(String),
-}
-
-/// MLS service operation errors. These wrap OpenMLS-emitted error types.
-#[derive(Debug, thiserror::Error)]
-pub enum MlsServiceError {
-    #[error("Failed to deserialize MLS message: {0}")]
-    MlsMessageInDeserialize(#[from] openmls::prelude::Error),
-
-    #[error("Failed to convert to protocol message: {0}")]
-    ProtocolMessage(#[from] openmls::framing::errors::ProtocolMessageError),
-
-    #[error("Failed to process MLS message: {0}")]
-    ProcessMessage(#[from] ProcessMessageError<MemoryStorageError>),
-
-    #[error("Failed to create MLS message: {0}")]
-    CreateMessage(#[from] CreateMessageError),
-
-    #[error("Failed to merge staged commit: {0}")]
-    MergeCommit(#[from] MergeCommitError<MemoryStorageError>),
-
-    #[error("Failed to merge pending commit: {0}")]
-    MergePendingCommit(#[from] MergePendingCommitError<MemoryStorageError>),
-
-    #[error("Failed to commit to pending proposals: {0}")]
-    CommitToPendingProposals(#[from] CommitToPendingProposalsError<MemoryStorageError>),
-
-    #[error("Failed to add member proposal: {0}")]
-    ProposeAddMember(#[from] ProposeAddMemberError<MemoryStorageError>),
-
-    #[error("Failed to remove member proposal: {0}")]
-    ProposeRemoveMember(#[from] ProposeRemoveMemberError<MemoryStorageError>),
-
-    #[error("Failed to create MLS group: {0}")]
-    NewGroup(#[from] NewGroupError<MemoryStorageError>),
-
-    #[error("Failed to join MLS group: {0}")]
-    Welcome(#[from] WelcomeError<MemoryStorageError>),
-
-    #[error("Failed to store pending proposal: {0}")]
-    StorePendingProposal(#[from] MemoryStorageError),
-
-    #[error("Failed to serialize MLS message: {0}")]
-    MlsMessage(#[from] openmls::framing::errors::MlsMessageError),
-
-    #[error("Invalid key package bytes: {0}")]
-    InvalidKeyPackage(#[from] serde_json::Error),
-
-    #[error("Unexpected MLS message type")]
-    UnexpectedMessageType,
-
-    #[error("Group not found: {0}")]
-    GroupNotFound(String),
-
-    #[error("Welcome message not for this user")]
-    WelcomeNotForUs,
-
-    #[error("No pending staged commit for group: {0}")]
-    NoPendingStagedCommit(String),
-
-    #[error("Remove proposal references leaf index {0} with no active credential")]
-    UnknownLeafIndex(u32),
-}
-
-/// Unified MLS error type.
-///
-/// Identity-related and storage-related variants live here directly to keep
-/// the error tree shallow. MLS-engine-specific errors are wrapped in
-/// [`MlsServiceError`]; backing-store errors in [`StorageError`].
+/// All MLS-side errors.
 #[derive(Debug, thiserror::Error)]
 pub enum MlsError {
     // ── Identity ──
-    /// Failed to build a key package — OpenMLS-side validation rejected the
-    /// constructed bundle.
+    /// Failed to build a key package.
     #[error(transparent)]
     UnableToCreateKeyPackage(#[from] KeyPackageNewError),
 
@@ -109,99 +28,100 @@ pub enum MlsError {
     InvalidHashRef(#[from] LibraryError),
 
     /// Failed to generate a fresh signature keypair.
-    #[error("Unable to create new signer: {0}")]
+    #[error("Failed to create signer: {0}")]
     UnableToCreateSigner(#[from] CryptoError),
 
-    /// JSON encoding/decoding error in identity-adjacent paths.
-    #[error("Invalid JSON: {0}")]
+    /// JSON serialization of a key package or other identity-adjacent value
+    /// failed. Used for outbound serde paths; inbound key-package decoding
+    /// goes through [`MlsError::KeyPackageJson`].
+    #[error("JSON encoding error: {0}")]
     InvalidJson(serde_json::Error),
 
     /// Wallet address string did not parse as a 20-byte hex address.
     #[error("Invalid wallet address: {0}")]
     InvalidWalletAddress(String),
 
-    // ── Sub-error wrappers ──
-    #[error(transparent)]
-    Service(#[from] MlsServiceError),
+    // ── MLS wire format ──
+    /// Failed to deserialize an inbound MLS message wire frame.
+    #[error("Failed to deserialize MLS message: {0}")]
+    MlsMessageDeserialize(#[from] openmls::prelude::Error),
 
-    #[error(transparent)]
-    Storage(#[from] StorageError),
-}
+    /// Failed to extract the protocol message from a deserialized envelope.
+    #[error("Failed to convert to protocol message: {0}")]
+    ProtocolMessage(#[from] openmls::framing::errors::ProtocolMessageError),
 
-impl From<MemoryStorageError> for MlsError {
-    fn from(e: MemoryStorageError) -> Self {
-        MlsError::Service(MlsServiceError::StorePendingProposal(e))
-    }
-}
+    /// Failed to serialize an outbound MLS message.
+    #[error("Failed to serialize MLS message: {0}")]
+    MlsMessageSerialize(#[from] openmls::framing::errors::MlsMessageError),
 
-impl From<NewGroupError<MemoryStorageError>> for MlsError {
-    fn from(e: NewGroupError<MemoryStorageError>) -> Self {
-        MlsError::Service(MlsServiceError::NewGroup(e))
-    }
-}
+    /// JSON decoding of an inbound key-package payload failed.
+    #[error("Invalid key package bytes: {0}")]
+    KeyPackageJson(serde_json::Error),
 
-impl From<WelcomeError<MemoryStorageError>> for MlsError {
-    fn from(e: WelcomeError<MemoryStorageError>) -> Self {
-        MlsError::Service(MlsServiceError::Welcome(e))
-    }
-}
+    // ── MLS group operations ──
+    /// OpenMLS rejected an inbound message during processing.
+    #[error("Failed to process MLS message: {0}")]
+    ProcessMessage(#[from] ProcessMessageError<MemoryStorageError>),
 
-impl From<ProcessMessageError<MemoryStorageError>> for MlsError {
-    fn from(e: ProcessMessageError<MemoryStorageError>) -> Self {
-        MlsError::Service(MlsServiceError::ProcessMessage(e))
-    }
-}
+    /// Encrypting/serializing an outbound MLS application message failed.
+    #[error("Failed to create MLS message: {0}")]
+    CreateMessage(#[from] CreateMessageError),
 
-impl From<CreateMessageError> for MlsError {
-    fn from(e: CreateMessageError) -> Self {
-        MlsError::Service(MlsServiceError::CreateMessage(e))
-    }
-}
+    /// Merging a previously-staged commit failed.
+    #[error("Failed to merge staged commit: {0}")]
+    MergeCommit(#[from] MergeCommitError<MemoryStorageError>),
 
-impl From<MergeCommitError<MemoryStorageError>> for MlsError {
-    fn from(e: MergeCommitError<MemoryStorageError>) -> Self {
-        MlsError::Service(MlsServiceError::MergeCommit(e))
-    }
-}
+    /// Merging the local pending commit failed.
+    #[error("Failed to merge pending commit: {0}")]
+    MergePendingCommit(#[from] MergePendingCommitError<MemoryStorageError>),
 
-impl From<ProposeAddMemberError<MemoryStorageError>> for MlsError {
-    fn from(e: ProposeAddMemberError<MemoryStorageError>) -> Self {
-        MlsError::Service(MlsServiceError::ProposeAddMember(e))
-    }
-}
+    /// Building the commit out of pending proposals failed.
+    #[error("Failed to commit to pending proposals: {0}")]
+    CommitToPendingProposals(#[from] CommitToPendingProposalsError<MemoryStorageError>),
 
-impl From<ProposeRemoveMemberError<MemoryStorageError>> for MlsError {
-    fn from(e: ProposeRemoveMemberError<MemoryStorageError>) -> Self {
-        MlsError::Service(MlsServiceError::ProposeRemoveMember(e))
-    }
-}
+    /// Building an Add proposal failed.
+    #[error("Failed to propose add member: {0}")]
+    ProposeAddMember(#[from] ProposeAddMemberError<MemoryStorageError>),
 
-impl From<CommitToPendingProposalsError<MemoryStorageError>> for MlsError {
-    fn from(e: CommitToPendingProposalsError<MemoryStorageError>) -> Self {
-        MlsError::Service(MlsServiceError::CommitToPendingProposals(e))
-    }
-}
+    /// Building a Remove proposal failed.
+    #[error("Failed to propose remove member: {0}")]
+    ProposeRemoveMember(#[from] ProposeRemoveMemberError<MemoryStorageError>),
 
-impl From<MergePendingCommitError<MemoryStorageError>> for MlsError {
-    fn from(e: MergePendingCommitError<MemoryStorageError>) -> Self {
-        MlsError::Service(MlsServiceError::MergePendingCommit(e))
-    }
-}
+    /// Creating a fresh MLS group failed.
+    #[error("Failed to create MLS group: {0}")]
+    NewGroup(#[from] NewGroupError<MemoryStorageError>),
 
-impl From<openmls::prelude::Error> for MlsError {
-    fn from(e: openmls::prelude::Error) -> Self {
-        MlsError::Service(MlsServiceError::MlsMessageInDeserialize(e))
-    }
-}
+    /// Joining an MLS group from a welcome failed.
+    #[error("Failed to join MLS group: {0}")]
+    Welcome(#[from] WelcomeError<MemoryStorageError>),
 
-impl From<openmls::framing::errors::ProtocolMessageError> for MlsError {
-    fn from(e: openmls::framing::errors::ProtocolMessageError) -> Self {
-        MlsError::Service(MlsServiceError::ProtocolMessage(e))
-    }
-}
+    // ── Storage / locking ──
+    /// OpenMLS storage backend reported a failure.
+    #[error("MLS storage error: {0}")]
+    MlsStorage(#[from] MemoryStorageError),
 
-impl From<openmls::framing::errors::MlsMessageError> for MlsError {
-    fn from(e: openmls::framing::errors::MlsMessageError) -> Self {
-        MlsError::Service(MlsServiceError::MlsMessage(e))
-    }
+    /// Synchronization-primitive lock recovered from a poison.
+    #[error("Lock poisoned: {0}")]
+    Lock(String),
+
+    // ── Semantic ──
+    /// Wire-level message kind didn't match the lane it arrived on.
+    #[error("Unexpected MLS message type")]
+    UnexpectedMessageType,
+
+    /// No local MLS state for the requested group id.
+    #[error("Group not found: {0}")]
+    GroupNotFound(String),
+
+    /// Welcome did not address one of our key packages.
+    #[error("Welcome message not for this user")]
+    WelcomeNotForUs,
+
+    /// Caller asked to merge/discard a staged commit but none was staged.
+    #[error("No pending staged commit for group: {0}")]
+    NoPendingStagedCommit(String),
+
+    /// Remove proposal references a leaf index that is not currently present.
+    #[error("Remove proposal references leaf index {0} with no active credential")]
+    UnknownLeafIndex(u32),
 }
