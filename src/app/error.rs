@@ -5,7 +5,7 @@ use hashgraph_like_consensus::error::ConsensusError;
 
 use crate::{
     core::{CallbackError, CoreError},
-    mls_crypto::{IdentityError, MlsError},
+    mls_crypto::MlsError,
 };
 
 /// Errors from User operations.
@@ -46,9 +46,6 @@ pub enum UserError {
 
     #[error("Signer error: {0}")]
     Signer(#[from] LocalSignerError),
-
-    #[error("Identity error: {0}")]
-    Identity(#[from] IdentityError),
 
     #[error("MLS error: {0}")]
     Mls(#[from] MlsError),

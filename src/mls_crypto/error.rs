@@ -30,35 +30,7 @@ pub enum StorageError {
     Backend(String),
 }
 
-/// Identity-specific errors.
-#[derive(Debug, thiserror::Error)]
-pub enum IdentityError {
-    #[error("Identity not initialized")]
-    IdentityNotFound,
-
-    #[error("Identity already initialized")]
-    AlreadyInitialized,
-
-    #[error(transparent)]
-    UnableToCreateKeyPackage(#[from] KeyPackageNewError),
-
-    #[error("Invalid hash reference: {0}")]
-    InvalidHashRef(#[from] LibraryError),
-
-    #[error("Unable to create new signer: {0}")]
-    UnableToCreateSigner(#[from] CryptoError),
-
-    #[error("Unable to save signature key: {0}")]
-    UnableToSaveSignatureKey(#[from] MemoryStorageError),
-
-    #[error("Invalid JSON: {0}")]
-    InvalidJson(#[from] serde_json::Error),
-
-    #[error("Invalid wallet address: {0}")]
-    InvalidWalletAddress(String),
-}
-
-/// MLS service operation errors.
+/// MLS service operation errors. These wrap OpenMLS-emitted error types.
 #[derive(Debug, thiserror::Error)]
 pub enum MlsServiceError {
     #[error("Failed to deserialize MLS message: {0}")]
@@ -109,9 +81,6 @@ pub enum MlsServiceError {
     #[error("Group not found: {0}")]
     GroupNotFound(String),
 
-    #[error("Group still active")]
-    GroupStillActive,
-
     #[error("Welcome message not for this user")]
     WelcomeNotForUs,
 
@@ -123,29 +92,40 @@ pub enum MlsServiceError {
 }
 
 /// Unified MLS error type.
+///
+/// Identity-related and storage-related variants live here directly to keep
+/// the error tree shallow. MLS-engine-specific errors are wrapped in
+/// [`MlsServiceError`]; backing-store errors in [`StorageError`].
 #[derive(Debug, thiserror::Error)]
 pub enum MlsError {
+    // ── Identity ──
+    /// Failed to build a key package — OpenMLS-side validation rejected the
+    /// constructed bundle.
     #[error(transparent)]
-    Identity(#[from] IdentityError),
+    UnableToCreateKeyPackage(#[from] KeyPackageNewError),
 
+    /// Hash-ref derivation failed for a key package.
+    #[error("Invalid hash reference: {0}")]
+    InvalidHashRef(#[from] LibraryError),
+
+    /// Failed to generate a fresh signature keypair.
+    #[error("Unable to create new signer: {0}")]
+    UnableToCreateSigner(#[from] CryptoError),
+
+    /// JSON encoding/decoding error in identity-adjacent paths.
+    #[error("Invalid JSON: {0}")]
+    InvalidJson(serde_json::Error),
+
+    /// Wallet address string did not parse as a 20-byte hex address.
+    #[error("Invalid wallet address: {0}")]
+    InvalidWalletAddress(String),
+
+    // ── Sub-error wrappers ──
     #[error(transparent)]
     Service(#[from] MlsServiceError),
 
     #[error(transparent)]
     Storage(#[from] StorageError),
-}
-
-// Convenience From impls for MlsError
-impl From<KeyPackageNewError> for MlsError {
-    fn from(e: KeyPackageNewError) -> Self {
-        MlsError::Identity(IdentityError::UnableToCreateKeyPackage(e))
-    }
-}
-
-impl From<CryptoError> for MlsError {
-    fn from(e: CryptoError) -> Self {
-        MlsError::Identity(IdentityError::UnableToCreateSigner(e))
-    }
 }
 
 impl From<MemoryStorageError> for MlsError {
@@ -223,11 +203,5 @@ impl From<openmls::framing::errors::ProtocolMessageError> for MlsError {
 impl From<openmls::framing::errors::MlsMessageError> for MlsError {
     fn from(e: openmls::framing::errors::MlsMessageError) -> Self {
         MlsError::Service(MlsServiceError::MlsMessage(e))
-    }
-}
-
-impl From<openmls::error::LibraryError> for MlsError {
-    fn from(e: openmls::error::LibraryError) -> Self {
-        MlsError::Identity(IdentityError::InvalidHashRef(e))
     }
 }

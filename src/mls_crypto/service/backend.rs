@@ -28,9 +28,9 @@ use openmls_rust_crypto::{MemoryStorage, RustCrypto};
 use openmls_traits::OpenMlsProvider;
 
 use crate::mls_crypto::{
-    CommitCandidate, DeMlsStorage, DecryptResult, GroupUpdate, IdentityError, IdentityProvider,
-    KeyPackageBytes, MlsError, MlsMessageKind, MlsProposalAction, MlsServiceError, OpenMlsService,
-    Result, StagedCommitResult, StorageError,
+    CommitCandidate, DeMlsStorage, DecryptResult, GroupUpdate, IdentityProvider, KeyPackageBytes,
+    MlsError, MlsMessageKind, MlsProposalAction, MlsServiceError, OpenMlsService, Result,
+    StagedCommitResult, StorageError,
 };
 
 /// MLS ciphersuite used by the default [`OpenMlsService`] impl.
@@ -371,7 +371,7 @@ where
 
         let kp = kp_bundle.key_package();
         let hash_ref = kp.hash_ref(provider.crypto())?.as_slice().to_vec();
-        let bytes = serde_json::to_vec(kp).map_err(IdentityError::InvalidJson)?;
+        let bytes = serde_json::to_vec(kp).map_err(MlsError::InvalidJson)?;
 
         self.storage.store_key_package_ref(&hash_ref)?;
 
