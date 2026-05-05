@@ -16,6 +16,8 @@ impl<
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
 > User<P, M, H, SCH>
+where
+    M::Identity: Clone,
 {
     /// Broadcast our key-package on the welcome subtopic so the steward
     /// can invite us.
@@ -24,10 +26,11 @@ impl<
             .lookup_entry(group_name)
             .await
             .ok_or(UserError::GroupNotFound)?;
-        let entry = entry_arc.read().await;
-        let packet =
-            build_key_package_message(&entry.group, self.mls_service.as_ref(), &self.app_id)?;
-        drop(entry);
+        let key_package = self.generate_key_package()?;
+        let packet = {
+            let entry = entry_arc.read().await;
+            build_key_package_message(&entry.group, key_package, &self.app_id)
+        };
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
     }
@@ -62,12 +65,8 @@ impl<
             }
             .into();
 
-            build_message(
-                group_name,
-                self.mls_service.as_ref(),
-                &app_msg,
-                &self.app_id,
-            )?
+            let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
+            build_message(mls.as_ref(), &app_msg, &self.app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())

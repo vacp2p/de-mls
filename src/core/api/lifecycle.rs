@@ -6,7 +6,7 @@ use prost::Message;
 use crate::{
     core::{error::CoreError, group::Group, steward_list::ProtocolConfig},
     ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC},
-    mls_crypto::{IdentityProvider, MlsService},
+    mls_crypto::{KeyPackageBytes, MlsService},
     protos::de_mls::messages::v1::{
         AppMessage, GroupUpdateRequest, InvitationToJoin, UserKeyPackage, WelcomeMessage,
     },
@@ -16,21 +16,16 @@ use crate::{
 
 /// Create a new MLS group as the steward.
 ///
-/// Initializes a bootstrap steward list containing the creator.
-pub fn create_group<M>(
+/// Initializes a bootstrap steward list containing the creator. The MLS
+/// group itself is constructed by the caller (typically via
+/// `OpenMlsService::new_as_creator`); this function builds only the
+/// app-level [`Group`] wrapping it.
+pub fn create_group(
     name: &str,
-    mls: &M,
+    self_identity: Vec<u8>,
     protocol_config: ProtocolConfig,
-) -> Result<Group, CoreError>
-where
-    M: MlsService,
-{
-    mls.create_group(name)?;
-    Group::new_as_creator(
-        name,
-        mls.identity().identity_bytes().to_vec(),
-        protocol_config,
-    )
+) -> Result<Group, CoreError> {
+    Group::new_as_creator(name, self_identity, protocol_config)
 }
 
 /// Prepare a handle for joining an existing group.
@@ -47,9 +42,8 @@ pub fn prepare_to_join(
 
 // ─────────────────────────── Message Building ───────────────────────────
 
-/// Build an MLS-encrypted application message.
+/// Build an MLS-encrypted application message for `mls`'s group.
 pub fn build_message<M>(
-    group_name: &str,
     mls: &M,
     app_msg: &AppMessage,
     app_id: &[u8],
@@ -57,41 +51,37 @@ pub fn build_message<M>(
 where
     M: MlsService,
 {
-    if !mls.has_group(group_name) {
-        return Err(CoreError::MlsGroupNotInitialized);
-    }
-
-    let message_out = mls.encrypt(group_name, &app_msg.encode_to_vec())?;
+    let message_out = mls.encrypt(&app_msg.encode_to_vec())?;
 
     Ok(OutboundPacket::new(
         message_out,
         APP_MSG_SUBTOPIC,
-        group_name,
+        mls.group_id(),
         app_id,
     ))
 }
 
 /// Build a key package message for joining a group.
-pub fn build_key_package_message<M>(
+///
+/// The key package is supplied by the caller (typically via
+/// `OpenMlsService::generate_key_package`) so a joiner can publish a key
+/// package before any MLS service for the target group exists.
+pub fn build_key_package_message(
     group: &Group,
-    mls: &M,
+    key_package: KeyPackageBytes,
     app_id: &[u8],
-) -> Result<OutboundPacket, CoreError>
-where
-    M: MlsService,
-{
-    let key_package = mls.generate_key_package()?;
+) -> OutboundPacket {
     let welcome_msg: WelcomeMessage = UserKeyPackage {
         key_package_bytes: key_package.as_bytes().to_vec(),
     }
     .into();
 
-    Ok(OutboundPacket::new(
+    OutboundPacket::new(
         welcome_msg.encode_to_vec(),
         WELCOME_SUBTOPIC,
         group.group_name(),
         app_id,
-    ))
+    )
 }
 
 /// Wrap raw MLS welcome bytes into an `OutboundPacket` on the welcome subtopic.

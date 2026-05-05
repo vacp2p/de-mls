@@ -25,6 +25,8 @@ impl<
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
 > User<P, M, H, SCH>
+where
+    M::Identity: Clone,
 {
     /// Entry point from the consensus service: decode the proposal, apply the
     /// result to the group, and dispatch to the correct follow-up handler
@@ -181,7 +183,8 @@ impl<
 
         let is_valid = {
             let entry = entry_arc.read().await;
-            let members = group_members(&entry.group, self.mls_service.as_ref())?;
+            let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
+            let members = group_members(&entry.group, mls.as_ref())?;
             entry.group.validate_steward_list_proposal(
                 &election.proposed_stewards,
                 election.election_epoch,

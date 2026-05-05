@@ -88,7 +88,7 @@ where
             tracing::debug!(group = %group_name, "candidate ignored: no approved proposals");
             return Ok(ProcessResult::Noop);
         }
-        let epoch = mls.current_epoch(&group_name)?;
+        let epoch = mls.current_epoch()?;
         group.ensure_freeze_round(epoch);
     }
 
@@ -121,7 +121,7 @@ where
         return Ok(ProcessResult::Noop);
     }
 
-    let epoch = mls.current_epoch(&group_name)?;
+    let epoch = mls.current_epoch()?;
     let buffered = group.add_freeze_candidate(
         BufferedCommitCandidate {
             candidate_msg,
@@ -161,18 +161,18 @@ pub fn finalize_freeze_round<M>(
 where
     M: MlsService,
 {
-    let current_epoch = mls.current_epoch(group.group_name())?;
+    let current_epoch = mls.current_epoch()?;
     group.lock_freeze_round_selection(current_epoch);
 
     let Some(candidates) = group.take_round_candidates(current_epoch) else {
         // Drop any local pending commit so the next MLS encrypt
         // doesn't trip on "pending proposal exists".
-        let _ = mls.discard_own_commit(group.group_name());
+        let _ = mls.discard_own_commit();
         return Ok(FreezeFinalizeResult::default());
     };
 
     if candidates.is_empty() {
-        let _ = mls.discard_own_commit(group.group_name());
+        let _ = mls.discard_own_commit();
         return Ok(FreezeFinalizeResult::default());
     }
 
@@ -180,7 +180,7 @@ where
     let sorted = rank_applicable_candidates(candidates, &ctx, allow_subset_candidates);
 
     if sorted.is_empty() {
-        let _ = mls.discard_own_commit(group.group_name());
+        let _ = mls.discard_own_commit();
         return Ok(FreezeFinalizeResult::default());
     }
 
@@ -234,7 +234,7 @@ impl RoundContext {
         }
         let mls_count = mls_actions.len();
 
-        let members = mls.members(group.group_name())?;
+        let members = mls.members()?;
         let live_epoch_steward_id = group
             .live_epoch_steward(current_epoch, &members)
             .map(|s| s.to_vec());
@@ -331,7 +331,7 @@ where
                 // A failure here leaves an old pending commit in MLS and
                 // would sabotage every subsequent staging attempt — bubble
                 // the error out of the round instead of pressing on.
-                mls.discard_own_commit(&group_name)?;
+                mls.discard_own_commit()?;
                 own_commit_discarded = true;
             }
             apply_incoming_candidate(group, mls, chosen, &ctx.mls_actions, ctx.current_epoch)?
@@ -398,7 +398,7 @@ where
     // merged or discarded along an incoming-wins path — leaving it
     // behind would break the next MLS encrypt.
     if !own_commit_discarded {
-        let _ = mls.discard_own_commit(&group_name);
+        let _ = mls.discard_own_commit();
     }
     group.clear_freeze_round();
     Ok(FreezeFinalizeResult {
@@ -476,7 +476,7 @@ where
     // is our own and is trusted by definition.
     let committer = chosen.candidate_msg.steward_identity.clone();
 
-    mls.merge_own_commit(group.group_name())?;
+    mls.merge_own_commit()?;
 
     // Welcomes go out only after our merge — joiners must not race ahead of the steward's epoch.
     let outbound = chosen
@@ -529,14 +529,14 @@ where
             StagingOutcome::Abort => {
                 // Wire-valid but MLS-invalid — penalize the author; the
                 // loop will try the next candidate.
-                mls.discard_staged_commit(&group_name)?;
+                mls.discard_staged_commit()?;
                 return Ok(CandidateOutcome::Drop(ScoreOp {
                     member_id: chosen.candidate_msg.steward_identity,
                     event: ScoreEvent::MisbehavingCommit,
                 }));
             }
             StagingOutcome::Violation(v) => {
-                mls.discard_staged_commit(&group_name)?;
+                mls.discard_staged_commit()?;
                 return Ok(CandidateOutcome::Drop(
                     v.target_score_op()
                         .expect("staged-violation always has a target-side score"),
@@ -546,7 +546,7 @@ where
 
     // Commit sender must be on the steward list (RFC §"Commit validation service").
     if let Some(violation) = check_commit_sender_authorized(group, &commit_sender, current_epoch) {
-        mls.discard_staged_commit(&group_name)?;
+        mls.discard_staged_commit()?;
         return Ok(CandidateOutcome::Drop(
             violation
                 .target_score_op()
@@ -562,7 +562,7 @@ where
         &commit_actions,
         current_epoch,
     )? {
-        mls.discard_staged_commit(&group_name)?;
+        mls.discard_staged_commit()?;
         return Ok(CandidateOutcome::Drop(
             violation
                 .target_score_op()
@@ -570,7 +570,7 @@ where
         ));
     }
 
-    mls.merge_staged_commit(&group_name)?;
+    mls.merge_staged_commit()?;
     let committed_batch = record_applied_commit(group, chosen.commit_hash);
 
     // Remote candidates never carry welcome bytes — only the author sends those.
@@ -623,11 +623,7 @@ where
         self_removed,
         actions: commit_actions,
     }) = mls
-        .apply_remote_candidate(
-            group_name,
-            &candidate.mls_proposals,
-            &candidate.commit_message,
-        )
+        .apply_remote_candidate(&candidate.mls_proposals, &candidate.commit_message)
         .inspect_err(|e| {
             tracing::debug!(group = group_name, error = %e, "candidate failed to stage");
         })

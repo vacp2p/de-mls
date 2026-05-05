@@ -1,37 +1,32 @@
 //! MLS cryptographic operations for DE-MLS.
 //!
-//! This module provides `OpenMlsService`, a unified API for all MLS operations:
-//!
-//! - Identity management (wallet-based)
-//! - Key package generation
-//! - Group creation and joining
-//! - Message encryption and decryption
-//! - Proposal and commit handling
+//! Each `OpenMlsService` instance is scoped to a single MLS group. The
+//! `MlsService` trait defines the per-group surface; constructors for the
+//! OpenMLS impl live as inherent methods on `OpenMlsService`.
 //!
 //! # Quick Start
 //!
 //! ```ignore
-//! use de_mls::mls_crypto::{OpenMlsService, MemoryDeMlsStorage, parse_wallet_address};
+//! use de_mls::mls_crypto::{OpenMlsService, MemoryDeMlsStorage, MlsService,
+//!     WalletIdentity, parse_wallet_address};
 //!
-//! // Create service with in-memory storage
-//! let storage = MemoryDeMlsStorage::new();
-//! let mls = OpenMlsService::new(storage);
-//!
-//! // Initialize identity
+//! // Identity + storage are constructor inputs, shared across groups.
 //! let wallet = parse_wallet_address("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")?;
-//! mls.init(wallet)?;
+//! let identity = WalletIdentity::from_wallet(wallet)?;
+//! let storage = MemoryDeMlsStorage::new();
 //!
-//! // Create a group
-//! mls.create_group("my-chat")?;
+//! // Create a fresh group as its sole initial member.
+//! let mls = OpenMlsService::new_as_creator("my-chat".into(), storage, identity)?;
 //!
-//! // Encrypt a message
-//! let ciphertext = mls.encrypt("my-chat", b"Hello!")?;
+//! // Encrypt a message.
+//! let ciphertext = mls.encrypt(b"Hello!")?;
 //! ```
 //!
 //! # Storage
 //!
-//! The service requires a storage backend implementing `DeMlsStorage`.
-//! Use `MemoryDeMlsStorage` for development or implement your own for persistence.
+//! Each service requires a storage backend implementing `DeMlsStorage`.
+//! Use `MemoryDeMlsStorage` for development or implement your own for
+//! persistence. Storage may be shared across services via `Arc<S>`.
 
 mod error;
 mod identity;

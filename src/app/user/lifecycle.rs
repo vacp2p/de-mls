@@ -24,6 +24,8 @@ impl<
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
 > User<P, M, H, SCH>
+where
+    M::Identity: Clone,
 {
     /// Create (`is_creation = true`) or join (`false`) a group using the
     /// user's default config.
@@ -52,22 +54,24 @@ impl<
         let threshold_peer_score = config.threshold_peer_score;
         let liveness_criteria_yes = config.liveness_criteria_yes;
         let pending_update_max_epochs = config.pending_update_max_epochs;
-        let (mut group, state_machine) = if is_creation {
+        let self_identity_bytes = self.identity().identity_bytes().to_vec();
+        let (mut group, state_machine, mls): (_, _, Option<Arc<M>>) = if is_creation {
+            let mls = (self.mls_creator_factory)(group_name.to_string())?;
             let group = create_group(
                 group_name,
-                self.mls_service.as_ref(),
+                self_identity_bytes.clone(),
                 config.protocol.clone(),
             )?;
             let state_machine = GroupStateMachine::new_as_member_with_config(config);
-            (group, state_machine)
+            (group, state_machine, Some(Arc::new(mls)))
         } else {
             let group = prepare_to_join(
                 group_name,
-                self.mls_service.identity().identity_bytes().to_vec(),
+                self_identity_bytes.clone(),
                 config.protocol.clone(),
             );
             let state_machine = GroupStateMachine::new_as_pending_join_with_config(config);
-            (group, state_machine)
+            (group, state_machine, None)
         };
         group.set_max_reelection_attempts(max_reelection_attempts);
         group.set_threshold_peer_score(threshold_peer_score);
@@ -84,14 +88,13 @@ impl<
         }
         groups.insert(
             group_name.to_string(),
-            Arc::new(RwLock::new(GroupEntry::new(group, state_machine))),
+            Arc::new(RwLock::new(GroupEntry::new(group, state_machine, mls))),
         );
         drop(groups);
 
         // Joiners start tracked at `JoinedGroup` time (once members are known).
         if is_creation {
-            self.scoring()
-                .add_member(group_name, self.mls_service.identity().identity_bytes());
+            self.scoring().add_member(group_name, &self_identity_bytes);
         }
 
         self.state_handler
@@ -184,12 +187,15 @@ impl<
             return Ok(());
         };
 
-        let packet = build_message(
-            group_name,
-            self.mls_service.as_ref(),
-            &app_msg,
-            &self.app_id,
-        )?;
+        let packet = {
+            let entry_arc = self
+                .lookup_entry(group_name)
+                .await
+                .ok_or(UserError::GroupNotFound)?;
+            let entry = entry_arc.read().await;
+            let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
+            build_message(mls.as_ref(), &app_msg, &self.app_id)?
+        };
         self.handler.on_outbound(group_name, packet).await?;
 
         Ok(())

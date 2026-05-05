@@ -6,8 +6,7 @@
 //! the impl is not tied to `openmls_rust_crypto::MemoryStorage`.
 
 use openmls::{
-    group::{GroupId, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, StagedWelcome},
-    key_packages::KeyPackage,
+    group::MlsGroup,
     prelude::{
         ContentType, DeserializeBytes, MlsMessageBodyIn, MlsMessageIn, ProcessedMessageContent,
         Proposal, ProtocolMessage,
@@ -17,15 +16,21 @@ use openmls_rust_crypto::RustCrypto;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 
 use crate::mls_crypto::{
-    CommitCandidate, DeMlsStorage, DecryptResult, GroupUpdate, IdentityProvider, KeyPackageBytes,
-    MlsError, MlsMessageKind, MlsProposalAction, OpenMlsService, StagedCandidateResult,
-    service::api::{CIPHERSUITE, MlsService},
+    CommitCandidate, DeMlsStorage, DecryptResult, GroupUpdate, IdentityProvider, MlsError,
+    MlsMessageKind, MlsProposalAction, OpenMlsService, StagedCandidateResult,
+    service::api::MlsService,
 };
 
 /// Internal OpenMLS provider that wraps the configured storage backend.
-struct MlsProvider<'a, T: StorageProvider<1>> {
+pub(super) struct MlsProvider<'a, T: StorageProvider<1>> {
     crypto: &'a RustCrypto,
     storage: &'a T,
+}
+
+impl<'a, T: StorageProvider<1>> MlsProvider<'a, T> {
+    pub(super) fn new(crypto: &'a RustCrypto, storage: &'a T) -> Self {
+        Self { crypto, storage }
+    }
 }
 
 impl<'a, T: StorageProvider<1>> OpenMlsProvider for MlsProvider<'a, T> {
@@ -96,74 +101,20 @@ where
         &self.identity
     }
 
+    fn group_id(&self) -> &str {
+        &self.group_id
+    }
+
     // ══════════════════════════════════════════════════════════
     // Group lifecycle
     // ══════════════════════════════════════════════════════════
 
-    fn create_group(&self, group_id: &str) -> Result<(), MlsError> {
+    fn delete(&self) -> Result<(), MlsError> {
         let provider = self.make_provider();
-
-        let config = MlsGroupCreateConfig::builder()
-            .use_ratchet_tree_extension(true)
-            .build();
-
-        let group = MlsGroup::new_with_group_id(
-            &provider,
-            self.identity.signer(),
-            &config,
-            GroupId::from_slice(group_id.as_bytes()),
-            self.identity.credential().clone(),
-        )?;
-
-        self.groups.write()?.insert(group_id.to_string(), group);
-
-        Ok(())
-    }
-
-    fn accept_welcome(&self, welcome_bytes: &[u8]) -> Result<Option<String>, MlsError> {
-        let provider = self.make_provider();
-
-        let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(welcome_bytes)?;
-        let welcome = match mls_message.extract() {
-            MlsMessageBodyIn::Welcome(w) => w,
-            _ => return Ok(None),
-        };
-
-        let is_for_us = welcome.secrets().iter().any(|s| {
-            self.storage
-                .is_our_key_package(s.new_member().as_slice())
-                .unwrap_or(false)
-        });
-        if !is_for_us {
-            return Ok(None);
-        }
-
-        for secret in welcome.secrets() {
-            let _ = self
-                .storage
-                .remove_key_package_ref(secret.new_member().as_slice());
-        }
-
-        let config = MlsGroupJoinConfig::builder()
-            .use_ratchet_tree_extension(true)
-            .build();
-        let group = StagedWelcome::new_from_welcome(&provider, &config, welcome, None)?
-            .into_group(&provider)?;
-
-        let group_id = String::from_utf8_lossy(group.group_id().as_slice()).to_string();
-        self.groups.write()?.insert(group_id.clone(), group);
-
-        Ok(Some(group_id))
-    }
-
-    fn delete_group(&self, group_id: &str) -> Result<(), MlsError> {
-        let provider = self.make_provider();
-        let mut groups = self.groups.write()?;
-        if let Some(mut group) = groups.remove(group_id) {
-            group
-                .delete(provider.storage())
-                .map_err(MlsError::storage)?;
-        }
+        let mut group = self.mls_group.write()?;
+        group
+            .delete(provider.storage())
+            .map_err(MlsError::storage)?;
         Ok(())
     }
 
@@ -171,64 +122,23 @@ where
     // Membership / state queries
     // ══════════════════════════════════════════════════════════
 
-    fn members(&self, group_id: &str) -> Result<Vec<Vec<u8>>, MlsError> {
-        let groups = self.groups.read()?;
-        let group = groups
-            .get(group_id)
-            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
-
+    fn members(&self) -> Result<Vec<Vec<u8>>, MlsError> {
+        let group = self.mls_group.read()?;
         Ok(group
             .members()
             .map(|m| m.credential.serialized_content().to_vec())
             .collect())
     }
 
-    fn is_member(&self, group_id: &str, identity: &[u8]) -> bool {
-        self.members(group_id)
+    fn is_member(&self, identity: &[u8]) -> bool {
+        self.members()
             .map(|members| members.iter().any(|m| m.as_slice() == identity))
             .unwrap_or(false)
     }
 
-    fn current_epoch(&self, group_id: &str) -> Result<u64, MlsError> {
-        let groups = self.groups.read()?;
-        let group = groups
-            .get(group_id)
-            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
-
+    fn current_epoch(&self) -> Result<u64, MlsError> {
+        let group = self.mls_group.read()?;
         Ok(group.epoch().as_u64())
-    }
-
-    fn has_group(&self, group_id: &str) -> bool {
-        self.groups
-            .read()
-            .map(|g| g.contains_key(group_id))
-            .unwrap_or(false)
-    }
-
-    // ══════════════════════════════════════════════════════════
-    // Key packages
-    // ══════════════════════════════════════════════════════════
-
-    fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
-        let provider = self.make_provider();
-
-        let kp_bundle = KeyPackage::builder().build(
-            CIPHERSUITE,
-            &provider,
-            self.identity.signer(),
-            self.identity.credential().clone(),
-        )?;
-
-        let kp = kp_bundle.key_package();
-        let hash_ref = kp.hash_ref(provider.crypto())?.as_slice().to_vec();
-        let bytes = serde_json::to_vec(kp).map_err(MlsError::InvalidJson)?;
-
-        self.storage.store_key_package_ref(&hash_ref)?;
-
-        Ok(KeyPackageBytes::new(
-            bytes,
-            self.identity.identity_bytes().to_vec(),
-        ))
     }
 
     // ══════════════════════════════════════════════════════════
@@ -237,24 +147,20 @@ where
 
     fn create_commit_candidate(
         &self,
-        group_id: &str,
         updates: &[GroupUpdate],
     ) -> Result<CommitCandidate, MlsError> {
         let provider = self.make_provider();
         let signer = self.identity.signer();
 
-        let mut groups = self.groups.write()?;
-        let group = groups
-            .get_mut(group_id)
-            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
-
+        let mut group = self.mls_group.write()?;
         let mut mls_proposals = Vec::new();
 
         for update in updates {
             match update {
                 GroupUpdate::Add(key_package) => {
-                    let kp: KeyPackage = serde_json::from_slice(key_package.as_bytes())
-                        .map_err(MlsError::KeyPackageJson)?;
+                    let kp: openmls::key_packages::KeyPackage =
+                        serde_json::from_slice(key_package.as_bytes())
+                            .map_err(MlsError::KeyPackageJson)?;
                     let (mls_message_out, _proposal_ref) =
                         group.propose_add_member(&provider, signer, &kp)?;
                     mls_proposals.push(mls_message_out.to_bytes()?);
@@ -291,26 +197,16 @@ where
         })
     }
 
-    fn merge_own_commit(&self, group_id: &str) -> Result<(), MlsError> {
+    fn merge_own_commit(&self) -> Result<(), MlsError> {
         let provider = self.make_provider();
-
-        let mut groups = self.groups.write()?;
-        let group = groups
-            .get_mut(group_id)
-            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
-
+        let mut group = self.mls_group.write()?;
         group.merge_pending_commit(&provider)?;
         Ok(())
     }
 
-    fn discard_own_commit(&self, group_id: &str) -> Result<(), MlsError> {
+    fn discard_own_commit(&self) -> Result<(), MlsError> {
         let provider = self.make_provider();
-
-        let mut groups = self.groups.write()?;
-        let group = groups
-            .get_mut(group_id)
-            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
-
+        let mut group = self.mls_group.write()?;
         let _ = group.clear_pending_commit(provider.storage());
         let _ = group.clear_pending_proposals(provider.storage());
         Ok(())
@@ -322,20 +218,16 @@ where
 
     fn apply_remote_candidate(
         &self,
-        group_id: &str,
         proposals: &[Vec<u8>],
         commit_bytes: &[u8],
     ) -> Result<StagedCandidateResult, MlsError> {
         let provider = self.make_provider();
 
-        // Phase 1: hold the groups lock for the whole atomic stage.
+        // Phase 1: hold the group lock for the whole atomic stage.
         // Anything we put into MLS pending state stays there for the caller
         // to roll back via `discard_staged_commit` on Aborted.
         let outcome = {
-            let mut groups = self.groups.write()?;
-            let group = groups
-                .get_mut(group_id)
-                .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
+            let mut group = self.mls_group.write()?;
 
             // ── Stage every proposal, collecting senders ──
             let mut proposal_senders: Vec<Vec<u8>> = Vec::with_capacity(proposals.len());
@@ -353,7 +245,7 @@ where
                     }
                     _ => {
                         tracing::debug!(
-                            group = group_id,
+                            group = %self.group_id,
                             index = i,
                             "apply_remote_candidate: non-proposal in proposal slot",
                         );
@@ -368,7 +260,8 @@ where
 
             if protocol_message.group_id().as_slice() != group.group_id().as_slice() {
                 tracing::debug!(
-                    "apply_remote_candidate: ignoring commit for wrong group ID (expected {group_id})"
+                    "apply_remote_candidate: ignoring commit for wrong group ID (expected {})",
+                    self.group_id,
                 );
                 return Ok(StagedCandidateResult::Aborted);
             }
@@ -416,7 +309,8 @@ where
                 }
                 _ => {
                     tracing::debug!(
-                        "apply_remote_candidate: ignoring non-commit message for group {group_id}"
+                        "apply_remote_candidate: ignoring non-commit message for group {}",
+                        self.group_id,
                     );
                     None
                 }
@@ -425,9 +319,7 @@ where
 
         match outcome {
             Some((commit_sender, proposal_senders, self_removed, actions, staged)) => {
-                self.pending_staged_commits
-                    .write()?
-                    .insert(group_id.to_string(), staged);
+                *self.pending_staged_commit.write()? = Some(staged);
                 Ok(StagedCandidateResult::Staged {
                     commit_sender,
                     proposal_senders,
@@ -439,33 +331,26 @@ where
         }
     }
 
-    fn merge_staged_commit(&self, group_id: &str) -> Result<(), MlsError> {
+    fn merge_staged_commit(&self) -> Result<(), MlsError> {
         let provider = self.make_provider();
 
         let staged = self
-            .pending_staged_commits
+            .pending_staged_commit
             .write()?
-            .remove(group_id)
-            .ok_or_else(|| MlsError::NoPendingStagedCommit(group_id.to_string()))?;
+            .take()
+            .ok_or_else(|| MlsError::NoPendingStagedCommit(self.group_id.clone()))?;
 
-        let mut groups = self.groups.write()?;
-        let group = groups
-            .get_mut(group_id)
-            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
-
+        let mut group = self.mls_group.write()?;
         group.merge_staged_commit(&provider, staged)?;
         Ok(())
     }
 
-    fn discard_staged_commit(&self, group_id: &str) -> Result<(), MlsError> {
-        self.pending_staged_commits.write()?.remove(group_id);
+    fn discard_staged_commit(&self) -> Result<(), MlsError> {
+        *self.pending_staged_commit.write()? = None;
 
         let provider = self.make_provider();
-        let mut groups = self.groups.write()?;
-        if let Some(group) = groups.get_mut(group_id) {
-            let _ = group.clear_pending_proposals(provider.storage());
-        }
-
+        let mut group = self.mls_group.write()?;
+        let _ = group.clear_pending_proposals(provider.storage());
         Ok(())
     }
 
@@ -473,30 +358,19 @@ where
     // Application messages
     // ══════════════════════════════════════════════════════════
 
-    fn encrypt(&self, group_id: &str, plaintext: &[u8]) -> Result<Vec<u8>, MlsError> {
+    fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, MlsError> {
         let provider = self.make_provider();
         let signer = self.identity.signer();
 
-        let mut groups = self.groups.write()?;
-        let group = groups
-            .get_mut(group_id)
-            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
-
+        let mut group = self.mls_group.write()?;
         let message = group.create_message(&provider, signer, plaintext)?;
         Ok(message.to_bytes()?)
     }
 
-    fn decrypt_application_only(
-        &self,
-        group_id: &str,
-        ciphertext: &[u8],
-    ) -> Result<DecryptResult, MlsError> {
+    fn decrypt_application_only(&self, ciphertext: &[u8]) -> Result<DecryptResult, MlsError> {
         let provider = self.make_provider();
 
-        let mut groups = self.groups.write()?;
-        let group = groups
-            .get_mut(group_id)
-            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
+        let mut group = self.mls_group.write()?;
 
         let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(ciphertext)?;
         let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
@@ -532,13 +406,10 @@ where
         }
     }
 
-    fn decrypt(&self, group_id: &str, ciphertext: &[u8]) -> Result<DecryptResult, MlsError> {
+    fn decrypt(&self, ciphertext: &[u8]) -> Result<DecryptResult, MlsError> {
         let provider = self.make_provider();
 
-        let mut groups = self.groups.write()?;
-        let group = groups
-            .get_mut(group_id)
-            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
+        let mut group = self.mls_group.write()?;
 
         let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(ciphertext)?;
         let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
@@ -561,7 +432,7 @@ where
         if protocol_message.content_type() == ContentType::Commit {
             tracing::debug!(
                 "Ignoring commit on decrypt() path for group {}: use apply_remote_candidate() instead",
-                group_id,
+                self.group_id,
             );
             return Ok(DecryptResult::Ignored);
         }
@@ -576,7 +447,7 @@ where
             )),
             ProcessedMessageContent::ProposalMessage(proposal) => {
                 let action =
-                    OpenMlsService::<S, I>::extract_proposal_action(group, proposal.proposal())?;
+                    OpenMlsService::<S, I>::extract_proposal_action(&group, proposal.proposal())?;
 
                 group
                     .store_pending_proposal(provider.storage(), proposal.as_ref().clone())

@@ -18,6 +18,8 @@ impl<
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
 > User<P, M, H, SCH>
+where
+    M::Identity: Clone,
 {
     /// Poll a `PendingJoin` group. Returns `true` while still waiting,
     /// `false` once joined or once the join attempt has been torn down
@@ -92,17 +94,21 @@ impl<
         let finalize_result = {
             let mut entry = entry_arc.write().await;
             let allow_subset = entry.group.allow_subset_candidates();
-            let result = match finalize_freeze_round(
-                &mut entry.group,
-                self.mls_service.as_ref(),
-                allow_subset,
-                &self.app_id,
-            ) {
-                Ok(result) => result,
-                Err(e) => {
-                    error!(group = group_name, error = %e, "freeze finalize failed");
-                    FreezeFinalizeResult::default()
+            let result = if let Some(mls) = entry.mls.clone() {
+                match finalize_freeze_round(
+                    &mut entry.group,
+                    mls.as_ref(),
+                    allow_subset,
+                    &self.app_id,
+                ) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        error!(group = group_name, error = %e, "freeze finalize failed");
+                        FreezeFinalizeResult::default()
+                    }
                 }
+            } else {
+                FreezeFinalizeResult::default()
             };
             entry.archive_committed_batch(result.committed_batch.clone());
             result
@@ -159,14 +165,19 @@ impl<
                         entry.state_machine.clear_proposal_timer();
                         entry.state_machine.start_reelection();
 
-                        let violation_epoch = self.mls_service.current_epoch(group_name)?;
-                        let self_identity = self.mls_service.identity().identity_bytes();
-                        let members = group_members(&entry.group, self.mls_service.as_ref())?;
-                        let target = entry
-                            .group
-                            .live_epoch_steward(violation_epoch, &members)
-                            .filter(|id| !id.is_empty() && *id != self_identity)
-                            .map(|id| id.to_vec());
+                        let target = match entry.mls() {
+                            Some(mls) => {
+                                let violation_epoch = mls.current_epoch()?;
+                                let self_identity = self.identity().identity_bytes();
+                                let members = group_members(&entry.group, mls.as_ref())?;
+                                entry
+                                    .group
+                                    .live_epoch_steward(violation_epoch, &members)
+                                    .filter(|id| !id.is_empty() && *id != self_identity)
+                                    .map(|id| id.to_vec())
+                            }
+                            None => None,
+                        };
 
                         (GroupState::Reelection, target)
                     } else {
@@ -243,18 +254,15 @@ impl<
             .state_machine
             .check_steward_inactivity(proposal_count, inactivity);
         if entered_freezing {
-            let epoch = self.mls_service.current_epoch(group_name)?;
+            let mls = entry.mls.clone().ok_or(UserError::MlsNotInitialized)?;
+            let epoch = mls.current_epoch()?;
             entry.group.ensure_freeze_round(epoch);
 
             // Stewards build their own candidate under the same lock.
             // Candidate-build failure must not block the freeze transition —
             // peers' candidates still get processed.
             let outbound = if entry.group.is_steward() {
-                match create_commit_candidate(
-                    &mut entry.group,
-                    self.mls_service.as_ref(),
-                    &self.app_id,
-                ) {
+                match create_commit_candidate(&mut entry.group, mls.as_ref(), &self.app_id) {
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(

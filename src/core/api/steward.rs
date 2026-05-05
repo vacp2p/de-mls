@@ -43,10 +43,6 @@ where
         return Err(CoreError::NoProposals);
     }
 
-    if !mls.has_group(group.group_name()) {
-        return Err(CoreError::MlsGroupNotInitialized);
-    }
-
     // MLS forbids committing one's own removal. If the approved batch contains
     // RemoveMember(self), skip local candidate creation — another steward will
     // commit the batch (including this node's removal) once they enter freeze.
@@ -84,7 +80,7 @@ where
     // Drop approved entries already reflected in group state (stale
     // rebroadcast KPs, duplicate removes) — without this MLS would reject
     // the whole batch with "Duplicate signature key in proposals and group".
-    let current_members = mls.members(group.group_name())?;
+    let current_members = mls.members()?;
     let current_members_set = member_set(&current_members);
     let is_member = |id: &[u8]| current_members_set.contains(id);
 
@@ -139,7 +135,7 @@ where
         proposals: mls_proposals,
         commit,
         welcome,
-    } = mls.create_commit_candidate(group.group_name(), &updates)?;
+    } = mls.create_commit_candidate(&updates)?;
 
     let candidate = CommitCandidate {
         group_name: group.group_name_bytes().to_vec(),
@@ -151,7 +147,7 @@ where
     // Welcome bytes are deferred: sent from finalize_freeze_round after the
     // commit merges, so joiners can't advance epoch ahead of the steward.
     let commit_hash = compute_commit_hash(&candidate.commit_message);
-    let epoch = mls.current_epoch(group.group_name())?;
+    let epoch = mls.current_epoch()?;
     let _ = group.add_freeze_candidate(
         BufferedCommitCandidate {
             candidate_msg: candidate.clone(),
@@ -181,16 +177,11 @@ where
 // ─────────────────────────── Member Queries ───────────────────────────
 
 /// Get the current members of a group.
-pub fn group_members<M>(group: &Group, mls: &M) -> Result<Vec<Vec<u8>>, CoreError>
+pub fn group_members<M>(_group: &Group, mls: &M) -> Result<Vec<Vec<u8>>, CoreError>
 where
     M: MlsService,
 {
-    if !mls.has_group(group.group_name()) {
-        return Err(CoreError::MlsGroupNotInitialized);
-    }
-
-    let members = mls.members(group.group_name())?;
-    Ok(members)
+    Ok(mls.members()?)
 }
 
 // ─────────────────────────── Housekeeping Decisions ───────────────────────────

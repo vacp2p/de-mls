@@ -46,6 +46,8 @@ impl<
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
 > User<P, M, H, SCH>
+where
+    M::Identity: Clone,
 {
     /// Check that the group state allows creating a proposal of this kind and
     /// return the expected voter count.
@@ -84,7 +86,8 @@ impl<
             }
         }
 
-        let members = group_members(&entry.group, self.mls_service.as_ref())?;
+        let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
+        let members = group_members(&entry.group, mls.as_ref())?;
         Ok(members.len() as u32)
     }
 
@@ -197,7 +200,7 @@ impl<
         let (proposal_id, unbundled) = submit_proposal::<P>(
             group_name,
             &request,
-            self.mls_service.identity().identity_bytes(),
+            self.identity().identity_bytes(),
             &self.consensus_service,
             ProposalParams {
                 expected_voters,
@@ -246,12 +249,15 @@ impl<
             None => unbundled,
         };
 
-        let packet = build_message(
-            group_name,
-            self.mls_service.as_ref(),
-            &outbound,
-            &self.app_id,
-        )?;
+        let packet = {
+            let entry_arc = self
+                .lookup_entry(group_name)
+                .await
+                .ok_or(UserError::GroupNotFound)?;
+            let entry = entry_arc.read().await;
+            let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
+            build_message(mls.as_ref(), &outbound, &self.app_id)?
+        };
         self.handler.on_outbound(group_name, packet).await?;
 
         match creator_vote {
@@ -361,21 +367,21 @@ impl<
             .await
             .ok_or(UserError::GroupNotFound)?;
 
-        let (pending_join, members_for_rotation) = {
+        let (pending_join, members_for_rotation, current_epoch) = {
             let entry = entry_arc.read().await;
             let pending = entry.state_machine.current_state() == GroupState::PendingJoin;
-            let members = if !pending && self.mls_service.has_group(entry.group.group_name()) {
-                group_members(&entry.group, self.mls_service.as_ref())?
-            } else {
-                Vec::new()
-            };
-            (pending, members)
+            match (pending, entry.mls()) {
+                (true, _) | (false, None) => (pending, Vec::new(), 0u64),
+                (false, Some(mls)) => (
+                    false,
+                    group_members(&entry.group, mls.as_ref())?,
+                    mls.current_epoch()?,
+                ),
+            }
         };
         if pending_join {
             return Ok(());
         }
-
-        let current_epoch = self.mls_service.current_epoch(group_name)?;
 
         let (inserted, is_epoch_steward, state, buffer_total, should_propose) = {
             let mut entry = entry_arc.write().await;
@@ -457,7 +463,11 @@ impl<
             self.eth_signer.clone(),
         )
         .await?;
-        let packet = build_message(group_name, self.mls_service.as_ref(), &app_message, &app_id)?;
+        let packet = {
+            let entry = entry_arc.read().await;
+            let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
+            build_message(mls.as_ref(), &app_message, &app_id)?
+        };
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
     }
@@ -554,9 +564,10 @@ impl<
         proposal_id: u32,
         vote: bool,
     ) -> Result<(), UserError> {
-        if self.lookup_entry(group_name).await.is_none() {
-            return Err(UserError::GroupNotFound);
-        }
+        let entry_arc = self
+            .lookup_entry(group_name)
+            .await
+            .ok_or(UserError::GroupNotFound)?;
         let app_message = cast_vote::<P, _>(
             group_name,
             proposal_id,
@@ -565,12 +576,11 @@ impl<
             self.eth_signer.clone(),
         )
         .await?;
-        let packet = build_message(
-            group_name,
-            self.mls_service.as_ref(),
-            &app_message,
-            &self.app_id,
-        )?;
+        let packet = {
+            let entry = entry_arc.read().await;
+            let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
+            build_message(mls.as_ref(), &app_message, &self.app_id)?
+        };
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
     }
