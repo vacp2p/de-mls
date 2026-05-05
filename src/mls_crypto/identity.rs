@@ -5,7 +5,7 @@
 //! Ethereum wallet address. Future impls (libchat-style `AccountId`, etc.)
 //! plug in by implementing the trait without touching the MLS service.
 
-use std::str::FromStr;
+use std::{str::FromStr, sync::Arc};
 
 use alloy::{hex, primitives::Address};
 use openmls::credentials::{BasicCredential, CredentialWithKey};
@@ -86,6 +86,24 @@ impl IdentityProvider for WalletIdentity {
 
     fn signer(&self) -> &SignatureKeyPair {
         &self.signer
+    }
+}
+
+/// Sharing impl: every `Arc<I>` over an [`IdentityProvider`] is itself an
+/// [`IdentityProvider`]. Lets one logical identity back many MLS services
+/// (one per group) without cloning the underlying signing key.
+impl<I: IdentityProvider + ?Sized> IdentityProvider for Arc<I> {
+    fn identity_bytes(&self) -> &[u8] {
+        (**self).identity_bytes()
+    }
+    fn identity_display(&self) -> &str {
+        (**self).identity_display()
+    }
+    fn credential(&self) -> &CredentialWithKey {
+        (**self).credential()
+    }
+    fn signer(&self) -> &SignatureKeyPair {
+        (**self).signer()
     }
 }
 
