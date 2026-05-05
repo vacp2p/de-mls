@@ -102,8 +102,7 @@ where
                 return Ok(ProcessResult::Noop);
             }
 
-            if mls.is_welcome_for_us(&invitation.mls_message_out_bytes)? {
-                let group_name = mls.join_group(&invitation.mls_message_out_bytes)?;
+            if let Some(group_name) = mls.accept_welcome(&invitation.mls_message_out_bytes)? {
                 info!(group = group.group_name(), "joined group via welcome");
                 return Ok(ProcessResult::JoinedGroup(group_name));
             }

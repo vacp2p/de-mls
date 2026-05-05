@@ -12,8 +12,7 @@ use crate::{
     },
     ds::OutboundPacket,
     mls_crypto::{
-        DecryptResult, IdentityProvider, MlsMessageKind, MlsProposalAction, MlsService,
-        StagedCommitResult,
+        IdentityProvider, MlsMessageKind, MlsProposalAction, MlsService, StagedCandidateResult,
     },
     protos::de_mls::messages::v1::{
         CommitCandidate, GroupUpdateRequest, ViolationEvidence, group_update_request::Payload,
@@ -618,41 +617,22 @@ fn stage_candidate<M>(
 where
     M: MlsService,
 {
-    // Any non-`ProposalStored` outcome from MLS aborts staging.
-    let mut proposal_senders: Vec<Vec<u8>> = Vec::new();
-    for (i, proposal_bytes) in candidate.mls_proposals.iter().enumerate() {
-        match mls.process_candidate_proposal(group_name, proposal_bytes) {
-            Ok(DecryptResult::ProposalStored(sender, _action)) => proposal_senders.push(sender),
-            outcome => {
-                tracing::debug!(
-                    group = group_name,
-                    index = i,
-                    outcome = ?outcome,
-                    "MLS proposal rejected during application"
-                );
-                return Ok(StagingOutcome::Abort);
-            }
-        }
-    }
-
-    let staged_result = match mls.process_commit(group_name, &candidate.commit_message) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::debug!(
-                group = group_name,
-                error = %e,
-                "commit failed to process during application"
-            );
-            return Ok(StagingOutcome::Abort);
-        }
-    };
-    let (commit_sender, self_removed, commit_actions) = match staged_result {
-        StagedCommitResult::Staged {
-            sender_identity,
-            self_removed,
-            actions,
-        } => (sender_identity, self_removed, actions),
-        StagedCommitResult::Ignored => return Ok(StagingOutcome::Abort),
+    let Ok(StagedCandidateResult::Staged {
+        commit_sender,
+        proposal_senders,
+        self_removed,
+        actions: commit_actions,
+    }) = mls
+        .apply_remote_candidate(
+            group_name,
+            &candidate.mls_proposals,
+            &candidate.commit_message,
+        )
+        .inspect_err(|e| {
+            tracing::debug!(group = group_name, error = %e, "candidate failed to stage");
+        })
+    else {
+        return Ok(StagingOutcome::Abort);
     };
 
     // Wire-claimed `steward_identity` must match the MLS-verified

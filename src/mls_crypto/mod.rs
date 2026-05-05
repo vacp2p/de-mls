@@ -48,5 +48,5 @@ pub use service::{CIPHERSUITE, MlsService, OpenMlsService};
 pub use storage::{DeMlsStorage, MemoryDeMlsStorage};
 pub use types::{
     CommitCandidate, DecryptResult, GroupUpdate, KeyPackageBytes, MlsMessageKind,
-    MlsProposalAction, StagedCommitResult, key_package_bytes_from_json,
+    MlsProposalAction, StagedCandidateResult, key_package_bytes_from_json,
 };

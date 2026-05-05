@@ -6,7 +6,7 @@
 //! this trait without changing call sites in `core/` or `app/`.
 //!
 //! The trait surface uses only opaque boundary types ([`KeyPackageBytes`],
-//! [`CommitCandidate`], [`DecryptResult`], [`StagedCommitResult`],
+//! [`CommitCandidate`], [`DecryptResult`], [`StagedCandidateResult`],
 //! [`MlsMessageKind`], [`GroupUpdate`]) — no `openmls::*` types appear
 //! there. Identity is exposed via the associated [`MlsService::Identity`]
 //! type, supplied at construction.
@@ -29,7 +29,7 @@ use openmls_traits::OpenMlsProvider;
 
 use crate::mls_crypto::{
     CommitCandidate, DeMlsStorage, DecryptResult, GroupUpdate, IdentityProvider, KeyPackageBytes,
-    MlsError, MlsMessageKind, MlsProposalAction, OpenMlsService, StagedCommitResult,
+    MlsError, MlsMessageKind, MlsProposalAction, OpenMlsService, StagedCandidateResult,
 };
 
 /// MLS ciphersuite used by the default [`OpenMlsService`] impl.
@@ -53,15 +53,13 @@ pub trait MlsService: Send + Sync + 'static {
     /// the sole initial member.
     fn create_group(&self, group_id: &str) -> Result<(), MlsError>;
 
-    /// Join a group from a serialized welcome. Returns the joined group id.
-    fn join_group(&self, welcome_bytes: &[u8]) -> Result<String, MlsError>;
+    /// Join a group from a serialized welcome if it addresses one of our
+    /// key packages. Returns `Some(group_id)` on success, `None` if the
+    /// welcome is not for us. The welcome is parsed once.
+    fn accept_welcome(&self, welcome_bytes: &[u8]) -> Result<Option<String>, MlsError>;
 
     /// Drop local MLS state for a group. Idempotent.
     fn delete_group(&self, group_id: &str) -> Result<(), MlsError>;
-
-    /// Whether this welcome message addresses one of our key packages,
-    /// without joining.
-    fn is_welcome_for_us(&self, welcome_bytes: &[u8]) -> Result<bool, MlsError>;
 
     // ── Membership / state queries ──
 
@@ -100,16 +98,24 @@ pub trait MlsService: Send + Sync + 'static {
     /// Discard our pending commit candidate.
     fn discard_own_commit(&self, group_id: &str) -> Result<(), MlsError>;
 
-    // ── Inbound commit pipeline (split: stage → merge/discard) ──
+    // ── Inbound candidate pipeline (stage → merge/discard) ──
 
-    /// Stage an inbound commit. Caller validates the batch, then calls
-    /// [`merge_staged_commit`](Self::merge_staged_commit) or
+    /// Stage a remote commit candidate atomically: store every proposal in
+    /// the MLS pending queue and stage the commit. The caller validates
+    /// the result and then either commits via
+    /// [`merge_staged_commit`](Self::merge_staged_commit) or rolls back via
     /// [`discard_staged_commit`](Self::discard_staged_commit).
-    fn process_commit(
+    ///
+    /// On benign mismatch (stale epoch, wrong group, non-proposal in a
+    /// proposal slot, non-commit in the commit slot), returns
+    /// [`StagedCandidateResult::Aborted`]; the caller still cleans MLS
+    /// state via `discard_staged_commit`.
+    fn apply_remote_candidate(
         &self,
         group_id: &str,
-        ciphertext: &[u8],
-    ) -> Result<StagedCommitResult, MlsError>;
+        proposals: &[Vec<u8>],
+        commit_bytes: &[u8],
+    ) -> Result<StagedCandidateResult, MlsError>;
 
     /// Merge a previously staged inbound commit, advancing the MLS epoch.
     fn merge_staged_commit(&self, group_id: &str) -> Result<(), MlsError>;
@@ -117,14 +123,6 @@ pub trait MlsService: Send + Sync + 'static {
     /// Discard a previously staged inbound commit and clear pending
     /// proposals.
     fn discard_staged_commit(&self, group_id: &str) -> Result<(), MlsError>;
-
-    /// Stage a candidate proposal in the MLS pending queue. Used by the
-    /// freeze-round candidate pipeline before [`process_commit`](Self::process_commit).
-    fn process_candidate_proposal(
-        &self,
-        group_id: &str,
-        proposal_bytes: &[u8],
-    ) -> Result<DecryptResult, MlsError>;
 
     // ── Application messages ──
 
@@ -141,7 +139,8 @@ pub trait MlsService: Send + Sync + 'static {
     ) -> Result<DecryptResult, MlsError>;
 
     /// Decrypt/process an inbound MLS message — application messages and
-    /// proposals only. Commits are routed through [`process_commit`](Self::process_commit).
+    /// proposals only. Commits are routed through
+    /// [`apply_remote_candidate`](Self::apply_remote_candidate).
     fn decrypt(&self, group_id: &str, ciphertext: &[u8]) -> Result<DecryptResult, MlsError>;
 
     /// Inspect the untrusted outer kind of an MLS message — pre-dispatch
@@ -248,13 +247,13 @@ where
         Ok(())
     }
 
-    fn join_group(&self, welcome_bytes: &[u8]) -> Result<String, MlsError> {
+    fn accept_welcome(&self, welcome_bytes: &[u8]) -> Result<Option<String>, MlsError> {
         let provider = self.make_provider();
 
         let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(welcome_bytes)?;
         let welcome = match mls_message.extract() {
             MlsMessageBodyIn::Welcome(w) => w,
-            _ => return Err(MlsError::UnexpectedMessageType),
+            _ => return Ok(None),
         };
 
         let is_for_us = welcome.secrets().iter().any(|s| {
@@ -263,7 +262,7 @@ where
                 .unwrap_or(false)
         });
         if !is_for_us {
-            return Err(MlsError::WelcomeNotForUs);
+            return Ok(None);
         }
 
         for secret in welcome.secrets() {
@@ -279,10 +278,9 @@ where
             .into_group(&provider)?;
 
         let group_id = String::from_utf8_lossy(group.group_id().as_slice()).to_string();
-
         self.groups.write()?.insert(group_id.clone(), group);
 
-        Ok(group_id)
+        Ok(Some(group_id))
     }
 
     fn delete_group(&self, group_id: &str) -> Result<(), MlsError> {
@@ -292,20 +290,6 @@ where
             group.delete(provider.storage())?;
         }
         Ok(())
-    }
-
-    fn is_welcome_for_us(&self, welcome_bytes: &[u8]) -> Result<bool, MlsError> {
-        let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(welcome_bytes)?;
-        let welcome = match mls_message.extract() {
-            MlsMessageBodyIn::Welcome(w) => w,
-            _ => return Ok(false),
-        };
-
-        Ok(welcome.secrets().iter().any(|s| {
-            self.storage
-                .is_our_key_package(s.new_member().as_slice())
-                .unwrap_or(false)
-        }))
     }
 
     // ══════════════════════════════════════════════════════════
@@ -458,51 +442,77 @@ where
     }
 
     // ══════════════════════════════════════════════════════════
-    // Inbound commit pipeline (split: stage → merge/discard)
+    // Inbound candidate pipeline (stage → merge/discard)
     // ══════════════════════════════════════════════════════════
 
-    fn process_commit(
+    fn apply_remote_candidate(
         &self,
         group_id: &str,
-        ciphertext: &[u8],
-    ) -> Result<StagedCommitResult, MlsError> {
+        proposals: &[Vec<u8>],
+        commit_bytes: &[u8],
+    ) -> Result<StagedCandidateResult, MlsError> {
         let provider = self.make_provider();
 
-        // Phase 1: Hold only the groups lock. Do all group work (deserialize,
-        // authenticate, extract actions) and produce an owned StagedCommit.
+        // Phase 1: hold the groups lock for the whole atomic stage.
+        // Anything we put into MLS pending state stays there for the caller
+        // to roll back via `discard_staged_commit` on Aborted.
         let outcome = {
             let mut groups = self.groups.write()?;
             let group = groups
                 .get_mut(group_id)
                 .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
 
-            let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(ciphertext)?;
+            // ── Stage every proposal, collecting senders ──
+            let mut proposal_senders: Vec<Vec<u8>> = Vec::with_capacity(proposals.len());
+            for (i, proposal_bytes) in proposals.iter().enumerate() {
+                let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(proposal_bytes)?;
+                let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
+                let processed = group.process_message(&provider, protocol_message)?;
+                let sender = processed.credential().serialized_content().to_vec();
+                match processed.into_content() {
+                    ProcessedMessageContent::ProposalMessage(proposal) => {
+                        group.store_pending_proposal(
+                            provider.storage(),
+                            proposal.as_ref().clone(),
+                        )?;
+                        proposal_senders.push(sender);
+                    }
+                    _ => {
+                        tracing::debug!(
+                            group = group_id,
+                            index = i,
+                            "apply_remote_candidate: non-proposal in proposal slot",
+                        );
+                        return Ok(StagedCandidateResult::Aborted);
+                    }
+                }
+            }
+
+            // ── Stage the commit ──
+            let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(commit_bytes)?;
             let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
 
             if protocol_message.group_id().as_slice() != group.group_id().as_slice() {
                 tracing::debug!(
-                    "process_commit: ignoring commit for wrong group ID (expected {})",
-                    group_id,
+                    "apply_remote_candidate: ignoring commit for wrong group ID (expected {group_id})"
                 );
-                return Ok(StagedCommitResult::Ignored);
+                return Ok(StagedCandidateResult::Aborted);
             }
-
             if protocol_message.epoch() < group.epoch() {
                 tracing::debug!(
-                    "process_commit: ignoring stale commit from epoch {} (current: {})",
+                    "apply_remote_candidate: ignoring stale commit from epoch {} (current: {})",
                     protocol_message.epoch().as_u64(),
                     group.epoch().as_u64(),
                 );
-                return Ok(StagedCommitResult::Ignored);
+                return Ok(StagedCandidateResult::Aborted);
             }
 
             let processed = group.process_message(&provider, protocol_message)?;
-            let sender_identity = processed.credential().serialized_content().to_vec();
+            let commit_sender = processed.credential().serialized_content().to_vec();
 
             match processed.into_content() {
                 ProcessedMessageContent::StagedCommitMessage(staged) => {
                     let self_removed = staged.self_removed();
-
                     let mut actions = Vec::new();
                     for add in staged.add_proposals() {
                         let id = add
@@ -522,13 +532,17 @@ where
                             .ok_or(MlsError::UnknownLeafIndex(removed_index.u32()))?;
                         actions.push(MlsProposalAction::Remove(id));
                     }
-
-                    Some((sender_identity, self_removed, actions, *staged))
+                    Some((
+                        commit_sender,
+                        proposal_senders,
+                        self_removed,
+                        actions,
+                        *staged,
+                    ))
                 }
                 _ => {
                     tracing::debug!(
-                        "process_commit: ignoring non-commit message for group {}",
-                        group_id,
+                        "apply_remote_candidate: ignoring non-commit message for group {group_id}"
                     );
                     None
                 }
@@ -536,18 +550,18 @@ where
         };
 
         match outcome {
-            Some((sender_identity, self_removed, actions, staged)) => {
+            Some((commit_sender, proposal_senders, self_removed, actions, staged)) => {
                 self.pending_staged_commits
                     .write()?
                     .insert(group_id.to_string(), staged);
-
-                Ok(StagedCommitResult::Staged {
-                    sender_identity,
+                Ok(StagedCandidateResult::Staged {
+                    commit_sender,
+                    proposal_senders,
                     self_removed,
                     actions,
                 })
             }
-            None => Ok(StagedCommitResult::Ignored),
+            None => Ok(StagedCandidateResult::Aborted),
         }
     }
 
@@ -579,36 +593,6 @@ where
         }
 
         Ok(())
-    }
-
-    fn process_candidate_proposal(
-        &self,
-        group_id: &str,
-        proposal_bytes: &[u8],
-    ) -> Result<DecryptResult, MlsError> {
-        let provider = self.make_provider();
-
-        let mut groups = self.groups.write()?;
-        let group = groups
-            .get_mut(group_id)
-            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
-
-        let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(proposal_bytes)?;
-        let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
-
-        let processed = group.process_message(&provider, protocol_message)?;
-        let sender_identity = processed.credential().serialized_content().to_vec();
-
-        match processed.into_content() {
-            ProcessedMessageContent::ProposalMessage(proposal) => {
-                let action =
-                    OpenMlsService::<S, I>::extract_proposal_action(group, proposal.proposal())?;
-
-                group.store_pending_proposal(provider.storage(), proposal.as_ref().clone())?;
-                Ok(DecryptResult::ProposalStored(sender_identity, action))
-            }
-            _ => Err(MlsError::UnexpectedMessageType),
-        }
     }
 
     // ══════════════════════════════════════════════════════════
@@ -702,7 +686,7 @@ where
 
         if protocol_message.content_type() == ContentType::Commit {
             tracing::debug!(
-                "Ignoring commit on decrypt() path for group {}: use process_commit() instead",
+                "Ignoring commit on decrypt() path for group {}: use apply_remote_candidate() instead",
                 group_id,
             );
             return Ok(DecryptResult::Ignored);
