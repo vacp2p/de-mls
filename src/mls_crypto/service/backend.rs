@@ -1,7 +1,9 @@
 //! OpenMLS-backed implementation of [`super::MlsService`].
 //!
 //! The trait definition lives in `super::api`; this file is the reference
-//! impl for the OpenMLS engine on `MemoryStorage`.
+//! impl for the OpenMLS engine. It works with any `DeMlsStorage` whose
+//! `MlsStorage` implements [`openmls_traits::storage::StorageProvider`] —
+//! the impl is not tied to `openmls_rust_crypto::MemoryStorage`.
 
 use openmls::{
     group::{GroupId, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, StagedWelcome},
@@ -11,8 +13,8 @@ use openmls::{
         Proposal, ProtocolMessage,
     },
 };
-use openmls_rust_crypto::{MemoryStorage, RustCrypto};
-use openmls_traits::OpenMlsProvider;
+use openmls_rust_crypto::RustCrypto;
+use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 
 use crate::mls_crypto::{
     CommitCandidate, DeMlsStorage, DecryptResult, GroupUpdate, IdentityProvider, KeyPackageBytes,
@@ -20,17 +22,16 @@ use crate::mls_crypto::{
     service::api::{CIPHERSUITE, MlsService},
 };
 
-/// Internal OpenMLS provider that wraps storage. Used by
-/// [`OpenMlsService::make_provider`].
-struct MlsProvider<'a> {
+/// Internal OpenMLS provider that wraps the configured storage backend.
+struct MlsProvider<'a, T: StorageProvider<1>> {
     crypto: &'a RustCrypto,
-    storage: &'a MemoryStorage,
+    storage: &'a T,
 }
 
-impl<'a> OpenMlsProvider for MlsProvider<'a> {
+impl<'a, T: StorageProvider<1>> OpenMlsProvider for MlsProvider<'a, T> {
     type CryptoProvider = RustCrypto;
     type RandProvider = RustCrypto;
-    type StorageProvider = MemoryStorage;
+    type StorageProvider = T;
 
     fn crypto(&self) -> &Self::CryptoProvider {
         self.crypto
@@ -47,10 +48,10 @@ impl<'a> OpenMlsProvider for MlsProvider<'a> {
 
 impl<S, I> OpenMlsService<S, I>
 where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+    S: DeMlsStorage,
     I: IdentityProvider,
 {
-    fn make_provider(&self) -> MlsProvider<'_> {
+    fn make_provider(&self) -> MlsProvider<'_, S::MlsStorage> {
         MlsProvider {
             crypto: &self.crypto,
             storage: self.storage.mls_storage(),
@@ -86,7 +87,7 @@ where
 
 impl<S, I> MlsService for OpenMlsService<S, I>
 where
-    S: DeMlsStorage<MlsStorage = MemoryStorage> + Send + Sync + 'static,
+    S: DeMlsStorage + Send + Sync + 'static,
     I: IdentityProvider,
 {
     type Identity = I;
@@ -159,7 +160,9 @@ where
         let provider = self.make_provider();
         let mut groups = self.groups.write()?;
         if let Some(mut group) = groups.remove(group_id) {
-            group.delete(provider.storage())?;
+            group
+                .delete(provider.storage())
+                .map_err(MlsError::storage)?;
         }
         Ok(())
     }
@@ -343,10 +346,9 @@ where
                 let sender = processed.credential().serialized_content().to_vec();
                 match processed.into_content() {
                     ProcessedMessageContent::ProposalMessage(proposal) => {
-                        group.store_pending_proposal(
-                            provider.storage(),
-                            proposal.as_ref().clone(),
-                        )?;
+                        group
+                            .store_pending_proposal(provider.storage(), proposal.as_ref().clone())
+                            .map_err(MlsError::storage)?;
                         proposal_senders.push(sender);
                     }
                     _ => {
@@ -576,7 +578,9 @@ where
                 let action =
                     OpenMlsService::<S, I>::extract_proposal_action(group, proposal.proposal())?;
 
-                group.store_pending_proposal(provider.storage(), proposal.as_ref().clone())?;
+                group
+                    .store_pending_proposal(provider.storage(), proposal.as_ref().clone())
+                    .map_err(MlsError::storage)?;
                 Ok(DecryptResult::ProposalStored(sender_identity, action))
             }
             ProcessedMessageContent::StagedCommitMessage(_) => Ok(DecryptResult::Ignored),
