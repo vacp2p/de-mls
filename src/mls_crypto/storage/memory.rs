@@ -27,26 +27,16 @@ impl DeMlsStorage for MemoryDeMlsStorage {
     type StorageError = openmls_rust_crypto::MemoryStorageError;
 
     fn store_key_package_ref(&self, hash_ref: &[u8]) -> Result<(), MlsError> {
-        self.key_package_refs
-            .write()
-            .map_err(|e| MlsError::Lock(e.to_string()))?
-            .insert(hash_ref.to_vec());
+        self.key_package_refs.write()?.insert(hash_ref.to_vec());
         Ok(())
     }
 
     fn is_our_key_package(&self, hash_ref: &[u8]) -> Result<bool, MlsError> {
-        Ok(self
-            .key_package_refs
-            .read()
-            .map_err(|e| MlsError::Lock(e.to_string()))?
-            .contains(hash_ref))
+        Ok(self.key_package_refs.read()?.contains(hash_ref))
     }
 
     fn remove_key_package_ref(&self, hash_ref: &[u8]) -> Result<(), MlsError> {
-        self.key_package_refs
-            .write()
-            .map_err(|e| MlsError::Lock(e.to_string()))?
-            .remove(hash_ref);
+        self.key_package_refs.write()?.remove(hash_ref);
         Ok(())
     }
 

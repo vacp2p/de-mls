@@ -243,10 +243,7 @@ where
             self.identity.credential().clone(),
         )?;
 
-        self.groups
-            .write()
-            .map_err(|e| MlsError::Lock(e.to_string()))?
-            .insert(group_id.to_string(), group);
+        self.groups.write()?.insert(group_id.to_string(), group);
 
         Ok(())
     }
@@ -283,24 +280,16 @@ where
 
         let group_id = String::from_utf8_lossy(group.group_id().as_slice()).to_string();
 
-        self.groups
-            .write()
-            .map_err(|e| MlsError::Lock(e.to_string()))?
-            .insert(group_id.clone(), group);
+        self.groups.write()?.insert(group_id.clone(), group);
 
         Ok(group_id)
     }
 
     fn delete_group(&self, group_id: &str) -> Result<(), MlsError> {
         let provider = self.make_provider();
-        let mut groups = self
-            .groups
-            .write()
-            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let mut groups = self.groups.write()?;
         if let Some(mut group) = groups.remove(group_id) {
-            group
-                .delete(provider.storage())
-                .map_err(MlsError::MlsStorage)?;
+            group.delete(provider.storage())?;
         }
         Ok(())
     }
@@ -324,10 +313,7 @@ where
     // ══════════════════════════════════════════════════════════
 
     fn members(&self, group_id: &str) -> Result<Vec<Vec<u8>>, MlsError> {
-        let groups = self
-            .groups
-            .read()
-            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let groups = self.groups.read()?;
         let group = groups
             .get(group_id)
             .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
@@ -345,10 +331,7 @@ where
     }
 
     fn current_epoch(&self, group_id: &str) -> Result<u64, MlsError> {
-        let groups = self
-            .groups
-            .read()
-            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let groups = self.groups.read()?;
         let group = groups
             .get(group_id)
             .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
@@ -401,10 +384,7 @@ where
         let provider = self.make_provider();
         let signer = self.identity.signer();
 
-        let mut groups = self
-            .groups
-            .write()
-            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let mut groups = self.groups.write()?;
         let group = groups
             .get_mut(group_id)
             .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
@@ -455,10 +435,7 @@ where
     fn merge_own_commit(&self, group_id: &str) -> Result<(), MlsError> {
         let provider = self.make_provider();
 
-        let mut groups = self
-            .groups
-            .write()
-            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let mut groups = self.groups.write()?;
         let group = groups
             .get_mut(group_id)
             .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
@@ -470,10 +447,7 @@ where
     fn discard_own_commit(&self, group_id: &str) -> Result<(), MlsError> {
         let provider = self.make_provider();
 
-        let mut groups = self
-            .groups
-            .write()
-            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let mut groups = self.groups.write()?;
         let group = groups
             .get_mut(group_id)
             .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
@@ -497,10 +471,7 @@ where
         // Phase 1: Hold only the groups lock. Do all group work (deserialize,
         // authenticate, extract actions) and produce an owned StagedCommit.
         let outcome = {
-            let mut groups = self
-                .groups
-                .write()
-                .map_err(|e| MlsError::Lock(e.to_string()))?;
+            let mut groups = self.groups.write()?;
             let group = groups
                 .get_mut(group_id)
                 .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
@@ -567,8 +538,7 @@ where
         match outcome {
             Some((sender_identity, self_removed, actions, staged)) => {
                 self.pending_staged_commits
-                    .write()
-                    .map_err(|e| MlsError::Lock(e.to_string()))?
+                    .write()?
                     .insert(group_id.to_string(), staged);
 
                 Ok(StagedCommitResult::Staged {
@@ -586,15 +556,11 @@ where
 
         let staged = self
             .pending_staged_commits
-            .write()
-            .map_err(|e| MlsError::Lock(e.to_string()))?
+            .write()?
             .remove(group_id)
             .ok_or_else(|| MlsError::NoPendingStagedCommit(group_id.to_string()))?;
 
-        let mut groups = self
-            .groups
-            .write()
-            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let mut groups = self.groups.write()?;
         let group = groups
             .get_mut(group_id)
             .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
@@ -604,16 +570,10 @@ where
     }
 
     fn discard_staged_commit(&self, group_id: &str) -> Result<(), MlsError> {
-        self.pending_staged_commits
-            .write()
-            .map_err(|e| MlsError::Lock(e.to_string()))?
-            .remove(group_id);
+        self.pending_staged_commits.write()?.remove(group_id);
 
         let provider = self.make_provider();
-        let mut groups = self
-            .groups
-            .write()
-            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let mut groups = self.groups.write()?;
         if let Some(group) = groups.get_mut(group_id) {
             let _ = group.clear_pending_proposals(provider.storage());
         }
@@ -628,10 +588,7 @@ where
     ) -> Result<DecryptResult, MlsError> {
         let provider = self.make_provider();
 
-        let mut groups = self
-            .groups
-            .write()
-            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let mut groups = self.groups.write()?;
         let group = groups
             .get_mut(group_id)
             .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
@@ -662,10 +619,7 @@ where
         let provider = self.make_provider();
         let signer = self.identity.signer();
 
-        let mut groups = self
-            .groups
-            .write()
-            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let mut groups = self.groups.write()?;
         let group = groups
             .get_mut(group_id)
             .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
@@ -681,10 +635,7 @@ where
     ) -> Result<DecryptResult, MlsError> {
         let provider = self.make_provider();
 
-        let mut groups = self
-            .groups
-            .write()
-            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let mut groups = self.groups.write()?;
         let group = groups
             .get_mut(group_id)
             .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
@@ -726,10 +677,7 @@ where
     fn decrypt(&self, group_id: &str, ciphertext: &[u8]) -> Result<DecryptResult, MlsError> {
         let provider = self.make_provider();
 
-        let mut groups = self
-            .groups
-            .write()
-            .map_err(|e| MlsError::Lock(e.to_string()))?;
+        let mut groups = self.groups.write()?;
         let group = groups
             .get_mut(group_id)
             .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
