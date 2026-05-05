@@ -28,7 +28,7 @@ use crate::{
         DeMlsProvider, DefaultProvider, Group, GroupEventHandler, ProposalId, ProviderConsensus,
         ScoringConfig,
     },
-    mls_crypto::{MemoryDeMlsStorage, MlsService},
+    mls_crypto::{MemoryDeMlsStorage, MlsService, OpenMlsService},
     protos::de_mls::messages::v1::GroupUpdateRequest,
 };
 
@@ -85,7 +85,7 @@ impl GroupEntry {
 type AutoVoteTimers = Arc<Mutex<HashMap<Arc<str>, HashMap<u32, JoinHandle<()>>>>>;
 
 pub struct User<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler> {
-    mls_service: Arc<MlsService<P::Storage>>,
+    mls_service: Arc<OpenMlsService<P::Storage>>,
     /// Outer lock: map CRUD (insert / remove / iterate names).
     /// Inner per-entry lock: per-group reads and mutations. A write on
     /// group A doesn't block reads on group B.
@@ -131,7 +131,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
     User<P, H, SCH>
 {
     fn new_with_config(
-        mls_service: MlsService<P::Storage>,
+        mls_service: OpenMlsService<P::Storage>,
         consensus_service: Arc<ProviderConsensus<P>>,
         eth_signer: PrivateKeySigner,
         handler: Arc<H>,
@@ -239,7 +239,7 @@ impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
         let signer = PrivateKeySigner::from_str(private_key)?;
         let user_address = signer.address();
 
-        let mls_service = MlsService::new(MemoryDeMlsStorage::new());
+        let mls_service = OpenMlsService::new(MemoryDeMlsStorage::new());
         mls_service
             .init(user_address)
             .map_err(|e| UserError::Core(e.into()))?;

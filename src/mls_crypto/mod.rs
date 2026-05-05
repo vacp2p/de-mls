@@ -1,6 +1,6 @@
 //! MLS cryptographic operations for DE-MLS.
 //!
-//! This module provides `MlsService`, a unified API for all MLS operations:
+//! This module provides `OpenMlsService`, a unified API for all MLS operations:
 //!
 //! - Identity management (wallet-based)
 //! - Key package generation
@@ -11,11 +11,11 @@
 //! # Quick Start
 //!
 //! ```ignore
-//! use de_mls::mls_crypto::{MlsService, MemoryDeMlsStorage, parse_wallet_address};
+//! use de_mls::mls_crypto::{OpenMlsService, MemoryDeMlsStorage, parse_wallet_address};
 //!
 //! // Create service with in-memory storage
 //! let storage = MemoryDeMlsStorage::new();
-//! let mls = MlsService::new(storage);
+//! let mls = OpenMlsService::new(storage);
 //!
 //! // Initialize identity
 //! let wallet = parse_wallet_address("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")?;
@@ -41,7 +41,7 @@ mod types;
 
 pub use error::{IdentityError, MlsError, MlsServiceError, Result, StorageError};
 pub use identity::{ShortId, format_wallet_address, parse_wallet_address, parse_wallet_to_bytes};
-pub use service::{CIPHERSUITE, MlsService};
+pub use service::{CIPHERSUITE, MlsService, OpenMlsService};
 pub use storage::{DeMlsStorage, MemoryDeMlsStorage};
 pub use types::{
     CommitCandidate, DecryptResult, GroupUpdate, KeyPackageBytes, MlsMessageKind,

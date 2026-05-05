@@ -77,7 +77,7 @@ pub enum DecryptResult {
 
 /// Result of inspecting a staged commit (before merging).
 ///
-/// Returned by `MlsService::process_commit`. The `Staged` variant contains
+/// Returned by `OpenMlsService::process_commit`. The `Staged` variant contains
 /// authenticated information needed to validate the batch. The `Ignored` variant
 /// signals a benign rejection (stale epoch, wrong group, non-commit message)
 /// where no sender was authenticated.

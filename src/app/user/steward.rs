@@ -10,7 +10,7 @@ use crate::{
         evaluate_election_initiation, group_members, is_deadlock_ecp_proposer, member_set,
         scoring_member_diff, target_identity_of,
     },
-    mls_crypto::ShortId,
+    mls_crypto::{MlsService, ShortId},
     protos::de_mls::messages::v1::{
         AppMessage, GroupSync, GroupUpdateRequest, PeerScore, StewardElectionProposal,
         TimingConfig, ViolationEvidence, group_update_request,

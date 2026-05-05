@@ -19,6 +19,7 @@ use crate::{
         DeMlsProvider, GroupEventHandler, ProposalKind, build_message, group_members,
         target_identity_of,
     },
+    mls_crypto::MlsService,
     protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest, VotePayload},
 };
 

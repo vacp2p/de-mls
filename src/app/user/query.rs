@@ -3,7 +3,7 @@
 use crate::{
     app::{GroupState, MemberRole, StateChangeHandler, User, UserError},
     core::{DeMlsProvider, GroupEventHandler, group_members},
-    mls_crypto::format_wallet_address,
+    mls_crypto::{MlsService, format_wallet_address},
     protos::de_mls::messages::v1::GroupUpdateRequest,
 };
 

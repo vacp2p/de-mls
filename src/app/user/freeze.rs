@@ -9,6 +9,7 @@ use crate::{
         create_commit_candidate, finalize_freeze_round, group_members,
     },
     ds::WELCOME_SUBTOPIC,
+    mls_crypto::MlsService,
 };
 
 impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>

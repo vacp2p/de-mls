@@ -1,6 +1,6 @@
 //! Per-group app-level state: proposal queues, steward list, freeze-round
 //! candidate buffer, pending-update buffer, ECP dedup. MLS crypto state
-//! lives in `MlsService` alongside this.
+//! lives in `OpenMlsService` alongside this.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -610,7 +610,7 @@ impl Group {
     /// Ensure a freeze round exists for the given MLS epoch.
     ///
     /// If absent or stale, initializes one with the current approved proposal IDs.
-    /// The `epoch` parameter should be the current MLS epoch from `MlsService::current_epoch()`.
+    /// The `epoch` parameter should be the current MLS epoch from `OpenMlsService::current_epoch()`.
     pub(crate) fn ensure_freeze_round(&mut self, epoch: u64) {
         if matches!(self.freeze_round, Some(ref round) if round.epoch == epoch) {
             return;
@@ -628,7 +628,7 @@ impl Group {
     /// Add a validated candidate to the active freeze round.
     ///
     /// Returns `true` if buffered, `false` if ignored (locked round or duplicate).
-    /// The `epoch` parameter should be the current MLS epoch from `MlsService::current_epoch()`.
+    /// The `epoch` parameter should be the current MLS epoch from `OpenMlsService::current_epoch()`.
     pub(crate) fn add_freeze_candidate(
         &mut self,
         candidate: BufferedCommitCandidate,
@@ -656,7 +656,7 @@ impl Group {
     }
 
     /// Mark the active freeze round as selection-locked.
-    /// The `epoch` parameter should be the current MLS epoch from `MlsService::current_epoch()`.
+    /// The `epoch` parameter should be the current MLS epoch from `OpenMlsService::current_epoch()`.
     pub(crate) fn lock_freeze_round_selection(&mut self, epoch: u64) {
         if let Some(round) = self.freeze_round.as_mut() {
             if round.epoch == epoch {

@@ -12,8 +12,8 @@ use crate::{
     },
     ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC},
     mls_crypto::{
-        DeMlsStorage, DecryptResult, MlsService, ShortId, key_package_bytes_from_json,
-        parse_wallet_to_bytes,
+        DeMlsStorage, DecryptResult, MlsService, OpenMlsService, ShortId,
+        key_package_bytes_from_json, parse_wallet_to_bytes,
     },
     protos::de_mls::messages::v1::{
         AppMessage, GroupUpdateRequest, InviteMember, WelcomeMessage, app_message,
@@ -49,7 +49,7 @@ pub fn process_inbound<S>(
     group: &mut Group,
     payload: &[u8],
     subtopic: &str,
-    mls: &MlsService<S>,
+    mls: &OpenMlsService<S>,
 ) -> Result<ProcessResult, CoreError>
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
@@ -64,7 +64,7 @@ where
 fn process_welcome_subtopic<S>(
     group: &mut Group,
     payload: &[u8],
-    mls: &MlsService<S>,
+    mls: &OpenMlsService<S>,
 ) -> Result<ProcessResult, CoreError>
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
@@ -118,7 +118,7 @@ where
 fn process_app_subtopic<S>(
     group: &mut Group,
     payload: &[u8],
-    mls: &MlsService<S>,
+    mls: &OpenMlsService<S>,
 ) -> Result<ProcessResult, CoreError>
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,

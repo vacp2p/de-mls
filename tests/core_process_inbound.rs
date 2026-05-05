@@ -8,7 +8,7 @@ use de_mls::core::{
     group_members, prepare_to_join, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
-use de_mls::mls_crypto::parse_wallet_address;
+use de_mls::mls_crypto::{MlsService, parse_wallet_address};
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationMessage, GroupUpdateRequest, app_message,
 };
@@ -290,7 +290,7 @@ fn test_process_inbound_leave_group() {
 
 /// Test: an evicted member can rejoin the same group_id in the same
 /// session. The steward commits a removal, the joiner finalizes it as
-/// `LeaveGroup`, then `MlsService::delete_group` clears storage so the
+/// `LeaveGroup`, then `OpenMlsService::delete_group` clears storage so the
 /// next welcome creates a fresh handle without colliding with the dead
 /// post-eviction state.
 #[test]

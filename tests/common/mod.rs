@@ -20,7 +20,7 @@ use de_mls::core::{
     finalize_freeze_round, prepare_to_join, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
-use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService, parse_wallet_address};
+use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService, OpenMlsService, parse_wallet_address};
 use de_mls::protos::de_mls::messages::v1::AppMessage;
 
 pub const DEFAULT_SCORE: i64 = 100;
@@ -120,9 +120,9 @@ pub fn default_steward_config() -> ProtocolConfig {
     ProtocolConfig::new(1, 5).unwrap()
 }
 
-pub fn setup_mls(wallet_hex: &str) -> MlsService<MemoryDeMlsStorage> {
+pub fn setup_mls(wallet_hex: &str) -> OpenMlsService<MemoryDeMlsStorage> {
     let storage = MemoryDeMlsStorage::new();
-    let mls = MlsService::new(storage);
+    let mls = OpenMlsService::new(storage);
     let wallet = parse_wallet_address(wallet_hex).unwrap();
     mls.init(wallet).unwrap();
     mls
@@ -131,7 +131,7 @@ pub fn setup_mls(wallet_hex: &str) -> MlsService<MemoryDeMlsStorage> {
 pub fn setup_steward(
     group_name: &str,
     wallet_hex: &str,
-) -> (MlsService<MemoryDeMlsStorage>, Group) {
+) -> (OpenMlsService<MemoryDeMlsStorage>, Group) {
     setup_steward_with_config(group_name, wallet_hex, default_steward_config())
 }
 
@@ -139,7 +139,7 @@ pub fn setup_steward_with_config(
     group_name: &str,
     wallet_hex: &str,
     config: ProtocolConfig,
-) -> (MlsService<MemoryDeMlsStorage>, Group) {
+) -> (OpenMlsService<MemoryDeMlsStorage>, Group) {
     let mls = setup_mls(wallet_hex);
     let group = create_group(group_name, &mls, config).unwrap();
     (mls, group)
@@ -148,7 +148,7 @@ pub fn setup_steward_with_config(
 pub fn setup_joiner(
     group_name: &str,
     wallet_hex: &str,
-) -> (MlsService<MemoryDeMlsStorage>, Group, OutboundPacket) {
+) -> (OpenMlsService<MemoryDeMlsStorage>, Group, OutboundPacket) {
     setup_joiner_with_config(group_name, wallet_hex, default_steward_config())
 }
 
@@ -156,7 +156,7 @@ pub fn setup_joiner_with_config(
     group_name: &str,
     wallet_hex: &str,
     config: ProtocolConfig,
-) -> (MlsService<MemoryDeMlsStorage>, Group, OutboundPacket) {
+) -> (OpenMlsService<MemoryDeMlsStorage>, Group, OutboundPacket) {
     let mls = setup_mls(wallet_hex);
     let group = prepare_to_join(group_name, mls.wallet_bytes().to_vec(), config);
     let kp_packet = build_key_package_message(&group, &mls, b"test-app-id").unwrap();
@@ -171,7 +171,7 @@ pub fn setup_joiner_with_config(
 /// high enough not to collide with the manually-picked IDs test code uses
 /// for direct `insert_approved_proposal` calls.
 pub fn steward_add_joiner(
-    steward_mls: &MlsService<MemoryDeMlsStorage>,
+    steward_mls: &OpenMlsService<MemoryDeMlsStorage>,
     steward_handle: &mut Group,
     joiner_kp_packet: &OutboundPacket,
 ) -> (OutboundPacket, OutboundPacket) {

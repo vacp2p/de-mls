@@ -13,7 +13,7 @@ use crate::{
     },
     ds::OutboundPacket,
     mls_crypto::{
-        DeMlsStorage, DecryptResult, MlsMessageKind, MlsProposalAction, MlsService,
+        DeMlsStorage, DecryptResult, MlsMessageKind, MlsProposalAction, MlsService, OpenMlsService,
         StagedCommitResult,
     },
     protos::de_mls::messages::v1::{
@@ -76,7 +76,7 @@ pub(crate) fn compute_commit_hash(commit_message: &[u8]) -> Vec<u8> {
 pub(crate) fn process_commit_candidate<S>(
     group: &mut Group,
     candidate_msg: CommitCandidate,
-    mls: &MlsService<S>,
+    mls: &OpenMlsService<S>,
 ) -> Result<ProcessResult, CoreError>
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
@@ -156,7 +156,7 @@ where
 ///    MLS staging rejects the current one.
 pub fn finalize_freeze_round<S>(
     group: &mut Group,
-    mls: &MlsService<S>,
+    mls: &OpenMlsService<S>,
     allow_subset_candidates: bool,
     app_id: &[u8],
 ) -> Result<FreezeFinalizeResult, CoreError>
@@ -217,7 +217,7 @@ struct RoundContext {
 impl RoundContext {
     fn snapshot<S>(
         group: &Group,
-        mls: &MlsService<S>,
+        mls: &OpenMlsService<S>,
         current_epoch: u64,
     ) -> Result<Self, CoreError>
     where
@@ -309,7 +309,7 @@ enum CandidateOutcome {
 /// lower-priority local candidate afterwards has nothing to apply.
 fn apply_in_priority_order<S>(
     group: &mut Group,
-    mls: &MlsService<S>,
+    mls: &OpenMlsService<S>,
     sorted: Vec<BufferedCommitCandidate>,
     ctx: &RoundContext,
     app_id: &[u8],
@@ -470,7 +470,7 @@ fn compare_candidate_priority(
 /// Always returns `Terminal(Applied)` on a clean merge.
 fn apply_local_candidate<S>(
     group: &mut Group,
-    mls: &MlsService<S>,
+    mls: &OpenMlsService<S>,
     chosen: BufferedCommitCandidate,
     self_removed: bool,
     app_id: &[u8],
@@ -515,7 +515,7 @@ where
 /// only one per group at a time.
 fn apply_incoming_candidate<S>(
     group: &mut Group,
-    mls: &MlsService<S>,
+    mls: &OpenMlsService<S>,
     chosen: BufferedCommitCandidate,
     expected_actions: &[MlsProposalAction],
     current_epoch: u64,
@@ -615,7 +615,7 @@ enum StagingOutcome {
 /// Leaves MLS in the staged state on `Staged`; the caller must clean up via
 /// `discard_and_*` for `Abort` / `Violation`.
 fn stage_candidate<S>(
-    mls: &MlsService<S>,
+    mls: &OpenMlsService<S>,
     group_name: &str,
     candidate: &CommitCandidate,
     current_epoch: u64,

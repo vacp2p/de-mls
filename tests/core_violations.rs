@@ -6,6 +6,7 @@ use de_mls::core::{
     create_commit_candidate, finalize_freeze_round, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
+use de_mls::mls_crypto::MlsService;
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, GroupUpdateRequest, ViolationEvidence, ViolationType, app_message,
     group_update_request,

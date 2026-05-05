@@ -9,6 +9,7 @@ use prost::Message;
 use de_mls::core::{
     ProtocolConfig, ScoreEvent, ScoreOp, apply_consensus_result, create_group, emergency_score_ops,
 };
+use de_mls::mls_crypto::MlsService;
 use de_mls::protos::de_mls::messages::v1::{
     ViolationEvidence, ViolationType, group_update_request,
 };

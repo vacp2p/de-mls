@@ -7,7 +7,7 @@ use prost::Message;
 use crate::{
     core::{error::CoreError, group::Group, steward_list::ProtocolConfig},
     ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC},
-    mls_crypto::{DeMlsStorage, MlsService},
+    mls_crypto::{DeMlsStorage, MlsService, OpenMlsService},
     protos::de_mls::messages::v1::{
         AppMessage, GroupUpdateRequest, InvitationToJoin, UserKeyPackage, WelcomeMessage,
     },
@@ -20,7 +20,7 @@ use crate::{
 /// Initializes a bootstrap steward list containing the creator.
 pub fn create_group<S>(
     name: &str,
-    mls: &MlsService<S>,
+    mls: &OpenMlsService<S>,
     protocol_config: ProtocolConfig,
 ) -> Result<Group, CoreError>
 where
@@ -47,7 +47,7 @@ pub fn prepare_to_join(
 /// Build an MLS-encrypted application message.
 pub fn build_message<S>(
     group_name: &str,
-    mls: &MlsService<S>,
+    mls: &OpenMlsService<S>,
     app_msg: &AppMessage,
     app_id: &[u8],
 ) -> Result<OutboundPacket, CoreError>
@@ -71,7 +71,7 @@ where
 /// Build a key package message for joining a group.
 pub fn build_key_package_message<S>(
     group: &Group,
-    mls: &MlsService<S>,
+    mls: &OpenMlsService<S>,
     app_id: &[u8],
 ) -> Result<OutboundPacket, CoreError>
 where

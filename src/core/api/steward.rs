@@ -15,7 +15,7 @@ use crate::{
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     mls_crypto::{
         CommitCandidate as MlsCommitCandidate, DeMlsStorage, GroupUpdate, KeyPackageBytes,
-        MlsService,
+        MlsService, OpenMlsService,
     },
     protos::de_mls::messages::v1::{AppMessage, CommitCandidate, group_update_request},
 };
@@ -30,7 +30,7 @@ use crate::{
 /// `Group::is_in_recovery_mode()` (Layer 3) bypasses the gate entirely.
 pub fn create_commit_candidate<S>(
     group: &mut Group,
-    mls: &MlsService<S>,
+    mls: &OpenMlsService<S>,
     app_id: &[u8],
 ) -> Result<Option<OutboundPacket>, CoreError>
 where
@@ -182,7 +182,7 @@ where
 // ─────────────────────────── Member Queries ───────────────────────────
 
 /// Get the current members of a group.
-pub fn group_members<S>(group: &Group, mls: &MlsService<S>) -> Result<Vec<Vec<u8>>, CoreError>
+pub fn group_members<S>(group: &Group, mls: &OpenMlsService<S>) -> Result<Vec<Vec<u8>>, CoreError>
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
 {

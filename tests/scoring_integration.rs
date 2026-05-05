@@ -10,7 +10,7 @@ use de_mls::core::{
     create_group, emergency_score_ops, group_members, prepare_to_join, process_inbound,
 };
 use de_mls::ds::WELCOME_SUBTOPIC;
-use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService};
+use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService, OpenMlsService};
 
 mod common;
 use common::{DEFAULT_SCORE, make_scoring, setup_mls, steward_add_joiner};
@@ -21,7 +21,7 @@ fn sync_scoring_members<S: de_mls::core::PeerScoreStorage, P: de_mls::core::Scor
     scoring: &mut PeerScoringService<S, P>,
     group_name: &str,
     group: &Group,
-    mls: &MlsService<MemoryDeMlsStorage>,
+    mls: &OpenMlsService<MemoryDeMlsStorage>,
 ) {
     let mls_members = group_members(group, mls).unwrap();
     let scored = scoring.all_members_with_scores(group_name);

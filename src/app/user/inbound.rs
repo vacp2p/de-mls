@@ -14,6 +14,7 @@ use crate::{
         build_message, create_commit_candidate, group_members, member_set, process_inbound,
     },
     ds::InboundPacket,
+    mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationMessage, GroupSync, GroupUpdateRequest, group_update_request,
     },

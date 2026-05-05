@@ -14,7 +14,7 @@ use crate::{
         DeMlsProvider, GroupEventHandler, auto_approved_leave_proposal_id, build_message,
         create_group, prepare_to_join,
     },
-    mls_crypto::parse_wallet_to_bytes,
+    mls_crypto::{MlsService, parse_wallet_to_bytes},
     protos::de_mls::messages::v1::{GroupUpdateRequest, RemoveMember, group_update_request},
 };
 
