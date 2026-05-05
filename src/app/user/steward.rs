@@ -10,7 +10,7 @@ use crate::{
         evaluate_election_initiation, group_members, is_deadlock_ecp_proposer, member_set,
         scoring_member_diff, target_identity_of,
     },
-    mls_crypto::{MlsService, ShortId},
+    mls_crypto::{IdentityProvider, MlsService, ShortId},
     protos::de_mls::messages::v1::{
         AppMessage, GroupSync, GroupUpdateRequest, PeerScore, StewardElectionProposal,
         TimingConfig, ViolationEvidence, group_update_request,
@@ -100,7 +100,7 @@ impl<
             let entry = entry_arc.read().await;
             let epoch = self.mls_service.current_epoch(group_name)?;
             let mls_members = group_members(&entry.group, self.mls_service.as_ref())?;
-            let self_identity = self.mls_service.wallet_bytes();
+            let self_identity = self.mls_service.identity().identity_bytes();
             match evaluate_election_initiation(
                 &entry.group,
                 &mls_members,
@@ -175,7 +175,7 @@ impl<
         let (is_authorized, self_id, epoch) = {
             let entry = entry_arc.read().await;
             let mls_members = group_members(&entry.group, self.mls_service.as_ref())?;
-            let self_id = self.mls_service.wallet_bytes();
+            let self_id = self.mls_service.identity().identity_bytes();
             let authorized = is_deadlock_ecp_proposer(&entry.group, &mls_members, self_id);
             let epoch = self.mls_service.current_epoch(group_name)?;
             (authorized, self_id, epoch)
@@ -440,7 +440,7 @@ impl<
         group_name: &str,
     ) -> Result<(), UserError> {
         let epoch = self.mls_service.current_epoch(group_name)?;
-        let self_id = self.mls_service.wallet_bytes();
+        let self_id = self.mls_service.identity().identity_bytes();
         let (is_steward, threshold) = self
             .with_entry(group_name, |e| {
                 (e.group.is_steward(), e.group.threshold_peer_score())

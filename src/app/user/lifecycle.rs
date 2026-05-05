@@ -14,7 +14,7 @@ use crate::{
         DeMlsProvider, GroupEventHandler, auto_approved_leave_proposal_id, build_message,
         create_group, prepare_to_join,
     },
-    mls_crypto::{MlsService, parse_wallet_to_bytes},
+    mls_crypto::{IdentityProvider, MlsService, parse_wallet_to_bytes},
     protos::de_mls::messages::v1::{GroupUpdateRequest, RemoveMember, group_update_request},
 };
 
@@ -63,7 +63,7 @@ impl<
         } else {
             let group = prepare_to_join(
                 group_name,
-                self.mls_service.wallet_bytes().to_vec(),
+                self.mls_service.identity().identity_bytes().to_vec(),
                 config.protocol.clone(),
             );
             let state_machine = GroupStateMachine::new_as_pending_join_with_config(config);
@@ -91,7 +91,7 @@ impl<
         // Joiners start tracked at `JoinedGroup` time (once members are known).
         if is_creation {
             self.scoring()
-                .add_member(group_name, self.mls_service.wallet_bytes());
+                .add_member(group_name, self.mls_service.identity().identity_bytes());
         }
 
         self.state_handler

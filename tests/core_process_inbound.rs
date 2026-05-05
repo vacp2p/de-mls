@@ -8,7 +8,7 @@ use de_mls::core::{
     group_members, prepare_to_join, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
-use de_mls::mls_crypto::{MlsService, parse_wallet_address};
+use de_mls::mls_crypto::{IdentityProvider, MlsService, parse_wallet_address};
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationMessage, GroupUpdateRequest, app_message,
 };
@@ -39,7 +39,7 @@ fn test_process_inbound_app_msg_before_mls_init() {
     let mls = setup_mls("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
     let mut group = prepare_to_join(
         "test-group",
-        mls.wallet_bytes().to_vec(),
+        mls.identity().identity_bytes().to_vec(),
         default_steward_config(),
     );
 
@@ -136,7 +136,7 @@ fn test_process_inbound_welcome_non_steward_buffers_key_package() {
     let mls = setup_mls("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
     let mut group = prepare_to_join(
         group_name,
-        mls.wallet_bytes().to_vec(),
+        mls.identity().identity_bytes().to_vec(),
         default_steward_config(),
     );
 
@@ -377,7 +377,7 @@ fn test_rejoin_after_eviction() {
     // steward re-adds.
     let mut joiner_handle = prepare_to_join(
         group_name,
-        joiner_mls.wallet_bytes().to_vec(),
+        joiner_mls.identity().identity_bytes().to_vec(),
         default_steward_config(),
     );
     let kp_packet = build_key_package_message(&joiner_handle, &joiner_mls, b"test-app-id").unwrap();
@@ -402,7 +402,7 @@ fn test_rejoin_after_eviction() {
     );
     assert!(steward_mls.is_member(group_name, &joiner_id));
     assert!(joiner_mls.is_member(group_name, &joiner_id));
-    assert!(joiner_mls.is_member(group_name, steward_mls.wallet_bytes()));
+    assert!(joiner_mls.is_member(group_name, steward_mls.identity().identity_bytes()));
 }
 
 #[test]

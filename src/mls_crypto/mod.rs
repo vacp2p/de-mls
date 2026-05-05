@@ -40,7 +40,10 @@ pub mod storage;
 mod types;
 
 pub use error::{IdentityError, MlsError, MlsServiceError, Result, StorageError};
-pub use identity::{ShortId, format_wallet_address, parse_wallet_address, parse_wallet_to_bytes};
+pub use identity::{
+    IdentityProvider, ShortId, WalletIdentity, format_wallet_address, parse_wallet_address,
+    parse_wallet_to_bytes,
+};
 pub use service::{CIPHERSUITE, MlsService, OpenMlsService};
 pub use storage::{DeMlsStorage, MemoryDeMlsStorage};
 pub use types::{

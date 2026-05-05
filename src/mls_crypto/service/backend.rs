@@ -8,35 +8,29 @@
 //! The trait surface uses only opaque boundary types ([`KeyPackageBytes`],
 //! [`CommitCandidate`], [`DecryptResult`], [`StagedCommitResult`],
 //! [`MlsMessageKind`], [`GroupUpdate`]) — no `openmls::*` types appear
-//! there.
+//! there. Identity is exposed via the associated [`MlsService::Identity`]
+//! type, supplied at construction.
 //!
 //! All methods take `&self` so the trait stays object-safe; a heterogeneous
 //! per-group backend map can be held behind `Arc<dyn MlsService>` later if
 //! needed. Today, call sites should bind it as a generic parameter
 //! (`<M: MlsService>`) for monomorphization.
-//!
-//! Note: the `init`, `wallet_hex`, and `wallet_bytes` methods are identity-
-//! adjacent; they will move to a separate `IdentityProvider` plugin in a
-//! later step. They are included here so the trait covers today's full
-//! [`OpenMlsService`] surface.
 
-use alloy::primitives::Address;
 use openmls::{
     group::{GroupId, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, StagedWelcome},
     key_packages::KeyPackage,
     prelude::{
-        BasicCredential, Ciphersuite, ContentType, CredentialWithKey, DeserializeBytes,
-        MlsMessageBodyIn, MlsMessageIn, ProcessedMessageContent, Proposal, ProtocolMessage,
+        Ciphersuite, ContentType, DeserializeBytes, MlsMessageBodyIn, MlsMessageIn,
+        ProcessedMessageContent, Proposal, ProtocolMessage,
     },
 };
-use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::{MemoryStorage, RustCrypto};
 use openmls_traits::OpenMlsProvider;
 
 use crate::mls_crypto::{
-    CommitCandidate, DeMlsStorage, DecryptResult, GroupUpdate, IdentityError, KeyPackageBytes,
-    MlsError, MlsMessageKind, MlsProposalAction, MlsServiceError, OpenMlsService, Result,
-    StagedCommitResult, StorageError, identity::IdentityData,
+    CommitCandidate, DeMlsStorage, DecryptResult, GroupUpdate, IdentityError, IdentityProvider,
+    KeyPackageBytes, MlsError, MlsMessageKind, MlsProposalAction, MlsServiceError, OpenMlsService,
+    Result, StagedCommitResult, StorageError,
 };
 
 /// MLS ciphersuite used by the default [`OpenMlsService`] impl.
@@ -47,17 +41,12 @@ pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_
 /// See the module-level documentation for the role this trait plays in the
 /// plugin-tree architecture.
 pub trait MlsService: Send + Sync + 'static {
-    // ── Identity (transitional — moves to IdentityProvider later) ──
+    /// Identity attached to this service. Set at construction time and
+    /// immutable thereafter.
+    type Identity: IdentityProvider;
 
-    /// Initialize identity from a wallet address. Returns
-    /// `IdentityError::AlreadyInitialized` on a second call.
-    fn init(&self, wallet: Address) -> Result<()>;
-
-    /// Checksummed wallet hex (`"0x…"`). Empty string before [`init`](Self::init).
-    fn wallet_hex(&self) -> &str;
-
-    /// Wallet bytes. Empty slice before [`init`](Self::init).
-    fn wallet_bytes(&self) -> &[u8];
+    /// Borrow the identity attached to this service.
+    fn identity(&self) -> &Self::Identity;
 
     // ── Group lifecycle ──
 
@@ -178,9 +167,10 @@ impl<'a> OpenMlsProvider for MlsProvider<'a> {
     }
 }
 
-impl<S> OpenMlsService<S>
+impl<S, I> OpenMlsService<S, I>
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage>,
+    I: IdentityProvider,
 {
     fn make_provider(&self) -> MlsProvider<'_> {
         MlsProvider {
@@ -215,56 +205,15 @@ where
     }
 }
 
-impl<S> MlsService for OpenMlsService<S>
+impl<S, I> MlsService for OpenMlsService<S, I>
 where
     S: DeMlsStorage<MlsStorage = MemoryStorage> + Send + Sync + 'static,
+    I: IdentityProvider,
 {
-    // ══════════════════════════════════════════════════════════
-    // Identity
-    // ══════════════════════════════════════════════════════════
+    type Identity = I;
 
-    fn init(&self, wallet: Address) -> Result<()> {
-        {
-            let guard = self
-                .identity
-                .read()
-                .map_err(|e| StorageError::Lock(e.to_string()))?;
-            if guard.is_some() {
-                return Err(MlsError::Identity(IdentityError::AlreadyInitialized));
-            }
-        }
-
-        let credential = BasicCredential::new(wallet.as_slice().to_vec());
-        let signer = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm())?;
-
-        signer.store(self.storage.mls_storage())?;
-
-        let data = IdentityData {
-            wallet,
-            credential: CredentialWithKey {
-                credential: credential.into(),
-                signature_key: signer.to_public_vec().into(),
-            },
-            signer,
-        };
-
-        let mut guard = self
-            .identity
-            .write()
-            .map_err(|e| StorageError::Lock(e.to_string()))?;
-        *guard = Some(data);
-
-        let _ = self.wallet_bytes.set(wallet.as_slice().to_vec());
-        let _ = self.wallet_hex.set(wallet.to_checksum(None));
-        Ok(())
-    }
-
-    fn wallet_hex(&self) -> &str {
-        self.wallet_hex.get().map(String::as_str).unwrap_or("")
-    }
-
-    fn wallet_bytes(&self) -> &[u8] {
-        self.wallet_bytes.get().map(Vec::as_slice).unwrap_or(&[])
+    fn identity(&self) -> &Self::Identity {
+        &self.identity
     }
 
     // ══════════════════════════════════════════════════════════
@@ -272,14 +221,6 @@ where
     // ══════════════════════════════════════════════════════════
 
     fn create_group(&self, group_id: &str) -> Result<()> {
-        let guard = self
-            .identity
-            .read()
-            .map_err(|e| StorageError::Lock(e.to_string()))?;
-        let identity = guard
-            .as_ref()
-            .ok_or(MlsError::Identity(IdentityError::IdentityNotFound))?;
-
         let provider = self.make_provider();
 
         let config = MlsGroupCreateConfig::builder()
@@ -288,10 +229,10 @@ where
 
         let group = MlsGroup::new_with_group_id(
             &provider,
-            &identity.signer,
+            self.identity.signer(),
             &config,
             GroupId::from_slice(group_id.as_bytes()),
-            identity.credential.clone(),
+            self.identity.credential().clone(),
         )?;
 
         self.groups
@@ -419,21 +360,13 @@ where
     // ══════════════════════════════════════════════════════════
 
     fn generate_key_package(&self) -> Result<KeyPackageBytes> {
-        let guard = self
-            .identity
-            .read()
-            .map_err(|e| StorageError::Lock(e.to_string()))?;
-        let identity = guard
-            .as_ref()
-            .ok_or(MlsError::Identity(IdentityError::IdentityNotFound))?;
-
         let provider = self.make_provider();
 
         let kp_bundle = KeyPackage::builder().build(
             CIPHERSUITE,
             &provider,
-            &identity.signer,
-            identity.credential.clone(),
+            self.identity.signer(),
+            self.identity.credential().clone(),
         )?;
 
         let kp = kp_bundle.key_package();
@@ -444,7 +377,7 @@ where
 
         Ok(KeyPackageBytes::new(
             bytes,
-            identity.wallet.as_slice().to_vec(),
+            self.identity.identity_bytes().to_vec(),
         ))
     }
 
@@ -457,15 +390,8 @@ where
         group_id: &str,
         updates: &[GroupUpdate],
     ) -> Result<CommitCandidate> {
-        let id_guard = self
-            .identity
-            .read()
-            .map_err(|e| StorageError::Lock(e.to_string()))?;
-        let identity = id_guard
-            .as_ref()
-            .ok_or(MlsError::Identity(IdentityError::IdentityNotFound))?;
-
         let provider = self.make_provider();
+        let signer = self.identity.signer();
 
         let mut groups = self
             .groups
@@ -483,7 +409,7 @@ where
                     let kp: KeyPackage = serde_json::from_slice(key_package.as_bytes())
                         .map_err(MlsServiceError::InvalidKeyPackage)?;
                     let (mls_message_out, _proposal_ref) =
-                        group.propose_add_member(&provider, &identity.signer, &kp)?;
+                        group.propose_add_member(&provider, signer, &kp)?;
                     mls_proposals.push(mls_message_out.to_bytes()?);
                 }
                 GroupUpdate::Remove(wallet_bytes) => {
@@ -496,7 +422,7 @@ where
                     });
                     if let Some(index) = member_index {
                         let (mls_message_out, _proposal_ref) =
-                            group.propose_remove_member(&provider, &identity.signer, index)?;
+                            group.propose_remove_member(&provider, signer, index)?;
                         mls_proposals.push(mls_message_out.to_bytes()?);
                     }
                 }
@@ -504,7 +430,7 @@ where
         }
 
         let (commit_msg, welcome, _group_info) =
-            group.commit_to_pending_proposals(&provider, &identity.signer)?;
+            group.commit_to_pending_proposals(&provider, signer)?;
 
         let welcome_bytes = match welcome {
             Some(w) => Some(w.to_bytes()?),
@@ -711,7 +637,7 @@ where
         match processed.into_content() {
             ProcessedMessageContent::ProposalMessage(proposal) => {
                 let action =
-                    OpenMlsService::<S>::extract_proposal_action(group, proposal.proposal())?;
+                    OpenMlsService::<S, I>::extract_proposal_action(group, proposal.proposal())?;
 
                 group.store_pending_proposal(provider.storage(), proposal.as_ref().clone())?;
                 Ok(DecryptResult::ProposalStored(sender_identity, action))
@@ -725,15 +651,8 @@ where
     // ══════════════════════════════════════════════════════════
 
     fn encrypt(&self, group_id: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let id_guard = self
-            .identity
-            .read()
-            .map_err(|e| StorageError::Lock(e.to_string()))?;
-        let identity = id_guard
-            .as_ref()
-            .ok_or(MlsError::Identity(IdentityError::IdentityNotFound))?;
-
         let provider = self.make_provider();
+        let signer = self.identity.signer();
 
         let mut groups = self
             .groups
@@ -743,7 +662,7 @@ where
             MlsError::Service(MlsServiceError::GroupNotFound(group_id.to_string()))
         })?;
 
-        let message = group.create_message(&provider, &identity.signer, plaintext)?;
+        let message = group.create_message(&provider, signer, plaintext)?;
         Ok(message.to_bytes()?)
     }
 
@@ -839,7 +758,7 @@ where
             )),
             ProcessedMessageContent::ProposalMessage(proposal) => {
                 let action =
-                    OpenMlsService::<S>::extract_proposal_action(group, proposal.proposal())?;
+                    OpenMlsService::<S, I>::extract_proposal_action(group, proposal.proposal())?;
 
                 group.store_pending_proposal(provider.storage(), proposal.as_ref().clone())?;
                 Ok(DecryptResult::ProposalStored(sender_identity, action))

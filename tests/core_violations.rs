@@ -6,7 +6,7 @@ use de_mls::core::{
     create_commit_candidate, finalize_freeze_round, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
-use de_mls::mls_crypto::MlsService;
+use de_mls::mls_crypto::{IdentityProvider, MlsService};
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, GroupUpdateRequest, ViolationEvidence, ViolationType, app_message,
     group_update_request,
@@ -425,7 +425,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
         .steward_list()
         .expect("steward should have a list");
     assert!(
-        steward_list.contains(steward_mls.wallet_bytes()),
+        steward_list.contains(steward_mls.identity().identity_bytes()),
         "Steward should be on the steward list"
     );
 }
@@ -447,8 +447,8 @@ fn test_backup_commit_scores_absent_steward() {
 
     let (alice_mls, mut alice_group) = setup_steward(group_name, alice_hex);
     let (bob_mls, mut bob_group, bob_kp_packet) = setup_joiner(group_name, bob_hex);
-    let alice_id = alice_mls.wallet_bytes().to_vec();
-    let bob_id = bob_mls.wallet_bytes().to_vec();
+    let alice_id = alice_mls.identity().identity_bytes().to_vec();
+    let bob_id = bob_mls.identity().identity_bytes().to_vec();
 
     let (welcome, _) = steward_add_joiner(&alice_mls, &mut alice_group, &bob_kp_packet);
     let join_result =
@@ -604,7 +604,7 @@ fn test_forged_steward_identity_scores_mls_sender() {
     // MLS commit message is still signed by the real steward, so staging
     // succeeds and the cross-check fires.
     let mut app_msg = AppMessage::decode(batch_packet.payload.as_slice()).unwrap();
-    let real_steward_id = steward_mls.wallet_bytes().to_vec();
+    let real_steward_id = steward_mls.identity().identity_bytes().to_vec();
     let forged_id = vec![0xCC; real_steward_id.len()];
     match &mut app_msg.payload {
         Some(app_message::Payload::CommitCandidate(c)) => {

@@ -14,7 +14,7 @@ use crate::{
         build_message, create_commit_candidate, group_members, member_set, process_inbound,
     },
     ds::InboundPacket,
-    mls_crypto::MlsService,
+    mls_crypto::{IdentityProvider, MlsService},
     protos::de_mls::messages::v1::{
         AppMessage, ConversationMessage, GroupSync, GroupUpdateRequest, group_update_request,
     },
@@ -146,8 +146,11 @@ impl<
         self.prune_pending_updates_after_commit(name).await?;
 
         let msg: AppMessage = ConversationMessage {
-            message: format!("User {} joined the group", self.mls_service.wallet_hex())
-                .into_bytes(),
+            message: format!(
+                "User {} joined the group",
+                self.mls_service.identity().identity_display()
+            )
+            .into_bytes(),
             sender: "SYSTEM".to_string(),
             group_name: name.to_string(),
         }

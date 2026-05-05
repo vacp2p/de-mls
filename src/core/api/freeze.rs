@@ -12,7 +12,8 @@ use crate::{
     },
     ds::OutboundPacket,
     mls_crypto::{
-        DecryptResult, MlsMessageKind, MlsProposalAction, MlsService, StagedCommitResult,
+        DecryptResult, IdentityProvider, MlsMessageKind, MlsProposalAction, MlsService,
+        StagedCommitResult,
     },
     protos::de_mls::messages::v1::{
         CommitCandidate, GroupUpdateRequest, ViolationEvidence, group_update_request::Payload,
@@ -217,7 +218,7 @@ impl RoundContext {
     where
         M: MlsService,
     {
-        let self_identity = mls.wallet_bytes().to_vec();
+        let self_identity = mls.identity().identity_bytes().to_vec();
 
         let mut mls_actions: Vec<MlsProposalAction> = Vec::new();
         let mut self_remove_pending = false;

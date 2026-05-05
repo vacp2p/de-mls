@@ -19,7 +19,7 @@ use crate::{
         DeMlsProvider, GroupEventHandler, ProposalKind, build_message, group_members,
         target_identity_of,
     },
-    mls_crypto::MlsService,
+    mls_crypto::{IdentityProvider, MlsService},
     protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest, VotePayload},
 };
 
@@ -197,7 +197,7 @@ impl<
         let (proposal_id, unbundled) = submit_proposal::<P>(
             group_name,
             &request,
-            self.mls_service.wallet_bytes(),
+            self.mls_service.identity().identity_bytes(),
             &self.consensus_service,
             ProposalParams {
                 expected_voters,

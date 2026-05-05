@@ -28,7 +28,9 @@ use crate::{
         DeMlsProvider, DefaultProvider, Group, GroupEventHandler, ProposalId, ProviderConsensus,
         ScoringConfig,
     },
-    mls_crypto::{MemoryDeMlsStorage, MlsService, OpenMlsService},
+    mls_crypto::{
+        IdentityProvider, MemoryDeMlsStorage, MlsService, OpenMlsService, WalletIdentity,
+    },
     protos::de_mls::messages::v1::GroupUpdateRequest,
 };
 
@@ -196,7 +198,7 @@ impl<
 
     /// Wallet address as checksummed hex.
     pub fn identity_string(&self) -> String {
-        self.mls_service.wallet_hex().to_string()
+        self.mls_service.identity().identity_display().to_string()
     }
 
     /// Drop all proposals / votes / sessions for this group from the
@@ -216,7 +218,7 @@ impl<
 // ─────────────────────────── DefaultProvider Convenience ───────────────────────────
 
 impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
-    User<DefaultProvider, OpenMlsService<MemoryDeMlsStorage>, H, SCH>
+    User<DefaultProvider, OpenMlsService<MemoryDeMlsStorage, WalletIdentity>, H, SCH>
 {
     /// Construct a `User` on [`DefaultProvider`] with the default config.
     pub fn with_private_key(
@@ -245,10 +247,8 @@ impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
         let signer = PrivateKeySigner::from_str(private_key)?;
         let user_address = signer.address();
 
-        let mls_service = OpenMlsService::new(MemoryDeMlsStorage::new());
-        mls_service
-            .init(user_address)
-            .map_err(|e| UserError::Core(e.into()))?;
+        let identity = WalletIdentity::from_wallet(user_address)?;
+        let mls_service = OpenMlsService::new(MemoryDeMlsStorage::new(), identity);
 
         Ok(Self::new_with_config(
             mls_service,

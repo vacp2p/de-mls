@@ -6,7 +6,7 @@ use prost::Message;
 use crate::{
     core::{error::CoreError, group::Group, steward_list::ProtocolConfig},
     ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC},
-    mls_crypto::MlsService,
+    mls_crypto::{IdentityProvider, MlsService},
     protos::de_mls::messages::v1::{
         AppMessage, GroupUpdateRequest, InvitationToJoin, UserKeyPackage, WelcomeMessage,
     },
@@ -26,7 +26,11 @@ where
     M: MlsService,
 {
     mls.create_group(name)?;
-    Group::new_as_creator(name, mls.wallet_bytes().to_vec(), protocol_config)
+    Group::new_as_creator(
+        name,
+        mls.identity().identity_bytes().to_vec(),
+        protocol_config,
+    )
 }
 
 /// Prepare a handle for joining an existing group.

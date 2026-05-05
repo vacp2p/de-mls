@@ -64,7 +64,10 @@ const DAVE_KEY: &str = "7c852118294e51e653712a81e05800f419141751be58f605c371e151
 
 type TU = User<
     DefaultProvider,
-    de_mls::mls_crypto::OpenMlsService<de_mls::mls_crypto::MemoryDeMlsStorage>,
+    de_mls::mls_crypto::OpenMlsService<
+        de_mls::mls_crypto::MemoryDeMlsStorage,
+        de_mls::mls_crypto::WalletIdentity,
+    >,
     H,
     SH,
 >;

@@ -10,7 +10,9 @@ use de_mls::core::{
     create_group, emergency_score_ops, group_members, prepare_to_join, process_inbound,
 };
 use de_mls::ds::WELCOME_SUBTOPIC;
-use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService, OpenMlsService};
+use de_mls::mls_crypto::{
+    IdentityProvider, MemoryDeMlsStorage, MlsService, OpenMlsService, WalletIdentity,
+};
 
 mod common;
 use common::{DEFAULT_SCORE, make_scoring, setup_mls, steward_add_joiner};
@@ -21,7 +23,7 @@ fn sync_scoring_members<S: de_mls::core::PeerScoreStorage, P: de_mls::core::Scor
     scoring: &mut PeerScoringService<S, P>,
     group_name: &str,
     group: &Group,
-    mls: &OpenMlsService<MemoryDeMlsStorage>,
+    mls: &OpenMlsService<MemoryDeMlsStorage, WalletIdentity>,
 ) {
     let mls_members = group_members(group, mls).unwrap();
     let scored = scoring.all_members_with_scores(group_name);
@@ -86,7 +88,7 @@ fn test_new_joiner_starts_with_default_scores() {
     let alice_mls = setup_mls(alice_hex);
     let mut alice_handle =
         create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
-    let alice_id = alice_mls.wallet_bytes().to_vec();
+    let alice_id = alice_mls.identity().identity_bytes().to_vec();
 
     // Alice's scoring has her at a non-default score (simulating prior events).
     let mut alice_scoring = make_scoring();
@@ -107,7 +109,7 @@ fn test_new_joiner_starts_with_default_scores() {
     let bob_mls = setup_mls(bob_hex);
     let mut bob_handle = prepare_to_join(
         group_name,
-        bob_mls.wallet_bytes().to_vec(),
+        bob_mls.identity().identity_bytes().to_vec(),
         ProtocolConfig::new(1, 5).unwrap(),
     );
     let bob_kp = build_key_package_message(&bob_handle, &bob_mls, b"test-app-id").unwrap();

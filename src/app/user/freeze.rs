@@ -9,7 +9,7 @@ use crate::{
         create_commit_candidate, finalize_freeze_round, group_members,
     },
     ds::WELCOME_SUBTOPIC,
-    mls_crypto::MlsService,
+    mls_crypto::{IdentityProvider, MlsService},
 };
 
 impl<
@@ -160,7 +160,7 @@ impl<
                         entry.state_machine.start_reelection();
 
                         let violation_epoch = self.mls_service.current_epoch(group_name)?;
-                        let self_identity = self.mls_service.wallet_bytes();
+                        let self_identity = self.mls_service.identity().identity_bytes();
                         let members = group_members(&entry.group, self.mls_service.as_ref())?;
                         let target = entry
                             .group
