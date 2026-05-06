@@ -1,7 +1,7 @@
 //! Display helpers for rendering protobuf types in the UI.
 
 use crate::{
-    mls_crypto::format_wallet_address,
+    identity::format_wallet_address,
     protos::de_mls::messages::v1::{
         GroupUpdateRequest, ViolationEvidence, ViolationType, app_message, group_update_request,
     },

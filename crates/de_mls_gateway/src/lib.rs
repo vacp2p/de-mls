@@ -37,15 +37,16 @@ pub use crate::bootstrap::{
 /// Type alias for the user reference stored in the gateway.
 ///
 /// Uses [`de_mls::app::DefaultMlsService`] — `OpenMlsService` over
-/// `Arc<MemoryDeMlsStorage>` + `Arc<WalletIdentity>` — so the per-group
-/// services share one storage and one identity (the `Arc<S>: DeMlsStorage`
-/// and `Arc<I>: IdentityProvider` blanket impls make this work).
+/// `Arc<MemoryDeMlsStorage>` — so per-group services share one storage
+/// (the `Arc<S>: DeMlsStorage` blanket impl makes this work). MLS
+/// credentials live on `User` and are passed in at service construction.
 type UserRef = Arc<
     tokio::sync::RwLock<
         User<
             DefaultProvider,
             de_mls::app::DefaultMlsService,
             de_mls::app::DefaultPeerScoring,
+            de_mls::identity::WalletIdentity,
             GatewayEventHandler<WakuDeliveryService>,
             GatewayEventHandler<WakuDeliveryService>,
         >,

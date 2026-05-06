@@ -13,8 +13,7 @@ use crate::{
     },
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     mls_crypto::{
-        CommitCandidate as MlsCommitCandidate, IdentityProvider, KeyPackageBytes, MlsCommitInput,
-        MlsService,
+        CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MlsCommitInput, MlsService,
     },
     protos::de_mls::messages::v1::{AppMessage, CommitCandidate, group_update_request},
 };
@@ -50,7 +49,7 @@ where
     // MLS forbids committing one's own removal. If the approved batch contains
     // RemoveMember(self), skip local candidate creation — another steward will
     // commit the batch (including this node's removal) once they enter freeze.
-    let self_identity = mls.identity().identity_bytes();
+    let self_identity = group.self_identity();
     let self_removal_pending = group.approved_proposals().values().any(|req| {
         matches!(
             req.payload.as_ref(),
@@ -145,7 +144,7 @@ where
         group_name: group.group_name_bytes().to_vec(),
         mls_proposals,
         commit_message: commit,
-        steward_identity: mls.identity().identity_bytes().to_vec(),
+        steward_identity: group.self_identity().to_vec(),
     };
 
     // Welcome bytes are deferred: sent from finalize_freeze_round after the

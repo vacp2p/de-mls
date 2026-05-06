@@ -62,8 +62,14 @@ const BOB_KEY: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6
 const CHARLIE_KEY: &str = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
 const DAVE_KEY: &str = "7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6";
 
-type TU =
-    User<DefaultProvider, de_mls::app::DefaultMlsService, de_mls::app::DefaultPeerScoring, H, SH>;
+type TU = User<
+    DefaultProvider,
+    de_mls::app::DefaultMlsService,
+    de_mls::app::DefaultPeerScoring,
+    de_mls::identity::WalletIdentity,
+    H,
+    SH,
+>;
 
 fn make(key: &str, cs: Arc<DefaultConsensusService>, cfg: GroupConfig) -> (TU, H) {
     let h = H::new();

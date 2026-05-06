@@ -9,7 +9,8 @@ use crate::{
         ScoreEvent, ScoreOp, create_commit_candidate, finalize_freeze_round, group_members,
     },
     ds::WELCOME_SUBTOPIC,
-    mls_crypto::{IdentityProvider, MlsService},
+    identity::Identity,
+    mls_crypto::MlsService,
 };
 
 use super::has_downward_cross;
@@ -18,11 +19,10 @@ impl<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    I: Identity,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, H, SCH>
-where
-    M::Identity: Clone,
+> User<P, M, Sc, I, H, SCH>
 {
     /// Poll a `PendingJoin` group. Returns `true` while still waiting,
     /// `false` once joined or once the join attempt has been torn down

@@ -8,7 +8,7 @@ use hashgraph_like_consensus::{
 
 use crate::{
     core::{CoreError, ScoreEvent, ScoreOp},
-    mls_crypto::parse_wallet_to_bytes,
+    identity::parse_wallet_to_bytes,
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, CommitCandidate, ConversationMessage, EmergencyCriteriaProposal,
         GroupSync, GroupUpdateRequest, InvitationToJoin, Outcome, ProposalAdded, RemoveMember,

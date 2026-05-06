@@ -29,9 +29,9 @@ use crate::{
         DeMlsProvider, DefaultProvider, Group, GroupEventHandler, PeerScoringEvent,
         PeerScoringPlugin, PeerScoringService, ProposalId, ProviderConsensus, ScoringConfig,
     },
+    identity::{Identity, WalletIdentity},
     mls_crypto::{
-        IdentityProvider, KeyPackageBytes, MemoryDeMlsStorage, MlsError, MlsService,
-        OpenMlsService, WalletIdentity,
+        KeyPackageBytes, MemoryDeMlsStorage, MlsCredentials, MlsError, MlsService, OpenMlsService,
     },
     protos::de_mls::messages::v1::GroupUpdateRequest,
 };
@@ -133,20 +133,20 @@ pub struct User<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    I: Identity,
     H: GroupEventHandler,
     SCH: StateChangeHandler,
-> where
-    M::Identity: Clone,
-{
-    /// Local identity, shared with every per-group MLS service this user
-    /// runs. Source of truth for "who am I" at the User level — call sites
-    /// must read this rather than reaching into a per-group service.
-    identity: M::Identity,
+> {
+    /// Local user-level identity, shared across all this user's groups.
+    /// Source of truth for "who am I"; MLS state lives in the per-group
+    /// service, MLS credentials are captured by the factories below
+    /// (built once from this identity at User init).
+    identity: Arc<I>,
     /// Build an MLS service for a brand-new group as its sole creator.
     mls_creator_factory: MlsCreatorFactory<M>,
     /// Try to build an MLS service from a serialized welcome.
     mls_welcome_factory: MlsWelcomeFactory<M>,
-    /// Generate a single-use key package using the user's storage + identity.
+    /// Generate a single-use key package using the user's storage + credentials.
     kp_generator: KeyPackageGenerator,
     /// Build a fresh peer-scoring plug-in for a new group entry.
     scoring_factory: ScoringFactory<Sc>,
@@ -174,15 +174,14 @@ impl<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    I: Identity,
     H: GroupEventHandler,
     SCH: StateChangeHandler,
-> Clone for User<P, M, Sc, H, SCH>
-where
-    M::Identity: Clone,
+> Clone for User<P, M, Sc, I, H, SCH>
 {
     fn clone(&self) -> Self {
         Self {
-            identity: self.identity.clone(),
+            identity: Arc::clone(&self.identity),
             mls_creator_factory: Arc::clone(&self.mls_creator_factory),
             mls_welcome_factory: Arc::clone(&self.mls_welcome_factory),
             kp_generator: Arc::clone(&self.kp_generator),
@@ -203,15 +202,14 @@ impl<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    I: Identity,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, H, SCH>
-where
-    M::Identity: Clone,
+> User<P, M, Sc, I, H, SCH>
 {
     #[allow(clippy::too_many_arguments)]
     fn new_with_config(
-        identity: M::Identity,
+        identity: Arc<I>,
         mls_creator_factory: MlsCreatorFactory<M>,
         mls_welcome_factory: MlsWelcomeFactory<M>,
         kp_generator: KeyPackageGenerator,
@@ -274,7 +272,7 @@ where
 
     /// Borrow the local identity. Source of truth for "who am I" at the
     /// User level.
-    pub(crate) fn identity(&self) -> &M::Identity {
+    pub(crate) fn identity(&self) -> &I {
         &self.identity
     }
 
@@ -305,10 +303,10 @@ where
 // ─────────────────────────── DefaultProvider Convenience ───────────────────────────
 
 /// MLS service type for the default `DefaultProvider`-backed `User`. Uses
-/// in-memory storage and a wallet-keyed identity, both shared across every
-/// per-group service via `Arc` (the `Arc<S>: DeMlsStorage` and
-/// `Arc<I>: IdentityProvider` blanket impls make this work).
-pub type DefaultMlsService = OpenMlsService<Arc<MemoryDeMlsStorage>, Arc<WalletIdentity>>;
+/// in-memory storage shared across every per-group service via `Arc` (the
+/// `Arc<S>: DeMlsStorage` blanket impl makes this work). MLS credentials
+/// live separately on `User` and are passed in at service construction.
+pub type DefaultMlsService = OpenMlsService<Arc<MemoryDeMlsStorage>>;
 
 /// Peer-scoring plug-in type for the default-config `User`: the
 /// reference [`PeerScoringService`] over in-memory storage and a
@@ -316,7 +314,7 @@ pub type DefaultMlsService = OpenMlsService<Arc<MemoryDeMlsStorage>, Arc<WalletI
 pub type DefaultPeerScoring = PeerScoringService<InMemoryPeerScoreStorage, FixedScoringProvider>;
 
 impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
-    User<DefaultProvider, DefaultMlsService, DefaultPeerScoring, H, SCH>
+    User<DefaultProvider, DefaultMlsService, DefaultPeerScoring, WalletIdentity, H, SCH>
 {
     /// Construct a `User` on [`DefaultProvider`] with the default config.
     pub fn with_private_key(
@@ -345,33 +343,39 @@ impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
         let signer = PrivateKeySigner::from_str(private_key)?;
         let user_address = signer.address();
 
-        let identity = Arc::new(WalletIdentity::from_wallet(user_address)?);
+        let identity = Arc::new(WalletIdentity::from_wallet(user_address));
+        let mls_credentials = Arc::new(MlsCredentials::from_identity(identity.as_ref())?);
         let storage = Arc::new(MemoryDeMlsStorage::new());
 
         let mls_creator_factory: MlsCreatorFactory<DefaultMlsService> = {
             let storage = Arc::clone(&storage);
-            let identity = Arc::clone(&identity);
+            let credentials = Arc::clone(&mls_credentials);
             Arc::new(move |group_id: String| {
                 OpenMlsService::new_as_creator(
                     group_id,
                     Arc::clone(&storage),
-                    Arc::clone(&identity),
+                    Arc::clone(&credentials),
                 )
             })
         };
         let mls_welcome_factory: MlsWelcomeFactory<DefaultMlsService> = {
             let storage = Arc::clone(&storage);
-            let identity = Arc::clone(&identity);
+            let credentials = Arc::clone(&mls_credentials);
             Arc::new(move |bytes: &[u8]| {
-                OpenMlsService::new_from_welcome(bytes, Arc::clone(&storage), Arc::clone(&identity))
+                OpenMlsService::new_from_welcome(
+                    bytes,
+                    Arc::clone(&storage),
+                    Arc::clone(&credentials),
+                )
             })
         };
         let kp_generator: KeyPackageGenerator = {
             let storage = Arc::clone(&storage);
-            let identity = Arc::clone(&identity);
+            let credentials = Arc::clone(&mls_credentials);
             Arc::new(move || {
-                OpenMlsService::<Arc<MemoryDeMlsStorage>, Arc<WalletIdentity>>::generate_key_package(
-                    &storage, &identity,
+                OpenMlsService::<Arc<MemoryDeMlsStorage>>::generate_key_package(
+                    &storage,
+                    &credentials,
                 )
             })
         };

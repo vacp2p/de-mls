@@ -13,7 +13,8 @@ use tracing::info;
 
 use crate::{
     core::{CoreError, Group},
-    mls_crypto::{MlsService, ShortId},
+    identity::ShortId,
+    mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         GroupUpdateRequest, RemoveMember, StewardElectionProposal, ViolationEvidence,
         ViolationType, group_update_request,

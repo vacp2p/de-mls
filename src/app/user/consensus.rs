@@ -19,7 +19,8 @@ use crate::{
         DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProposalKind, group_members,
         target_identity_of,
     },
-    mls_crypto::{IdentityProvider, MlsService},
+    identity::Identity,
+    mls_crypto::MlsService,
     protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest, VotePayload},
 };
 
@@ -44,11 +45,10 @@ impl<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    I: Identity,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, H, SCH>
-where
-    M::Identity: Clone,
+> User<P, M, Sc, I, H, SCH>
 {
     /// Check that the group state allows creating a proposal of this kind and
     /// return the expected voter count.

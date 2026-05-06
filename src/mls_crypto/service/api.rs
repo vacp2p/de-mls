@@ -2,8 +2,9 @@
 //!
 //! [`MlsService`] is the swap point for MLS implementations. The default
 //! impl is [`OpenMlsService`](super::OpenMlsService). One service instance
-//! corresponds to one MLS group; identity and group id are set at
-//! construction and every method operates on that implicit group.
+//! corresponds to one MLS group; the user's MLS credentials and group id
+//! are set at construction and every method operates on that implicit
+//! group.
 //!
 //! Group construction is intentionally *not* on the trait — concrete impls
 //! expose their own constructors (e.g. `OpenMlsService::new_as_creator` /
@@ -12,15 +13,16 @@
 //!
 //! The trait surface uses only opaque boundary types: no `openmls::*`
 //! types appear here, so swapping in a different MLS engine is purely a
-//! matter of writing a new impl. Identity is exposed through the
-//! associated [`MlsService::Identity`] type.
+//! matter of writing a new impl. Identity is a separate User-level
+//! concept ([`crate::identity::Identity`]) — the MLS service consumes
+//! credentials built from it but does not own the identity itself.
 
 use openmls::prelude::Ciphersuite;
 
 use crate::{
     ds::OutboundPacket,
     mls_crypto::{
-        CommitCandidate, DecryptResult, IdentityProvider, MlsCommitInput, MlsError, MlsMessageKind,
+        CommitCandidate, DecryptResult, MlsCommitInput, MlsError, MlsMessageKind,
         StagedCandidateResult,
     },
     protos::de_mls::messages::v1::AppMessage,
@@ -31,13 +33,6 @@ pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_
 
 /// Per-group MLS backend. Each instance corresponds to one MLS group.
 pub trait MlsService: Send + Sync + 'static {
-    /// Identity attached to this service. Set at construction and
-    /// immutable thereafter.
-    type Identity: IdentityProvider;
-
-    /// The signing identity for every MLS message this service produces.
-    fn identity(&self) -> &Self::Identity;
-
     /// The group id this service is scoped to.
     fn group_id(&self) -> &str;
 

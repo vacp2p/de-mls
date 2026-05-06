@@ -13,7 +13,8 @@ use crate::{
         api::process_commit_candidate, error::CoreError, group::Group,
         process_result::ProcessResult,
     },
-    mls_crypto::{DecryptResult, MlsService, ShortId, parse_wallet_to_bytes},
+    identity::{ShortId, parse_wallet_to_bytes},
+    mls_crypto::{DecryptResult, MlsService},
     protos::de_mls::messages::v1::{
         AppMessage, GroupUpdateRequest, app_message, group_update_request,
     },

@@ -19,9 +19,8 @@ use prost::Message;
 use crate::{
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     mls_crypto::{
-        CommitCandidate, DeMlsStorage, DecryptResult, IdentityProvider, MlsCommitInput, MlsError,
-        MlsMessageKind, MlsProposalOutput, OpenMlsService, StagedCandidateResult,
-        service::api::MlsService,
+        CommitCandidate, DeMlsStorage, DecryptResult, MlsCommitInput, MlsError, MlsMessageKind,
+        MlsProposalOutput, OpenMlsService, StagedCandidateResult, service::api::MlsService,
     },
     protos::de_mls::messages::v1::AppMessage,
 };
@@ -56,10 +55,9 @@ impl<'a, T: StorageProvider<1>> OpenMlsProvider for MlsProvider<'a, T> {
     }
 }
 
-impl<S, I> OpenMlsService<S, I>
+impl<S> OpenMlsService<S>
 where
     S: DeMlsStorage,
-    I: IdentityProvider,
 {
     fn make_provider(&self) -> MlsProvider<'_, S::MlsStorage> {
         MlsProvider {
@@ -95,17 +93,10 @@ where
     }
 }
 
-impl<S, I> MlsService for OpenMlsService<S, I>
+impl<S> MlsService for OpenMlsService<S>
 where
     S: DeMlsStorage + Send + Sync + 'static,
-    I: IdentityProvider,
 {
-    type Identity = I;
-
-    fn identity(&self) -> &Self::Identity {
-        &self.identity
-    }
-
     fn group_id(&self) -> &str {
         &self.group_id
     }
@@ -155,7 +146,7 @@ where
         updates: &[MlsCommitInput],
     ) -> Result<CommitCandidate, MlsError> {
         let provider = self.make_provider();
-        let signer = self.identity.signer();
+        let signer = self.credentials.signer();
 
         let mut group = self.mls_group.write()?;
         let mut mls_proposals = Vec::new();
@@ -365,7 +356,7 @@ where
 
     fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, MlsError> {
         let provider = self.make_provider();
-        let signer = self.identity.signer();
+        let signer = self.credentials.signer();
 
         let mut group = self.mls_group.write()?;
         let message = group.create_message(&provider, signer, plaintext)?;
@@ -466,7 +457,7 @@ where
             )),
             ProcessedMessageContent::ProposalMessage(proposal) => {
                 let action =
-                    OpenMlsService::<S, I>::extract_proposal_action(&group, proposal.proposal())?;
+                    OpenMlsService::<S>::extract_proposal_action(&group, proposal.proposal())?;
 
                 group
                     .store_pending_proposal(provider.storage(), proposal.as_ref().clone())

@@ -4,19 +4,32 @@
 //! `MlsService` trait defines the per-group surface; constructors for the
 //! OpenMLS impl live as inherent methods on `OpenMlsService`.
 //!
+//! Identity and MLS credentials are split: [`crate::identity::Identity`]
+//! is the user-level abstraction (just `identity_bytes` + display);
+//! `MlsCredentials` (re-exported here) holds the MLS-specific signing keypair and
+//! credential, built from an `Identity` at User init and shared across
+//! every per-group service.
+//!
 //! # Quick Start
 //!
 //! ```ignore
-//! use de_mls::mls_crypto::{OpenMlsService, MemoryDeMlsStorage, MlsService,
-//!     WalletIdentity, parse_wallet_address};
+//! use std::sync::Arc;
+//! use de_mls::identity::{WalletIdentity, parse_wallet_address};
+//! use de_mls::mls_crypto::{
+//!     MemoryDeMlsStorage, MlsCredentials, MlsService, OpenMlsService,
+//! };
 //!
-//! // Identity + storage are constructor inputs, shared across groups.
 //! let wallet = parse_wallet_address("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")?;
-//! let identity = WalletIdentity::from_wallet(wallet)?;
+//! let identity = WalletIdentity::from_wallet(wallet);
+//! let credentials = Arc::new(MlsCredentials::from_identity(&identity)?);
 //! let storage = MemoryDeMlsStorage::new();
 //!
 //! // Create a fresh group as its sole initial member.
-//! let mls = OpenMlsService::new_as_creator("my-chat".into(), storage, identity)?;
+//! let mls = OpenMlsService::new_as_creator(
+//!     "my-chat".into(),
+//!     storage,
+//!     Arc::clone(&credentials),
+//! )?;
 //!
 //! // Encrypt a message.
 //! let ciphertext = mls.encrypt(b"Hello!")?;
@@ -28,17 +41,14 @@
 //! Use `MemoryDeMlsStorage` for development or implement your own for
 //! persistence. Storage may be shared across services via `Arc<S>`.
 
+mod credentials;
 mod error;
-mod identity;
 mod service;
 pub mod storage;
 mod types;
 
+pub use credentials::MlsCredentials;
 pub use error::MlsError;
-pub use identity::{
-    IdentityProvider, ShortId, WalletIdentity, format_wallet_address, parse_wallet_address,
-    parse_wallet_to_bytes,
-};
 pub use service::{CIPHERSUITE, MlsService, OpenMlsService};
 pub use storage::{DeMlsStorage, MemoryDeMlsStorage};
 pub use types::{
