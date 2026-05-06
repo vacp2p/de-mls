@@ -289,6 +289,10 @@ where
     ) -> Result<(), UserError> {
         if let Some(entry_arc) = self.lookup_entry(group_name).await {
             let mut entry = entry_arc.write().await;
+            // Events from this apply chain into the score-removal pass
+            // below (after `handle_emergency_scored` returns into its
+            // caller). The terminal `check_and_initiate_score_removals`
+            // call covers it, so we only need to drop the events here.
             let _events = entry.scoring.apply_ops(score_ops);
             if let Ok(req) = GroupUpdateRequest::decode(payload)
                 && let Some(group_update_request::Payload::EmergencyCriteria(ec)) = &req.payload

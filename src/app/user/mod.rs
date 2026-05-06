@@ -95,6 +95,19 @@ impl<M: MlsService> GroupEntry<M> {
     }
 }
 
+/// `true` iff `events` contains at least one downward threshold cross —
+/// the signal coordinators react to by chaining into score-removal
+/// initiation. Helper kept here so every callsite uses the same
+/// triggering rule.
+pub(crate) fn has_downward_cross(events: &[crate::core::PeerScoringEvent]) -> bool {
+    events.iter().any(|e| {
+        matches!(
+            e,
+            crate::core::PeerScoringEvent::ThresholdCrossedDown { .. }
+        )
+    })
+}
+
 /// Registry of outstanding auto-vote timers, keyed by
 /// `(group_name, proposal_id)`. Cancelled on manual vote, consensus
 /// resolution, or group leave. Outer key is the group name (`Arc<str>` so

@@ -441,43 +441,38 @@ where
             .await
             .ok_or(UserError::GroupNotFound)?;
         let self_id = self.identity().identity_bytes();
-        let (is_steward, epoch, targets): (bool, u64, Vec<(Vec<u8>, i64)>) = {
-            let entry = entry_arc.read().await;
+
+        // Reactive entry: callers chain into this after a scoring apply
+        // emitted a downward cross, so we expect at least one tracked
+        // member to be at-or-below threshold. The scan is the source of
+        // truth — events just trigger the look.
+        let (is_steward, epoch, to_remove): (bool, u64, Vec<(Vec<u8>, i64)>) = {
+            let mut entry = entry_arc.write().await;
             let mls = entry.group.expect_mls()?;
             let is_steward = entry.group.is_steward();
             let epoch = mls.current_epoch()?;
-            let targets = if is_steward {
-                entry
-                    .scoring
-                    .members_below_threshold()
-                    .into_iter()
-                    .filter(|id| *id != self_id)
-                    .map(|id| {
-                        let score = entry.scoring.score_for(&id).unwrap_or(0);
-                        (id, score)
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            (is_steward, epoch, targets)
+            if !is_steward {
+                return Ok(());
+            }
+            let to_remove = entry
+                .scoring
+                .members_below_threshold()
+                .into_iter()
+                .filter(|id| *id != self_id)
+                .filter(|id| !entry.group.has_pending_removal(id))
+                .filter_map(|id| {
+                    let score = entry.scoring.score_for(&id)?;
+                    Some((id, score))
+                })
+                .collect::<Vec<_>>();
+            for (id, _) in &to_remove {
+                entry.group.observe_pending_removal(id.clone());
+            }
+            (is_steward, epoch, to_remove)
         };
 
         if !is_steward {
             return Ok(());
-        }
-
-        // Mark all targets pending under a single write-lock, then submit
-        // proposals outside the lock to avoid holding it across `.await`.
-        let mut to_remove = Vec::new();
-        if let Some(entry_arc) = self.lookup_entry(group_name).await {
-            let mut entry = entry_arc.write().await;
-            for (target_id, current_score) in targets {
-                if !entry.group.has_pending_removal(&target_id) {
-                    entry.group.observe_pending_removal(target_id.clone());
-                    to_remove.push((target_id, current_score));
-                }
-            }
         }
 
         // Submit proposals without holding the lock.

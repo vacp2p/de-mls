@@ -5,6 +5,7 @@
 //! (e.g. [`crate::app::FixedScoringProvider`]) live in the app layer.
 
 use prost::Message;
+use std::collections::HashSet;
 
 use crate::protos::de_mls::messages::v1::{
     GroupUpdateRequest, ViolationEvidence, group_update_request::Payload,
@@ -124,8 +125,8 @@ pub struct ScoringMemberDiff {
 /// Pure diff between a scoring table snapshot and an MLS member roster.
 /// Caller applies the diff to its own [`PeerScoringService`].
 pub fn scoring_member_diff(scored: &[Vec<u8>], mls_members: &[Vec<u8>]) -> ScoringMemberDiff {
-    let scored_set: std::collections::HashSet<&[u8]> = scored.iter().map(Vec::as_slice).collect();
-    let mls_set: std::collections::HashSet<&[u8]> = mls_members.iter().map(Vec::as_slice).collect();
+    let scored_set: HashSet<&[u8]> = scored.iter().map(Vec::as_slice).collect();
+    let mls_set: HashSet<&[u8]> = mls_members.iter().map(Vec::as_slice).collect();
 
     let to_add = mls_members
         .iter()

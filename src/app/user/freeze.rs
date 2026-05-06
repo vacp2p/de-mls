@@ -91,7 +91,7 @@ where
             .on_state_changed(group_name, GroupState::Selection)
             .await;
 
-        let finalize_result = {
+        let (finalize_result, downward_cross) = {
             let mut entry = entry_arc.write().await;
             let allow_subset = entry.group.allow_subset_candidates();
             let result = if entry.group.mls().is_some() {
@@ -109,15 +109,20 @@ where
             // Apply locally-observed score events before releasing the
             // entry lock. These come from dropped candidates in the
             // phase-3 loop (RFC §Peer Scoring: direct local observation,
-            // no ECP needed). Threshold-cross events from this apply
-            // belong to the steward coordinator's event drain; this
-            // commit ignores them. Wired into removal triggers in the
-            // next commit.
-            if !result.score_ops.is_empty() {
-                let _events = entry.scoring.apply_ops(&result.score_ops);
-            }
-            result
+            // no ECP needed). A downward threshold cross schedules a
+            // removal-init pass below, after the lock drops.
+            let cross = if !result.score_ops.is_empty() {
+                let events = entry.scoring.apply_ops(&result.score_ops);
+                crate::app::user::has_downward_cross(&events)
+            } else {
+                false
+            };
+            (result, cross)
         };
+
+        if downward_cross && let Err(e) = self.check_and_initiate_score_removals(group_name).await {
+            error!(group = group_name, error = %e, "score-removal check failed (freeze finalize)");
+        }
 
         match finalize_result.outcome {
             FreezeOutcome::Applied { result, outbound } => {
@@ -152,7 +157,7 @@ where
                 // other than ourselves. Self-penalties are skipped — the
                 // node that failed to commit observes its own state directly
                 // and doesn't need to record a ScoreOp against itself.
-                let next_state = {
+                let (next_state, downward_cross) = {
                     let mut entry = entry_arc.write().await;
 
                     if has_proposals {
@@ -180,20 +185,29 @@ where
                             }
                             None => None,
                         };
-                        if let Some(steward_id) = accuse_target {
-                            let _events = entry.scoring.apply_op(&ScoreOp {
+                        let cross = if let Some(steward_id) = accuse_target {
+                            let events = entry.scoring.apply_op(&ScoreOp {
                                 member_id: steward_id,
                                 event: ScoreEvent::CensorshipInactivity,
                             });
-                        }
+                            crate::app::user::has_downward_cross(&events)
+                        } else {
+                            false
+                        };
 
-                        GroupState::Reelection
+                        (GroupState::Reelection, cross)
                     } else {
                         entry.group.clear_freeze_round();
                         entry.state_machine.start_working();
-                        GroupState::Working
+                        (GroupState::Working, false)
                     }
                 };
+
+                if downward_cross
+                    && let Err(e) = self.check_and_initiate_score_removals(group_name).await
+                {
+                    error!(group = group_name, error = %e, "score-removal check failed (freeze timeout)");
+                }
 
                 let entered_reelection = next_state == GroupState::Reelection;
                 self.state_handler

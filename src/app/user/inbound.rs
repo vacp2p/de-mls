@@ -391,9 +391,9 @@ where
                 .map(|ps| (ps.member_id.clone(), ps.score))
                 .collect(),
         };
-        // Events from this apply belong to the steward coordinator's
-        // event drain; this commit ignores them. Wired into removal
-        // triggers in the next commit.
+        // Joiners aren't stewards yet, so any downward crosses surfaced
+        // here will be acted on by an existing steward via their own
+        // event chain. Drop our events.
         let _events = entry.scoring.apply_snapshot(&snapshot);
         entry
             .group
