@@ -192,7 +192,7 @@ fn creator_penalty(ev: &ViolationEvidence) -> ScoreOp {
 /// at safe points and turns threshold crossings into protocol actions.
 /// The plug-in itself owns no I/O — storage backends and event
 /// publishing are caller concerns.
-pub trait PeerScoringPlugin {
+pub trait PeerScoringPlugin: Send + Sync + 'static {
     fn add_member(&mut self, member_id: &[u8]);
     fn remove_member(&mut self, member_id: &[u8]);
 
@@ -218,6 +218,9 @@ pub trait PeerScoringPlugin {
     fn members_below_threshold(&self) -> Vec<Vec<u8>>;
     fn all_members_with_scores(&self) -> Vec<(Vec<u8>, i64)>;
 
+    /// Current removal threshold. Coordinator reads this when building
+    /// `GroupSync` so joiners adopt the same value.
+    fn threshold(&self) -> i64;
     fn set_threshold(&mut self, threshold: i64);
 }
 
@@ -256,7 +259,9 @@ impl<S: PeerScoreStorage, P: ScoringProvider> PeerScoringService<S, P> {
     }
 }
 
-impl<S: PeerScoreStorage, P: ScoringProvider> PeerScoringPlugin for PeerScoringService<S, P> {
+impl<S: PeerScoreStorage + Send + Sync + 'static, P: ScoringProvider + Send + Sync + 'static>
+    PeerScoringPlugin for PeerScoringService<S, P>
+{
     fn add_member(&mut self, member_id: &[u8]) {
         self.storage.set(member_id, self.config.default_score);
     }
@@ -341,6 +346,10 @@ impl<S: PeerScoreStorage, P: ScoringProvider> PeerScoringPlugin for PeerScoringS
 
     fn all_members_with_scores(&self) -> Vec<(Vec<u8>, i64)> {
         self.storage.all_scores()
+    }
+
+    fn threshold(&self) -> i64 {
+        self.config.threshold
     }
 
     fn set_threshold(&mut self, threshold: i64) {

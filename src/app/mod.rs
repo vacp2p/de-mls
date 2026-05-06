@@ -39,5 +39,6 @@ pub use error::UserError;
 pub use peer_scoring::{FixedScoringProvider, InMemoryPeerScoreStorage};
 pub use state_machine::{FreezeTimeoutStatus, GroupState, GroupStateMachine, StateChangeHandler};
 pub use user::{
-    DefaultMlsService, KeyPackageGenerator, MlsCreatorFactory, MlsWelcomeFactory, User,
+    DefaultMlsService, DefaultPeerScoring, KeyPackageGenerator, MlsCreatorFactory,
+    MlsWelcomeFactory, ScoringFactory, User,
 };

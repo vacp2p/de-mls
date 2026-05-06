@@ -25,9 +25,10 @@ use crate::{
 impl<
     P: DeMlsProvider,
     M: MlsService,
+    Sc: PeerScoringPlugin,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, H, SCH>
+> User<P, M, Sc, H, SCH>
 where
     M::Identity: Clone,
 {

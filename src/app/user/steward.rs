@@ -20,9 +20,10 @@ use crate::{
 impl<
     P: DeMlsProvider,
     M: MlsService,
+    Sc: PeerScoringPlugin,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, H, SCH>
+> User<P, M, Sc, H, SCH>
 where
     M::Identity: Clone,
 {
@@ -416,7 +417,7 @@ where
                 retry_round: list.retry_round(),
                 max_reelection_attempts: entry.group.max_reelection_attempts(),
                 liveness_criteria_yes: entry.group.liveness_criteria_yes(),
-                threshold_peer_score: entry.scoring.config().threshold,
+                threshold_peer_score: entry.scoring.threshold(),
                 pending_update_max_epochs: entry.group.pending_update_max_epochs(),
             };
 

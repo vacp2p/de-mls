@@ -15,7 +15,10 @@ use crate::{
     app::{
         GroupState, ProposalParams, StateChangeHandler, User, UserError, cast_vote, submit_proposal,
     },
-    core::{DeMlsProvider, GroupEventHandler, ProposalKind, group_members, target_identity_of},
+    core::{
+        DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProposalKind, group_members,
+        target_identity_of,
+    },
     mls_crypto::{IdentityProvider, MlsService},
     protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest, VotePayload},
 };
@@ -40,9 +43,10 @@ struct NewProposal {
 impl<
     P: DeMlsProvider,
     M: MlsService,
+    Sc: PeerScoringPlugin,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, H, SCH>
+> User<P, M, Sc, H, SCH>
 where
     M::Identity: Clone,
 {
