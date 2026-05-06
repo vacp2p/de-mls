@@ -127,7 +127,9 @@ pub type MlsWelcomeFactory<M> =
 pub type KeyPackageGenerator =
     Arc<dyn Fn() -> Result<KeyPackageBytes, MlsError> + Send + Sync + 'static>;
 /// Factory closure that builds a [`PeerScoringPlugin`] instance for a
-/// fresh group, using the user's default scoring config.
+/// fresh group. Currently invoked with the user's default
+/// [`ScoringConfig`] derived from `default_group_config`; the parameter
+/// is forward-looking for per-group config overrides.
 pub type ScoringFactory<Sc> = Arc<dyn Fn(&ScoringConfig) -> Sc + Send + Sync + 'static>;
 
 pub struct User<

@@ -80,7 +80,10 @@ where
         let mut scoring = self.make_scoring_service();
         // Joiners start tracked at `JoinedGroup` time (once members are known).
         if is_creation {
-            scoring.add_member(&self_identity_bytes);
+            // Creator is self at `default_score`; under standard config
+            // (`default > threshold`) no cross event fires, so we drop
+            // the return value here.
+            let _events = scoring.add_member(&self_identity_bytes);
         }
 
         let initial_state = state_machine.current_state();

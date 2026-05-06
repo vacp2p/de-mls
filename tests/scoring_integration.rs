@@ -32,7 +32,7 @@ fn sync_scoring_members<
 
     for member_id in &mls_ids {
         if !scored_ids.contains(member_id) {
-            scoring.add_member(member_id);
+            let _ = scoring.add_member(member_id);
         }
     }
     for member_id in &scored_ids {
@@ -87,7 +87,7 @@ fn test_new_joiner_starts_with_default_scores() {
 
     // Alice's scoring has her at a non-default score (simulating prior events).
     let mut alice_scoring = make_scoring();
-    alice_scoring.add_member(&alice_id);
+    let _ = alice_scoring.add_member(&alice_id);
     let _ = alice_scoring.apply_op(&ScoreOp {
         member_id: alice_id.clone(),
         event: ScoreEvent::EmergencyYesCreator,

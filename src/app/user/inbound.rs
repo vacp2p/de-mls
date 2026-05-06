@@ -392,9 +392,11 @@ where
                 .map(|ps| (ps.member_id.clone(), ps.score))
                 .collect(),
         };
-        // Joiners aren't stewards yet, so any downward crosses surfaced
-        // here will be acted on by an existing steward via their own
-        // event chain. Drop our events.
+        // The GroupSync sender (an existing steward) holds the same
+        // scores and is the canonical actor for any below-threshold
+        // member in this snapshot — they'll submit
+        // `SCORE_BELOW_THRESHOLD` from their own event chain. Drop our
+        // events to avoid duplicate proposals from joiners.
         let _events = entry.scoring.apply_snapshot(&snapshot);
         entry
             .group

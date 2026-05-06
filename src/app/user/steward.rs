@@ -43,7 +43,11 @@ where
             .collect();
         let diff = scoring_member_diff(&scored, mls_members);
         for member_id in &diff.to_add {
-            entry.scoring.add_member(member_id);
+            // Under the standard config (`default > threshold`) this
+            // returns no events; an exotic config could surface a fresh
+            // member as below-threshold, but the score-removal chain
+            // doesn't fire on membership-sync ticks today.
+            let _events = entry.scoring.add_member(member_id);
         }
         for member_id in &diff.to_remove {
             entry.scoring.remove_member(member_id);
@@ -368,9 +372,15 @@ where
             .ok_or(UserError::GroupNotFound)?;
         let packet = {
             let entry = entry_arc.read().await;
+            // Sparse snapshot — only members whose score has diverged
+            // from `default_score`. Joiners init every member at default
+            // via membership sync before applying the snapshot, so
+            // missing entries imply default. Saves wire size at scale
+            // (Waku message budget concern past ~1k members).
             let scores: Vec<PeerScore> = entry
                 .scoring
-                .all_members_with_scores()
+                .snapshot()
+                .diverged
                 .into_iter()
                 .map(|(id, score)| PeerScore {
                     member_id: id,

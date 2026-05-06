@@ -121,6 +121,11 @@ where
             (result, cross)
         };
 
+        // Lock split is intentional: `check_and_initiate_score_removals`
+        // re-acquires the entry write lock and calls `initiate_proposal`
+        // which `.await`s on the consensus service. Holding the entry
+        // lock across that await would block other operations on this
+        // group, so we drop the lock above before chaining.
         if downward_cross && let Err(e) = self.check_and_initiate_score_removals(group_name).await {
             error!(group = group_name, error = %e, "score-removal check failed (freeze finalize)");
         }

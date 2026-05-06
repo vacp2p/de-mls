@@ -137,8 +137,8 @@ fn test_full_pipeline_penalties_to_removal() {
     let target_id = vec![0xDD];
 
     let mut scoring = make_scoring();
-    scoring.add_member(&steward_id);
-    scoring.add_member(&target_id);
+    let _ = scoring.add_member(&steward_id);
+    let _ = scoring.add_member(&target_id);
 
     // Apply penalties until target drops below threshold
     // 100 - 50 = 50 (BrokenCommit)
@@ -219,8 +219,8 @@ fn test_steward_skips_self_for_removal() {
     let steward_id = vec![0x01];
     let other_id = vec![0x02];
 
-    scoring.add_member(&steward_id);
-    scoring.add_member(&other_id);
+    let _ = scoring.add_member(&steward_id);
+    let _ = scoring.add_member(&other_id);
 
     // Drop both below threshold
     for event in [ScoreEvent::BrokenCommit, ScoreEvent::EmergencyNoCreator] {
@@ -259,9 +259,9 @@ fn test_members_below_threshold_uses_per_group_value() {
     let carol = vec![0xCC];
 
     let mut scoring = make_scoring();
-    scoring.add_member(&alice);
-    scoring.add_member(&bob);
-    scoring.add_member(&carol);
+    let _ = scoring.add_member(&alice);
+    let _ = scoring.add_member(&bob);
+    let _ = scoring.add_member(&carol);
     let _ = scoring.apply_snapshot(&ScoreSnapshot {
         diverged: vec![
             (alice.clone(), -10),
