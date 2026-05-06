@@ -7,8 +7,8 @@
 use prost::Message;
 
 use de_mls::core::{
-    PeerScoringPlugin, ScoreEvent, ScoreOp, ScoreSnapshot, apply_consensus_result,
-    emergency_score_ops,
+    PeerScoringEvent, PeerScoringPlugin, ScoreEvent, ScoreOp, ScoreSnapshot,
+    apply_consensus_result, emergency_score_ops,
 };
 use de_mls::protos::de_mls::messages::v1::{
     ViolationEvidence, ViolationType, group_update_request,
@@ -247,6 +247,51 @@ fn test_steward_skips_self_for_removal() {
 
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0], other_id);
+}
+
+/// `apply_ops` emits `ThresholdCrossedDown` exactly when a member
+/// crosses the threshold downward, and `members_below_threshold`
+/// surfaces them. This is the trigger condition the User layer chains
+/// into [`check_and_initiate_score_removals`] on, in `freeze.rs` and
+/// `consensus_events.rs`.
+#[test]
+fn test_apply_ops_emits_event_and_marks_below_threshold() {
+    let target = vec![0xAA];
+    let bystander = vec![0xBB];
+
+    let mut scoring = make_scoring();
+    let _ = scoring.add_member(&target);
+    let _ = scoring.add_member(&bystander);
+
+    // 100 → 50 (BrokenCommit) — still above threshold 0, no event.
+    let events = scoring.apply_ops(&[ScoreOp {
+        member_id: target.clone(),
+        event: ScoreEvent::BrokenCommit,
+    }]);
+    assert!(events.is_empty(), "above threshold, no event");
+    assert!(!scoring.members_below_threshold().contains(&target));
+
+    // 50 → 0 (EmergencyNoCreator) — crosses to at-or-below threshold.
+    let events = scoring.apply_ops(&[ScoreOp {
+        member_id: target.clone(),
+        event: ScoreEvent::EmergencyNoCreator,
+    }]);
+    assert_eq!(events.len(), 1, "exactly one cross event");
+    assert!(matches!(
+        events[0],
+        PeerScoringEvent::ThresholdCrossedDown { ref member_id, score: 0 }
+            if *member_id == target
+    ));
+    assert!(scoring.members_below_threshold().contains(&target));
+    assert!(!scoring.members_below_threshold().contains(&bystander));
+
+    // Re-applying ops on an already-below member emits no further
+    // event — coordinator dedup at this layer keeps the chain quiet.
+    let events = scoring.apply_ops(&[ScoreOp {
+        member_id: target.clone(),
+        event: ScoreEvent::BrokenCommit,
+    }]);
+    assert!(events.is_empty(), "already below threshold, no re-fire");
 }
 
 /// `members_below_threshold` honours the threshold stored in the
