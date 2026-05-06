@@ -15,7 +15,8 @@ use crate::{
         member_set, process_inbound,
     },
     ds::{APP_MSG_SUBTOPIC, InboundPacket, WELCOME_SUBTOPIC},
-    mls_crypto::{IdentityProvider, MlsService, ShortId, key_package_bytes_from_json},
+    identity::{Identity, ShortId},
+    mls_crypto::{MlsService, key_package_bytes_from_json},
     protos::de_mls::messages::v1::{
         AppMessage, ConversationMessage, GroupSync, GroupUpdateRequest, InviteMember,
         WelcomeMessage, group_update_request, welcome_message,
@@ -26,11 +27,10 @@ impl<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    I: Identity,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, H, SCH>
-where
-    M::Identity: Clone,
+> User<P, M, Sc, I, H, SCH>
 {
     /// Dispatches a single ProcessResult to the appropriate handler/consensus/state-machine action.
     pub async fn dispatch_inbound_result(

@@ -48,8 +48,11 @@
 //! use de_mls::core::{DefaultProvider, GroupEventHandler, ProcessResult};
 //! use de_mls::app::User;
 //!
-//! // Create a user with an Ethereum private key
-//! let user: User<DefaultProvider, _, _, _> = User::with_private_key(
+//! // Create a user with an Ethereum private key. The convenience
+//! // constructor anchors all six User generics, so type inference
+//! // picks up the right defaults — no annotation needed at the
+//! // call site.
+//! let user = User::with_private_key(
 //!     "0xac0974...",   // Private key
 //!     consensus,       // Consensus service
 //!     event_handler,   // Your GroupEventHandler implementation
@@ -75,6 +78,9 @@ pub mod ds;
 
 /// MLS cryptographic operations: OpenMLS wrapper for encryption/decryption.
 pub mod mls_crypto;
+
+/// User-level identity, decoupled from MLS state.
+pub mod identity;
 
 /// Protobuf message definitions.
 pub mod protos {

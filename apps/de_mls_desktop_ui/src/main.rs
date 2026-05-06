@@ -12,7 +12,7 @@ use std::{
 
 use de_mls::{
     app::format_group_request,
-    mls_crypto::parse_wallet_address,
+    identity::parse_wallet_address,
     protos::de_mls::messages::v1::{ConversationMessage, GroupUpdateRequest, VotePayload},
 };
 use de_mls_gateway::{GATEWAY, bootstrap_core_from_env};

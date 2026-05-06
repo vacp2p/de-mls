@@ -13,6 +13,7 @@ use crate::{
         DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProposalKind, ScoreOp,
         apply_consensus_result, emergency_score_ops, group_members, target_identity_of,
     },
+    identity::Identity,
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         GroupUpdateRequest, StewardElectionProposal, group_update_request,
@@ -23,11 +24,10 @@ impl<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    I: Identity,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, H, SCH>
-where
-    M::Identity: Clone,
+> User<P, M, Sc, I, H, SCH>
 {
     /// Entry point from the consensus service: decode the proposal, apply the
     /// result to the group, and dispatch to the correct follow-up handler

@@ -1,7 +1,7 @@
 use std::sync::{Arc, atomic::Ordering};
 
 use de_mls::{
-    app::format_group_request, ds::WakuDeliveryService, mls_crypto::format_wallet_address,
+    app::format_group_request, ds::WakuDeliveryService, identity::format_wallet_address,
     protos::de_mls::messages::v1::GroupUpdateRequest,
 };
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};

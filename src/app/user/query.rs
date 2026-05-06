@@ -3,7 +3,8 @@
 use crate::{
     app::{GroupState, MemberRole, StateChangeHandler, User, UserError},
     core::{DeMlsProvider, GroupEventHandler, PeerScoringPlugin, group_members},
-    mls_crypto::{MlsService, format_wallet_address},
+    identity::{Identity, format_wallet_address},
+    mls_crypto::MlsService,
     protos::de_mls::messages::v1::GroupUpdateRequest,
 };
 
@@ -11,11 +12,10 @@ impl<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    I: Identity,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, H, SCH>
-where
-    M::Identity: Clone,
+> User<P, M, Sc, I, H, SCH>
 {
     pub async fn get_group_state(&self, group_name: &str) -> Result<GroupState, UserError> {
         self.with_entry(group_name, |e| e.state_machine.current_state())

@@ -1,6 +1,6 @@
 //! OpenMLS-backed implementation of [`MlsService`].
 
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use openmls::{
     group::{
@@ -12,7 +12,7 @@ use openmls::{
 use openmls_rust_crypto::RustCrypto;
 use openmls_traits::OpenMlsProvider;
 
-use crate::mls_crypto::{DeMlsStorage, IdentityProvider, KeyPackageBytes, MlsError};
+use crate::mls_crypto::{DeMlsStorage, KeyPackageBytes, MlsCredentials, MlsError};
 
 mod api;
 mod backend;
@@ -23,21 +23,26 @@ use backend::MlsProvider;
 /// OpenMLS-backed MLS service, scoped to a single group.
 ///
 /// The service owns one `MlsGroup` plus an optional staged-commit slot
-/// for the inbound stage→merge/discard pipeline. Identity and storage are
-/// supplied at construction and immutable for the service's lifetime.
-/// The implementation of [`MlsService`] for this type lives in `backend.rs`.
-pub struct OpenMlsService<S: DeMlsStorage, I: IdentityProvider> {
+/// for the inbound stage→merge/discard pipeline. MLS credentials and
+/// storage are supplied at construction. Credentials are
+/// `Arc<MlsCredentials>` so one user's credentials back every per-group
+/// service without copying the signing key.
+pub struct OpenMlsService<S: DeMlsStorage> {
     pub(super) storage: S,
     pub(super) crypto: RustCrypto,
-    pub(super) identity: I,
+    pub(super) credentials: Arc<MlsCredentials>,
     pub(super) group_id: String,
     pub(super) mls_group: RwLock<MlsGroup>,
     pub(super) pending_staged_commit: RwLock<Option<StagedCommit>>,
 }
 
-impl<S: DeMlsStorage, I: IdentityProvider> OpenMlsService<S, I> {
+impl<S: DeMlsStorage> OpenMlsService<S> {
     /// Create a fresh MLS group as the sole initial member ("creator").
-    pub fn new_as_creator(group_id: String, storage: S, identity: I) -> Result<Self, MlsError> {
+    pub fn new_as_creator(
+        group_id: String,
+        storage: S,
+        credentials: Arc<MlsCredentials>,
+    ) -> Result<Self, MlsError> {
         let crypto = RustCrypto::default();
         let group = {
             let provider = MlsProvider::new(&crypto, storage.mls_storage());
@@ -46,17 +51,17 @@ impl<S: DeMlsStorage, I: IdentityProvider> OpenMlsService<S, I> {
                 .build();
             MlsGroup::new_with_group_id(
                 &provider,
-                identity.signer(),
+                credentials.signer(),
                 &config,
                 GroupId::from_slice(group_id.as_bytes()),
-                identity.credential().clone(),
+                credentials.credential().clone(),
             )?
         };
 
         Ok(Self {
             storage,
             crypto,
-            identity,
+            credentials,
             group_id,
             mls_group: RwLock::new(group),
             pending_staged_commit: RwLock::new(None),
@@ -72,7 +77,7 @@ impl<S: DeMlsStorage, I: IdentityProvider> OpenMlsService<S, I> {
     pub fn new_from_welcome(
         welcome_bytes: &[u8],
         storage: S,
-        identity: I,
+        credentials: Arc<MlsCredentials>,
     ) -> Result<Option<Self>, MlsError> {
         let crypto = RustCrypto::default();
 
@@ -108,28 +113,31 @@ impl<S: DeMlsStorage, I: IdentityProvider> OpenMlsService<S, I> {
         Ok(Some(Self {
             storage,
             crypto,
-            identity,
+            credentials,
             group_id,
             mls_group: RwLock::new(group),
             pending_staged_commit: RwLock::new(None),
         }))
     }
 
-    /// Generate a single-use key package for `identity` backed by `storage`.
+    /// Generate a single-use key package for `credentials` backed by `storage`.
     ///
-    /// This intentionally takes only storage + identity rather than `&self`,
+    /// This intentionally takes only storage + credentials rather than `&self`,
     /// so a joiner can publish a key package before any MLS group has been
     /// created. The resulting hash ref is registered in `storage` so a
     /// later `new_from_welcome` can identify the welcome as "for us".
-    pub fn generate_key_package(storage: &S, identity: &I) -> Result<KeyPackageBytes, MlsError> {
+    pub fn generate_key_package(
+        storage: &S,
+        credentials: &MlsCredentials,
+    ) -> Result<KeyPackageBytes, MlsError> {
         let crypto = RustCrypto::default();
         let provider = MlsProvider::new(&crypto, storage.mls_storage());
 
         let kp_bundle = KeyPackage::builder().build(
             CIPHERSUITE,
             &provider,
-            identity.signer(),
-            identity.credential().clone(),
+            credentials.signer(),
+            credentials.credential().clone(),
         )?;
 
         let kp = kp_bundle.key_package();
@@ -138,9 +146,12 @@ impl<S: DeMlsStorage, I: IdentityProvider> OpenMlsService<S, I> {
 
         storage.store_key_package_ref(&hash_ref)?;
 
-        Ok(KeyPackageBytes::new(
-            bytes,
-            identity.identity_bytes().to_vec(),
-        ))
+        let identity_bytes = credentials
+            .credential()
+            .credential
+            .serialized_content()
+            .to_vec();
+
+        Ok(KeyPackageBytes::new(bytes, identity_bytes))
     }
 }

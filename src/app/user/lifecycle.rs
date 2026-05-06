@@ -13,7 +13,8 @@ use crate::{
     core::{
         DeMlsProvider, Group, GroupEventHandler, PeerScoringPlugin, auto_approved_leave_proposal_id,
     },
-    mls_crypto::{IdentityProvider, MlsService, parse_wallet_to_bytes},
+    identity::Identity,
+    mls_crypto::MlsService,
     protos::de_mls::messages::v1::{GroupUpdateRequest, RemoveMember, group_update_request},
 };
 
@@ -21,11 +22,10 @@ impl<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    I: Identity,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, H, SCH>
-where
-    M::Identity: Clone,
+> User<P, M, Sc, I, H, SCH>
 {
     /// Create (`is_creation = true`) or join (`false`) a group using the
     /// user's default config.
@@ -129,7 +129,7 @@ where
             return Ok(());
         }
 
-        let self_identity = parse_wallet_to_bytes(&self.identity_string())?;
+        let self_identity = self.identity().identity_bytes().to_vec();
 
         // Idempotent: a second click after a successful submit finds the
         // approved entry and short-circuits.

@@ -1,109 +1,69 @@
-//! Identity sources for DE-MLS.
+//! User-level identity, decoupled from MLS state.
 //!
-//! [`IdentityProvider`] is the swap point for identity sources. The default
-//! impl is [`WalletIdentity`], which derives MLS credentials from an
-//! Ethereum wallet address. Future impls (libchat-style `AccountId`, etc.)
-//! plug in by implementing the trait without touching the MLS service.
+//! The `Identity` trait defines a user — the bytes that name them and a
+//! display form. MLS-specific binding (signing keypair, credential)
+//! lives in `MlsCredentials` under [`crate::mls_crypto`], constructed
+//! *from* an `Identity` at User init and held shared (one per user, not
+//! per group). This split mirrors libchat's `MlsContext`: identity is
+//! its own concept, MLS is one of many systems that consumes it.
+//!
+//! The default impl is [`crate::identity::WalletIdentity`], which derives
+//! the canonical identity bytes from a 20-byte Ethereum address. Future
+//! impls (libchat-style `AccountId`, etc.) plug in by implementing the
+//! trait; they do not need to know anything about MLS.
 
-use std::{str::FromStr, sync::Arc};
+use std::str::FromStr;
 
 use alloy::{hex, primitives::Address};
-use openmls::credentials::{BasicCredential, CredentialWithKey};
-use openmls_basic_credential::SignatureKeyPair;
 
-use crate::mls_crypto::{MlsError, service::CIPHERSUITE};
+use crate::mls_crypto::MlsError;
 
-/// Pluggable identity source.
+/// Pluggable user identity.
 ///
-/// Identity bridges an authenticated user (wallet address, account id, …)
-/// to the MLS credential system. The trait exposes the canonical identity
-/// bytes plus a display form, and gives the OpenMLS-backed service access
-/// to the credential and signer it needs.
-///
-/// All methods take `&self` so the trait stays object-safe; the
-/// OpenMLS-backed service binds it as a generic field for monomorphization.
-pub trait IdentityProvider: Send + Sync + 'static {
-    /// Canonical identity bytes — what the credential's serialized content
-    /// holds (e.g. wallet address bytes).
+/// Bridges an authenticated user (wallet, account id, …) to anything
+/// downstream that needs to name them. Methods take `&self` so the
+/// trait stays object-safe; callers usually hold an `Arc<I>` so one
+/// identity can back many User-level subsystems (peer scoring, UI,
+/// transport addressing). The MLS service does *not* consume `Identity`
+/// directly — it consumes `MlsCredentials` built once from this
+/// identity at User init.
+pub trait Identity: Send + Sync + 'static {
+    /// Canonical identity bytes — the unique on-the-wire identifier
+    /// used by the MLS credential's serialized content, scoring keys,
+    /// member-id comparisons, and so on.
     fn identity_bytes(&self) -> &[u8];
 
-    /// Display form (e.g. checksummed `0x…` hex). Stable for the lifetime
-    /// of the identity.
+    /// Display form (e.g. checksummed `0x…` hex). Stable for the
+    /// lifetime of the identity; intended for logs and UI.
     fn identity_display(&self) -> &str;
-
-    /// MLS credential bundle — public part of the identity, embedded in
-    /// every signed MLS message we produce.
-    fn credential(&self) -> &CredentialWithKey;
-
-    /// MLS signing key pair — owns the private key used to sign MLS
-    /// messages and proposals.
-    fn signer(&self) -> &SignatureKeyPair;
 }
 
-/// Wallet-based identity. The default [`IdentityProvider`] impl: derives an
-/// MLS credential from a 20-byte Ethereum address, and generates a fresh
-/// MLS signature key pair.
-#[derive(Debug)]
+/// Wallet-based identity. The default [`Identity`] impl: holds a 20-byte
+/// Ethereum address and its checksummed hex form. No MLS state — that
+/// lives in [`crate::mls_crypto::MlsCredentials`].
+#[derive(Debug, Clone)]
 pub struct WalletIdentity {
     wallet_bytes: Vec<u8>,
     wallet_hex: String,
-    credential: CredentialWithKey,
-    signer: SignatureKeyPair,
 }
 
 impl WalletIdentity {
-    /// Build a wallet identity from an Ethereum address. Generates a fresh
-    /// signing keypair and bundles it with a basic credential containing the
-    /// wallet bytes. Does not touch any MLS storage — the signer is held
-    /// in-memory and passed explicitly into MLS calls that need it.
-    pub fn from_wallet(wallet: Address) -> Result<Self, MlsError> {
-        let credential = BasicCredential::new(wallet.as_slice().to_vec());
-        let signer = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm())?;
-        Ok(Self {
+    /// Build a wallet identity from an Ethereum address.
+    pub fn from_wallet(wallet: Address) -> Self {
+        Self {
             wallet_bytes: wallet.as_slice().to_vec(),
             wallet_hex: wallet.to_checksum(None),
-            credential: CredentialWithKey {
-                credential: credential.into(),
-                signature_key: signer.to_public_vec().into(),
-            },
-            signer,
-        })
+        }
     }
 }
 
-impl IdentityProvider for WalletIdentity {
+impl Identity for WalletIdentity {
     fn identity_bytes(&self) -> &[u8] {
         &self.wallet_bytes
     }
 
     fn identity_display(&self) -> &str {
         &self.wallet_hex
-    }
-
-    fn credential(&self) -> &CredentialWithKey {
-        &self.credential
-    }
-
-    fn signer(&self) -> &SignatureKeyPair {
-        &self.signer
-    }
-}
-
-/// Sharing impl: every `Arc<I>` over an [`IdentityProvider`] is itself an
-/// [`IdentityProvider`]. Lets one logical identity back many MLS services
-/// (one per group) without cloning the underlying signing key.
-impl<I: IdentityProvider + ?Sized> IdentityProvider for Arc<I> {
-    fn identity_bytes(&self) -> &[u8] {
-        (**self).identity_bytes()
-    }
-    fn identity_display(&self) -> &str {
-        (**self).identity_display()
-    }
-    fn credential(&self) -> &CredentialWithKey {
-        (**self).credential()
-    }
-    fn signer(&self) -> &SignatureKeyPair {
-        (**self).signer()
     }
 }
 
@@ -145,12 +105,6 @@ pub fn parse_wallet_address(address: &str) -> Result<Address, MlsError> {
 /// This is the inverse of `parse_wallet_address`. MLS credentials
 /// store wallet addresses as raw 20-byte arrays; this formats them
 /// for display.
-///
-/// # Examples
-/// ```ignore
-/// let bytes = [0x11, 0x22, ...]; // 20 bytes
-/// let hex = format_wallet_address(&bytes); // "0x1122..."
-/// ```
 pub fn format_wallet_address(raw: &[u8]) -> String {
     if raw.is_empty() {
         String::new()

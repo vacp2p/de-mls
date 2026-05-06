@@ -972,59 +972,30 @@ impl ResolvedProposalCache {
 /// Test-only stubs shared across `core/`'s unit-test modules.
 #[cfg(test)]
 pub(crate) mod test_stubs {
-    use openmls::prelude::CredentialWithKey;
-    use openmls_basic_credential::SignatureKeyPair;
-
     use crate::ds::OutboundPacket;
     use crate::mls_crypto::{
-        CommitCandidate as MlsCommitCandidate, DecryptResult, IdentityProvider, MlsCommitInput,
-        MlsError, MlsMessageKind, MlsService, StagedCandidateResult,
+        CommitCandidate as MlsCommitCandidate, DecryptResult, MlsCommitInput, MlsError,
+        MlsMessageKind, MlsService, StagedCandidateResult,
     };
     use crate::protos::de_mls::messages::v1::AppMessage;
-
-    /// Test-only no-op identity; only `identity_bytes` and `identity_display`
-    /// are ever called from `Group`'s pure-state tests, so the credential
-    /// and signer accessors are stubbed with `unreachable!()`.
-    pub(crate) struct NoopIdentity;
-
-    impl IdentityProvider for NoopIdentity {
-        fn identity_bytes(&self) -> &[u8] {
-            &[]
-        }
-        fn identity_display(&self) -> &str {
-            "noop"
-        }
-        fn credential(&self) -> &CredentialWithKey {
-            unreachable!("NoopIdentity::credential is not used in pure-state Group tests")
-        }
-        fn signer(&self) -> &SignatureKeyPair {
-            unreachable!("NoopIdentity::signer is not used in pure-state Group tests")
-        }
-    }
 
     /// Test-only no-op MLS service. `Group`'s pure-state tests never call
     /// MLS operations, so every protocol method is a stub. If a test
     /// reaches one of these, it's the wrong test and the panic message
     /// will say so.
     pub(crate) struct NoopMls {
-        identity: NoopIdentity,
         group_id: String,
     }
 
     impl NoopMls {
         pub(crate) fn new(group_id: &str) -> Self {
             Self {
-                identity: NoopIdentity,
                 group_id: group_id.to_string(),
             }
         }
     }
 
     impl MlsService for NoopMls {
-        type Identity = NoopIdentity;
-        fn identity(&self) -> &Self::Identity {
-            &self.identity
-        }
         fn group_id(&self) -> &str {
             &self.group_id
         }

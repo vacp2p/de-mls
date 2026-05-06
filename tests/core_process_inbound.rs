@@ -14,10 +14,8 @@ use de_mls::core::{
     build_key_package_message, create_commit_candidate, finalize_freeze_round, group_members,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
-use de_mls::mls_crypto::{
-    IdentityProvider, MemoryDeMlsStorage, MlsService, OpenMlsService, WalletIdentity,
-    parse_wallet_address,
-};
+use de_mls::identity::{Identity, parse_wallet_address};
+use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService, OpenMlsService};
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationMessage, GroupUpdateRequest, app_message,
 };
@@ -45,7 +43,7 @@ fn test_process_inbound_invalid_subtopic() {
 #[test]
 fn test_process_inbound_app_msg_before_mls_init() {
     // Joiner-side handle with no MLS service attached yet.
-    let (identity, _storage): (Arc<WalletIdentity>, Arc<MemoryDeMlsStorage>) =
+    let (identity, _credentials, _storage) =
         setup_identity_storage("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
     let mut group: Group<TestMls> = Group::prepare_to_join(
         "test-group",
@@ -127,7 +125,7 @@ fn test_process_inbound_welcome_non_steward_buffers_key_package() {
 
     // Joiner-side handle with no MLS yet — the key-package surfaces all the
     // same; promotion to a voting proposal is the app's decision.
-    let (identity, _storage): (Arc<WalletIdentity>, Arc<MemoryDeMlsStorage>) =
+    let (identity, _credentials, _storage) =
         setup_identity_storage("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
     let mut group: Group<TestMls> = Group::prepare_to_join(
         group_name,
@@ -338,12 +336,11 @@ fn test_rejoin_after_eviction() {
         joiner.identity.identity_bytes().to_vec(),
         default_steward_config(),
     );
-    let key_package =
-        OpenMlsService::<Arc<MemoryDeMlsStorage>, Arc<WalletIdentity>>::generate_key_package(
-            &joiner.storage,
-            &joiner.identity,
-        )
-        .unwrap();
+    let key_package = OpenMlsService::<Arc<MemoryDeMlsStorage>>::generate_key_package(
+        &joiner.storage,
+        &joiner.credentials,
+    )
+    .unwrap();
     let kp_packet = build_key_package_message(group_name, key_package, b"test-app-id");
     let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &kp_packet);
 
@@ -361,7 +358,7 @@ fn test_rejoin_after_eviction() {
     let svc = OpenMlsService::new_from_welcome(
         &invitation.mls_message_out_bytes,
         Arc::clone(&joiner.storage),
-        Arc::clone(&joiner.identity),
+        Arc::clone(&joiner.credentials),
     )
     .unwrap()
     .expect("welcome should match this joiner's fresh KP");

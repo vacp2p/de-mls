@@ -3,7 +3,8 @@
 use crate::{
     app::{GroupState, StateChangeHandler, User, UserError},
     core::{DeMlsProvider, GroupEventHandler, PeerScoringPlugin, build_key_package_message},
-    mls_crypto::{MlsService, parse_wallet_to_bytes},
+    identity::{Identity, parse_wallet_to_bytes},
+    mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, ConversationMessage, GroupUpdateRequest, RemoveMember,
         group_update_request,
@@ -14,11 +15,10 @@ impl<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    I: Identity,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, H, SCH>
-where
-    M::Identity: Clone,
+> User<P, M, Sc, I, H, SCH>
 {
     /// Broadcast our key-package on the welcome subtopic so the steward
     /// can invite us.

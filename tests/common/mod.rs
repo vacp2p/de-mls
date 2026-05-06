@@ -21,9 +21,9 @@ use de_mls::core::{
     process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
+use de_mls::identity::{Identity, WalletIdentity, parse_wallet_address};
 use de_mls::mls_crypto::{
-    IdentityProvider, MemoryDeMlsStorage, MlsService, OpenMlsService, WalletIdentity,
-    key_package_bytes_from_json, parse_wallet_address,
+    MemoryDeMlsStorage, MlsCredentials, MlsService, OpenMlsService, key_package_bytes_from_json,
 };
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, GroupUpdateRequest, InviteMember, WelcomeMessage, group_update_request,
@@ -31,9 +31,11 @@ use de_mls::protos::de_mls::messages::v1::{
 };
 use prost::Message as _;
 
-/// Test-side MLS service: storage and identity are `Arc`-shared so a single
-/// helper can build many per-group services from one identity.
-pub type TestMls = OpenMlsService<Arc<MemoryDeMlsStorage>, Arc<WalletIdentity>>;
+/// Test-side MLS service: storage is `Arc`-shared so a single helper can
+/// build many per-group services from one identity. MLS credentials live
+/// at the test-fixture level (one per identity), passed in via
+/// `Arc<MlsCredentials>`.
+pub type TestMls = OpenMlsService<Arc<MemoryDeMlsStorage>>;
 
 pub const DEFAULT_SCORE: i64 = 100;
 
@@ -132,13 +134,21 @@ pub fn default_steward_config() -> ProtocolConfig {
     ProtocolConfig::new(1, 5).unwrap()
 }
 
-/// Build a fresh identity + storage pair, both Arc-shared so a later helper
-/// can construct multiple per-group services from one logical identity.
-pub fn setup_identity_storage(wallet_hex: &str) -> (Arc<WalletIdentity>, Arc<MemoryDeMlsStorage>) {
+/// Build a fresh identity, MLS credentials, and storage. Both
+/// credentials and storage are `Arc`-shared so a later helper can
+/// construct multiple per-group services from one logical identity.
+pub fn setup_identity_storage(
+    wallet_hex: &str,
+) -> (
+    Arc<WalletIdentity>,
+    Arc<MlsCredentials>,
+    Arc<MemoryDeMlsStorage>,
+) {
     let wallet = parse_wallet_address(wallet_hex).unwrap();
-    let identity = Arc::new(WalletIdentity::from_wallet(wallet).unwrap());
+    let identity = Arc::new(WalletIdentity::from_wallet(wallet));
+    let credentials = Arc::new(MlsCredentials::from_identity(identity.as_ref()).unwrap());
     let storage = Arc::new(MemoryDeMlsStorage::new());
-    (identity, storage)
+    (identity, credentials, storage)
 }
 
 /// Build an [`OpenMlsService`] for a fresh group with a default test id.
@@ -153,8 +163,8 @@ pub fn setup_mls(wallet_hex: &str) -> TestMls {
 /// test asserts something about the MLS-tracked group id or when two
 /// services share a group.
 pub fn setup_mls_for_group(group_name: &str, wallet_hex: &str) -> TestMls {
-    let (identity, storage) = setup_identity_storage(wallet_hex);
-    OpenMlsService::new_as_creator(group_name.to_string(), storage, identity).unwrap()
+    let (_, credentials, storage) = setup_identity_storage(wallet_hex);
+    OpenMlsService::new_as_creator(group_name.to_string(), storage, credentials).unwrap()
 }
 
 /// Compat shim that mirrors the pre-refactor `core::process_inbound`
@@ -220,19 +230,20 @@ pub fn setup_steward_with_config(
     wallet_hex: &str,
     config: ProtocolConfig,
 ) -> Group<TestMls> {
-    let (identity, storage) = setup_identity_storage(wallet_hex);
+    let (identity, credentials, storage) = setup_identity_storage(wallet_hex);
     let mls =
-        OpenMlsService::new_as_creator(group_name.to_string(), storage, Arc::clone(&identity))
+        OpenMlsService::new_as_creator(group_name.to_string(), storage, Arc::clone(&credentials))
             .unwrap();
     Group::create_group(group_name, identity.identity_bytes().to_vec(), config, mls).unwrap()
 }
 
 /// Pre-join handle for a joiner: the joiner has no MLS service yet (they
-/// haven't accepted a welcome), so test code keeps `identity` and `storage`
-/// to build one via [`OpenMlsService::new_from_welcome`] when a welcome
-/// arrives. KP generation uses the same storage/identity pair.
+/// haven't accepted a welcome), so test code keeps `credentials` and
+/// `storage` to build one via [`OpenMlsService::new_from_welcome`] when a
+/// welcome arrives. KP generation uses the same storage/credentials pair.
 pub struct JoinerHandle {
     pub identity: Arc<WalletIdentity>,
+    pub credentials: Arc<MlsCredentials>,
     pub storage: Arc<MemoryDeMlsStorage>,
     pub group: Group<TestMls>,
     pub kp_packet: OutboundPacket,
@@ -249,7 +260,7 @@ impl JoinerHandle {
         OpenMlsService::new_from_welcome(
             welcome_bytes,
             Arc::clone(&self.storage),
-            Arc::clone(&self.identity),
+            Arc::clone(&self.credentials),
         )
     }
 
@@ -280,17 +291,16 @@ pub fn setup_joiner_with_config(
     wallet_hex: &str,
     config: ProtocolConfig,
 ) -> JoinerHandle {
-    let (identity, storage) = setup_identity_storage(wallet_hex);
+    let (identity, credentials, storage) = setup_identity_storage(wallet_hex);
     let group: Group<TestMls> =
         Group::prepare_to_join(group_name, identity.identity_bytes().to_vec(), config);
     let key_package =
-        OpenMlsService::<Arc<MemoryDeMlsStorage>, Arc<WalletIdentity>>::generate_key_package(
-            &storage, &identity,
-        )
-        .unwrap();
+        OpenMlsService::<Arc<MemoryDeMlsStorage>>::generate_key_package(&storage, &credentials)
+            .unwrap();
     let kp_packet = build_key_package_message(group_name, key_package, b"test-app-id");
     JoinerHandle {
         identity,
+        credentials,
         storage,
         group,
         kp_packet,
