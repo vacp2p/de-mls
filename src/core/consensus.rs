@@ -13,7 +13,7 @@ use tracing::info;
 
 use crate::{
     core::{CoreError, Group},
-    mls_crypto::ShortId,
+    mls_crypto::{MlsService, ShortId},
     protos::de_mls::messages::v1::{
         GroupUpdateRequest, RemoveMember, StewardElectionProposal, ViolationEvidence,
         ViolationType, group_update_request,
@@ -96,8 +96,8 @@ fn pending_removal_target(
 /// Election outcome — no MLS operation. YES hands the proposed list
 /// back to the app for validation and install; NO drops the owner's
 /// voting-queue entry.
-fn apply_election_outcome(
-    group: &mut Group,
+fn apply_election_outcome<M: MlsService>(
+    group: &mut Group<M>,
     proposal_id: u32,
     approved: bool,
     election: StewardElectionProposal,
@@ -143,8 +143,8 @@ fn apply_election_outcome(
 ///   `RemoveMember` for an already-queued target is deduped at insertion.
 /// - **Rejected (any kind)** — dropped from the voting queue if we
 ///   owned it.
-pub fn apply_consensus_result(
-    group: &mut Group,
+pub fn apply_consensus_result<M: MlsService>(
+    group: &mut Group<M>,
     proposal_id: u32,
     approved: bool,
     payload: &[u8],
@@ -264,6 +264,7 @@ pub fn apply_consensus_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::group::test_stubs::NoopMls;
     use crate::core::steward_list::{ProtocolConfig, StewardList};
     use crate::protos::de_mls::messages::v1::{
         GroupUpdateRequest, StewardElectionProposal, group_update_request,
@@ -276,6 +277,10 @@ mod tests {
 
     fn members(ids: &[u8]) -> Vec<Vec<u8>> {
         ids.iter().map(|&id| member(id)).collect()
+    }
+
+    fn make_group(name: &str, identity: Vec<u8>, config: ProtocolConfig) -> Group<NoopMls> {
+        Group::new_as_creator(name, identity, config, NoopMls::new(name)).unwrap()
     }
 
     fn election_request(stewards: Vec<Vec<u8>>, epoch: u64) -> GroupUpdateRequest {
@@ -295,7 +300,7 @@ mod tests {
     #[test]
     fn election_yes_owner_returns_outcome_and_clears_queue() {
         let config = ProtocolConfig::new(2, 5).unwrap();
-        let mut group = Group::new_as_creator("test-group", member(1), config.clone()).unwrap();
+        let mut group = make_group("test-group", member(1), config.clone());
         let mems = members(&[1, 2, 3, 4, 5]);
         let sn = mems.len().min(config.sn_max);
         let list = StewardList::generate(10, b"test-group", &mems, sn, config, 0).unwrap();
@@ -318,7 +323,7 @@ mod tests {
     #[test]
     fn election_no_returns_empty() {
         let config = ProtocolConfig::new(2, 5).unwrap();
-        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        let mut group = make_group("test-group", member(1), config);
         let request = election_request(vec![member(1), member(2)], 10);
 
         let proposal_id = 43;
@@ -337,7 +342,7 @@ mod tests {
     #[test]
     fn election_yes_nonowner_returns_outcome_without_queue_side_effects() {
         let config = ProtocolConfig::new(2, 5).unwrap();
-        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        let mut group = make_group("test-group", member(1), config);
         let request = election_request(vec![member(1), member(2), member(3)], 5);
 
         let proposal_id = 44;
@@ -364,7 +369,7 @@ mod tests {
     #[test]
     fn removal_deduped_when_target_already_pending() {
         let config = ProtocolConfig::new(2, 5).unwrap();
-        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        let mut group = make_group("test-group", member(1), config);
         let target = member(7);
 
         // First removal — non-owner path inserts straight into approved.
@@ -394,7 +399,7 @@ mod tests {
     #[test]
     fn removal_dedup_clears_owner_voting_entry() {
         let config = ProtocolConfig::new(2, 5).unwrap();
-        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        let mut group = make_group("test-group", member(1), config);
         let target = member(7);
 
         // Pre-existing approved removal from an unrelated path.
@@ -430,7 +435,7 @@ mod tests {
     #[test]
     fn ecp_score_below_threshold_yes_marks_urgent_and_force_freezes() {
         let config = ProtocolConfig::new(1, 5).unwrap();
-        let mut group = Group::new_as_creator("urgent-yes", member(1), config).unwrap();
+        let mut group = make_group("urgent-yes", member(1), config);
         let target = member(7);
 
         let request = score_below_threshold_request(target.clone(), member(1));
@@ -451,7 +456,7 @@ mod tests {
     #[test]
     fn ecp_score_below_threshold_no_does_not_mark_urgent() {
         let config = ProtocolConfig::new(1, 5).unwrap();
-        let mut group = Group::new_as_creator("urgent-no", member(1), config).unwrap();
+        let mut group = make_group("urgent-no", member(1), config);
         let request = score_below_threshold_request(member(7), member(1));
         let payload = request.encode_to_vec();
 
@@ -472,7 +477,7 @@ mod tests {
     #[test]
     fn ecp_deadlock_yes_opens_recovery_mode_and_force_freezes() {
         let config = ProtocolConfig::new(1, 5).unwrap();
-        let mut group = Group::new_as_creator("deadlock-yes", member(1), config).unwrap();
+        let mut group = make_group("deadlock-yes", member(1), config);
         assert!(!group.is_in_recovery_mode());
 
         let request = deadlock_request(member(1));
@@ -495,7 +500,7 @@ mod tests {
     #[test]
     fn ecp_deadlock_no_does_not_open_recovery_mode() {
         let config = ProtocolConfig::new(1, 5).unwrap();
-        let mut group = Group::new_as_creator("deadlock-no", member(1), config).unwrap();
+        let mut group = make_group("deadlock-no", member(1), config);
 
         let request = deadlock_request(member(1));
         let payload = request.encode_to_vec();

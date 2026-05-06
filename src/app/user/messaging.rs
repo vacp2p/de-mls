@@ -22,15 +22,15 @@ where
     /// Broadcast our key-package on the welcome subtopic so the steward
     /// can invite us.
     pub async fn send_kp_message(&self, group_name: &str) -> Result<(), UserError> {
-        let entry_arc = self
+        // Existence-check on the group; the packet itself is built from
+        // `group_name` and a freshly-generated KP, neither of which need
+        // the entry guard.
+        let _ = self
             .lookup_entry(group_name)
             .await
             .ok_or(UserError::GroupNotFound)?;
         let key_package = self.generate_key_package()?;
-        let packet = {
-            let entry = entry_arc.read().await;
-            build_key_package_message(&entry.group, key_package, &self.app_id)
-        };
+        let packet = build_key_package_message(group_name, key_package, &self.app_id);
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
     }
@@ -65,8 +65,8 @@ where
             }
             .into();
 
-            let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
-            build_message(mls.as_ref(), &app_msg, &self.app_id)?
+            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
+            build_message(mls, &app_msg, &self.app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())

@@ -16,27 +16,28 @@ use crate::{
 
 /// Create a new MLS group as the steward.
 ///
-/// Initializes a bootstrap steward list containing the creator. The MLS
-/// group itself is constructed by the caller (typically via
-/// `OpenMlsService::new_as_creator`); this function builds only the
-/// app-level [`Group`] wrapping it.
-pub fn create_group(
+/// Initializes a bootstrap steward list containing the creator and embeds
+/// the supplied MLS service in the resulting [`Group`].
+pub fn create_group<M: MlsService>(
     name: &str,
     self_identity: Vec<u8>,
     protocol_config: ProtocolConfig,
-) -> Result<Group, CoreError> {
-    Group::new_as_creator(name, self_identity, protocol_config)
+    mls: M,
+) -> Result<Group<M>, CoreError> {
+    Group::new_as_creator(name, self_identity, protocol_config, mls)
 }
 
 /// Prepare a handle for joining an existing group.
 ///
 /// The joiner knows the config from group discovery but won't have the
-/// actual steward list until receiving it via sync message.
-pub fn prepare_to_join(
+/// actual steward list — or an MLS service — until they receive a
+/// `GroupSync` and a welcome respectively. The MLS service slot stays
+/// `None` until the welcome arrives.
+pub fn prepare_to_join<M: MlsService>(
     name: &str,
     self_identity: Vec<u8>,
     protocol_config: ProtocolConfig,
-) -> Group {
+) -> Group<M> {
     Group::new_as_joiner(name, self_identity, protocol_config)
 }
 
@@ -67,7 +68,7 @@ where
 /// `OpenMlsService::generate_key_package`) so a joiner can publish a key
 /// package before any MLS service for the target group exists.
 pub fn build_key_package_message(
-    group: &Group,
+    group_name: &str,
     key_package: KeyPackageBytes,
     app_id: &[u8],
 ) -> OutboundPacket {
@@ -79,7 +80,7 @@ pub fn build_key_package_message(
     OutboundPacket::new(
         welcome_msg.encode_to_vec(),
         WELCOME_SUBTOPIC,
-        group.group_name(),
+        group_name,
         app_id,
     )
 }
@@ -87,7 +88,7 @@ pub fn build_key_package_message(
 /// Wrap raw MLS welcome bytes into an `OutboundPacket` on the welcome subtopic.
 pub(crate) fn build_invitation_packet(
     welcome_bytes: Vec<u8>,
-    group: &Group,
+    group_name: &str,
     app_id: &[u8],
 ) -> OutboundPacket {
     let welcome_msg: WelcomeMessage = InvitationToJoin {
@@ -97,7 +98,7 @@ pub(crate) fn build_invitation_packet(
     OutboundPacket::new(
         welcome_msg.encode_to_vec(),
         WELCOME_SUBTOPIC,
-        group.group_name(),
+        group_name,
         app_id,
     )
 }

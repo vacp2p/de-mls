@@ -56,8 +56,8 @@ where
             .ok_or(UserError::GroupNotFound)?;
         let (needs_fill, members, epoch) = {
             let entry = entry_arc.read().await;
-            let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
-            let members = group_members(&entry.group, mls.as_ref())?;
+            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
+            let members = group_members(&entry.group)?;
             let needs = members.len() < entry.group.protocol_config().sn_min;
             let epoch = mls.current_epoch()?;
             (needs, members, epoch)
@@ -100,9 +100,9 @@ where
             .ok_or(UserError::GroupNotFound)?;
         let (members, election_epoch, retry_round, config) = {
             let entry = entry_arc.read().await;
-            let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
+            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
             let epoch = mls.current_epoch()?;
-            let mls_members = group_members(&entry.group, mls.as_ref())?;
+            let mls_members = group_members(&entry.group)?;
             let self_identity = self.identity().identity_bytes();
             match evaluate_election_initiation(
                 &entry.group,
@@ -177,8 +177,8 @@ where
             .ok_or(UserError::GroupNotFound)?;
         let (is_authorized, self_id, epoch) = {
             let entry = entry_arc.read().await;
-            let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
-            let mls_members = group_members(&entry.group, mls.as_ref())?;
+            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
+            let mls_members = group_members(&entry.group)?;
             let self_id = self.identity().identity_bytes();
             let authorized = is_deadlock_ecp_proposer(&entry.group, &mls_members, self_id);
             let epoch = mls.current_epoch()?;
@@ -227,9 +227,9 @@ where
             .ok_or(UserError::GroupNotFound)?;
         let (current_epoch, members) = {
             let entry = entry_arc.read().await;
-            let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
+            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
             let current_epoch = mls.current_epoch()?;
-            let members = group_members(&entry.group, mls.as_ref())?;
+            let members = group_members(&entry.group)?;
             (current_epoch, members)
         };
 
@@ -258,12 +258,12 @@ where
             .ok_or(UserError::GroupNotFound)?;
         let (current_epoch, members, max_age) = {
             let entry = entry_arc.read().await;
-            let Some(mls) = entry.mls() else {
+            let Some(mls) = entry.group.mls() else {
                 return Ok(());
             };
             (
                 mls.current_epoch()?,
-                group_members(&entry.group, mls.as_ref())?,
+                group_members(&entry.group)?,
                 entry.group.pending_update_max_epochs(),
             )
         };
@@ -296,11 +296,8 @@ where
         let (current_epoch, to_propose): (u64, Vec<GroupUpdateRequest>) = {
             let entry = entry_arc.read().await;
 
-            let (current_epoch, members) = match entry.mls() {
-                Some(mls) => (
-                    mls.current_epoch()?,
-                    group_members(&entry.group, mls.as_ref())?,
-                ),
+            let (current_epoch, members) = match entry.group.mls() {
+                Some(mls) => (mls.current_epoch()?, group_members(&entry.group)?),
                 None => (0, Vec::new()),
             };
             if !entry.group.is_live_epoch_steward(current_epoch, &members) {
@@ -402,8 +399,8 @@ where
             // Filter ghosts and queued-removal targets so joiners don't
             // inherit stewards they would have to walk past on the very
             // first epoch.
-            let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
-            let mls_members = group_members(&entry.group, mls.as_ref())?;
+            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
+            let mls_members = group_members(&entry.group)?;
             let steward_members = entry.group.live_steward_members(&mls_members);
 
             // `retry_round` is the seed that produced the *stored* list —
@@ -426,7 +423,7 @@ where
             };
 
             let app_msg: AppMessage = sync.into();
-            build_message(mls.as_ref(), &app_msg, &self.app_id)?
+            build_message(mls, &app_msg, &self.app_id)?
         };
 
         self.handler.on_outbound(group_name, packet).await?;
@@ -447,7 +444,7 @@ where
             .ok_or(UserError::GroupNotFound)?;
         let (is_steward, threshold, epoch) = {
             let entry = entry_arc.read().await;
-            let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
+            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
             (
                 entry.group.is_steward(),
                 entry.group.threshold_peer_score(),

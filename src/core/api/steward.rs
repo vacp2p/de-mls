@@ -28,8 +28,7 @@ use crate::{
 /// *previous* list can commit recovery actions when an election fails.
 /// `Group::is_in_recovery_mode()` (Layer 3) bypasses the gate entirely.
 pub fn create_commit_candidate<M>(
-    group: &mut Group,
-    mls: &M,
+    group: &mut Group<M>,
     app_id: &[u8],
 ) -> Result<Option<OutboundPacket>, CoreError>
 where
@@ -42,6 +41,11 @@ where
     if group.approved_proposals().is_empty() {
         return Err(CoreError::NoProposals);
     }
+    let res = group.mls();
+    if res.is_none() {
+        return Err(CoreError::MlsGroupNotInitialized);
+    }
+    let mls = res.unwrap();
 
     // MLS forbids committing one's own removal. If the approved batch contains
     // RemoveMember(self), skip local candidate creation — another steward will
@@ -176,12 +180,17 @@ where
 
 // ─────────────────────────── Member Queries ───────────────────────────
 
-/// Get the current members of a group.
-pub fn group_members<M>(_group: &Group, mls: &M) -> Result<Vec<Vec<u8>>, CoreError>
+/// Current members of a group, read from its MLS service. Returns an
+/// empty list when the group hasn't accepted a welcome yet (e.g. a
+/// pending joiner querying its own state).
+pub fn group_members<M>(group: &Group<M>) -> Result<Vec<Vec<u8>>, CoreError>
 where
     M: MlsService,
 {
-    Ok(mls.members()?)
+    match group.mls() {
+        Some(mls) => Ok(mls.members()?),
+        None => Ok(Vec::new()),
+    }
 }
 
 // ─────────────────────────── Housekeeping Decisions ───────────────────────────
@@ -206,8 +215,8 @@ pub enum ElectionDecision {
 /// election-already-in-flight, (3) responsible-proposer authorization,
 /// (4) eligible-candidate-pool non-empty. The async submission stays in
 /// the caller; this function performs no I/O.
-pub fn evaluate_election_initiation(
-    group: &Group,
+pub fn evaluate_election_initiation<M: MlsService>(
+    group: &Group<M>,
     mls_members: &[Vec<u8>],
     self_identity: &[u8],
     epoch: u64,
@@ -259,8 +268,8 @@ pub fn evaluate_election_initiation(
 /// `true` when this node is the responsible proposer for a Layer-3
 /// `Deadlock` ECP. Requires the proposer to be MLS-present and not
 /// queued for removal.
-pub fn is_deadlock_ecp_proposer(
-    group: &Group,
+pub fn is_deadlock_ecp_proposer<M: MlsService>(
+    group: &Group<M>,
     mls_members: &[Vec<u8>],
     self_identity: &[u8],
 ) -> bool {

@@ -86,8 +86,10 @@ where
             }
         }
 
-        let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
-        let members = group_members(&entry.group, mls.as_ref())?;
+        if entry.group.mls().is_none() {
+            return Err(UserError::MlsNotInitialized);
+        }
+        let members = group_members(&entry.group)?;
         Ok(members.len() as u32)
     }
 
@@ -255,8 +257,8 @@ where
                 .await
                 .ok_or(UserError::GroupNotFound)?;
             let entry = entry_arc.read().await;
-            let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
-            build_message(mls.as_ref(), &outbound, &self.app_id)?
+            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
+            build_message(mls, &outbound, &self.app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
 
@@ -370,13 +372,9 @@ where
         let (pending_join, members_for_rotation, current_epoch) = {
             let entry = entry_arc.read().await;
             let pending = entry.state_machine.current_state() == GroupState::PendingJoin;
-            match (pending, entry.mls()) {
+            match (pending, entry.group.mls()) {
                 (true, _) | (false, None) => (pending, Vec::new(), 0u64),
-                (false, Some(mls)) => (
-                    false,
-                    group_members(&entry.group, mls.as_ref())?,
-                    mls.current_epoch()?,
-                ),
+                (false, Some(mls)) => (false, group_members(&entry.group)?, mls.current_epoch()?),
             }
         };
         if pending_join {
@@ -465,8 +463,8 @@ where
         .await?;
         let packet = {
             let entry = entry_arc.read().await;
-            let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
-            build_message(mls.as_ref(), &app_message, &app_id)?
+            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
+            build_message(mls, &app_message, &app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
@@ -578,8 +576,8 @@ where
         .await?;
         let packet = {
             let entry = entry_arc.read().await;
-            let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
-            build_message(mls.as_ref(), &app_message, &self.app_id)?
+            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
+            build_message(mls, &app_message, &self.app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())

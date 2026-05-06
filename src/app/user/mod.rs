@@ -49,13 +49,12 @@ mod steward;
 const MAX_EPOCH_HISTORY: usize = 10;
 
 pub(crate) struct GroupEntry<M: MlsService> {
-    group: Group,
+    /// `Group<M>` owns the per-group MLS service inside its own
+    /// `Option<M>` slot — joiners in `PendingJoin` carry `None` until a
+    /// welcome arrives, at which point the User attaches the service via
+    /// [`Group::attach_mls`].
+    group: Group<M>,
     state_machine: GroupStateMachine,
-    /// Per-group MLS service. `None` for joiners in `PendingJoin` state
-    /// (no welcome accepted yet); `Some` after the joiner attaches a
-    /// service via [`User::mls_welcome_factory`] or for groups created
-    /// locally via [`User::mls_creator_factory`].
-    mls: Option<Arc<M>>,
     /// Per-group rolling history of committed batches, most recent last.
     /// Bounded at [`MAX_EPOCH_HISTORY`]. Populated by
     /// [`GroupEntry::archive_committed_batch`] from the snapshot
@@ -66,18 +65,12 @@ pub(crate) struct GroupEntry<M: MlsService> {
 impl<M: MlsService> GroupEntry<M> {
     /// Build a fresh entry. Internal-only auxiliary state (epoch
     /// history, future per-entry caches) starts empty.
-    pub(crate) fn new(group: Group, state_machine: GroupStateMachine, mls: Option<Arc<M>>) -> Self {
+    pub(crate) fn new(group: Group<M>, state_machine: GroupStateMachine) -> Self {
         Self {
             group,
             state_machine,
-            mls,
             epoch_history: VecDeque::new(),
         }
-    }
-
-    /// Borrow the MLS service for this group, if attached.
-    pub(crate) fn mls(&self) -> Option<&Arc<M>> {
-        self.mls.as_ref()
     }
 
     /// Append a just-committed batch to the bounded UI history.

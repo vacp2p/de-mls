@@ -30,7 +30,7 @@ where
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        let epoch = match entry.mls() {
+        let epoch = match entry.group.mls() {
             Some(mls) => mls.current_epoch()?,
             None => 0,
         };
@@ -77,10 +77,10 @@ where
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        let Some(mls) = entry.mls() else {
+        if entry.group.mls().is_none() {
             return Ok(Vec::new());
-        };
-        let members = group_members(&entry.group, mls.as_ref())?;
+        }
+        let members = group_members(&entry.group)?;
         Ok(members
             .into_iter()
             .map(|raw| format_wallet_address(raw.as_slice()).to_string())
@@ -106,8 +106,10 @@ where
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
-        let members = group_members(&entry.group, mls.as_ref())?;
+        if entry.group.mls().is_none() {
+            return Err(UserError::MlsNotInitialized);
+        }
+        let members = group_members(&entry.group)?;
         Ok(members
             .into_iter()
             .filter(|id| entry.group.is_pending_self_leave(id))
@@ -125,9 +127,9 @@ where
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
+        let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
         let epoch = mls.current_epoch()?;
-        let members = group_members(&entry.group, mls.as_ref())?;
+        let members = group_members(&entry.group)?;
 
         let list = entry.group.steward_list();
         let (live_epoch, live_backup) = entry.group.live_epoch_and_backup(epoch, &members);

@@ -94,13 +94,8 @@ where
         let finalize_result = {
             let mut entry = entry_arc.write().await;
             let allow_subset = entry.group.allow_subset_candidates();
-            let result = if let Some(mls) = entry.mls.clone() {
-                match finalize_freeze_round(
-                    &mut entry.group,
-                    mls.as_ref(),
-                    allow_subset,
-                    &self.app_id,
-                ) {
+            let result = if entry.group.mls().is_some() {
+                match finalize_freeze_round(&mut entry.group, allow_subset, &self.app_id) {
                     Ok(result) => result,
                     Err(e) => {
                         error!(group = group_name, error = %e, "freeze finalize failed");
@@ -165,11 +160,11 @@ where
                         entry.state_machine.clear_proposal_timer();
                         entry.state_machine.start_reelection();
 
-                        let target = match entry.mls() {
+                        let target = match entry.group.mls() {
                             Some(mls) => {
                                 let violation_epoch = mls.current_epoch()?;
                                 let self_identity = self.identity().identity_bytes();
-                                let members = group_members(&entry.group, mls.as_ref())?;
+                                let members = group_members(&entry.group)?;
                                 entry
                                     .group
                                     .live_epoch_steward(violation_epoch, &members)
@@ -254,15 +249,18 @@ where
             .state_machine
             .check_steward_inactivity(proposal_count, inactivity);
         if entered_freezing {
-            let mls = entry.mls.clone().ok_or(UserError::MlsNotInitialized)?;
-            let epoch = mls.current_epoch()?;
+            let epoch = entry
+                .group
+                .mls()
+                .ok_or(UserError::MlsNotInitialized)?
+                .current_epoch()?;
             entry.group.ensure_freeze_round(epoch);
 
             // Stewards build their own candidate under the same lock.
             // Candidate-build failure must not block the freeze transition —
             // peers' candidates still get processed.
             let outbound = if entry.group.is_steward() {
-                match create_commit_candidate(&mut entry.group, mls.as_ref(), &self.app_id) {
+                match create_commit_candidate(&mut entry.group, &self.app_id) {
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(

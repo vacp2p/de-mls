@@ -44,21 +44,18 @@ fn authorize_fast_path_proposal(proposal: &Proposal, mls_sender: &[u8]) -> bool 
 
 /// Process an inbound packet on the app subtopic and decide what action is
 /// needed. Welcome-subtopic packets are handled at the app layer.
-pub fn process_inbound<M>(
-    group: &mut Group,
-    payload: &[u8],
-    mls: &M,
-) -> Result<ProcessResult, CoreError>
+pub fn process_inbound<M>(group: &mut Group<M>, payload: &[u8]) -> Result<ProcessResult, CoreError>
 where
     M: MlsService,
 {
     // 1. Try plaintext CommitCandidate (sent as plaintext AppMessage)
     if let Ok(app_message) = AppMessage::decode(payload) {
         if let Some(app_message::Payload::CommitCandidate(candidate)) = app_message.payload {
-            return process_commit_candidate(group, candidate, mls);
+            return process_commit_candidate(group, candidate);
         }
     }
 
+    let mls = group.mls().ok_or(CoreError::MlsGroupNotInitialized)?;
     // 2. MLS-encrypted app messages only — use decrypt_application_only.
     //    This NEVER stores proposals or processes commits, preventing
     //    rogue MLS proposals on the app subtopic from polluting state.

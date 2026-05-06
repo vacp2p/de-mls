@@ -183,8 +183,10 @@ where
 
         let is_valid = {
             let entry = entry_arc.read().await;
-            let mls = entry.mls().ok_or(UserError::MlsNotInitialized)?;
-            let members = group_members(&entry.group, mls.as_ref())?;
+            if entry.group.mls().is_none() {
+                return Err(UserError::MlsNotInitialized);
+            }
+            let members = group_members(&entry.group)?;
             entry.group.validate_steward_list_proposal(
                 &election.proposed_stewards,
                 election.election_epoch,

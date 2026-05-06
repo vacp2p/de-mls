@@ -20,6 +20,7 @@ use crate::{
         CoreError, DeMlsProvider, Group, GroupEventHandler, ProviderConsensus,
         auto_approved_leave_proposal_id, build_create_proposal_request,
     },
+    mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         AppMessage, GroupUpdateRequest, RemoveMember, VotePayload, group_update_request,
     },
@@ -163,9 +164,9 @@ pub async fn forward_incoming_proposal<P: DeMlsProvider>(
 ///   swallow the error so inbound dispatch keeps draining.
 ///
 /// Other consensus errors propagate.
-pub async fn forward_incoming_vote<P: DeMlsProvider>(
+pub async fn forward_incoming_vote<P: DeMlsProvider, M: MlsService>(
     group_name: &str,
-    group: &Group,
+    group: &Group<M>,
     vote: Vote,
     consensus: &ProviderConsensus<P>,
 ) -> Result<(), CoreError> {
