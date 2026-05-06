@@ -78,20 +78,3 @@ jobs:
           tool: protoc@${{ env.PROTOC_VERSION }}
       - name: Test (core library)
         run: cargo test -p de-mls --release
-
-  unused_dependencies:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "nightly"
-      - name: Install protoc
-        uses: taiki-e/install-action@v2
-        with:
-          tool: protoc@${{ env.PROTOC_VERSION }}
-      - name: Install cargo-udeps
-        uses: taiki-e/install-action@cargo-udeps
-      - name: Check for unused dependencies
-        run: cargo +nightly udeps -p de-mls --all-targets

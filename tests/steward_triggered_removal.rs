@@ -6,16 +6,13 @@
 
 use prost::Message;
 
-use de_mls::core::{
-    ProtocolConfig, ScoreEvent, ScoreOp, apply_consensus_result, create_group, emergency_score_ops,
-};
-use de_mls::mls_crypto::{IdentityProvider, MlsService};
+use de_mls::core::{ScoreEvent, ScoreOp, apply_consensus_result, emergency_score_ops};
 use de_mls::protos::de_mls::messages::v1::{
     ViolationEvidence, ViolationType, group_update_request,
 };
 
 mod common;
-use common::{make_scoring, setup_mls};
+use common::{make_scoring, setup_steward};
 
 // ─────────────────────────── Tests ───────────────────────────
 
@@ -24,10 +21,8 @@ use common::{make_scoring, setup_mls};
 fn test_score_below_threshold_yes_transforms_to_remove_member() {
     let group_name = "removal-yes";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-    let alice_mls = setup_mls(alice_hex);
-    let mut group =
-        create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
-    let steward_id = alice_mls.identity().identity_bytes().to_vec();
+    let mut group = setup_steward(group_name, alice_hex);
+    let steward_id = group.self_identity().to_vec();
 
     let target_id = vec![0xBB];
     let proposal_id = 100;
@@ -67,9 +62,7 @@ fn test_score_below_threshold_yes_transforms_to_remove_member() {
 fn test_score_below_threshold_yes_non_owner() {
     let group_name = "removal-yes-nonowner";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-    let alice_mls = setup_mls(alice_hex);
-    let mut group =
-        create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
+    let mut group = setup_steward(group_name, alice_hex);
 
     let target_id = vec![0xBB];
     let creator_id = vec![0xCC]; // someone else
@@ -105,10 +98,8 @@ fn test_score_below_threshold_yes_non_owner() {
 fn test_score_below_threshold_no_penalizes_creator() {
     let group_name = "removal-no";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-    let alice_mls = setup_mls(alice_hex);
-    let mut group =
-        create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
-    let steward_id = alice_mls.identity().identity_bytes().to_vec();
+    let mut group = setup_steward(group_name, alice_hex);
+    let steward_id = group.self_identity().to_vec();
 
     let target_id = vec![0xBB];
     let proposal_id = 102;
@@ -138,10 +129,8 @@ fn test_score_below_threshold_no_penalizes_creator() {
 fn test_full_pipeline_penalties_to_removal() {
     let group_name = "removal-pipeline";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-    let alice_mls = setup_mls(alice_hex);
-    let mut group =
-        create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
-    let steward_id = alice_mls.identity().identity_bytes().to_vec();
+    let mut group = setup_steward(group_name, alice_hex);
+    let steward_id = group.self_identity().to_vec();
     let target_id = vec![0xDD];
 
     let threshold = group.threshold_peer_score();
@@ -205,12 +194,7 @@ fn test_full_pipeline_penalties_to_removal() {
 /// Dedup: Group prevents duplicate ECP for same target.
 #[test]
 fn test_dedup_pending_removal_targets() {
-    let mut group = create_group(
-        "dedup-group",
-        &setup_mls("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"),
-        ProtocolConfig::new(1, 5).unwrap(),
-    )
-    .unwrap();
+    let mut group = setup_steward("dedup-group", "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
     let target = vec![0xAA];
 
     assert!(!group.has_pending_removal(&target));
@@ -232,8 +216,7 @@ fn test_dedup_pending_removal_targets() {
 fn test_steward_skips_self_for_removal() {
     let group_name = "removal-self-guard";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-    let alice_mls = setup_mls(alice_hex);
-    let group = create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
+    let group = setup_steward(group_name, alice_hex);
     let threshold = group.threshold_peer_score();
 
     let mut scoring = make_scoring();
@@ -294,8 +277,7 @@ fn test_steward_skips_self_for_removal() {
 fn test_members_below_threshold_uses_per_group_value() {
     let group_name = "per-group-threshold";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-    let alice_mls = setup_mls(alice_hex);
-    let group = create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
+    let group = setup_steward(group_name, alice_hex);
     assert_eq!(
         group.threshold_peer_score(),
         de_mls::core::DEFAULT_THRESHOLD_PEER_SCORE
@@ -367,12 +349,10 @@ fn test_violation_evidence_score_below_threshold_constructor() {
 fn test_regular_emergency_yes_no_transform() {
     let group_name = "no-transform";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-    let alice_mls = setup_mls(alice_hex);
-    let mut group =
-        create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
+    let mut group = setup_steward(group_name, alice_hex);
+    let creator_id = group.self_identity().to_vec();
 
     let target_id = vec![0xBB];
-    let creator_id = alice_mls.identity().identity_bytes().to_vec();
     let proposal_id = 300;
 
     // Regular violation (not score-below-threshold)

@@ -13,7 +13,7 @@ use crate::{
     },
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     mls_crypto::{
-        CommitCandidate as MlsCommitCandidate, GroupUpdate, IdentityProvider, KeyPackageBytes,
+        CommitCandidate as MlsCommitCandidate, IdentityProvider, KeyPackageBytes, MlsCommitInput,
         MlsService,
     },
     protos::de_mls::messages::v1::{AppMessage, CommitCandidate, group_update_request},
@@ -28,8 +28,7 @@ use crate::{
 /// *previous* list can commit recovery actions when an election fails.
 /// `Group::is_in_recovery_mode()` (Layer 3) bypasses the gate entirely.
 pub fn create_commit_candidate<M>(
-    group: &mut Group,
-    mls: &M,
+    group: &mut Group<M>,
     app_id: &[u8],
 ) -> Result<Option<OutboundPacket>, CoreError>
 where
@@ -42,10 +41,11 @@ where
     if group.approved_proposals().is_empty() {
         return Err(CoreError::NoProposals);
     }
-
-    if !mls.has_group(group.group_name()) {
+    let res = group.mls();
+    if res.is_none() {
         return Err(CoreError::MlsGroupNotInitialized);
     }
+    let mls = res.unwrap();
 
     // MLS forbids committing one's own removal. If the approved batch contains
     // RemoveMember(self), skip local candidate creation — another steward will
@@ -84,7 +84,7 @@ where
     // Drop approved entries already reflected in group state (stale
     // rebroadcast KPs, duplicate removes) — without this MLS would reject
     // the whole batch with "Duplicate signature key in proposals and group".
-    let current_members = mls.members(group.group_name())?;
+    let current_members = mls.members()?;
     let current_members_set = member_set(&current_members);
     let is_member = |id: &[u8]| current_members_set.contains(id);
 
@@ -111,7 +111,7 @@ where
                 if is_member(&im.identity) {
                     continue;
                 }
-                updates.push(GroupUpdate::Add(KeyPackageBytes::new(
+                updates.push(MlsCommitInput::Add(KeyPackageBytes::new(
                     im.key_package_bytes.clone(),
                     im.identity.clone(),
                 )));
@@ -125,7 +125,7 @@ where
                 if !is_member(&rm.identity) {
                     continue;
                 }
-                updates.push(GroupUpdate::Remove(rm.identity.clone()));
+                updates.push(MlsCommitInput::Remove(rm.identity.clone()));
             }
             _ => return Err(CoreError::InvalidGroupUpdateRequest),
         }
@@ -139,7 +139,7 @@ where
         proposals: mls_proposals,
         commit,
         welcome,
-    } = mls.create_commit_candidate(group.group_name(), &updates)?;
+    } = mls.create_commit_candidate(&updates)?;
 
     let candidate = CommitCandidate {
         group_name: group.group_name_bytes().to_vec(),
@@ -151,7 +151,7 @@ where
     // Welcome bytes are deferred: sent from finalize_freeze_round after the
     // commit merges, so joiners can't advance epoch ahead of the steward.
     let commit_hash = compute_commit_hash(&candidate.commit_message);
-    let epoch = mls.current_epoch(group.group_name())?;
+    let epoch = mls.current_epoch()?;
     let _ = group.add_freeze_candidate(
         BufferedCommitCandidate {
             candidate_msg: candidate.clone(),
@@ -180,17 +180,17 @@ where
 
 // ─────────────────────────── Member Queries ───────────────────────────
 
-/// Get the current members of a group.
-pub fn group_members<M>(group: &Group, mls: &M) -> Result<Vec<Vec<u8>>, CoreError>
+/// Current members of a group, read from its MLS service. Returns an
+/// empty list when the group hasn't accepted a welcome yet (e.g. a
+/// pending joiner querying its own state).
+pub fn group_members<M>(group: &Group<M>) -> Result<Vec<Vec<u8>>, CoreError>
 where
     M: MlsService,
 {
-    if !mls.has_group(group.group_name()) {
-        return Err(CoreError::MlsGroupNotInitialized);
+    match group.mls() {
+        Some(mls) => Ok(mls.members()?),
+        None => Ok(Vec::new()),
     }
-
-    let members = mls.members(group.group_name())?;
-    Ok(members)
 }
 
 // ─────────────────────────── Housekeeping Decisions ───────────────────────────
@@ -215,8 +215,8 @@ pub enum ElectionDecision {
 /// election-already-in-flight, (3) responsible-proposer authorization,
 /// (4) eligible-candidate-pool non-empty. The async submission stays in
 /// the caller; this function performs no I/O.
-pub fn evaluate_election_initiation(
-    group: &Group,
+pub fn evaluate_election_initiation<M: MlsService>(
+    group: &Group<M>,
     mls_members: &[Vec<u8>],
     self_identity: &[u8],
     epoch: u64,
@@ -268,8 +268,8 @@ pub fn evaluate_election_initiation(
 /// `true` when this node is the responsible proposer for a Layer-3
 /// `Deadlock` ECP. Requires the proposer to be MLS-present and not
 /// queued for removal.
-pub fn is_deadlock_ecp_proposer(
-    group: &Group,
+pub fn is_deadlock_ecp_proposer<M: MlsService>(
+    group: &Group<M>,
     mls_members: &[Vec<u8>],
     self_identity: &[u8],
 ) -> bool {

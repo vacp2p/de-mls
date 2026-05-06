@@ -12,6 +12,7 @@ use crate::{
         proposal_kind::ProposalKind,
         steward_list::{ProtocolConfig, StewardList},
     },
+    mls_crypto::MlsService,
     protos::de_mls::messages::v1::{CommitCandidate, GroupUpdateRequest, group_update_request},
 };
 
@@ -93,9 +94,15 @@ pub(crate) struct FreezeRound {
 }
 
 /// Per-group protocol state. Stewards batch commits; members vote.
-/// Construct with [`Self::new_as_creator`] or [`Self::new_as_joiner`].
-#[derive(Clone, Debug)]
-pub struct Group {
+/// Construct with [`Self::create_group`] or [`Self::prepare_to_join`].
+///
+/// Owns the per-group MLS service (`Option<M>` because joiners in
+/// `PendingJoin` don't have a service until the welcome arrives — at that
+/// point the User attaches one via [`Self::attach_mls`]).
+pub struct Group<M: MlsService> {
+    /// Per-group MLS service. `None` for joiners that haven't accepted
+    /// a welcome yet; otherwise `Some`.
+    mls: Option<M>,
     /// The name of the group.
     group_name: String,
     /// This user's wallet identity (for deriving steward status from the list).
@@ -171,9 +178,15 @@ pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
 
 pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
 
-impl Group {
-    fn new_base(group_name: &str, self_identity: Vec<u8>, protocol_config: ProtocolConfig) -> Self {
+impl<M: MlsService> Group<M> {
+    fn new_base(
+        group_name: &str,
+        self_identity: Vec<u8>,
+        protocol_config: ProtocolConfig,
+        mls: Option<M>,
+    ) -> Self {
         Self {
+            mls,
             group_name: group_name.to_string(),
             self_identity,
             approved_proposals: HashMap::new(),
@@ -197,6 +210,39 @@ impl Group {
         }
     }
 
+    /// Local identity bytes for this group's member (this user's wallet
+    /// address). Set at construction; same value MLS will surface on this
+    /// group's leaf credential.
+    pub fn self_identity(&self) -> &[u8] {
+        &self.self_identity
+    }
+
+    /// Borrow the MLS service for this group, if attached. Returns `None`
+    /// for joiners in `PendingJoin` who haven't accepted a welcome yet.
+    pub fn mls(&self) -> Option<&M> {
+        self.mls.as_ref()
+    }
+
+    /// Borrow the MLS service, erroring with [`CoreError::MlsGroupNotInitialized`]
+    /// when not attached. Use this in code paths where the service must be
+    /// present (Working state) so the `?` chain stays linear.
+    pub fn expect_mls(&self) -> Result<&M, CoreError> {
+        self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)
+    }
+
+    /// Attach an MLS service to this group. Used by joiners after a
+    /// welcome arrives; idempotent in spirit (overwrites whatever was
+    /// there — caller is responsible for not double-attaching).
+    pub fn attach_mls(&mut self, mls: M) {
+        self.mls = Some(mls);
+    }
+
+    /// Drop the attached MLS service and return it. Used on group leave
+    /// so the caller can run service-side cleanup (`mls.delete()`).
+    pub fn take_mls(&mut self) -> Option<M> {
+        self.mls.take()
+    }
+
     pub(crate) fn is_consensus_outcome_applied(&self, proposal_id: ProposalId) -> bool {
         self.resolved_proposals.contains(proposal_id)
     }
@@ -205,25 +251,30 @@ impl Group {
         self.resolved_proposals.record(proposal_id);
     }
 
-    /// Create a new group handle for a joining member (not yet steward).
-    pub fn new_as_joiner(
+    /// Build a joiner-side handle for an existing group. The MLS service
+    /// starts unattached; the User attaches it via [`Self::attach_mls`]
+    /// once the welcome arrives.
+    pub fn prepare_to_join(
         group_name: &str,
         self_identity: Vec<u8>,
         protocol_config: ProtocolConfig,
     ) -> Self {
-        Self::new_base(group_name, self_identity, protocol_config)
+        Self::new_base(group_name, self_identity, protocol_config, None)
     }
 
-    /// Create a new group handle for the group creator, initializing the steward list.
-    pub fn new_as_creator(
+    /// Build a creator-side handle: initializes a bootstrap steward list
+    /// containing the creator and embeds the supplied MLS service.
+    pub fn create_group(
         group_name: &str,
         creator_identity: Vec<u8>,
         protocol_config: ProtocolConfig,
+        mls: M,
     ) -> Result<Self, CoreError> {
         let mut group = Self::new_base(
             group_name,
             creator_identity.clone(),
             protocol_config.clone(),
+            Some(mls),
         );
         let list = StewardList::generate(
             0,
@@ -932,9 +983,128 @@ impl ResolvedProposalCache {
     }
 }
 
+/// Test-only stubs shared across `core/`'s unit-test modules.
+#[cfg(test)]
+pub(crate) mod test_stubs {
+    use openmls::prelude::CredentialWithKey;
+    use openmls_basic_credential::SignatureKeyPair;
+
+    use crate::ds::OutboundPacket;
+    use crate::mls_crypto::{
+        CommitCandidate as MlsCommitCandidate, DecryptResult, IdentityProvider, MlsCommitInput,
+        MlsError, MlsMessageKind, MlsService, StagedCandidateResult,
+    };
+    use crate::protos::de_mls::messages::v1::AppMessage;
+
+    /// Test-only no-op identity; only `identity_bytes` and `identity_display`
+    /// are ever called from `Group`'s pure-state tests, so the credential
+    /// and signer accessors are stubbed with `unreachable!()`.
+    pub(crate) struct NoopIdentity;
+
+    impl IdentityProvider for NoopIdentity {
+        fn identity_bytes(&self) -> &[u8] {
+            &[]
+        }
+        fn identity_display(&self) -> &str {
+            "noop"
+        }
+        fn credential(&self) -> &CredentialWithKey {
+            unreachable!("NoopIdentity::credential is not used in pure-state Group tests")
+        }
+        fn signer(&self) -> &SignatureKeyPair {
+            unreachable!("NoopIdentity::signer is not used in pure-state Group tests")
+        }
+    }
+
+    /// Test-only no-op MLS service. `Group`'s pure-state tests never call
+    /// MLS operations, so every protocol method is a stub. If a test
+    /// reaches one of these, it's the wrong test and the panic message
+    /// will say so.
+    pub(crate) struct NoopMls {
+        identity: NoopIdentity,
+        group_id: String,
+    }
+
+    impl NoopMls {
+        pub(crate) fn new(group_id: &str) -> Self {
+            Self {
+                identity: NoopIdentity,
+                group_id: group_id.to_string(),
+            }
+        }
+    }
+
+    impl MlsService for NoopMls {
+        type Identity = NoopIdentity;
+        fn identity(&self) -> &Self::Identity {
+            &self.identity
+        }
+        fn group_id(&self) -> &str {
+            &self.group_id
+        }
+        fn delete(&self) -> Result<(), MlsError> {
+            Ok(())
+        }
+        fn members(&self) -> Result<Vec<Vec<u8>>, MlsError> {
+            Ok(Vec::new())
+        }
+        fn is_member(&self, _identity: &[u8]) -> bool {
+            false
+        }
+        fn current_epoch(&self) -> Result<u64, MlsError> {
+            Ok(0)
+        }
+        fn create_commit_candidate(
+            &self,
+            _updates: &[MlsCommitInput],
+        ) -> Result<MlsCommitCandidate, MlsError> {
+            unreachable!("NoopMls::create_commit_candidate not used in pure-state tests")
+        }
+        fn merge_own_commit(&self) -> Result<(), MlsError> {
+            unreachable!()
+        }
+        fn discard_own_commit(&self) -> Result<(), MlsError> {
+            unreachable!()
+        }
+        fn stage_remote_commit(
+            &self,
+            _proposals: &[Vec<u8>],
+            _commit_bytes: &[u8],
+        ) -> Result<StagedCandidateResult, MlsError> {
+            unreachable!()
+        }
+        fn merge_staged_commit(&self) -> Result<(), MlsError> {
+            unreachable!()
+        }
+        fn discard_staged_commit(&self) -> Result<(), MlsError> {
+            unreachable!()
+        }
+        fn encrypt(&self, _plaintext: &[u8]) -> Result<Vec<u8>, MlsError> {
+            unreachable!()
+        }
+        fn build_message(
+            &self,
+            _app_msg: &AppMessage,
+            _app_id: &[u8],
+        ) -> Result<OutboundPacket, MlsError> {
+            unreachable!()
+        }
+        fn decrypt_application_only(&self, _ciphertext: &[u8]) -> Result<DecryptResult, MlsError> {
+            unreachable!()
+        }
+        fn decrypt(&self, _ciphertext: &[u8]) -> Result<DecryptResult, MlsError> {
+            unreachable!()
+        }
+        fn inspect_message_kind(&self, _message_bytes: &[u8]) -> Result<MlsMessageKind, MlsError> {
+            unreachable!()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::group::test_stubs::NoopMls;
     use crate::protos::de_mls::messages::v1::{InviteMember, RemoveMember};
 
     fn member(id: u8) -> Vec<u8> {
@@ -949,11 +1119,21 @@ mod tests {
         ProtocolConfig::new(1, 5).unwrap()
     }
 
+    /// Test convenience: build a creator-side `Group<NoopMls>`.
+    fn creator_group(name: &str, identity: Vec<u8>, config: ProtocolConfig) -> Group<NoopMls> {
+        Group::create_group(name, identity, config, NoopMls::new(name)).unwrap()
+    }
+
+    /// Test convenience: build a joiner-side `Group<NoopMls>` (no MLS service yet).
+    fn joiner_group(name: &str, identity: Vec<u8>, config: ProtocolConfig) -> Group<NoopMls> {
+        Group::prepare_to_join(name, identity, config)
+    }
+
     #[test]
-    fn test_new_as_creator_with_protocol_config() {
+    fn test_create_group_with_protocol_config() {
         let config = ProtocolConfig::new(1, 3).unwrap();
         let creator = member(1);
-        let group = Group::new_as_creator("test-group", creator.clone(), config).unwrap();
+        let group = creator_group("test-group", creator.clone(), config);
 
         assert!(group.is_steward());
         assert!(group.steward_list().is_some());
@@ -966,7 +1146,7 @@ mod tests {
     #[test]
     fn test_set_steward_list_on_joiner() {
         let config = ProtocolConfig::new(2, 5).unwrap();
-        let mut group = Group::new_as_joiner("test-group", member(1), config.clone());
+        let mut group = joiner_group("test-group", member(1), config.clone());
         assert!(group.steward_list().is_none());
 
         let mems = members(&[1, 2, 3]);
@@ -979,21 +1159,21 @@ mod tests {
     /// Joiner pre-sync: no list yet → no epoch steward at any epoch.
     #[test]
     fn test_epoch_steward_no_list() {
-        let group = Group::new_as_joiner("test-group", member(1), default_config());
+        let group = joiner_group("test-group", member(1), default_config());
         assert!(group.epoch_steward(0).is_none());
     }
 
     /// Joiner pre-sync: no list yet → not "exhausted" either.
     #[test]
     fn test_is_steward_list_exhausted_no_list() {
-        let group = Group::new_as_joiner("test-group", member(1), default_config());
+        let group = joiner_group("test-group", member(1), default_config());
         assert!(!group.is_steward_list_exhausted(0));
     }
 
     #[test]
     fn test_generate_and_set_steward_list() {
         let config = ProtocolConfig::new(2, 5).unwrap();
-        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        let mut group = creator_group("test-group", member(1), config);
         assert_eq!(group.steward_list().unwrap().len(), 1);
 
         let mems = members(&[1, 2, 3, 4]);
@@ -1008,18 +1188,18 @@ mod tests {
     /// and the node's identity sits in it.
     #[test]
     fn test_steward_flag_derived_from_list() {
-        let mut group = Group::new_as_joiner("test-group", member(1), default_config());
+        let mut group = joiner_group("test-group", member(1), default_config());
         assert!(!group.is_steward());
 
         let mems = members(&[1, 2, 3]);
         group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
         assert!(group.is_steward());
 
-        let outsider = Group::new_as_joiner("test-group", member(99), default_config());
+        let outsider = joiner_group("test-group", member(99), default_config());
         assert!(!outsider.is_steward());
     }
 
-    fn insert_self_leave(group: &mut Group, identity: &[u8]) {
+    fn insert_self_leave(group: &mut Group<NoopMls>, identity: &[u8]) {
         let remove = GroupUpdateRequest {
             payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
                 identity: identity.to_vec(),
@@ -1032,7 +1212,7 @@ mod tests {
     fn test_reject_all_approved_preserves_self_leave_entry() {
         let config = ProtocolConfig::new(1, 3).unwrap();
         let mems = members(&[1, 2, 3]);
-        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        let mut group = creator_group("test-group", member(1), config);
         group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
 
         let leaver = member(2);
@@ -1061,7 +1241,7 @@ mod tests {
     fn test_prune_clears_self_leave_entry_when_member_gone() {
         let config = ProtocolConfig::new(1, 3).unwrap();
         let mems = members(&[1, 2, 3]);
-        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        let mut group = creator_group("test-group", member(1), config);
         group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
 
         let leaver = member(2);
@@ -1115,7 +1295,7 @@ mod tests {
 
     #[test]
     fn mark_consensus_outcome_persists_in_resolved_cache() {
-        let mut group = Group::new_as_creator("g", member(1), default_config()).unwrap();
+        let mut group = creator_group("g", member(1), default_config());
         assert!(!group.is_consensus_outcome_applied(42));
         group.mark_consensus_outcome_applied(42);
         assert!(group.is_consensus_outcome_applied(42));
@@ -1126,7 +1306,7 @@ mod tests {
     fn test_live_rotation_skips_pending_self_leave() {
         let config = ProtocolConfig::new(3, 3).unwrap();
         let mems = members(&[1, 2, 3]);
-        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        let mut group = creator_group("test-group", member(1), config);
         group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
 
         let nominal = group.epoch_steward(0).unwrap().to_vec();
@@ -1138,7 +1318,7 @@ mod tests {
         assert!(mems.iter().any(|m| m == live));
     }
 
-    fn insert_remove_member(group: &mut Group, target: &[u8], proposal_id: ProposalId) {
+    fn insert_remove_member(group: &mut Group<NoopMls>, target: &[u8], proposal_id: ProposalId) {
         let remove = GroupUpdateRequest {
             payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
                 identity: target.to_vec(),
@@ -1153,7 +1333,7 @@ mod tests {
     fn test_live_rotation_skips_ban_pending_removal() {
         let config = ProtocolConfig::new(3, 3).unwrap();
         let mems = members(&[1, 2, 3]);
-        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        let mut group = creator_group("test-group", member(1), config);
         group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
 
         let nominal = group.epoch_steward(0).unwrap().to_vec();
@@ -1176,7 +1356,7 @@ mod tests {
     fn test_live_epoch_and_backup_skips_draining_pair() {
         let config = ProtocolConfig::new(4, 4).unwrap();
         let mems = members(&[1, 2, 3, 4]);
-        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        let mut group = creator_group("test-group", member(1), config);
         group.generate_and_set_steward_list(0, &mems, 4, 0).unwrap();
 
         let nominal = group.epoch_steward(0).unwrap().to_vec();
@@ -1206,7 +1386,7 @@ mod tests {
     fn test_reject_all_approved_preserves_all_remove_member() {
         let config = ProtocolConfig::new(1, 3).unwrap();
         let mems = members(&[1, 2, 3, 4]);
-        let mut group = Group::new_as_creator("test-group", member(1), config).unwrap();
+        let mut group = creator_group("test-group", member(1), config);
         group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
 
         let ban_id: ProposalId = 0x1111_2222;
@@ -1234,7 +1414,7 @@ mod tests {
     /// `approved_order` is FIFO regardless of proposal-id ordering.
     #[test]
     fn test_approved_order_preserves_fifo_across_mutations() {
-        let mut group = Group::new_as_creator("g", member(1), default_config()).unwrap();
+        let mut group = creator_group("g", member(1), default_config());
 
         insert_remove_member(&mut group, &member(2), 500);
         insert_remove_member(&mut group, &member(3), 100);
@@ -1254,7 +1434,7 @@ mod tests {
 
     #[test]
     fn test_urgent_commit_target_set_take_clears() {
-        let mut group = Group::new_as_creator("g", member(1), default_config()).unwrap();
+        let mut group = creator_group("g", member(1), default_config());
         assert!(group.urgent_commit_target().is_none());
 
         let target = member(7);
@@ -1268,7 +1448,7 @@ mod tests {
 
     #[test]
     fn test_drop_approved_removals_for_target() {
-        let mut group = Group::new_as_creator("g", member(1), default_config()).unwrap();
+        let mut group = creator_group("g", member(1), default_config());
         let victim = member(7);
         let bystander = member(9);
 
@@ -1285,7 +1465,7 @@ mod tests {
         assert!(!group.approved_proposals().contains_key(&101));
     }
 
-    fn buffer_remove_at(group: &mut Group, target: &[u8], epoch: u64) {
+    fn buffer_remove_at(group: &mut Group<NoopMls>, target: &[u8], epoch: u64) {
         let request = GroupUpdateRequest {
             payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
                 identity: target.to_vec(),
@@ -1300,7 +1480,7 @@ mod tests {
     /// `first_seen_epoch < cutoff` are dropped.
     #[test]
     fn test_expire_pending_updates_drops_entries_older_than_max_age() {
-        let mut group = Group::new_as_creator("g", member(1), default_config()).unwrap();
+        let mut group = creator_group("g", member(1), default_config());
         let stale = member(7);
         let fresh = member(9);
 
@@ -1320,7 +1500,7 @@ mod tests {
     /// boundary case a tightened sync hits when shrinking the window.
     #[test]
     fn test_expire_pending_updates_max_age_zero_keeps_only_current_epoch() {
-        let mut group = Group::new_as_creator("g", member(1), default_config()).unwrap();
+        let mut group = creator_group("g", member(1), default_config());
         let prior = member(7);
         let current = member(9);
 

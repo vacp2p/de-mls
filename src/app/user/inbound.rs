@@ -11,12 +11,13 @@ use crate::{
     },
     core::{
         DeMlsProvider, GroupEventHandler, ProcessResult, ProposalKind, ProtocolConfig, StewardList,
-        build_message, create_commit_candidate, group_members, member_set, process_inbound,
+        create_commit_candidate, group_members, member_set, process_inbound,
     },
-    ds::InboundPacket,
-    mls_crypto::{IdentityProvider, MlsService},
+    ds::{APP_MSG_SUBTOPIC, InboundPacket, WELCOME_SUBTOPIC},
+    mls_crypto::{IdentityProvider, MlsService, ShortId, key_package_bytes_from_json},
     protos::de_mls::messages::v1::{
-        AppMessage, ConversationMessage, GroupSync, GroupUpdateRequest, group_update_request,
+        AppMessage, ConversationMessage, GroupSync, GroupUpdateRequest, InviteMember,
+        WelcomeMessage, group_update_request, welcome_message,
     },
 };
 
@@ -26,6 +27,8 @@ impl<
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
 > User<P, M, H, SCH>
+where
+    M::Identity: Clone,
 {
     /// Dispatches a single ProcessResult to the appropriate handler/consensus/state-machine action.
     pub async fn dispatch_inbound_result(
@@ -47,13 +50,7 @@ impl<
                     .await
                     .ok_or(UserError::GroupNotFound)?;
                 let entry = entry_arc.read().await;
-                forward_incoming_vote::<P>(
-                    group_name,
-                    &entry.group,
-                    vote,
-                    &*self.consensus_service,
-                )
-                .await?;
+                forward_incoming_vote::<P, M>(&entry.group, vote, &*self.consensus_service).await?;
                 Ok(())
             }
             ProcessResult::MembershipChangeReceived(request) => {
@@ -88,22 +85,25 @@ impl<
         proposal: Proposal,
     ) -> Result<(), UserError> {
         let decoded = GroupUpdateRequest::decode(proposal.payload.as_slice()).ok();
-        if let Some(req) = decoded.as_ref() {
-            let current_epoch = self.mls_service.current_epoch(group_name)?;
-            if let Some(entry_arc) = self.lookup_entry(group_name).await {
-                let mut entry = entry_arc.write().await;
-                match &req.payload {
-                    Some(group_update_request::Payload::EmergencyCriteria(_)) => {
-                        entry.group.observe_emergency(proposal.proposal_id);
-                    }
-                    Some(group_update_request::Payload::InviteMember(_))
-                    | Some(group_update_request::Payload::RemoveMember(_)) => {
-                        entry
-                            .group
-                            .buffer_pending_update(req.clone(), current_epoch);
-                    }
-                    _ => {}
+        if let Some(req) = decoded.as_ref()
+            && let Some(entry_arc) = self.lookup_entry(group_name).await
+        {
+            let mut entry = entry_arc.write().await;
+            let current_epoch = match entry.group.mls() {
+                Some(mls) => mls.current_epoch()?,
+                None => 0,
+            };
+            match &req.payload {
+                Some(group_update_request::Payload::EmergencyCriteria(_)) => {
+                    entry.group.observe_emergency(proposal.proposal_id);
                 }
+                Some(group_update_request::Payload::InviteMember(_))
+                | Some(group_update_request::Payload::RemoveMember(_)) => {
+                    entry
+                        .group
+                        .buffer_pending_update(req.clone(), current_epoch);
+                }
+                _ => {}
             }
         }
         let proposal_id = proposal.proposal_id;
@@ -148,7 +148,7 @@ impl<
         let msg: AppMessage = ConversationMessage {
             message: format!(
                 "User {} joined the group",
-                self.mls_service.identity().identity_display()
+                self.identity().identity_display()
             )
             .into_bytes(),
             sender: "SYSTEM".to_string(),
@@ -158,14 +158,15 @@ impl<
         let Some(entry_arc) = self.lookup_entry(name).await else {
             return Ok(());
         };
-        let packet = build_message(name, self.mls_service.as_ref(), &msg, &self.app_id)?;
+        let (packet, mls_members) = {
+            let entry = entry_arc.read().await;
+            let mls = entry.group.expect_mls()?;
+            let packet = mls.build_message(&msg, &self.app_id)?;
+            let members = group_members(&entry.group).unwrap_or_default();
+            (packet, members)
+        };
         self.handler.on_outbound(name, packet).await?;
         self.handler.on_joined_group(name).await?;
-
-        let mls_members = {
-            let entry = entry_arc.read().await;
-            group_members(&entry.group, self.mls_service.as_ref()).unwrap_or_default()
-        };
         self.sync_scoring_members(name, &mls_members);
 
         let state = {
@@ -185,7 +186,11 @@ impl<
         if let Some(entry_arc) = self.lookup_entry(group_name).await {
             let mls_members = {
                 let entry = entry_arc.read().await;
-                group_members(&entry.group, self.mls_service.as_ref()).unwrap_or_default()
+                if entry.group.mls().is_some() {
+                    group_members(&entry.group).unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
             };
             self.sync_scoring_members(group_name, &mls_members);
         }
@@ -250,8 +255,14 @@ impl<
     }
 
     async fn on_leave_group(&self, group_name: &str) -> Result<(), UserError> {
-        self.groups.write().await.remove(group_name);
-        self.mls_service.delete_group(group_name)?;
+        let entry = self.groups.write().await.remove(group_name);
+        if let Some(entry) = entry {
+            // Drop MLS state for the departing group: take the service out
+            // of the Group so its `delete()` runs before the entry drops.
+            if let Some(mls) = entry.write().await.group.take_mls() {
+                let _ = mls.delete();
+            }
+        }
         self.scoring().remove_group(group_name);
         self.cleanup_consensus_scope(group_name).await?;
         self.handler.on_leave_group(group_name).await?;
@@ -272,15 +283,11 @@ impl<
             }
 
             entry.state_machine.start_freezing();
-            let epoch = self.mls_service.current_epoch(group_name)?;
+            let epoch = entry.group.expect_mls()?.current_epoch()?;
             entry.group.ensure_freeze_round(epoch);
 
             let outbound = if entry.group.is_steward() {
-                match create_commit_candidate(
-                    &mut entry.group,
-                    self.mls_service.as_ref(),
-                    &self.app_id,
-                ) {
+                match create_commit_candidate(&mut entry.group, &self.app_id) {
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(
@@ -313,7 +320,7 @@ impl<
     /// (not the full MLS set — the list may have been generated before we
     /// existed), then applies list + protocol flags + timing + peer scores.
     async fn on_group_sync(&self, group_name: &str, sync: GroupSync) -> Result<(), UserError> {
-        let members = {
+        let (members, current_epoch) = {
             let entry_arc = match self.lookup_entry(group_name).await {
                 Some(e) => e,
                 None => return Ok(()),
@@ -322,10 +329,9 @@ impl<
             if entry.group.steward_list().is_some() {
                 return Ok(());
             }
-            group_members(&entry.group, self.mls_service.as_ref())?
+            let mls = entry.group.expect_mls()?;
+            (group_members(&entry.group)?, mls.current_epoch()?)
         };
-
-        let current_epoch = self.mls_service.current_epoch(group_name)?;
         let local_default_peer_score = self.default_group_config.default_peer_score;
         if !validate_group_sync(
             group_name,
@@ -421,17 +427,113 @@ impl<
             .lookup_entry(&group_name)
             .await
             .ok_or(UserError::GroupNotFound)?;
-        let result = {
-            let mut entry = entry_arc.write().await;
-            process_inbound(
-                &mut entry.group,
-                &packet.payload,
-                &packet.subtopic,
-                self.mls_service.as_ref(),
-            )?
-        };
 
-        self.dispatch_inbound_result(&group_name, result).await
+        match packet.subtopic.as_str() {
+            WELCOME_SUBTOPIC => {
+                self.process_welcome_packet(&group_name, &packet.payload)
+                    .await
+            }
+            APP_MSG_SUBTOPIC => {
+                let result = {
+                    let mut entry = entry_arc.write().await;
+                    if entry.group.mls().is_none() {
+                        // App messages on a group we haven't joined yet → ignore.
+                        return Ok(());
+                    }
+                    process_inbound(&mut entry.group, &packet.payload)?
+                };
+                self.dispatch_inbound_result(&group_name, result).await
+            }
+            other => Err(UserError::Core(crate::core::CoreError::InvalidSubtopic(
+                other.to_string(),
+            ))),
+        }
+    }
+
+    /// Welcome-subtopic dispatch. Two payload kinds:
+    /// - `UserKeyPackage` — a peer wants to join. If we already have an MLS
+    ///   service for this group and the candidate isn't a member, surface
+    ///   it as a membership-change request.
+    /// - `InvitationToJoin` — try the welcome factory. If it returns
+    ///   `Some(svc)`, attach to the entry and fire the join flow.
+    async fn process_welcome_packet(
+        &self,
+        group_name: &str,
+        payload: &[u8],
+    ) -> Result<(), UserError> {
+        let welcome_msg = WelcomeMessage::decode(payload)?;
+        match welcome_msg.payload {
+            Some(welcome_message::Payload::UserKeyPackage(user_kp)) => {
+                let (key_package_bytes, identity) =
+                    key_package_bytes_from_json(user_kp.key_package_bytes)?;
+
+                let entry_arc = self
+                    .lookup_entry(group_name)
+                    .await
+                    .ok_or(UserError::GroupNotFound)?;
+                let already_member = {
+                    let entry = entry_arc.read().await;
+                    entry
+                        .group
+                        .mls()
+                        .map(|m| m.is_member(&identity))
+                        .unwrap_or(false)
+                };
+                if already_member {
+                    info!(
+                        group = group_name,
+                        identity = %ShortId(&identity),
+                        "key package skipped: already a member"
+                    );
+                    return Ok(());
+                }
+
+                info!(
+                    group = group_name,
+                    identity = %ShortId(&identity),
+                    "key package received"
+                );
+
+                let gur = GroupUpdateRequest {
+                    payload: Some(group_update_request::Payload::InviteMember(InviteMember {
+                        key_package_bytes,
+                        identity,
+                    })),
+                };
+                self.handle_incoming_update_request(group_name, gur).await
+            }
+            Some(welcome_message::Payload::InvitationToJoin(invitation)) => {
+                let entry_arc = self
+                    .lookup_entry(group_name)
+                    .await
+                    .ok_or(UserError::GroupNotFound)?;
+                let already_in = {
+                    let entry = entry_arc.read().await;
+                    entry.group.is_steward() || entry.group.mls().is_some()
+                };
+                if already_in {
+                    return Ok(());
+                }
+
+                let svc = (self.mls_welcome_factory)(&invitation.mls_message_out_bytes)?;
+                let Some(svc) = svc else {
+                    // Welcome wasn't for us.
+                    return Ok(());
+                };
+                let joined_name = svc.group_id().to_string();
+                {
+                    let mut entry = entry_arc.write().await;
+                    entry.group.attach_mls(svc);
+                }
+                info!(group = group_name, "joined group via welcome");
+                self.dispatch_inbound_result(
+                    group_name,
+                    crate::core::ProcessResult::JoinedGroup(joined_name),
+                )
+                .await
+            }
+            None => Ok(()),
+        }
     }
 }
 

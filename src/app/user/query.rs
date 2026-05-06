@@ -13,6 +13,8 @@ impl<
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
 > User<P, M, H, SCH>
+where
+    M::Identity: Clone,
 {
     pub async fn get_group_state(&self, group_name: &str) -> Result<GroupState, UserError> {
         self.with_entry(group_name, |e| e.state_machine.current_state())
@@ -28,10 +30,9 @@ impl<
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        let epoch = if self.mls_service.has_group(entry.group.group_name()) {
-            self.mls_service.current_epoch(group_name)?
-        } else {
-            0
+        let epoch = match entry.group.mls() {
+            Some(mls) => mls.current_epoch()?,
+            None => 0,
         };
         Ok((epoch, entry.group.reelection_round()))
     }
@@ -76,10 +77,10 @@ impl<
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        if !self.mls_service.has_group(entry.group.group_name()) {
+        if entry.group.mls().is_none() {
             return Ok(Vec::new());
         }
-        let members = group_members(&entry.group, self.mls_service.as_ref())?;
+        let members = group_members(&entry.group)?;
         Ok(members
             .into_iter()
             .map(|raw| format_wallet_address(raw.as_slice()).to_string())
@@ -105,7 +106,8 @@ impl<
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        let members = group_members(&entry.group, self.mls_service.as_ref())?;
+        entry.group.expect_mls()?;
+        let members = group_members(&entry.group)?;
         Ok(members
             .into_iter()
             .filter(|id| entry.group.is_pending_self_leave(id))
@@ -123,8 +125,9 @@ impl<
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        let epoch = self.mls_service.current_epoch(group_name)?;
-        let members = group_members(&entry.group, self.mls_service.as_ref())?;
+        let mls = entry.group.expect_mls()?;
+        let epoch = mls.current_epoch()?;
+        let members = group_members(&entry.group)?;
 
         let list = entry.group.steward_list();
         let (live_epoch, live_backup) = entry.group.live_epoch_and_backup(epoch, &members);

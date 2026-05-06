@@ -7,6 +7,8 @@ mod memory;
 
 pub use memory::MemoryDeMlsStorage;
 
+use std::sync::Arc;
+
 use crate::mls_crypto::MlsError;
 
 /// Storage backend for DE-MLS.
@@ -48,4 +50,29 @@ pub trait DeMlsStorage: Send + Sync + 'static {
     ///
     /// OpenMLS calls this synchronously for all MLS state persistence.
     fn mls_storage(&self) -> &Self::MlsStorage;
+}
+
+/// Sharing impl: every `Arc<S>` over a [`DeMlsStorage`] is itself a
+/// [`DeMlsStorage`]. Lets one storage backend back many MLS services
+/// (one per group) so key-package refs and OpenMLS state remain
+/// reachable from whichever service receives a welcome.
+impl<S: DeMlsStorage + ?Sized> DeMlsStorage for Arc<S> {
+    type MlsStorage = S::MlsStorage;
+    type StorageError = S::StorageError;
+
+    fn store_key_package_ref(&self, hash_ref: &[u8]) -> Result<(), MlsError> {
+        (**self).store_key_package_ref(hash_ref)
+    }
+
+    fn is_our_key_package(&self, hash_ref: &[u8]) -> Result<bool, MlsError> {
+        (**self).is_our_key_package(hash_ref)
+    }
+
+    fn remove_key_package_ref(&self, hash_ref: &[u8]) -> Result<(), MlsError> {
+        (**self).remove_key_package_ref(hash_ref)
+    }
+
+    fn mls_storage(&self) -> &Self::MlsStorage {
+        (**self).mls_storage()
+    }
 }

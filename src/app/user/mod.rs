@@ -29,7 +29,8 @@ use crate::{
         ScoringConfig,
     },
     mls_crypto::{
-        IdentityProvider, MemoryDeMlsStorage, MlsService, OpenMlsService, WalletIdentity,
+        IdentityProvider, KeyPackageBytes, MemoryDeMlsStorage, MlsError, MlsService,
+        OpenMlsService, WalletIdentity,
     },
     protos::de_mls::messages::v1::GroupUpdateRequest,
 };
@@ -47,8 +48,12 @@ mod steward;
 /// concern only; protocol logic in `core::Group` is history-agnostic.
 const MAX_EPOCH_HISTORY: usize = 10;
 
-pub(crate) struct GroupEntry {
-    group: Group,
+pub(crate) struct GroupEntry<M: MlsService> {
+    /// `Group<M>` owns the per-group MLS service inside its own
+    /// `Option<M>` slot — joiners in `PendingJoin` carry `None` until a
+    /// welcome arrives, at which point the User attaches the service via
+    /// [`Group::attach_mls`].
+    group: Group<M>,
     state_machine: GroupStateMachine,
     /// Per-group rolling history of committed batches, most recent last.
     /// Bounded at [`MAX_EPOCH_HISTORY`]. Populated by
@@ -57,10 +62,10 @@ pub(crate) struct GroupEntry {
     epoch_history: VecDeque<HashMap<ProposalId, GroupUpdateRequest>>,
 }
 
-impl GroupEntry {
+impl<M: MlsService> GroupEntry<M> {
     /// Build a fresh entry. Internal-only auxiliary state (epoch
     /// history, future per-entry caches) starts empty.
-    pub(crate) fn new(group: Group, state_machine: GroupStateMachine) -> Self {
+    pub(crate) fn new(group: Group<M>, state_machine: GroupStateMachine) -> Self {
         Self {
             group,
             state_machine,
@@ -86,8 +91,37 @@ impl GroupEntry {
 /// `&str` lookups don't allocate); inner key is the proposal id.
 type AutoVoteTimers = Arc<Mutex<HashMap<Arc<str>, HashMap<u32, JoinHandle<()>>>>>;
 
-pub struct User<P: DeMlsProvider, M: MlsService, H: GroupEventHandler, SCH: StateChangeHandler> {
-    mls_service: Arc<M>,
+/// Per-user registry of group entries, with one outer lock for map CRUD
+/// and one inner lock per entry so writes on one group don't block reads
+/// on another.
+type GroupRegistry<M> = Arc<RwLock<HashMap<String, Arc<RwLock<GroupEntry<M>>>>>>;
+
+/// Factory closure that builds an [`MlsService`] for a fresh group.
+pub type MlsCreatorFactory<M> = Arc<dyn Fn(String) -> Result<M, MlsError> + Send + Sync + 'static>;
+/// Factory closure that tries to build an [`MlsService`] from a serialized
+/// MLS welcome. Returns `Ok(None)` when the welcome isn't for us.
+pub type MlsWelcomeFactory<M> =
+    Arc<dyn Fn(&[u8]) -> Result<Option<M>, MlsError> + Send + Sync + 'static>;
+/// Factory closure that generates a fresh single-use key package using the
+/// user's storage + identity. Independent of any group's MLS service so a
+/// joiner can publish a key package before joining.
+pub type KeyPackageGenerator =
+    Arc<dyn Fn() -> Result<KeyPackageBytes, MlsError> + Send + Sync + 'static>;
+
+pub struct User<P: DeMlsProvider, M: MlsService, H: GroupEventHandler, SCH: StateChangeHandler>
+where
+    M::Identity: Clone,
+{
+    /// Local identity, shared with every per-group MLS service this user
+    /// runs. Source of truth for "who am I" at the User level — call sites
+    /// must read this rather than reaching into a per-group service.
+    identity: M::Identity,
+    /// Build an MLS service for a brand-new group as its sole creator.
+    mls_creator_factory: MlsCreatorFactory<M>,
+    /// Try to build an MLS service from a serialized welcome.
+    mls_welcome_factory: MlsWelcomeFactory<M>,
+    /// Generate a single-use key package using the user's storage + identity.
+    kp_generator: KeyPackageGenerator,
     /// Outer lock: map CRUD (insert / remove / iterate names).
     /// Inner per-entry lock: per-group reads and mutations. A write on
     /// group A doesn't block reads on group B.
@@ -96,7 +130,7 @@ pub struct User<P: DeMlsProvider, M: MlsService, H: GroupEventHandler, SCH: Stat
     /// the scoring `Mutex` guard across `lookup_entry` or any acquisition
     /// of the inner entry `RwLock`. Acquire `scoring()` in a single
     /// statement and let the guard drop at the semicolon.
-    groups: Arc<RwLock<HashMap<String, Arc<RwLock<GroupEntry>>>>>,
+    groups: GroupRegistry<M>,
     consensus_service: Arc<ProviderConsensus<P>>,
     eth_signer: PrivateKeySigner,
     handler: Arc<H>,
@@ -114,10 +148,15 @@ pub struct User<P: DeMlsProvider, M: MlsService, H: GroupEventHandler, SCH: Stat
 
 impl<P: DeMlsProvider, M: MlsService, H: GroupEventHandler, SCH: StateChangeHandler> Clone
     for User<P, M, H, SCH>
+where
+    M::Identity: Clone,
 {
     fn clone(&self) -> Self {
         Self {
-            mls_service: Arc::clone(&self.mls_service),
+            identity: self.identity.clone(),
+            mls_creator_factory: Arc::clone(&self.mls_creator_factory),
+            mls_welcome_factory: Arc::clone(&self.mls_welcome_factory),
+            kp_generator: Arc::clone(&self.kp_generator),
             groups: Arc::clone(&self.groups),
             consensus_service: Arc::clone(&self.consensus_service),
             eth_signer: self.eth_signer.clone(),
@@ -137,9 +176,15 @@ impl<
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
 > User<P, M, H, SCH>
+where
+    M::Identity: Clone,
 {
+    #[allow(clippy::too_many_arguments)]
     fn new_with_config(
-        mls_service: M,
+        identity: M::Identity,
+        mls_creator_factory: MlsCreatorFactory<M>,
+        mls_welcome_factory: MlsWelcomeFactory<M>,
+        kp_generator: KeyPackageGenerator,
         consensus_service: Arc<ProviderConsensus<P>>,
         eth_signer: PrivateKeySigner,
         handler: Arc<H>,
@@ -150,7 +195,10 @@ impl<
             default_score: default_group_config.default_peer_score,
         };
         Self {
-            mls_service: Arc::new(mls_service),
+            identity,
+            mls_creator_factory,
+            mls_welcome_factory,
+            kp_generator,
             groups: Arc::new(RwLock::new(HashMap::new())),
             consensus_service,
             eth_signer,
@@ -180,7 +228,10 @@ impl<
     /// Look up a group entry. Returns `None` when the entry isn't present.
     /// Takes the outer read lock briefly to clone the inner `Arc`, then
     /// releases it before the caller acquires the entry's own lock.
-    pub(crate) async fn lookup_entry(&self, group_name: &str) -> Option<Arc<RwLock<GroupEntry>>> {
+    pub(crate) async fn lookup_entry(
+        &self,
+        group_name: &str,
+    ) -> Option<Arc<RwLock<GroupEntry<M>>>> {
         self.groups.read().await.get(group_name).cloned()
     }
 
@@ -189,16 +240,27 @@ impl<
     pub(crate) async fn with_entry<R>(
         &self,
         group_name: &str,
-        f: impl FnOnce(&GroupEntry) -> R,
+        f: impl FnOnce(&GroupEntry<M>) -> R,
     ) -> Option<R> {
         let entry_arc = self.lookup_entry(group_name).await?;
         let entry = entry_arc.read().await;
         Some(f(&entry))
     }
 
+    /// Borrow the local identity. Source of truth for "who am I" at the
+    /// User level.
+    pub(crate) fn identity(&self) -> &M::Identity {
+        &self.identity
+    }
+
     /// Wallet address as checksummed hex.
     pub fn identity_string(&self) -> String {
-        self.mls_service.identity().identity_display().to_string()
+        self.identity.identity_display().to_string()
+    }
+
+    /// Generate a single-use key package for our identity.
+    pub(crate) fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
+        (self.kp_generator)()
     }
 
     /// Drop all proposals / votes / sessions for this group from the
@@ -217,8 +279,14 @@ impl<
 
 // ─────────────────────────── DefaultProvider Convenience ───────────────────────────
 
+/// MLS service type for the default `DefaultProvider`-backed `User`. Uses
+/// in-memory storage and a wallet-keyed identity, both shared across every
+/// per-group service via `Arc` (the `Arc<S>: DeMlsStorage` and
+/// `Arc<I>: IdentityProvider` blanket impls make this work).
+pub type DefaultMlsService = OpenMlsService<Arc<MemoryDeMlsStorage>, Arc<WalletIdentity>>;
+
 impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
-    User<DefaultProvider, OpenMlsService<MemoryDeMlsStorage, WalletIdentity>, H, SCH>
+    User<DefaultProvider, DefaultMlsService, H, SCH>
 {
     /// Construct a `User` on [`DefaultProvider`] with the default config.
     pub fn with_private_key(
@@ -247,11 +315,42 @@ impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
         let signer = PrivateKeySigner::from_str(private_key)?;
         let user_address = signer.address();
 
-        let identity = WalletIdentity::from_wallet(user_address)?;
-        let mls_service = OpenMlsService::new(MemoryDeMlsStorage::new(), identity);
+        let identity = Arc::new(WalletIdentity::from_wallet(user_address)?);
+        let storage = Arc::new(MemoryDeMlsStorage::new());
+
+        let mls_creator_factory: MlsCreatorFactory<DefaultMlsService> = {
+            let storage = Arc::clone(&storage);
+            let identity = Arc::clone(&identity);
+            Arc::new(move |group_id: String| {
+                OpenMlsService::new_as_creator(
+                    group_id,
+                    Arc::clone(&storage),
+                    Arc::clone(&identity),
+                )
+            })
+        };
+        let mls_welcome_factory: MlsWelcomeFactory<DefaultMlsService> = {
+            let storage = Arc::clone(&storage);
+            let identity = Arc::clone(&identity);
+            Arc::new(move |bytes: &[u8]| {
+                OpenMlsService::new_from_welcome(bytes, Arc::clone(&storage), Arc::clone(&identity))
+            })
+        };
+        let kp_generator: KeyPackageGenerator = {
+            let storage = Arc::clone(&storage);
+            let identity = Arc::clone(&identity);
+            Arc::new(move || {
+                OpenMlsService::<Arc<MemoryDeMlsStorage>, Arc<WalletIdentity>>::generate_key_package(
+                    &storage, &identity,
+                )
+            })
+        };
 
         Ok(Self::new_with_config(
-            mls_service,
+            identity,
+            mls_creator_factory,
+            mls_welcome_factory,
+            kp_generator,
             consensus_service,
             signer,
             handler,

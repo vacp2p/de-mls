@@ -1,103 +1,51 @@
-//! Group lifecycle operations: creation, joining, and message building.
+//! Group lifecycle helpers: outbound message framing for the welcome
+//! subtopic and consensus proposal building. Group construction lives on
+//! [`Group::create_group`](crate::core::Group::create_group) and
+//! [`Group::prepare_to_join`](crate::core::Group::prepare_to_join);
+//! application-message framing lives on
+//! [`MlsService::build_message`](crate::mls_crypto::MlsService::build_message).
 
 use hashgraph_like_consensus::types::CreateProposalRequest;
 use prost::Message;
 
 use crate::{
-    core::{error::CoreError, group::Group, steward_list::ProtocolConfig},
-    ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC},
-    mls_crypto::{IdentityProvider, MlsService},
+    core::error::CoreError,
+    ds::{OutboundPacket, WELCOME_SUBTOPIC},
+    mls_crypto::KeyPackageBytes,
     protos::de_mls::messages::v1::{
-        AppMessage, GroupUpdateRequest, InvitationToJoin, UserKeyPackage, WelcomeMessage,
+        GroupUpdateRequest, InvitationToJoin, UserKeyPackage, WelcomeMessage,
     },
 };
 
-// ─────────────────────────── Group Lifecycle ───────────────────────────
-
-/// Create a new MLS group as the steward.
-///
-/// Initializes a bootstrap steward list containing the creator.
-pub fn create_group<M>(
-    name: &str,
-    mls: &M,
-    protocol_config: ProtocolConfig,
-) -> Result<Group, CoreError>
-where
-    M: MlsService,
-{
-    mls.create_group(name)?;
-    Group::new_as_creator(
-        name,
-        mls.identity().identity_bytes().to_vec(),
-        protocol_config,
-    )
-}
-
-/// Prepare a handle for joining an existing group.
-///
-/// The joiner knows the config from group discovery but won't have the
-/// actual steward list until receiving it via sync message.
-pub fn prepare_to_join(
-    name: &str,
-    self_identity: Vec<u8>,
-    protocol_config: ProtocolConfig,
-) -> Group {
-    Group::new_as_joiner(name, self_identity, protocol_config)
-}
-
-// ─────────────────────────── Message Building ───────────────────────────
-
-/// Build an MLS-encrypted application message.
-pub fn build_message<M>(
-    group_name: &str,
-    mls: &M,
-    app_msg: &AppMessage,
-    app_id: &[u8],
-) -> Result<OutboundPacket, CoreError>
-where
-    M: MlsService,
-{
-    if !mls.has_group(group_name) {
-        return Err(CoreError::MlsGroupNotInitialized);
-    }
-
-    let message_out = mls.encrypt(group_name, &app_msg.encode_to_vec())?;
-
-    Ok(OutboundPacket::new(
-        message_out,
-        APP_MSG_SUBTOPIC,
-        group_name,
-        app_id,
-    ))
-}
+// ─────────────────────────── Welcome-subtopic framing ───────────────────────────
 
 /// Build a key package message for joining a group.
-pub fn build_key_package_message<M>(
-    group: &Group,
-    mls: &M,
+///
+/// The key package is supplied by the caller (typically via
+/// `OpenMlsService::generate_key_package`) so a joiner can publish a key
+/// package before any MLS service for the target group exists.
+pub fn build_key_package_message(
+    group_name: &str,
+    key_package: KeyPackageBytes,
     app_id: &[u8],
-) -> Result<OutboundPacket, CoreError>
-where
-    M: MlsService,
-{
-    let key_package = mls.generate_key_package()?;
+) -> OutboundPacket {
     let welcome_msg: WelcomeMessage = UserKeyPackage {
         key_package_bytes: key_package.as_bytes().to_vec(),
     }
     .into();
 
-    Ok(OutboundPacket::new(
+    OutboundPacket::new(
         welcome_msg.encode_to_vec(),
         WELCOME_SUBTOPIC,
-        group.group_name(),
+        group_name,
         app_id,
-    ))
+    )
 }
 
 /// Wrap raw MLS welcome bytes into an `OutboundPacket` on the welcome subtopic.
 pub(crate) fn build_invitation_packet(
     welcome_bytes: Vec<u8>,
-    group: &Group,
+    group_name: &str,
     app_id: &[u8],
 ) -> OutboundPacket {
     let welcome_msg: WelcomeMessage = InvitationToJoin {
@@ -107,7 +55,7 @@ pub(crate) fn build_invitation_packet(
     OutboundPacket::new(
         welcome_msg.encode_to_vec(),
         WELCOME_SUBTOPIC,
-        group.group_name(),
+        group_name,
         app_id,
     )
 }

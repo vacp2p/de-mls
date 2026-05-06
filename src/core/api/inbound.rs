@@ -1,4 +1,8 @@
-//! Inbound message routing and processing.
+//! Inbound app-subtopic message processing.
+//!
+//! Welcome-subtopic packets are handled at the app layer (because the
+//! invitation path constructs a new `MlsService` via the user-supplied
+//! factory) and are not routed through this module.
 
 use hashgraph_like_consensus::protos::consensus::v1::Proposal;
 use prost::Message;
@@ -9,13 +13,9 @@ use crate::{
         api::process_commit_candidate, error::CoreError, group::Group,
         process_result::ProcessResult,
     },
-    ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC},
-    mls_crypto::{
-        DecryptResult, MlsService, ShortId, key_package_bytes_from_json, parse_wallet_to_bytes,
-    },
+    mls_crypto::{DecryptResult, MlsService, ShortId, parse_wallet_to_bytes},
     protos::de_mls::messages::v1::{
-        AppMessage, GroupUpdateRequest, InviteMember, WelcomeMessage, app_message,
-        group_update_request, welcome_message,
+        AppMessage, GroupUpdateRequest, app_message, group_update_request,
     },
 };
 
@@ -42,99 +42,24 @@ fn authorize_fast_path_proposal(proposal: &Proposal, mls_sender: &[u8]) -> bool 
     )
 }
 
-/// Process an inbound packet and determine what action is needed.
-pub fn process_inbound<M>(
-    group: &mut Group,
-    payload: &[u8],
-    subtopic: &str,
-    mls: &M,
-) -> Result<ProcessResult, CoreError>
+/// Process an inbound packet on the app subtopic and decide what action is
+/// needed. Welcome-subtopic packets are handled at the app layer.
+pub fn process_inbound<M>(group: &mut Group<M>, payload: &[u8]) -> Result<ProcessResult, CoreError>
 where
     M: MlsService,
 {
-    match subtopic {
-        WELCOME_SUBTOPIC => process_welcome_subtopic(group, payload, mls),
-        APP_MSG_SUBTOPIC => process_app_subtopic(group, payload, mls),
-        _ => Err(CoreError::InvalidSubtopic(subtopic.to_string())),
-    }
-}
-
-fn process_welcome_subtopic<M>(
-    group: &mut Group,
-    payload: &[u8],
-    mls: &M,
-) -> Result<ProcessResult, CoreError>
-where
-    M: MlsService,
-{
-    let welcome_msg = WelcomeMessage::decode(payload)?;
-    match welcome_msg.payload {
-        Some(welcome_message::Payload::UserKeyPackage(user_kp)) => {
-            let (key_package_bytes, identity) =
-                key_package_bytes_from_json(user_kp.key_package_bytes)?;
-
-            if mls.is_member(group.group_name(), &identity) {
-                info!(
-                    group = group.group_name(),
-                    identity = %ShortId(&identity),
-                    "key package skipped: already a member"
-                );
-                return Ok(ProcessResult::Noop);
-            }
-
-            info!(
-                group = group.group_name(),
-                identity = %ShortId(&identity),
-                "key package received"
-            );
-
-            let gur = GroupUpdateRequest {
-                payload: Some(group_update_request::Payload::InviteMember(InviteMember {
-                    key_package_bytes,
-                    identity,
-                })),
-            };
-
-            Ok(ProcessResult::MembershipChangeReceived(gur))
-        }
-        Some(welcome_message::Payload::InvitationToJoin(invitation)) => {
-            if group.is_steward() || mls.has_group(group.group_name()) {
-                return Ok(ProcessResult::Noop);
-            }
-
-            if let Some(group_name) = mls.accept_welcome(&invitation.mls_message_out_bytes)? {
-                info!(group = group.group_name(), "joined group via welcome");
-                return Ok(ProcessResult::JoinedGroup(group_name));
-            }
-            Ok(ProcessResult::Noop)
-        }
-        None => Ok(ProcessResult::Noop),
-    }
-}
-
-fn process_app_subtopic<M>(
-    group: &mut Group,
-    payload: &[u8],
-    mls: &M,
-) -> Result<ProcessResult, CoreError>
-where
-    M: MlsService,
-{
-    if !mls.has_group(group.group_name()) {
-        return Ok(ProcessResult::Noop);
-    }
-
     // 1. Try plaintext CommitCandidate (sent as plaintext AppMessage)
     if let Ok(app_message) = AppMessage::decode(payload) {
         if let Some(app_message::Payload::CommitCandidate(candidate)) = app_message.payload {
-            return process_commit_candidate(group, candidate, mls);
+            return process_commit_candidate(group, candidate);
         }
     }
 
+    let mls = group.expect_mls()?;
     // 2. MLS-encrypted app messages only — use decrypt_application_only.
     //    This NEVER stores proposals or processes commits, preventing
     //    rogue MLS proposals on the app subtopic from polluting state.
-    let res = mls.decrypt_application_only(group.group_name(), payload)?;
+    let res = mls.decrypt_application_only(payload)?;
 
     match res {
         DecryptResult::Application(app_bytes, sender) => {
@@ -152,11 +77,10 @@ where
                 return Ok(ProcessResult::Noop);
             }
             // Drop BanRequests whose target isn't in the group — saves a
-            // useless consensus round. Mirrors the already-a-member check
-            // on KPs in `process_welcome_subtopic`.
+            // useless consensus round.
             if let Some(app_message::Payload::BanRequest(ban)) = &app_msg.payload {
                 let target = parse_wallet_to_bytes(&ban.user_to_ban)?;
-                if !mls.is_member(group.group_name(), &target) {
+                if !mls.is_member(&target) {
                     info!(
                         group = group.group_name(),
                         target = %ShortId(&target),

@@ -6,7 +6,7 @@ use tracing::{error, info};
 use crate::{
     app::{StateChangeHandler, User, UserError},
     core::{
-        DeMlsProvider, ElectionDecision, GroupEventHandler, StewardList, build_message,
+        DeMlsProvider, ElectionDecision, GroupEventHandler, StewardList,
         evaluate_election_initiation, group_members, is_deadlock_ecp_proposer, member_set,
         scoring_member_diff, target_identity_of,
     },
@@ -23,6 +23,8 @@ impl<
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
 > User<P, M, H, SCH>
+where
+    M::Identity: Clone,
 {
     /// Add any MLS members not yet tracked in scoring, and drop scored
     /// entries for identities no longer in MLS. Takes `mls_members`
@@ -52,18 +54,18 @@ impl<
             .lookup_entry(group_name)
             .await
             .ok_or(UserError::GroupNotFound)?;
-        let (needs_fill, members) = {
+        let (needs_fill, members, epoch) = {
             let entry = entry_arc.read().await;
-            let members = group_members(&entry.group, self.mls_service.as_ref())?;
+            let mls = entry.group.expect_mls()?;
+            let members = group_members(&entry.group)?;
             let needs = members.len() < entry.group.protocol_config().sn_min;
-            (needs, members)
+            let epoch = mls.current_epoch()?;
+            (needs, members, epoch)
         };
 
         if !needs_fill {
             return Ok(());
         }
-
-        let epoch = self.mls_service.current_epoch(group_name)?;
         {
             let mut entry = entry_arc.write().await;
             let sn = entry
@@ -98,9 +100,10 @@ impl<
             .ok_or(UserError::GroupNotFound)?;
         let (members, election_epoch, retry_round, config) = {
             let entry = entry_arc.read().await;
-            let epoch = self.mls_service.current_epoch(group_name)?;
-            let mls_members = group_members(&entry.group, self.mls_service.as_ref())?;
-            let self_identity = self.mls_service.identity().identity_bytes();
+            let mls = entry.group.expect_mls()?;
+            let epoch = mls.current_epoch()?;
+            let mls_members = group_members(&entry.group)?;
+            let self_identity = self.identity().identity_bytes();
             match evaluate_election_initiation(
                 &entry.group,
                 &mls_members,
@@ -174,10 +177,11 @@ impl<
             .ok_or(UserError::GroupNotFound)?;
         let (is_authorized, self_id, epoch) = {
             let entry = entry_arc.read().await;
-            let mls_members = group_members(&entry.group, self.mls_service.as_ref())?;
-            let self_id = self.mls_service.identity().identity_bytes();
+            let mls = entry.group.expect_mls()?;
+            let mls_members = group_members(&entry.group)?;
+            let self_id = self.identity().identity_bytes();
             let authorized = is_deadlock_ecp_proposer(&entry.group, &mls_members, self_id);
-            let epoch = self.mls_service.current_epoch(group_name)?;
+            let epoch = mls.current_epoch()?;
             (authorized, self_id, epoch)
         };
 
@@ -217,14 +221,16 @@ impl<
     /// MLS member set — same effect as a successful election. Intended for
     /// tests and administrative tooling.
     pub async fn regenerate_steward_list(&self, group_name: &str) -> Result<(), UserError> {
-        let current_epoch = self.mls_service.current_epoch(group_name)?;
         let entry_arc = self
             .lookup_entry(group_name)
             .await
             .ok_or(UserError::GroupNotFound)?;
-        let members = {
+        let (current_epoch, members) = {
             let entry = entry_arc.read().await;
-            group_members(&entry.group, self.mls_service.as_ref())?
+            let mls = entry.group.expect_mls()?;
+            let current_epoch = mls.current_epoch()?;
+            let members = group_members(&entry.group)?;
+            (current_epoch, members)
         };
 
         let mut entry = entry_arc.write().await;
@@ -246,19 +252,18 @@ impl<
         &self,
         group_name: &str,
     ) -> Result<(), UserError> {
-        let current_epoch = self.mls_service.current_epoch(group_name)?;
-
         let entry_arc = self
             .lookup_entry(group_name)
             .await
             .ok_or(UserError::GroupNotFound)?;
-        let (members, max_age) = {
+        let (current_epoch, members, max_age) = {
             let entry = entry_arc.read().await;
-            if !self.mls_service.has_group(entry.group.group_name()) {
+            let Some(mls) = entry.group.mls() else {
                 return Ok(());
-            }
+            };
             (
-                group_members(&entry.group, self.mls_service.as_ref())?,
+                mls.current_epoch()?,
+                group_members(&entry.group)?,
                 entry.group.pending_update_max_epochs(),
             )
         };
@@ -284,19 +289,16 @@ impl<
     /// buffer into voting proposals. Skips entries already covered by the
     /// current voting/approved queues so we don't double-propose.
     pub async fn process_buffered_updates(&self, group_name: &str) -> Result<(), UserError> {
-        let current_epoch = self.mls_service.current_epoch(group_name)?;
-
         let entry_arc = self
             .lookup_entry(group_name)
             .await
             .ok_or(UserError::GroupNotFound)?;
-        let to_propose: Vec<GroupUpdateRequest> = {
+        let (current_epoch, to_propose): (u64, Vec<GroupUpdateRequest>) = {
             let entry = entry_arc.read().await;
 
-            let members = if self.mls_service.has_group(entry.group.group_name()) {
-                group_members(&entry.group, self.mls_service.as_ref())?
-            } else {
-                Vec::new()
+            let (current_epoch, members) = match entry.group.mls() {
+                Some(mls) => (mls.current_epoch()?, group_members(&entry.group)?),
+                None => (0, Vec::new()),
             };
             if !entry.group.is_live_epoch_steward(current_epoch, &members) {
                 return Ok(());
@@ -309,7 +311,7 @@ impl<
                 approved.values().filter_map(target_identity_of).collect();
             let members_set = member_set(&members);
 
-            entry
+            let to_propose: Vec<GroupUpdateRequest> = entry
                 .group
                 .pending_updates()
                 .iter()
@@ -324,7 +326,8 @@ impl<
                     }
                 })
                 .map(|(_, p)| p.request.clone())
-                .collect()
+                .collect();
+            (current_epoch, to_propose)
         };
 
         if to_propose.is_empty() {
@@ -396,7 +399,8 @@ impl<
             // Filter ghosts and queued-removal targets so joiners don't
             // inherit stewards they would have to walk past on the very
             // first epoch.
-            let mls_members = group_members(&entry.group, self.mls_service.as_ref())?;
+            let mls = entry.group.expect_mls()?;
+            let mls_members = group_members(&entry.group)?;
             let steward_members = entry.group.live_steward_members(&mls_members);
 
             // `retry_round` is the seed that produced the *stored* list —
@@ -419,12 +423,7 @@ impl<
             };
 
             let app_msg: AppMessage = sync.into();
-            build_message(
-                group_name,
-                self.mls_service.as_ref(),
-                &app_msg,
-                &self.app_id,
-            )?
+            mls.build_message(&app_msg, &self.app_id)?
         };
 
         self.handler.on_outbound(group_name, packet).await?;
@@ -439,14 +438,20 @@ impl<
         &self,
         group_name: &str,
     ) -> Result<(), UserError> {
-        let epoch = self.mls_service.current_epoch(group_name)?;
-        let self_id = self.mls_service.identity().identity_bytes();
-        let (is_steward, threshold) = self
-            .with_entry(group_name, |e| {
-                (e.group.is_steward(), e.group.threshold_peer_score())
-            })
+        let entry_arc = self
+            .lookup_entry(group_name)
             .await
             .ok_or(UserError::GroupNotFound)?;
+        let (is_steward, threshold, epoch) = {
+            let entry = entry_arc.read().await;
+            let mls = entry.group.expect_mls()?;
+            (
+                entry.group.is_steward(),
+                entry.group.threshold_peer_score(),
+                mls.current_epoch()?,
+            )
+        };
+        let self_id = self.identity().identity_bytes();
 
         if !is_steward {
             return Ok(());
