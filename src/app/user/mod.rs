@@ -28,7 +28,9 @@ use crate::{
         DeMlsProvider, DefaultProvider, Group, GroupEventHandler, ProposalId, ProviderConsensus,
         ScoringConfig,
     },
-    mls_crypto::{MemoryDeMlsStorage, MlsService},
+    mls_crypto::{
+        IdentityProvider, MemoryDeMlsStorage, MlsService, OpenMlsService, WalletIdentity,
+    },
     protos::de_mls::messages::v1::GroupUpdateRequest,
 };
 
@@ -84,8 +86,8 @@ impl GroupEntry {
 /// `&str` lookups don't allocate); inner key is the proposal id.
 type AutoVoteTimers = Arc<Mutex<HashMap<Arc<str>, HashMap<u32, JoinHandle<()>>>>>;
 
-pub struct User<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler> {
-    mls_service: Arc<MlsService<P::Storage>>,
+pub struct User<P: DeMlsProvider, M: MlsService, H: GroupEventHandler, SCH: StateChangeHandler> {
+    mls_service: Arc<M>,
     /// Outer lock: map CRUD (insert / remove / iterate names).
     /// Inner per-entry lock: per-group reads and mutations. A write on
     /// group A doesn't block reads on group B.
@@ -110,7 +112,9 @@ pub struct User<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler>
     auto_vote_timers: AutoVoteTimers,
 }
 
-impl<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler> Clone for User<P, H, SCH> {
+impl<P: DeMlsProvider, M: MlsService, H: GroupEventHandler, SCH: StateChangeHandler> Clone
+    for User<P, M, H, SCH>
+{
     fn clone(&self) -> Self {
         Self {
             mls_service: Arc::clone(&self.mls_service),
@@ -127,11 +131,15 @@ impl<P: DeMlsProvider, H: GroupEventHandler, SCH: StateChangeHandler> Clone for 
     }
 }
 
-impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
-    User<P, H, SCH>
+impl<
+    P: DeMlsProvider,
+    M: MlsService,
+    H: GroupEventHandler + 'static,
+    SCH: StateChangeHandler + 'static,
+> User<P, M, H, SCH>
 {
     fn new_with_config(
-        mls_service: MlsService<P::Storage>,
+        mls_service: M,
         consensus_service: Arc<ProviderConsensus<P>>,
         eth_signer: PrivateKeySigner,
         handler: Arc<H>,
@@ -190,7 +198,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
     /// Wallet address as checksummed hex.
     pub fn identity_string(&self) -> String {
-        self.mls_service.wallet_hex().to_string()
+        self.mls_service.identity().identity_display().to_string()
     }
 
     /// Drop all proposals / votes / sessions for this group from the
@@ -210,7 +218,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 // ─────────────────────────── DefaultProvider Convenience ───────────────────────────
 
 impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
-    User<DefaultProvider, H, SCH>
+    User<DefaultProvider, OpenMlsService<MemoryDeMlsStorage, WalletIdentity>, H, SCH>
 {
     /// Construct a `User` on [`DefaultProvider`] with the default config.
     pub fn with_private_key(
@@ -239,10 +247,8 @@ impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
         let signer = PrivateKeySigner::from_str(private_key)?;
         let user_address = signer.address();
 
-        let mls_service = MlsService::new(MemoryDeMlsStorage::new());
-        mls_service
-            .init(user_address)
-            .map_err(|e| UserError::Core(e.into()))?;
+        let identity = WalletIdentity::from_wallet(user_address)?;
+        let mls_service = OpenMlsService::new(MemoryDeMlsStorage::new(), identity);
 
         Ok(Self::new_with_config(
             mls_service,

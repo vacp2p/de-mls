@@ -1,13 +1,12 @@
 //! Group lifecycle operations: creation, joining, and message building.
 
 use hashgraph_like_consensus::types::CreateProposalRequest;
-use openmls_rust_crypto::MemoryStorage;
 use prost::Message;
 
 use crate::{
     core::{error::CoreError, group::Group, steward_list::ProtocolConfig},
     ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC},
-    mls_crypto::{DeMlsStorage, MlsService},
+    mls_crypto::{IdentityProvider, MlsService},
     protos::de_mls::messages::v1::{
         AppMessage, GroupUpdateRequest, InvitationToJoin, UserKeyPackage, WelcomeMessage,
     },
@@ -18,16 +17,20 @@ use crate::{
 /// Create a new MLS group as the steward.
 ///
 /// Initializes a bootstrap steward list containing the creator.
-pub fn create_group<S>(
+pub fn create_group<M>(
     name: &str,
-    mls: &MlsService<S>,
+    mls: &M,
     protocol_config: ProtocolConfig,
 ) -> Result<Group, CoreError>
 where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+    M: MlsService,
 {
     mls.create_group(name)?;
-    Group::new_as_creator(name, mls.wallet_bytes().to_vec(), protocol_config)
+    Group::new_as_creator(
+        name,
+        mls.identity().identity_bytes().to_vec(),
+        protocol_config,
+    )
 }
 
 /// Prepare a handle for joining an existing group.
@@ -45,14 +48,14 @@ pub fn prepare_to_join(
 // ─────────────────────────── Message Building ───────────────────────────
 
 /// Build an MLS-encrypted application message.
-pub fn build_message<S>(
+pub fn build_message<M>(
     group_name: &str,
-    mls: &MlsService<S>,
+    mls: &M,
     app_msg: &AppMessage,
     app_id: &[u8],
 ) -> Result<OutboundPacket, CoreError>
 where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+    M: MlsService,
 {
     if !mls.has_group(group_name) {
         return Err(CoreError::MlsGroupNotInitialized);
@@ -69,13 +72,13 @@ where
 }
 
 /// Build a key package message for joining a group.
-pub fn build_key_package_message<S>(
+pub fn build_key_package_message<M>(
     group: &Group,
-    mls: &MlsService<S>,
+    mls: &M,
     app_id: &[u8],
 ) -> Result<OutboundPacket, CoreError>
 where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+    M: MlsService,
 {
     let key_package = mls.generate_key_package()?;
     let welcome_msg: WelcomeMessage = UserKeyPackage {

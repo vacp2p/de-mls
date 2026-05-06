@@ -14,13 +14,18 @@ use crate::{
         build_message, create_commit_candidate, group_members, member_set, process_inbound,
     },
     ds::InboundPacket,
+    mls_crypto::{IdentityProvider, MlsService},
     protos::de_mls::messages::v1::{
         AppMessage, ConversationMessage, GroupSync, GroupUpdateRequest, group_update_request,
     },
 };
 
-impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
-    User<P, H, SCH>
+impl<
+    P: DeMlsProvider,
+    M: MlsService,
+    H: GroupEventHandler + 'static,
+    SCH: StateChangeHandler + 'static,
+> User<P, M, H, SCH>
 {
     /// Dispatches a single ProcessResult to the appropriate handler/consensus/state-machine action.
     pub async fn dispatch_inbound_result(
@@ -141,8 +146,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         self.prune_pending_updates_after_commit(name).await?;
 
         let msg: AppMessage = ConversationMessage {
-            message: format!("User {} joined the group", self.mls_service.wallet_hex())
-                .into_bytes(),
+            message: format!(
+                "User {} joined the group",
+                self.mls_service.identity().identity_display()
+            )
+            .into_bytes(),
             sender: "SYSTEM".to_string(),
             group_name: name.to_string(),
         }
@@ -150,13 +158,13 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let Some(entry_arc) = self.lookup_entry(name).await else {
             return Ok(());
         };
-        let packet = build_message(name, &self.mls_service, &msg, &self.app_id)?;
+        let packet = build_message(name, self.mls_service.as_ref(), &msg, &self.app_id)?;
         self.handler.on_outbound(name, packet).await?;
         self.handler.on_joined_group(name).await?;
 
         let mls_members = {
             let entry = entry_arc.read().await;
-            group_members(&entry.group, &self.mls_service).unwrap_or_default()
+            group_members(&entry.group, self.mls_service.as_ref()).unwrap_or_default()
         };
         self.sync_scoring_members(name, &mls_members);
 
@@ -177,7 +185,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         if let Some(entry_arc) = self.lookup_entry(group_name).await {
             let mls_members = {
                 let entry = entry_arc.read().await;
-                group_members(&entry.group, &self.mls_service).unwrap_or_default()
+                group_members(&entry.group, self.mls_service.as_ref()).unwrap_or_default()
             };
             self.sync_scoring_members(group_name, &mls_members);
         }
@@ -268,7 +276,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             entry.group.ensure_freeze_round(epoch);
 
             let outbound = if entry.group.is_steward() {
-                match create_commit_candidate(&mut entry.group, &self.mls_service, &self.app_id) {
+                match create_commit_candidate(
+                    &mut entry.group,
+                    self.mls_service.as_ref(),
+                    &self.app_id,
+                ) {
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(
@@ -310,7 +322,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             if entry.group.steward_list().is_some() {
                 return Ok(());
             }
-            group_members(&entry.group, &self.mls_service)?
+            group_members(&entry.group, self.mls_service.as_ref())?
         };
 
         let current_epoch = self.mls_service.current_epoch(group_name)?;
@@ -415,7 +427,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 &mut entry.group,
                 &packet.payload,
                 &packet.subtopic,
-                &self.mls_service,
+                self.mls_service.as_ref(),
             )?
         };
 

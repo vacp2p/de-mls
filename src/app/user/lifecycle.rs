@@ -14,12 +14,16 @@ use crate::{
         DeMlsProvider, GroupEventHandler, auto_approved_leave_proposal_id, build_message,
         create_group, prepare_to_join,
     },
-    mls_crypto::parse_wallet_to_bytes,
+    mls_crypto::{IdentityProvider, MlsService, parse_wallet_to_bytes},
     protos::de_mls::messages::v1::{GroupUpdateRequest, RemoveMember, group_update_request},
 };
 
-impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
-    User<P, H, SCH>
+impl<
+    P: DeMlsProvider,
+    M: MlsService,
+    H: GroupEventHandler + 'static,
+    SCH: StateChangeHandler + 'static,
+> User<P, M, H, SCH>
 {
     /// Create (`is_creation = true`) or join (`false`) a group using the
     /// user's default config.
@@ -49,13 +53,17 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let liveness_criteria_yes = config.liveness_criteria_yes;
         let pending_update_max_epochs = config.pending_update_max_epochs;
         let (mut group, state_machine) = if is_creation {
-            let group = create_group(group_name, &self.mls_service, config.protocol.clone())?;
+            let group = create_group(
+                group_name,
+                self.mls_service.as_ref(),
+                config.protocol.clone(),
+            )?;
             let state_machine = GroupStateMachine::new_as_member_with_config(config);
             (group, state_machine)
         } else {
             let group = prepare_to_join(
                 group_name,
-                self.mls_service.wallet_bytes().to_vec(),
+                self.mls_service.identity().identity_bytes().to_vec(),
                 config.protocol.clone(),
             );
             let state_machine = GroupStateMachine::new_as_pending_join_with_config(config);
@@ -83,7 +91,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         // Joiners start tracked at `JoinedGroup` time (once members are known).
         if is_creation {
             self.scoring()
-                .add_member(group_name, self.mls_service.wallet_bytes());
+                .add_member(group_name, self.mls_service.identity().identity_bytes());
         }
 
         self.state_handler
@@ -176,7 +184,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             return Ok(());
         };
 
-        let packet = build_message(group_name, &self.mls_service, &app_msg, &self.app_id)?;
+        let packet = build_message(
+            group_name,
+            self.mls_service.as_ref(),
+            &app_msg,
+            &self.app_id,
+        )?;
         self.handler.on_outbound(group_name, packet).await?;
 
         Ok(())

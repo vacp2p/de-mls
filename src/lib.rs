@@ -49,7 +49,7 @@
 //! use de_mls::app::User;
 //!
 //! // Create a user with an Ethereum private key
-//! let user: User<DefaultProvider, _, _> = User::with_private_key(
+//! let user: User<DefaultProvider, _, _, _> = User::with_private_key(
 //!     "0xac0974...",   // Private key
 //!     consensus,       // Consensus service
 //!     event_handler,   // Your GroupEventHandler implementation

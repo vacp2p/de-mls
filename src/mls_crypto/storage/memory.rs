@@ -4,7 +4,7 @@ use std::{collections::HashSet, sync::RwLock};
 
 use openmls_rust_crypto::MemoryStorage;
 
-use crate::mls_crypto::{DeMlsStorage, error::StorageError};
+use crate::mls_crypto::{DeMlsStorage, MlsError};
 
 /// In-memory storage for development and testing.
 ///
@@ -26,27 +26,17 @@ impl DeMlsStorage for MemoryDeMlsStorage {
     type MlsStorage = MemoryStorage;
     type StorageError = openmls_rust_crypto::MemoryStorageError;
 
-    fn store_key_package_ref(&self, hash_ref: &[u8]) -> Result<(), StorageError> {
-        self.key_package_refs
-            .write()
-            .map_err(|e| StorageError::Lock(e.to_string()))?
-            .insert(hash_ref.to_vec());
+    fn store_key_package_ref(&self, hash_ref: &[u8]) -> Result<(), MlsError> {
+        self.key_package_refs.write()?.insert(hash_ref.to_vec());
         Ok(())
     }
 
-    fn is_our_key_package(&self, hash_ref: &[u8]) -> Result<bool, StorageError> {
-        Ok(self
-            .key_package_refs
-            .read()
-            .map_err(|e| StorageError::Lock(e.to_string()))?
-            .contains(hash_ref))
+    fn is_our_key_package(&self, hash_ref: &[u8]) -> Result<bool, MlsError> {
+        Ok(self.key_package_refs.read()?.contains(hash_ref))
     }
 
-    fn remove_key_package_ref(&self, hash_ref: &[u8]) -> Result<(), StorageError> {
-        self.key_package_refs
-            .write()
-            .map_err(|e| StorageError::Lock(e.to_string()))?
-            .remove(hash_ref);
+    fn remove_key_package_ref(&self, hash_ref: &[u8]) -> Result<(), MlsError> {
+        self.key_package_refs.write()?.remove(hash_ref);
         Ok(())
     }
 

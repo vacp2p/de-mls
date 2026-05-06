@@ -9,10 +9,15 @@ use crate::{
         create_commit_candidate, finalize_freeze_round, group_members,
     },
     ds::WELCOME_SUBTOPIC,
+    mls_crypto::{IdentityProvider, MlsService},
 };
 
-impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
-    User<P, H, SCH>
+impl<
+    P: DeMlsProvider,
+    M: MlsService,
+    H: GroupEventHandler + 'static,
+    SCH: StateChangeHandler + 'static,
+> User<P, M, H, SCH>
 {
     /// Poll a `PendingJoin` group. Returns `true` while still waiting,
     /// `false` once joined or once the join attempt has been torn down
@@ -89,7 +94,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let allow_subset = entry.group.allow_subset_candidates();
             let result = match finalize_freeze_round(
                 &mut entry.group,
-                &self.mls_service,
+                self.mls_service.as_ref(),
                 allow_subset,
                 &self.app_id,
             ) {
@@ -155,8 +160,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                         entry.state_machine.start_reelection();
 
                         let violation_epoch = self.mls_service.current_epoch(group_name)?;
-                        let self_identity = self.mls_service.wallet_bytes();
-                        let members = group_members(&entry.group, &self.mls_service)?;
+                        let self_identity = self.mls_service.identity().identity_bytes();
+                        let members = group_members(&entry.group, self.mls_service.as_ref())?;
                         let target = entry
                             .group
                             .live_epoch_steward(violation_epoch, &members)
@@ -245,7 +250,11 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             // Candidate-build failure must not block the freeze transition —
             // peers' candidates still get processed.
             let outbound = if entry.group.is_steward() {
-                match create_commit_candidate(&mut entry.group, &self.mls_service, &self.app_id) {
+                match create_commit_candidate(
+                    &mut entry.group,
+                    self.mls_service.as_ref(),
+                    &self.app_id,
+                ) {
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(

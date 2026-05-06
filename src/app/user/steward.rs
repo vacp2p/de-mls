@@ -10,15 +10,19 @@ use crate::{
         evaluate_election_initiation, group_members, is_deadlock_ecp_proposer, member_set,
         scoring_member_diff, target_identity_of,
     },
-    mls_crypto::ShortId,
+    mls_crypto::{IdentityProvider, MlsService, ShortId},
     protos::de_mls::messages::v1::{
         AppMessage, GroupSync, GroupUpdateRequest, PeerScore, StewardElectionProposal,
         TimingConfig, ViolationEvidence, group_update_request,
     },
 };
 
-impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
-    User<P, H, SCH>
+impl<
+    P: DeMlsProvider,
+    M: MlsService,
+    H: GroupEventHandler + 'static,
+    SCH: StateChangeHandler + 'static,
+> User<P, M, H, SCH>
 {
     /// Add any MLS members not yet tracked in scoring, and drop scored
     /// entries for identities no longer in MLS. Takes `mls_members`
@@ -50,7 +54,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             .ok_or(UserError::GroupNotFound)?;
         let (needs_fill, members) = {
             let entry = entry_arc.read().await;
-            let members = group_members(&entry.group, &self.mls_service)?;
+            let members = group_members(&entry.group, self.mls_service.as_ref())?;
             let needs = members.len() < entry.group.protocol_config().sn_min;
             (needs, members)
         };
@@ -95,8 +99,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let (members, election_epoch, retry_round, config) = {
             let entry = entry_arc.read().await;
             let epoch = self.mls_service.current_epoch(group_name)?;
-            let mls_members = group_members(&entry.group, &self.mls_service)?;
-            let self_identity = self.mls_service.wallet_bytes();
+            let mls_members = group_members(&entry.group, self.mls_service.as_ref())?;
+            let self_identity = self.mls_service.identity().identity_bytes();
             match evaluate_election_initiation(
                 &entry.group,
                 &mls_members,
@@ -170,8 +174,8 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             .ok_or(UserError::GroupNotFound)?;
         let (is_authorized, self_id, epoch) = {
             let entry = entry_arc.read().await;
-            let mls_members = group_members(&entry.group, &self.mls_service)?;
-            let self_id = self.mls_service.wallet_bytes();
+            let mls_members = group_members(&entry.group, self.mls_service.as_ref())?;
+            let self_id = self.mls_service.identity().identity_bytes();
             let authorized = is_deadlock_ecp_proposer(&entry.group, &mls_members, self_id);
             let epoch = self.mls_service.current_epoch(group_name)?;
             (authorized, self_id, epoch)
@@ -220,7 +224,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             .ok_or(UserError::GroupNotFound)?;
         let members = {
             let entry = entry_arc.read().await;
-            group_members(&entry.group, &self.mls_service)?
+            group_members(&entry.group, self.mls_service.as_ref())?
         };
 
         let mut entry = entry_arc.write().await;
@@ -254,7 +258,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
                 return Ok(());
             }
             (
-                group_members(&entry.group, &self.mls_service)?,
+                group_members(&entry.group, self.mls_service.as_ref())?,
                 entry.group.pending_update_max_epochs(),
             )
         };
@@ -290,7 +294,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let entry = entry_arc.read().await;
 
             let members = if self.mls_service.has_group(entry.group.group_name()) {
-                group_members(&entry.group, &self.mls_service)?
+                group_members(&entry.group, self.mls_service.as_ref())?
             } else {
                 Vec::new()
             };
@@ -392,7 +396,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             // Filter ghosts and queued-removal targets so joiners don't
             // inherit stewards they would have to walk past on the very
             // first epoch.
-            let mls_members = group_members(&entry.group, &self.mls_service)?;
+            let mls_members = group_members(&entry.group, self.mls_service.as_ref())?;
             let steward_members = entry.group.live_steward_members(&mls_members);
 
             // `retry_round` is the seed that produced the *stored* list —
@@ -415,7 +419,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             };
 
             let app_msg: AppMessage = sync.into();
-            build_message(group_name, &self.mls_service, &app_msg, &self.app_id)?
+            build_message(
+                group_name,
+                self.mls_service.as_ref(),
+                &app_msg,
+                &self.app_id,
+            )?
         };
 
         self.handler.on_outbound(group_name, packet).await?;
@@ -431,7 +440,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         group_name: &str,
     ) -> Result<(), UserError> {
         let epoch = self.mls_service.current_epoch(group_name)?;
-        let self_id = self.mls_service.wallet_bytes();
+        let self_id = self.mls_service.identity().identity_bytes();
         let (is_steward, threshold) = self
             .with_entry(group_name, |e| {
                 (e.group.is_steward(), e.group.threshold_peer_score())

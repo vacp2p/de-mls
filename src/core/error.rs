@@ -4,17 +4,9 @@ use crate::mls_crypto;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
-    /// Identity error.
-    #[error("Identity error: {0}")]
-    IdentityError(#[from] mls_crypto::IdentityError),
-
-    /// MLS service error.
+    /// MLS error (covers identity, service, and storage variants).
     #[error("MLS error: {0}")]
-    MlsServiceError(#[from] mls_crypto::MlsServiceError),
-
-    /// Storage error.
-    #[error("Storage error: {0}")]
-    StorageError(#[from] mls_crypto::StorageError),
+    Mls(#[from] mls_crypto::MlsError),
 
     #[error("Consensus error: {0}")]
     ConsensusError(#[from] hashgraph_like_consensus::error::ConsensusError),
@@ -62,14 +54,4 @@ pub enum CoreError {
          They should have been removed by apply_consensus_result."
     )]
     UnexpectedNonMlsProposals { proposal_ids: Vec<u32> },
-}
-
-impl From<mls_crypto::MlsError> for CoreError {
-    fn from(e: mls_crypto::MlsError) -> Self {
-        match e {
-            mls_crypto::MlsError::Identity(e) => CoreError::IdentityError(e),
-            mls_crypto::MlsError::Service(e) => CoreError::MlsServiceError(e),
-            mls_crypto::MlsError::Storage(e) => CoreError::StorageError(e),
-        }
-    }
 }

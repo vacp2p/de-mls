@@ -1,6 +1,5 @@
 //! Steward commit candidate creation and group member queries.
 
-use openmls_rust_crypto::MemoryStorage;
 use prost::Message;
 use tracing::info;
 
@@ -14,7 +13,7 @@ use crate::{
     },
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     mls_crypto::{
-        CommitCandidate as MlsCommitCandidate, DeMlsStorage, GroupUpdate, KeyPackageBytes,
+        CommitCandidate as MlsCommitCandidate, GroupUpdate, IdentityProvider, KeyPackageBytes,
         MlsService,
     },
     protos::de_mls::messages::v1::{AppMessage, CommitCandidate, group_update_request},
@@ -28,13 +27,13 @@ use crate::{
 /// `is_live_epoch_steward` or a list-exhaustion check, so members of the
 /// *previous* list can commit recovery actions when an election fails.
 /// `Group::is_in_recovery_mode()` (Layer 3) bypasses the gate entirely.
-pub fn create_commit_candidate<S>(
+pub fn create_commit_candidate<M>(
     group: &mut Group,
-    mls: &MlsService<S>,
+    mls: &M,
     app_id: &[u8],
 ) -> Result<Option<OutboundPacket>, CoreError>
 where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+    M: MlsService,
 {
     if !group.is_steward() && !group.is_in_recovery_mode() {
         return Err(CoreError::NotASteward);
@@ -51,7 +50,7 @@ where
     // MLS forbids committing one's own removal. If the approved batch contains
     // RemoveMember(self), skip local candidate creation — another steward will
     // commit the batch (including this node's removal) once they enter freeze.
-    let self_identity = mls.wallet_bytes();
+    let self_identity = mls.identity().identity_bytes();
     let self_removal_pending = group.approved_proposals().values().any(|req| {
         matches!(
             req.payload.as_ref(),
@@ -146,7 +145,7 @@ where
         group_name: group.group_name_bytes().to_vec(),
         mls_proposals,
         commit_message: commit,
-        steward_identity: mls.wallet_bytes().to_vec(),
+        steward_identity: mls.identity().identity_bytes().to_vec(),
     };
 
     // Welcome bytes are deferred: sent from finalize_freeze_round after the
@@ -182,9 +181,9 @@ where
 // ─────────────────────────── Member Queries ───────────────────────────
 
 /// Get the current members of a group.
-pub fn group_members<S>(group: &Group, mls: &MlsService<S>) -> Result<Vec<Vec<u8>>, CoreError>
+pub fn group_members<M>(group: &Group, mls: &M) -> Result<Vec<Vec<u8>>, CoreError>
 where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+    M: MlsService,
 {
     if !mls.has_group(group.group_name()) {
         return Err(CoreError::MlsGroupNotInitialized);

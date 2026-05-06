@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 
-use openmls_rust_crypto::MemoryStorage;
 use sha2::{Digest, Sha256};
 use tracing::info;
 
@@ -13,8 +12,7 @@ use crate::{
     },
     ds::OutboundPacket,
     mls_crypto::{
-        DeMlsStorage, DecryptResult, MlsMessageKind, MlsProposalAction, MlsService,
-        StagedCommitResult,
+        IdentityProvider, MlsMessageKind, MlsProposalAction, MlsService, StagedCandidateResult,
     },
     protos::de_mls::messages::v1::{
         CommitCandidate, GroupUpdateRequest, ViolationEvidence, group_update_request::Payload,
@@ -73,13 +71,13 @@ pub(crate) fn compute_commit_hash(commit_message: &[u8]) -> Vec<u8> {
 /// Enforces the invariants [`finalize_freeze_round`] assumes: non-empty
 /// proposals/commit, valid MLS wire kinds, non-empty `steward_identity`,
 /// not already committed. No MLS state is mutated here.
-pub(crate) fn process_commit_candidate<S>(
+pub(crate) fn process_commit_candidate<M>(
     group: &mut Group,
     candidate_msg: CommitCandidate,
-    mls: &MlsService<S>,
+    mls: &M,
 ) -> Result<ProcessResult, CoreError>
 where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+    M: MlsService,
 {
     let group_name = group.group_name().to_owned();
 
@@ -154,14 +152,14 @@ where
 /// 2. Filter candidates by action count and rank them by RFC priority.
 /// 3. Apply in priority order, falling back on the next candidate when
 ///    MLS staging rejects the current one.
-pub fn finalize_freeze_round<S>(
+pub fn finalize_freeze_round<M>(
     group: &mut Group,
-    mls: &MlsService<S>,
+    mls: &M,
     allow_subset_candidates: bool,
     app_id: &[u8],
 ) -> Result<FreezeFinalizeResult, CoreError>
 where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+    M: MlsService,
 {
     let current_epoch = mls.current_epoch(group.group_name())?;
     group.lock_freeze_round_selection(current_epoch);
@@ -215,15 +213,11 @@ struct RoundContext {
 }
 
 impl RoundContext {
-    fn snapshot<S>(
-        group: &Group,
-        mls: &MlsService<S>,
-        current_epoch: u64,
-    ) -> Result<Self, CoreError>
+    fn snapshot<M>(group: &Group, mls: &M, current_epoch: u64) -> Result<Self, CoreError>
     where
-        S: DeMlsStorage<MlsStorage = MemoryStorage>,
+        M: MlsService,
     {
-        let self_identity = mls.wallet_bytes().to_vec();
+        let self_identity = mls.identity().identity_bytes().to_vec();
 
         let mut mls_actions: Vec<MlsProposalAction> = Vec::new();
         let mut self_remove_pending = false;
@@ -307,15 +301,15 @@ enum CandidateOutcome {
 /// `own_commit_discarded` enforces MLS's one-pending-commit rule: the
 /// first incoming attempt wipes our own pending commit, so a
 /// lower-priority local candidate afterwards has nothing to apply.
-fn apply_in_priority_order<S>(
+fn apply_in_priority_order<M>(
     group: &mut Group,
-    mls: &MlsService<S>,
+    mls: &M,
     sorted: Vec<BufferedCommitCandidate>,
     ctx: &RoundContext,
     app_id: &[u8],
 ) -> Result<FreezeFinalizeResult, CoreError>
 where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+    M: MlsService,
 {
     let mut score_ops: Vec<ScoreOp> = Vec::new();
     let mut own_commit_discarded = false;
@@ -468,15 +462,15 @@ fn compare_candidate_priority(
 /// Merge our own commit and send the deferred welcomes we held back.
 /// Validation happened at commit-creation time, so no re-staging is needed.
 /// Always returns `Terminal(Applied)` on a clean merge.
-fn apply_local_candidate<S>(
+fn apply_local_candidate<M>(
     group: &mut Group,
-    mls: &MlsService<S>,
+    mls: &M,
     chosen: BufferedCommitCandidate,
     self_removed: bool,
     app_id: &[u8],
 ) -> Result<CandidateOutcome, CoreError>
 where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+    M: MlsService,
 {
     // Local candidate: we wrote the message, so the wire-claimed identity
     // is our own and is trusted by definition.
@@ -513,15 +507,15 @@ where
 ///
 /// Caller must have discarded any own pending commit first — MLS allows
 /// only one per group at a time.
-fn apply_incoming_candidate<S>(
+fn apply_incoming_candidate<M>(
     group: &mut Group,
-    mls: &MlsService<S>,
+    mls: &M,
     chosen: BufferedCommitCandidate,
     expected_actions: &[MlsProposalAction],
     current_epoch: u64,
 ) -> Result<CandidateOutcome, CoreError>
 where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+    M: MlsService,
 {
     let group_name = group.group_name().to_owned();
 
@@ -614,50 +608,31 @@ enum StagingOutcome {
 ///
 /// Leaves MLS in the staged state on `Staged`; the caller must clean up via
 /// `discard_and_*` for `Abort` / `Violation`.
-fn stage_candidate<S>(
-    mls: &MlsService<S>,
+fn stage_candidate<M>(
+    mls: &M,
     group_name: &str,
     candidate: &CommitCandidate,
     current_epoch: u64,
 ) -> Result<StagingOutcome, CoreError>
 where
-    S: DeMlsStorage<MlsStorage = MemoryStorage>,
+    M: MlsService,
 {
-    // Any non-`ProposalStored` outcome from MLS aborts staging.
-    let mut proposal_senders: Vec<Vec<u8>> = Vec::new();
-    for (i, proposal_bytes) in candidate.mls_proposals.iter().enumerate() {
-        match mls.process_candidate_proposal(group_name, proposal_bytes) {
-            Ok(DecryptResult::ProposalStored(sender, _action)) => proposal_senders.push(sender),
-            outcome => {
-                tracing::debug!(
-                    group = group_name,
-                    index = i,
-                    outcome = ?outcome,
-                    "MLS proposal rejected during application"
-                );
-                return Ok(StagingOutcome::Abort);
-            }
-        }
-    }
-
-    let staged_result = match mls.process_commit(group_name, &candidate.commit_message) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::debug!(
-                group = group_name,
-                error = %e,
-                "commit failed to process during application"
-            );
-            return Ok(StagingOutcome::Abort);
-        }
-    };
-    let (commit_sender, self_removed, commit_actions) = match staged_result {
-        StagedCommitResult::Staged {
-            sender_identity,
-            self_removed,
-            actions,
-        } => (sender_identity, self_removed, actions),
-        StagedCommitResult::Ignored => return Ok(StagingOutcome::Abort),
+    let Ok(StagedCandidateResult::Staged {
+        commit_sender,
+        proposal_senders,
+        self_removed,
+        actions: commit_actions,
+    }) = mls
+        .apply_remote_candidate(
+            group_name,
+            &candidate.mls_proposals,
+            &candidate.commit_message,
+        )
+        .inspect_err(|e| {
+            tracing::debug!(group = group_name, error = %e, "candidate failed to stage");
+        })
+    else {
+        return Ok(StagingOutcome::Abort);
     };
 
     // Wire-claimed `steward_identity` must match the MLS-verified

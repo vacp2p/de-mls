@@ -2,7 +2,7 @@
 
 use openmls::key_packages::KeyPackage as MlsKeyPackage;
 
-use crate::mls_crypto::{MlsError, MlsServiceError};
+use crate::mls_crypto::MlsError;
 
 /// Serialized key package for joining groups.
 ///
@@ -75,26 +75,32 @@ pub enum DecryptResult {
     Ignored,
 }
 
-/// Result of inspecting a staged commit (before merging).
+/// Result of staging a remote candidate (proposal batch + commit).
 ///
-/// Returned by `MlsService::process_commit`. The `Staged` variant contains
-/// authenticated information needed to validate the batch. The `Ignored` variant
-/// signals a benign rejection (stale epoch, wrong group, non-commit message)
-/// where no sender was authenticated.
+/// Returned by `MlsService::apply_remote_candidate`. The `Staged` variant
+/// carries the MLS-authenticated senders of every staged proposal and of
+/// the commit, plus the membership-change actions extracted from the
+/// commit. `Aborted` signals a benign rejection (stale epoch, wrong group,
+/// non-proposal in a proposal slot, non-commit in the commit slot) where
+/// no validated outcome can be produced — the caller must NOT treat it as
+/// a violation but should clean MLS state via `discard_staged_commit`.
 #[derive(Clone, Debug)]
-pub enum StagedCommitResult {
-    /// Commit staged successfully. The sender identity is MLS-authenticated.
+pub enum StagedCandidateResult {
+    /// Candidate staged successfully. All identities are MLS-authenticated.
     Staged {
-        /// Identity (wallet bytes) of the commit sender, authenticated by MLS.
-        sender_identity: Vec<u8>,
+        /// Identity (wallet bytes) of the commit sender.
+        commit_sender: Vec<u8>,
+        /// Per-proposal sender identity, in input order. Caller cross-checks
+        /// these against the commit sender to detect bundles signed by
+        /// non-committers.
+        proposal_senders: Vec<Vec<u8>>,
         /// Whether this commit removes us from the group.
         self_removed: bool,
-        /// The membership changes (Add/Remove) contained in the commit's proposals.
+        /// Membership changes (Add/Remove) contained in the commit's proposals.
         actions: Vec<MlsProposalAction>,
     },
-    /// Message was benign but not processable (stale epoch, wrong group, non-commit).
-    /// No sender was authenticated — the caller must NOT treat this as a violation.
-    Ignored,
+    /// Candidate was benign but not processable. Caller cleans MLS state.
+    Aborted,
 }
 
 /// Result of creating a commit candidate (not merged yet).
@@ -115,7 +121,7 @@ pub struct CommitCandidate {
 /// - `identity` is the wallet address extracted from the credential
 pub fn key_package_bytes_from_json(json_bytes: Vec<u8>) -> Result<(Vec<u8>, Vec<u8>), MlsError> {
     let kp: MlsKeyPackage =
-        serde_json::from_slice(&json_bytes).map_err(MlsServiceError::InvalidKeyPackage)?;
+        serde_json::from_slice(&json_bytes).map_err(MlsError::KeyPackageJson)?;
     let identity = kp.leaf_node().credential().serialized_content().to_vec();
     Ok((json_bytes, identity))
 }

@@ -13,13 +13,18 @@ use crate::{
         DeMlsProvider, GroupEventHandler, ProposalKind, ScoreOp, apply_consensus_result,
         emergency_score_ops, group_members, target_identity_of,
     },
+    mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         GroupUpdateRequest, StewardElectionProposal, group_update_request,
     },
 };
 
-impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
-    User<P, H, SCH>
+impl<
+    P: DeMlsProvider,
+    M: MlsService,
+    H: GroupEventHandler + 'static,
+    SCH: StateChangeHandler + 'static,
+> User<P, M, H, SCH>
 {
     /// Entry point from the consensus service: decode the proposal, apply the
     /// result to the group, and dispatch to the correct follow-up handler
@@ -176,7 +181,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
 
         let is_valid = {
             let entry = entry_arc.read().await;
-            let members = group_members(&entry.group, &self.mls_service)?;
+            let members = group_members(&entry.group, self.mls_service.as_ref())?;
             entry.group.validate_steward_list_proposal(
                 &election.proposed_stewards,
                 election.election_epoch,

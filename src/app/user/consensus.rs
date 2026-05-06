@@ -19,6 +19,7 @@ use crate::{
         DeMlsProvider, GroupEventHandler, ProposalKind, build_message, group_members,
         target_identity_of,
     },
+    mls_crypto::{IdentityProvider, MlsService},
     protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest, VotePayload},
 };
 
@@ -39,8 +40,12 @@ struct NewProposal {
     creator_vote: Option<bool>,
 }
 
-impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
-    User<P, H, SCH>
+impl<
+    P: DeMlsProvider,
+    M: MlsService,
+    H: GroupEventHandler + 'static,
+    SCH: StateChangeHandler + 'static,
+> User<P, M, H, SCH>
 {
     /// Check that the group state allows creating a proposal of this kind and
     /// return the expected voter count.
@@ -79,7 +84,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             }
         }
 
-        let members = group_members(&entry.group, &self.mls_service)?;
+        let members = group_members(&entry.group, self.mls_service.as_ref())?;
         Ok(members.len() as u32)
     }
 
@@ -192,7 +197,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
         let (proposal_id, unbundled) = submit_proposal::<P>(
             group_name,
             &request,
-            self.mls_service.wallet_bytes(),
+            self.mls_service.identity().identity_bytes(),
             &self.consensus_service,
             ProposalParams {
                 expected_voters,
@@ -241,7 +246,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             None => unbundled,
         };
 
-        let packet = build_message(group_name, &self.mls_service, &outbound, &self.app_id)?;
+        let packet = build_message(
+            group_name,
+            self.mls_service.as_ref(),
+            &outbound,
+            &self.app_id,
+        )?;
         self.handler.on_outbound(group_name, packet).await?;
 
         match creator_vote {
@@ -355,7 +365,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             let entry = entry_arc.read().await;
             let pending = entry.state_machine.current_state() == GroupState::PendingJoin;
             let members = if !pending && self.mls_service.has_group(entry.group.group_name()) {
-                group_members(&entry.group, &self.mls_service)?
+                group_members(&entry.group, self.mls_service.as_ref())?
             } else {
                 Vec::new()
             };
@@ -447,7 +457,7 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             self.eth_signer.clone(),
         )
         .await?;
-        let packet = build_message(group_name, &self.mls_service, &app_message, &app_id)?;
+        let packet = build_message(group_name, self.mls_service.as_ref(), &app_message, &app_id)?;
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
     }
@@ -555,7 +565,12 @@ impl<P: DeMlsProvider, H: GroupEventHandler + 'static, SCH: StateChangeHandler +
             self.eth_signer.clone(),
         )
         .await?;
-        let packet = build_message(group_name, &self.mls_service, &app_message, &self.app_id)?;
+        let packet = build_message(
+            group_name,
+            self.mls_service.as_ref(),
+            &app_message,
+            &self.app_id,
+        )?;
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
     }

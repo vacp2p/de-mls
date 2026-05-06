@@ -7,7 +7,7 @@ mod memory;
 
 pub use memory::MemoryDeMlsStorage;
 
-use crate::mls_crypto::error::StorageError;
+use crate::mls_crypto::MlsError;
 
 /// Storage backend for DE-MLS.
 ///
@@ -32,13 +32,13 @@ pub trait DeMlsStorage: Send + Sync + 'static {
     // ─────────────────────────────────────────────────────────
 
     /// Store a key package hash reference as "ours".
-    fn store_key_package_ref(&self, hash_ref: &[u8]) -> Result<(), StorageError>;
+    fn store_key_package_ref(&self, hash_ref: &[u8]) -> Result<(), MlsError>;
 
     /// Check if a key package hash reference belongs to us.
-    fn is_our_key_package(&self, hash_ref: &[u8]) -> Result<bool, StorageError>;
+    fn is_our_key_package(&self, hash_ref: &[u8]) -> Result<bool, MlsError>;
 
     /// Remove a key package reference (after it's used in a welcome).
-    fn remove_key_package_ref(&self, hash_ref: &[u8]) -> Result<(), StorageError>;
+    fn remove_key_package_ref(&self, hash_ref: &[u8]) -> Result<(), MlsError>;
 
     // ─────────────────────────────────────────────────────────
     // OpenMLS Storage Delegation
