@@ -10,8 +10,8 @@ use tracing::{error, info};
 use crate::{
     app::{GroupState, StateChangeHandler, User, UserError},
     core::{
-        DeMlsProvider, GroupEventHandler, ProposalKind, ScoreOp, apply_consensus_result,
-        emergency_score_ops, group_members, target_identity_of,
+        DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProposalKind, ScoreOp,
+        apply_consensus_result, emergency_score_ops, group_members, target_identity_of,
     },
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
@@ -22,9 +22,10 @@ use crate::{
 impl<
     P: DeMlsProvider,
     M: MlsService,
+    Sc: PeerScoringPlugin,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, H, SCH>
+> User<P, M, Sc, H, SCH>
 where
     M::Identity: Clone,
 {
@@ -287,15 +288,19 @@ where
         payload: &[u8],
         score_ops: &[ScoreOp],
     ) -> Result<(), UserError> {
-        self.scoring().apply_ops(group_name, score_ops);
-
-        if let Ok(req) = GroupUpdateRequest::decode(payload)
-            && let Some(group_update_request::Payload::EmergencyCriteria(ec)) = &req.payload
-            && let Some(ev) = &ec.evidence
-            && let Some(entry_arc) = self.lookup_entry(group_name).await
-        {
+        if let Some(entry_arc) = self.lookup_entry(group_name).await {
             let mut entry = entry_arc.write().await;
-            entry.group.resolve_pending_removal(&ev.target_member_id);
+            // Events from this apply chain into the score-removal pass
+            // below (after `handle_emergency_scored` returns into its
+            // caller). The terminal `check_and_initiate_score_removals`
+            // call covers it, so we only need to drop the events here.
+            let _events = entry.scoring.apply_ops(score_ops);
+            if let Ok(req) = GroupUpdateRequest::decode(payload)
+                && let Some(group_update_request::Payload::EmergencyCriteria(ec)) = &req.payload
+                && let Some(ev) = &ec.evidence
+            {
+                entry.group.resolve_pending_removal(&ev.target_member_id);
+            }
         }
 
         let resumed_from_reelection = match self.lookup_entry(group_name).await {

@@ -2,7 +2,7 @@
 
 use crate::{
     app::{GroupState, MemberRole, StateChangeHandler, User, UserError},
-    core::{DeMlsProvider, GroupEventHandler, group_members},
+    core::{DeMlsProvider, GroupEventHandler, PeerScoringPlugin, group_members},
     mls_crypto::{MlsService, format_wallet_address},
     protos::de_mls::messages::v1::GroupUpdateRequest,
 };
@@ -10,9 +10,10 @@ use crate::{
 impl<
     P: DeMlsProvider,
     M: MlsService,
+    Sc: PeerScoringPlugin,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, H, SCH>
+> User<P, M, Sc, H, SCH>
 where
     M::Identity: Clone,
 {
@@ -87,12 +88,17 @@ where
             .collect())
     }
 
-    pub fn get_member_scores(&self, group_name: &str) -> Vec<(Vec<u8>, i64)> {
-        self.scoring().all_members_with_scores(group_name)
+    pub async fn get_member_scores(&self, group_name: &str) -> Vec<(Vec<u8>, i64)> {
+        match self.lookup_entry(group_name).await {
+            Some(entry_arc) => entry_arc.read().await.scoring.all_members_with_scores(),
+            None => Vec::new(),
+        }
     }
 
-    pub fn get_member_score(&self, group_name: &str, member_id: &[u8]) -> Option<i64> {
-        self.scoring().score_for(group_name, member_id)
+    pub async fn get_member_score(&self, group_name: &str, member_id: &[u8]) -> Option<i64> {
+        let entry_arc = self.lookup_entry(group_name).await?;
+        let entry = entry_arc.read().await;
+        entry.scoring.score_for(member_id)
     }
 
     /// Identities that have an in-flight self-leave request. Used by the UI

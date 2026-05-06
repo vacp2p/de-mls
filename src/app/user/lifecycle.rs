@@ -10,7 +10,9 @@ use crate::{
         GroupConfig, GroupState, GroupStateMachine, ProposalParams, StateChangeHandler, User,
         UserError, submit_self_leave_proposal, user::GroupEntry,
     },
-    core::{DeMlsProvider, Group, GroupEventHandler, auto_approved_leave_proposal_id},
+    core::{
+        DeMlsProvider, Group, GroupEventHandler, PeerScoringPlugin, auto_approved_leave_proposal_id,
+    },
     mls_crypto::{IdentityProvider, MlsService, parse_wallet_to_bytes},
     protos::de_mls::messages::v1::{GroupUpdateRequest, RemoveMember, group_update_request},
 };
@@ -18,9 +20,10 @@ use crate::{
 impl<
     P: DeMlsProvider,
     M: MlsService,
+    Sc: PeerScoringPlugin,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, H, SCH>
+> User<P, M, Sc, H, SCH>
 where
     M::Identity: Clone,
 {
@@ -48,7 +51,6 @@ where
         }
 
         let max_reelection_attempts = config.max_reelection_attempts;
-        let threshold_peer_score = config.threshold_peer_score;
         let liveness_criteria_yes = config.liveness_criteria_yes;
         let pending_update_max_epochs = config.pending_update_max_epochs;
         let self_identity_bytes = self.identity().identity_bytes().to_vec();
@@ -60,7 +62,7 @@ where
                 config.protocol.clone(),
                 mls,
             )?;
-            let state_machine = GroupStateMachine::new_as_member_with_config(config);
+            let state_machine = GroupStateMachine::new_as_member_with_config(config.clone());
             (group, state_machine)
         } else {
             let group: Group<M> = Group::prepare_to_join(
@@ -68,13 +70,21 @@ where
                 self_identity_bytes.clone(),
                 config.protocol.clone(),
             );
-            let state_machine = GroupStateMachine::new_as_pending_join_with_config(config);
+            let state_machine = GroupStateMachine::new_as_pending_join_with_config(config.clone());
             (group, state_machine)
         };
         group.set_max_reelection_attempts(max_reelection_attempts);
-        group.set_threshold_peer_score(threshold_peer_score);
         group.set_liveness_criteria_yes(liveness_criteria_yes);
         group.set_pending_update_max_epochs(pending_update_max_epochs);
+
+        let mut scoring = self.make_scoring_service();
+        // Joiners start tracked at `JoinedGroup` time (once members are known).
+        if is_creation {
+            // Creator is self at `default_score`; under standard config
+            // (`default > threshold`) no cross event fires, so we drop
+            // the return value here.
+            let _events = scoring.add_member(&self_identity_bytes);
+        }
 
         let initial_state = state_machine.current_state();
         if initial_state == GroupState::PendingJoin {
@@ -86,14 +96,9 @@ where
         }
         groups.insert(
             group_name.to_string(),
-            Arc::new(RwLock::new(GroupEntry::new(group, state_machine))),
+            Arc::new(RwLock::new(GroupEntry::new(group, state_machine, scoring))),
         );
         drop(groups);
-
-        // Joiners start tracked at `JoinedGroup` time (once members are known).
-        if is_creation {
-            self.scoring().add_member(group_name, &self_identity_bytes);
-        }
 
         self.state_handler
             .on_state_changed(group_name, initial_state)

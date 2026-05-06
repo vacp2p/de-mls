@@ -1,10 +1,11 @@
 //! [`User`] — multi-group facade over core. One node owns one `User`, which
-//! holds the MLS service, consensus service, event handler, peer-scoring
-//! service, and per-group state map. Methods split across the submodules:
-//! `lifecycle` (create/leave), `query` (read-only getters), `messaging`
-//! (send/ban), `consensus` (voting), `consensus_events` (outcome dispatch),
-//! `inbound` (packet dispatch), `freeze` (timers), `steward` (steward-side
-//! housekeeping).
+//! holds the consensus service, event handler, and per-group state map.
+//! Each group's MLS service and peer-scoring service live on the
+//! [`GroupEntry`] (one instance per group). Methods split across the
+//! submodules: `lifecycle` (create/leave), `query` (read-only getters),
+//! `messaging` (send/ban), `consensus` (voting), `consensus_events`
+//! (outcome dispatch), `inbound` (packet dispatch), `freeze` (timers),
+//! `steward` (steward-side housekeeping).
 //!
 //! `User` is `Clone` — all fields are `Arc` or cheap `Clone` — so background
 //! tasks just take their own handle via `self.clone()`.
@@ -22,11 +23,11 @@ use tokio::{sync::RwLock, task::JoinHandle};
 use crate::{
     app::{
         FixedScoringProvider, GroupConfig, GroupStateMachine, InMemoryPeerScoreStorage,
-        PeerScoringService, StateChangeHandler, UserError,
+        StateChangeHandler, UserError,
     },
     core::{
-        DeMlsProvider, DefaultProvider, Group, GroupEventHandler, ProposalId, ProviderConsensus,
-        ScoringConfig,
+        DeMlsProvider, DefaultProvider, Group, GroupEventHandler, PeerScoringEvent,
+        PeerScoringPlugin, PeerScoringService, ProposalId, ProviderConsensus, ScoringConfig,
     },
     mls_crypto::{
         IdentityProvider, KeyPackageBytes, MemoryDeMlsStorage, MlsError, MlsService,
@@ -48,13 +49,17 @@ mod steward;
 /// concern only; protocol logic in `core::Group` is history-agnostic.
 const MAX_EPOCH_HISTORY: usize = 10;
 
-pub(crate) struct GroupEntry<M: MlsService> {
+pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin> {
     /// `Group<M>` owns the per-group MLS service inside its own
     /// `Option<M>` slot — joiners in `PendingJoin` carry `None` until a
     /// welcome arrives, at which point the User attaches the service via
     /// [`Group::attach_mls`].
     group: Group<M>,
     state_machine: GroupStateMachine,
+    /// Per-group peer-score plug-in. Lives next to `state_machine` as
+    /// app-layer wiring; protocol decisions read it via the entry's
+    /// `RwLock`, no separate `Mutex` needed.
+    scoring: Sc,
     /// Per-group rolling history of committed batches, most recent last.
     /// Bounded at [`MAX_EPOCH_HISTORY`]. Populated by
     /// [`GroupEntry::archive_committed_batch`] from the snapshot
@@ -62,13 +67,14 @@ pub(crate) struct GroupEntry<M: MlsService> {
     epoch_history: VecDeque<HashMap<ProposalId, GroupUpdateRequest>>,
 }
 
-impl<M: MlsService> GroupEntry<M> {
+impl<M: MlsService, Sc: PeerScoringPlugin> GroupEntry<M, Sc> {
     /// Build a fresh entry. Internal-only auxiliary state (epoch
     /// history, future per-entry caches) starts empty.
-    pub(crate) fn new(group: Group<M>, state_machine: GroupStateMachine) -> Self {
+    pub(crate) fn new(group: Group<M>, state_machine: GroupStateMachine, scoring: Sc) -> Self {
         Self {
             group,
             state_machine,
+            scoring,
             epoch_history: VecDeque::new(),
         }
     }
@@ -85,6 +91,16 @@ impl<M: MlsService> GroupEntry<M> {
     }
 }
 
+/// `true` iff `events` contains at least one downward threshold cross —
+/// the signal coordinators react to by chaining into score-removal
+/// initiation. Helper kept here so every callsite uses the same
+/// triggering rule.
+pub(crate) fn has_downward_cross(events: &[PeerScoringEvent]) -> bool {
+    events
+        .iter()
+        .any(|e| matches!(e, PeerScoringEvent::ThresholdCrossedDown { .. }))
+}
+
 /// Registry of outstanding auto-vote timers, keyed by
 /// `(group_name, proposal_id)`. Cancelled on manual vote, consensus
 /// resolution, or group leave. Outer key is the group name (`Arc<str>` so
@@ -94,7 +110,7 @@ type AutoVoteTimers = Arc<Mutex<HashMap<Arc<str>, HashMap<u32, JoinHandle<()>>>>
 /// Per-user registry of group entries, with one outer lock for map CRUD
 /// and one inner lock per entry so writes on one group don't block reads
 /// on another.
-type GroupRegistry<M> = Arc<RwLock<HashMap<String, Arc<RwLock<GroupEntry<M>>>>>>;
+type GroupRegistry<M, Sc> = Arc<RwLock<HashMap<String, Arc<RwLock<GroupEntry<M, Sc>>>>>>;
 
 /// Factory closure that builds an [`MlsService`] for a fresh group.
 pub type MlsCreatorFactory<M> = Arc<dyn Fn(String) -> Result<M, MlsError> + Send + Sync + 'static>;
@@ -107,9 +123,19 @@ pub type MlsWelcomeFactory<M> =
 /// joiner can publish a key package before joining.
 pub type KeyPackageGenerator =
     Arc<dyn Fn() -> Result<KeyPackageBytes, MlsError> + Send + Sync + 'static>;
+/// Factory closure that builds a [`PeerScoringPlugin`] instance for a
+/// fresh group. Currently invoked with the user's default
+/// [`ScoringConfig`] derived from `default_group_config`; the parameter
+/// is forward-looking for per-group config overrides.
+pub type ScoringFactory<Sc> = Arc<dyn Fn(&ScoringConfig) -> Sc + Send + Sync + 'static>;
 
-pub struct User<P: DeMlsProvider, M: MlsService, H: GroupEventHandler, SCH: StateChangeHandler>
-where
+pub struct User<
+    P: DeMlsProvider,
+    M: MlsService,
+    Sc: PeerScoringPlugin,
+    H: GroupEventHandler,
+    SCH: StateChangeHandler,
+> where
     M::Identity: Clone,
 {
     /// Local identity, shared with every per-group MLS service this user
@@ -122,15 +148,14 @@ where
     mls_welcome_factory: MlsWelcomeFactory<M>,
     /// Generate a single-use key package using the user's storage + identity.
     kp_generator: KeyPackageGenerator,
+    /// Build a fresh peer-scoring plug-in for a new group entry.
+    scoring_factory: ScoringFactory<Sc>,
     /// Outer lock: map CRUD (insert / remove / iterate names).
     /// Inner per-entry lock: per-group reads and mutations. A write on
-    /// group A doesn't block reads on group B.
-    ///
-    /// Lock-order convention with [`Self::scoring_service`]: never hold
-    /// the scoring `Mutex` guard across `lookup_entry` or any acquisition
-    /// of the inner entry `RwLock`. Acquire `scoring()` in a single
-    /// statement and let the guard drop at the semicolon.
-    groups: GroupRegistry<M>,
+    /// group A doesn't block reads on group B. Per-group peer scoring
+    /// lives inside the entry, so scoring access is guarded by the same
+    /// `RwLock` — no separate scoring lock.
+    groups: GroupRegistry<M, Sc>,
     consensus_service: Arc<ProviderConsensus<P>>,
     eth_signer: PrivateKeySigner,
     handler: Arc<H>,
@@ -139,15 +164,19 @@ where
     /// Per-instance UUID embedded in every outbound packet. Inbound packets
     /// carrying our `app_id` are self-echoes and silently dropped.
     app_id: Vec<u8>,
-    scoring_service: Arc<Mutex<PeerScoringService<InMemoryPeerScoreStorage, FixedScoringProvider>>>,
     /// Per-proposal auto-vote timers. Spawned when a proposal first becomes
     /// visible locally (own submit or peer inbound); cancelled on manual
     /// vote, consensus resolution, or group leave.
     auto_vote_timers: AutoVoteTimers,
 }
 
-impl<P: DeMlsProvider, M: MlsService, H: GroupEventHandler, SCH: StateChangeHandler> Clone
-    for User<P, M, H, SCH>
+impl<
+    P: DeMlsProvider,
+    M: MlsService,
+    Sc: PeerScoringPlugin,
+    H: GroupEventHandler,
+    SCH: StateChangeHandler,
+> Clone for User<P, M, Sc, H, SCH>
 where
     M::Identity: Clone,
 {
@@ -157,6 +186,7 @@ where
             mls_creator_factory: Arc::clone(&self.mls_creator_factory),
             mls_welcome_factory: Arc::clone(&self.mls_welcome_factory),
             kp_generator: Arc::clone(&self.kp_generator),
+            scoring_factory: Arc::clone(&self.scoring_factory),
             groups: Arc::clone(&self.groups),
             consensus_service: Arc::clone(&self.consensus_service),
             eth_signer: self.eth_signer.clone(),
@@ -164,7 +194,6 @@ where
             state_handler: Arc::clone(&self.state_handler),
             default_group_config: self.default_group_config.clone(),
             app_id: self.app_id.clone(),
-            scoring_service: Arc::clone(&self.scoring_service),
             auto_vote_timers: Arc::clone(&self.auto_vote_timers),
         }
     }
@@ -173,9 +202,10 @@ where
 impl<
     P: DeMlsProvider,
     M: MlsService,
+    Sc: PeerScoringPlugin,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, H, SCH>
+> User<P, M, Sc, H, SCH>
 where
     M::Identity: Clone,
 {
@@ -185,44 +215,39 @@ where
         mls_creator_factory: MlsCreatorFactory<M>,
         mls_welcome_factory: MlsWelcomeFactory<M>,
         kp_generator: KeyPackageGenerator,
+        scoring_factory: ScoringFactory<Sc>,
         consensus_service: Arc<ProviderConsensus<P>>,
         eth_signer: PrivateKeySigner,
         handler: Arc<H>,
         state_handler: Arc<SCH>,
         default_group_config: GroupConfig,
     ) -> Self {
-        let scoring_config = ScoringConfig {
-            default_score: default_group_config.default_peer_score,
-        };
         Self {
             identity,
             mls_creator_factory,
             mls_welcome_factory,
             kp_generator,
+            scoring_factory,
             groups: Arc::new(RwLock::new(HashMap::new())),
             consensus_service,
             eth_signer,
             handler,
             state_handler,
             default_group_config,
-            scoring_service: Arc::new(Mutex::new(PeerScoringService::new(
-                InMemoryPeerScoreStorage::new(),
-                FixedScoringProvider::with_default_deltas(),
-                scoring_config,
-            ))),
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
             auto_vote_timers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Lock the scoring service, recovering from a poisoned mutex.
-    fn scoring(
-        &self,
-    ) -> std::sync::MutexGuard<'_, PeerScoringService<InMemoryPeerScoreStorage, FixedScoringProvider>>
-    {
-        self.scoring_service
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+    /// Build a fresh per-group scoring plug-in from the user's default
+    /// scoring config. Used by entry construction in lifecycle / welcome
+    /// paths.
+    pub(crate) fn make_scoring_service(&self) -> Sc {
+        let scoring_config = ScoringConfig {
+            default_score: self.default_group_config.default_peer_score,
+            threshold: self.default_group_config.threshold_peer_score,
+        };
+        (self.scoring_factory)(&scoring_config)
     }
 
     /// Look up a group entry. Returns `None` when the entry isn't present.
@@ -231,7 +256,7 @@ where
     pub(crate) async fn lookup_entry(
         &self,
         group_name: &str,
-    ) -> Option<Arc<RwLock<GroupEntry<M>>>> {
+    ) -> Option<Arc<RwLock<GroupEntry<M, Sc>>>> {
         self.groups.read().await.get(group_name).cloned()
     }
 
@@ -240,7 +265,7 @@ where
     pub(crate) async fn with_entry<R>(
         &self,
         group_name: &str,
-        f: impl FnOnce(&GroupEntry<M>) -> R,
+        f: impl FnOnce(&GroupEntry<M, Sc>) -> R,
     ) -> Option<R> {
         let entry_arc = self.lookup_entry(group_name).await?;
         let entry = entry_arc.read().await;
@@ -285,8 +310,13 @@ where
 /// `Arc<I>: IdentityProvider` blanket impls make this work).
 pub type DefaultMlsService = OpenMlsService<Arc<MemoryDeMlsStorage>, Arc<WalletIdentity>>;
 
+/// Peer-scoring plug-in type for the default-config `User`: the
+/// reference [`PeerScoringService`] over in-memory storage and a
+/// fixed-table provider.
+pub type DefaultPeerScoring = PeerScoringService<InMemoryPeerScoreStorage, FixedScoringProvider>;
+
 impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
-    User<DefaultProvider, DefaultMlsService, H, SCH>
+    User<DefaultProvider, DefaultMlsService, DefaultPeerScoring, H, SCH>
 {
     /// Construct a `User` on [`DefaultProvider`] with the default config.
     pub fn with_private_key(
@@ -345,12 +375,21 @@ impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
                 )
             })
         };
+        let scoring_factory: ScoringFactory<DefaultPeerScoring> =
+            Arc::new(|cfg: &ScoringConfig| {
+                PeerScoringService::new(
+                    InMemoryPeerScoreStorage::new(),
+                    FixedScoringProvider::with_default_deltas(),
+                    cfg.clone(),
+                )
+            });
 
         Ok(Self::new_with_config(
             identity,
             mls_creator_factory,
             mls_welcome_factory,
             kp_generator,
+            scoring_factory,
             consensus_service,
             signer,
             handler,

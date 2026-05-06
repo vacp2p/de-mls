@@ -6,7 +6,10 @@
 
 use prost::Message;
 
-use de_mls::core::{ScoreEvent, ScoreOp, apply_consensus_result, emergency_score_ops};
+use de_mls::core::{
+    PeerScoringEvent, PeerScoringPlugin, ScoreEvent, ScoreOp, ScoreSnapshot,
+    apply_consensus_result, emergency_score_ops,
+};
 use de_mls::protos::de_mls::messages::v1::{
     ViolationEvidence, ViolationType, group_update_request,
 };
@@ -124,6 +127,54 @@ fn test_score_below_threshold_no_penalizes_creator() {
     assert_eq!(group.approved_proposals_count(), 0);
 }
 
+/// Regression: after a SCORE_BELOW_THRESHOLD ECP resolves YES, the
+/// target is queued in `approved_proposals` as `RemoveMember(target)`
+/// but `pending_removal_targets` is cleared (the in-flight ECP is
+/// done). Their score has not changed and is still ≤ threshold. The
+/// steward MUST NOT submit a fresh duplicate ECP for the same target
+/// before the RemoveMember commits — `is_pending_removal` (queued in
+/// `approved_proposals`) plus `has_pending_removal` (in-flight ECP)
+/// together gate the next-pass scan.
+#[test]
+fn test_below_threshold_target_queued_for_removal_is_not_re_proposed() {
+    let group_name = "removal-no-duplicate";
+    let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+    let mut group = setup_steward(group_name, alice_hex);
+    let steward_id = group.self_identity().to_vec();
+    let target_id = vec![0xEE];
+
+    // Stand the target at threshold (score == 0).
+    let evidence = ViolationEvidence::score_below_threshold(target_id.clone(), 0, 0)
+        .with_creator(steward_id.clone());
+    let request = evidence.into_update_request().unwrap();
+    let payload = request.encode_to_vec();
+    let proposal_id = 300;
+    group.store_voting_proposal(proposal_id, request);
+    group.observe_pending_removal(target_id.clone());
+    apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
+
+    // Mirror the User layer: clear the in-flight dedup on resolution.
+    group.resolve_pending_removal(&target_id);
+
+    // The target is queued for removal — `is_pending_removal` must say so.
+    assert!(
+        group.is_pending_removal(&target_id),
+        "RemoveMember should be queued in approved_proposals"
+    );
+    // The ECP-in-flight dedup is cleared (mirrors handle_emergency_scored).
+    assert!(
+        !group.has_pending_removal(&target_id),
+        "in-flight ECP dedup is cleared once the ECP resolves"
+    );
+    // Both gates together must keep the steward from re-proposing.
+    let would_re_propose =
+        !group.has_pending_removal(&target_id) && !group.is_pending_removal(&target_id);
+    assert!(
+        !would_re_propose,
+        "steward must skip a target already queued in approved_proposals"
+    );
+}
+
 /// Full pipeline: penalties → below threshold → ECP → YES → RemoveMember in queue.
 #[test]
 fn test_full_pipeline_penalties_to_removal() {
@@ -133,37 +184,30 @@ fn test_full_pipeline_penalties_to_removal() {
     let steward_id = group.self_identity().to_vec();
     let target_id = vec![0xDD];
 
-    let threshold = group.threshold_peer_score();
     let mut scoring = make_scoring();
-    scoring.add_member(group_name, &steward_id);
-    scoring.add_member(group_name, &target_id);
+    let _ = scoring.add_member(&steward_id);
+    let _ = scoring.add_member(&target_id);
 
     // Apply penalties until target drops below threshold
     // 100 - 50 = 50 (BrokenCommit)
-    scoring.apply_op(
-        group_name,
-        &ScoreOp {
-            member_id: target_id.clone(),
-            event: ScoreEvent::BrokenCommit,
-        },
-    );
-    assert!(!scoring.is_below_threshold(group_name, &target_id, threshold));
+    let _ = scoring.apply_op(&ScoreOp {
+        member_id: target_id.clone(),
+        event: ScoreEvent::BrokenCommit,
+    });
+    assert!(!scoring.members_below_threshold().contains(&target_id));
 
     // 50 - 50 = 0 (EmergencyNoCreator)
-    scoring.apply_op(
-        group_name,
-        &ScoreOp {
-            member_id: target_id.clone(),
-            event: ScoreEvent::EmergencyNoCreator,
-        },
-    );
-    assert!(scoring.is_below_threshold(group_name, &target_id, threshold));
+    let _ = scoring.apply_op(&ScoreOp {
+        member_id: target_id.clone(),
+        event: ScoreEvent::EmergencyNoCreator,
+    });
+    assert!(scoring.members_below_threshold().contains(&target_id));
 
     // Now steward creates SCORE_BELOW_THRESHOLD ECP
-    let below = scoring.members_below_threshold(group_name, threshold);
+    let below = scoring.members_below_threshold();
     assert!(below.contains(&target_id));
 
-    let current_score = scoring.score_for(group_name, &target_id).unwrap();
+    let current_score = scoring.score_for(&target_id).unwrap();
     let evidence = ViolationEvidence::score_below_threshold(target_id.clone(), 0, current_score)
         .with_creator(steward_id.clone());
     let request = evidence.into_update_request().unwrap();
@@ -177,7 +221,7 @@ fn test_full_pipeline_penalties_to_removal() {
     let score_ops = emergency_score_ops(&payload, true);
 
     // Apply score ops
-    scoring.apply_ops(group_name, &score_ops);
+    let _ = scoring.apply_ops(&score_ops);
 
     // RemoveMember should be in approved queue
     assert_eq!(group.approved_proposals_count(), 1);
@@ -216,53 +260,35 @@ fn test_dedup_pending_removal_targets() {
 fn test_steward_skips_self_for_removal() {
     let group_name = "removal-self-guard";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-    let group = setup_steward(group_name, alice_hex);
-    let threshold = group.threshold_peer_score();
+    let _group = setup_steward(group_name, alice_hex);
 
     let mut scoring = make_scoring();
 
     let steward_id = vec![0x01];
     let other_id = vec![0x02];
 
-    scoring.add_member(group_name, &steward_id);
-    scoring.add_member(group_name, &other_id);
+    let _ = scoring.add_member(&steward_id);
+    let _ = scoring.add_member(&other_id);
 
     // Drop both below threshold
-    scoring.apply_op(
-        group_name,
-        &ScoreOp {
+    for event in [ScoreEvent::BrokenCommit, ScoreEvent::EmergencyNoCreator] {
+        let _ = scoring.apply_op(&ScoreOp {
             member_id: steward_id.clone(),
-            event: ScoreEvent::BrokenCommit,
-        },
-    );
-    scoring.apply_op(
-        group_name,
-        &ScoreOp {
-            member_id: steward_id.clone(),
-            event: ScoreEvent::EmergencyNoCreator,
-        },
-    );
-    scoring.apply_op(
-        group_name,
-        &ScoreOp {
+            event,
+        });
+        let _ = scoring.apply_op(&ScoreOp {
             member_id: other_id.clone(),
-            event: ScoreEvent::BrokenCommit,
-        },
-    );
-    scoring.apply_op(
-        group_name,
-        &ScoreOp {
-            member_id: other_id.clone(),
-            event: ScoreEvent::EmergencyNoCreator,
-        },
-    );
+            event,
+        });
+    }
 
-    assert!(scoring.is_below_threshold(group_name, &steward_id, threshold));
-    assert!(scoring.is_below_threshold(group_name, &other_id, threshold));
+    let below = scoring.members_below_threshold();
+    assert!(below.contains(&steward_id));
+    assert!(below.contains(&other_id));
 
     // Filter as the steward would
     let targets: Vec<Vec<u8>> = scoring
-        .members_below_threshold(group_name, threshold)
+        .members_below_threshold()
         .into_iter()
         .filter(|id| *id != steward_id)
         .collect();
@@ -271,39 +297,83 @@ fn test_steward_skips_self_for_removal() {
     assert_eq!(targets[0], other_id);
 }
 
-/// `members_below_threshold` selects against the threshold passed in,
-/// not a global default.
+/// `apply_ops` emits `ThresholdCrossedDown` exactly when a member
+/// crosses the threshold downward, and `members_below_threshold`
+/// surfaces them. This is the trigger condition the User layer chains
+/// into [`check_and_initiate_score_removals`] on, in `freeze.rs` and
+/// `consensus_events.rs`.
+#[test]
+fn test_apply_ops_emits_event_and_marks_below_threshold() {
+    let target = vec![0xAA];
+    let bystander = vec![0xBB];
+
+    let mut scoring = make_scoring();
+    let _ = scoring.add_member(&target);
+    let _ = scoring.add_member(&bystander);
+
+    // 100 → 50 (BrokenCommit) — still above threshold 0, no event.
+    let events = scoring.apply_ops(&[ScoreOp {
+        member_id: target.clone(),
+        event: ScoreEvent::BrokenCommit,
+    }]);
+    assert!(events.is_empty(), "above threshold, no event");
+    assert!(!scoring.members_below_threshold().contains(&target));
+
+    // 50 → 0 (EmergencyNoCreator) — crosses to at-or-below threshold.
+    let events = scoring.apply_ops(&[ScoreOp {
+        member_id: target.clone(),
+        event: ScoreEvent::EmergencyNoCreator,
+    }]);
+    assert_eq!(events.len(), 1, "exactly one cross event");
+    assert!(matches!(
+        events[0],
+        PeerScoringEvent::ThresholdCrossedDown { ref member_id, score: 0 }
+            if *member_id == target
+    ));
+    assert!(scoring.members_below_threshold().contains(&target));
+    assert!(!scoring.members_below_threshold().contains(&bystander));
+
+    // Re-applying ops on an already-below member emits no further
+    // event — coordinator dedup at this layer keeps the chain quiet.
+    let events = scoring.apply_ops(&[ScoreOp {
+        member_id: target.clone(),
+        event: ScoreEvent::BrokenCommit,
+    }]);
+    assert!(events.is_empty(), "already below threshold, no re-fire");
+}
+
+/// `members_below_threshold` honours the threshold stored in the
+/// service's [`ScoringConfig`], including post-construction updates via
+/// `set_threshold`.
 #[test]
 fn test_members_below_threshold_uses_per_group_value() {
-    let group_name = "per-group-threshold";
-    let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-    let group = setup_steward(group_name, alice_hex);
-    assert_eq!(
-        group.threshold_peer_score(),
-        de_mls::core::DEFAULT_THRESHOLD_PEER_SCORE
-    );
-
     let alice = vec![0xAA];
     let bob = vec![0xBB];
     let carol = vec![0xCC];
 
     let mut scoring = make_scoring();
-    scoring.add_member(group_name, &alice);
-    scoring.add_member(group_name, &bob);
-    scoring.add_member(group_name, &carol);
-    scoring.set_score(group_name, &alice, -10);
-    scoring.set_score(group_name, &bob, -30);
-    scoring.set_score(group_name, &carol, -60);
+    let _ = scoring.add_member(&alice);
+    let _ = scoring.add_member(&bob);
+    let _ = scoring.add_member(&carol);
+    let _ = scoring.apply_snapshot(&ScoreSnapshot {
+        diverged: vec![
+            (alice.clone(), -10),
+            (bob.clone(), -30),
+            (carol.clone(), -60),
+        ],
+    });
 
     // Strict threshold (-50): only Carol qualifies for removal.
-    let strict = scoring.members_below_threshold(group_name, -50);
+    scoring.set_threshold(-50);
+    let strict = scoring.members_below_threshold();
     assert!(strict.contains(&carol));
     assert!(!strict.contains(&bob));
     assert!(!strict.contains(&alice));
 
     // Loose threshold (-25, e.g. after a GroupSync reduced strictness):
     // both Bob and Carol qualify; Alice still safe.
-    let loose = scoring.members_below_threshold(group_name, -25);
+    scoring.set_threshold(-25);
+    let loose = scoring.members_below_threshold();
     assert!(loose.contains(&bob));
     assert!(loose.contains(&carol));
     assert!(!loose.contains(&alice));

@@ -28,7 +28,7 @@ pub(crate) async fn load_member_info(
 ) -> anyhow::Result<Vec<MemberInfo>> {
     let user = user.read().await;
     let addresses = user.get_group_members(group_name).await?;
-    let scores = user.get_member_scores(group_name);
+    let scores = user.get_member_scores(group_name).await;
     let roles = user.get_member_roles(group_name).await.unwrap_or_default();
     let pending_leavers: Vec<String> = user
         .get_pending_leave_identities(group_name)

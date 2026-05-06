@@ -34,8 +34,9 @@ pub use api::{
 // ── Consensus result application (pure, synchronous) ──
 pub use consensus::{ConsensusApplyResult, apply_consensus_result};
 pub use peer_scoring::{
-    PeerScoreStorage, ScoreEvent, ScoreOp, ScoringConfig, ScoringMemberDiff, ScoringProvider,
-    emergency_score_ops, scoring_member_diff,
+    DEFAULT_THRESHOLD_PEER_SCORE, PeerScoreStorage, PeerScoringEvent, PeerScoringPlugin,
+    PeerScoringService, ScoreEvent, ScoreOp, ScoreSnapshot, ScoringConfig, ScoringMemberDiff,
+    ScoringProvider, emergency_score_ops, scoring_member_diff,
 };
 
 // ── Error type ──
@@ -48,8 +49,8 @@ pub use events::{CallbackError, GroupEventHandler};
 pub(crate) use group::member_set;
 pub use group::{
     DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_MAX_REELECTION_ATTEMPTS,
-    DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_THRESHOLD_PEER_SCORE, Group, PendingUpdate,
-    ProposalId, auto_approved_leave_proposal_id, target_identity_of,
+    DEFAULT_PENDING_UPDATE_MAX_EPOCHS, Group, PendingUpdate, ProposalId,
+    auto_approved_leave_proposal_id, target_identity_of,
 };
 
 // ── Proposal classification ──

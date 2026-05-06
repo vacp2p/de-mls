@@ -5,19 +5,22 @@ use tracing::{error, info};
 use crate::{
     app::{FreezeTimeoutStatus, GroupState, StateChangeHandler, User, UserError},
     core::{
-        DeMlsProvider, FreezeFinalizeResult, FreezeOutcome, GroupEventHandler, ScoreEvent, ScoreOp,
-        create_commit_candidate, finalize_freeze_round, group_members,
+        DeMlsProvider, FreezeFinalizeResult, FreezeOutcome, GroupEventHandler, PeerScoringPlugin,
+        ScoreEvent, ScoreOp, create_commit_candidate, finalize_freeze_round, group_members,
     },
     ds::WELCOME_SUBTOPIC,
     mls_crypto::{IdentityProvider, MlsService},
 };
 
+use super::has_downward_cross;
+
 impl<
     P: DeMlsProvider,
     M: MlsService,
+    Sc: PeerScoringPlugin,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, H, SCH>
+> User<P, M, Sc, H, SCH>
 where
     M::Identity: Clone,
 {
@@ -91,7 +94,7 @@ where
             .on_state_changed(group_name, GroupState::Selection)
             .await;
 
-        let finalize_result = {
+        let (finalize_result, downward_cross) = {
             let mut entry = entry_arc.write().await;
             let allow_subset = entry.group.allow_subset_candidates();
             let result = if entry.group.mls().is_some() {
@@ -106,15 +109,27 @@ where
                 FreezeFinalizeResult::default()
             };
             entry.archive_committed_batch(result.committed_batch.clone());
-            result
+            // Apply locally-observed score events before releasing the
+            // entry lock. These come from dropped candidates in the
+            // phase-3 loop (RFC §Peer Scoring: direct local observation,
+            // no ECP needed). A downward threshold cross schedules a
+            // removal-init pass below, after the lock drops.
+            let cross = if !result.score_ops.is_empty() {
+                let events = entry.scoring.apply_ops(&result.score_ops);
+                has_downward_cross(&events)
+            } else {
+                false
+            };
+            (result, cross)
         };
 
-        // Apply locally-observed score events before dispatching the
-        // outcome. These come from dropped candidates in the phase-3 loop
-        // (RFC §Peer Scoring: direct local observation, no ECP needed).
-        if !finalize_result.score_ops.is_empty() {
-            self.scoring()
-                .apply_ops(group_name, &finalize_result.score_ops);
+        // Lock split is intentional: `check_and_initiate_score_removals`
+        // re-acquires the entry write lock and calls `initiate_proposal`
+        // which `.await`s on the consensus service. Holding the entry
+        // lock across that await would block other operations on this
+        // group, so we drop the lock above before chaining.
+        if downward_cross && let Err(e) = self.check_and_initiate_score_removals(group_name).await {
+            error!(group = group_name, error = %e, "score-removal check failed (freeze finalize)");
         }
 
         match finalize_result.outcome {
@@ -150,7 +165,7 @@ where
                 // other than ourselves. Self-penalties are skipped — the
                 // node that failed to commit observes its own state directly
                 // and doesn't need to record a ScoreOp against itself.
-                let (next_state, accuse_target) = {
+                let (next_state, downward_cross) = {
                     let mut entry = entry_arc.write().await;
 
                     if has_proposals {
@@ -160,7 +175,12 @@ where
                         entry.state_machine.clear_proposal_timer();
                         entry.state_machine.start_reelection();
 
-                        let target = match entry.group.mls() {
+                        // Local observation → direct peer-score penalty,
+                        // no ECP round-trip. Each honest member records
+                        // the same event independently; threshold-crossing
+                        // removal still goes through SCORE_BELOW_THRESHOLD
+                        // consensus in steward.rs.
+                        let accuse_target = match entry.group.mls() {
                             Some(mls) => {
                                 let violation_epoch = mls.current_epoch()?;
                                 let self_identity = self.identity().identity_bytes();
@@ -173,33 +193,34 @@ where
                             }
                             None => None,
                         };
+                        let cross = if let Some(steward_id) = accuse_target {
+                            let events = entry.scoring.apply_op(&ScoreOp {
+                                member_id: steward_id,
+                                event: ScoreEvent::CensorshipInactivity,
+                            });
+                            has_downward_cross(&events)
+                        } else {
+                            false
+                        };
 
-                        (GroupState::Reelection, target)
+                        (GroupState::Reelection, cross)
                     } else {
                         entry.group.clear_freeze_round();
                         entry.state_machine.start_working();
-                        (GroupState::Working, None)
+                        (GroupState::Working, false)
                     }
                 };
+
+                if downward_cross
+                    && let Err(e) = self.check_and_initiate_score_removals(group_name).await
+                {
+                    error!(group = group_name, error = %e, "score-removal check failed (freeze timeout)");
+                }
 
                 let entered_reelection = next_state == GroupState::Reelection;
                 self.state_handler
                     .on_state_changed(group_name, next_state)
                     .await;
-
-                if let Some(steward_id) = accuse_target {
-                    // Local observation → direct peer-score penalty, no ECP
-                    // round-trip. Each honest member records the same event
-                    // independently; threshold-crossing removal still goes
-                    // through SCORE_BELOW_THRESHOLD consensus in steward.rs.
-                    self.scoring().apply_op(
-                        group_name,
-                        &ScoreOp {
-                            member_id: steward_id,
-                            event: ScoreEvent::CensorshipInactivity,
-                        },
-                    );
-                }
 
                 // Layer 2 recovery: regenerate the steward list. Only the
                 // responsible proposer's call actually submits.

@@ -10,8 +10,9 @@ use crate::{
         forward_incoming_vote,
     },
     core::{
-        DeMlsProvider, GroupEventHandler, ProcessResult, ProposalKind, ProtocolConfig, StewardList,
-        create_commit_candidate, group_members, member_set, process_inbound,
+        DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProcessResult, ProposalKind,
+        ProtocolConfig, ScoreSnapshot, StewardList, create_commit_candidate, group_members,
+        member_set, process_inbound,
     },
     ds::{APP_MSG_SUBTOPIC, InboundPacket, WELCOME_SUBTOPIC},
     mls_crypto::{IdentityProvider, MlsService, ShortId, key_package_bytes_from_json},
@@ -24,9 +25,10 @@ use crate::{
 impl<
     P: DeMlsProvider,
     M: MlsService,
+    Sc: PeerScoringPlugin,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, H, SCH>
+> User<P, M, Sc, H, SCH>
 where
     M::Identity: Clone,
 {
@@ -167,7 +169,7 @@ where
         };
         self.handler.on_outbound(name, packet).await?;
         self.handler.on_joined_group(name).await?;
-        self.sync_scoring_members(name, &mls_members);
+        self.sync_scoring_members(name, &mls_members).await;
 
         let state = {
             let mut entry = entry_arc.write().await;
@@ -192,7 +194,7 @@ where
                     Vec::new()
                 }
             };
-            self.sync_scoring_members(group_name, &mls_members);
+            self.sync_scoring_members(group_name, &mls_members).await;
         }
         self.prune_pending_updates_after_commit(group_name).await?;
 
@@ -259,11 +261,12 @@ where
         if let Some(entry) = entry {
             // Drop MLS state for the departing group: take the service out
             // of the Group so its `delete()` runs before the entry drops.
+            // Per-group scoring is dropped when the entry leaves the
+            // registry below.
             if let Some(mls) = entry.write().await.group.take_mls() {
                 let _ = mls.delete();
             }
         }
-        self.scoring().remove_group(group_name);
         self.cleanup_consensus_scope(group_name).await?;
         self.handler.on_leave_group(group_name).await?;
         Ok(())
@@ -346,13 +349,6 @@ where
         let sn = sync.steward_members.len();
         self.apply_group_sync_to_entry(group_name, &sync).await?;
 
-        if !sync.peer_scores.is_empty() {
-            let mut scoring = self.scoring();
-            for ps in &sync.peer_scores {
-                scoring.set_score(group_name, &ps.member_id, ps.score);
-            }
-        }
-
         info!(
             group = group_name,
             election_epoch = sync.election_epoch,
@@ -388,9 +384,20 @@ where
         entry
             .group
             .set_max_reelection_attempts(sync.max_reelection_attempts);
-        entry
-            .group
-            .set_threshold_peer_score(sync.threshold_peer_score);
+        entry.scoring.set_threshold(sync.threshold_peer_score);
+        let snapshot = ScoreSnapshot {
+            diverged: sync
+                .peer_scores
+                .iter()
+                .map(|ps| (ps.member_id.clone(), ps.score))
+                .collect(),
+        };
+        // The GroupSync sender (an existing steward) holds the same
+        // scores and is the canonical actor for any below-threshold
+        // member in this snapshot — they'll submit
+        // `SCORE_BELOW_THRESHOLD` from their own event chain. Drop our
+        // events to avoid duplicate proposals from joiners.
+        let _events = entry.scoring.apply_snapshot(&snapshot);
         entry
             .group
             .set_liveness_criteria_yes(sync.liveness_criteria_yes);

@@ -6,7 +6,7 @@ use tracing::{error, info};
 use crate::{
     app::{StateChangeHandler, User, UserError},
     core::{
-        DeMlsProvider, ElectionDecision, GroupEventHandler, StewardList,
+        DeMlsProvider, ElectionDecision, GroupEventHandler, PeerScoringPlugin, StewardList,
         evaluate_election_initiation, group_members, is_deadlock_ecp_proposer, member_set,
         scoring_member_diff, target_identity_of,
     },
@@ -20,30 +20,37 @@ use crate::{
 impl<
     P: DeMlsProvider,
     M: MlsService,
+    Sc: PeerScoringPlugin,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, H, SCH>
+> User<P, M, Sc, H, SCH>
 where
     M::Identity: Clone,
 {
     /// Add any MLS members not yet tracked in scoring, and drop scored
-    /// entries for identities no longer in MLS. Takes `mls_members`
-    /// pre-fetched so the caller can release any group-entry guard
-    /// before the scoring mutex is acquired. Diffing is delegated to
+    /// entries for identities no longer in MLS. Diffing is delegated to
     /// [`scoring_member_diff`]; this method only applies the diff.
-    pub fn sync_scoring_members(&self, group_name: &str, mls_members: &[Vec<u8>]) {
-        let mut scoring = self.scoring();
-        let scored: Vec<Vec<u8>> = scoring
-            .all_members_with_scores(group_name)
+    pub async fn sync_scoring_members(&self, group_name: &str, mls_members: &[Vec<u8>]) {
+        let Some(entry_arc) = self.lookup_entry(group_name).await else {
+            return;
+        };
+        let mut entry = entry_arc.write().await;
+        let scored: Vec<Vec<u8>> = entry
+            .scoring
+            .all_members_with_scores()
             .into_iter()
             .map(|(id, _)| id)
             .collect();
         let diff = scoring_member_diff(&scored, mls_members);
         for member_id in &diff.to_add {
-            scoring.add_member(group_name, member_id);
+            // Under the standard config (`default > threshold`) this
+            // returns no events; an exotic config could surface a fresh
+            // member as below-threshold, but the score-removal chain
+            // doesn't fire on membership-sync ticks today.
+            let _events = entry.scoring.add_member(member_id);
         }
         for member_id in &diff.to_remove {
-            scoring.remove_member(group_name, member_id);
+            entry.scoring.remove_member(member_id);
         }
     }
 
@@ -359,25 +366,27 @@ where
     /// commit so new joiners can fully participate. Idempotent for members
     /// who already have a steward list.
     pub async fn send_group_sync(&self, group_name: &str) -> Result<(), UserError> {
-        // Read scores under the sync Mutex first — no `.await` held across it.
-        let scores: Vec<PeerScore> = {
-            let scoring = self.scoring();
-            scoring
-                .all_members_with_scores(group_name)
-                .into_iter()
-                .map(|(id, score)| PeerScore {
-                    member_id: id,
-                    score,
-                })
-                .collect()
-        };
-
         let entry_arc = self
             .lookup_entry(group_name)
             .await
             .ok_or(UserError::GroupNotFound)?;
         let packet = {
             let entry = entry_arc.read().await;
+            // Sparse snapshot — only members whose score has diverged
+            // from `default_score`. Joiners init every member at default
+            // via membership sync before applying the snapshot, so
+            // missing entries imply default. Saves wire size at scale
+            // (Waku message budget concern past ~1k members).
+            let scores: Vec<PeerScore> = entry
+                .scoring
+                .snapshot()
+                .diverged
+                .into_iter()
+                .map(|(id, score)| PeerScore {
+                    member_id: id,
+                    score,
+                })
+                .collect();
 
             let list = match entry.group.steward_list() {
                 Some(l) => l,
@@ -418,7 +427,7 @@ where
                 retry_round: list.retry_round(),
                 max_reelection_attempts: entry.group.max_reelection_attempts(),
                 liveness_criteria_yes: entry.group.liveness_criteria_yes(),
-                threshold_peer_score: entry.group.threshold_peer_score(),
+                threshold_peer_score: entry.scoring.threshold(),
                 pending_update_max_epochs: entry.group.pending_update_max_epochs(),
             };
 
@@ -442,45 +451,51 @@ where
             .lookup_entry(group_name)
             .await
             .ok_or(UserError::GroupNotFound)?;
-        let (is_steward, threshold, epoch) = {
-            let entry = entry_arc.read().await;
-            let mls = entry.group.expect_mls()?;
-            (
-                entry.group.is_steward(),
-                entry.group.threshold_peer_score(),
-                mls.current_epoch()?,
-            )
-        };
         let self_id = self.identity().identity_bytes();
+
+        // Reactive entry: callers chain into this after a scoring apply
+        // emitted a downward cross, so we expect at least one tracked
+        // member to be at-or-below threshold. The scan is the source of
+        // truth — events just trigger the look.
+        let (is_steward, epoch, to_remove): (bool, u64, Vec<(Vec<u8>, i64)>) = {
+            let mut entry = entry_arc.write().await;
+            let mls = entry.group.expect_mls()?;
+            let is_steward = entry.group.is_steward();
+            let epoch = mls.current_epoch()?;
+            if !is_steward {
+                return Ok(());
+            }
+            // Two dedup gates:
+            //   - `has_pending_removal` — there's an in-flight ECP for
+            //     this target (live consensus session).
+            //   - `is_pending_removal` — `RemoveMember(target)` is
+            //     already queued in `approved_proposals` waiting for
+            //     the next commit. Without this gate, a just-resolved
+            //     SCORE_BELOW_THRESHOLD ECP (which clears
+            //     `pending_removal_targets` on resolve, but leaves the
+            //     target in `approved_proposals` with their score still
+            //     ≤ threshold) would re-fire a duplicate ECP for the
+            //     same target before the RemoveMember commits.
+            let to_remove = entry
+                .scoring
+                .members_below_threshold()
+                .into_iter()
+                .filter(|id| *id != self_id)
+                .filter(|id| !entry.group.has_pending_removal(id))
+                .filter(|id| !entry.group.is_pending_removal(id))
+                .filter_map(|id| {
+                    let score = entry.scoring.score_for(&id)?;
+                    Some((id, score))
+                })
+                .collect::<Vec<_>>();
+            for (id, _) in &to_remove {
+                entry.group.observe_pending_removal(id.clone());
+            }
+            (is_steward, epoch, to_remove)
+        };
 
         if !is_steward {
             return Ok(());
-        }
-
-        let targets: Vec<(Vec<u8>, i64)> = {
-            let scoring = self.scoring();
-            scoring
-                .members_below_threshold(group_name, threshold)
-                .into_iter()
-                .filter(|id| *id != self_id) // self-removal handled separately
-                .map(|id| {
-                    let score = scoring.score_for(group_name, &id).unwrap_or(0);
-                    (id, score)
-                })
-                .collect()
-        };
-
-        // Mark all targets pending under a single write-lock, then submit
-        // proposals outside the lock to avoid holding it across `.await`.
-        let mut to_remove = Vec::new();
-        if let Some(entry_arc) = self.lookup_entry(group_name).await {
-            let mut entry = entry_arc.write().await;
-            for (target_id, current_score) in targets {
-                if !entry.group.has_pending_removal(&target_id) {
-                    entry.group.observe_pending_removal(target_id.clone());
-                    to_remove.push((target_id, current_score));
-                }
-            }
         }
 
         // Submit proposals without holding the lock.

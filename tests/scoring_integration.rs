@@ -4,9 +4,9 @@
 
 use prost::Message;
 
-use de_mls::app::PeerScoringService;
 use de_mls::core::{
-    Group, ScoreEvent, ScoreOp, apply_consensus_result, emergency_score_ops, group_members,
+    Group, PeerScoringPlugin, PeerScoringService, ScoreEvent, ScoreOp, apply_consensus_result,
+    emergency_score_ops, group_members,
 };
 use de_mls::ds::WELCOME_SUBTOPIC;
 
@@ -17,25 +17,27 @@ use common::{
 
 /// Sync the scoring service's member list with the MLS group's actual members.
 /// Mirrors `User::sync_scoring_members`.
-fn sync_scoring_members<S: de_mls::core::PeerScoreStorage, P: de_mls::core::ScoringProvider>(
+fn sync_scoring_members<
+    S: de_mls::core::PeerScoreStorage + Send + Sync + 'static,
+    P: de_mls::core::ScoringProvider + Send + Sync + 'static,
+>(
     scoring: &mut PeerScoringService<S, P>,
-    group_name: &str,
     group: &Group<TestMls>,
 ) {
     let mls_members = group_members(group).unwrap();
-    let scored = scoring.all_members_with_scores(group_name);
+    let scored = scoring.all_members_with_scores();
     let scored_ids: std::collections::HashSet<Vec<u8>> =
         scored.iter().map(|(id, _)| id.clone()).collect();
     let mls_ids: std::collections::HashSet<Vec<u8>> = mls_members.into_iter().collect();
 
     for member_id in &mls_ids {
         if !scored_ids.contains(member_id) {
-            scoring.add_member(group_name, member_id);
+            let _ = scoring.add_member(member_id);
         }
     }
     for member_id in &scored_ids {
         if !mls_ids.contains(member_id) {
-            scoring.remove_member(group_name, member_id);
+            scoring.remove_member(member_id);
         }
     }
 }
@@ -85,18 +87,12 @@ fn test_new_joiner_starts_with_default_scores() {
 
     // Alice's scoring has her at a non-default score (simulating prior events).
     let mut alice_scoring = make_scoring();
-    alice_scoring.add_member(group_name, &alice_id);
-    alice_scoring.apply_op(
-        group_name,
-        &ScoreOp {
-            member_id: alice_id.clone(),
-            event: ScoreEvent::EmergencyYesCreator,
-        },
-    );
-    assert_eq!(
-        alice_scoring.score_for(group_name, &alice_id),
-        Some(DEFAULT_SCORE + 20)
-    );
+    let _ = alice_scoring.add_member(&alice_id);
+    let _ = alice_scoring.apply_op(&ScoreOp {
+        member_id: alice_id.clone(),
+        event: ScoreEvent::EmergencyYesCreator,
+    });
+    assert_eq!(alice_scoring.score_for(&alice_id), Some(DEFAULT_SCORE + 20));
 
     // Bob joins.
     let mut bob = setup_joiner(group_name, bob_hex);
@@ -108,10 +104,7 @@ fn test_new_joiner_starts_with_default_scores() {
 
     // Bob builds his scoring from MLS members — gets defaults.
     let mut bob_scoring = make_scoring();
-    sync_scoring_members(&mut bob_scoring, group_name, &bob.group);
+    sync_scoring_members(&mut bob_scoring, &bob.group);
 
-    assert_eq!(
-        bob_scoring.score_for(group_name, &alice_id),
-        Some(DEFAULT_SCORE),
-    );
+    assert_eq!(bob_scoring.score_for(&alice_id), Some(DEFAULT_SCORE));
 }
