@@ -6,7 +6,10 @@
 
 use prost::Message;
 
-use de_mls::core::{ScoreEvent, ScoreOp, apply_consensus_result, emergency_score_ops};
+use de_mls::core::{
+    PeerScoringPlugin, ScoreEvent, ScoreOp, ScoreSnapshot, apply_consensus_result,
+    emergency_score_ops,
+};
 use de_mls::protos::de_mls::messages::v1::{
     ViolationEvidence, ViolationType, group_update_request,
 };
@@ -139,18 +142,18 @@ fn test_full_pipeline_penalties_to_removal() {
 
     // Apply penalties until target drops below threshold
     // 100 - 50 = 50 (BrokenCommit)
-    scoring.apply_op(&ScoreOp {
+    let _ = scoring.apply_op(&ScoreOp {
         member_id: target_id.clone(),
         event: ScoreEvent::BrokenCommit,
     });
-    assert!(!scoring.is_below_threshold(&target_id));
+    assert!(!scoring.members_below_threshold().contains(&target_id));
 
     // 50 - 50 = 0 (EmergencyNoCreator)
-    scoring.apply_op(&ScoreOp {
+    let _ = scoring.apply_op(&ScoreOp {
         member_id: target_id.clone(),
         event: ScoreEvent::EmergencyNoCreator,
     });
-    assert!(scoring.is_below_threshold(&target_id));
+    assert!(scoring.members_below_threshold().contains(&target_id));
 
     // Now steward creates SCORE_BELOW_THRESHOLD ECP
     let below = scoring.members_below_threshold();
@@ -170,7 +173,7 @@ fn test_full_pipeline_penalties_to_removal() {
     let score_ops = emergency_score_ops(&payload, true);
 
     // Apply score ops
-    scoring.apply_ops(&score_ops);
+    let _ = scoring.apply_ops(&score_ops);
 
     // RemoveMember should be in approved queue
     assert_eq!(group.approved_proposals_count(), 1);
@@ -221,18 +224,19 @@ fn test_steward_skips_self_for_removal() {
 
     // Drop both below threshold
     for event in [ScoreEvent::BrokenCommit, ScoreEvent::EmergencyNoCreator] {
-        scoring.apply_op(&ScoreOp {
+        let _ = scoring.apply_op(&ScoreOp {
             member_id: steward_id.clone(),
             event,
         });
-        scoring.apply_op(&ScoreOp {
+        let _ = scoring.apply_op(&ScoreOp {
             member_id: other_id.clone(),
             event,
         });
     }
 
-    assert!(scoring.is_below_threshold(&steward_id));
-    assert!(scoring.is_below_threshold(&other_id));
+    let below = scoring.members_below_threshold();
+    assert!(below.contains(&steward_id));
+    assert!(below.contains(&other_id));
 
     // Filter as the steward would
     let targets: Vec<Vec<u8>> = scoring
@@ -258,9 +262,13 @@ fn test_members_below_threshold_uses_per_group_value() {
     scoring.add_member(&alice);
     scoring.add_member(&bob);
     scoring.add_member(&carol);
-    scoring.set_score(&alice, -10);
-    scoring.set_score(&bob, -30);
-    scoring.set_score(&carol, -60);
+    let _ = scoring.apply_snapshot(&ScoreSnapshot {
+        diverged: vec![
+            (alice.clone(), -10),
+            (bob.clone(), -30),
+            (carol.clone(), -60),
+        ],
+    });
 
     // Strict threshold (-50): only Carol qualifies for removal.
     scoring.set_threshold(-50);

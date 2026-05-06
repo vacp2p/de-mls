@@ -10,8 +10,9 @@ use crate::{
         forward_incoming_vote,
     },
     core::{
-        DeMlsProvider, GroupEventHandler, ProcessResult, ProposalKind, ProtocolConfig, StewardList,
-        create_commit_candidate, group_members, member_set, process_inbound,
+        DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProcessResult, ProposalKind,
+        ProtocolConfig, ScoreSnapshot, StewardList, create_commit_candidate, group_members,
+        member_set, process_inbound,
     },
     ds::{APP_MSG_SUBTOPIC, InboundPacket, WELCOME_SUBTOPIC},
     mls_crypto::{IdentityProvider, MlsService, ShortId, key_package_bytes_from_json},
@@ -383,9 +384,17 @@ where
             .group
             .set_max_reelection_attempts(sync.max_reelection_attempts);
         entry.scoring.set_threshold(sync.threshold_peer_score);
-        for ps in &sync.peer_scores {
-            entry.scoring.set_score(&ps.member_id, ps.score);
-        }
+        let snapshot = ScoreSnapshot {
+            diverged: sync
+                .peer_scores
+                .iter()
+                .map(|ps| (ps.member_id.clone(), ps.score))
+                .collect(),
+        };
+        // Events from this apply belong to the steward coordinator's
+        // event drain; this commit ignores them. Wired into removal
+        // triggers in the next commit.
+        let _events = entry.scoring.apply_snapshot(&snapshot);
         entry
             .group
             .set_liveness_criteria_yes(sync.liveness_criteria_yes);

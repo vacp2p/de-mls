@@ -6,7 +6,7 @@ use tracing::{error, info};
 use crate::{
     app::{StateChangeHandler, User, UserError},
     core::{
-        DeMlsProvider, ElectionDecision, GroupEventHandler, StewardList,
+        DeMlsProvider, ElectionDecision, GroupEventHandler, PeerScoringPlugin, StewardList,
         evaluate_election_initiation, group_members, is_deadlock_ecp_proposer, member_set,
         scoring_member_diff, target_identity_of,
     },

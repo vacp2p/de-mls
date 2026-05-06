@@ -5,8 +5,8 @@ use tracing::{error, info};
 use crate::{
     app::{FreezeTimeoutStatus, GroupState, StateChangeHandler, User, UserError},
     core::{
-        DeMlsProvider, FreezeFinalizeResult, FreezeOutcome, GroupEventHandler, ScoreEvent, ScoreOp,
-        create_commit_candidate, finalize_freeze_round, group_members,
+        DeMlsProvider, FreezeFinalizeResult, FreezeOutcome, GroupEventHandler, PeerScoringPlugin,
+        ScoreEvent, ScoreOp, create_commit_candidate, finalize_freeze_round, group_members,
     },
     ds::WELCOME_SUBTOPIC,
     mls_crypto::{IdentityProvider, MlsService},
@@ -109,9 +109,12 @@ where
             // Apply locally-observed score events before releasing the
             // entry lock. These come from dropped candidates in the
             // phase-3 loop (RFC §Peer Scoring: direct local observation,
-            // no ECP needed).
+            // no ECP needed). Threshold-cross events from this apply
+            // belong to the steward coordinator's event drain; this
+            // commit ignores them. Wired into removal triggers in the
+            // next commit.
             if !result.score_ops.is_empty() {
-                entry.scoring.apply_ops(&result.score_ops);
+                let _events = entry.scoring.apply_ops(&result.score_ops);
             }
             result
         };
@@ -178,7 +181,7 @@ where
                             None => None,
                         };
                         if let Some(steward_id) = accuse_target {
-                            entry.scoring.apply_op(&ScoreOp {
+                            let _events = entry.scoring.apply_op(&ScoreOp {
                                 member_id: steward_id,
                                 event: ScoreEvent::CensorshipInactivity,
                             });

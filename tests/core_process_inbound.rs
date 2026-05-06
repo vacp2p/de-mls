@@ -608,7 +608,7 @@ fn test_group_sync_roundtrip() {
 #[test]
 fn test_group_sync_propagates_divergent_per_group_config() {
     use de_mls::app::InMemoryPeerScoreStorage;
-    use de_mls::core::PeerScoringService;
+    use de_mls::core::{PeerScoringPlugin, PeerScoringService, ScoreSnapshot};
     use de_mls::core::{ScoreEvent, ScoreOp, ScoringConfig};
     use de_mls::protos::de_mls::messages::v1::{GroupSync, PeerScore};
 
@@ -717,10 +717,14 @@ fn test_group_sync_propagates_divergent_per_group_config() {
         },
     );
     scoring.set_threshold(received.threshold_peer_score);
-    for ps in &received.peer_scores {
-        scoring.set_score(&ps.member_id, ps.score);
-    }
-    scoring.apply_op(&ScoreOp {
+    let _ = scoring.apply_snapshot(&ScoreSnapshot {
+        diverged: received
+            .peer_scores
+            .iter()
+            .map(|ps| (ps.member_id.clone(), ps.score))
+            .collect(),
+    });
+    let _ = scoring.apply_op(&ScoreOp {
         member_id: alice.clone(),
         event: ScoreEvent::SuccessfulCommit,
     });

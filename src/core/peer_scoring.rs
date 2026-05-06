@@ -72,6 +72,35 @@ pub struct ScoringConfig {
 /// Default removal threshold (RFC §Peer Scoring `threshold_peer_score`).
 pub const DEFAULT_THRESHOLD_PEER_SCORE: i64 = 0;
 
+// ── Plug-in events ──────────────────────────────────────────────────
+
+/// Event emitted by a [`PeerScoringPlugin`] when an apply call moves a
+/// member across the configured threshold. Plug-ins return events from
+/// every mutating call; the coordinator drains them at known safe
+/// points and turns them into protocol actions (e.g. submitting
+/// `SCORE_BELOW_THRESHOLD`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerScoringEvent {
+    /// Member's score moved from above-threshold to at-or-below threshold.
+    ThresholdCrossedDown { member_id: Vec<u8>, score: i64 },
+    /// Member's score moved from at-or-below threshold back above it.
+    /// Reserved for recovery scoring; not currently emitted by the
+    /// reference [`PeerScoringService`].
+    ThresholdCrossedUp { member_id: Vec<u8>, score: i64 },
+}
+
+// ── GroupSync snapshot ──────────────────────────────────────────────
+
+/// Sparse snapshot of per-member scores for joiner bootstrap. Carries
+/// only members whose score has diverged from `default_score`; the
+/// recipient initialises every member at default via membership sync
+/// before applying the snapshot, so missing entries imply default.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScoreSnapshot {
+    /// Members whose score `!= default_score`. Absolute scores, not deltas.
+    pub diverged: Vec<(Vec<u8>, i64)>,
+}
+
 /// Per-member score persistence for a single group. The app layer ships
 /// an in-memory default impl. One storage instance per group — no
 /// `group_id` keying.
@@ -155,12 +184,49 @@ fn creator_penalty(ev: &ViolationEvidence) -> ScoreOp {
     }
 }
 
+// ── Plug-in trait ───────────────────────────────────────────────────
+
+/// Per-group peer-scoring plug-in. Mutating methods return any
+/// [`PeerScoringEvent`]s the call produced; the coordinator drains them
+/// at safe points and turns threshold crossings into protocol actions.
+/// The plug-in itself owns no I/O — storage backends and event
+/// publishing are caller concerns.
+pub trait PeerScoringPlugin {
+    fn add_member(&mut self, member_id: &[u8]);
+    fn remove_member(&mut self, member_id: &[u8]);
+
+    /// Apply a single [`ScoreOp`]. Returns events for any threshold
+    /// crossings the op caused.
+    #[must_use]
+    fn apply_op(&mut self, op: &ScoreOp) -> Vec<PeerScoringEvent>;
+
+    /// Apply a batch of [`ScoreOp`]s. Returns the concatenated events
+    /// for every op in order.
+    #[must_use]
+    fn apply_ops(&mut self, ops: &[ScoreOp]) -> Vec<PeerScoringEvent>;
+
+    /// Apply a [`ScoreSnapshot`] (GroupSync receive). Returns events
+    /// for any member who lands at-or-below threshold after the apply.
+    #[must_use]
+    fn apply_snapshot(&mut self, snapshot: &ScoreSnapshot) -> Vec<PeerScoringEvent>;
+
+    /// Sparse snapshot of non-default scores for GroupSync send.
+    fn snapshot(&self) -> ScoreSnapshot;
+
+    fn score_for(&self, member_id: &[u8]) -> Option<i64>;
+    fn members_below_threshold(&self) -> Vec<Vec<u8>>;
+    fn all_members_with_scores(&self) -> Vec<(Vec<u8>, i64)>;
+
+    fn set_threshold(&mut self, threshold: i64);
+}
+
 // ── Reference scoring service ───────────────────────────────────────
 
-/// Per-group, per-member score tracker. One instance per group;
-/// threshold travels with [`ScoringConfig`]. Storage is abstracted via
-/// [`PeerScoreStorage`] so app-layer backends (in-memory, on-disk, …)
-/// plug in without touching this protocol logic.
+/// Per-group, per-member score tracker. Reference [`PeerScoringPlugin`]
+/// implementation. One instance per group; threshold travels with
+/// [`ScoringConfig`]. Storage is abstracted via [`PeerScoreStorage`] so
+/// app-layer backends (in-memory, on-disk, …) plug in without touching
+/// this protocol logic.
 pub struct PeerScoringService<S: PeerScoreStorage, P: ScoringProvider> {
     storage: S,
     provider: P,
@@ -176,43 +242,93 @@ impl<S: PeerScoreStorage, P: ScoringProvider> PeerScoringService<S, P> {
         }
     }
 
-    /// Start tracking a member with the default score.
-    pub fn add_member(&mut self, member_id: &[u8]) {
+    pub fn config(&self) -> &ScoringConfig {
+        &self.config
+    }
+
+    /// Test-only: returns whether `member_id` is at-or-below threshold.
+    #[cfg(test)]
+    pub fn is_below_threshold(&self, member_id: &[u8]) -> bool {
+        self.storage
+            .get(member_id)
+            .is_some_and(|s| s <= self.config.threshold)
+    }
+}
+
+impl<S: PeerScoreStorage, P: ScoringProvider> PeerScoringPlugin for PeerScoringService<S, P> {
+    fn add_member(&mut self, member_id: &[u8]) {
         self.storage.set(member_id, self.config.default_score);
     }
 
-    pub fn remove_member(&mut self, member_id: &[u8]) {
+    fn remove_member(&mut self, member_id: &[u8]) {
         self.storage.remove(member_id);
     }
 
-    /// Apply a single [`ScoreOp`] and return the target's new score, or
-    /// `None` if the target isn't tracked.
-    pub fn apply_op(&mut self, op: &ScoreOp) -> Option<i64> {
-        let current = self.storage.get(&op.member_id)?;
+    fn apply_op(&mut self, op: &ScoreOp) -> Vec<PeerScoringEvent> {
+        let Some(current) = self.storage.get(&op.member_id) else {
+            return Vec::new();
+        };
         let delta = self.provider.score_delta(op.event);
         let new_score = current.saturating_add(delta);
         self.storage.set(&op.member_id, new_score);
-        Some(new_score)
-    }
 
-    /// Apply a batch of [`ScoreOp`]s. Untracked targets are skipped
-    /// silently (same semantics as [`Self::apply_op`]).
-    pub fn apply_ops(&mut self, ops: &[ScoreOp]) {
-        for op in ops {
-            self.apply_op(op);
+        let threshold = self.config.threshold;
+        let was_above = current > threshold;
+        let now_below = new_score <= threshold;
+        if was_above && now_below {
+            vec![PeerScoringEvent::ThresholdCrossedDown {
+                member_id: op.member_id.clone(),
+                score: new_score,
+            }]
+        } else if !was_above && new_score > threshold {
+            vec![PeerScoringEvent::ThresholdCrossedUp {
+                member_id: op.member_id.clone(),
+                score: new_score,
+            }]
+        } else {
+            Vec::new()
         }
     }
 
-    pub fn score_for(&self, member_id: &[u8]) -> Option<i64> {
+    fn apply_ops(&mut self, ops: &[ScoreOp]) -> Vec<PeerScoringEvent> {
+        let mut events = Vec::new();
+        for op in ops {
+            events.extend(self.apply_op(op));
+        }
+        events
+    }
+
+    fn apply_snapshot(&mut self, snapshot: &ScoreSnapshot) -> Vec<PeerScoringEvent> {
+        let threshold = self.config.threshold;
+        let mut events = Vec::new();
+        for (member_id, score) in &snapshot.diverged {
+            self.storage.set(member_id, *score);
+            if *score <= threshold {
+                events.push(PeerScoringEvent::ThresholdCrossedDown {
+                    member_id: member_id.clone(),
+                    score: *score,
+                });
+            }
+        }
+        events
+    }
+
+    fn snapshot(&self) -> ScoreSnapshot {
+        let default = self.config.default_score;
+        let diverged = self
+            .storage
+            .all_scores()
+            .into_iter()
+            .filter(|(_, score)| *score != default)
+            .collect();
+        ScoreSnapshot { diverged }
+    }
+
+    fn score_for(&self, member_id: &[u8]) -> Option<i64> {
         self.storage.get(member_id)
     }
 
-    /// Force-set a score; used when applying a `GroupSync` from the steward.
-    pub fn set_score(&mut self, member_id: &[u8], score: i64) {
-        self.storage.set(member_id, score);
-    }
-
-    pub fn members_below_threshold(&self) -> Vec<Vec<u8>> {
+    fn members_below_threshold(&self) -> Vec<Vec<u8>> {
         let threshold = self.config.threshold;
         self.storage
             .all_scores()
@@ -222,21 +338,11 @@ impl<S: PeerScoreStorage, P: ScoringProvider> PeerScoringService<S, P> {
             .collect()
     }
 
-    pub fn is_below_threshold(&self, member_id: &[u8]) -> bool {
-        self.storage
-            .get(member_id)
-            .is_some_and(|s| s <= self.config.threshold)
-    }
-
-    pub fn all_members_with_scores(&self) -> Vec<(Vec<u8>, i64)> {
+    fn all_members_with_scores(&self) -> Vec<(Vec<u8>, i64)> {
         self.storage.all_scores()
     }
 
-    pub fn config(&self) -> &ScoringConfig {
-        &self.config
-    }
-
-    pub fn set_threshold(&mut self, threshold: i64) {
+    fn set_threshold(&mut self, threshold: i64) {
         self.config.threshold = threshold;
     }
 }
@@ -325,22 +431,22 @@ mod tests {
     fn apply_event_decreases_score() {
         let mut svc = make_service();
         svc.add_member(b"alice");
-        let new_score = svc.apply_op(&ScoreOp {
+        let events = svc.apply_op(&ScoreOp {
             member_id: b"alice".to_vec(),
             event: ScoreEvent::EmergencyNoCreator,
         });
-        assert_eq!(new_score, Some(50));
+        assert!(events.is_empty(), "100 → 50 stays above threshold 0");
         assert_eq!(svc.score_for(b"alice"), Some(50));
     }
 
     #[test]
-    fn apply_event_unknown_member_returns_none() {
+    fn apply_event_unknown_member_returns_no_events() {
         let mut svc = make_service();
-        let result = svc.apply_op(&ScoreOp {
+        let events = svc.apply_op(&ScoreOp {
             member_id: b"unknown".to_vec(),
             event: ScoreEvent::EmergencyNoCreator,
         });
-        assert_eq!(result, None);
+        assert!(events.is_empty());
     }
 
     #[test]
@@ -352,12 +458,118 @@ mod tests {
             ScoreEvent::MisbehavingCommit,
             ScoreEvent::SuccessfulCommit,
         ] {
-            svc.apply_op(&ScoreOp {
+            let _ = svc.apply_op(&ScoreOp {
                 member_id: b"alice".to_vec(),
                 event,
             });
         }
         assert_eq!(svc.score_for(b"alice"), Some(30));
+    }
+
+    #[test]
+    fn threshold_cross_down_emits_event() {
+        let mut svc = make_service();
+        svc.add_member(b"alice");
+
+        // 100 → 50, still above threshold 0.
+        let events = svc.apply_op(&ScoreOp {
+            member_id: b"alice".to_vec(),
+            event: ScoreEvent::EmergencyNoCreator,
+        });
+        assert!(events.is_empty(), "above threshold, no event");
+
+        // 50 → 0, crosses to at-or-below threshold.
+        let events = svc.apply_op(&ScoreOp {
+            member_id: b"alice".to_vec(),
+            event: ScoreEvent::EmergencyNoCreator,
+        });
+        assert_eq!(
+            events,
+            vec![PeerScoringEvent::ThresholdCrossedDown {
+                member_id: b"alice".to_vec(),
+                score: 0,
+            }]
+        );
+
+        // 0 → -50, already below — no further event.
+        let events = svc.apply_op(&ScoreOp {
+            member_id: b"alice".to_vec(),
+            event: ScoreEvent::BrokenCommit,
+        });
+        assert!(events.is_empty(), "already below threshold, no event");
+    }
+
+    #[test]
+    fn apply_ops_concatenates_events_in_order() {
+        let mut svc = make_service();
+        svc.add_member(b"alice");
+        svc.add_member(b"bob");
+        // Drop alice across threshold (-50 + -50 = 0 ≤ 0) and bob too in
+        // the same batch.
+        let ops = vec![
+            ScoreOp {
+                member_id: b"alice".to_vec(),
+                event: ScoreEvent::BrokenCommit,
+            },
+            ScoreOp {
+                member_id: b"alice".to_vec(),
+                event: ScoreEvent::BrokenCommit,
+            },
+            ScoreOp {
+                member_id: b"bob".to_vec(),
+                event: ScoreEvent::BrokenCommit,
+            },
+            ScoreOp {
+                member_id: b"bob".to_vec(),
+                event: ScoreEvent::BrokenCommit,
+            },
+        ];
+        let events = svc.apply_ops(&ops);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0],
+            PeerScoringEvent::ThresholdCrossedDown { ref member_id, .. } if member_id == b"alice"
+        ));
+        assert!(matches!(
+            events[1],
+            PeerScoringEvent::ThresholdCrossedDown { ref member_id, .. } if member_id == b"bob"
+        ));
+    }
+
+    #[test]
+    fn snapshot_includes_only_diverged_scores() {
+        let mut svc = make_service();
+        svc.add_member(b"alice");
+        svc.add_member(b"bob");
+        svc.add_member(b"charlie");
+        let _ = svc.apply_op(&ScoreOp {
+            member_id: b"alice".to_vec(),
+            event: ScoreEvent::SuccessfulCommit,
+        });
+        let snap = svc.snapshot();
+        let ids: Vec<&[u8]> = snap.diverged.iter().map(|(id, _)| id.as_slice()).collect();
+        assert_eq!(ids, vec![b"alice".as_slice()]);
+        assert_eq!(snap.diverged[0].1, 110);
+    }
+
+    #[test]
+    fn apply_snapshot_emits_events_for_below_threshold_entries() {
+        let mut svc = make_service();
+        svc.add_member(b"alice");
+        svc.add_member(b"bob");
+        let snap = ScoreSnapshot {
+            diverged: vec![(b"alice".to_vec(), -10), (b"bob".to_vec(), 50)],
+        };
+        let events = svc.apply_snapshot(&snap);
+        assert_eq!(
+            events,
+            vec![PeerScoringEvent::ThresholdCrossedDown {
+                member_id: b"alice".to_vec(),
+                score: -10,
+            }]
+        );
+        assert_eq!(svc.score_for(b"alice"), Some(-10));
+        assert_eq!(svc.score_for(b"bob"), Some(50));
     }
 
     #[test]
@@ -367,13 +579,13 @@ mod tests {
         svc.add_member(b"bob");
         svc.add_member(b"charlie");
         for event in [ScoreEvent::EmergencyNoCreator, ScoreEvent::BrokenCommit] {
-            svc.apply_op(&ScoreOp {
+            let _ = svc.apply_op(&ScoreOp {
                 member_id: b"alice".to_vec(),
                 event,
             });
         }
         for _ in 0..2 {
-            svc.apply_op(&ScoreOp {
+            let _ = svc.apply_op(&ScoreOp {
                 member_id: b"charlie".to_vec(),
                 event: ScoreEvent::EmergencyNoCreator,
             });
@@ -388,7 +600,11 @@ mod tests {
     fn set_threshold_changes_below_threshold_set() {
         let mut svc = make_service();
         svc.add_member(b"alice");
-        svc.set_score(b"alice", -10);
+        // Apply via snapshot to set an absolute score without going
+        // through the delta provider.
+        let _ = svc.apply_snapshot(&ScoreSnapshot {
+            diverged: vec![(b"alice".to_vec(), -10)],
+        });
 
         svc.set_threshold(-50);
         assert!(!svc.members_below_threshold().contains(&b"alice".to_vec()));
@@ -408,11 +624,11 @@ mod tests {
             },
         );
         svc.add_member(b"alice");
-        let new_score = svc.apply_op(&ScoreOp {
+        let _ = svc.apply_op(&ScoreOp {
             member_id: b"alice".to_vec(),
             event: ScoreEvent::SuccessfulCommit,
         });
-        assert_eq!(new_score, Some(i64::MAX));
+        assert_eq!(svc.score_for(b"alice"), Some(i64::MAX));
     }
 
     #[test]
@@ -426,11 +642,11 @@ mod tests {
             },
         );
         svc.add_member(b"alice");
-        let new_score = svc.apply_op(&ScoreOp {
+        let _ = svc.apply_op(&ScoreOp {
             member_id: b"alice".to_vec(),
             event: ScoreEvent::SuccessfulCommit,
         });
-        assert_eq!(new_score, Some(100));
+        assert_eq!(svc.score_for(b"alice"), Some(100));
     }
 
     // ── ECP score derivation tests ──────────────────────────────────

@@ -5,8 +5,8 @@
 use prost::Message;
 
 use de_mls::core::{
-    Group, PeerScoringService, ScoreEvent, ScoreOp, apply_consensus_result, emergency_score_ops,
-    group_members,
+    Group, PeerScoringPlugin, PeerScoringService, ScoreEvent, ScoreOp, apply_consensus_result,
+    emergency_score_ops, group_members,
 };
 use de_mls::ds::WELCOME_SUBTOPIC;
 
@@ -85,7 +85,7 @@ fn test_new_joiner_starts_with_default_scores() {
     // Alice's scoring has her at a non-default score (simulating prior events).
     let mut alice_scoring = make_scoring();
     alice_scoring.add_member(&alice_id);
-    alice_scoring.apply_op(&ScoreOp {
+    let _ = alice_scoring.apply_op(&ScoreOp {
         member_id: alice_id.clone(),
         event: ScoreEvent::EmergencyYesCreator,
     });

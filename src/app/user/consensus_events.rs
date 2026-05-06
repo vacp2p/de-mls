@@ -10,8 +10,8 @@ use tracing::{error, info};
 use crate::{
     app::{GroupState, StateChangeHandler, User, UserError},
     core::{
-        DeMlsProvider, GroupEventHandler, ProposalKind, ScoreOp, apply_consensus_result,
-        emergency_score_ops, group_members, target_identity_of,
+        DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProposalKind, ScoreOp,
+        apply_consensus_result, emergency_score_ops, group_members, target_identity_of,
     },
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
@@ -289,7 +289,7 @@ where
     ) -> Result<(), UserError> {
         if let Some(entry_arc) = self.lookup_entry(group_name).await {
             let mut entry = entry_arc.write().await;
-            entry.scoring.apply_ops(score_ops);
+            let _events = entry.scoring.apply_ops(score_ops);
             if let Ok(req) = GroupUpdateRequest::decode(payload)
                 && let Some(group_update_request::Payload::EmergencyCriteria(ec)) = &req.payload
                 && let Some(ev) = &ec.evidence

@@ -10,7 +10,9 @@ use crate::{
         GroupConfig, GroupState, GroupStateMachine, ProposalParams, StateChangeHandler, User,
         UserError, submit_self_leave_proposal, user::GroupEntry,
     },
-    core::{DeMlsProvider, Group, GroupEventHandler, auto_approved_leave_proposal_id},
+    core::{
+        DeMlsProvider, Group, GroupEventHandler, PeerScoringPlugin, auto_approved_leave_proposal_id,
+    },
     mls_crypto::{IdentityProvider, MlsService, parse_wallet_to_bytes},
     protos::de_mls::messages::v1::{GroupUpdateRequest, RemoveMember, group_update_request},
 };
