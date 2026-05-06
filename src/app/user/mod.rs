@@ -26,8 +26,8 @@ use crate::{
         StateChangeHandler, UserError,
     },
     core::{
-        DeMlsProvider, DefaultProvider, Group, GroupEventHandler, PeerScoringPlugin,
-        PeerScoringService, ProposalId, ProviderConsensus, ScoringConfig,
+        DeMlsProvider, DefaultProvider, Group, GroupEventHandler, PeerScoringEvent,
+        PeerScoringPlugin, PeerScoringService, ProposalId, ProviderConsensus, ScoringConfig,
     },
     mls_crypto::{
         IdentityProvider, KeyPackageBytes, MemoryDeMlsStorage, MlsError, MlsService,
@@ -95,13 +95,10 @@ impl<M: MlsService, Sc: PeerScoringPlugin> GroupEntry<M, Sc> {
 /// the signal coordinators react to by chaining into score-removal
 /// initiation. Helper kept here so every callsite uses the same
 /// triggering rule.
-pub(crate) fn has_downward_cross(events: &[crate::core::PeerScoringEvent]) -> bool {
-    events.iter().any(|e| {
-        matches!(
-            e,
-            crate::core::PeerScoringEvent::ThresholdCrossedDown { .. }
-        )
-    })
+pub(crate) fn has_downward_cross(events: &[PeerScoringEvent]) -> bool {
+    events
+        .iter()
+        .any(|e| matches!(e, PeerScoringEvent::ThresholdCrossedDown { .. }))
 }
 
 /// Registry of outstanding auto-vote timers, keyed by

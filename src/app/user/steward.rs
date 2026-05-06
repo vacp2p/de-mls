@@ -465,12 +465,24 @@ where
             if !is_steward {
                 return Ok(());
             }
+            // Two dedup gates:
+            //   - `has_pending_removal` — there's an in-flight ECP for
+            //     this target (live consensus session).
+            //   - `is_pending_removal` — `RemoveMember(target)` is
+            //     already queued in `approved_proposals` waiting for
+            //     the next commit. Without this gate, a just-resolved
+            //     SCORE_BELOW_THRESHOLD ECP (which clears
+            //     `pending_removal_targets` on resolve, but leaves the
+            //     target in `approved_proposals` with their score still
+            //     ≤ threshold) would re-fire a duplicate ECP for the
+            //     same target before the RemoveMember commits.
             let to_remove = entry
                 .scoring
                 .members_below_threshold()
                 .into_iter()
                 .filter(|id| *id != self_id)
                 .filter(|id| !entry.group.has_pending_removal(id))
+                .filter(|id| !entry.group.is_pending_removal(id))
                 .filter_map(|id| {
                     let score = entry.scoring.score_for(&id)?;
                     Some((id, score))

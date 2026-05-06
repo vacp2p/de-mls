@@ -12,6 +12,8 @@ use crate::{
     mls_crypto::{IdentityProvider, MlsService},
 };
 
+use super::has_downward_cross;
+
 impl<
     P: DeMlsProvider,
     M: MlsService,
@@ -114,7 +116,7 @@ where
             // removal-init pass below, after the lock drops.
             let cross = if !result.score_ops.is_empty() {
                 let events = entry.scoring.apply_ops(&result.score_ops);
-                crate::app::user::has_downward_cross(&events)
+                has_downward_cross(&events)
             } else {
                 false
             };
@@ -196,7 +198,7 @@ where
                                 member_id: steward_id,
                                 event: ScoreEvent::CensorshipInactivity,
                             });
-                            crate::app::user::has_downward_cross(&events)
+                            has_downward_cross(&events)
                         } else {
                             false
                         };

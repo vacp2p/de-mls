@@ -127,6 +127,54 @@ fn test_score_below_threshold_no_penalizes_creator() {
     assert_eq!(group.approved_proposals_count(), 0);
 }
 
+/// Regression: after a SCORE_BELOW_THRESHOLD ECP resolves YES, the
+/// target is queued in `approved_proposals` as `RemoveMember(target)`
+/// but `pending_removal_targets` is cleared (the in-flight ECP is
+/// done). Their score has not changed and is still ≤ threshold. The
+/// steward MUST NOT submit a fresh duplicate ECP for the same target
+/// before the RemoveMember commits — `is_pending_removal` (queued in
+/// `approved_proposals`) plus `has_pending_removal` (in-flight ECP)
+/// together gate the next-pass scan.
+#[test]
+fn test_below_threshold_target_queued_for_removal_is_not_re_proposed() {
+    let group_name = "removal-no-duplicate";
+    let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+    let mut group = setup_steward(group_name, alice_hex);
+    let steward_id = group.self_identity().to_vec();
+    let target_id = vec![0xEE];
+
+    // Stand the target at threshold (score == 0).
+    let evidence = ViolationEvidence::score_below_threshold(target_id.clone(), 0, 0)
+        .with_creator(steward_id.clone());
+    let request = evidence.into_update_request().unwrap();
+    let payload = request.encode_to_vec();
+    let proposal_id = 300;
+    group.store_voting_proposal(proposal_id, request);
+    group.observe_pending_removal(target_id.clone());
+    apply_consensus_result(&mut group, proposal_id, true, &payload).unwrap();
+
+    // Mirror the User layer: clear the in-flight dedup on resolution.
+    group.resolve_pending_removal(&target_id);
+
+    // The target is queued for removal — `is_pending_removal` must say so.
+    assert!(
+        group.is_pending_removal(&target_id),
+        "RemoveMember should be queued in approved_proposals"
+    );
+    // The ECP-in-flight dedup is cleared (mirrors handle_emergency_scored).
+    assert!(
+        !group.has_pending_removal(&target_id),
+        "in-flight ECP dedup is cleared once the ECP resolves"
+    );
+    // Both gates together must keep the steward from re-proposing.
+    let would_re_propose =
+        !group.has_pending_removal(&target_id) && !group.is_pending_removal(&target_id);
+    assert!(
+        !would_re_propose,
+        "steward must skip a target already queued in approved_proposals"
+    );
+}
+
 /// Full pipeline: penalties → below threshold → ECP → YES → RemoveMember in queue.
 #[test]
 fn test_full_pipeline_penalties_to_removal() {

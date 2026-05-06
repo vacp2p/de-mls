@@ -199,19 +199,29 @@ fn creator_penalty(ev: &ViolationEvidence) -> ScoreOp {
 /// The plug-in itself owns no I/O — storage backends and event
 /// publishing are caller concerns.
 pub trait PeerScoringPlugin: Send + Sync + 'static {
-    /// Start tracking a member at the plug-in's default score. If the
-    /// default lands at-or-below threshold (unusual config), emits
-    /// [`PeerScoringEvent::ThresholdCrossedDown`]; otherwise no event.
+    /// Start tracking a member at the plug-in's default score.
+    ///
+    /// MUST be called at most once per member: a duplicate call resets
+    /// the score to default and discards any accumulated state. Callers
+    /// guard with [`Self::score_for`] or a roster diff (see
+    /// [`scoring_member_diff`]).
+    ///
+    /// Emits [`PeerScoringEvent::ThresholdCrossedDown`] iff the default
+    /// score lands at-or-below threshold (unusual config); otherwise no
+    /// event.
     #[must_use]
     fn add_member(&mut self, member_id: &[u8]) -> Vec<PeerScoringEvent>;
 
     /// Stop tracking a member. Emits no events — removal is a membership
-    /// change, not a score event.
+    /// change, not a score event. Idempotent: a no-op on an untracked
+    /// member.
     fn remove_member(&mut self, member_id: &[u8]);
 
-    /// Apply a single [`ScoreOp`]. Returns events only when the op
-    /// causes a threshold cross — repeated ops on a member already
-    /// at-or-below threshold do not re-emit.
+    /// Apply a single [`ScoreOp`]. Untracked members are no-ops (no
+    /// event, no auto-tracking — coordinators must call [`Self::add_member`]
+    /// before applying ops). Returns events only when the op causes a
+    /// threshold cross; repeated ops on a member already at-or-below
+    /// threshold do not re-emit.
     #[must_use]
     fn apply_op(&mut self, op: &ScoreOp) -> Vec<PeerScoringEvent>;
 
@@ -221,10 +231,17 @@ pub trait PeerScoringPlugin: Send + Sync + 'static {
     #[must_use]
     fn apply_ops(&mut self, ops: &[ScoreOp]) -> Vec<PeerScoringEvent>;
 
-    /// Apply a [`ScoreSnapshot`] (GroupSync receive). Each entry is a
-    /// state replacement: events fire only when the entry's prior state
-    /// was on the opposite side of threshold from the new score.
-    /// Idempotent — re-applying the same snapshot emits no events.
+    /// Apply a [`ScoreSnapshot`] (GroupSync receive). Each entry is an
+    /// absolute-score replacement that auto-tracks members not already
+    /// known to the plug-in (treating "untracked → tracked" as crossing
+    /// from above for cross-detection — see [`PeerScoringEvent`]). This
+    /// is the one mutator that diverges from [`Self::apply_op`]'s
+    /// no-track-on-unknown behaviour: snapshots are bootstrap payloads
+    /// and arrive before membership sync in some edge cases.
+    ///
+    /// Events fire only when the entry's prior state was on the
+    /// opposite side of threshold from the new score; re-applying an
+    /// unchanged snapshot emits nothing.
     #[must_use]
     fn apply_snapshot(&mut self, snapshot: &ScoreSnapshot) -> Vec<PeerScoringEvent>;
 
@@ -238,6 +255,14 @@ pub trait PeerScoringPlugin: Send + Sync + 'static {
     /// Current removal threshold. Coordinator reads this when building
     /// `GroupSync` so joiners adopt the same value.
     fn threshold(&self) -> i64;
+
+    /// Update the threshold in place. Emits NO events — even though a
+    /// tightened threshold can re-classify members from above to
+    /// at-or-below, the plug-in does not retroactively scan and emit.
+    /// Event-driven coordinators MUST re-scan
+    /// [`Self::members_below_threshold`] after a `set_threshold` call,
+    /// or arrange for a subsequent apply that surfaces the affected
+    /// members through normal cross-detection.
     fn set_threshold(&mut self, threshold: i64);
 }
 
