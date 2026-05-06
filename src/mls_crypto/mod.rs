@@ -42,6 +42,6 @@ pub use identity::{
 pub use service::{CIPHERSUITE, MlsService, OpenMlsService};
 pub use storage::{DeMlsStorage, MemoryDeMlsStorage};
 pub use types::{
-    CommitCandidate, DecryptResult, GroupUpdate, KeyPackageBytes, MlsMessageKind,
-    MlsProposalAction, StagedCandidateResult, key_package_bytes_from_json,
+    CommitCandidate, DecryptResult, KeyPackageBytes, MlsCommitInput, MlsMessageKind,
+    MlsProposalOutput, StagedCandidateResult, key_package_bytes_from_json,
 };

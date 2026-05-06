@@ -24,26 +24,37 @@ impl KeyPackageBytes {
     }
 }
 
-/// Membership change for commit.
+/// Membership change as supplied to the steward's commit pipeline.
+///
+/// One of three "membership change" shapes used in the codebase. They
+/// describe the same underlying intent at different boundaries:
+///
+/// | Shape | Where | Carries |
+/// |-------|-------|---------|
+/// | [`crate::protos::de_mls::messages::v1::GroupUpdateRequest`] | consensus wire | wire payload, also covers governance kinds (emergency / election) |
+/// | [`MlsCommitInput`] | input to [`super::MlsService::create_commit_candidate`] | Add carries the full key package; Remove carries the wallet bytes |
+/// | [`MlsProposalOutput`] | output of MLS staging / decryption | identity-only, plus `Other` for proposal kinds we don't construct |
 #[derive(Clone, Debug)]
-pub enum GroupUpdate {
+pub enum MlsCommitInput {
     /// Add a new member using their key package.
     Add(KeyPackageBytes),
     /// Remove a member by their wallet address (20 bytes).
     Remove(Vec<u8>),
 }
 
-/// What an MLS proposal actually does (extracted before storing).
+/// Membership change as observed in a single MLS proposal — extracted by
+/// the MLS service from incoming proposals (standalone or commit-bundled).
 ///
-/// Used by the caller to verify that MLS proposals match the voted
-/// `GroupUpdateRequest` proposals (review issue #4: payload equivalence).
+/// See [`MlsCommitInput`] for the corresponding input shape and the
+/// boundary table.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum MlsProposalAction {
-    /// Add a member — carries the identity from the key package credential.
+pub enum MlsProposalOutput {
+    /// Add a member — identity is read from the key package credential.
     Add(Vec<u8>),
-    /// Remove a member — carries the identity of the removed member.
+    /// Remove a member — identity of the removed member.
     Remove(Vec<u8>),
-    /// Any other proposal type (update, reinit, etc.) — unexpected.
+    /// Any other proposal type (update, reinit, etc.) — we do not
+    /// construct these ourselves; receipt is logged for diagnostics.
     Other(String),
 }
 
@@ -70,14 +81,14 @@ pub enum DecryptResult {
     Removed(Vec<u8>),
     /// Proposal stored (no action needed).
     /// Contains `(sender_identity, action)`.
-    ProposalStored(Vec<u8>, MlsProposalAction),
+    ProposalStored(Vec<u8>, MlsProposalOutput),
     /// Message ignored (wrong group/epoch).
     Ignored,
 }
 
 /// Result of staging a remote candidate (proposal batch + commit).
 ///
-/// Returned by `MlsService::apply_remote_candidate`. The `Staged` variant
+/// Returned by `MlsService::stage_remote_commit`. The `Staged` variant
 /// carries the MLS-authenticated senders of every staged proposal and of
 /// the commit, plus the membership-change actions extracted from the
 /// commit. `Aborted` signals a benign rejection (stale epoch, wrong group,
@@ -97,7 +108,7 @@ pub enum StagedCandidateResult {
         /// Whether this commit removes us from the group.
         self_removed: bool,
         /// Membership changes (Add/Remove) contained in the commit's proposals.
-        actions: Vec<MlsProposalAction>,
+        actions: Vec<MlsProposalOutput>,
     },
     /// Candidate was benign but not processable. Caller cleans MLS state.
     Aborted,

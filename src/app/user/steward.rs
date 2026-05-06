@@ -6,7 +6,7 @@ use tracing::{error, info};
 use crate::{
     app::{StateChangeHandler, User, UserError},
     core::{
-        DeMlsProvider, ElectionDecision, GroupEventHandler, StewardList, build_message,
+        DeMlsProvider, ElectionDecision, GroupEventHandler, StewardList,
         evaluate_election_initiation, group_members, is_deadlock_ecp_proposer, member_set,
         scoring_member_diff, target_identity_of,
     },
@@ -56,7 +56,7 @@ where
             .ok_or(UserError::GroupNotFound)?;
         let (needs_fill, members, epoch) = {
             let entry = entry_arc.read().await;
-            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
+            let mls = entry.group.expect_mls()?;
             let members = group_members(&entry.group)?;
             let needs = members.len() < entry.group.protocol_config().sn_min;
             let epoch = mls.current_epoch()?;
@@ -100,7 +100,7 @@ where
             .ok_or(UserError::GroupNotFound)?;
         let (members, election_epoch, retry_round, config) = {
             let entry = entry_arc.read().await;
-            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
+            let mls = entry.group.expect_mls()?;
             let epoch = mls.current_epoch()?;
             let mls_members = group_members(&entry.group)?;
             let self_identity = self.identity().identity_bytes();
@@ -177,7 +177,7 @@ where
             .ok_or(UserError::GroupNotFound)?;
         let (is_authorized, self_id, epoch) = {
             let entry = entry_arc.read().await;
-            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
+            let mls = entry.group.expect_mls()?;
             let mls_members = group_members(&entry.group)?;
             let self_id = self.identity().identity_bytes();
             let authorized = is_deadlock_ecp_proposer(&entry.group, &mls_members, self_id);
@@ -227,7 +227,7 @@ where
             .ok_or(UserError::GroupNotFound)?;
         let (current_epoch, members) = {
             let entry = entry_arc.read().await;
-            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
+            let mls = entry.group.expect_mls()?;
             let current_epoch = mls.current_epoch()?;
             let members = group_members(&entry.group)?;
             (current_epoch, members)
@@ -399,7 +399,7 @@ where
             // Filter ghosts and queued-removal targets so joiners don't
             // inherit stewards they would have to walk past on the very
             // first epoch.
-            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
+            let mls = entry.group.expect_mls()?;
             let mls_members = group_members(&entry.group)?;
             let steward_members = entry.group.live_steward_members(&mls_members);
 
@@ -423,7 +423,7 @@ where
             };
 
             let app_msg: AppMessage = sync.into();
-            build_message(mls, &app_msg, &self.app_id)?
+            mls.build_message(&app_msg, &self.app_id)?
         };
 
         self.handler.on_outbound(group_name, packet).await?;
@@ -444,7 +444,7 @@ where
             .ok_or(UserError::GroupNotFound)?;
         let (is_steward, threshold, epoch) = {
             let entry = entry_arc.read().await;
-            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
+            let mls = entry.group.expect_mls()?;
             (
                 entry.group.is_steward(),
                 entry.group.threshold_peer_score(),

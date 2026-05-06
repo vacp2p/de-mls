@@ -55,7 +55,7 @@ where
         }
     }
 
-    let mls = group.mls().ok_or(CoreError::MlsGroupNotInitialized)?;
+    let mls = group.expect_mls()?;
     // 2. MLS-encrypted app messages only — use decrypt_application_only.
     //    This NEVER stores proposals or processes commits, preventing
     //    rogue MLS proposals on the app subtopic from polluting state.

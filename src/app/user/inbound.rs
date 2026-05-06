@@ -11,7 +11,7 @@ use crate::{
     },
     core::{
         DeMlsProvider, GroupEventHandler, ProcessResult, ProposalKind, ProtocolConfig, StewardList,
-        build_message, create_commit_candidate, group_members, member_set, process_inbound,
+        create_commit_candidate, group_members, member_set, process_inbound,
     },
     ds::{APP_MSG_SUBTOPIC, InboundPacket, WELCOME_SUBTOPIC},
     mls_crypto::{IdentityProvider, MlsService, ShortId, key_package_bytes_from_json},
@@ -50,13 +50,7 @@ where
                     .await
                     .ok_or(UserError::GroupNotFound)?;
                 let entry = entry_arc.read().await;
-                forward_incoming_vote::<P, M>(
-                    group_name,
-                    &entry.group,
-                    vote,
-                    &*self.consensus_service,
-                )
-                .await?;
+                forward_incoming_vote::<P, M>(&entry.group, vote, &*self.consensus_service).await?;
                 Ok(())
             }
             ProcessResult::MembershipChangeReceived(request) => {
@@ -166,8 +160,8 @@ where
         };
         let (packet, mls_members) = {
             let entry = entry_arc.read().await;
-            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
-            let packet = build_message(mls, &msg, &self.app_id)?;
+            let mls = entry.group.expect_mls()?;
+            let packet = mls.build_message(&msg, &self.app_id)?;
             let members = group_members(&entry.group).unwrap_or_default();
             (packet, members)
         };
@@ -289,11 +283,7 @@ where
             }
 
             entry.state_machine.start_freezing();
-            let epoch = entry
-                .group
-                .mls()
-                .ok_or(UserError::MlsNotInitialized)?
-                .current_epoch()?;
+            let epoch = entry.group.expect_mls()?.current_epoch()?;
             entry.group.ensure_freeze_round(epoch);
 
             let outbound = if entry.group.is_steward() {
@@ -339,7 +329,7 @@ where
             if entry.group.steward_list().is_some() {
                 return Ok(());
             }
-            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
+            let mls = entry.group.expect_mls()?;
             (group_members(&entry.group)?, mls.current_epoch()?)
         };
         let local_default_peer_score = self.default_group_config.default_peer_score;

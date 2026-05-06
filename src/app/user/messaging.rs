@@ -2,7 +2,7 @@
 
 use crate::{
     app::{GroupState, StateChangeHandler, User, UserError},
-    core::{DeMlsProvider, GroupEventHandler, build_key_package_message, build_message},
+    core::{DeMlsProvider, GroupEventHandler, build_key_package_message},
     mls_crypto::{MlsService, parse_wallet_to_bytes},
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, ConversationMessage, GroupUpdateRequest, RemoveMember,
@@ -65,8 +65,10 @@ where
             }
             .into();
 
-            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
-            build_message(mls, &app_msg, &self.app_id)?
+            entry
+                .group
+                .expect_mls()?
+                .build_message(&app_msg, &self.app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())

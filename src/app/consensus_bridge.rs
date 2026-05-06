@@ -165,12 +165,12 @@ pub async fn forward_incoming_proposal<P: DeMlsProvider>(
 ///
 /// Other consensus errors propagate.
 pub async fn forward_incoming_vote<P: DeMlsProvider, M: MlsService>(
-    group_name: &str,
     group: &Group<M>,
     vote: Vote,
     consensus: &ProviderConsensus<P>,
 ) -> Result<(), CoreError> {
     let proposal_id = vote.proposal_id;
+    let group_name = group.group_name();
     let scope = P::Scope::from(group_name.to_string());
     match consensus.process_incoming_vote(&scope, vote).await {
         Ok(()) => Ok(()),

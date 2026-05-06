@@ -15,10 +15,7 @@ use crate::{
     app::{
         GroupState, ProposalParams, StateChangeHandler, User, UserError, cast_vote, submit_proposal,
     },
-    core::{
-        DeMlsProvider, GroupEventHandler, ProposalKind, build_message, group_members,
-        target_identity_of,
-    },
+    core::{DeMlsProvider, GroupEventHandler, ProposalKind, group_members, target_identity_of},
     mls_crypto::{IdentityProvider, MlsService},
     protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest, VotePayload},
 };
@@ -86,9 +83,7 @@ where
             }
         }
 
-        if entry.group.mls().is_none() {
-            return Err(UserError::MlsNotInitialized);
-        }
+        entry.group.expect_mls()?;
         let members = group_members(&entry.group)?;
         Ok(members.len() as u32)
     }
@@ -257,8 +252,10 @@ where
                 .await
                 .ok_or(UserError::GroupNotFound)?;
             let entry = entry_arc.read().await;
-            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
-            build_message(mls, &outbound, &self.app_id)?
+            entry
+                .group
+                .expect_mls()?
+                .build_message(&outbound, &self.app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
 
@@ -463,8 +460,10 @@ where
         .await?;
         let packet = {
             let entry = entry_arc.read().await;
-            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
-            build_message(mls, &app_message, &app_id)?
+            entry
+                .group
+                .expect_mls()?
+                .build_message(&app_message, &app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
@@ -576,8 +575,10 @@ where
         .await?;
         let packet = {
             let entry = entry_arc.read().await;
-            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
-            build_message(mls, &app_message, &self.app_id)?
+            entry
+                .group
+                .expect_mls()?
+                .build_message(&app_message, &self.app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())

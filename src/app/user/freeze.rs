@@ -249,11 +249,7 @@ where
             .state_machine
             .check_steward_inactivity(proposal_count, inactivity);
         if entered_freezing {
-            let epoch = entry
-                .group
-                .mls()
-                .ok_or(UserError::MlsNotInitialized)?
-                .current_epoch()?;
+            let epoch = entry.group.expect_mls()?.current_epoch()?;
             entry.group.ensure_freeze_round(epoch);
 
             // Stewards build their own candidate under the same lock.

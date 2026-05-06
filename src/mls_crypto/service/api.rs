@@ -1,26 +1,29 @@
 //! Pluggable MLS backend trait, scoped per group.
 //!
 //! [`MlsService`] is the swap point for MLS implementations. The default
-//! impl is [`OpenMlsService`](super::OpenMlsService). Each instance owns
-//! exactly one MLS group; the trait's identity and group-id getters
-//! describe that group, and every method operates on the implicit group.
+//! impl is [`OpenMlsService`](super::OpenMlsService). One service instance
+//! corresponds to one MLS group; identity and group id are set at
+//! construction and every method operates on that implicit group.
 //!
-//! Group construction is deliberately *not* on the trait — concrete impls
+//! Group construction is intentionally *not* on the trait — concrete impls
 //! expose their own constructors (e.g. `OpenMlsService::new_as_creator` /
-//! `new_from_welcome`). Key-package generation is similarly off the trait,
-//! since a joiner needs to publish a key package before any group exists.
+//! `new_from_welcome`), and key-package generation is also off the trait
+//! because a joiner needs to publish a key package before any group exists.
 //!
-//! The trait surface uses only opaque boundary types ([`CommitCandidate`],
-//! [`DecryptResult`], [`StagedCandidateResult`], [`MlsMessageKind`],
-//! [`GroupUpdate`]) — no `openmls::*` types appear here. Identity is
-//! exposed via the associated [`MlsService::Identity`] type, supplied at
-//! construction.
+//! The trait surface uses only opaque boundary types: no `openmls::*`
+//! types appear here, so swapping in a different MLS engine is purely a
+//! matter of writing a new impl. Identity is exposed through the
+//! associated [`MlsService::Identity`] type.
 
 use openmls::prelude::Ciphersuite;
 
-use crate::mls_crypto::{
-    CommitCandidate, DecryptResult, GroupUpdate, IdentityProvider, MlsError, MlsMessageKind,
-    StagedCandidateResult,
+use crate::{
+    ds::OutboundPacket,
+    mls_crypto::{
+        CommitCandidate, DecryptResult, IdentityProvider, MlsCommitInput, MlsError, MlsMessageKind,
+        StagedCandidateResult,
+    },
+    protos::de_mls::messages::v1::AppMessage,
 };
 
 /// MLS ciphersuite used by the default OpenMLS-backed impl.
@@ -28,88 +31,123 @@ pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_
 
 /// Per-group MLS backend. Each instance corresponds to one MLS group.
 pub trait MlsService: Send + Sync + 'static {
-    /// Identity attached to this service. Set at construction time and
+    /// Identity attached to this service. Set at construction and
     /// immutable thereafter.
     type Identity: IdentityProvider;
 
-    /// Borrow the identity attached to this service.
+    /// The signing identity for every MLS message this service produces.
     fn identity(&self) -> &Self::Identity;
 
-    /// The group id this service is scoped to. Set at construction time
-    /// and immutable thereafter.
+    /// The group id this service is scoped to.
     fn group_id(&self) -> &str;
 
     // ── Group lifecycle ──
 
-    /// Drop local MLS state for this group. Idempotent.
+    /// Tear down all local MLS state for this group. Idempotent so
+    /// repeated leave / cleanup is safe.
     fn delete(&self) -> Result<(), MlsError>;
 
     // ── Membership / state queries ──
 
-    /// Current group members, as serialized credential bytes.
+    /// Current group members as serialized credential bytes (one entry
+    /// per leaf, in MLS leaf order).
     fn members(&self) -> Result<Vec<Vec<u8>>, MlsError>;
 
-    /// Whether `identity` is a current member.
+    /// Whether `identity` is currently a member.
     fn is_member(&self, identity: &[u8]) -> bool;
 
-    /// Current MLS epoch — the single source of truth.
+    /// Current MLS epoch. This is the single source of truth — never
+    /// maintain a parallel counter at the app layer.
     fn current_epoch(&self) -> Result<u64, MlsError>;
 
-    // ── Local commit pipeline (steward) ──
+    // ── Steward-side commit pipeline (we are the committer) ──
 
-    /// Stage a commit candidate from a list of membership updates. Does not
-    /// merge; caller follows up with [`merge_own_commit`](Self::merge_own_commit)
-    /// or [`discard_own_commit`](Self::discard_own_commit).
-    fn create_commit_candidate(&self, updates: &[GroupUpdate])
-    -> Result<CommitCandidate, MlsError>;
+    /// Build a commit candidate from a list of membership changes and
+    /// stage it locally. Returns the wire bytes (proposals + commit + an
+    /// optional welcome) for the steward to broadcast.
+    ///
+    /// Side effect: leaves MLS holding our pending proposals and pending
+    /// commit. The caller MUST follow up with
+    /// [`merge_own_commit`](Self::merge_own_commit) once the candidate
+    /// wins selection, or [`discard_own_commit`](Self::discard_own_commit)
+    /// to roll back.
+    fn create_commit_candidate(
+        &self,
+        updates: &[MlsCommitInput],
+    ) -> Result<CommitCandidate, MlsError>;
 
-    /// Merge our pending commit candidate, advancing the MLS epoch.
+    /// Apply our pending commit, advancing the MLS epoch. Call after a
+    /// successful [`create_commit_candidate`](Self::create_commit_candidate)
+    /// when our candidate has won the freeze round.
     fn merge_own_commit(&self) -> Result<(), MlsError>;
 
-    /// Discard our pending commit candidate.
+    /// Roll back the local side effects of
+    /// [`create_commit_candidate`](Self::create_commit_candidate):
+    /// drop the pending commit and the pending proposals it contained.
     fn discard_own_commit(&self) -> Result<(), MlsError>;
 
-    // ── Inbound candidate pipeline (stage → merge/discard) ──
+    // ── Inbound commit pipeline (someone else committed) ──
 
-    /// Stage a remote commit candidate atomically: store every proposal in
-    /// the MLS pending queue and stage the commit. The caller validates
-    /// the result and then either commits via
-    /// [`merge_staged_commit`](Self::merge_staged_commit) or rolls back via
-    /// [`discard_staged_commit`](Self::discard_staged_commit).
+    /// Validate and stage a remote commit candidate atomically: each
+    /// proposal is processed and stored as MLS-pending, then the commit
+    /// is processed against that pending set, producing a staged commit
+    /// held internally.
     ///
-    /// On benign mismatch (stale epoch, wrong group, non-proposal in a
-    /// proposal slot, non-commit in the commit slot), returns
-    /// [`StagedCandidateResult::Aborted`]; the caller still cleans MLS
-    /// state via `discard_staged_commit`.
-    fn apply_remote_candidate(
+    /// Does **not** merge. The caller validates the result (sender,
+    /// authorization, action set vs. voted-approved) and then calls
+    /// [`merge_staged_commit`](Self::merge_staged_commit) to advance the
+    /// epoch, or [`discard_staged_commit`](Self::discard_staged_commit)
+    /// to roll back proposals + staged commit together.
+    ///
+    /// Returns [`StagedCandidateResult::Aborted`] for benign rejections
+    /// (stale epoch, wrong group id, wire-shape mismatch). The caller
+    /// must still call `discard_staged_commit` to clean up any partial
+    /// state before trying the next candidate.
+    fn stage_remote_commit(
         &self,
         proposals: &[Vec<u8>],
         commit_bytes: &[u8],
     ) -> Result<StagedCandidateResult, MlsError>;
 
-    /// Merge a previously staged inbound commit, advancing the MLS epoch.
+    /// Apply the previously staged inbound commit, advancing the MLS
+    /// epoch. Errors if no commit is staged.
     fn merge_staged_commit(&self) -> Result<(), MlsError>;
 
-    /// Discard a previously staged inbound commit and clear pending
-    /// proposals.
+    /// Roll back [`stage_remote_commit`](Self::stage_remote_commit):
+    /// drop the staged commit and clear the pending proposals it
+    /// staged on top of.
     fn discard_staged_commit(&self) -> Result<(), MlsError>;
 
     // ── Application messages ──
 
-    /// Encrypt an application message for the group.
+    /// Encrypt an application message for the group, returning the raw
+    /// MLS wire bytes.
     fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, MlsError>;
 
-    /// Decrypt an inbound MLS message, accepting only application messages.
-    /// Used on the application subtopic to avoid MLS state pollution from
-    /// proposals/commits arriving on the wrong channel.
+    /// Encode and encrypt `app_msg` and wrap the result as an
+    /// [`OutboundPacket`] on the application subtopic. The convenience
+    /// path most senders use.
+    fn build_message(
+        &self,
+        app_msg: &AppMessage,
+        app_id: &[u8],
+    ) -> Result<OutboundPacket, MlsError>;
+
+    /// Strict app-subtopic decrypt: accepts only `Application` messages,
+    /// silently ignoring anything else (including proposals and commits).
+    /// This guards the app subtopic against MLS-state pollution from
+    /// peers that misroute control messages.
     fn decrypt_application_only(&self, ciphertext: &[u8]) -> Result<DecryptResult, MlsError>;
 
-    /// Decrypt/process an inbound MLS message — application messages and
-    /// proposals only. Commits are routed through
-    /// [`apply_remote_candidate`](Self::apply_remote_candidate).
+    /// General decrypt: accepts `Application` messages and stores
+    /// incoming proposals as pending. Commits are out of scope here —
+    /// route them through
+    /// [`stage_remote_commit`](Self::stage_remote_commit) so they pass
+    /// the validation pipeline.
     fn decrypt(&self, ciphertext: &[u8]) -> Result<DecryptResult, MlsError>;
 
-    /// Inspect the untrusted outer kind of an MLS message — pre-dispatch
-    /// lane check on raw bytes (no group state required).
+    /// Peek the untrusted outer kind of an MLS wire message without
+    /// processing or signature-checking it. Used for cheap pre-dispatch
+    /// lane checks (e.g. "is this a proposal or a commit").
     fn inspect_message_kind(&self, message_bytes: &[u8]) -> Result<MlsMessageKind, MlsError>;
 }

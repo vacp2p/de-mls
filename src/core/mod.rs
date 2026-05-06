@@ -27,9 +27,8 @@ mod steward_list;
 // ── Core group operations ──
 pub use api::{
     ElectionDecision, FreezeFinalizeResult, FreezeOutcome, build_create_proposal_request,
-    build_key_package_message, build_message, create_commit_candidate, create_group,
-    evaluate_election_initiation, finalize_freeze_round, group_members, is_deadlock_ecp_proposer,
-    prepare_to_join, process_inbound,
+    build_key_package_message, create_commit_candidate, evaluate_election_initiation,
+    finalize_freeze_round, group_members, is_deadlock_ecp_proposer, process_inbound,
 };
 
 // ── Consensus result application (pure, synchronous) ──

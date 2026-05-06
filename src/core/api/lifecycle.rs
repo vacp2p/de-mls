@@ -1,66 +1,23 @@
-//! Group lifecycle operations: creation, joining, and message building.
+//! Group lifecycle helpers: outbound message framing for the welcome
+//! subtopic and consensus proposal building. Group construction lives on
+//! [`Group::create_group`](crate::core::Group::create_group) and
+//! [`Group::prepare_to_join`](crate::core::Group::prepare_to_join);
+//! application-message framing lives on
+//! [`MlsService::build_message`](crate::mls_crypto::MlsService::build_message).
 
 use hashgraph_like_consensus::types::CreateProposalRequest;
 use prost::Message;
 
 use crate::{
-    core::{error::CoreError, group::Group, steward_list::ProtocolConfig},
-    ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC},
-    mls_crypto::{KeyPackageBytes, MlsService},
+    core::error::CoreError,
+    ds::{OutboundPacket, WELCOME_SUBTOPIC},
+    mls_crypto::KeyPackageBytes,
     protos::de_mls::messages::v1::{
-        AppMessage, GroupUpdateRequest, InvitationToJoin, UserKeyPackage, WelcomeMessage,
+        GroupUpdateRequest, InvitationToJoin, UserKeyPackage, WelcomeMessage,
     },
 };
 
-// ─────────────────────────── Group Lifecycle ───────────────────────────
-
-/// Create a new MLS group as the steward.
-///
-/// Initializes a bootstrap steward list containing the creator and embeds
-/// the supplied MLS service in the resulting [`Group`].
-pub fn create_group<M: MlsService>(
-    name: &str,
-    self_identity: Vec<u8>,
-    protocol_config: ProtocolConfig,
-    mls: M,
-) -> Result<Group<M>, CoreError> {
-    Group::new_as_creator(name, self_identity, protocol_config, mls)
-}
-
-/// Prepare a handle for joining an existing group.
-///
-/// The joiner knows the config from group discovery but won't have the
-/// actual steward list — or an MLS service — until they receive a
-/// `GroupSync` and a welcome respectively. The MLS service slot stays
-/// `None` until the welcome arrives.
-pub fn prepare_to_join<M: MlsService>(
-    name: &str,
-    self_identity: Vec<u8>,
-    protocol_config: ProtocolConfig,
-) -> Group<M> {
-    Group::new_as_joiner(name, self_identity, protocol_config)
-}
-
-// ─────────────────────────── Message Building ───────────────────────────
-
-/// Build an MLS-encrypted application message for `mls`'s group.
-pub fn build_message<M>(
-    mls: &M,
-    app_msg: &AppMessage,
-    app_id: &[u8],
-) -> Result<OutboundPacket, CoreError>
-where
-    M: MlsService,
-{
-    let message_out = mls.encrypt(&app_msg.encode_to_vec())?;
-
-    Ok(OutboundPacket::new(
-        message_out,
-        APP_MSG_SUBTOPIC,
-        mls.group_id(),
-        app_id,
-    ))
-}
+// ─────────────────────────── Welcome-subtopic framing ───────────────────────────
 
 /// Build a key package message for joining a group.
 ///

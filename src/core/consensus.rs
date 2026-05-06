@@ -280,7 +280,7 @@ mod tests {
     }
 
     fn make_group(name: &str, identity: Vec<u8>, config: ProtocolConfig) -> Group<NoopMls> {
-        Group::new_as_creator(name, identity, config, NoopMls::new(name)).unwrap()
+        Group::create_group(name, identity, config, NoopMls::new(name)).unwrap()
     }
 
     fn election_request(stewards: Vec<Vec<u8>>, epoch: u64) -> GroupUpdateRequest {

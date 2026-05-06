@@ -94,7 +94,7 @@ pub(crate) struct FreezeRound {
 }
 
 /// Per-group protocol state. Stewards batch commits; members vote.
-/// Construct with [`Self::new_as_creator`] or [`Self::new_as_joiner`].
+/// Construct with [`Self::create_group`] or [`Self::prepare_to_join`].
 ///
 /// Owns the per-group MLS service (`Option<M>` because joiners in
 /// `PendingJoin` don't have a service until the welcome arrives — at that
@@ -216,6 +216,13 @@ impl<M: MlsService> Group<M> {
         self.mls.as_ref()
     }
 
+    /// Borrow the MLS service, erroring with [`CoreError::MlsGroupNotInitialized`]
+    /// when not attached. Use this in code paths where the service must be
+    /// present (Working state) so the `?` chain stays linear.
+    pub fn expect_mls(&self) -> Result<&M, CoreError> {
+        self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)
+    }
+
     /// Attach an MLS service to this group. Used by joiners after a
     /// welcome arrives; idempotent in spirit (overwrites whatever was
     /// there — caller is responsible for not double-attaching).
@@ -237,10 +244,10 @@ impl<M: MlsService> Group<M> {
         self.resolved_proposals.record(proposal_id);
     }
 
-    /// Create a new group handle for a joining member (not yet steward).
-    /// The MLS service starts unattached; call [`Self::attach_mls`] after
-    /// the welcome is accepted.
-    pub fn new_as_joiner(
+    /// Build a joiner-side handle for an existing group. The MLS service
+    /// starts unattached; the User attaches it via [`Self::attach_mls`]
+    /// once the welcome arrives.
+    pub fn prepare_to_join(
         group_name: &str,
         self_identity: Vec<u8>,
         protocol_config: ProtocolConfig,
@@ -248,9 +255,9 @@ impl<M: MlsService> Group<M> {
         Self::new_base(group_name, self_identity, protocol_config, None)
     }
 
-    /// Create a new group handle for the group creator, initializing the
-    /// steward list and attaching the supplied MLS service.
-    pub fn new_as_creator(
+    /// Build a creator-side handle: initializes a bootstrap steward list
+    /// containing the creator and embeds the supplied MLS service.
+    pub fn create_group(
         group_name: &str,
         creator_identity: Vec<u8>,
         protocol_config: ProtocolConfig,
@@ -975,10 +982,12 @@ pub(crate) mod test_stubs {
     use openmls::prelude::CredentialWithKey;
     use openmls_basic_credential::SignatureKeyPair;
 
+    use crate::ds::OutboundPacket;
     use crate::mls_crypto::{
-        CommitCandidate as MlsCommitCandidate, DecryptResult, GroupUpdate, IdentityProvider,
+        CommitCandidate as MlsCommitCandidate, DecryptResult, IdentityProvider, MlsCommitInput,
         MlsError, MlsMessageKind, MlsService, StagedCandidateResult,
     };
+    use crate::protos::de_mls::messages::v1::AppMessage;
 
     /// Test-only no-op identity; only `identity_bytes` and `identity_display`
     /// are ever called from `Group`'s pure-state tests, so the credential
@@ -1040,7 +1049,7 @@ pub(crate) mod test_stubs {
         }
         fn create_commit_candidate(
             &self,
-            _updates: &[GroupUpdate],
+            _updates: &[MlsCommitInput],
         ) -> Result<MlsCommitCandidate, MlsError> {
             unreachable!("NoopMls::create_commit_candidate not used in pure-state tests")
         }
@@ -1050,7 +1059,7 @@ pub(crate) mod test_stubs {
         fn discard_own_commit(&self) -> Result<(), MlsError> {
             unreachable!()
         }
-        fn apply_remote_candidate(
+        fn stage_remote_commit(
             &self,
             _proposals: &[Vec<u8>],
             _commit_bytes: &[u8],
@@ -1064,6 +1073,13 @@ pub(crate) mod test_stubs {
             unreachable!()
         }
         fn encrypt(&self, _plaintext: &[u8]) -> Result<Vec<u8>, MlsError> {
+            unreachable!()
+        }
+        fn build_message(
+            &self,
+            _app_msg: &AppMessage,
+            _app_id: &[u8],
+        ) -> Result<OutboundPacket, MlsError> {
             unreachable!()
         }
         fn decrypt_application_only(&self, _ciphertext: &[u8]) -> Result<DecryptResult, MlsError> {
@@ -1098,16 +1114,16 @@ mod tests {
 
     /// Test convenience: build a creator-side `Group<NoopMls>`.
     fn creator_group(name: &str, identity: Vec<u8>, config: ProtocolConfig) -> Group<NoopMls> {
-        Group::new_as_creator(name, identity, config, NoopMls::new(name)).unwrap()
+        Group::create_group(name, identity, config, NoopMls::new(name)).unwrap()
     }
 
     /// Test convenience: build a joiner-side `Group<NoopMls>` (no MLS service yet).
     fn joiner_group(name: &str, identity: Vec<u8>, config: ProtocolConfig) -> Group<NoopMls> {
-        Group::new_as_joiner(name, identity, config)
+        Group::prepare_to_join(name, identity, config)
     }
 
     #[test]
-    fn test_new_as_creator_with_protocol_config() {
+    fn test_create_group_with_protocol_config() {
         let config = ProtocolConfig::new(1, 3).unwrap();
         let creator = member(1);
         let group = creator_group("test-group", creator.clone(), config);

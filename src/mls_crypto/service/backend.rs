@@ -14,11 +14,16 @@ use openmls::{
 };
 use openmls_rust_crypto::RustCrypto;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
+use prost::Message;
 
-use crate::mls_crypto::{
-    CommitCandidate, DeMlsStorage, DecryptResult, GroupUpdate, IdentityProvider, MlsError,
-    MlsMessageKind, MlsProposalAction, OpenMlsService, StagedCandidateResult,
-    service::api::MlsService,
+use crate::{
+    ds::{APP_MSG_SUBTOPIC, OutboundPacket},
+    mls_crypto::{
+        CommitCandidate, DeMlsStorage, DecryptResult, IdentityProvider, MlsCommitInput, MlsError,
+        MlsMessageKind, MlsProposalOutput, OpenMlsService, StagedCandidateResult,
+        service::api::MlsService,
+    },
+    protos::de_mls::messages::v1::AppMessage,
 };
 
 /// Internal OpenMLS provider that wraps the configured storage backend.
@@ -66,7 +71,7 @@ where
     fn extract_proposal_action(
         group: &MlsGroup,
         proposal: &Proposal,
-    ) -> Result<MlsProposalAction, MlsError> {
+    ) -> Result<MlsProposalOutput, MlsError> {
         match proposal {
             Proposal::Add(add) => {
                 let id = add
@@ -75,7 +80,7 @@ where
                     .credential()
                     .serialized_content()
                     .to_vec();
-                Ok(MlsProposalAction::Add(id))
+                Ok(MlsProposalOutput::Add(id))
             }
             Proposal::Remove(remove) => {
                 let removed = remove.removed();
@@ -83,9 +88,9 @@ where
                     .member(removed)
                     .map(|c| c.serialized_content().to_vec())
                     .ok_or(MlsError::UnknownLeafIndex(removed.u32()))?;
-                Ok(MlsProposalAction::Remove(id))
+                Ok(MlsProposalOutput::Remove(id))
             }
-            other => Ok(MlsProposalAction::Other(format!("{other:?}"))),
+            other => Ok(MlsProposalOutput::Other(format!("{other:?}"))),
         }
     }
 }
@@ -147,7 +152,7 @@ where
 
     fn create_commit_candidate(
         &self,
-        updates: &[GroupUpdate],
+        updates: &[MlsCommitInput],
     ) -> Result<CommitCandidate, MlsError> {
         let provider = self.make_provider();
         let signer = self.identity.signer();
@@ -157,7 +162,7 @@ where
 
         for update in updates {
             match update {
-                GroupUpdate::Add(key_package) => {
+                MlsCommitInput::Add(key_package) => {
                     let kp: openmls::key_packages::KeyPackage =
                         serde_json::from_slice(key_package.as_bytes())
                             .map_err(MlsError::KeyPackageJson)?;
@@ -165,7 +170,7 @@ where
                         group.propose_add_member(&provider, signer, &kp)?;
                     mls_proposals.push(mls_message_out.to_bytes()?);
                 }
-                GroupUpdate::Remove(wallet_bytes) => {
+                MlsCommitInput::Remove(wallet_bytes) => {
                     let member_index = group.members().find_map(|m| {
                         if m.credential.serialized_content() == wallet_bytes {
                             Some(m.index)
@@ -216,16 +221,16 @@ where
     // Inbound candidate pipeline (stage → merge/discard)
     // ══════════════════════════════════════════════════════════
 
-    fn apply_remote_candidate(
+    fn stage_remote_commit(
         &self,
         proposals: &[Vec<u8>],
         commit_bytes: &[u8],
     ) -> Result<StagedCandidateResult, MlsError> {
         let provider = self.make_provider();
 
-        // Phase 1: hold the group lock for the whole atomic stage.
-        // Anything we put into MLS pending state stays there for the caller
-        // to roll back via `discard_staged_commit` on Aborted.
+        // Hold the group lock for the whole atomic stage. Anything we put
+        // into MLS pending state stays there for the caller to roll back
+        // via `discard_staged_commit` on Aborted.
         let outcome = {
             let mut group = self.mls_group.write()?;
 
@@ -247,7 +252,7 @@ where
                         tracing::debug!(
                             group = %self.group_id,
                             index = i,
-                            "apply_remote_candidate: non-proposal in proposal slot",
+                            "stage_remote_commit: non-proposal in proposal slot",
                         );
                         return Ok(StagedCandidateResult::Aborted);
                     }
@@ -260,14 +265,14 @@ where
 
             if protocol_message.group_id().as_slice() != group.group_id().as_slice() {
                 tracing::debug!(
-                    "apply_remote_candidate: ignoring commit for wrong group ID (expected {})",
+                    "stage_remote_commit: ignoring commit for wrong group ID (expected {})",
                     self.group_id,
                 );
                 return Ok(StagedCandidateResult::Aborted);
             }
             if protocol_message.epoch() < group.epoch() {
                 tracing::debug!(
-                    "apply_remote_candidate: ignoring stale commit from epoch {} (current: {})",
+                    "stage_remote_commit: ignoring stale commit from epoch {} (current: {})",
                     protocol_message.epoch().as_u64(),
                     group.epoch().as_u64(),
                 );
@@ -289,7 +294,7 @@ where
                             .credential()
                             .serialized_content()
                             .to_vec();
-                        actions.push(MlsProposalAction::Add(id));
+                        actions.push(MlsProposalOutput::Add(id));
                     }
                     for remove in staged.remove_proposals() {
                         let removed_index = remove.remove_proposal().removed();
@@ -297,7 +302,7 @@ where
                             .member(removed_index)
                             .map(|c| c.serialized_content().to_vec())
                             .ok_or(MlsError::UnknownLeafIndex(removed_index.u32()))?;
-                        actions.push(MlsProposalAction::Remove(id));
+                        actions.push(MlsProposalOutput::Remove(id));
                     }
                     Some((
                         commit_sender,
@@ -309,7 +314,7 @@ where
                 }
                 _ => {
                     tracing::debug!(
-                        "apply_remote_candidate: ignoring non-commit message for group {}",
+                        "stage_remote_commit: ignoring non-commit message for group {}",
                         self.group_id,
                     );
                     None
@@ -365,6 +370,20 @@ where
         let mut group = self.mls_group.write()?;
         let message = group.create_message(&provider, signer, plaintext)?;
         Ok(message.to_bytes()?)
+    }
+
+    fn build_message(
+        &self,
+        app_msg: &AppMessage,
+        app_id: &[u8],
+    ) -> Result<OutboundPacket, MlsError> {
+        let bytes = self.encrypt(&app_msg.encode_to_vec())?;
+        Ok(OutboundPacket::new(
+            bytes,
+            APP_MSG_SUBTOPIC,
+            self.group_id(),
+            app_id,
+        ))
     }
 
     fn decrypt_application_only(&self, ciphertext: &[u8]) -> Result<DecryptResult, MlsError> {
@@ -431,7 +450,7 @@ where
 
         if protocol_message.content_type() == ContentType::Commit {
             tracing::debug!(
-                "Ignoring commit on decrypt() path for group {}: use apply_remote_candidate() instead",
+                "Ignoring commit on decrypt() path for group {}: use stage_remote_commit() instead",
                 self.group_id,
             );
             return Ok(DecryptResult::Ignored);

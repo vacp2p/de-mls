@@ -17,9 +17,6 @@ pub enum UserError {
     #[error("Group not found")]
     GroupNotFound,
 
-    #[error("MLS service not yet attached for this group (still pending join)")]
-    MlsNotInitialized,
-
     #[error("Already leaving this group")]
     AlreadyLeaving,
 

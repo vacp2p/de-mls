@@ -10,10 +10,7 @@ use crate::{
         GroupConfig, GroupState, GroupStateMachine, ProposalParams, StateChangeHandler, User,
         UserError, submit_self_leave_proposal, user::GroupEntry,
     },
-    core::{
-        DeMlsProvider, GroupEventHandler, auto_approved_leave_proposal_id, build_message,
-        create_group, prepare_to_join,
-    },
+    core::{DeMlsProvider, Group, GroupEventHandler, auto_approved_leave_proposal_id},
     mls_crypto::{IdentityProvider, MlsService, parse_wallet_to_bytes},
     protos::de_mls::messages::v1::{GroupUpdateRequest, RemoveMember, group_update_request},
 };
@@ -57,7 +54,7 @@ where
         let self_identity_bytes = self.identity().identity_bytes().to_vec();
         let (mut group, state_machine) = if is_creation {
             let mls = (self.mls_creator_factory)(group_name.to_string())?;
-            let group = create_group(
+            let group = Group::create_group(
                 group_name,
                 self_identity_bytes.clone(),
                 config.protocol.clone(),
@@ -66,7 +63,7 @@ where
             let state_machine = GroupStateMachine::new_as_member_with_config(config);
             (group, state_machine)
         } else {
-            let group: crate::core::Group<M> = prepare_to_join(
+            let group: Group<M> = Group::prepare_to_join(
                 group_name,
                 self_identity_bytes.clone(),
                 config.protocol.clone(),
@@ -194,8 +191,10 @@ where
                 .await
                 .ok_or(UserError::GroupNotFound)?;
             let entry = entry_arc.read().await;
-            let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
-            build_message(mls, &app_msg, &self.app_id)?
+            entry
+                .group
+                .expect_mls()?
+                .build_message(&app_msg, &self.app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
 

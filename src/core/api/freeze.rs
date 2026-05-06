@@ -12,7 +12,7 @@ use crate::{
     },
     ds::OutboundPacket,
     mls_crypto::{
-        IdentityProvider, MlsMessageKind, MlsProposalAction, MlsService, StagedCandidateResult,
+        IdentityProvider, MlsMessageKind, MlsProposalOutput, MlsService, StagedCandidateResult,
     },
     protos::de_mls::messages::v1::{
         CommitCandidate, GroupUpdateRequest, ViolationEvidence, group_update_request::Payload,
@@ -87,10 +87,7 @@ where
             tracing::debug!(group = %group_name, "candidate ignored: no approved proposals");
             return Ok(ProcessResult::Noop);
         }
-        let epoch = group
-            .mls()
-            .ok_or(CoreError::MlsGroupNotInitialized)?
-            .current_epoch()?;
+        let epoch = group.expect_mls()?.current_epoch()?;
         group.ensure_freeze_round(epoch);
     }
 
@@ -110,7 +107,7 @@ where
         return Ok(ProcessResult::Noop);
     }
 
-    let mls = group.mls().ok_or(CoreError::MlsGroupNotInitialized)?;
+    let mls = group.expect_mls()?;
 
     // Wire-level kind check — no MLS staging.
     let proposals_ok = candidate_msg
@@ -164,10 +161,7 @@ pub fn finalize_freeze_round<M>(
 where
     M: MlsService,
 {
-    let current_epoch = group
-        .mls()
-        .ok_or(CoreError::MlsGroupNotInitialized)?
-        .current_epoch()?;
+    let current_epoch = group.expect_mls()?.current_epoch()?;
     group.lock_freeze_round_selection(current_epoch);
 
     let Some(candidates) = group.take_round_candidates(current_epoch) else {
@@ -216,7 +210,7 @@ where
 /// expected to have committed at `current_epoch`; used to penalise an
 /// absent steward when a backup commits in their place.
 struct RoundContext {
-    mls_actions: Vec<MlsProposalAction>,
+    mls_actions: Vec<MlsProposalOutput>,
     mls_count: usize,
     self_remove_pending: bool,
     current_epoch: u64,
@@ -229,10 +223,10 @@ impl RoundContext {
     where
         M: MlsService,
     {
-        let mls = group.mls().ok_or(CoreError::MlsGroupNotInitialized)?;
+        let mls = group.expect_mls()?;
         let self_identity = mls.identity().identity_bytes().to_vec();
 
-        let mut mls_actions: Vec<MlsProposalAction> = Vec::new();
+        let mut mls_actions: Vec<MlsProposalOutput> = Vec::new();
         let mut self_remove_pending = false;
         for req in group.approved_proposals().values() {
             if let Some(action) = expected_action_for_request(req) {
@@ -343,10 +337,7 @@ where
                 // A failure here leaves an old pending commit in MLS and
                 // would sabotage every subsequent staging attempt — bubble
                 // the error out of the round instead of pressing on.
-                group
-                    .mls()
-                    .ok_or(CoreError::MlsGroupNotInitialized)?
-                    .discard_own_commit()?;
+                group.expect_mls()?.discard_own_commit()?;
                 own_commit_discarded = true;
             }
             apply_incoming_candidate(group, chosen, &ctx.mls_actions, ctx.current_epoch)?
@@ -490,10 +481,7 @@ where
     // is our own and is trusted by definition.
     let committer = chosen.candidate_msg.steward_identity.clone();
 
-    group
-        .mls()
-        .ok_or(CoreError::MlsGroupNotInitialized)?
-        .merge_own_commit()?;
+    group.expect_mls()?.merge_own_commit()?;
 
     // Welcomes go out only after our merge — joiners must not race ahead of the steward's epoch.
     let outbound = chosen
@@ -527,14 +515,14 @@ where
 fn apply_incoming_candidate<M>(
     group: &mut Group<M>,
     chosen: BufferedCommitCandidate,
-    expected_actions: &[MlsProposalAction],
+    expected_actions: &[MlsProposalOutput],
     current_epoch: u64,
 ) -> Result<CandidateOutcome, CoreError>
 where
     M: MlsService,
 {
     let group_name = group.group_name().to_owned();
-    let mls = group.mls().ok_or(CoreError::MlsGroupNotInitialized)?;
+    let mls = group.expect_mls()?;
 
     let (commit_sender, self_removed, commit_actions) =
         match stage_candidate(mls, &group_name, &chosen.candidate_msg, current_epoch)? {
@@ -613,7 +601,7 @@ enum StagingOutcome {
     Staged {
         commit_sender: Vec<u8>,
         self_removed: bool,
-        commit_actions: Vec<MlsProposalAction>,
+        commit_actions: Vec<MlsProposalOutput>,
     },
     /// MLS rejected a piece (bad wire, protocol error).
     Abort,
@@ -640,7 +628,7 @@ where
         self_removed,
         actions: commit_actions,
     }) = mls
-        .apply_remote_candidate(&candidate.mls_proposals, &candidate.commit_message)
+        .stage_remote_commit(&candidate.mls_proposals, &candidate.commit_message)
         .inspect_err(|e| {
             tracing::debug!(group = group_name, error = %e, "candidate failed to stage");
         })
@@ -693,9 +681,9 @@ where
 /// `Some(evidence)` on mismatch.
 fn validate_commit_candidate<M: MlsService>(
     group: &Group<M>,
-    expected_actions: &[MlsProposalAction],
+    expected_actions: &[MlsProposalOutput],
     sender_id: &[u8],
-    mls_actions: &[MlsProposalAction],
+    mls_actions: &[MlsProposalOutput],
     epoch: u64,
 ) -> Result<Option<ViolationEvidence>, CoreError> {
     let group_name = group.group_name();
@@ -725,10 +713,10 @@ fn validate_commit_candidate<M: MlsService>(
 
 /// The MLS action a voted request should map to, or `None` for non-MLS
 /// payloads (emergency/election) — doubles as the "MLS-producing" filter.
-fn expected_action_for_request(req: &GroupUpdateRequest) -> Option<MlsProposalAction> {
+fn expected_action_for_request(req: &GroupUpdateRequest) -> Option<MlsProposalOutput> {
     match &req.payload {
-        Some(Payload::InviteMember(im)) => Some(MlsProposalAction::Add(im.identity.clone())),
-        Some(Payload::RemoveMember(rm)) => Some(MlsProposalAction::Remove(rm.identity.clone())),
+        Some(Payload::InviteMember(im)) => Some(MlsProposalOutput::Add(im.identity.clone())),
+        Some(Payload::RemoveMember(rm)) => Some(MlsProposalOutput::Remove(rm.identity.clone())),
         Some(Payload::EmergencyCriteria(_)) | Some(Payload::StewardElection(_)) | None => None,
     }
 }

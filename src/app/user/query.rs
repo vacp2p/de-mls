@@ -106,9 +106,7 @@ where
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        if entry.group.mls().is_none() {
-            return Err(UserError::MlsNotInitialized);
-        }
+        entry.group.expect_mls()?;
         let members = group_members(&entry.group)?;
         Ok(members
             .into_iter()
@@ -127,7 +125,7 @@ where
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        let mls = entry.group.mls().ok_or(UserError::MlsNotInitialized)?;
+        let mls = entry.group.expect_mls()?;
         let epoch = mls.current_epoch()?;
         let members = group_members(&entry.group)?;
 

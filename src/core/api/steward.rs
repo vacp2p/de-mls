@@ -13,7 +13,7 @@ use crate::{
     },
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     mls_crypto::{
-        CommitCandidate as MlsCommitCandidate, GroupUpdate, IdentityProvider, KeyPackageBytes,
+        CommitCandidate as MlsCommitCandidate, IdentityProvider, KeyPackageBytes, MlsCommitInput,
         MlsService,
     },
     protos::de_mls::messages::v1::{AppMessage, CommitCandidate, group_update_request},
@@ -111,7 +111,7 @@ where
                 if is_member(&im.identity) {
                     continue;
                 }
-                updates.push(GroupUpdate::Add(KeyPackageBytes::new(
+                updates.push(MlsCommitInput::Add(KeyPackageBytes::new(
                     im.key_package_bytes.clone(),
                     im.identity.clone(),
                 )));
@@ -125,7 +125,7 @@ where
                 if !is_member(&rm.identity) {
                     continue;
                 }
-                updates.push(GroupUpdate::Remove(rm.identity.clone()));
+                updates.push(MlsCommitInput::Remove(rm.identity.clone()));
             }
             _ => return Err(CoreError::InvalidGroupUpdateRequest),
         }
