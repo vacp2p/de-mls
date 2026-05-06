@@ -4,9 +4,9 @@
 
 use prost::Message;
 
-use de_mls::app::PeerScoringService;
 use de_mls::core::{
-    Group, ScoreEvent, ScoreOp, apply_consensus_result, emergency_score_ops, group_members,
+    Group, PeerScoringService, ScoreEvent, ScoreOp, apply_consensus_result, emergency_score_ops,
+    group_members,
 };
 use de_mls::ds::WELCOME_SUBTOPIC;
 

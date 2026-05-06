@@ -607,7 +607,8 @@ fn test_group_sync_roundtrip() {
 
 #[test]
 fn test_group_sync_propagates_divergent_per_group_config() {
-    use de_mls::app::{InMemoryPeerScoreStorage, PeerScoringService};
+    use de_mls::app::InMemoryPeerScoreStorage;
+    use de_mls::core::PeerScoringService;
     use de_mls::core::{ScoreEvent, ScoreOp, ScoringConfig};
     use de_mls::protos::de_mls::messages::v1::{GroupSync, PeerScore};
 

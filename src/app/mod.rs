@@ -36,7 +36,7 @@ pub use display::{
     MemberRole, MessageType, format_group_request, format_group_request_target, message_types,
 };
 pub use error::UserError;
-pub use peer_scoring::{FixedScoringProvider, InMemoryPeerScoreStorage, PeerScoringService};
+pub use peer_scoring::{FixedScoringProvider, InMemoryPeerScoreStorage};
 pub use state_machine::{FreezeTimeoutStatus, GroupState, GroupStateMachine, StateChangeHandler};
 pub use user::{
     DefaultMlsService, KeyPackageGenerator, MlsCreatorFactory, MlsWelcomeFactory, User,

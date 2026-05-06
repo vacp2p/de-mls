@@ -13,7 +13,8 @@ use std::sync::{
 
 use async_trait::async_trait;
 
-use de_mls::app::{FixedScoringProvider, InMemoryPeerScoreStorage, PeerScoringService};
+use de_mls::app::{FixedScoringProvider, InMemoryPeerScoreStorage};
+use de_mls::core::PeerScoringService;
 use de_mls::core::{
     CallbackError, FreezeOutcome, Group, GroupEventHandler, ProcessResult, ProtocolConfig,
     ScoringConfig, build_key_package_message, create_commit_candidate, finalize_freeze_round,

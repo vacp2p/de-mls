@@ -23,11 +23,11 @@ use tokio::{sync::RwLock, task::JoinHandle};
 use crate::{
     app::{
         FixedScoringProvider, GroupConfig, GroupStateMachine, InMemoryPeerScoreStorage,
-        PeerScoringService, StateChangeHandler, UserError,
+        StateChangeHandler, UserError,
     },
     core::{
-        DeMlsProvider, DefaultProvider, Group, GroupEventHandler, ProposalId, ProviderConsensus,
-        ScoringConfig,
+        DeMlsProvider, DefaultProvider, Group, GroupEventHandler, PeerScoringService, ProposalId,
+        ProviderConsensus, ScoringConfig,
     },
     mls_crypto::{
         IdentityProvider, KeyPackageBytes, MemoryDeMlsStorage, MlsError, MlsService,

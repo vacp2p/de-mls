@@ -34,8 +34,8 @@ pub use api::{
 // ── Consensus result application (pure, synchronous) ──
 pub use consensus::{ConsensusApplyResult, apply_consensus_result};
 pub use peer_scoring::{
-    DEFAULT_THRESHOLD_PEER_SCORE, PeerScoreStorage, ScoreEvent, ScoreOp, ScoringConfig,
-    ScoringMemberDiff, ScoringProvider, emergency_score_ops, scoring_member_diff,
+    DEFAULT_THRESHOLD_PEER_SCORE, PeerScoreStorage, PeerScoringService, ScoreEvent, ScoreOp,
+    ScoringConfig, ScoringMemberDiff, ScoringProvider, emergency_score_ops, scoring_member_diff,
 };
 
 // ── Error type ──
