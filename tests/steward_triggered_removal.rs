@@ -133,37 +133,30 @@ fn test_full_pipeline_penalties_to_removal() {
     let steward_id = group.self_identity().to_vec();
     let target_id = vec![0xDD];
 
-    let threshold = group.threshold_peer_score();
     let mut scoring = make_scoring();
-    scoring.add_member(group_name, &steward_id);
-    scoring.add_member(group_name, &target_id);
+    scoring.add_member(&steward_id);
+    scoring.add_member(&target_id);
 
     // Apply penalties until target drops below threshold
     // 100 - 50 = 50 (BrokenCommit)
-    scoring.apply_op(
-        group_name,
-        &ScoreOp {
-            member_id: target_id.clone(),
-            event: ScoreEvent::BrokenCommit,
-        },
-    );
-    assert!(!scoring.is_below_threshold(group_name, &target_id, threshold));
+    scoring.apply_op(&ScoreOp {
+        member_id: target_id.clone(),
+        event: ScoreEvent::BrokenCommit,
+    });
+    assert!(!scoring.is_below_threshold(&target_id));
 
     // 50 - 50 = 0 (EmergencyNoCreator)
-    scoring.apply_op(
-        group_name,
-        &ScoreOp {
-            member_id: target_id.clone(),
-            event: ScoreEvent::EmergencyNoCreator,
-        },
-    );
-    assert!(scoring.is_below_threshold(group_name, &target_id, threshold));
+    scoring.apply_op(&ScoreOp {
+        member_id: target_id.clone(),
+        event: ScoreEvent::EmergencyNoCreator,
+    });
+    assert!(scoring.is_below_threshold(&target_id));
 
     // Now steward creates SCORE_BELOW_THRESHOLD ECP
-    let below = scoring.members_below_threshold(group_name, threshold);
+    let below = scoring.members_below_threshold();
     assert!(below.contains(&target_id));
 
-    let current_score = scoring.score_for(group_name, &target_id).unwrap();
+    let current_score = scoring.score_for(&target_id).unwrap();
     let evidence = ViolationEvidence::score_below_threshold(target_id.clone(), 0, current_score)
         .with_creator(steward_id.clone());
     let request = evidence.into_update_request().unwrap();
@@ -177,7 +170,7 @@ fn test_full_pipeline_penalties_to_removal() {
     let score_ops = emergency_score_ops(&payload, true);
 
     // Apply score ops
-    scoring.apply_ops(group_name, &score_ops);
+    scoring.apply_ops(&score_ops);
 
     // RemoveMember should be in approved queue
     assert_eq!(group.approved_proposals_count(), 1);
@@ -216,53 +209,34 @@ fn test_dedup_pending_removal_targets() {
 fn test_steward_skips_self_for_removal() {
     let group_name = "removal-self-guard";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-    let group = setup_steward(group_name, alice_hex);
-    let threshold = group.threshold_peer_score();
+    let _group = setup_steward(group_name, alice_hex);
 
     let mut scoring = make_scoring();
 
     let steward_id = vec![0x01];
     let other_id = vec![0x02];
 
-    scoring.add_member(group_name, &steward_id);
-    scoring.add_member(group_name, &other_id);
+    scoring.add_member(&steward_id);
+    scoring.add_member(&other_id);
 
     // Drop both below threshold
-    scoring.apply_op(
-        group_name,
-        &ScoreOp {
+    for event in [ScoreEvent::BrokenCommit, ScoreEvent::EmergencyNoCreator] {
+        scoring.apply_op(&ScoreOp {
             member_id: steward_id.clone(),
-            event: ScoreEvent::BrokenCommit,
-        },
-    );
-    scoring.apply_op(
-        group_name,
-        &ScoreOp {
-            member_id: steward_id.clone(),
-            event: ScoreEvent::EmergencyNoCreator,
-        },
-    );
-    scoring.apply_op(
-        group_name,
-        &ScoreOp {
+            event,
+        });
+        scoring.apply_op(&ScoreOp {
             member_id: other_id.clone(),
-            event: ScoreEvent::BrokenCommit,
-        },
-    );
-    scoring.apply_op(
-        group_name,
-        &ScoreOp {
-            member_id: other_id.clone(),
-            event: ScoreEvent::EmergencyNoCreator,
-        },
-    );
+            event,
+        });
+    }
 
-    assert!(scoring.is_below_threshold(group_name, &steward_id, threshold));
-    assert!(scoring.is_below_threshold(group_name, &other_id, threshold));
+    assert!(scoring.is_below_threshold(&steward_id));
+    assert!(scoring.is_below_threshold(&other_id));
 
     // Filter as the steward would
     let targets: Vec<Vec<u8>> = scoring
-        .members_below_threshold(group_name, threshold)
+        .members_below_threshold()
         .into_iter()
         .filter(|id| *id != steward_id)
         .collect();
@@ -271,39 +245,34 @@ fn test_steward_skips_self_for_removal() {
     assert_eq!(targets[0], other_id);
 }
 
-/// `members_below_threshold` selects against the threshold passed in,
-/// not a global default.
+/// `members_below_threshold` honours the threshold stored in the
+/// service's [`ScoringConfig`], including post-construction updates via
+/// `set_threshold`.
 #[test]
 fn test_members_below_threshold_uses_per_group_value() {
-    let group_name = "per-group-threshold";
-    let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-    let group = setup_steward(group_name, alice_hex);
-    assert_eq!(
-        group.threshold_peer_score(),
-        de_mls::core::DEFAULT_THRESHOLD_PEER_SCORE
-    );
-
     let alice = vec![0xAA];
     let bob = vec![0xBB];
     let carol = vec![0xCC];
 
     let mut scoring = make_scoring();
-    scoring.add_member(group_name, &alice);
-    scoring.add_member(group_name, &bob);
-    scoring.add_member(group_name, &carol);
-    scoring.set_score(group_name, &alice, -10);
-    scoring.set_score(group_name, &bob, -30);
-    scoring.set_score(group_name, &carol, -60);
+    scoring.add_member(&alice);
+    scoring.add_member(&bob);
+    scoring.add_member(&carol);
+    scoring.set_score(&alice, -10);
+    scoring.set_score(&bob, -30);
+    scoring.set_score(&carol, -60);
 
     // Strict threshold (-50): only Carol qualifies for removal.
-    let strict = scoring.members_below_threshold(group_name, -50);
+    scoring.set_threshold(-50);
+    let strict = scoring.members_below_threshold();
     assert!(strict.contains(&carol));
     assert!(!strict.contains(&bob));
     assert!(!strict.contains(&alice));
 
     // Loose threshold (-25, e.g. after a GroupSync reduced strictness):
     // both Bob and Carol qualify; Alice still safe.
-    let loose = scoring.members_below_threshold(group_name, -25);
+    scoring.set_threshold(-25);
+    let loose = scoring.members_below_threshold();
     assert!(loose.contains(&bob));
     assert!(loose.contains(&carol));
     assert!(!loose.contains(&alice));

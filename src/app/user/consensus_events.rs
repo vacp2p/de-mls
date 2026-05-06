@@ -287,15 +287,15 @@ where
         payload: &[u8],
         score_ops: &[ScoreOp],
     ) -> Result<(), UserError> {
-        self.scoring().apply_ops(group_name, score_ops);
-
-        if let Ok(req) = GroupUpdateRequest::decode(payload)
-            && let Some(group_update_request::Payload::EmergencyCriteria(ec)) = &req.payload
-            && let Some(ev) = &ec.evidence
-            && let Some(entry_arc) = self.lookup_entry(group_name).await
-        {
+        if let Some(entry_arc) = self.lookup_entry(group_name).await {
             let mut entry = entry_arc.write().await;
-            entry.group.resolve_pending_removal(&ev.target_member_id);
+            entry.scoring.apply_ops(score_ops);
+            if let Ok(req) = GroupUpdateRequest::decode(payload)
+                && let Some(group_update_request::Payload::EmergencyCriteria(ec)) = &req.payload
+                && let Some(ev) = &ec.evidence
+            {
+                entry.group.resolve_pending_removal(&ev.target_member_id);
+            }
         }
 
         let resumed_from_reelection = match self.lookup_entry(group_name).await {

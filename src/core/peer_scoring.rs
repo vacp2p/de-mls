@@ -63,21 +63,22 @@ pub trait ScoringProvider {
 pub struct ScoringConfig {
     /// Score assigned to newly added members.
     pub default_score: i64,
+    /// At or below this score, a member is eligible for
+    /// `SCORE_BELOW_THRESHOLD` ECP removal (RFC §Peer Scoring).
+    pub threshold: i64,
 }
 
-/// Per-(group, member) score persistence. The app layer ships an
-/// in-memory default impl.
-pub trait PeerScoreStorage {
-    fn get(&self, group_id: &str, member_id: &[u8]) -> Option<i64>;
-    fn set(&mut self, group_id: &str, member_id: &[u8], score: i64);
-    fn remove(&mut self, group_id: &str, member_id: &[u8]);
-    fn all_scores(&self, group_id: &str) -> Vec<(Vec<u8>, i64)>;
+/// Default removal threshold (RFC §Peer Scoring `threshold_peer_score`).
+pub const DEFAULT_THRESHOLD_PEER_SCORE: i64 = 0;
 
-    /// Drop every score entry for `group_id`. Called on leave so a future
-    /// rejoin starts from a clean per-group table populated by the new
-    /// `GroupSync` rather than carrying stale entries from the prior
-    /// session.
-    fn remove_group(&mut self, group_id: &str);
+/// Per-member score persistence for a single group. The app layer ships
+/// an in-memory default impl. One storage instance per group — no
+/// `group_id` keying.
+pub trait PeerScoreStorage {
+    fn get(&self, member_id: &[u8]) -> Option<i64>;
+    fn set(&mut self, member_id: &[u8], score: i64);
+    fn remove(&mut self, member_id: &[u8]);
+    fn all_scores(&self) -> Vec<(Vec<u8>, i64)>;
 }
 
 // ── Scoring-member diff ─────────────────────────────────────────────

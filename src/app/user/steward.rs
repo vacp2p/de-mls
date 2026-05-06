@@ -27,23 +27,25 @@ where
     M::Identity: Clone,
 {
     /// Add any MLS members not yet tracked in scoring, and drop scored
-    /// entries for identities no longer in MLS. Takes `mls_members`
-    /// pre-fetched so the caller can release any group-entry guard
-    /// before the scoring mutex is acquired. Diffing is delegated to
+    /// entries for identities no longer in MLS. Diffing is delegated to
     /// [`scoring_member_diff`]; this method only applies the diff.
-    pub fn sync_scoring_members(&self, group_name: &str, mls_members: &[Vec<u8>]) {
-        let mut scoring = self.scoring();
-        let scored: Vec<Vec<u8>> = scoring
-            .all_members_with_scores(group_name)
+    pub async fn sync_scoring_members(&self, group_name: &str, mls_members: &[Vec<u8>]) {
+        let Some(entry_arc) = self.lookup_entry(group_name).await else {
+            return;
+        };
+        let mut entry = entry_arc.write().await;
+        let scored: Vec<Vec<u8>> = entry
+            .scoring
+            .all_members_with_scores()
             .into_iter()
             .map(|(id, _)| id)
             .collect();
         let diff = scoring_member_diff(&scored, mls_members);
         for member_id in &diff.to_add {
-            scoring.add_member(group_name, member_id);
+            entry.scoring.add_member(member_id);
         }
         for member_id in &diff.to_remove {
-            scoring.remove_member(group_name, member_id);
+            entry.scoring.remove_member(member_id);
         }
     }
 
@@ -359,25 +361,21 @@ where
     /// commit so new joiners can fully participate. Idempotent for members
     /// who already have a steward list.
     pub async fn send_group_sync(&self, group_name: &str) -> Result<(), UserError> {
-        // Read scores under the sync Mutex first — no `.await` held across it.
-        let scores: Vec<PeerScore> = {
-            let scoring = self.scoring();
-            scoring
-                .all_members_with_scores(group_name)
-                .into_iter()
-                .map(|(id, score)| PeerScore {
-                    member_id: id,
-                    score,
-                })
-                .collect()
-        };
-
         let entry_arc = self
             .lookup_entry(group_name)
             .await
             .ok_or(UserError::GroupNotFound)?;
         let packet = {
             let entry = entry_arc.read().await;
+            let scores: Vec<PeerScore> = entry
+                .scoring
+                .all_members_with_scores()
+                .into_iter()
+                .map(|(id, score)| PeerScore {
+                    member_id: id,
+                    score,
+                })
+                .collect();
 
             let list = match entry.group.steward_list() {
                 Some(l) => l,
@@ -418,7 +416,7 @@ where
                 retry_round: list.retry_round(),
                 max_reelection_attempts: entry.group.max_reelection_attempts(),
                 liveness_criteria_yes: entry.group.liveness_criteria_yes(),
-                threshold_peer_score: entry.group.threshold_peer_score(),
+                threshold_peer_score: entry.scoring.config().threshold,
                 pending_update_max_epochs: entry.group.pending_update_max_epochs(),
             };
 
@@ -442,33 +440,32 @@ where
             .lookup_entry(group_name)
             .await
             .ok_or(UserError::GroupNotFound)?;
-        let (is_steward, threshold, epoch) = {
+        let self_id = self.identity().identity_bytes();
+        let (is_steward, epoch, targets): (bool, u64, Vec<(Vec<u8>, i64)>) = {
             let entry = entry_arc.read().await;
             let mls = entry.group.expect_mls()?;
-            (
-                entry.group.is_steward(),
-                entry.group.threshold_peer_score(),
-                mls.current_epoch()?,
-            )
+            let is_steward = entry.group.is_steward();
+            let epoch = mls.current_epoch()?;
+            let targets = if is_steward {
+                entry
+                    .scoring
+                    .members_below_threshold()
+                    .into_iter()
+                    .filter(|id| *id != self_id)
+                    .map(|id| {
+                        let score = entry.scoring.score_for(&id).unwrap_or(0);
+                        (id, score)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            (is_steward, epoch, targets)
         };
-        let self_id = self.identity().identity_bytes();
 
         if !is_steward {
             return Ok(());
         }
-
-        let targets: Vec<(Vec<u8>, i64)> = {
-            let scoring = self.scoring();
-            scoring
-                .members_below_threshold(group_name, threshold)
-                .into_iter()
-                .filter(|id| *id != self_id) // self-removal handled separately
-                .map(|id| {
-                    let score = scoring.score_for(group_name, &id).unwrap_or(0);
-                    (id, score)
-                })
-                .collect()
-        };
 
         // Mark all targets pending under a single write-lock, then submit
         // proposals outside the lock to avoid holding it across `.await`.

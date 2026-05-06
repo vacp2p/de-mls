@@ -156,9 +156,6 @@ pub struct Group<M: MlsService> {
     /// While `true`, `create_commit_candidate` bypasses the `is_steward()`
     /// gate so any member can produce the recovery commit.
     recovery_mode: bool,
-    /// At or below this score, a member is eligible for
-    /// `SCORE_BELOW_THRESHOLD` ECP removal (RFC §Peer Scoring).
-    threshold_peer_score: i64,
     /// Auto-vote default and consensus tie-break rule (RFC §Creating
     /// Voting Proposal).
     liveness_criteria_yes: bool,
@@ -171,8 +168,6 @@ pub struct Group<M: MlsService> {
 /// responsible proposer a second shot with a different list composition;
 /// beyond that human/policy intervention is expected.
 pub const DEFAULT_MAX_REELECTION_ATTEMPTS: u32 = 1;
-
-pub const DEFAULT_THRESHOLD_PEER_SCORE: i64 = 0;
 
 pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
 
@@ -204,7 +199,6 @@ impl<M: MlsService> Group<M> {
             resolved_proposals: ResolvedProposalCache::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
             urgent_commit_target: None,
             recovery_mode: false,
-            threshold_peer_score: DEFAULT_THRESHOLD_PEER_SCORE,
             liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,
             pending_update_max_epochs: DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
         }
@@ -831,14 +825,6 @@ impl<M: MlsService> Group<M> {
 
     pub fn set_max_reelection_attempts(&mut self, max: u32) {
         self.max_reelection_attempts = max;
-    }
-
-    pub fn threshold_peer_score(&self) -> i64 {
-        self.threshold_peer_score
-    }
-
-    pub fn set_threshold_peer_score(&mut self, threshold: i64) {
-        self.threshold_peer_score = threshold;
     }
 
     pub fn liveness_criteria_yes(&self) -> bool {

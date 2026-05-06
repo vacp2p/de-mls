@@ -167,7 +167,7 @@ where
         };
         self.handler.on_outbound(name, packet).await?;
         self.handler.on_joined_group(name).await?;
-        self.sync_scoring_members(name, &mls_members);
+        self.sync_scoring_members(name, &mls_members).await;
 
         let state = {
             let mut entry = entry_arc.write().await;
@@ -192,7 +192,7 @@ where
                     Vec::new()
                 }
             };
-            self.sync_scoring_members(group_name, &mls_members);
+            self.sync_scoring_members(group_name, &mls_members).await;
         }
         self.prune_pending_updates_after_commit(group_name).await?;
 
@@ -259,11 +259,12 @@ where
         if let Some(entry) = entry {
             // Drop MLS state for the departing group: take the service out
             // of the Group so its `delete()` runs before the entry drops.
+            // Per-group scoring is dropped when the entry leaves the
+            // registry below.
             if let Some(mls) = entry.write().await.group.take_mls() {
                 let _ = mls.delete();
             }
         }
-        self.scoring().remove_group(group_name);
         self.cleanup_consensus_scope(group_name).await?;
         self.handler.on_leave_group(group_name).await?;
         Ok(())
@@ -346,13 +347,6 @@ where
         let sn = sync.steward_members.len();
         self.apply_group_sync_to_entry(group_name, &sync).await?;
 
-        if !sync.peer_scores.is_empty() {
-            let mut scoring = self.scoring();
-            for ps in &sync.peer_scores {
-                scoring.set_score(group_name, &ps.member_id, ps.score);
-            }
-        }
-
         info!(
             group = group_name,
             election_epoch = sync.election_epoch,
@@ -388,9 +382,10 @@ where
         entry
             .group
             .set_max_reelection_attempts(sync.max_reelection_attempts);
-        entry
-            .group
-            .set_threshold_peer_score(sync.threshold_peer_score);
+        entry.scoring.set_threshold(sync.threshold_peer_score);
+        for ps in &sync.peer_scores {
+            entry.scoring.set_score(&ps.member_id, ps.score);
+        }
         entry
             .group
             .set_liveness_criteria_yes(sync.liveness_criteria_yes);

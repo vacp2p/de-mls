@@ -106,16 +106,15 @@ where
                 FreezeFinalizeResult::default()
             };
             entry.archive_committed_batch(result.committed_batch.clone());
+            // Apply locally-observed score events before releasing the
+            // entry lock. These come from dropped candidates in the
+            // phase-3 loop (RFC §Peer Scoring: direct local observation,
+            // no ECP needed).
+            if !result.score_ops.is_empty() {
+                entry.scoring.apply_ops(&result.score_ops);
+            }
             result
         };
-
-        // Apply locally-observed score events before dispatching the
-        // outcome. These come from dropped candidates in the phase-3 loop
-        // (RFC §Peer Scoring: direct local observation, no ECP needed).
-        if !finalize_result.score_ops.is_empty() {
-            self.scoring()
-                .apply_ops(group_name, &finalize_result.score_ops);
-        }
 
         match finalize_result.outcome {
             FreezeOutcome::Applied { result, outbound } => {
@@ -150,7 +149,7 @@ where
                 // other than ourselves. Self-penalties are skipped — the
                 // node that failed to commit observes its own state directly
                 // and doesn't need to record a ScoreOp against itself.
-                let (next_state, accuse_target) = {
+                let next_state = {
                     let mut entry = entry_arc.write().await;
 
                     if has_proposals {
@@ -160,7 +159,12 @@ where
                         entry.state_machine.clear_proposal_timer();
                         entry.state_machine.start_reelection();
 
-                        let target = match entry.group.mls() {
+                        // Local observation → direct peer-score penalty,
+                        // no ECP round-trip. Each honest member records
+                        // the same event independently; threshold-crossing
+                        // removal still goes through SCORE_BELOW_THRESHOLD
+                        // consensus in steward.rs.
+                        let accuse_target = match entry.group.mls() {
                             Some(mls) => {
                                 let violation_epoch = mls.current_epoch()?;
                                 let self_identity = self.identity().identity_bytes();
@@ -173,12 +177,18 @@ where
                             }
                             None => None,
                         };
+                        if let Some(steward_id) = accuse_target {
+                            entry.scoring.apply_op(&ScoreOp {
+                                member_id: steward_id,
+                                event: ScoreEvent::CensorshipInactivity,
+                            });
+                        }
 
-                        (GroupState::Reelection, target)
+                        GroupState::Reelection
                     } else {
                         entry.group.clear_freeze_round();
                         entry.state_machine.start_working();
-                        (GroupState::Working, None)
+                        GroupState::Working
                     }
                 };
 
@@ -186,20 +196,6 @@ where
                 self.state_handler
                     .on_state_changed(group_name, next_state)
                     .await;
-
-                if let Some(steward_id) = accuse_target {
-                    // Local observation → direct peer-score penalty, no ECP
-                    // round-trip. Each honest member records the same event
-                    // independently; threshold-crossing removal still goes
-                    // through SCORE_BELOW_THRESHOLD consensus in steward.rs.
-                    self.scoring().apply_op(
-                        group_name,
-                        &ScoreOp {
-                            member_id: steward_id,
-                            event: ScoreEvent::CensorshipInactivity,
-                        },
-                    );
-                }
 
                 // Layer 2 recovery: regenerate the steward list. Only the
                 // responsible proposer's call actually submits.

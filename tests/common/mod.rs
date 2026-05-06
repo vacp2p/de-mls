@@ -368,6 +368,7 @@ pub fn make_scoring() -> PeerScoringService<InMemoryPeerScoreStorage, FixedScori
         FixedScoringProvider::with_default_deltas(),
         ScoringConfig {
             default_score: DEFAULT_SCORE,
+            threshold: 0,
         },
     )
 }
