@@ -210,6 +210,13 @@ impl<M: MlsService> Group<M> {
         }
     }
 
+    /// Local identity bytes for this group's member (this user's wallet
+    /// address). Set at construction; same value MLS will surface on this
+    /// group's leaf credential.
+    pub fn self_identity(&self) -> &[u8] {
+        &self.self_identity
+    }
+
     /// Borrow the MLS service for this group, if attached. Returns `None`
     /// for joiners in `PendingJoin` who haven't accepted a welcome yet.
     pub fn mls(&self) -> Option<&M> {

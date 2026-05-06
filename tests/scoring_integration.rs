@@ -1,35 +1,28 @@
 //! Integration tests for the peer-scoring pipeline at the core level
-//! (no async User layer), covering the regular-proposal no-op path and
-//! the joiner default-score contract.
-//!
-//! Temporarily disabled while the architecture moves to per-group
-//! `MlsService`. Will be ported in a follow-up commit.
-#![cfg(any())]
+//! (no async User layer): regular-proposal no-op path and the joiner
+//! default-score contract.
 
 use prost::Message;
 
 use de_mls::app::PeerScoringService;
 use de_mls::core::{
-    Group, ProtocolConfig, ScoreEvent, ScoreOp, apply_consensus_result, build_key_package_message,
-    create_group, emergency_score_ops, group_members, prepare_to_join, process_inbound,
+    Group, ScoreEvent, ScoreOp, apply_consensus_result, emergency_score_ops, group_members,
 };
 use de_mls::ds::WELCOME_SUBTOPIC;
-use de_mls::mls_crypto::{
-    IdentityProvider, MemoryDeMlsStorage, MlsService, OpenMlsService, WalletIdentity,
-};
 
 mod common;
-use common::{DEFAULT_SCORE, make_scoring, setup_mls, steward_add_joiner};
+use common::{
+    DEFAULT_SCORE, TestMls, make_scoring, setup_joiner, setup_steward, steward_add_joiner,
+};
 
 /// Sync the scoring service's member list with the MLS group's actual members.
 /// Mirrors `User::sync_scoring_members`.
 fn sync_scoring_members<S: de_mls::core::PeerScoreStorage, P: de_mls::core::ScoringProvider>(
     scoring: &mut PeerScoringService<S, P>,
     group_name: &str,
-    group: &Group,
-    mls: &OpenMlsService<MemoryDeMlsStorage, WalletIdentity>,
+    group: &Group<TestMls>,
 ) {
-    let mls_members = group_members(group, mls).unwrap();
+    let mls_members = group_members(group).unwrap();
     let scored = scoring.all_members_with_scores(group_name);
     let scored_ids: std::collections::HashSet<Vec<u8>> =
         scored.iter().map(|(id, _)| id.clone()).collect();
@@ -55,9 +48,7 @@ fn test_scoring_no_ops_for_regular_proposal() {
     let group_name = "scoring-regular";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 
-    let alice_mls = setup_mls(alice_hex);
-    let mut alice_handle =
-        create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
+    let mut alice_handle = setup_steward(group_name, alice_hex);
 
     let regular_request = de_mls::protos::de_mls::messages::v1::GroupUpdateRequest {
         payload: Some(
@@ -89,10 +80,8 @@ fn test_new_joiner_starts_with_default_scores() {
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
     let bob_hex = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 
-    let alice_mls = setup_mls(alice_hex);
-    let mut alice_handle =
-        create_group(group_name, &alice_mls, ProtocolConfig::new(1, 5).unwrap()).unwrap();
-    let alice_id = alice_mls.identity().identity_bytes().to_vec();
+    let mut alice_handle = setup_steward(group_name, alice_hex);
+    let alice_id = alice_handle.self_identity().to_vec();
 
     // Alice's scoring has her at a non-default score (simulating prior events).
     let mut alice_scoring = make_scoring();
@@ -110,26 +99,16 @@ fn test_new_joiner_starts_with_default_scores() {
     );
 
     // Bob joins.
-    let bob_mls = setup_mls(bob_hex);
-    let mut bob_handle = prepare_to_join(
-        group_name,
-        bob_mls.identity().identity_bytes().to_vec(),
-        ProtocolConfig::new(1, 5).unwrap(),
-    );
-    let bob_kp = build_key_package_message(&bob_handle, &bob_mls, b"test-app-id").unwrap();
-
-    let (welcome, _batch) = steward_add_joiner(&alice_mls, &mut alice_handle, &bob_kp);
-    process_inbound(
-        &mut bob_handle,
-        &welcome.payload,
-        WELCOME_SUBTOPIC,
-        &bob_mls,
-    )
-    .unwrap();
+    let mut bob = setup_joiner(group_name, bob_hex);
+    let (welcome, _batch) = steward_add_joiner(&mut alice_handle, &bob.kp_packet);
+    bob.accept_welcome_packet(&welcome);
+    // Sanity-check that the welcome path still surfaces only the
+    // welcome subtopic at this layer; nothing else flows through compat.
+    assert_eq!(welcome.subtopic, WELCOME_SUBTOPIC);
 
     // Bob builds his scoring from MLS members — gets defaults.
     let mut bob_scoring = make_scoring();
-    sync_scoring_members(&mut bob_scoring, group_name, &bob_handle, &bob_mls);
+    sync_scoring_members(&mut bob_scoring, group_name, &bob.group);
 
     assert_eq!(
         bob_scoring.score_for(group_name, &alice_id),

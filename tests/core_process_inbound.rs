@@ -1,38 +1,40 @@
-//! Integration tests for `process_inbound`.
+//! Integration tests for the core inbound pipeline.
 //!
-//! Temporarily disabled while the architecture moves to per-group
-//! `MlsService`. Many tests here exercised the old core-level welcome
-//! subtopic path (which now lives at the User layer) or the multi-arg
-//! `process_inbound` signature. Will be ported in a follow-up commit.
-#![cfg(any())]
+//! Covers the app-message decrypt path, the steward-side key-package
+//! intake (now surfaced via the test-only [`process_inbound_compat`]
+//! shim), the joiner welcome-acceptance flow, and the GroupSync handling
+//! that flows through `decrypt_application_only`.
+
+use std::sync::Arc;
 
 use prost::Message;
 
 use de_mls::core::{
-    CoreError, FreezeOutcome, ProcessResult, ProtocolConfig, StewardList,
-    build_key_package_message, build_message, create_commit_candidate, finalize_freeze_round,
-    group_members, prepare_to_join, process_inbound,
+    CoreError, FreezeOutcome, Group, ProcessResult, ProtocolConfig, StewardList,
+    build_key_package_message, create_commit_candidate, finalize_freeze_round, group_members,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
-use de_mls::mls_crypto::{IdentityProvider, MlsService, parse_wallet_address};
+use de_mls::mls_crypto::{
+    IdentityProvider, MemoryDeMlsStorage, MlsService, OpenMlsService, WalletIdentity,
+    parse_wallet_address,
+};
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationMessage, GroupUpdateRequest, app_message,
 };
 
 mod common;
 use common::{
-    default_steward_config, setup_joiner, setup_joiner_with_config, setup_mls, setup_steward,
-    setup_steward_with_config, steward_add_joiner,
+    TestMls, default_steward_config, process_inbound_compat, setup_identity_storage, setup_joiner,
+    setup_joiner_with_config, setup_steward, setup_steward_with_config, steward_add_joiner,
 };
 
 // ─────────────────────────── process_inbound tests ───────────────────────────
 
 #[test]
 fn test_process_inbound_invalid_subtopic() {
-    let (mls, mut group) =
-        setup_steward("test-group", "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let mut group = setup_steward("test-group", "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
-    let result = process_inbound(&mut group, b"some payload", "invalid", &mls);
+    let result = process_inbound_compat(&mut group, b"some payload", "invalid");
     assert!(result.is_err());
     match result.unwrap_err() {
         CoreError::InvalidSubtopic(s) => assert_eq!(s, "invalid"),
@@ -42,14 +44,16 @@ fn test_process_inbound_invalid_subtopic() {
 
 #[test]
 fn test_process_inbound_app_msg_before_mls_init() {
-    let mls = setup_mls("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let mut group = prepare_to_join(
+    // Joiner-side handle with no MLS service attached yet.
+    let (identity, _storage): (Arc<WalletIdentity>, Arc<MemoryDeMlsStorage>) =
+        setup_identity_storage("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let mut group: Group<TestMls> = Group::prepare_to_join(
         "test-group",
-        mls.identity().identity_bytes().to_vec(),
+        identity.identity_bytes().to_vec(),
         default_steward_config(),
     );
 
-    let result = process_inbound(&mut group, b"some payload", APP_MSG_SUBTOPIC, &mls).unwrap();
+    let result = process_inbound_compat(&mut group, b"some payload", APP_MSG_SUBTOPIC).unwrap();
     assert!(matches!(result, ProcessResult::Noop));
 }
 
@@ -57,21 +61,12 @@ fn test_process_inbound_app_msg_before_mls_init() {
 fn test_process_inbound_conversation_message_roundtrip() {
     let group_name = "roundtrip-group";
 
-    let (steward_mls, mut steward_handle) =
+    let mut steward_handle =
         setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let (joiner_mls, mut joiner_handle, kp_packet) =
-        setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+    let mut joiner = setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
 
-    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
-
-    let join_result = process_inbound(
-        &mut joiner_handle,
-        &welcome_packet.payload,
-        WELCOME_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
-    assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
+    let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
+    joiner.accept_welcome_packet(&welcome_packet);
 
     let conv = ConversationMessage {
         message: b"Hello from steward!".to_vec(),
@@ -79,21 +74,14 @@ fn test_process_inbound_conversation_message_roundtrip() {
         group_name: group_name.to_string(),
     };
     let app_msg: AppMessage = conv.into();
-    let outbound = build_message(
-        steward_handle.group_name(),
-        &steward_mls,
-        &app_msg,
-        b"test-app-id",
-    )
-    .unwrap();
+    let outbound = steward_handle
+        .mls()
+        .unwrap()
+        .build_message(&app_msg, b"test-app-id")
+        .unwrap();
 
-    let result = process_inbound(
-        &mut joiner_handle,
-        &outbound.payload,
-        APP_MSG_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
+    let result =
+        process_inbound_compat(&mut joiner.group, &outbound.payload, APP_MSG_SUBTOPIC).unwrap();
 
     match result {
         ProcessResult::AppMessage(msg) => {
@@ -114,16 +102,14 @@ fn test_process_inbound_conversation_message_roundtrip() {
 fn test_process_inbound_welcome_steward_receives_key_package() {
     let group_name = "steward-kp-group";
 
-    let (_steward_mls, mut steward_handle) =
+    let mut steward_handle =
         setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let (_joiner_mls, _joiner_handle, kp_packet) =
-        setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+    let joiner = setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
 
-    let result = process_inbound(
+    let result = process_inbound_compat(
         &mut steward_handle,
-        &kp_packet.payload,
+        &joiner.kp_packet.payload,
         WELCOME_SUBTOPIC,
-        &_steward_mls,
     )
     .unwrap();
 
@@ -139,20 +125,21 @@ fn test_process_inbound_welcome_steward_receives_key_package() {
 fn test_process_inbound_welcome_non_steward_buffers_key_package() {
     let group_name = "non-steward-kp";
 
-    let mls = setup_mls("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let mut group = prepare_to_join(
+    // Joiner-side handle with no MLS yet — the key-package surfaces all the
+    // same; promotion to a voting proposal is the app's decision.
+    let (identity, _storage): (Arc<WalletIdentity>, Arc<MemoryDeMlsStorage>) =
+        setup_identity_storage("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let mut group: Group<TestMls> = Group::prepare_to_join(
         group_name,
-        mls.identity().identity_bytes().to_vec(),
+        identity.identity_bytes().to_vec(),
         default_steward_config(),
     );
 
-    let (_joiner_mls, _joiner_handle, kp_packet) =
-        setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+    let other = setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
 
-    let result = process_inbound(&mut group, &kp_packet.payload, WELCOME_SUBTOPIC, &mls).unwrap();
+    let result =
+        process_inbound_compat(&mut group, &other.kp_packet.payload, WELCOME_SUBTOPIC).unwrap();
 
-    // Every member (steward or not) now surfaces KPs so the app layer can
-    // buffer them; promotion to a voting proposal is the app's decision.
     assert!(
         matches!(result, ProcessResult::MembershipChangeReceived(_)),
         "Expected MembershipChangeReceived, got {:?}",
@@ -164,85 +151,69 @@ fn test_process_inbound_welcome_non_steward_buffers_key_package() {
 fn test_process_inbound_welcome_invitation_joins_group() {
     let group_name = "join-group";
 
-    let (steward_mls, mut steward_handle) =
+    let mut steward_handle =
         setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let (joiner_mls, mut joiner_handle, kp_packet) =
-        setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+    let mut joiner = setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
 
-    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
+    let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
+    joiner.accept_welcome_packet(&welcome_packet);
 
-    let result = process_inbound(
-        &mut joiner_handle,
-        &welcome_packet.payload,
-        WELCOME_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
-
-    match result {
-        ProcessResult::JoinedGroup(name) => {
-            assert_eq!(name, group_name);
-            assert!(joiner_mls.has_group(joiner_handle.group_name()));
-        }
-        other => panic!("Expected JoinedGroup, got {:?}", other),
-    }
+    // Joiner now has a live MLS service for the right group.
+    let mls = joiner.group.mls().expect("welcome attaches MLS service");
+    assert_eq!(mls.group_id(), group_name);
 }
 
 #[test]
 fn test_process_inbound_welcome_already_joined_ignores() {
     let group_name = "already-joined";
 
-    let (steward_mls, mut steward_handle) =
+    let mut steward_handle =
         setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let (joiner_mls, mut joiner_handle, kp_packet) =
-        setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+    let mut joiner = setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
 
-    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
-    let result = process_inbound(
-        &mut joiner_handle,
-        &welcome_packet.payload,
-        WELCOME_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
-    assert!(matches!(result, ProcessResult::JoinedGroup(_)));
+    let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
+    joiner.accept_welcome_packet(&welcome_packet);
 
-    let (_joiner2_mls, _joiner2_handle, kp2_packet) =
-        setup_joiner(group_name, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
-    let (welcome_packet2, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp2_packet);
+    // A second welcome (this one for joiner2's KP) doesn't address us, so
+    // try_accept_welcome surfaces "not for us" rather than disturbing our
+    // MLS state. The User-layer dispatch additionally guards on
+    // `group.mls().is_some()` to skip wholesale; both safeguards land at
+    // the same outcome.
+    let mut joiner2 = setup_joiner(group_name, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
+    let (welcome_packet2, _) = steward_add_joiner(&mut steward_handle, &joiner2.kp_packet);
 
-    let result2 = process_inbound(
-        &mut joiner_handle,
-        &welcome_packet2.payload,
-        WELCOME_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
+    let invitation = match prost::Message::decode(welcome_packet2.payload.as_slice())
+        .map(|w: de_mls::protos::de_mls::messages::v1::WelcomeMessage| w.payload)
+        .unwrap()
+    {
+        Some(de_mls::protos::de_mls::messages::v1::welcome_message::Payload::InvitationToJoin(
+            inv,
+        )) => inv,
+        other => panic!("Expected InvitationToJoin, got {:?}", other),
+    };
+    let outcome = joiner
+        .try_accept_welcome(&invitation.mls_message_out_bytes)
+        .expect("non-matching welcomes parse cleanly");
     assert!(
-        matches!(result2, ProcessResult::Noop),
-        "Expected Noop for already joined, got {:?}",
-        result2
+        outcome.is_none(),
+        "second welcome targets joiner2's KP, must not produce a service for joiner1"
     );
+
+    // Joiner2 actually accepts theirs as a sanity check.
+    joiner2.accept_welcome_packet(&welcome_packet2);
+    assert!(joiner2.group.mls().is_some());
 }
 
 #[test]
 fn test_process_inbound_leave_group() {
     let group_name = "leave-group";
 
-    let (steward_mls, mut steward_handle) =
+    let mut steward_handle =
         setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let (joiner_mls, mut joiner_handle, kp_packet) =
-        setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+    let mut joiner = setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
 
-    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
-    let result = process_inbound(
-        &mut joiner_handle,
-        &welcome_packet.payload,
-        WELCOME_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
-    assert!(matches!(result, ProcessResult::JoinedGroup(_)));
+    let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
+    joiner.accept_welcome_packet(&welcome_packet);
 
     let joiner_wallet = parse_wallet_address("0x70997970C51812dc3A010C7d01b50e0d17dc79C8").unwrap();
     let remove_req = GroupUpdateRequest {
@@ -255,9 +226,8 @@ fn test_process_inbound_leave_group() {
         ),
     };
     steward_handle.insert_approved_proposal(2, remove_req.clone());
-    joiner_handle.insert_approved_proposal(2, remove_req);
-    let packets =
-        create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id").unwrap();
+    joiner.group.insert_approved_proposal(2, remove_req);
+    let packets = create_commit_candidate(&mut steward_handle, b"test-app-id").unwrap();
 
     let batch_packet = packets
         .iter()
@@ -265,16 +235,11 @@ fn test_process_inbound_leave_group() {
         .expect("Expected batch proposals packet");
 
     // Start freeze round before receiving candidate
-    let epoch = joiner_mls.current_epoch(group_name).unwrap();
-    joiner_handle.start_freeze_round(epoch);
+    let epoch = joiner.group.mls().unwrap().current_epoch().unwrap();
+    joiner.group.start_freeze_round(epoch);
 
-    let remove_result = process_inbound(
-        &mut joiner_handle,
-        &batch_packet.payload,
-        APP_MSG_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
+    let remove_result =
+        process_inbound_compat(&mut joiner.group, &batch_packet.payload, APP_MSG_SUBTOPIC).unwrap();
 
     assert!(
         matches!(remove_result, ProcessResult::CommitCandidateReceived),
@@ -282,8 +247,7 @@ fn test_process_inbound_leave_group() {
         remove_result
     );
 
-    let finalize =
-        finalize_freeze_round(&mut joiner_handle, &joiner_mls, false, b"test-app-id").unwrap();
+    let finalize = finalize_freeze_round(&mut joiner.group, false, b"test-app-id").unwrap();
     let matched = matches!(
         &finalize.outcome,
         FreezeOutcome::Applied { result, .. } if matches!(**result, ProcessResult::LeaveGroup)
@@ -296,7 +260,7 @@ fn test_process_inbound_leave_group() {
 
 /// Test: an evicted member can rejoin the same group_id in the same
 /// session. The steward commits a removal, the joiner finalizes it as
-/// `LeaveGroup`, then `OpenMlsService::delete_group` clears storage so the
+/// `LeaveGroup`, then `Group::take_mls().delete()` clears storage so the
 /// next welcome creates a fresh handle without colliding with the dead
 /// post-eviction state.
 #[test]
@@ -310,18 +274,11 @@ fn test_rejoin_after_eviction() {
         .to_vec();
 
     // Phase 1: joiner joins.
-    let (steward_mls, mut steward_handle) = setup_steward(group_name, steward_hex);
-    let (joiner_mls, mut joiner_handle, kp_packet) = setup_joiner(group_name, joiner_hex);
-    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
-    let join_result = process_inbound(
-        &mut joiner_handle,
-        &welcome_packet.payload,
-        WELCOME_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
-    assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
-    assert!(joiner_mls.has_group(group_name));
+    let mut steward_handle = setup_steward(group_name, steward_hex);
+    let mut joiner = setup_joiner(group_name, joiner_hex);
+    let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
+    joiner.accept_welcome_packet(&welcome_packet);
+    assert!(joiner.group.mls().is_some());
 
     // Phase 2: steward commits a removal of the joiner. Both sides apply
     // the commit; the joiner's finalize emits `LeaveGroup`.
@@ -335,26 +292,18 @@ fn test_rejoin_after_eviction() {
         ),
     };
     steward_handle.insert_approved_proposal(2, remove_req.clone());
-    joiner_handle.insert_approved_proposal(2, remove_req);
-    let packets =
-        create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id").unwrap();
+    joiner.group.insert_approved_proposal(2, remove_req);
+    let packets = create_commit_candidate(&mut steward_handle, b"test-app-id").unwrap();
     let batch_packet = packets
         .iter()
         .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
         .expect("Expected batch proposals packet");
 
-    let epoch_before_remove = joiner_mls.current_epoch(group_name).unwrap();
-    joiner_handle.start_freeze_round(epoch_before_remove);
+    let epoch_before_remove = joiner.group.mls().unwrap().current_epoch().unwrap();
+    joiner.group.start_freeze_round(epoch_before_remove);
 
-    process_inbound(
-        &mut joiner_handle,
-        &batch_packet.payload,
-        APP_MSG_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
-    let finalize_joiner =
-        finalize_freeze_round(&mut joiner_handle, &joiner_mls, false, b"test-app-id").unwrap();
+    process_inbound_compat(&mut joiner.group, &batch_packet.payload, APP_MSG_SUBTOPIC).unwrap();
+    let finalize_joiner = finalize_freeze_round(&mut joiner.group, false, b"test-app-id").unwrap();
     assert!(
         matches!(
             &finalize_joiner.outcome,
@@ -363,72 +312,87 @@ fn test_rejoin_after_eviction() {
         "Expected LeaveGroup on joiner finalize, got {finalize_joiner:?}"
     );
     let finalize_steward =
-        finalize_freeze_round(&mut steward_handle, &steward_mls, false, b"test-app-id").unwrap();
+        finalize_freeze_round(&mut steward_handle, false, b"test-app-id").unwrap();
     assert!(matches!(
         &finalize_steward.outcome,
         FreezeOutcome::Applied { result, .. } if matches!(**result, ProcessResult::GroupUpdated)
     ));
-    assert!(!steward_mls.is_member(group_name, &joiner_id));
+    assert!(!steward_handle.mls().unwrap().is_member(&joiner_id),);
 
     // Phase 3: app-layer cleanup that follows `ProcessResult::LeaveGroup`.
-    joiner_mls.delete_group(group_name).unwrap();
+    // Take the MLS service out of the joiner's group and tear down its
+    // storage; the second take is a no-op (idempotent at the Group level).
+    let removed = joiner.group.take_mls().expect("mls present pre-leave");
+    removed.delete().unwrap();
+    drop(removed);
+    assert!(joiner.group.mls().is_none());
     assert!(
-        !joiner_mls.has_group(group_name),
-        "MLS state should be gone after delete_group"
+        joiner.group.take_mls().is_none(),
+        "second take is idempotent"
     );
-    // Idempotent: a second cleanup attempt is safe.
-    joiner_mls.delete_group(group_name).unwrap();
 
-    // Phase 4: joiner rebuilds the app-layer handle and a fresh key package,
-    // steward re-adds.
-    let mut joiner_handle = prepare_to_join(
+    // Phase 4: joiner rebuilds the app-layer handle, generates a fresh KP
+    // (re-using the same identity + storage), and the steward re-adds.
+    let mut joiner_group: Group<TestMls> = Group::prepare_to_join(
         group_name,
-        joiner_mls.identity().identity_bytes().to_vec(),
+        joiner.identity.identity_bytes().to_vec(),
         default_steward_config(),
     );
-    let kp_packet = build_key_package_message(&joiner_handle, &joiner_mls, b"test-app-id").unwrap();
-    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
-    let rejoin_result = process_inbound(
-        &mut joiner_handle,
-        &welcome_packet.payload,
-        WELCOME_SUBTOPIC,
-        &joiner_mls,
+    let key_package =
+        OpenMlsService::<Arc<MemoryDeMlsStorage>, Arc<WalletIdentity>>::generate_key_package(
+            &joiner.storage,
+            &joiner.identity,
+        )
+        .unwrap();
+    let kp_packet = build_key_package_message(group_name, key_package, b"test-app-id");
+    let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &kp_packet);
+
+    // Manually accept the welcome (we can't reuse JoinerHandle because we
+    // built `joiner_group` directly; the helper takes the same path).
+    let invitation = match prost::Message::decode(welcome_packet.payload.as_slice())
+        .map(|w: de_mls::protos::de_mls::messages::v1::WelcomeMessage| w.payload)
+        .unwrap()
+    {
+        Some(de_mls::protos::de_mls::messages::v1::welcome_message::Payload::InvitationToJoin(
+            inv,
+        )) => inv,
+        other => panic!("Expected InvitationToJoin, got {:?}", other),
+    };
+    let svc = OpenMlsService::new_from_welcome(
+        &invitation.mls_message_out_bytes,
+        Arc::clone(&joiner.storage),
+        Arc::clone(&joiner.identity),
     )
-    .unwrap();
-    assert!(
-        matches!(rejoin_result, ProcessResult::JoinedGroup(_)),
-        "Expected JoinedGroup after rejoin, got {rejoin_result:?}"
-    );
+    .unwrap()
+    .expect("welcome should match this joiner's fresh KP");
+    joiner_group.attach_mls(svc);
 
     // Phase 5: both sides see the rejoined member at a strictly-later epoch.
-    let epoch_after_rejoin = joiner_mls.current_epoch(group_name).unwrap();
+    let epoch_after_rejoin = joiner_group.mls().unwrap().current_epoch().unwrap();
     assert!(
         epoch_after_rejoin > epoch_before_remove,
         "Rejoin should land at a later epoch ({epoch_after_rejoin} > {epoch_before_remove})"
     );
-    assert!(steward_mls.is_member(group_name, &joiner_id));
-    assert!(joiner_mls.is_member(group_name, &joiner_id));
-    assert!(joiner_mls.is_member(group_name, steward_mls.identity().identity_bytes()));
+    assert!(steward_handle.mls().unwrap().is_member(&joiner_id));
+    assert!(joiner_group.mls().unwrap().is_member(&joiner_id));
+    assert!(
+        joiner_group
+            .mls()
+            .unwrap()
+            .is_member(steward_handle.self_identity()),
+    );
 }
 
 #[test]
 fn test_process_inbound_raw_commit_payload_is_ignored() {
     let group_name = "raw-commit-ignored";
 
-    let (steward_mls, mut steward_handle) =
+    let mut steward_handle =
         setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let (joiner_mls, mut joiner_handle, kp_packet) =
-        setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+    let mut joiner = setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
 
-    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
-    let join_result = process_inbound(
-        &mut joiner_handle,
-        &welcome_packet.payload,
-        WELCOME_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
-    assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
+    let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
+    joiner.accept_welcome_packet(&welcome_packet);
 
     let joiner_wallet = parse_wallet_address("0x70997970C51812dc3A010C7d01b50e0d17dc79C8").unwrap();
     let remove_req = GroupUpdateRequest {
@@ -441,8 +405,7 @@ fn test_process_inbound_raw_commit_payload_is_ignored() {
         ),
     };
     steward_handle.insert_approved_proposal(7, remove_req);
-    let packets =
-        create_commit_candidate(&mut steward_handle, &steward_mls, b"test-app-id").unwrap();
+    let packets = create_commit_candidate(&mut steward_handle, b"test-app-id").unwrap();
 
     let batch_packet = packets
         .iter()
@@ -455,21 +418,12 @@ fn test_process_inbound_raw_commit_payload_is_ignored() {
         _ => panic!("Expected CommitCandidate payload"),
     };
 
-    let result = process_inbound(
-        &mut joiner_handle,
-        &raw_commit,
-        APP_MSG_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
+    let result = process_inbound_compat(&mut joiner.group, &raw_commit, APP_MSG_SUBTOPIC).unwrap();
     assert!(matches!(result, ProcessResult::Noop));
 }
 
 // ─────────────────────────── Auto-fill steward list tests ───────────────────────────
 
-/// After a commit that adds a member, if member_count < sn_min the steward list
-/// should be auto-filled with all members. With sn_min=3, a 2-member group triggers
-/// auto-fill; once a third member joins, auto-fill no longer triggers.
 #[test]
 fn test_auto_fill_steward_list_triggers_below_sn_min() {
     let group = "auto-fill-group";
@@ -480,24 +434,22 @@ fn test_auto_fill_steward_list_triggers_below_sn_min() {
     // sn_min=3: auto-fill when member_count < 3
     let config = ProtocolConfig::new(3, 5).unwrap();
 
-    let (steward_mls, mut steward_handle) =
-        setup_steward_with_config(group, steward_hex, config.clone());
+    let mut steward_handle = setup_steward_with_config(group, steward_hex, config.clone());
 
-    // Bootstrap: 1 member < sn_min=3 → auto-fill should trigger
-    let members_before = group_members(&steward_handle, &steward_mls).unwrap();
+    // Bootstrap: 1 member < sn_min=3
+    let members_before = group_members(&steward_handle).unwrap();
     assert_eq!(members_before.len(), 1);
     assert!(members_before.len() < config.sn_min);
 
     // Add first joiner
-    let (_joiner1_mls, _joiner1_handle, joiner1_kp) =
-        setup_joiner_with_config(group, joiner1_hex, config.clone());
-    steward_add_joiner(&steward_mls, &mut steward_handle, &joiner1_kp);
+    let joiner1 = setup_joiner_with_config(group, joiner1_hex, config.clone());
+    steward_add_joiner(&mut steward_handle, &joiner1.kp_packet);
 
-    // 2 members: still below sn_min=3 → auto-fill should trigger
-    let members_2 = group_members(&steward_handle, &steward_mls).unwrap();
+    // 2 members: still below sn_min=3
+    let members_2 = group_members(&steward_handle).unwrap();
     assert_eq!(members_2.len(), 2);
     assert!(members_2.len() < config.sn_min);
-    let epoch = steward_mls.current_epoch(group).unwrap();
+    let epoch = steward_handle.mls().unwrap().current_epoch().unwrap();
     let sn = members_2.len().min(config.sn_max);
     assert!(
         steward_handle
@@ -505,7 +457,6 @@ fn test_auto_fill_steward_list_triggers_below_sn_min() {
             .is_ok()
     );
 
-    // Verify the steward list was regenerated with all 2 members
     let list = steward_handle
         .steward_list()
         .expect("steward list should exist after auto-fill");
@@ -518,12 +469,11 @@ fn test_auto_fill_steward_list_triggers_below_sn_min() {
     }
 
     // Add second joiner
-    let (_joiner2_mls, _joiner2_handle, joiner2_kp) =
-        setup_joiner_with_config(group, joiner2_hex, config.clone());
-    steward_add_joiner(&steward_mls, &mut steward_handle, &joiner2_kp);
+    let joiner2 = setup_joiner_with_config(group, joiner2_hex, config.clone());
+    steward_add_joiner(&mut steward_handle, &joiner2.kp_packet);
 
-    // 3 members: at sn_min=3 → auto-fill should NOT trigger
-    let members_3 = group_members(&steward_handle, &steward_mls).unwrap();
+    // 3 members: at sn_min=3
+    let members_3 = group_members(&steward_handle).unwrap();
     assert_eq!(members_3.len(), 3);
     assert!(
         members_3.len() >= config.sn_min,
@@ -531,16 +481,14 @@ fn test_auto_fill_steward_list_triggers_below_sn_min() {
     );
 }
 
-/// With default config (sn_min=1), auto-fill never triggers because
-/// member_count is always >= 1.
 #[test]
 fn test_auto_fill_never_triggers_with_default_config() {
     let group = "no-auto-fill-group";
     let steward_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 
-    let (steward_mls, steward_handle) = setup_steward(group, steward_hex);
+    let steward_handle = setup_steward(group, steward_hex);
 
-    let members = group_members(&steward_handle, &steward_mls).unwrap();
+    let members = group_members(&steward_handle).unwrap();
     assert_eq!(members.len(), 1);
     assert!(
         members.len() >= steward_handle.protocol_config().sn_min,
@@ -550,8 +498,6 @@ fn test_auto_fill_never_triggers_with_default_config() {
 
 // ─────────────────────────── Group sync tests ───────────────────────────
 
-/// Steward sends a GroupSync app message after adding a joiner.
-/// The joiner receives it, validates it, and applies the steward list.
 #[test]
 fn test_group_sync_roundtrip() {
     use de_mls::protos::de_mls::messages::v1::GroupSync;
@@ -560,29 +506,17 @@ fn test_group_sync_roundtrip() {
     let steward_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
     let joiner_hex = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 
-    let (steward_mls, mut steward_handle) = setup_steward(group_name, steward_hex);
-    let (joiner_mls, mut joiner_handle, kp_packet) = setup_joiner(group_name, joiner_hex);
+    let mut steward_handle = setup_steward(group_name, steward_hex);
+    let mut joiner = setup_joiner(group_name, joiner_hex);
 
-    // Steward adds joiner
-    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
+    let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
+    joiner.accept_welcome_packet(&welcome_packet);
 
-    // Joiner processes welcome
-    let join_result = process_inbound(
-        &mut joiner_handle,
-        &welcome_packet.payload,
-        WELCOME_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
-    assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
-
-    // Joiner has no steward list yet
     assert!(
-        joiner_handle.steward_list().is_none(),
+        joiner.group.steward_list().is_none(),
         "Joiner should not have a steward list before sync"
     );
 
-    // Steward builds the sync message from its list
     let steward_list = steward_handle
         .steward_list()
         .expect("steward should have a list");
@@ -601,24 +535,15 @@ fn test_group_sync_roundtrip() {
         pending_update_max_epochs: 3,
     };
     let app_msg: AppMessage = sync.clone().into();
-    let sync_packet = build_message(
-        steward_handle.group_name(),
-        &steward_mls,
-        &app_msg,
-        b"test-app-id",
-    )
-    .unwrap();
+    let sync_packet = steward_handle
+        .mls()
+        .unwrap()
+        .build_message(&app_msg, b"test-app-id")
+        .unwrap();
 
-    // Joiner processes the encrypted sync message
-    let result = process_inbound(
-        &mut joiner_handle,
-        &sync_packet.payload,
-        APP_MSG_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
+    let result =
+        process_inbound_compat(&mut joiner.group, &sync_packet.payload, APP_MSG_SUBTOPIC).unwrap();
 
-    // Should get GroupSyncReceived
     match &result {
         ProcessResult::GroupSyncReceived(received_sync) => {
             assert_eq!(received_sync.steward_members, sync.steward_members);
@@ -629,12 +554,10 @@ fn test_group_sync_roundtrip() {
         other => panic!("Expected GroupSyncReceived, got {:?}", other),
     }
 
-    // Simulate app-layer handling: validate and apply
     if let ProcessResult::GroupSyncReceived(sync) = result {
         let config = ProtocolConfig::new(sync.sn_min as usize, sync.sn_max as usize).unwrap();
-        let members = group_members(&joiner_handle, &joiner_mls).unwrap();
+        let members = group_members(&joiner.group).unwrap();
 
-        // Validate: all steward members are current group members
         let all_present = sync
             .steward_members
             .iter()
@@ -644,7 +567,6 @@ fn test_group_sync_roundtrip() {
             "All steward members should be current group members"
         );
 
-        // Validate: ordering is correct (self-consistent hash sort)
         assert!(
             StewardList::validate(
                 &sync.steward_members,
@@ -660,7 +582,8 @@ fn test_group_sync_roundtrip() {
 
         let sn = sync.steward_members.len();
         assert!(
-            joiner_handle
+            joiner
+                .group
                 .generate_and_set_steward_list(
                     sync.election_epoch,
                     &sync.steward_members,
@@ -671,8 +594,8 @@ fn test_group_sync_roundtrip() {
         );
     }
 
-    // Joiner now has the steward list
-    let joiner_list = joiner_handle
+    let joiner_list = joiner
+        .group
         .steward_list()
         .expect("Joiner should have a steward list after sync");
     let steward_list = steward_handle
@@ -682,10 +605,6 @@ fn test_group_sync_roundtrip() {
     assert_eq!(joiner_list.election_epoch(), steward_list.election_epoch());
 }
 
-/// `GroupSync` carries per-group config from steward to joiner: the
-/// joiner adopts the steward's values via the same getters production
-/// code uses, and `members_below_threshold` selects on the synced
-/// threshold.
 #[test]
 fn test_group_sync_propagates_divergent_per_group_config() {
     use de_mls::app::{InMemoryPeerScoreStorage, PeerScoringService};
@@ -703,39 +622,25 @@ fn test_group_sync_propagates_divergent_per_group_config() {
     let joiner_hex = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 
     let steward_protocol = ProtocolConfig::new(STEWARD_SN_MIN, STEWARD_SN_MAX).unwrap();
-    let (steward_mls, mut steward_handle) =
-        setup_steward_with_config(group_name, steward_hex, steward_protocol);
-    let (joiner_mls, mut joiner_handle, kp_packet) =
-        setup_joiner_with_config(group_name, joiner_hex, default_steward_config());
+    let mut steward_handle = setup_steward_with_config(group_name, steward_hex, steward_protocol);
+    let mut joiner = setup_joiner_with_config(group_name, joiner_hex, default_steward_config());
 
-    // Steward configures the group with non-default per-group state.
     steward_handle.set_threshold_peer_score(STEWARD_THRESHOLD);
     steward_handle.set_liveness_criteria_yes(STEWARD_LIVENESS_YES);
     steward_handle.set_pending_update_max_epochs(STEWARD_PENDING_MAX_EPOCHS);
 
-    // Joiner starts with the core defaults — different from the steward's.
-    assert_ne!(joiner_handle.threshold_peer_score(), STEWARD_THRESHOLD);
-    assert_ne!(joiner_handle.liveness_criteria_yes(), STEWARD_LIVENESS_YES);
+    assert_ne!(joiner.group.threshold_peer_score(), STEWARD_THRESHOLD);
+    assert_ne!(joiner.group.liveness_criteria_yes(), STEWARD_LIVENESS_YES);
     assert_ne!(
-        joiner_handle.pending_update_max_epochs(),
+        joiner.group.pending_update_max_epochs(),
         STEWARD_PENDING_MAX_EPOCHS
     );
-    assert_ne!(joiner_handle.protocol_config().sn_min, STEWARD_SN_MIN);
-    assert_ne!(joiner_handle.protocol_config().sn_max, STEWARD_SN_MAX);
+    assert_ne!(joiner.group.protocol_config().sn_min, STEWARD_SN_MIN);
+    assert_ne!(joiner.group.protocol_config().sn_max, STEWARD_SN_MAX);
 
-    // Steward adds joiner so a Welcome path exists.
-    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
-    process_inbound(
-        &mut joiner_handle,
-        &welcome_packet.payload,
-        WELCOME_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
+    let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
+    joiner.accept_welcome_packet(&welcome_packet);
 
-    // Steward builds a GroupSync from per-group state. Two members are
-    // included with peer scores below STEWARD_THRESHOLD so the synced
-    // threshold has something to assert on.
     let alice = b"alice".to_vec();
     let bob = b"bob".to_vec();
     let steward_list = steward_handle.steward_list().unwrap();
@@ -763,28 +668,19 @@ fn test_group_sync_propagates_divergent_per_group_config() {
         pending_update_max_epochs: steward_handle.pending_update_max_epochs(),
     };
     let app_msg: AppMessage = sync.clone().into();
-    let sync_packet = build_message(
-        steward_handle.group_name(),
-        &steward_mls,
-        &app_msg,
-        b"test-app-id",
-    )
-    .unwrap();
+    let sync_packet = steward_handle
+        .mls()
+        .unwrap()
+        .build_message(&app_msg, b"test-app-id")
+        .unwrap();
 
-    // Joiner processes the encrypted sync.
-    let result = process_inbound(
-        &mut joiner_handle,
-        &sync_packet.payload,
-        APP_MSG_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
+    let result =
+        process_inbound_compat(&mut joiner.group, &sync_packet.payload, APP_MSG_SUBTOPIC).unwrap();
     let received = match result {
         ProcessResult::GroupSyncReceived(s) => s,
         other => panic!("Expected GroupSyncReceived, got {:?}", other),
     };
 
-    // The new fields survive the wire.
     assert_eq!(received.threshold_peer_score, STEWARD_THRESHOLD);
     assert_eq!(received.liveness_criteria_yes, STEWARD_LIVENESS_YES);
     assert_eq!(
@@ -794,28 +690,29 @@ fn test_group_sync_propagates_divergent_per_group_config() {
     assert_eq!(received.sn_min as usize, STEWARD_SN_MIN);
     assert_eq!(received.sn_max as usize, STEWARD_SN_MAX);
 
-    // App-layer application — same setters `User::on_group_sync` uses.
     let mut applied_protocol =
         ProtocolConfig::new(received.sn_min as usize, received.sn_max as usize).unwrap();
     applied_protocol.allow_subset_candidates = received.allow_subset_candidates;
-    joiner_handle.set_protocol_config(applied_protocol);
-    joiner_handle.set_threshold_peer_score(received.threshold_peer_score);
-    joiner_handle.set_liveness_criteria_yes(received.liveness_criteria_yes);
-    joiner_handle.set_pending_update_max_epochs(received.pending_update_max_epochs);
+    joiner.group.set_protocol_config(applied_protocol);
+    joiner
+        .group
+        .set_threshold_peer_score(received.threshold_peer_score);
+    joiner
+        .group
+        .set_liveness_criteria_yes(received.liveness_criteria_yes);
+    joiner
+        .group
+        .set_pending_update_max_epochs(received.pending_update_max_epochs);
 
-    // Joiner now reads the steward's values via the same getters production
-    // code consults.
-    assert_eq!(joiner_handle.threshold_peer_score(), STEWARD_THRESHOLD);
-    assert_eq!(joiner_handle.liveness_criteria_yes(), STEWARD_LIVENESS_YES);
+    assert_eq!(joiner.group.threshold_peer_score(), STEWARD_THRESHOLD);
+    assert_eq!(joiner.group.liveness_criteria_yes(), STEWARD_LIVENESS_YES);
     assert_eq!(
-        joiner_handle.pending_update_max_epochs(),
+        joiner.group.pending_update_max_epochs(),
         STEWARD_PENDING_MAX_EPOCHS
     );
-    assert_eq!(joiner_handle.protocol_config().sn_min, STEWARD_SN_MIN);
-    assert_eq!(joiner_handle.protocol_config().sn_max, STEWARD_SN_MAX);
+    assert_eq!(joiner.group.protocol_config().sn_min, STEWARD_SN_MIN);
+    assert_eq!(joiner.group.protocol_config().sn_max, STEWARD_SN_MAX);
 
-    // Behaviour assertion: a scoring lookup at the synced threshold
-    // returns members at or below it.
     let mut scoring = PeerScoringService::new(
         InMemoryPeerScoreStorage::new(),
         de_mls::app::FixedScoringProvider::with_default_deltas(),
@@ -824,7 +721,6 @@ fn test_group_sync_propagates_divergent_per_group_config() {
     for ps in &received.peer_scores {
         scoring.set_score(group_name, &ps.member_id, ps.score);
     }
-    // Apply a single op so the score-mutation path is also exercised.
     scoring.apply_op(
         group_name,
         &ScoreOp {
@@ -832,22 +728,21 @@ fn test_group_sync_propagates_divergent_per_group_config() {
             event: ScoreEvent::SuccessfulCommit,
         },
     );
-    let below = scoring.members_below_threshold(group_name, joiner_handle.threshold_peer_score());
+    let below = scoring.members_below_threshold(group_name, joiner.group.threshold_peer_score());
     assert!(
         below.contains(&alice),
         "alice (score {}) is below the synced threshold {}",
         STEWARD_THRESHOLD - 10 + 10,
-        joiner_handle.threshold_peer_score()
+        joiner.group.threshold_peer_score()
     );
     assert!(
         !below.contains(&bob),
         "bob (score {}) is above the synced threshold {}",
         STEWARD_THRESHOLD + 10,
-        joiner_handle.threshold_peer_score()
+        joiner.group.threshold_peer_score()
     );
 }
 
-/// If a member already has a steward list, receiving a sync message is a no-op.
 #[test]
 fn test_group_sync_idempotent_for_existing_members() {
     use de_mls::protos::de_mls::messages::v1::GroupSync;
@@ -856,32 +751,22 @@ fn test_group_sync_idempotent_for_existing_members() {
     let steward_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
     let joiner_hex = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 
-    let (steward_mls, mut steward_handle) = setup_steward(group_name, steward_hex);
-    let (joiner_mls, mut joiner_handle, kp_packet) = setup_joiner(group_name, joiner_hex);
+    let mut steward_handle = setup_steward(group_name, steward_hex);
+    let mut joiner = setup_joiner(group_name, joiner_hex);
 
-    // Steward adds joiner
-    let (welcome_packet, _) = steward_add_joiner(&steward_mls, &mut steward_handle, &kp_packet);
-
-    // Joiner processes welcome
-    let join_result = process_inbound(
-        &mut joiner_handle,
-        &welcome_packet.payload,
-        WELCOME_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
-    assert!(matches!(join_result, ProcessResult::JoinedGroup(_)));
+    let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
+    joiner.accept_welcome_packet(&welcome_packet);
 
     // Manually give the joiner a steward list (simulating a previous sync)
-    let members = group_members(&joiner_handle, &joiner_mls).unwrap();
+    let members = group_members(&joiner.group).unwrap();
     assert!(
-        joiner_handle
+        joiner
+            .group
             .generate_and_set_steward_list(0, &members, 1, 0)
             .is_ok()
     );
-    assert!(joiner_handle.steward_list().is_some());
+    assert!(joiner.group.steward_list().is_some());
 
-    // Now steward sends a sync message
     let steward_list = steward_handle.steward_list().unwrap();
     let sync = GroupSync {
         steward_members: steward_list.members().to_vec(),
@@ -898,42 +783,29 @@ fn test_group_sync_idempotent_for_existing_members() {
         pending_update_max_epochs: 3,
     };
     let app_msg: AppMessage = sync.into();
-    let sync_packet = build_message(
-        steward_handle.group_name(),
-        &steward_mls,
-        &app_msg,
-        b"test-app-id",
-    )
-    .unwrap();
+    let sync_packet = steward_handle
+        .mls()
+        .unwrap()
+        .build_message(&app_msg, b"test-app-id")
+        .unwrap();
 
-    // Joiner processes sync — should get GroupSyncReceived at the core level
-    let result = process_inbound(
-        &mut joiner_handle,
-        &sync_packet.payload,
-        APP_MSG_SUBTOPIC,
-        &joiner_mls,
-    )
-    .unwrap();
+    // Joiner processes sync — core still surfaces GroupSyncReceived
+    let result =
+        process_inbound_compat(&mut joiner.group, &sync_packet.payload, APP_MSG_SUBTOPIC).unwrap();
     assert!(
         matches!(result, ProcessResult::GroupSyncReceived(_)),
         "Core should still return GroupSyncReceived"
     );
 
-    // But the app layer would skip it because the list is already set.
-    // We verify the existing list wasn't overwritten (still 1 member, not steward's list).
+    // App layer would skip applying because the list is already set; verify
+    // the existing list wasn't overwritten.
     assert_eq!(
-        joiner_handle.steward_list().unwrap().len(),
+        joiner.group.steward_list().unwrap().len(),
         1,
         "Existing list should be preserved (1 member), not overwritten by sync"
     );
 }
 
-/// A list accepted at `retry_round > 0` must ship its generation seed
-/// on `GroupSync` so the joiner re-derives the same ordering. The seed
-/// lives on `StewardList` as a frozen tag, distinct from
-/// `Group::reelection_round` (the dynamic counter, which resets to 0
-/// on accept). Sourcing the wire `retry_round` from the list keeps the
-/// two values from diverging after an accept.
 #[test]
 fn test_group_sync_carries_list_retry_round_not_group_counter() {
     let group_name = "sync-retry-tag-group";
@@ -942,29 +814,21 @@ fn test_group_sync_carries_list_retry_round_not_group_counter() {
     let extra1_hex = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
     let extra2_hex = "0x90F79bf6EB2c4f870365E785982E1f101E93b906";
 
-    // sn=4 over 4 members: retry_round affects ordering, not membership.
     let config = ProtocolConfig::new(2, 4).unwrap();
-    let (steward_mls, mut steward_handle) =
-        setup_steward_with_config(group_name, steward_hex, config.clone());
+    let mut steward_handle = setup_steward_with_config(group_name, steward_hex, config.clone());
 
-    // Pull three joiners into the MLS group so we have a four-member set
-    // for a meaningful hash-sorted list.
     for hex in [joiner_hex, extra1_hex, extra2_hex] {
-        let (_, _, kp) = setup_joiner_with_config(group_name, hex, config.clone());
-        steward_add_joiner(&steward_mls, &mut steward_handle, &kp);
+        let joiner = setup_joiner_with_config(group_name, hex, config.clone());
+        steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
     }
-    let members = group_members(&steward_handle, &steward_mls).unwrap();
+    let members = group_members(&steward_handle).unwrap();
     assert_eq!(members.len(), 4);
 
-    // Simulate an election accepted after two rejections: the resulting
-    // list is generated at retry_round=2 and stored with that tag.
-    let epoch = steward_mls.current_epoch(group_name).unwrap();
+    let epoch = steward_handle.mls().unwrap().current_epoch().unwrap();
     let accepted_round: u32 = 2;
     steward_handle
         .generate_and_set_steward_list(epoch, &members, 4, accepted_round)
         .unwrap();
-    // Accept-side bookkeeping: the dynamic counter clears; the list's
-    // seed is unaffected.
     steward_handle.reset_reelection_round();
 
     let list = steward_handle.steward_list().expect("list set above");
@@ -975,9 +839,6 @@ fn test_group_sync_carries_list_retry_round_not_group_counter() {
         "counter was reset on accept — distinct from the list tag"
     );
 
-    // The round-2 ordering must differ from round 0 for the assertion
-    // below to be meaningful — if they happened to match, the seed
-    // wouldn't be load-bearing.
     let round0 =
         StewardList::generate(epoch, group_name.as_bytes(), &members, 4, config.clone(), 0)
             .unwrap();
@@ -987,8 +848,6 @@ fn test_group_sync_carries_list_retry_round_not_group_counter() {
         "test assumption: retry_round must shuffle the ordering"
     );
 
-    // Build a GroupSync the way `send_group_sync` does — seed sourced
-    // from the list's `retry_round`.
     use de_mls::protos::de_mls::messages::v1::GroupSync;
     let sync = GroupSync {
         steward_members: list.members().to_vec(),
@@ -1005,7 +864,6 @@ fn test_group_sync_carries_list_retry_round_not_group_counter() {
         pending_update_max_epochs: 3,
     };
 
-    // Joiner re-derives the ordering using the wire seed — should match.
     assert!(
         StewardList::validate(
             &sync.steward_members,
@@ -1019,9 +877,6 @@ fn test_group_sync_carries_list_retry_round_not_group_counter() {
         "joiner validates when the wire retry_round matches the list's seed"
     );
 
-    // The counter's current value (0) regenerates a different ordering —
-    // confirms `retry_round`-on-list is load-bearing, not redundant with
-    // the counter.
     assert!(
         !StewardList::validate(
             &sync.steward_members,

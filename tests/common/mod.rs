@@ -16,8 +16,8 @@ use async_trait::async_trait;
 use de_mls::app::{FixedScoringProvider, InMemoryPeerScoreStorage, PeerScoringService};
 use de_mls::core::{
     CallbackError, FreezeOutcome, Group, GroupEventHandler, ProcessResult, ProtocolConfig,
-    ScoringConfig, build_key_package_message, create_commit_candidate, create_group,
-    finalize_freeze_round, prepare_to_join, process_inbound,
+    ScoringConfig, build_key_package_message, create_commit_candidate, finalize_freeze_round,
+    process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
 use de_mls::mls_crypto::{
@@ -156,17 +156,17 @@ pub fn setup_mls_for_group(group_name: &str, wallet_hex: &str) -> TestMls {
     OpenMlsService::new_as_creator(group_name.to_string(), storage, identity).unwrap()
 }
 
-/// Test-only compatibility shim for the pre-refactor `core::process_inbound`
-/// 4-arg signature. Welcome `UserKeyPackage` packets are still handled
-/// here so existing tests for steward-side intake keep working;
-/// `InvitationToJoin` packets must be ported to the new
-/// [`OpenMlsService::new_from_welcome`] constructor (via
-/// [`JoinerHandle::try_accept_welcome`]).
-pub fn process_inbound_compat<M: MlsService>(
-    group: &mut Group,
+/// Compat shim that mirrors the pre-refactor `core::process_inbound`
+/// 4-arg surface for tests that drive packet relay manually. Routes
+/// app-subtopic packets to the new `core::process_inbound`, and synthesises
+/// the steward-side `UserKeyPackage` membership-change response that used
+/// to live inside core. `InvitationToJoin` packets must instead be
+/// accepted via [`JoinerHandle::accept_welcome_packet`], which constructs
+/// a fresh MLS service and attaches it to the joiner's group.
+pub fn process_inbound_compat(
+    group: &mut Group<TestMls>,
     payload: &[u8],
     subtopic: &str,
-    mls: &M,
 ) -> Result<ProcessResult, de_mls::core::CoreError> {
     if subtopic == WELCOME_SUBTOPIC {
         let welcome_msg = WelcomeMessage::decode(payload)?;
@@ -174,7 +174,9 @@ pub fn process_inbound_compat<M: MlsService>(
             Some(welcome_message::Payload::UserKeyPackage(user_kp)) => {
                 let (key_package_bytes, identity) =
                     key_package_bytes_from_json(user_kp.key_package_bytes)?;
-                if mls.is_member(&identity) {
+                if let Some(mls) = group.mls()
+                    && mls.is_member(&identity)
+                {
                     return Ok(ProcessResult::Noop);
                 }
                 Ok(ProcessResult::MembershipChangeReceived(
@@ -189,13 +191,18 @@ pub fn process_inbound_compat<M: MlsService>(
             Some(welcome_message::Payload::InvitationToJoin(_)) => {
                 panic!(
                     "InvitationToJoin no longer flows through core::process_inbound; \
-                     use OpenMlsService::new_from_welcome (e.g. JoinerHandle::try_accept_welcome)"
+                     use JoinerHandle::accept_welcome_packet"
                 );
             }
             None => Ok(ProcessResult::Noop),
         }
     } else if subtopic == APP_MSG_SUBTOPIC {
-        process_inbound(group, payload, mls)
+        if group.mls().is_none() {
+            // Pre-refactor behaviour: app messages on a group with no MLS
+            // state are silently ignored. Mirrors the User-layer dispatch.
+            return Ok(ProcessResult::Noop);
+        }
+        process_inbound(group, payload)
     } else {
         Err(de_mls::core::CoreError::InvalidSubtopic(
             subtopic.to_string(),
@@ -203,7 +210,7 @@ pub fn process_inbound_compat<M: MlsService>(
     }
 }
 
-pub fn setup_steward(group_name: &str, wallet_hex: &str) -> (TestMls, Group) {
+pub fn setup_steward(group_name: &str, wallet_hex: &str) -> Group<TestMls> {
     setup_steward_with_config(group_name, wallet_hex, default_steward_config())
 }
 
@@ -211,13 +218,12 @@ pub fn setup_steward_with_config(
     group_name: &str,
     wallet_hex: &str,
     config: ProtocolConfig,
-) -> (TestMls, Group) {
+) -> Group<TestMls> {
     let (identity, storage) = setup_identity_storage(wallet_hex);
     let mls =
         OpenMlsService::new_as_creator(group_name.to_string(), storage, Arc::clone(&identity))
             .unwrap();
-    let group = create_group(group_name, identity.identity_bytes().to_vec(), config).unwrap();
-    (mls, group)
+    Group::create_group(group_name, identity.identity_bytes().to_vec(), config, mls).unwrap()
 }
 
 /// Pre-join handle for a joiner: the joiner has no MLS service yet (they
@@ -227,12 +233,12 @@ pub fn setup_steward_with_config(
 pub struct JoinerHandle {
     pub identity: Arc<WalletIdentity>,
     pub storage: Arc<MemoryDeMlsStorage>,
-    pub group: Group,
+    pub group: Group<TestMls>,
     pub kp_packet: OutboundPacket,
 }
 
 impl JoinerHandle {
-    /// Try to accept a welcome packet payload, materialising the joiner's
+    /// Try to accept a serialized welcome, materialising the joiner's
     /// MLS service if it addresses our key package. Returns `Ok(None)`
     /// when the welcome isn't for us.
     pub fn try_accept_welcome(
@@ -244,6 +250,23 @@ impl JoinerHandle {
             Arc::clone(&self.storage),
             Arc::clone(&self.identity),
         )
+    }
+
+    /// Accept a welcome `OutboundPacket` (the kind `steward_add_joiner`
+    /// returns) and attach the resulting MLS service to `self.group`.
+    /// Panics if the packet isn't an `InvitationToJoin` or doesn't match
+    /// this joiner's key package — both indicate a test setup bug.
+    pub fn accept_welcome_packet(&mut self, welcome_packet: &OutboundPacket) {
+        let welcome_msg = WelcomeMessage::decode(welcome_packet.payload.as_slice()).unwrap();
+        let invitation = match welcome_msg.payload {
+            Some(welcome_message::Payload::InvitationToJoin(inv)) => inv,
+            other => panic!("expected InvitationToJoin, got {:?}", other),
+        };
+        let svc = self
+            .try_accept_welcome(&invitation.mls_message_out_bytes)
+            .unwrap()
+            .expect("welcome did not match this joiner's KP");
+        self.group.attach_mls(svc);
     }
 }
 
@@ -257,13 +280,14 @@ pub fn setup_joiner_with_config(
     config: ProtocolConfig,
 ) -> JoinerHandle {
     let (identity, storage) = setup_identity_storage(wallet_hex);
-    let group = prepare_to_join(group_name, identity.identity_bytes().to_vec(), config);
+    let group: Group<TestMls> =
+        Group::prepare_to_join(group_name, identity.identity_bytes().to_vec(), config);
     let key_package =
         OpenMlsService::<Arc<MemoryDeMlsStorage>, Arc<WalletIdentity>>::generate_key_package(
             &storage, &identity,
         )
         .unwrap();
-    let kp_packet = build_key_package_message(&group, key_package, b"test-app-id");
+    let kp_packet = build_key_package_message(group_name, key_package, b"test-app-id");
     JoinerHandle {
         identity,
         storage,
@@ -280,17 +304,15 @@ pub fn setup_joiner_with_config(
 /// high enough not to collide with the manually-picked IDs test code uses
 /// for direct `insert_approved_proposal` calls.
 pub fn steward_add_joiner(
-    steward_mls: &TestMls,
-    steward_handle: &mut Group,
+    steward_handle: &mut Group<TestMls>,
     joiner_kp_packet: &OutboundPacket,
 ) -> (OutboundPacket, OutboundPacket) {
     static PROPOSAL_COUNTER: AtomicU32 = AtomicU32::new(100);
 
-    // The welcome subtopic dispatch moved to the User layer (it can't run in
-    // core anymore because constructing a service from a welcome needs the
-    // app-supplied factory). Tests still drive packet relay manually, so
-    // we decode the KP envelope here and surface the same membership-change
-    // request that core used to emit.
+    // The welcome subtopic dispatch moved to the User layer (constructing a
+    // service from a welcome needs the app-supplied factory). Tests still
+    // drive packet relay manually, so decode the KP envelope here and
+    // surface the same membership-change request that core used to emit.
     let welcome_msg = WelcomeMessage::decode(joiner_kp_packet.payload.as_slice()).unwrap();
     let user_kp = match welcome_msg.payload {
         Some(welcome_message::Payload::UserKeyPackage(kp)) => kp,
@@ -298,7 +320,8 @@ pub fn steward_add_joiner(
     };
     let (key_package_bytes, identity) =
         key_package_bytes_from_json(user_kp.key_package_bytes).unwrap();
-    if steward_mls.is_member(&identity) {
+    let already_member = steward_handle.mls().is_some_and(|m| m.is_member(&identity));
+    if already_member {
         panic!("Expected key package skipped for already-member");
     }
     let gur = GroupUpdateRequest {
@@ -310,10 +333,9 @@ pub fn steward_add_joiner(
 
     let proposal_id = PROPOSAL_COUNTER.fetch_add(1, Ordering::Relaxed);
     steward_handle.insert_approved_proposal(proposal_id, gur);
-    let packets = create_commit_candidate(steward_handle, steward_mls, b"test-app-id").unwrap();
+    let packets = create_commit_candidate(steward_handle, b"test-app-id").unwrap();
 
-    let finalize =
-        finalize_freeze_round(steward_handle, steward_mls, false, b"test-app-id").unwrap();
+    let finalize = finalize_freeze_round(steward_handle, false, b"test-app-id").unwrap();
     let welcome_packet = match finalize.outcome {
         FreezeOutcome::Applied { result, outbound } => {
             assert!(
