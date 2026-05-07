@@ -52,30 +52,25 @@ impl<
             return Err(UserError::GroupAlreadyExists);
         }
 
-        let max_reelection_attempts = config.max_reelection_attempts;
-        let liveness_criteria_yes = config.liveness_criteria_yes;
-        let pending_update_max_epochs = config.pending_update_max_epochs;
         let self_identity_bytes = self.identity().identity_bytes().to_vec();
-        let (mut group, mls_opt, state_machine, phase_timer) = if is_creation {
+        let (group, mls_opt, state_machine, phase_timer) = if is_creation {
             let mls = (self.mls_creator_factory)(group_name.to_string())?;
             let group = Group::create_group(group_name, self_identity_bytes.clone());
             let state_machine = GroupStateMachine::new_as_member();
-            let phase_timer = PhaseTimer::with_config(config.clone());
+            let phase_timer = PhaseTimer::with_config(&config);
             (group, Some(mls), state_machine, phase_timer)
         } else {
             let group = Group::prepare_to_join(group_name, self_identity_bytes.clone());
             let state_machine = GroupStateMachine::new_as_pending_join();
             // Anchor the timer at "now" so `is_pending_join_expired` can
-            // detect the 3× epoch-duration timeout.
-            let mut phase_timer = PhaseTimer::with_config(config.clone());
+            // detect the 3× commit-inactivity timeout.
+            let mut phase_timer = PhaseTimer::with_config(&config);
             phase_timer.start();
             (group, None, state_machine, phase_timer)
         };
-        group.set_liveness_criteria_yes(liveness_criteria_yes);
-        group.set_pending_update_max_epochs(pending_update_max_epochs);
 
         let mut steward = self.make_steward_plugin(group_name, &config.protocol);
-        steward.set_max_retries(max_reelection_attempts);
+        steward.set_max_retries(config.max_reelection_attempts);
         // Creator path: bootstrap the list with self as sole steward at
         // epoch 0. Joiner path leaves the plug-in empty until `GroupSync`.
         if is_creation {
@@ -107,6 +102,7 @@ impl<
                 mls_opt,
                 state_machine,
                 phase_timer,
+                config,
                 scoring,
                 steward,
             ))),
@@ -178,8 +174,8 @@ impl<
             let mut entry = entry_arc.write().await;
             entry.group.store_voting_proposal(proposal_id, request);
             (
-                entry.phase_timer.proposal_expiration(),
-                entry.phase_timer.consensus_timeout(),
+                entry.config.proposal_expiration,
+                entry.config.consensus_timeout,
             )
         };
 

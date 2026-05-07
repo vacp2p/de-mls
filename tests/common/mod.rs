@@ -360,6 +360,11 @@ pub struct StewardHandle {
     pub mls: TestMls,
     pub steward: DeterministicStewardList,
     pub identity: Vec<u8>,
+    /// Mirrors `GroupEntry.config.liveness_criteria_yes` from production.
+    /// Tests own this directly because the handle isn't a `GroupEntry`.
+    pub liveness_criteria_yes: bool,
+    /// Mirrors `GroupEntry.config.pending_update_max_epochs`.
+    pub pending_update_max_epochs: u32,
 }
 
 impl StewardHandle {
@@ -406,6 +411,8 @@ pub fn setup_steward_with_config(
         mls,
         steward,
         identity: identity_bytes,
+        liveness_criteria_yes: de_mls::core::DEFAULT_LIVENESS_CRITERIA_YES,
+        pending_update_max_epochs: de_mls::core::DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
     }
 }
 
@@ -421,6 +428,10 @@ pub struct JoinerHandle {
     pub mls: Option<TestMls>,
     pub steward: DeterministicStewardList,
     pub kp_packet: OutboundPacket,
+    /// Mirrors `GroupEntry.config.liveness_criteria_yes` from production.
+    pub liveness_criteria_yes: bool,
+    /// Mirrors `GroupEntry.config.pending_update_max_epochs`.
+    pub pending_update_max_epochs: u32,
 }
 
 impl JoinerHandle {
@@ -480,6 +491,8 @@ pub fn setup_joiner_with_config(
         mls: None,
         steward,
         kp_packet,
+        liveness_criteria_yes: de_mls::core::DEFAULT_LIVENESS_CRITERIA_YES,
+        pending_update_max_epochs: de_mls::core::DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
     }
 }
 

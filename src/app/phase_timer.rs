@@ -1,21 +1,18 @@
 //! App-side phase timer.
 //!
-//! Holds the wall-clock anchor (`started_at`) and the `Duration` knobs
-//! the timer-driven helpers consult: commit inactivity, freeze, recovery
-//! inactivity, proposal expiration, consensus timeout, voting delays.
-//! State transitions and the state enum live in
-//! [`crate::core::GroupStateMachine`]; `GroupEntry` composes the two and
-//! drives them through coordinator methods.
+//! Holds the wall-clock anchor (`started_at`) and the phase-anchor
+//! `Duration` knobs the timer-driven helpers consult: commit inactivity,
+//! freeze, recovery inactivity. State transitions and the state enum
+//! live in [`crate::core::GroupStateMachine`]; voting/consensus durations
+//! live in [`crate::app::GroupConfig`] on `GroupEntry`. `GroupEntry`
+//! composes the SM and the timer through coordinator methods.
 
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tracing::info;
 
-use crate::{
-    app::config::GroupConfig,
-    core::{GroupState, ProposalKind},
-};
+use crate::{app::config::GroupConfig, core::GroupState};
 
 /// Notifies the integrator when a group transitions between [`GroupState`]
 /// variants. Fired from the app layer.
@@ -58,15 +55,6 @@ pub struct PhaseTimer {
     /// RFC §Inactivity Timer #2 — "Recovery inactivity" threshold; caller
     /// of `poll_steward_inactivity` picks which duration to apply.
     recovery_inactivity_duration: Duration,
-    /// Voting-proposal lifetime (RFC §Creating Voting Proposal).
-    proposal_expiration: Duration,
-    /// Library deadline per consensus session. Mismatched values across
-    /// nodes split outcomes.
-    consensus_timeout: Duration,
-    /// Per-member window before auto-vote fires. Local-only.
-    voting_delay: Duration,
-    /// Auto-vote delay for steward-election proposals. Local-only.
-    election_voting_delay: Duration,
 }
 
 impl Default for PhaseTimer {
@@ -77,19 +65,15 @@ impl Default for PhaseTimer {
 
 impl PhaseTimer {
     pub fn with_default_config() -> Self {
-        Self::with_config(GroupConfig::default())
+        Self::with_config(&GroupConfig::default())
     }
 
-    pub fn with_config(config: GroupConfig) -> Self {
+    pub fn with_config(config: &GroupConfig) -> Self {
         Self {
             started_at: None,
             commit_inactivity_duration: config.commit_inactivity_duration,
             freeze_duration: config.freeze_duration,
             recovery_inactivity_duration: config.recovery_inactivity_duration,
-            proposal_expiration: config.proposal_expiration,
-            consensus_timeout: config.consensus_timeout,
-            voting_delay: config.voting_delay,
-            election_voting_delay: config.election_voting_delay,
         }
     }
 
@@ -122,26 +106,9 @@ impl PhaseTimer {
         self.recovery_inactivity_duration
     }
 
-    pub fn proposal_expiration(&self) -> Duration {
-        self.proposal_expiration
-    }
-
-    pub fn consensus_timeout(&self) -> Duration {
-        self.consensus_timeout
-    }
-
-    /// Steward-election proposals use the shorter `election_voting_delay`
-    /// for fast recovery convergence.
-    pub fn voting_delay_for(&self, kind: ProposalKind) -> Duration {
-        if kind.is_steward_election() {
-            self.election_voting_delay
-        } else {
-            self.voting_delay
-        }
-    }
-
     // Setters below are called by `User::on_group_sync` to apply the
-    // steward's `TimingConfig`.
+    // steward's `TimingConfig`. Voting/consensus durations live in
+    // `GroupConfig` on the entry, written there directly.
 
     pub fn set_commit_inactivity_duration(&mut self, value: Duration) {
         self.commit_inactivity_duration = value;
@@ -153,14 +120,6 @@ impl PhaseTimer {
 
     pub fn set_recovery_inactivity_duration(&mut self, value: Duration) {
         self.recovery_inactivity_duration = value;
-    }
-
-    pub fn set_proposal_expiration(&mut self, value: Duration) {
-        self.proposal_expiration = value;
-    }
-
-    pub fn set_consensus_timeout(&mut self, value: Duration) {
-        self.consensus_timeout = value;
     }
 
     // ─────────────────────────── State-aware queries ───────────────────────────
@@ -267,7 +226,7 @@ mod tests {
     #[test]
     fn pending_join_expires_after_three_commit_inactivity_windows() {
         let config = GroupConfig::default();
-        let mut pt = PhaseTimer::with_config(config.clone());
+        let mut pt = PhaseTimer::with_config(&config);
         pt.start();
         assert!(!pt.is_pending_join_expired(GroupState::PendingJoin));
 
@@ -358,29 +317,8 @@ mod tests {
             recovery_inactivity_duration: short_inactivity(),
             ..GroupConfig::default()
         };
-        let pt = PhaseTimer::with_config(config);
+        let pt = PhaseTimer::with_config(&config);
         assert_eq!(pt.commit_inactivity_duration(), long_inactivity());
         assert_eq!(pt.recovery_inactivity_duration(), short_inactivity());
-    }
-
-    /// `voting_delay_for` dispatches on proposal kind: steward-election
-    /// proposals get the shorter `election_voting_delay`, others get
-    /// `voting_delay`.
-    #[test]
-    fn voting_delay_dispatch_on_proposal_kind() {
-        let config = GroupConfig {
-            voting_delay: Duration::from_secs(7),
-            election_voting_delay: Duration::from_secs(3),
-            ..GroupConfig::default()
-        };
-        let pt = PhaseTimer::with_config(config);
-        assert_eq!(
-            pt.voting_delay_for(ProposalKind::Commit),
-            Duration::from_secs(7)
-        );
-        assert_eq!(
-            pt.voting_delay_for(ProposalKind::StewardElection),
-            Duration::from_secs(3)
-        );
     }
 }

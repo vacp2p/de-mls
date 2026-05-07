@@ -62,9 +62,15 @@ pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin, St: StewardLi
     /// Per-group state machine. Coordinator methods on this entry update
     /// it together with `phase_timer` so the two never drift.
     state_machine: GroupStateMachine,
-    /// Wall-clock anchor + duration knobs combined with `state_machine`
-    /// by the entry's coordinator methods.
+    /// Wall-clock anchor + phase-anchor durations combined with
+    /// `state_machine` by the entry's coordinator methods.
     phase_timer: PhaseTimer,
+    /// Per-group durable config — voting/consensus knobs and the two
+    /// `Group`-level flags (`liveness_criteria_yes`,
+    /// `pending_update_max_epochs`). Read by app-layer coordinators;
+    /// joiner-sync writes through this directly. Plug-ins keep their own
+    /// internal config slices (`StewardListConfig`, `ScoringConfig`).
+    pub(crate) config: GroupConfig,
     /// Per-group peer-score plug-in. Lives next to `state_machine` as
     /// app-layer wiring; protocol decisions read it via the entry's
     /// `RwLock`, no separate `Mutex` needed.
@@ -84,6 +90,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
         mls: Option<M>,
         state_machine: GroupStateMachine,
         phase_timer: PhaseTimer,
+        config: GroupConfig,
         scoring: Sc,
         steward: St,
     ) -> Self {
@@ -92,6 +99,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
             mls,
             state_machine,
             phase_timer,
+            config,
             scoring,
             steward,
         }

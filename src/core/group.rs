@@ -135,12 +135,6 @@ pub struct Group {
     /// so any member can produce the recovery commit. Set by Layer-3
     /// Deadlock ECP, cleared on accepted election.
     recovery_mode: bool,
-    /// Auto-vote default and consensus tie-break rule (RFC §Creating
-    /// Voting Proposal).
-    liveness_criteria_yes: bool,
-    /// Max age (in epochs) of a buffered membership update before the
-    /// epoch steward drops it.
-    pending_update_max_epochs: u32,
 }
 
 pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
@@ -163,8 +157,6 @@ impl Group {
             resolved_proposals: ResolvedProposalCache::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
             urgent_commit_target: None,
             recovery_mode: false,
-            liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,
-            pending_update_max_epochs: DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
         }
     }
 
@@ -575,24 +567,6 @@ impl Group {
         self.approved_proposals
             .get(&pid)
             .is_some_and(|req| is_auto_approved_entry(pid, req))
-    }
-
-    // ─────────────────────────── GroupSync-Tunable Fields ───────────────────────────
-
-    pub fn liveness_criteria_yes(&self) -> bool {
-        self.liveness_criteria_yes
-    }
-
-    pub fn set_liveness_criteria_yes(&mut self, value: bool) {
-        self.liveness_criteria_yes = value;
-    }
-
-    pub fn pending_update_max_epochs(&self) -> u32 {
-        self.pending_update_max_epochs
-    }
-
-    pub fn set_pending_update_max_epochs(&mut self, value: u32) {
-        self.pending_update_max_epochs = value;
     }
 
     /// Drop a buffered update by target identity.

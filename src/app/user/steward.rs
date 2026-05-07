@@ -274,7 +274,7 @@ impl<
             (
                 mls.current_epoch()?,
                 entry.group_members()?,
-                entry.group.pending_update_max_epochs(),
+                entry.config.pending_update_max_epochs,
             )
         };
 
@@ -408,8 +408,8 @@ impl<
                     .commit_inactivity_duration()
                     .as_millis() as u64,
                 freeze_duration_ms: entry.phase_timer.freeze_duration().as_millis() as u64,
-                proposal_expiration_ms: entry.phase_timer.proposal_expiration().as_millis() as u64,
-                consensus_timeout_ms: entry.phase_timer.consensus_timeout().as_millis() as u64,
+                proposal_expiration_ms: entry.config.proposal_expiration.as_millis() as u64,
+                consensus_timeout_ms: entry.config.consensus_timeout.as_millis() as u64,
                 recovery_inactivity_duration_ms: entry
                     .phase_timer
                     .recovery_inactivity_duration()
@@ -438,9 +438,9 @@ impl<
                 timing: Some(timing),
                 retry_round: list.retry_round(),
                 max_reelection_attempts: entry.steward.max_retries(),
-                liveness_criteria_yes: entry.group.liveness_criteria_yes(),
+                liveness_criteria_yes: entry.config.liveness_criteria_yes,
                 threshold_peer_score: entry.scoring.threshold(),
-                pending_update_max_epochs: entry.group.pending_update_max_epochs(),
+                pending_update_max_epochs: entry.config.pending_update_max_epochs,
             };
 
             let app_msg: AppMessage = sync.into();

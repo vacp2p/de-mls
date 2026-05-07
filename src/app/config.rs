@@ -123,3 +123,27 @@ impl GroupConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Steward-election proposals get the shorter `election_voting_delay`;
+    /// other kinds get `voting_delay`.
+    #[test]
+    fn voting_delay_dispatch_on_proposal_kind() {
+        let config = GroupConfig {
+            voting_delay: Duration::from_secs(7),
+            election_voting_delay: Duration::from_secs(3),
+            ..GroupConfig::default()
+        };
+        assert_eq!(
+            config.voting_delay_for(ProposalKind::Commit),
+            Duration::from_secs(7)
+        );
+        assert_eq!(
+            config.voting_delay_for(ProposalKind::StewardElection),
+            Duration::from_secs(3)
+        );
+    }
+}

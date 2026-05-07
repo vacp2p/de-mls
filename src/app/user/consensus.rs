@@ -160,7 +160,7 @@ impl<
         };
 
         let Some(consensus_timeout) = self
-            .with_entry(&group_name, |e| e.phase_timer.consensus_timeout())
+            .with_entry(&group_name, |e| e.config.consensus_timeout)
             .await
         else {
             return;
@@ -190,10 +190,10 @@ impl<
         let (proposal_expiration, consensus_timeout, liveness_criteria_yes, voting_delay) = self
             .with_entry(group_name, |e| {
                 (
-                    e.phase_timer.proposal_expiration(),
-                    e.phase_timer.consensus_timeout(),
-                    e.group.liveness_criteria_yes(),
-                    e.phase_timer.voting_delay_for(kind),
+                    e.config.proposal_expiration,
+                    e.config.consensus_timeout,
+                    e.config.liveness_criteria_yes,
+                    e.config.voting_delay_for(kind),
                 )
             })
             .await
