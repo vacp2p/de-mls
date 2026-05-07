@@ -24,7 +24,7 @@ use tracing::info;
 
 use crate::{
     app::{
-        FixedScoringProvider, GroupConfig, GroupStateMachine, InMemoryPeerScoreStorage,
+        FixedScoringProvider, GroupConfig, InMemoryPeerScoreStorage, PhaseTimer,
         StateChangeHandler, UserError,
     },
     core::{
@@ -64,7 +64,7 @@ pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin, St: StewardLi
     /// haven't accepted a welcome yet; once attached via
     /// [`Self::attach_mls`] it stays `Some` for the entry's lifetime.
     mls: Option<M>,
-    state_machine: GroupStateMachine,
+    phase_timer: PhaseTimer,
     /// Per-group peer-score plug-in. Lives next to `state_machine` as
     /// app-layer wiring; protocol decisions read it via the entry's
     /// `RwLock`, no separate `Mutex` needed.
@@ -87,14 +87,14 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
     pub(crate) fn new(
         group: Group,
         mls: Option<M>,
-        state_machine: GroupStateMachine,
+        phase_timer: PhaseTimer,
         scoring: Sc,
         steward: St,
     ) -> Self {
         Self {
             group,
             mls,
-            state_machine,
+            phase_timer,
             scoring,
             steward,
             epoch_history: VecDeque::new(),

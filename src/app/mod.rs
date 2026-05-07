@@ -6,7 +6,7 @@
 //! then drive it from a transport receive loop
 //! ([`crate::app::User::process_inbound_packet`]) and a periodic poll
 //! ([`crate::app::User::check_member_freeze`],
-//! [`crate::app::User::poll_freeze_status`]). [`crate::app::GroupStateMachine`]
+//! [`crate::app::User::poll_freeze_status`]). [`crate::app::PhaseTimer`]
 //! owns the per-group state transitions
 //! (`PendingJoin → Working → Freezing → Selection → Reelection → Leaving`).
 //!
@@ -18,7 +18,7 @@ mod consensus_bridge;
 mod display;
 mod error;
 mod peer_scoring;
-mod state_machine;
+mod phase_timer;
 mod user;
 
 pub use config::{
@@ -37,7 +37,7 @@ pub use display::{
 };
 pub use error::UserError;
 pub use peer_scoring::{FixedScoringProvider, InMemoryPeerScoreStorage};
-pub use state_machine::{FreezeTimeoutStatus, GroupState, GroupStateMachine, StateChangeHandler};
+pub use phase_timer::{FreezeTimeoutStatus, GroupState, PhaseTimer, StateChangeHandler};
 pub use user::{
     DefaultMlsService, DefaultPeerScoring, DefaultStewardList, KeyPackageGenerator,
     MlsCreatorFactory, MlsWelcomeFactory, ScoringFactory, StewardFactory, User,

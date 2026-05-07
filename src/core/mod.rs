@@ -22,6 +22,7 @@ mod peer_scoring;
 mod process_result;
 mod proposal_kind;
 mod provider;
+mod state_machine;
 mod steward_list_plugin;
 
 // ── Core group operations ──
@@ -53,6 +54,9 @@ pub use group::{
 
 // ── Proposal classification ──
 pub use proposal_kind::ProposalKind;
+
+// ── State machine (passive: state enum + named transitions) ──
+pub use state_machine::{GroupState, GroupStateMachine};
 
 // ── Steward list ──
 pub use steward_list_plugin::{

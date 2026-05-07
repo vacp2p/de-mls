@@ -128,7 +128,7 @@ impl<
             let Some((delay, vote)) = self
                 .with_entry(group_name, |e| {
                     (
-                        e.state_machine.voting_delay_for(kind),
+                        e.phase_timer.voting_delay_for(kind),
                         e.group.liveness_criteria_yes(),
                     )
                 })
@@ -173,8 +173,8 @@ impl<
 
         let state = {
             let mut entry = entry_arc.write().await;
-            entry.state_machine.start_working();
-            entry.state_machine.current_state()
+            entry.phase_timer.start_working();
+            entry.phase_timer.current_state()
         };
         self.state_handler.on_state_changed(name, state).await;
         Ok(())
@@ -205,7 +205,7 @@ impl<
             Some(entry_arc) => {
                 let mut entry = entry_arc.write().await;
                 entry.steward.reset_retry();
-                let state = entry.state_machine.current_state();
+                let state = entry.phase_timer.current_state();
                 if matches!(
                     state,
                     GroupState::Working
@@ -213,7 +213,7 @@ impl<
                         | GroupState::Selection
                         | GroupState::Reelection
                 ) {
-                    entry.state_machine.start_working();
+                    entry.phase_timer.start_working();
                     true
                 } else {
                     false
@@ -281,11 +281,11 @@ impl<
         };
         let (transitioned, outbound) = {
             let mut entry = entry_arc.write().await;
-            if entry.state_machine.current_state() != GroupState::Working {
+            if entry.phase_timer.current_state() != GroupState::Working {
                 return Ok(());
             }
 
-            entry.state_machine.start_freezing();
+            entry.phase_timer.start_freezing();
             let epoch = entry.expect_mls()?.current_epoch()?;
             entry.group.ensure_freeze_round(epoch);
 
@@ -405,7 +405,7 @@ impl<
             .group
             .set_pending_update_max_epochs(sync.pending_update_max_epochs);
         if let Some(timing) = &sync.timing {
-            let sm = &mut entry.state_machine;
+            let sm = &mut entry.phase_timer;
             sm.set_epoch_duration(std::time::Duration::from_millis(timing.epoch_duration_ms));
             sm.set_freeze_duration(std::time::Duration::from_millis(timing.freeze_duration_ms));
             sm.set_retry_inactivity_duration(std::time::Duration::from_millis(
