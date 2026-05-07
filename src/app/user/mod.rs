@@ -18,7 +18,9 @@ use std::{
 
 use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::storage::ConsensusStorage;
+use prost::Message;
 use tokio::{sync::RwLock, task::JoinHandle};
+use tracing::info;
 
 use crate::{
     app::{
@@ -26,15 +28,21 @@ use crate::{
         StateChangeHandler, UserError,
     },
     core::{
-        DeMlsProvider, DefaultProvider, DeterministicStewardList, Group, GroupEventHandler,
-        PeerScoringEvent, PeerScoringPlugin, PeerScoringService, ProposalId, ProviderConsensus,
-        ScoringConfig, StewardListConfig, StewardListPlugin,
+        BufferedCommitCandidate, CoreError, DeMlsProvider, DefaultProvider,
+        DeterministicStewardList, FreezeFinalizeResult, Group, GroupEventHandler, PeerScoringEvent,
+        PeerScoringPlugin, PeerScoringService, ProcessResult, ProposalId, ProposalKind,
+        ProviderConsensus, ScoringConfig, StewardListConfig, StewardListPlugin,
+        compute_commit_hash, finalize_freeze_round, member_set, process_inbound,
     },
+    ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     identity::{Identity, WalletIdentity},
     mls_crypto::{
-        KeyPackageBytes, MemoryDeMlsStorage, MlsCredentials, MlsError, MlsService, OpenMlsService,
+        CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MemoryDeMlsStorage, MlsCommitInput,
+        MlsCredentials, MlsError, MlsService, OpenMlsService,
     },
-    protos::de_mls::messages::v1::GroupUpdateRequest,
+    protos::de_mls::messages::v1::{
+        AppMessage, CommitCandidate, GroupUpdateRequest, group_update_request::Payload,
+    },
 };
 
 mod consensus;
@@ -51,11 +59,11 @@ mod steward;
 const MAX_EPOCH_HISTORY: usize = 10;
 
 pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> {
-    /// `Group<M>` owns the per-group MLS service inside its own
-    /// `Option<M>` slot — joiners in `PendingJoin` carry `None` until a
-    /// welcome arrives, at which point the User attaches the service via
-    /// [`Group::attach_mls`].
-    group: Group<M>,
+    group: Group,
+    /// Per-group MLS service. `None` for joiners in `PendingJoin` who
+    /// haven't accepted a welcome yet; once attached via
+    /// [`Self::attach_mls`] it stays `Some` for the entry's lifetime.
+    mls: Option<M>,
     state_machine: GroupStateMachine,
     /// Per-group peer-score plug-in. Lives next to `state_machine` as
     /// app-layer wiring; protocol decisions read it via the entry's
@@ -74,21 +82,241 @@ pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin, St: StewardLi
 }
 
 impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, Sc, St> {
-    /// Build a fresh entry. Internal-only auxiliary state (epoch
-    /// history, future per-entry caches) starts empty.
+    /// Build a fresh entry. Creator path passes `Some(mls)`; joiner
+    /// path passes `None` and attaches later via [`Self::attach_mls`].
     pub(crate) fn new(
-        group: Group<M>,
+        group: Group,
+        mls: Option<M>,
         state_machine: GroupStateMachine,
         scoring: Sc,
         steward: St,
     ) -> Self {
         Self {
             group,
+            mls,
             state_machine,
             scoring,
             steward,
             epoch_history: VecDeque::new(),
         }
+    }
+
+    /// Borrow the MLS service, if attached. `None` for joiners
+    /// pre-welcome.
+    pub(crate) fn mls(&self) -> Option<&M> {
+        self.mls.as_ref()
+    }
+
+    /// Borrow the MLS service, erroring with
+    /// [`crate::core::CoreError::MlsGroupNotInitialized`] when not
+    /// attached. Use this in code paths where the service must be
+    /// present so the `?` chain stays linear.
+    pub(crate) fn expect_mls(&self) -> Result<&M, crate::core::CoreError> {
+        self.mls
+            .as_ref()
+            .ok_or(crate::core::CoreError::MlsGroupNotInitialized)
+    }
+
+    /// Attach an MLS service. Called by joiners after the welcome
+    /// arrives. Caller is responsible for not double-attaching.
+    pub(crate) fn attach_mls(&mut self, mls: M) {
+        self.mls = Some(mls);
+    }
+
+    /// Drop the attached MLS service and return it. Used on group leave
+    /// so the caller can run service-side cleanup (`mls.delete()`).
+    pub(crate) fn take_mls(&mut self) -> Option<M> {
+        self.mls.take()
+    }
+
+    // ── Protocol-function wrappers ─────────────────────────────────
+    //
+    // Pull `group`, `mls`, and `steward` from `self` so coordinator
+    // callsites don't destructure the entry. Protocol logic stays in
+    // `core::api`; these are pure delegation.
+
+    /// Current MLS members; empty when no service is attached
+    /// (joiner pre-welcome).
+    pub(crate) fn group_members(&self) -> Result<Vec<Vec<u8>>, CoreError> {
+        match &self.mls {
+            Some(mls) => Ok(mls.members()?),
+            None => Err(CoreError::MlsGroupNotInitialized),
+        }
+    }
+
+    /// Build a commit candidate. Errors with
+    /// [`CoreError::MlsGroupNotInitialized`] when no MLS service is
+    /// attached.
+    pub(crate) fn create_commit_candidate(
+        &mut self,
+        self_identity: &[u8],
+        app_id: &[u8],
+    ) -> Result<Option<OutboundPacket>, CoreError> {
+        let mls = self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)?;
+        if !self.steward.is_steward(self_identity) && !self.group.is_in_recovery_mode() {
+            return Err(CoreError::NotASteward);
+        }
+
+        if self.group.approved_proposals().is_empty() {
+            return Err(CoreError::NoProposals);
+        }
+
+        // MLS forbids committing one's own removal. If the approved batch contains
+        // RemoveMember(self), skip local candidate creation — another steward will
+        // commit the batch (including this node's removal) once they enter freeze.
+        let self_removal_pending = self.group.approved_proposals().values().any(|req| {
+            matches!(
+                req.payload.as_ref(),
+                Some(Payload::RemoveMember(r))
+                    if r.identity == self_identity
+            )
+        });
+        if self_removal_pending {
+            info!(
+                group = self.group.group_name(),
+                "commit candidate skipped: approved batch contains self-remove"
+            );
+            return Ok(None);
+        }
+
+        // Governance proposals (emergency, election) are consensus-only and must
+        // not be in the approved queue at batch creation time.
+        let non_mls_ids: Vec<u32> = self
+            .group
+            .approved_proposals()
+            .iter()
+            .filter(|(_, req)| ProposalKind::of(req).is_governance())
+            .map(|(&id, _)| id)
+            .collect();
+
+        if !non_mls_ids.is_empty() {
+            return Err(CoreError::UnexpectedNonMlsProposals {
+                proposal_ids: non_mls_ids,
+            });
+        }
+
+        // Drop approved entries already reflected in group state (stale
+        // rebroadcast KPs, duplicate removes) — without this MLS would reject
+        // the whole batch with "Duplicate signature key in proposals and group".
+        let current_members = mls.members()?;
+        let current_members_set = member_set(&current_members);
+        let is_member = |id: &[u8]| current_members_set.contains(id);
+
+        // Urgent (ECP-driven) freeze: restrict the batch to just the target's
+        // RemoveMember. See `Group::urgent_commit_target`.
+        let urgent_target = self.group.urgent_commit_target().map(|t| t.to_vec());
+
+        // Iterate in insertion order (FIFO): library proposal IDs are
+        // content-derived hashes, so sort-by-id is not temporal.
+        let k_max = mls.commit_batch_max();
+        let mut updates = Vec::with_capacity(self.group.approved_order().len().min(k_max));
+        for pid in self.group.approved_order() {
+            if updates.len() >= k_max {
+                break;
+            }
+            let Some(proposal) = self.group.approved_proposals().get(pid) else {
+                continue;
+            };
+            match proposal.payload.as_ref() {
+                Some(Payload::InviteMember(im)) => {
+                    if urgent_target.is_some() {
+                        continue;
+                    }
+                    if is_member(&im.identity) {
+                        continue;
+                    }
+                    updates.push(MlsCommitInput::Add(KeyPackageBytes::new(
+                        im.key_package_bytes.clone(),
+                        im.identity.clone(),
+                    )));
+                }
+                Some(Payload::RemoveMember(rm)) => {
+                    if let Some(target) = urgent_target.as_deref()
+                        && rm.identity != target
+                    {
+                        continue;
+                    }
+                    if !is_member(&rm.identity) {
+                        continue;
+                    }
+                    updates.push(MlsCommitInput::Remove(rm.identity.clone()));
+                }
+                _ => return Err(CoreError::InvalidGroupUpdateRequest),
+            }
+        }
+
+        if updates.is_empty() {
+            return Ok(None);
+        }
+
+        let MlsCommitCandidate {
+            proposals: mls_proposals,
+            commit,
+            welcome,
+        } = mls.create_commit_candidate(&updates)?;
+
+        let candidate = CommitCandidate {
+            group_name: self.group.group_name_bytes().to_vec(),
+            mls_proposals,
+            commit_message: commit,
+            steward_identity: self_identity.to_vec(),
+        };
+
+        // Welcome bytes are deferred: sent from finalize_freeze_round after the
+        // commit merges, so joiners can't advance epoch ahead of the steward.
+        let commit_hash = compute_commit_hash(&candidate.commit_message);
+        let epoch = mls.current_epoch()?;
+        let _ = self.group.add_freeze_candidate(
+            BufferedCommitCandidate {
+                candidate_msg: candidate.clone(),
+                commit_hash,
+                is_local_candidate: true,
+                welcome_bytes: welcome,
+            },
+            epoch,
+        );
+
+        info!(
+            group = self.group.group_name(),
+            epoch,
+            proposals = updates.len(),
+            "commit candidate created"
+        );
+
+        let candidate_msg: AppMessage = candidate.into();
+        Ok(Some(OutboundPacket::new(
+            candidate_msg.encode_to_vec(),
+            APP_MSG_SUBTOPIC,
+            self.group.group_name(),
+            app_id,
+        )))
+        // create_commit_candidate(&mut self.group, mls, &self.steward, self_identity, app_id)
+    }
+
+    /// Finalize the active freeze round. Errors with
+    /// [`CoreError::MlsGroupNotInitialized`] when no MLS service is
+    /// attached.
+    pub(crate) fn finalize_freeze_round(
+        &mut self,
+        allow_subset_candidates: bool,
+        app_id: &[u8],
+    ) -> Result<FreezeFinalizeResult, CoreError> {
+        let mls = self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)?;
+        finalize_freeze_round(
+            &mut self.group,
+            mls,
+            &self.steward,
+            allow_subset_candidates,
+            app_id,
+        )
+    }
+
+    /// Process an inbound app-subtopic payload. Errors with
+    /// [`CoreError::MlsGroupNotInitialized`] when no MLS service is
+    /// attached — caller should check `mls().is_some()` first.
+    pub(crate) fn process_inbound(&mut self, payload: &[u8]) -> Result<ProcessResult, CoreError> {
+        let mls = self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)?;
+        process_inbound(&mut self.group, mls, payload)
     }
 
     /// Append a just-committed batch to the bounded UI history.

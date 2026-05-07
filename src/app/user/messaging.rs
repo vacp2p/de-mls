@@ -70,10 +70,7 @@ impl<
             }
             .into();
 
-            entry
-                .group
-                .expect_mls()?
-                .build_message(&app_msg, &self.app_id)?
+            entry.expect_mls()?.build_message(&app_msg, &self.app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())

@@ -1,14 +1,14 @@
-//! Per-group app-level state: proposal queues, steward list, freeze-round
-//! candidate buffer, pending-update buffer, ECP dedup. MLS crypto state
-//! lives in `OpenMlsService` alongside this.
+//! Per-group protocol-queue state: approved/voting proposal queues,
+//! freeze-round candidate buffer, pending-update buffer, urgent-commit
+//! target, recovery-mode flag, ECP dedup. MLS crypto state and the
+//! steward-list plug-in live alongside on `GroupEntry`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use sha2::{Digest, Sha256};
 
 use crate::{
-    core::{CoreError, proposal_kind::ProposalKind, steward_list_plugin::StewardListConfig},
-    mls_crypto::MlsService,
+    core::{proposal_kind::ProposalKind, steward_list_plugin::StewardListConfig},
     protos::de_mls::messages::v1::{CommitCandidate, GroupUpdateRequest, group_update_request},
 };
 
@@ -39,7 +39,7 @@ pub fn is_auto_approved_entry(proposal_id: u32, request: &GroupUpdateRequest) ->
 
 /// Borrow-only `HashSet` view over a slice of identity blobs, for O(1)
 /// membership lookups against `Vec<Vec<u8>>`.
-pub(crate) fn member_set(members: &[Vec<u8>]) -> HashSet<&[u8]> {
+pub fn member_set(members: &[Vec<u8>]) -> HashSet<&[u8]> {
     members.iter().map(|m| m.as_slice()).collect()
 }
 
@@ -74,7 +74,7 @@ const MAX_COMMITTED_HASHES: usize = 10;
 
 /// A commit candidate buffered during freeze for later selection.
 #[derive(Clone, Debug)]
-pub(crate) struct BufferedCommitCandidate {
+pub struct BufferedCommitCandidate {
     pub candidate_msg: CommitCandidate,
     pub commit_hash: Vec<u8>,
     pub is_local_candidate: bool,
@@ -92,16 +92,11 @@ pub(crate) struct FreezeRound {
 /// Per-group protocol state. Stewards batch commits; members vote.
 /// Construct with [`Self::create_group`] or [`Self::prepare_to_join`].
 ///
-/// Owns the per-group MLS service (`Option<M>` because joiners in
-/// `PendingJoin` don't have a service until the welcome arrives — at that
-/// point the User attaches one via [`Self::attach_mls`]).
-///
-/// Steward-list state (active list, retry round, retry policy) lives in
-/// the per-group `StewardListPlugin` instance on `GroupEntry`, not here.
-pub struct Group<M: MlsService> {
-    /// Per-group MLS service. `None` for joiners that haven't accepted
-    /// a welcome yet; otherwise `Some`.
-    mls: Option<M>,
+/// Pure proposal-queue and freeze-round bookkeeping — MLS state lives
+/// on the per-group [`crate::mls_crypto::MlsService`] instance held on
+/// `GroupEntry`, alongside the steward-list plug-in. `Group` itself has
+/// no `M` generic.
+pub struct Group {
     /// The name of the group.
     group_name: String,
     /// This user's identity bytes (set at construction; matches the
@@ -156,15 +151,13 @@ pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
 
 pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
 
-impl<M: MlsService> Group<M> {
+impl Group {
     fn new_base(
         group_name: &str,
         self_identity: Vec<u8>,
         protocol_config: StewardListConfig,
-        mls: Option<M>,
     ) -> Self {
         Self {
-            mls,
             group_name: group_name.to_string(),
             self_identity,
             approved_proposals: HashMap::new(),
@@ -191,32 +184,6 @@ impl<M: MlsService> Group<M> {
         &self.self_identity
     }
 
-    /// Borrow the MLS service for this group, if attached. Returns `None`
-    /// for joiners in `PendingJoin` who haven't accepted a welcome yet.
-    pub fn mls(&self) -> Option<&M> {
-        self.mls.as_ref()
-    }
-
-    /// Borrow the MLS service, erroring with [`CoreError::MlsGroupNotInitialized`]
-    /// when not attached. Use this in code paths where the service must be
-    /// present (Working state) so the `?` chain stays linear.
-    pub fn expect_mls(&self) -> Result<&M, CoreError> {
-        self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)
-    }
-
-    /// Attach an MLS service to this group. Used by joiners after a
-    /// welcome arrives; idempotent in spirit (overwrites whatever was
-    /// there — caller is responsible for not double-attaching).
-    pub fn attach_mls(&mut self, mls: M) {
-        self.mls = Some(mls);
-    }
-
-    /// Drop the attached MLS service and return it. Used on group leave
-    /// so the caller can run service-side cleanup (`mls.delete()`).
-    pub fn take_mls(&mut self) -> Option<M> {
-        self.mls.take()
-    }
-
     pub(crate) fn is_consensus_outcome_applied(&self, proposal_id: ProposalId) -> bool {
         self.resolved_proposals.contains(proposal_id)
     }
@@ -226,26 +193,25 @@ impl<M: MlsService> Group<M> {
     }
 
     /// Build a joiner-side handle for an existing group. The MLS service
-    /// starts unattached; the User attaches it via [`Self::attach_mls`]
-    /// once the welcome arrives.
+    /// is held on `GroupEntry`; the lifecycle layer attaches it via
+    /// `entry.attach_mls(...)` once the welcome arrives.
     pub fn prepare_to_join(
         group_name: &str,
         self_identity: Vec<u8>,
         protocol_config: StewardListConfig,
     ) -> Self {
-        Self::new_base(group_name, self_identity, protocol_config, None)
+        Self::new_base(group_name, self_identity, protocol_config)
     }
 
-    /// Build a creator-side handle. The steward list is owned by the
-    /// per-group `StewardListPlugin` on `GroupEntry`; the lifecycle
-    /// layer bootstraps the list separately after this constructor.
+    /// Build a creator-side handle. The steward list and MLS service
+    /// are owned by `GroupEntry`; this constructor only initializes the
+    /// proposal-queue and freeze-round state.
     pub fn create_group(
         group_name: &str,
         creator_identity: Vec<u8>,
         protocol_config: StewardListConfig,
-        mls: M,
     ) -> Self {
-        Self::new_base(group_name, creator_identity, protocol_config, Some(mls))
+        Self::new_base(group_name, creator_identity, protocol_config)
     }
 
     pub fn group_name(&self) -> &str {
@@ -520,11 +486,7 @@ impl<M: MlsService> Group<M> {
     ///
     /// Returns `true` if buffered, `false` if ignored (locked round or duplicate).
     /// The `epoch` parameter should be the current MLS epoch from `OpenMlsService::current_epoch()`.
-    pub(crate) fn add_freeze_candidate(
-        &mut self,
-        candidate: BufferedCommitCandidate,
-        epoch: u64,
-    ) -> bool {
+    pub fn add_freeze_candidate(&mut self, candidate: BufferedCommitCandidate, epoch: u64) -> bool {
         self.ensure_freeze_round(epoch);
         let Some(round) = self.freeze_round.as_mut() else {
             return false;
@@ -792,97 +754,8 @@ impl ResolvedProposalCache {
 
 /// Test-only stubs shared across `core/`'s unit-test modules.
 #[cfg(test)]
-pub(crate) mod test_stubs {
-    use crate::ds::OutboundPacket;
-    use crate::mls_crypto::{
-        CommitCandidate as MlsCommitCandidate, DecryptResult, MlsCommitInput, MlsError,
-        MlsMessageKind, MlsService, StagedCandidateResult,
-    };
-    use crate::protos::de_mls::messages::v1::AppMessage;
-
-    /// Test-only no-op MLS service. `Group`'s pure-state tests never call
-    /// MLS operations, so every protocol method is a stub. If a test
-    /// reaches one of these, it's the wrong test and the panic message
-    /// will say so.
-    pub(crate) struct NoopMls {
-        group_id: String,
-    }
-
-    impl NoopMls {
-        pub(crate) fn new(group_id: &str) -> Self {
-            Self {
-                group_id: group_id.to_string(),
-            }
-        }
-    }
-
-    impl MlsService for NoopMls {
-        fn group_id(&self) -> &str {
-            &self.group_id
-        }
-        fn delete(&self) -> Result<(), MlsError> {
-            Ok(())
-        }
-        fn members(&self) -> Result<Vec<Vec<u8>>, MlsError> {
-            Ok(Vec::new())
-        }
-        fn is_member(&self, _identity: &[u8]) -> bool {
-            false
-        }
-        fn current_epoch(&self) -> Result<u64, MlsError> {
-            Ok(0)
-        }
-        fn create_commit_candidate(
-            &self,
-            _updates: &[MlsCommitInput],
-        ) -> Result<MlsCommitCandidate, MlsError> {
-            unreachable!("NoopMls::create_commit_candidate not used in pure-state tests")
-        }
-        fn merge_own_commit(&self) -> Result<(), MlsError> {
-            unreachable!()
-        }
-        fn discard_own_commit(&self) -> Result<(), MlsError> {
-            unreachable!()
-        }
-        fn stage_remote_commit(
-            &self,
-            _proposals: &[Vec<u8>],
-            _commit_bytes: &[u8],
-        ) -> Result<StagedCandidateResult, MlsError> {
-            unreachable!()
-        }
-        fn merge_staged_commit(&self) -> Result<(), MlsError> {
-            unreachable!()
-        }
-        fn discard_staged_commit(&self) -> Result<(), MlsError> {
-            unreachable!()
-        }
-        fn encrypt(&self, _plaintext: &[u8]) -> Result<Vec<u8>, MlsError> {
-            unreachable!()
-        }
-        fn build_message(
-            &self,
-            _app_msg: &AppMessage,
-            _app_id: &[u8],
-        ) -> Result<OutboundPacket, MlsError> {
-            unreachable!()
-        }
-        fn decrypt_application_only(&self, _ciphertext: &[u8]) -> Result<DecryptResult, MlsError> {
-            unreachable!()
-        }
-        fn decrypt(&self, _ciphertext: &[u8]) -> Result<DecryptResult, MlsError> {
-            unreachable!()
-        }
-        fn inspect_message_kind(&self, _message_bytes: &[u8]) -> Result<MlsMessageKind, MlsError> {
-            unreachable!()
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::group::test_stubs::NoopMls;
     use crate::protos::de_mls::messages::v1::{InviteMember, RemoveMember};
 
     fn member(id: u8) -> Vec<u8> {
@@ -897,15 +770,15 @@ mod tests {
         StewardListConfig::new(1, 5).unwrap()
     }
 
-    /// Test convenience: build a creator-side `Group<NoopMls>`. Steward
+    /// Test convenience: build a creator-side `Group`. Steward
     /// list is owned by the per-group plug-in (covered separately in
     /// `core::steward_list_plugin::tests`); these tests focus on
     /// proposal-queue + dedup + freeze-round logic on `Group`.
-    fn creator_group(name: &str, identity: Vec<u8>, config: StewardListConfig) -> Group<NoopMls> {
-        Group::create_group(name, identity, config, NoopMls::new(name))
+    fn creator_group(name: &str, identity: Vec<u8>, config: StewardListConfig) -> Group {
+        Group::create_group(name, identity, config)
     }
 
-    fn insert_self_leave(group: &mut Group<NoopMls>, identity: &[u8]) {
+    fn insert_self_leave(group: &mut Group, identity: &[u8]) {
         let remove = GroupUpdateRequest {
             payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
                 identity: identity.to_vec(),
@@ -1003,7 +876,7 @@ mod tests {
         assert!(group.is_consensus_outcome_applied(42));
     }
 
-    fn insert_remove_member(group: &mut Group<NoopMls>, target: &[u8], proposal_id: ProposalId) {
+    fn insert_remove_member(group: &mut Group, target: &[u8], proposal_id: ProposalId) {
         let remove = GroupUpdateRequest {
             payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
                 identity: target.to_vec(),
@@ -1095,7 +968,7 @@ mod tests {
         assert!(!group.approved_proposals().contains_key(&101));
     }
 
-    fn buffer_remove_at(group: &mut Group<NoopMls>, target: &[u8], epoch: u64) {
+    fn buffer_remove_at(group: &mut Group, target: &[u8], epoch: u64) {
         let request = GroupUpdateRequest {
             payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
                 identity: target.to_vec(),

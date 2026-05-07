@@ -17,7 +17,7 @@ use crate::{
     },
     core::{
         DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProposalKind, StewardListPlugin,
-        group_members, target_identity_of,
+        target_identity_of,
     },
     identity::Identity,
     mls_crypto::MlsService,
@@ -88,8 +88,8 @@ impl<
             }
         }
 
-        entry.group.expect_mls()?;
-        let members = group_members(&entry.group)?;
+        entry.expect_mls()?;
+        let members = entry.group_members()?;
         Ok(members.len() as u32)
     }
 
@@ -257,10 +257,7 @@ impl<
                 .await
                 .ok_or(UserError::GroupNotFound)?;
             let entry = entry_arc.read().await;
-            entry
-                .group
-                .expect_mls()?
-                .build_message(&outbound, &self.app_id)?
+            entry.expect_mls()?.build_message(&outbound, &self.app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
 
@@ -374,9 +371,9 @@ impl<
         let (pending_join, members_for_rotation, current_epoch) = {
             let entry = entry_arc.read().await;
             let pending = entry.state_machine.current_state() == GroupState::PendingJoin;
-            match (pending, entry.group.mls()) {
+            match (pending, entry.mls()) {
                 (true, _) | (false, None) => (pending, Vec::new(), 0u64),
-                (false, Some(mls)) => (false, group_members(&entry.group)?, mls.current_epoch()?),
+                (false, Some(mls)) => (false, entry.group_members()?, mls.current_epoch()?),
             }
         };
         if pending_join {
@@ -468,10 +465,7 @@ impl<
         .await?;
         let packet = {
             let entry = entry_arc.read().await;
-            entry
-                .group
-                .expect_mls()?
-                .build_message(&app_message, &app_id)?
+            entry.expect_mls()?.build_message(&app_message, &app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
@@ -584,7 +578,6 @@ impl<
         let packet = {
             let entry = entry_arc.read().await;
             entry
-                .group
                 .expect_mls()?
                 .build_message(&app_message, &self.app_id)?
         };

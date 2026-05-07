@@ -56,24 +56,23 @@ impl<
         let liveness_criteria_yes = config.liveness_criteria_yes;
         let pending_update_max_epochs = config.pending_update_max_epochs;
         let self_identity_bytes = self.identity().identity_bytes().to_vec();
-        let (mut group, state_machine) = if is_creation {
+        let (mut group, mls_opt, state_machine) = if is_creation {
             let mls = (self.mls_creator_factory)(group_name.to_string())?;
             let group = Group::create_group(
                 group_name,
                 self_identity_bytes.clone(),
                 config.protocol.clone(),
-                mls,
             );
             let state_machine = GroupStateMachine::new_as_member_with_config(config.clone());
-            (group, state_machine)
+            (group, Some(mls), state_machine)
         } else {
-            let group: Group<M> = Group::prepare_to_join(
+            let group = Group::prepare_to_join(
                 group_name,
                 self_identity_bytes.clone(),
                 config.protocol.clone(),
             );
             let state_machine = GroupStateMachine::new_as_pending_join_with_config(config.clone());
-            (group, state_machine)
+            (group, None, state_machine)
         };
         group.set_liveness_criteria_yes(liveness_criteria_yes);
         group.set_pending_update_max_epochs(pending_update_max_epochs);
@@ -108,6 +107,7 @@ impl<
             group_name.to_string(),
             Arc::new(RwLock::new(GroupEntry::new(
                 group,
+                mls_opt,
                 state_machine,
                 scoring,
                 steward,
@@ -211,10 +211,7 @@ impl<
                 .await
                 .ok_or(UserError::GroupNotFound)?;
             let entry = entry_arc.read().await;
-            entry
-                .group
-                .expect_mls()?
-                .build_message(&app_msg, &self.app_id)?
+            entry.expect_mls()?.build_message(&app_msg, &self.app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
 

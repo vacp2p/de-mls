@@ -180,7 +180,7 @@ impl<
 
         let is_valid = {
             let entry = entry_arc.read().await;
-            entry.group.expect_mls()?;
+            entry.expect_mls()?;
             // Election proposals carry the candidate pool implicitly:
             // `proposed_stewards` is the full set the proposer sorted, so
             // `candidate_pool == proposed_stewards` for validation.

@@ -7,7 +7,7 @@ use crate::{
     app::{StateChangeHandler, User, UserError},
     core::{
         DeMlsProvider, ElectionDecision, GroupEventHandler, PeerScoringPlugin, StewardListPlugin,
-        group_members, member_set, scoring_member_diff, target_identity_of,
+        member_set, scoring_member_diff, target_identity_of,
     },
     identity::{Identity, ShortId},
     mls_crypto::MlsService,
@@ -64,9 +64,9 @@ impl<
             .await
             .ok_or(UserError::GroupNotFound)?;
         let mut entry = entry_arc.write().await;
-        let mls = entry.group.expect_mls()?;
+        let mls = entry.expect_mls()?;
         let epoch = mls.current_epoch()?;
-        let members = group_members(&entry.group)?;
+        let members = entry.group_members()?;
         let _events = entry.steward.maybe_auto_fill(epoch, &members)?;
         Ok(())
     }
@@ -90,9 +90,9 @@ impl<
             .ok_or(UserError::GroupNotFound)?;
         let (proposed_stewards, election_epoch, retry_round) = {
             let entry = entry_arc.read().await;
-            let mls = entry.group.expect_mls()?;
+            let mls = entry.expect_mls()?;
             let epoch = mls.current_epoch()?;
-            let mls_members = group_members(&entry.group)?;
+            let mls_members = entry.group_members()?;
             let self_identity = self.identity().identity_bytes();
 
             // `has_election_in_flight` is a proposal-queue check, not a
@@ -182,8 +182,8 @@ impl<
             .ok_or(UserError::GroupNotFound)?;
         let (is_authorized, self_id, epoch) = {
             let entry = entry_arc.read().await;
-            let mls = entry.group.expect_mls()?;
-            let mls_members = group_members(&entry.group)?;
+            let mls = entry.expect_mls()?;
+            let mls_members = entry.group_members()?;
             let self_id = self.identity().identity_bytes();
             // Deadlock proposer = election proposer with the stricter
             // predicate (MLS-present and not queued for removal).
@@ -242,9 +242,9 @@ impl<
             .ok_or(UserError::GroupNotFound)?;
         let (current_epoch, members) = {
             let entry = entry_arc.read().await;
-            let mls = entry.group.expect_mls()?;
+            let mls = entry.expect_mls()?;
             let current_epoch = mls.current_epoch()?;
-            let members = group_members(&entry.group)?;
+            let members = entry.group_members()?;
             (current_epoch, members)
         };
 
@@ -268,12 +268,12 @@ impl<
             .ok_or(UserError::GroupNotFound)?;
         let (current_epoch, members, max_age) = {
             let entry = entry_arc.read().await;
-            let Some(mls) = entry.group.mls() else {
+            let Some(mls) = entry.mls() else {
                 return Ok(());
             };
             (
                 mls.current_epoch()?,
-                group_members(&entry.group)?,
+                entry.group_members()?,
                 entry.group.pending_update_max_epochs(),
             )
         };
@@ -306,8 +306,8 @@ impl<
         let (current_epoch, to_propose): (u64, Vec<GroupUpdateRequest>) = {
             let entry = entry_arc.read().await;
 
-            let (current_epoch, members) = match entry.group.mls() {
-                Some(mls) => (mls.current_epoch()?, group_members(&entry.group)?),
+            let (current_epoch, members) = match entry.mls() {
+                Some(mls) => (mls.current_epoch()?, entry.group_members()?),
                 None => (0, Vec::new()),
             };
             let self_identity = self.identity().identity_bytes();
@@ -417,8 +417,8 @@ impl<
             // Filter ghosts and queued-removal targets so joiners don't
             // inherit stewards they would have to walk past on the very
             // first epoch.
-            let mls = entry.group.expect_mls()?;
-            let mls_members = group_members(&entry.group)?;
+            let mls = entry.expect_mls()?;
+            let mls_members = entry.group_members()?;
             let eligible = entry.group.steward_eligibility(&mls_members);
             let steward_members = entry.steward.steward_members(&eligible);
 
@@ -469,7 +469,7 @@ impl<
         // truth — events just trigger the look.
         let (is_steward, epoch, to_remove): (bool, u64, Vec<(Vec<u8>, i64)>) = {
             let mut entry = entry_arc.write().await;
-            let mls = entry.group.expect_mls()?;
+            let mls = entry.expect_mls()?;
             let is_steward = entry.steward.is_steward(self_id);
             let epoch = mls.current_epoch()?;
             if !is_steward {

@@ -14,7 +14,6 @@ use tracing::info;
 use crate::{
     core::{CoreError, Group},
     identity::ShortId,
-    mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         GroupUpdateRequest, RemoveMember, StewardElectionProposal, ViolationEvidence,
         ViolationType, group_update_request,
@@ -97,8 +96,8 @@ fn pending_removal_target(
 /// Election outcome — no MLS operation. YES hands the proposed list
 /// back to the app for validation and install; NO drops the owner's
 /// voting-queue entry.
-fn apply_election_outcome<M: MlsService>(
-    group: &mut Group<M>,
+fn apply_election_outcome(
+    group: &mut Group,
     proposal_id: u32,
     approved: bool,
     election: StewardElectionProposal,
@@ -144,8 +143,8 @@ fn apply_election_outcome<M: MlsService>(
 ///   `RemoveMember` for an already-queued target is deduped at insertion.
 /// - **Rejected (any kind)** — dropped from the voting queue if we
 ///   owned it.
-pub fn apply_consensus_result<M: MlsService>(
-    group: &mut Group<M>,
+pub fn apply_consensus_result(
+    group: &mut Group,
     proposal_id: u32,
     approved: bool,
     payload: &[u8],
@@ -265,7 +264,6 @@ pub fn apply_consensus_result<M: MlsService>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::group::test_stubs::NoopMls;
     use crate::core::steward_list_plugin::{StewardList, StewardListConfig};
     use crate::protos::de_mls::messages::v1::{
         GroupUpdateRequest, StewardElectionProposal, group_update_request,
@@ -280,8 +278,8 @@ mod tests {
         ids.iter().map(|&id| member(id)).collect()
     }
 
-    fn make_group(name: &str, identity: Vec<u8>, config: StewardListConfig) -> Group<NoopMls> {
-        Group::create_group(name, identity, config, NoopMls::new(name))
+    fn make_group(name: &str, identity: Vec<u8>, config: StewardListConfig) -> Group {
+        Group::create_group(name, identity, config)
     }
 
     fn election_request(stewards: Vec<Vec<u8>>, epoch: u64) -> GroupUpdateRequest {

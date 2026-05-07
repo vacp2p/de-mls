@@ -2,7 +2,7 @@
 
 use crate::{
     app::{GroupState, MemberRole, StateChangeHandler, User, UserError},
-    core::{DeMlsProvider, GroupEventHandler, PeerScoringPlugin, StewardListPlugin, group_members},
+    core::{DeMlsProvider, GroupEventHandler, PeerScoringPlugin, StewardListPlugin},
     identity::{Identity, format_wallet_address},
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::GroupUpdateRequest,
@@ -32,7 +32,7 @@ impl<
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        let epoch = match entry.group.mls() {
+        let epoch = match entry.mls() {
             Some(mls) => mls.current_epoch()?,
             None => 0,
         };
@@ -80,10 +80,10 @@ impl<
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        if entry.group.mls().is_none() {
+        if entry.mls().is_none() {
             return Ok(Vec::new());
         }
-        let members = group_members(&entry.group)?;
+        let members = entry.group_members()?;
         Ok(members
             .into_iter()
             .map(|raw| format_wallet_address(raw.as_slice()).to_string())
@@ -114,8 +114,8 @@ impl<
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        entry.group.expect_mls()?;
-        let members = group_members(&entry.group)?;
+        entry.expect_mls()?;
+        let members = entry.group_members()?;
         Ok(members
             .into_iter()
             .filter(|id| entry.group.is_pending_self_leave(id))
@@ -133,9 +133,9 @@ impl<
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        let mls = entry.group.expect_mls()?;
+        let mls = entry.expect_mls()?;
         let epoch = mls.current_epoch()?;
-        let members = group_members(&entry.group)?;
+        let members = entry.group_members()?;
 
         let eligible = entry.group.steward_eligibility(&members);
         let (live_epoch, live_backup) = entry.steward.epoch_and_backup(epoch, &eligible);
