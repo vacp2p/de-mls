@@ -3,10 +3,10 @@
 use std::time::Duration;
 
 pub use crate::core::{
-    DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_MAX_REELECTION_ATTEMPTS,
-    DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_THRESHOLD_PEER_SCORE,
+    DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_MAX_RETRIES, DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
+    DEFAULT_THRESHOLD_PEER_SCORE,
 };
-use crate::core::{ProposalKind, ProtocolConfig};
+use crate::core::{ProposalKind, StewardListConfig};
 
 /// Wall-clock window the steward waits before batching approved proposals
 /// into a commit.
@@ -35,13 +35,13 @@ pub const DEFAULT_ELECTION_VOTING_DELAY: Duration = Duration::from_secs(5);
 /// RFC §Peer Scoring `default_peer_score`: starting score for a new member.
 pub const DEFAULT_PEER_SCORE: i64 = 100;
 
-/// Fallback [`ProtocolConfig`] for a group created without explicit bounds —
+/// Fallback [`StewardListConfig`] for a group created without explicit bounds —
 /// tiny groups with `sn ∈ [1, 2]`.
-fn default_protocol_config() -> ProtocolConfig {
-    ProtocolConfig::new(1, 2).expect("1..=2 is always a valid ProtocolConfig range")
+fn default_protocol_config() -> StewardListConfig {
+    StewardListConfig::new(1, 2).expect("1..=2 is always a valid StewardListConfig range")
 }
 
-/// App-layer timing + embedded core-layer [`ProtocolConfig`].
+/// App-layer timing + embedded core-layer [`StewardListConfig`].
 #[derive(Debug, Clone)]
 pub struct GroupConfig {
     pub epoch_duration: Duration,
@@ -76,7 +76,7 @@ pub struct GroupConfig {
     pub default_peer_score: i64,
     /// RFC §Peer Scoring `threshold_peer_score`. See [`DEFAULT_THRESHOLD_PEER_SCORE`].
     pub threshold_peer_score: i64,
-    pub protocol: ProtocolConfig,
+    pub protocol: StewardListConfig,
 }
 
 impl Default for GroupConfig {
@@ -88,7 +88,7 @@ impl Default for GroupConfig {
             proposal_expiration: DEFAULT_PROPOSAL_EXPIRATION,
             consensus_timeout: DEFAULT_CONSENSUS_TIMEOUT,
             pending_update_max_epochs: DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
-            max_reelection_attempts: DEFAULT_MAX_REELECTION_ATTEMPTS,
+            max_reelection_attempts: DEFAULT_MAX_RETRIES,
             voting_delay: DEFAULT_VOTING_DELAY,
             election_voting_delay: DEFAULT_ELECTION_VOTING_DELAY,
             liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,

@@ -9,7 +9,7 @@ use crate::{
         error::CoreError,
         group::{BufferedCommitCandidate, Group, member_set},
         proposal_kind::ProposalKind,
-        steward_list::ProtocolConfig,
+        steward_list_plugin::StewardListPlugin,
     },
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     mls_crypto::{
@@ -22,18 +22,20 @@ use crate::{
 
 /// Build a commit candidate and buffer it for [`crate::core::finalize_freeze_round`].
 ///
-/// The gate is plain `is_steward()` (list membership) — intentionally **not**
-/// `is_live_epoch_steward` or a list-exhaustion check, so members of the
-/// *previous* list can commit recovery actions when an election fails.
+/// The gate is plain steward-list membership — intentionally **not**
+/// epoch-steward or list-exhaustion, so members of the *previous* list
+/// can commit recovery actions when an election fails.
 /// `Group::is_in_recovery_mode()` (Layer 3) bypasses the gate entirely.
 pub fn create_commit_candidate<M>(
     group: &mut Group<M>,
+    steward: &dyn StewardListPlugin,
+    self_identity: &[u8],
     app_id: &[u8],
 ) -> Result<Option<OutboundPacket>, CoreError>
 where
     M: MlsService,
 {
-    if !group.is_steward() && !group.is_in_recovery_mode() {
+    if !steward.is_steward(self_identity) && !group.is_in_recovery_mode() {
         return Err(CoreError::NotASteward);
     }
 
@@ -49,7 +51,6 @@ where
     // MLS forbids committing one's own removal. If the approved batch contains
     // RemoveMember(self), skip local candidate creation — another steward will
     // commit the batch (including this node's removal) once they enter freeze.
-    let self_identity = group.self_identity();
     let self_removal_pending = group.approved_proposals().values().any(|req| {
         matches!(
             req.payload.as_ref(),
@@ -93,7 +94,7 @@ where
 
     // Iterate in insertion order (FIFO): library proposal IDs are
     // content-derived hashes, so sort-by-id is not temporal.
-    let k_max = group.protocol_config().k_max;
+    let k_max = mls.commit_batch_max();
     let mut updates = Vec::with_capacity(group.approved_order().len().min(k_max));
     for pid in group.approved_order() {
         if updates.len() >= k_max {
@@ -144,7 +145,7 @@ where
         group_name: group.group_name_bytes().to_vec(),
         mls_proposals,
         commit_message: commit,
-        steward_identity: group.self_identity().to_vec(),
+        steward_identity: self_identity.to_vec(),
     };
 
     // Welcome bytes are deferred: sent from finalize_freeze_round after the
@@ -190,96 +191,4 @@ where
         Some(mls) => Ok(mls.members()?),
         None => Ok(Vec::new()),
     }
-}
-
-// ─────────────────────────── Housekeeping Decisions ───────────────────────────
-
-/// Outcome of [`evaluate_election_initiation`]. `Skip` carries a brief
-/// reason for the log; `Proposed` carries the parameters the caller uses
-/// to build and submit a `StewardElection` proposal.
-#[derive(Debug, Clone)]
-pub enum ElectionDecision {
-    Skip(&'static str),
-    Proposed {
-        candidate_pool: Vec<Vec<u8>>,
-        election_epoch: u64,
-        retry_round: u32,
-        protocol_config: ProtocolConfig,
-    },
-}
-
-/// Decide whether this node SHOULD file a steward-election proposal.
-///
-/// Checks (in order): (1) gate on recovery vs list-exhaustion, (2)
-/// election-already-in-flight, (3) responsible-proposer authorization,
-/// (4) eligible-candidate-pool non-empty. The async submission stays in
-/// the caller; this function performs no I/O.
-pub fn evaluate_election_initiation<M: MlsService>(
-    group: &Group<M>,
-    mls_members: &[Vec<u8>],
-    self_identity: &[u8],
-    epoch: u64,
-    recovery: bool,
-    extra_exclude: Option<&[u8]>,
-) -> ElectionDecision {
-    if !recovery && !group.is_steward_list_exhausted(epoch) {
-        return ElectionDecision::Skip("steward list not exhausted");
-    }
-    if group.has_election_in_flight() {
-        return ElectionDecision::Skip("election already in flight");
-    }
-
-    let mls_members_set: std::collections::HashSet<&[u8]> =
-        mls_members.iter().map(Vec::as_slice).collect();
-    let is_authorized = group
-        .steward_list()
-        .and_then(|list| list.responsible_election_proposer(|c| mls_members_set.contains(c)))
-        .is_some_and(|proposer| proposer == self_identity);
-    if !is_authorized {
-        return ElectionDecision::Skip("not the responsible proposer");
-    }
-
-    let candidate_pool: Vec<Vec<u8>> = mls_members
-        .iter()
-        .filter(|m| {
-            if extra_exclude.is_some_and(|x| x == m.as_slice()) {
-                return false;
-            }
-            if recovery && group.is_pending_removal(m) {
-                return false;
-            }
-            true
-        })
-        .cloned()
-        .collect();
-    if candidate_pool.is_empty() {
-        return ElectionDecision::Skip("no eligible candidates after filter");
-    }
-
-    ElectionDecision::Proposed {
-        candidate_pool,
-        election_epoch: epoch,
-        retry_round: group.reelection_round(),
-        protocol_config: group.protocol_config().clone(),
-    }
-}
-
-/// `true` when this node is the responsible proposer for a Layer-3
-/// `Deadlock` ECP. Requires the proposer to be MLS-present and not
-/// queued for removal.
-pub fn is_deadlock_ecp_proposer<M: MlsService>(
-    group: &Group<M>,
-    mls_members: &[Vec<u8>],
-    self_identity: &[u8],
-) -> bool {
-    let mls_members_set: std::collections::HashSet<&[u8]> =
-        mls_members.iter().map(Vec::as_slice).collect();
-    group
-        .steward_list()
-        .and_then(|list| {
-            list.responsible_election_proposer(|c| {
-                mls_members_set.contains(c) && !group.is_pending_removal(c)
-            })
-        })
-        .is_some_and(|proposer| proposer == self_identity)
 }

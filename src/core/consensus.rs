@@ -266,7 +266,7 @@ pub fn apply_consensus_result<M: MlsService>(
 mod tests {
     use super::*;
     use crate::core::group::test_stubs::NoopMls;
-    use crate::core::steward_list::{ProtocolConfig, StewardList};
+    use crate::core::steward_list_plugin::{StewardList, StewardListConfig};
     use crate::protos::de_mls::messages::v1::{
         GroupUpdateRequest, StewardElectionProposal, group_update_request,
     };
@@ -280,8 +280,8 @@ mod tests {
         ids.iter().map(|&id| member(id)).collect()
     }
 
-    fn make_group(name: &str, identity: Vec<u8>, config: ProtocolConfig) -> Group<NoopMls> {
-        Group::create_group(name, identity, config, NoopMls::new(name)).unwrap()
+    fn make_group(name: &str, identity: Vec<u8>, config: StewardListConfig) -> Group<NoopMls> {
+        Group::create_group(name, identity, config, NoopMls::new(name))
     }
 
     fn election_request(stewards: Vec<Vec<u8>>, epoch: u64) -> GroupUpdateRequest {
@@ -300,7 +300,7 @@ mod tests {
     /// and doesn't leave the proposal in the approved queue.
     #[test]
     fn election_yes_owner_returns_outcome_and_clears_queue() {
-        let config = ProtocolConfig::new(2, 5).unwrap();
+        let config = StewardListConfig::new(2, 5).unwrap();
         let mut group = make_group("test-group", member(1), config.clone());
         let mems = members(&[1, 2, 3, 4, 5]);
         let sn = mems.len().min(config.sn_max);
@@ -323,7 +323,7 @@ mod tests {
     /// NO on an election returns no outcome and leaves the approved queue empty.
     #[test]
     fn election_no_returns_empty() {
-        let config = ProtocolConfig::new(2, 5).unwrap();
+        let config = StewardListConfig::new(2, 5).unwrap();
         let mut group = make_group("test-group", member(1), config);
         let request = election_request(vec![member(1), member(2)], 10);
 
@@ -342,7 +342,7 @@ mod tests {
     /// (non-owner path), and doesn't touch any proposal queues.
     #[test]
     fn election_yes_nonowner_returns_outcome_without_queue_side_effects() {
-        let config = ProtocolConfig::new(2, 5).unwrap();
+        let config = StewardListConfig::new(2, 5).unwrap();
         let mut group = make_group("test-group", member(1), config);
         let request = election_request(vec![member(1), member(2), member(3)], 5);
 
@@ -369,7 +369,7 @@ mod tests {
     /// when an entry for the same target is already in `approved_proposals`.
     #[test]
     fn removal_deduped_when_target_already_pending() {
-        let config = ProtocolConfig::new(2, 5).unwrap();
+        let config = StewardListConfig::new(2, 5).unwrap();
         let mut group = make_group("test-group", member(1), config);
         let target = member(7);
 
@@ -399,7 +399,7 @@ mod tests {
     /// queue does not retain an outcome we deliberately discarded.
     #[test]
     fn removal_dedup_clears_owner_voting_entry() {
-        let config = ProtocolConfig::new(2, 5).unwrap();
+        let config = StewardListConfig::new(2, 5).unwrap();
         let mut group = make_group("test-group", member(1), config);
         let target = member(7);
 
@@ -435,7 +435,7 @@ mod tests {
 
     #[test]
     fn ecp_score_below_threshold_yes_marks_urgent_and_force_freezes() {
-        let config = ProtocolConfig::new(1, 5).unwrap();
+        let config = StewardListConfig::new(1, 5).unwrap();
         let mut group = make_group("urgent-yes", member(1), config);
         let target = member(7);
 
@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn ecp_score_below_threshold_no_does_not_mark_urgent() {
-        let config = ProtocolConfig::new(1, 5).unwrap();
+        let config = StewardListConfig::new(1, 5).unwrap();
         let mut group = make_group("urgent-no", member(1), config);
         let request = score_below_threshold_request(member(7), member(1));
         let payload = request.encode_to_vec();
@@ -477,7 +477,7 @@ mod tests {
 
     #[test]
     fn ecp_deadlock_yes_opens_recovery_mode_and_force_freezes() {
-        let config = ProtocolConfig::new(1, 5).unwrap();
+        let config = StewardListConfig::new(1, 5).unwrap();
         let mut group = make_group("deadlock-yes", member(1), config);
         assert!(!group.is_in_recovery_mode());
 
@@ -500,7 +500,7 @@ mod tests {
 
     #[test]
     fn ecp_deadlock_no_does_not_open_recovery_mode() {
-        let config = ProtocolConfig::new(1, 5).unwrap();
+        let config = StewardListConfig::new(1, 5).unwrap();
         let mut group = make_group("deadlock-no", member(1), config);
 
         let request = deadlock_request(member(1));

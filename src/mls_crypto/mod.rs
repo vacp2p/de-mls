@@ -49,7 +49,7 @@ mod types;
 
 pub use credentials::MlsCredentials;
 pub use error::MlsError;
-pub use service::{CIPHERSUITE, MlsService, OpenMlsService};
+pub use service::{CIPHERSUITE, DEFAULT_COMMIT_BATCH_MAX, MlsService, OpenMlsService};
 pub use storage::{DeMlsStorage, MemoryDeMlsStorage};
 pub use types::{
     CommitCandidate, DecryptResult, KeyPackageBytes, MlsCommitInput, MlsMessageKind,

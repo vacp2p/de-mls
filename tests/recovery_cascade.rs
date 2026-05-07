@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use hashgraph_like_consensus::service::DefaultConsensusService;
 
 use de_mls::app::{GroupConfig, GroupState, StateChangeHandler, User};
-use de_mls::core::{CallbackError, DefaultProvider, GroupEventHandler, ProtocolConfig};
+use de_mls::core::{CallbackError, DefaultProvider, GroupEventHandler, StewardListConfig};
 use de_mls::ds::{InboundPacket, OutboundPacket};
 use de_mls::protos::de_mls::messages::v1::AppMessage;
 
@@ -66,6 +66,7 @@ type TU = User<
     DefaultProvider,
     de_mls::app::DefaultMlsService,
     de_mls::app::DefaultPeerScoring,
+    de_mls::app::DefaultStewardList,
     de_mls::identity::WalletIdentity,
     H,
     SH,
@@ -108,7 +109,7 @@ async fn concurrent_joins_leave_joiners_with_empty_buffer() {
     let cfg = GroupConfig {
         epoch_duration: Duration::from_millis(50),
         freeze_duration: Duration::from_millis(10),
-        protocol: ProtocolConfig::new(1, 5).unwrap(),
+        protocol: StewardListConfig::new(1, 5).unwrap(),
         ..GroupConfig::default()
     };
     let cs = Arc::new(DefaultConsensusService::new_with_max_sessions(100));

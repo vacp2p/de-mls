@@ -9,7 +9,7 @@
 //! Strategy A: keep epoch=0, vary retry_round 0..5 (in-epoch retry).
 //! Strategy B: keep retry_round=0, vary epoch 0..5 (one list per epoch).
 
-use de_mls::core::{ProtocolConfig, StewardList};
+use de_mls::core::{StewardList, StewardListConfig};
 
 fn addr(hex: &str) -> Vec<u8> {
     let trimmed = hex.trim_start_matches("0x");
@@ -39,7 +39,7 @@ fn main() {
     .into_iter()
     .collect();
 
-    let config = ProtocolConfig::new(1, 2).unwrap();
+    let config = StewardListConfig::new(1, 2).unwrap();
     let group = b"test";
     let rounds = 5;
 

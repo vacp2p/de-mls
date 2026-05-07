@@ -31,10 +31,22 @@ use crate::{
 /// MLS ciphersuite used by the default OpenMLS-backed impl.
 pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
+/// Default ceiling on MLS proposals per commit batch. Defends against
+/// runaway batch growth when freeze recovery preserves work across
+/// multiple failed cycles. Per-node config; not synced via `GroupSync`.
+pub const DEFAULT_COMMIT_BATCH_MAX: usize = 50;
+
 /// Per-group MLS backend. Each instance corresponds to one MLS group.
 pub trait MlsService: Send + Sync + 'static {
     /// The group id this service is scoped to.
     fn group_id(&self) -> &str;
+
+    /// Maximum number of MLS proposals the steward will pack into one
+    /// commit batch. Defaults to [`DEFAULT_COMMIT_BATCH_MAX`]; impls may
+    /// override per-instance.
+    fn commit_batch_max(&self) -> usize {
+        DEFAULT_COMMIT_BATCH_MAX
+    }
 
     // ── Group lifecycle ──
 

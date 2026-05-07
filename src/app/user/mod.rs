@@ -26,8 +26,9 @@ use crate::{
         StateChangeHandler, UserError,
     },
     core::{
-        DeMlsProvider, DefaultProvider, Group, GroupEventHandler, PeerScoringEvent,
-        PeerScoringPlugin, PeerScoringService, ProposalId, ProviderConsensus, ScoringConfig,
+        DeMlsProvider, DefaultProvider, DeterministicStewardList, Group, GroupEventHandler,
+        PeerScoringEvent, PeerScoringPlugin, PeerScoringService, ProposalId, ProviderConsensus,
+        ScoringConfig, StewardListConfig, StewardListPlugin,
     },
     identity::{Identity, WalletIdentity},
     mls_crypto::{
@@ -49,7 +50,7 @@ mod steward;
 /// concern only; protocol logic in `core::Group` is history-agnostic.
 const MAX_EPOCH_HISTORY: usize = 10;
 
-pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin> {
+pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> {
     /// `Group<M>` owns the per-group MLS service inside its own
     /// `Option<M>` slot — joiners in `PendingJoin` carry `None` until a
     /// welcome arrives, at which point the User attaches the service via
@@ -60,6 +61,11 @@ pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin> {
     /// app-layer wiring; protocol decisions read it via the entry's
     /// `RwLock`, no separate `Mutex` needed.
     scoring: Sc,
+    /// Per-group steward list plug-in. Holds the active list, retry
+    /// counter, and election retry policy. Coordinator composes
+    /// eligibility from MLS members + `Group::is_pending_removal` and
+    /// passes it on every position query.
+    steward: St,
     /// Per-group rolling history of committed batches, most recent last.
     /// Bounded at [`MAX_EPOCH_HISTORY`]. Populated by
     /// [`GroupEntry::archive_committed_batch`] from the snapshot
@@ -67,14 +73,20 @@ pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin> {
     epoch_history: VecDeque<HashMap<ProposalId, GroupUpdateRequest>>,
 }
 
-impl<M: MlsService, Sc: PeerScoringPlugin> GroupEntry<M, Sc> {
+impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, Sc, St> {
     /// Build a fresh entry. Internal-only auxiliary state (epoch
     /// history, future per-entry caches) starts empty.
-    pub(crate) fn new(group: Group<M>, state_machine: GroupStateMachine, scoring: Sc) -> Self {
+    pub(crate) fn new(
+        group: Group<M>,
+        state_machine: GroupStateMachine,
+        scoring: Sc,
+        steward: St,
+    ) -> Self {
         Self {
             group,
             state_machine,
             scoring,
+            steward,
             epoch_history: VecDeque::new(),
         }
     }
@@ -110,7 +122,7 @@ type AutoVoteTimers = Arc<Mutex<HashMap<Arc<str>, HashMap<u32, JoinHandle<()>>>>
 /// Per-user registry of group entries, with one outer lock for map CRUD
 /// and one inner lock per entry so writes on one group don't block reads
 /// on another.
-type GroupRegistry<M, Sc> = Arc<RwLock<HashMap<String, Arc<RwLock<GroupEntry<M, Sc>>>>>>;
+type GroupRegistry<M, Sc, St> = Arc<RwLock<HashMap<String, Arc<RwLock<GroupEntry<M, Sc, St>>>>>>;
 
 /// Factory closure that builds an [`MlsService`] for a fresh group.
 pub type MlsCreatorFactory<M> = Arc<dyn Fn(String) -> Result<M, MlsError> + Send + Sync + 'static>;
@@ -128,11 +140,18 @@ pub type KeyPackageGenerator =
 /// [`ScoringConfig`] derived from `default_group_config`; the parameter
 /// is forward-looking for per-group config overrides.
 pub type ScoringFactory<Sc> = Arc<dyn Fn(&ScoringConfig) -> Sc + Send + Sync + 'static>;
+/// Factory closure that builds a [`StewardListPlugin`] instance for a
+/// fresh group. Receives `(group_id_bytes, protocol_config)` and
+/// returns an empty plug-in. Lifecycle then bootstraps via
+/// [`StewardListPlugin::install_list`] for the creator path or leaves
+/// it empty for joiners (filled when `GroupSync` arrives).
+pub type StewardFactory<St> = Arc<dyn Fn(&[u8], StewardListConfig) -> St + Send + Sync + 'static>;
 
 pub struct User<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler,
     SCH: StateChangeHandler,
@@ -150,12 +169,14 @@ pub struct User<
     kp_generator: KeyPackageGenerator,
     /// Build a fresh peer-scoring plug-in for a new group entry.
     scoring_factory: ScoringFactory<Sc>,
+    /// Build a fresh steward-list plug-in for a new group entry.
+    steward_factory: StewardFactory<St>,
     /// Outer lock: map CRUD (insert / remove / iterate names).
     /// Inner per-entry lock: per-group reads and mutations. A write on
     /// group A doesn't block reads on group B. Per-group peer scoring
     /// lives inside the entry, so scoring access is guarded by the same
     /// `RwLock` — no separate scoring lock.
-    groups: GroupRegistry<M, Sc>,
+    groups: GroupRegistry<M, Sc, St>,
     consensus_service: Arc<ProviderConsensus<P>>,
     eth_signer: PrivateKeySigner,
     handler: Arc<H>,
@@ -174,10 +195,11 @@ impl<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler,
     SCH: StateChangeHandler,
-> Clone for User<P, M, Sc, I, H, SCH>
+> Clone for User<P, M, Sc, St, I, H, SCH>
 {
     fn clone(&self) -> Self {
         Self {
@@ -186,6 +208,7 @@ impl<
             mls_welcome_factory: Arc::clone(&self.mls_welcome_factory),
             kp_generator: Arc::clone(&self.kp_generator),
             scoring_factory: Arc::clone(&self.scoring_factory),
+            steward_factory: Arc::clone(&self.steward_factory),
             groups: Arc::clone(&self.groups),
             consensus_service: Arc::clone(&self.consensus_service),
             eth_signer: self.eth_signer.clone(),
@@ -202,10 +225,11 @@ impl<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, I, H, SCH>
+> User<P, M, Sc, St, I, H, SCH>
 {
     #[allow(clippy::too_many_arguments)]
     fn new_with_config(
@@ -214,6 +238,7 @@ impl<
         mls_welcome_factory: MlsWelcomeFactory<M>,
         kp_generator: KeyPackageGenerator,
         scoring_factory: ScoringFactory<Sc>,
+        steward_factory: StewardFactory<St>,
         consensus_service: Arc<ProviderConsensus<P>>,
         eth_signer: PrivateKeySigner,
         handler: Arc<H>,
@@ -226,6 +251,7 @@ impl<
             mls_welcome_factory,
             kp_generator,
             scoring_factory,
+            steward_factory,
             groups: Arc::new(RwLock::new(HashMap::new())),
             consensus_service,
             eth_signer,
@@ -248,13 +274,20 @@ impl<
         (self.scoring_factory)(&scoring_config)
     }
 
+    /// Build a fresh per-group steward-list plug-in. Returns an empty
+    /// plug-in; lifecycle creator path bootstraps via `install_list`,
+    /// joiner path leaves it empty until `GroupSync` arrives.
+    pub(crate) fn make_steward_plugin(&self, group_name: &str, config: &StewardListConfig) -> St {
+        (self.steward_factory)(group_name.as_bytes(), config.clone())
+    }
+
     /// Look up a group entry. Returns `None` when the entry isn't present.
     /// Takes the outer read lock briefly to clone the inner `Arc`, then
     /// releases it before the caller acquires the entry's own lock.
     pub(crate) async fn lookup_entry(
         &self,
         group_name: &str,
-    ) -> Option<Arc<RwLock<GroupEntry<M, Sc>>>> {
+    ) -> Option<Arc<RwLock<GroupEntry<M, Sc, St>>>> {
         self.groups.read().await.get(group_name).cloned()
     }
 
@@ -263,7 +296,7 @@ impl<
     pub(crate) async fn with_entry<R>(
         &self,
         group_name: &str,
-        f: impl FnOnce(&GroupEntry<M, Sc>) -> R,
+        f: impl FnOnce(&GroupEntry<M, Sc, St>) -> R,
     ) -> Option<R> {
         let entry_arc = self.lookup_entry(group_name).await?;
         let entry = entry_arc.read().await;
@@ -313,8 +346,20 @@ pub type DefaultMlsService = OpenMlsService<Arc<MemoryDeMlsStorage>>;
 /// fixed-table provider.
 pub type DefaultPeerScoring = PeerScoringService<InMemoryPeerScoreStorage, FixedScoringProvider>;
 
+/// Steward-list plug-in type for the default-config `User`: the
+/// reference [`DeterministicStewardList`].
+pub type DefaultStewardList = DeterministicStewardList;
+
 impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
-    User<DefaultProvider, DefaultMlsService, DefaultPeerScoring, WalletIdentity, H, SCH>
+    User<
+        DefaultProvider,
+        DefaultMlsService,
+        DefaultPeerScoring,
+        DefaultStewardList,
+        WalletIdentity,
+        H,
+        SCH,
+    >
 {
     /// Construct a `User` on [`DefaultProvider`] with the default config.
     pub fn with_private_key(
@@ -387,6 +432,10 @@ impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
                     cfg.clone(),
                 )
             });
+        let steward_factory: StewardFactory<DefaultStewardList> =
+            Arc::new(|group_id: &[u8], config: StewardListConfig| {
+                DeterministicStewardList::empty(group_id.to_vec(), config)
+            });
 
         Ok(Self::new_with_config(
             identity,
@@ -394,6 +443,7 @@ impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
             mls_welcome_factory,
             kp_generator,
             scoring_factory,
+            steward_factory,
             consensus_service,
             signer,
             handler,

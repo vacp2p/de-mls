@@ -7,11 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    core::{
-        CoreError,
-        proposal_kind::ProposalKind,
-        steward_list::{ProtocolConfig, StewardList},
-    },
+    core::{CoreError, proposal_kind::ProposalKind, steward_list_plugin::StewardListConfig},
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{CommitCandidate, GroupUpdateRequest, group_update_request},
 };
@@ -99,13 +95,17 @@ pub(crate) struct FreezeRound {
 /// Owns the per-group MLS service (`Option<M>` because joiners in
 /// `PendingJoin` don't have a service until the welcome arrives — at that
 /// point the User attaches one via [`Self::attach_mls`]).
+///
+/// Steward-list state (active list, retry round, retry policy) lives in
+/// the per-group `StewardListPlugin` instance on `GroupEntry`, not here.
 pub struct Group<M: MlsService> {
     /// Per-group MLS service. `None` for joiners that haven't accepted
     /// a welcome yet; otherwise `Some`.
     mls: Option<M>,
     /// The name of the group.
     group_name: String,
-    /// This user's wallet identity (for deriving steward status from the list).
+    /// This user's identity bytes (set at construction; matches the
+    /// MLS leaf credential).
     self_identity: Vec<u8>,
     /// Proposals that passed consensus, waiting for steward to commit.
     approved_proposals: HashMap<ProposalId, GroupUpdateRequest>,
@@ -114,11 +114,10 @@ pub struct Group<M: MlsService> {
     approved_order: Vec<ProposalId>,
     /// Proposals waiting on consensus voting (created by this user).
     voting_proposals: HashMap<ProposalId, GroupUpdateRequest>,
-    /// Active steward list for the current epoch window.
-    /// `Some` after bootstrap (creator) or sync (joiner). `None` only for joiners pre-sync.
-    steward_list: Option<StewardList>,
-    /// Protocol configuration (steward list bounds and protocol-level flags).
-    protocol_config: ProtocolConfig,
+    /// Protocol configuration. Currently bundles steward list bounds
+    /// (also held on the steward plug-in) with `k_max` (commit batch
+    /// ceiling). Pending split into per-concern config types.
+    protocol_config: StewardListConfig,
     /// Active emergency criteria proposals not yet finalized by consensus.
     /// While non-empty, lower-priority proposals MUST be blocked (RFC §Partial Freeze).
     active_emergency_ids: HashSet<ProposalId>,
@@ -132,18 +131,6 @@ pub struct Group<M: MlsService> {
     /// future epoch steward can retry them if the current one fails to commit.
     /// Keyed by target identity so duplicates don't stack.
     pending_updates: HashMap<Vec<u8>, PendingUpdate>,
-    /// Current steward-election retry round. Starts at 0, increments
-    /// every time an election proposal is rejected within the same MLS
-    /// epoch, reset to 0 when an election is accepted. Threaded into
-    /// [`StewardList::generate`] so each retry proposes a different
-    /// list composition.
-    reelection_round: u32,
-    /// Group-configured ceiling on steward-election retries before the
-    /// "stuck" error surfaces. Every member in the group holds the same
-    /// value — joiners pick it up from `GroupSync` — so the error path
-    /// triggers consistently across the group. Overridden at group
-    /// creation from `GroupConfig`; defaults to [`DEFAULT_MAX_REELECTION_ATTEMPTS`].
-    max_reelection_attempts: u32,
     /// Bounded FIFO of proposal IDs with a locally-observed consensus outcome.
     /// Used by `apply_consensus_outcome` to drop library re-emissions and by
     /// `forward_incoming_vote` to distinguish benign late peer votes (session
@@ -153,8 +140,9 @@ pub struct Group<M: MlsService> {
     /// `RemoveMember(target)` entry; other approvals wait so they don't
     /// dilute the fast-removal intent.
     urgent_commit_target: Option<Vec<u8>>,
-    /// While `true`, `create_commit_candidate` bypasses the `is_steward()`
-    /// gate so any member can produce the recovery commit.
+    /// While `true`, `create_commit_candidate` bypasses the steward gate
+    /// so any member can produce the recovery commit. Set by Layer-3
+    /// Deadlock ECP, cleared on accepted election.
     recovery_mode: bool,
     /// Auto-vote default and consensus tie-break rule (RFC §Creating
     /// Voting Proposal).
@@ -164,11 +152,6 @@ pub struct Group<M: MlsService> {
     pending_update_max_epochs: u32,
 }
 
-/// Fallback ceiling on steward-election retries. One retry gives the
-/// responsible proposer a second shot with a different list composition;
-/// beyond that human/policy intervention is expected.
-pub const DEFAULT_MAX_REELECTION_ATTEMPTS: u32 = 1;
-
 pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
 
 pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
@@ -177,7 +160,7 @@ impl<M: MlsService> Group<M> {
     fn new_base(
         group_name: &str,
         self_identity: Vec<u8>,
-        protocol_config: ProtocolConfig,
+        protocol_config: StewardListConfig,
         mls: Option<M>,
     ) -> Self {
         Self {
@@ -187,15 +170,12 @@ impl<M: MlsService> Group<M> {
             approved_proposals: HashMap::new(),
             approved_order: Vec::new(),
             voting_proposals: HashMap::new(),
-            steward_list: None,
             protocol_config,
             active_emergency_ids: HashSet::new(),
             pending_removal_targets: HashSet::new(),
             committed_batch_hashes: VecDeque::new(),
             freeze_round: None,
             pending_updates: HashMap::new(),
-            reelection_round: 0,
-            max_reelection_attempts: DEFAULT_MAX_REELECTION_ATTEMPTS,
             resolved_proposals: ResolvedProposalCache::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
             urgent_commit_target: None,
             recovery_mode: false,
@@ -251,36 +231,21 @@ impl<M: MlsService> Group<M> {
     pub fn prepare_to_join(
         group_name: &str,
         self_identity: Vec<u8>,
-        protocol_config: ProtocolConfig,
+        protocol_config: StewardListConfig,
     ) -> Self {
         Self::new_base(group_name, self_identity, protocol_config, None)
     }
 
-    /// Build a creator-side handle: initializes a bootstrap steward list
-    /// containing the creator and embeds the supplied MLS service.
+    /// Build a creator-side handle. The steward list is owned by the
+    /// per-group `StewardListPlugin` on `GroupEntry`; the lifecycle
+    /// layer bootstraps the list separately after this constructor.
     pub fn create_group(
         group_name: &str,
         creator_identity: Vec<u8>,
-        protocol_config: ProtocolConfig,
+        protocol_config: StewardListConfig,
         mls: M,
-    ) -> Result<Self, CoreError> {
-        let mut group = Self::new_base(
-            group_name,
-            creator_identity.clone(),
-            protocol_config.clone(),
-            Some(mls),
-        );
-        let list = StewardList::generate(
-            0,
-            group_name.as_bytes(),
-            &[creator_identity],
-            1,
-            protocol_config,
-            0, // initial list — no election, no retries
-        )?;
-        group.steward_list = Some(list);
-
-        Ok(group)
+    ) -> Self {
+        Self::new_base(group_name, creator_identity, protocol_config, Some(mls))
     }
 
     pub fn group_name(&self) -> &str {
@@ -295,55 +260,17 @@ impl<M: MlsService> Group<M> {
         self.protocol_config.allow_subset_candidates
     }
 
-    /// Derived from `steward_list.contains(self_identity)` — `false` for
-    /// joiners that haven't received the list yet.
-    pub fn is_steward(&self) -> bool {
-        self.steward_list
-            .as_ref()
-            .is_some_and(|l| l.contains(&self.self_identity))
-    }
-
-    pub fn is_epoch_steward(&self, epoch: u64) -> bool {
-        self.epoch_steward(epoch)
-            .is_some_and(|es| es == self.self_identity)
-    }
-
-    /// Like [`Self::is_epoch_steward`] but via [`Self::live_epoch_steward`]
-    /// (skips members no longer in the group or pending a self-leave).
-    pub fn is_live_epoch_steward(&self, epoch: u64, members: &[Vec<u8>]) -> bool {
-        self.live_epoch_steward(epoch, members)
-            .is_some_and(|es| es == self.self_identity)
-    }
-
-    /// Resolve the live epoch steward. Skips stewards no longer in the group
-    /// and stewards that have buffered an auto-approved self-leave.
-    pub fn live_epoch_steward<'a>(&'a self, epoch: u64, members: &[Vec<u8>]) -> Option<&'a [u8]> {
-        let member_set = member_set(members);
-        self.steward_list.as_ref().and_then(|l| {
-            l.live_epoch_steward(epoch, |candidate| {
-                self.is_steward_eligible_in(candidate, &member_set)
-            })
-        })
-    }
-
-    /// Epoch + backup stewards, filtered by steward-eligibility and
-    /// guaranteed distinct when ≥2 are eligible.
-    pub fn live_epoch_and_backup<'a>(
+    /// Build the eligibility predicate that the steward plug-in's "live"
+    /// position queries take. A candidate is eligible when they are an
+    /// MLS member of the group AND don't have a removal queued in
+    /// `approved_proposals`. The closure borrows from `self` and
+    /// `mls_members` for the lifetime of the call.
+    pub fn steward_eligibility<'a>(
         &'a self,
-        epoch: u64,
-        members: &[Vec<u8>],
-    ) -> (Option<&'a [u8]>, Option<&'a [u8]>) {
-        match self.steward_list.as_ref() {
-            Some(l) => {
-                let member_set = member_set(members);
-                l.live_epoch_and_backup(epoch, |c| self.is_steward_eligible_in(c, &member_set))
-            }
-            None => (None, None),
-        }
-    }
-
-    fn is_steward_eligible_in(&self, candidate: &[u8], member_set: &HashSet<&[u8]>) -> bool {
-        !self.is_pending_removal(candidate) && member_set.contains(candidate)
+        mls_members: &'a [Vec<u8>],
+    ) -> impl Fn(&[u8]) -> bool + 'a {
+        let mls_set = member_set(mls_members);
+        move |candidate: &[u8]| !self.is_pending_removal(candidate) && mls_set.contains(candidate)
     }
 
     /// True iff `approved_proposals` carries any `RemoveMember(identity)` —
@@ -542,104 +469,23 @@ impl<M: MlsService> Group<M> {
         self.recovery_mode = false;
     }
 
-    // ─────────────────────────── Steward List Operations ───────────────────────────
+    // ─────────────────────────── Protocol Config ───────────────────────────
 
-    pub fn steward_list(&self) -> Option<&StewardList> {
-        self.steward_list.as_ref()
-    }
-
-    pub fn protocol_config(&self) -> &ProtocolConfig {
+    pub fn protocol_config(&self) -> &StewardListConfig {
         &self.protocol_config
     }
 
-    pub fn set_protocol_config(&mut self, config: ProtocolConfig) {
+    pub fn set_protocol_config(&mut self, config: StewardListConfig) {
         self.protocol_config = config;
     }
 
-    pub fn epoch_steward(&self, epoch: u64) -> Option<&[u8]> {
-        self.steward_list
-            .as_ref()
-            .and_then(|l| l.epoch_steward(epoch))
-    }
-
-    /// Steward identities filtered by the steward-eligibility predicate
-    /// (MLS-present and not queued for removal). Joiners receive this view
-    /// via `GroupSync` so they don't inherit ghosts or members whose
-    /// removal is queued. Order is preserved from the canonical list.
-    /// Returns an empty `Vec` if no list is set.
-    pub(crate) fn live_steward_members(&self, members: &[Vec<u8>]) -> Vec<Vec<u8>> {
-        let Some(list) = self.steward_list.as_ref() else {
-            return Vec::new();
-        };
-        let member_set = member_set(members);
-        list.members()
-            .iter()
-            .filter(|m| self.is_steward_eligible_in(m, &member_set))
-            .cloned()
-            .collect()
-    }
-
     /// Cheap idempotence check for auto-retry: don't submit a second election
-    /// while the previous one is still being voted on.
+    /// while the previous one is still being voted on. Reads the local
+    /// voting queue — proposal-queue concern, not steward-list state.
     pub fn has_election_in_flight(&self) -> bool {
         self.voting_proposals
             .values()
             .any(|req| ProposalKind::of(req).is_steward_election())
-    }
-
-    /// Check if the steward list is exhausted at the given epoch.
-    pub fn is_steward_list_exhausted(&self, epoch: u64) -> bool {
-        self.steward_list
-            .as_ref()
-            .is_some_and(|l| l.is_exhausted(epoch))
-    }
-
-    /// Generate a steward list and set it on the group.
-    ///
-    /// `retry_round` is the seed fed into the SHA256 sort and stored on the
-    /// resulting list as its historical tag. Pass the round from the
-    /// accepted election proposal; use 0 for the creator's initial list and
-    /// for `sn_min` auto-fills, where no election happened.
-    pub fn generate_and_set_steward_list(
-        &mut self,
-        epoch: u64,
-        member_ids: &[Vec<u8>],
-        sn: usize,
-        retry_round: u32,
-    ) -> Result<(), CoreError> {
-        let config = self.protocol_config.clone();
-        let list = StewardList::generate(
-            epoch,
-            self.group_name.as_bytes(),
-            member_ids,
-            sn,
-            config,
-            retry_round,
-        )?;
-        self.steward_list = Some(list);
-        Ok(())
-    }
-
-    /// Check whether a proposed steward list matches what this group would
-    /// deterministically generate for the given epoch, member set, and
-    /// retry round. App layer calls this before applying an election
-    /// result; `apply_consensus_result` can't do it itself because it
-    /// has no access to the MLS member list.
-    pub fn validate_steward_list_proposal(
-        &self,
-        proposed_stewards: &[Vec<u8>],
-        election_epoch: u64,
-        member_ids: &[Vec<u8>],
-        retry_round: u32,
-    ) -> Result<bool, CoreError> {
-        StewardList::validate(
-            proposed_stewards,
-            election_epoch,
-            self.group_name.as_bytes(),
-            member_ids,
-            &self.protocol_config,
-            retry_round,
-        )
     }
 
     // ─────────────────────────── Freeze Round Operations ───────────────────────────
@@ -800,32 +646,7 @@ impl<M: MlsService> Group<M> {
             .is_some_and(|req| is_auto_approved_entry(pid, req))
     }
 
-    // ─────────────────────────── Reelection / GroupSync-Tunable Fields ───────────────────────────
-
-    /// Current steward-election retry round (0 for fresh elections).
-    pub fn reelection_round(&self) -> u32 {
-        self.reelection_round
-    }
-
-    /// Increment the retry round. Called on rejected election; the next
-    /// election proposal uses the bumped round so its list composition
-    /// differs.
-    pub fn bump_reelection_round(&mut self) {
-        self.reelection_round = self.reelection_round.saturating_add(1);
-    }
-
-    /// Reset the retry round. Called on accepted election.
-    pub fn reset_reelection_round(&mut self) {
-        self.reelection_round = 0;
-    }
-
-    pub fn max_reelection_attempts(&self) -> u32 {
-        self.max_reelection_attempts
-    }
-
-    pub fn set_max_reelection_attempts(&mut self, max: u32) {
-        self.max_reelection_attempts = max;
-    }
+    // ─────────────────────────── GroupSync-Tunable Fields ───────────────────────────
 
     pub fn liveness_criteria_yes(&self) -> bool {
         self.liveness_criteria_yes
@@ -1072,88 +893,16 @@ mod tests {
         ids.iter().map(|&id| member(id)).collect()
     }
 
-    fn default_config() -> ProtocolConfig {
-        ProtocolConfig::new(1, 5).unwrap()
+    fn default_config() -> StewardListConfig {
+        StewardListConfig::new(1, 5).unwrap()
     }
 
-    /// Test convenience: build a creator-side `Group<NoopMls>`.
-    fn creator_group(name: &str, identity: Vec<u8>, config: ProtocolConfig) -> Group<NoopMls> {
-        Group::create_group(name, identity, config, NoopMls::new(name)).unwrap()
-    }
-
-    /// Test convenience: build a joiner-side `Group<NoopMls>` (no MLS service yet).
-    fn joiner_group(name: &str, identity: Vec<u8>, config: ProtocolConfig) -> Group<NoopMls> {
-        Group::prepare_to_join(name, identity, config)
-    }
-
-    #[test]
-    fn test_create_group_with_protocol_config() {
-        let config = ProtocolConfig::new(1, 3).unwrap();
-        let creator = member(1);
-        let group = creator_group("test-group", creator.clone(), config);
-
-        assert!(group.is_steward());
-        assert!(group.steward_list().is_some());
-
-        let list = group.steward_list().unwrap();
-        assert_eq!(list.len(), 1);
-        assert!(list.contains(&creator));
-    }
-
-    #[test]
-    fn test_set_steward_list_on_joiner() {
-        let config = ProtocolConfig::new(2, 5).unwrap();
-        let mut group = joiner_group("test-group", member(1), config.clone());
-        assert!(group.steward_list().is_none());
-
-        let mems = members(&[1, 2, 3]);
-        group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
-
-        assert!(group.steward_list().is_some());
-        assert_eq!(group.steward_list().unwrap().len(), 3);
-    }
-
-    /// Joiner pre-sync: no list yet → no epoch steward at any epoch.
-    #[test]
-    fn test_epoch_steward_no_list() {
-        let group = joiner_group("test-group", member(1), default_config());
-        assert!(group.epoch_steward(0).is_none());
-    }
-
-    /// Joiner pre-sync: no list yet → not "exhausted" either.
-    #[test]
-    fn test_is_steward_list_exhausted_no_list() {
-        let group = joiner_group("test-group", member(1), default_config());
-        assert!(!group.is_steward_list_exhausted(0));
-    }
-
-    #[test]
-    fn test_generate_and_set_steward_list() {
-        let config = ProtocolConfig::new(2, 5).unwrap();
-        let mut group = creator_group("test-group", member(1), config);
-        assert_eq!(group.steward_list().unwrap().len(), 1);
-
-        let mems = members(&[1, 2, 3, 4]);
-        assert!(group.generate_and_set_steward_list(1, &mems, 4, 0).is_ok());
-
-        let list = group.steward_list().unwrap();
-        assert_eq!(list.len(), 4);
-        assert_eq!(list.election_epoch(), 1);
-    }
-
-    /// `is_steward()` flips to true only once the list has been generated
-    /// and the node's identity sits in it.
-    #[test]
-    fn test_steward_flag_derived_from_list() {
-        let mut group = joiner_group("test-group", member(1), default_config());
-        assert!(!group.is_steward());
-
-        let mems = members(&[1, 2, 3]);
-        group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
-        assert!(group.is_steward());
-
-        let outsider = joiner_group("test-group", member(99), default_config());
-        assert!(!outsider.is_steward());
+    /// Test convenience: build a creator-side `Group<NoopMls>`. Steward
+    /// list is owned by the per-group plug-in (covered separately in
+    /// `core::steward_list_plugin::tests`); these tests focus on
+    /// proposal-queue + dedup + freeze-round logic on `Group`.
+    fn creator_group(name: &str, identity: Vec<u8>, config: StewardListConfig) -> Group<NoopMls> {
+        Group::create_group(name, identity, config, NoopMls::new(name))
     }
 
     fn insert_self_leave(group: &mut Group<NoopMls>, identity: &[u8]) {
@@ -1167,10 +916,8 @@ mod tests {
 
     #[test]
     fn test_reject_all_approved_preserves_self_leave_entry() {
-        let config = ProtocolConfig::new(1, 3).unwrap();
-        let mems = members(&[1, 2, 3]);
+        let config = StewardListConfig::new(1, 3).unwrap();
         let mut group = creator_group("test-group", member(1), config);
-        group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
 
         let leaver = member(2);
         insert_self_leave(&mut group, &leaver);
@@ -1196,10 +943,8 @@ mod tests {
 
     #[test]
     fn test_prune_clears_self_leave_entry_when_member_gone() {
-        let config = ProtocolConfig::new(1, 3).unwrap();
-        let mems = members(&[1, 2, 3]);
+        let config = StewardListConfig::new(1, 3).unwrap();
         let mut group = creator_group("test-group", member(1), config);
-        group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
 
         let leaver = member(2);
         insert_self_leave(&mut group, &leaver);
@@ -1258,23 +1003,6 @@ mod tests {
         assert!(group.is_consensus_outcome_applied(42));
     }
 
-    /// Live rotation skips a nominal steward who has submitted a self-leave.
-    #[test]
-    fn test_live_rotation_skips_pending_self_leave() {
-        let config = ProtocolConfig::new(3, 3).unwrap();
-        let mems = members(&[1, 2, 3]);
-        let mut group = creator_group("test-group", member(1), config);
-        group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
-
-        let nominal = group.epoch_steward(0).unwrap().to_vec();
-        assert_eq!(group.live_epoch_steward(0, &mems), Some(nominal.as_slice()));
-
-        insert_self_leave(&mut group, &nominal);
-        let live = group.live_epoch_steward(0, &mems).unwrap();
-        assert_ne!(live, nominal.as_slice());
-        assert!(mems.iter().any(|m| m == live));
-    }
-
     fn insert_remove_member(group: &mut Group<NoopMls>, target: &[u8], proposal_id: ProposalId) {
         let remove = GroupUpdateRequest {
             payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
@@ -1284,67 +1012,12 @@ mod tests {
         group.insert_approved_proposal(proposal_id, remove);
     }
 
-    /// Live rotation skips a nominal steward whose removal is queued under a
-    /// non-self-leave proposal id (ban / ECP-derived).
-    #[test]
-    fn test_live_rotation_skips_ban_pending_removal() {
-        let config = ProtocolConfig::new(3, 3).unwrap();
-        let mems = members(&[1, 2, 3]);
-        let mut group = creator_group("test-group", member(1), config);
-        group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
-
-        let nominal = group.epoch_steward(0).unwrap().to_vec();
-        assert_eq!(group.live_epoch_steward(0, &mems), Some(nominal.as_slice()));
-
-        // Removal under an arbitrary proposal id (not the deterministic
-        // self-leave id) — the narrower self-leave predicate would miss it.
-        insert_remove_member(&mut group, &nominal, 0xdead_beef);
-        assert!(!group.is_pending_self_leave(&nominal));
-        assert!(group.is_pending_removal(&nominal));
-
-        let live = group.live_epoch_steward(0, &mems).unwrap();
-        assert_ne!(live, nominal.as_slice());
-        assert!(mems.iter().any(|m| m == live));
-    }
-
-    /// `live_epoch_and_backup` skips a draining nominal *and* a draining
-    /// backup, returning the next two eligible distinct stewards.
-    #[test]
-    fn test_live_epoch_and_backup_skips_draining_pair() {
-        let config = ProtocolConfig::new(4, 4).unwrap();
-        let mems = members(&[1, 2, 3, 4]);
-        let mut group = creator_group("test-group", member(1), config);
-        group.generate_and_set_steward_list(0, &mems, 4, 0).unwrap();
-
-        let nominal = group.epoch_steward(0).unwrap().to_vec();
-        let backup = group
-            .steward_list()
-            .unwrap()
-            .backup_steward(0)
-            .unwrap()
-            .to_vec();
-
-        insert_remove_member(&mut group, &nominal, 1);
-        insert_remove_member(&mut group, &backup, 2);
-
-        let (live_epoch, live_backup) = group.live_epoch_and_backup(0, &mems);
-        let live_epoch = live_epoch.expect("eligible epoch steward").to_vec();
-        let live_backup = live_backup.expect("eligible backup steward").to_vec();
-        assert_ne!(live_epoch, nominal);
-        assert_ne!(live_epoch, backup);
-        assert_ne!(live_backup, nominal);
-        assert_ne!(live_backup, backup);
-        assert_ne!(live_epoch, live_backup);
-    }
-
     /// `RemoveMember` proposals survive a freeze failure regardless of
     /// source; Add proposals are dropped.
     #[test]
     fn test_reject_all_approved_preserves_all_remove_member() {
-        let config = ProtocolConfig::new(1, 3).unwrap();
-        let mems = members(&[1, 2, 3, 4]);
+        let config = StewardListConfig::new(1, 3).unwrap();
         let mut group = creator_group("test-group", member(1), config);
-        group.generate_and_set_steward_list(0, &mems, 3, 0).unwrap();
 
         let ban_id: ProposalId = 0x1111_2222;
         let ecp_id: ProposalId = 0x3333_4444;

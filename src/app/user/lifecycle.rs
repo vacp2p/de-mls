@@ -11,7 +11,8 @@ use crate::{
         UserError, submit_self_leave_proposal, user::GroupEntry,
     },
     core::{
-        DeMlsProvider, Group, GroupEventHandler, PeerScoringPlugin, auto_approved_leave_proposal_id,
+        DeMlsProvider, Group, GroupEventHandler, PeerScoringPlugin, StewardListPlugin,
+        auto_approved_leave_proposal_id,
     },
     identity::Identity,
     mls_crypto::MlsService,
@@ -22,10 +23,11 @@ impl<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, I, H, SCH>
+> User<P, M, Sc, St, I, H, SCH>
 {
     /// Create (`is_creation = true`) or join (`false`) a group using the
     /// user's default config.
@@ -61,7 +63,7 @@ impl<
                 self_identity_bytes.clone(),
                 config.protocol.clone(),
                 mls,
-            )?;
+            );
             let state_machine = GroupStateMachine::new_as_member_with_config(config.clone());
             (group, state_machine)
         } else {
@@ -73,9 +75,17 @@ impl<
             let state_machine = GroupStateMachine::new_as_pending_join_with_config(config.clone());
             (group, state_machine)
         };
-        group.set_max_reelection_attempts(max_reelection_attempts);
         group.set_liveness_criteria_yes(liveness_criteria_yes);
         group.set_pending_update_max_epochs(pending_update_max_epochs);
+
+        let mut steward = self.make_steward_plugin(group_name, &config.protocol);
+        steward.set_max_retries(max_reelection_attempts);
+        // Creator path: bootstrap the list with self as sole steward at
+        // epoch 0. Joiner path leaves the plug-in empty until `GroupSync`.
+        if is_creation {
+            let _events =
+                steward.install_list(0, std::slice::from_ref(&self_identity_bytes), 1, 0)?;
+        }
 
         let mut scoring = self.make_scoring_service();
         // Joiners start tracked at `JoinedGroup` time (once members are known).
@@ -96,7 +106,12 @@ impl<
         }
         groups.insert(
             group_name.to_string(),
-            Arc::new(RwLock::new(GroupEntry::new(group, state_machine, scoring))),
+            Arc::new(RwLock::new(GroupEntry::new(
+                group,
+                state_machine,
+                scoring,
+                steward,
+            ))),
         );
         drop(groups);
 

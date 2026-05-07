@@ -7,12 +7,12 @@ use tracing::{error, info};
 use crate::{
     app::{
         GroupState, StateChangeHandler, User, UserError, forward_incoming_proposal,
-        forward_incoming_vote,
+        forward_incoming_vote, user::GroupEntry,
     },
     core::{
         DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProcessResult, ProposalKind,
-        ProtocolConfig, ScoreSnapshot, StewardList, create_commit_candidate, group_members,
-        member_set, process_inbound,
+        ScoreSnapshot, StewardList, StewardListConfig, StewardListPlugin, create_commit_candidate,
+        group_members, member_set, process_inbound,
     },
     ds::{APP_MSG_SUBTOPIC, InboundPacket, WELCOME_SUBTOPIC},
     identity::{Identity, ShortId},
@@ -27,10 +27,11 @@ impl<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, I, H, SCH>
+> User<P, M, Sc, St, I, H, SCH>
 {
     /// Dispatches a single ProcessResult to the appropriate handler/consensus/state-machine action.
     pub async fn dispatch_inbound_result(
@@ -204,7 +205,7 @@ impl<
         let transitioned = match self.lookup_entry(group_name).await {
             Some(entry_arc) => {
                 let mut entry = entry_arc.write().await;
-                entry.group.reset_reelection_round();
+                entry.steward.reset_retry();
                 let state = entry.state_machine.current_state();
                 if matches!(
                     state,
@@ -289,8 +290,10 @@ impl<
             let epoch = entry.group.expect_mls()?.current_epoch()?;
             entry.group.ensure_freeze_round(epoch);
 
-            let outbound = if entry.group.is_steward() {
-                match create_commit_candidate(&mut entry.group, &self.app_id) {
+            let self_identity = self.identity().identity_bytes().to_vec();
+            let outbound = if entry.steward.is_steward(&self_identity) {
+                let GroupEntry { group, steward, .. } = &mut *entry;
+                match create_commit_candidate(group, steward, &self_identity, &self.app_id) {
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(
@@ -329,7 +332,7 @@ impl<
                 None => return Ok(()),
             };
             let entry = entry_arc.read().await;
-            if entry.group.steward_list().is_some() {
+            if entry.steward.current_list().is_some() {
                 return Ok(());
             }
             let mls = entry.group.expect_mls()?;
@@ -365,7 +368,8 @@ impl<
         group_name: &str,
         sync: &GroupSync,
     ) -> Result<(), UserError> {
-        let mut protocol_config = ProtocolConfig::new(sync.sn_min as usize, sync.sn_max as usize)?;
+        let mut protocol_config =
+            StewardListConfig::new(sync.sn_min as usize, sync.sn_max as usize)?;
         protocol_config.allow_subset_candidates = sync.allow_subset_candidates;
 
         let entry_arc = match self.lookup_entry(group_name).await {
@@ -374,16 +378,15 @@ impl<
         };
         let mut entry = entry_arc.write().await;
         let sn = sync.steward_members.len();
-        entry.group.generate_and_set_steward_list(
+        entry.steward.set_config(protocol_config.clone());
+        let _events = entry.steward.install_list(
             sync.election_epoch,
             &sync.steward_members,
             sn,
             sync.retry_round,
         )?;
         entry.group.set_protocol_config(protocol_config);
-        entry
-            .group
-            .set_max_reelection_attempts(sync.max_reelection_attempts);
+        entry.steward.set_max_retries(sync.max_reelection_attempts);
         entry.scoring.set_threshold(sync.threshold_peer_score);
         let snapshot = ScoreSnapshot {
             diverged: sync
@@ -514,9 +517,10 @@ impl<
                     .lookup_entry(group_name)
                     .await
                     .ok_or(UserError::GroupNotFound)?;
+                let self_id = self.identity().identity_bytes().to_vec();
                 let already_in = {
                     let entry = entry_arc.read().await;
-                    entry.group.is_steward() || entry.group.mls().is_some()
+                    entry.steward.is_steward(&self_id) || entry.group.mls().is_some()
                 };
                 if already_in {
                     return Ok(());
@@ -582,7 +586,7 @@ fn validate_group_sync(
         sync.election_epoch,
         group_name.as_bytes(),
         &sync.steward_members,
-        &ProtocolConfig::new(sync.sn_min as usize, sync.sn_max as usize)?,
+        &StewardListConfig::new(sync.sn_min as usize, sync.sn_max as usize)?,
         sync.retry_round,
     )?;
     if !(any_present && ordering_valid) {

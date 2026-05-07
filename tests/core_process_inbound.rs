@@ -10,8 +10,9 @@ use std::sync::Arc;
 use prost::Message;
 
 use de_mls::core::{
-    CoreError, FreezeOutcome, Group, ProcessResult, ProtocolConfig, StewardList,
-    build_key_package_message, create_commit_candidate, finalize_freeze_round, group_members,
+    CoreError, FreezeOutcome, Group, ProcessResult, StewardList, StewardListConfig,
+    StewardListPlugin, build_key_package_message, create_commit_candidate, finalize_freeze_round,
+    group_members,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 use de_mls::identity::{Identity, parse_wallet_address};
@@ -225,7 +226,13 @@ fn test_process_inbound_leave_group() {
     };
     steward_handle.insert_approved_proposal(2, remove_req.clone());
     joiner.group.insert_approved_proposal(2, remove_req);
-    let packets = create_commit_candidate(&mut steward_handle, b"test-app-id").unwrap();
+    let packets = create_commit_candidate(
+        &mut steward_handle.group,
+        &steward_handle.steward,
+        &steward_handle.identity,
+        b"test-app-id",
+    )
+    .unwrap();
 
     let batch_packet = packets
         .iter()
@@ -245,7 +252,8 @@ fn test_process_inbound_leave_group() {
         remove_result
     );
 
-    let finalize = finalize_freeze_round(&mut joiner.group, false, b"test-app-id").unwrap();
+    let finalize =
+        finalize_freeze_round(&mut joiner.group, &joiner.steward, false, b"test-app-id").unwrap();
     let matched = matches!(
         &finalize.outcome,
         FreezeOutcome::Applied { result, .. } if matches!(**result, ProcessResult::LeaveGroup)
@@ -291,7 +299,13 @@ fn test_rejoin_after_eviction() {
     };
     steward_handle.insert_approved_proposal(2, remove_req.clone());
     joiner.group.insert_approved_proposal(2, remove_req);
-    let packets = create_commit_candidate(&mut steward_handle, b"test-app-id").unwrap();
+    let packets = create_commit_candidate(
+        &mut steward_handle.group,
+        &steward_handle.steward,
+        &steward_handle.identity,
+        b"test-app-id",
+    )
+    .unwrap();
     let batch_packet = packets
         .iter()
         .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
@@ -301,7 +315,8 @@ fn test_rejoin_after_eviction() {
     joiner.group.start_freeze_round(epoch_before_remove);
 
     process_inbound_compat(&mut joiner.group, &batch_packet.payload, APP_MSG_SUBTOPIC).unwrap();
-    let finalize_joiner = finalize_freeze_round(&mut joiner.group, false, b"test-app-id").unwrap();
+    let finalize_joiner =
+        finalize_freeze_round(&mut joiner.group, &joiner.steward, false, b"test-app-id").unwrap();
     assert!(
         matches!(
             &finalize_joiner.outcome,
@@ -309,8 +324,13 @@ fn test_rejoin_after_eviction() {
         ),
         "Expected LeaveGroup on joiner finalize, got {finalize_joiner:?}"
     );
-    let finalize_steward =
-        finalize_freeze_round(&mut steward_handle, false, b"test-app-id").unwrap();
+    let finalize_steward = finalize_freeze_round(
+        &mut steward_handle.group,
+        &steward_handle.steward,
+        false,
+        b"test-app-id",
+    )
+    .unwrap();
     assert!(matches!(
         &finalize_steward.outcome,
         FreezeOutcome::Applied { result, .. } if matches!(**result, ProcessResult::GroupUpdated)
@@ -402,7 +422,13 @@ fn test_process_inbound_raw_commit_payload_is_ignored() {
         ),
     };
     steward_handle.insert_approved_proposal(7, remove_req);
-    let packets = create_commit_candidate(&mut steward_handle, b"test-app-id").unwrap();
+    let packets = create_commit_candidate(
+        &mut steward_handle.group,
+        &steward_handle.steward,
+        &steward_handle.identity,
+        b"test-app-id",
+    )
+    .unwrap();
 
     let batch_packet = packets
         .iter()
@@ -429,7 +455,7 @@ fn test_auto_fill_steward_list_triggers_below_sn_min() {
     let joiner2_hex = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
 
     // sn_min=3: auto-fill when member_count < 3
-    let config = ProtocolConfig::new(3, 5).unwrap();
+    let config = StewardListConfig::new(3, 5).unwrap();
 
     let mut steward_handle = setup_steward_with_config(group, steward_hex, config.clone());
 
@@ -450,12 +476,14 @@ fn test_auto_fill_steward_list_triggers_below_sn_min() {
     let sn = members_2.len().min(config.sn_max);
     assert!(
         steward_handle
-            .generate_and_set_steward_list(epoch, &members_2, sn, 0)
+            .steward
+            .install_list(epoch, &members_2, sn, 0)
             .is_ok()
     );
 
     let list = steward_handle
-        .steward_list()
+        .steward
+        .current_list()
         .expect("steward list should exist after auto-fill");
     assert_eq!(list.len(), 2);
     for m in &members_2 {
@@ -510,12 +538,13 @@ fn test_group_sync_roundtrip() {
     joiner.accept_welcome_packet(&welcome_packet);
 
     assert!(
-        joiner.group.steward_list().is_none(),
+        joiner.steward.current_list().is_none(),
         "Joiner should not have a steward list before sync"
     );
 
     let steward_list = steward_handle
-        .steward_list()
+        .steward
+        .current_list()
         .expect("steward should have a list");
     let sync = GroupSync {
         steward_members: steward_list.members().to_vec(),
@@ -552,7 +581,7 @@ fn test_group_sync_roundtrip() {
     }
 
     if let ProcessResult::GroupSyncReceived(sync) = result {
-        let config = ProtocolConfig::new(sync.sn_min as usize, sync.sn_max as usize).unwrap();
+        let config = StewardListConfig::new(sync.sn_min as usize, sync.sn_max as usize).unwrap();
         let members = group_members(&joiner.group).unwrap();
 
         let all_present = sync
@@ -580,8 +609,8 @@ fn test_group_sync_roundtrip() {
         let sn = sync.steward_members.len();
         assert!(
             joiner
-                .group
-                .generate_and_set_steward_list(
+                .steward
+                .install_list(
                     sync.election_epoch,
                     &sync.steward_members,
                     sn,
@@ -592,11 +621,12 @@ fn test_group_sync_roundtrip() {
     }
 
     let joiner_list = joiner
-        .group
-        .steward_list()
+        .steward
+        .current_list()
         .expect("Joiner should have a steward list after sync");
     let steward_list = steward_handle
-        .steward_list()
+        .steward
+        .current_list()
         .expect("steward should have a list");
     assert_eq!(joiner_list.members(), steward_list.members());
     assert_eq!(joiner_list.election_epoch(), steward_list.election_epoch());
@@ -619,7 +649,7 @@ fn test_group_sync_propagates_divergent_per_group_config() {
     let steward_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
     let joiner_hex = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 
-    let steward_protocol = ProtocolConfig::new(STEWARD_SN_MIN, STEWARD_SN_MAX).unwrap();
+    let steward_protocol = StewardListConfig::new(STEWARD_SN_MIN, STEWARD_SN_MAX).unwrap();
     let mut steward_handle = setup_steward_with_config(group_name, steward_hex, steward_protocol);
     let mut joiner = setup_joiner_with_config(group_name, joiner_hex, default_steward_config());
 
@@ -639,7 +669,7 @@ fn test_group_sync_propagates_divergent_per_group_config() {
 
     let alice = b"alice".to_vec();
     let bob = b"bob".to_vec();
-    let steward_list = steward_handle.steward_list().unwrap();
+    let steward_list = steward_handle.steward.current_list().unwrap();
     let sync = GroupSync {
         steward_members: steward_list.members().to_vec(),
         election_epoch: steward_list.election_epoch(),
@@ -658,7 +688,7 @@ fn test_group_sync_propagates_divergent_per_group_config() {
         ],
         timing: None,
         retry_round: steward_list.retry_round(),
-        max_reelection_attempts: steward_handle.max_reelection_attempts(),
+        max_reelection_attempts: steward_handle.steward.max_retries(),
         liveness_criteria_yes: steward_handle.liveness_criteria_yes(),
         threshold_peer_score: STEWARD_THRESHOLD,
         pending_update_max_epochs: steward_handle.pending_update_max_epochs(),
@@ -687,7 +717,7 @@ fn test_group_sync_propagates_divergent_per_group_config() {
     assert_eq!(received.sn_max as usize, STEWARD_SN_MAX);
 
     let mut applied_protocol =
-        ProtocolConfig::new(received.sn_min as usize, received.sn_max as usize).unwrap();
+        StewardListConfig::new(received.sn_min as usize, received.sn_max as usize).unwrap();
     applied_protocol.allow_subset_candidates = received.allow_subset_candidates;
     joiner.group.set_protocol_config(applied_protocol);
     joiner
@@ -754,15 +784,10 @@ fn test_group_sync_idempotent_for_existing_members() {
 
     // Manually give the joiner a steward list (simulating a previous sync)
     let members = group_members(&joiner.group).unwrap();
-    assert!(
-        joiner
-            .group
-            .generate_and_set_steward_list(0, &members, 1, 0)
-            .is_ok()
-    );
-    assert!(joiner.group.steward_list().is_some());
+    assert!(joiner.steward.install_list(0, &members, 1, 0).is_ok());
+    assert!(joiner.steward.current_list().is_some());
 
-    let steward_list = steward_handle.steward_list().unwrap();
+    let steward_list = steward_handle.steward.current_list().unwrap();
     let sync = GroupSync {
         steward_members: steward_list.members().to_vec(),
         election_epoch: steward_list.election_epoch(),
@@ -795,7 +820,7 @@ fn test_group_sync_idempotent_for_existing_members() {
     // App layer would skip applying because the list is already set; verify
     // the existing list wasn't overwritten.
     assert_eq!(
-        joiner.group.steward_list().unwrap().len(),
+        joiner.steward.current_list().unwrap().len(),
         1,
         "Existing list should be preserved (1 member), not overwritten by sync"
     );
@@ -809,7 +834,7 @@ fn test_group_sync_carries_list_retry_round_not_group_counter() {
     let extra1_hex = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
     let extra2_hex = "0x90F79bf6EB2c4f870365E785982E1f101E93b906";
 
-    let config = ProtocolConfig::new(2, 4).unwrap();
+    let config = StewardListConfig::new(2, 4).unwrap();
     let mut steward_handle = setup_steward_with_config(group_name, steward_hex, config.clone());
 
     for hex in [joiner_hex, extra1_hex, extra2_hex] {
@@ -822,14 +847,18 @@ fn test_group_sync_carries_list_retry_round_not_group_counter() {
     let epoch = steward_handle.mls().unwrap().current_epoch().unwrap();
     let accepted_round: u32 = 2;
     steward_handle
-        .generate_and_set_steward_list(epoch, &members, 4, accepted_round)
+        .steward
+        .install_list(epoch, &members, 4, accepted_round)
         .unwrap();
-    steward_handle.reset_reelection_round();
+    steward_handle.steward.reset_retry();
 
-    let list = steward_handle.steward_list().expect("list set above");
+    let list = steward_handle
+        .steward
+        .current_list()
+        .expect("list set above");
     assert_eq!(list.retry_round(), accepted_round, "list keeps its seed");
     assert_eq!(
-        steward_handle.reelection_round(),
+        steward_handle.steward.retry_round(),
         0,
         "counter was reset on accept — distinct from the list tag"
     );
@@ -853,7 +882,7 @@ fn test_group_sync_carries_list_retry_round_not_group_counter() {
         peer_scores: vec![],
         timing: None,
         retry_round: list.retry_round(),
-        max_reelection_attempts: steward_handle.max_reelection_attempts(),
+        max_reelection_attempts: steward_handle.steward.max_retries(),
         liveness_criteria_yes: true,
         threshold_peer_score: 0,
         pending_update_max_epochs: 3,
@@ -879,7 +908,7 @@ fn test_group_sync_carries_list_retry_round_not_group_counter() {
             group_name.as_bytes(),
             &sync.steward_members,
             &config,
-            steward_handle.reelection_round(),
+            steward_handle.steward.retry_round(),
         )
         .unwrap(),
         "the post-accept counter value (0) regenerates a different ordering"
