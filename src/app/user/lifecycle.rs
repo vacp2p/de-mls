@@ -7,12 +7,12 @@ use tracing::info;
 
 use crate::{
     app::{
-        GroupConfig, GroupState, GroupStateMachine, ProposalParams, StateChangeHandler, User,
-        UserError, submit_self_leave_proposal, user::GroupEntry,
+        GroupConfig, GroupState, PhaseTimer, ProposalParams, StateChangeHandler, User, UserError,
+        submit_self_leave_proposal, user::GroupEntry,
     },
     core::{
-        DeMlsProvider, Group, GroupEventHandler, PeerScoringPlugin, StewardListPlugin,
-        auto_approved_leave_proposal_id,
+        DeMlsProvider, Group, GroupEventHandler, GroupStateMachine, PeerScoringPlugin,
+        StewardListPlugin, auto_approved_leave_proposal_id,
     },
     identity::Identity,
     mls_crypto::MlsService,
@@ -56,15 +56,20 @@ impl<
         let liveness_criteria_yes = config.liveness_criteria_yes;
         let pending_update_max_epochs = config.pending_update_max_epochs;
         let self_identity_bytes = self.identity().identity_bytes().to_vec();
-        let (mut group, mls_opt, state_machine) = if is_creation {
+        let (mut group, mls_opt, state_machine, phase_timer) = if is_creation {
             let mls = (self.mls_creator_factory)(group_name.to_string())?;
             let group = Group::create_group(group_name, self_identity_bytes.clone());
-            let state_machine = GroupStateMachine::new_as_member_with_config(config.clone());
-            (group, Some(mls), state_machine)
+            let state_machine = GroupStateMachine::new_as_member();
+            let phase_timer = PhaseTimer::with_config(config.clone());
+            (group, Some(mls), state_machine, phase_timer)
         } else {
             let group = Group::prepare_to_join(group_name, self_identity_bytes.clone());
-            let state_machine = GroupStateMachine::new_as_pending_join_with_config(config.clone());
-            (group, None, state_machine)
+            let state_machine = GroupStateMachine::new_as_pending_join();
+            // Anchor the timer at "now" so `is_pending_join_expired` can
+            // detect the 3× epoch-duration timeout.
+            let mut phase_timer = PhaseTimer::with_config(config.clone());
+            phase_timer.start();
+            (group, None, state_machine, phase_timer)
         };
         group.set_liveness_criteria_yes(liveness_criteria_yes);
         group.set_pending_update_max_epochs(pending_update_max_epochs);
@@ -91,7 +96,7 @@ impl<
         if initial_state == GroupState::PendingJoin {
             info!(
                 group = group_name,
-                timeout_s = state_machine.epoch_duration().as_secs() * 3,
+                timeout_s = phase_timer.commit_inactivity_duration().as_secs() * 3,
                 "pending join, awaiting welcome"
             );
         }
@@ -101,6 +106,7 @@ impl<
                 group,
                 mls_opt,
                 state_machine,
+                phase_timer,
                 scoring,
                 steward,
             ))),
@@ -125,7 +131,7 @@ impl<
 
         let is_pending_join = self
             .with_entry(group_name, |entry| {
-                entry.state_machine.current_state() == GroupState::PendingJoin
+                entry.current_state() == GroupState::PendingJoin
             })
             .await
             .ok_or(UserError::GroupNotFound)?;
@@ -172,8 +178,8 @@ impl<
             let mut entry = entry_arc.write().await;
             entry.group.store_voting_proposal(proposal_id, request);
             (
-                entry.state_machine.proposal_expiration(),
-                entry.state_machine.consensus_timeout(),
+                entry.phase_timer.proposal_expiration(),
+                entry.phase_timer.consensus_timeout(),
             )
         };
 

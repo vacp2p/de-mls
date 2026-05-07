@@ -14,6 +14,7 @@ use std::{
     collections::{HashMap, VecDeque},
     str::FromStr,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use alloy::signers::local::PrivateKeySigner;
@@ -24,15 +25,15 @@ use tracing::info;
 
 use crate::{
     app::{
-        FixedScoringProvider, GroupConfig, GroupStateMachine, InMemoryPeerScoreStorage,
+        FixedScoringProvider, GroupConfig, InMemoryPeerScoreStorage, PhaseTimer,
         StateChangeHandler, UserError,
     },
     core::{
         BufferedCommitCandidate, CoreError, DeMlsProvider, DefaultProvider,
-        DeterministicStewardList, FreezeFinalizeResult, Group, GroupEventHandler, PeerScoringEvent,
-        PeerScoringPlugin, PeerScoringService, ProcessResult, ProposalId, ProposalKind,
-        ProviderConsensus, ScoringConfig, StewardListConfig, StewardListPlugin,
-        compute_commit_hash, finalize_freeze_round, member_set, process_inbound,
+        DeterministicStewardList, FreezeFinalizeResult, Group, GroupEventHandler, GroupState,
+        GroupStateMachine, PeerScoringEvent, PeerScoringPlugin, PeerScoringService, ProcessResult,
+        ProposalId, ProposalKind, ProviderConsensus, ScoringConfig, StewardListConfig,
+        StewardListPlugin, compute_commit_hash, finalize_freeze_round, member_set, process_inbound,
     },
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     identity::{Identity, WalletIdentity},
@@ -64,7 +65,12 @@ pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin, St: StewardLi
     /// haven't accepted a welcome yet; once attached via
     /// [`Self::attach_mls`] it stays `Some` for the entry's lifetime.
     mls: Option<M>,
+    /// Per-group state machine. Coordinator methods on this entry update
+    /// it together with `phase_timer` so the two never drift.
     state_machine: GroupStateMachine,
+    /// Wall-clock anchor + duration knobs combined with `state_machine`
+    /// by the entry's coordinator methods.
+    phase_timer: PhaseTimer,
     /// Per-group peer-score plug-in. Lives next to `state_machine` as
     /// app-layer wiring; protocol decisions read it via the entry's
     /// `RwLock`, no separate `Mutex` needed.
@@ -88,6 +94,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
         group: Group,
         mls: Option<M>,
         state_machine: GroupStateMachine,
+        phase_timer: PhaseTimer,
         scoring: Sc,
         steward: St,
     ) -> Self {
@@ -95,10 +102,86 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
             group,
             mls,
             state_machine,
+            phase_timer,
             scoring,
             steward,
             epoch_history: VecDeque::new(),
         }
+    }
+
+    // ── State-machine + phase-timer coordinators ────────────────────
+
+    pub(crate) fn current_state(&self) -> GroupState {
+        self.state_machine.current_state()
+    }
+
+    pub(crate) fn start_working(&mut self) {
+        self.state_machine.start_working();
+        self.phase_timer.clear();
+        info!(state = "Working", "state transition");
+    }
+
+    pub(crate) fn start_freezing(&mut self) {
+        self.state_machine.start_freezing();
+        self.phase_timer.start();
+        info!(state = "Freezing", "state transition");
+    }
+
+    /// Bypass the inactivity timer and enter Freezing immediately. Returns
+    /// `true` on transition (only fires from `Working` or `Reelection`).
+    pub(crate) fn force_freezing(&mut self) -> bool {
+        if self.state_machine.force_freezing() {
+            self.phase_timer.start();
+            info!(state = "Freezing", "state transition (forced)");
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn start_selection(&mut self) {
+        self.state_machine.start_selection();
+        info!(state = "Selection", "state transition");
+    }
+
+    pub(crate) fn start_reelection(&mut self) {
+        self.state_machine.start_reelection();
+        self.phase_timer.clear();
+        info!(state = "Reelection", "state transition");
+    }
+
+    /// `true` once 3× `commit_inactivity_duration` has passed in
+    /// `PendingJoin` without a welcome.
+    pub(crate) fn is_pending_join_expired(&self) -> bool {
+        self.phase_timer
+            .is_pending_join_expired(self.state_machine.current_state())
+    }
+
+    /// `true` once the freeze window elapsed while in `Freezing`.
+    pub(crate) fn is_freeze_timed_out(&self) -> bool {
+        self.phase_timer
+            .is_freeze_timed_out(self.state_machine.current_state())
+    }
+
+    /// Drives the "steward waited too long to commit" transition into
+    /// `Freezing`. Call each poll tick; returns `true` exactly on the tick
+    /// that transitions. Self-starts the timer on the first tick with
+    /// approved work; no-op outside `Working`.
+    pub(crate) fn check_steward_inactivity(
+        &mut self,
+        approved_proposals_count: usize,
+        inactivity_duration: Duration,
+    ) -> bool {
+        let state = self.state_machine.current_state();
+        let should_freeze = self.phase_timer.poll_steward_inactivity(
+            state,
+            approved_proposals_count,
+            inactivity_duration,
+        );
+        if should_freeze {
+            self.start_freezing();
+        }
+        should_freeze
     }
 
     /// Borrow the MLS service, if attached. `None` for joiners

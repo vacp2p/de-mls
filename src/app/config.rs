@@ -9,8 +9,8 @@ pub use crate::core::{
 use crate::core::{ProposalKind, StewardListConfig};
 
 /// Wall-clock window the steward waits before batching approved proposals
-/// into a commit.
-pub const DEFAULT_EPOCH_DURATION: Duration = Duration::from_secs(60);
+/// into a commit (RFC §Inactivity Timer #1, "Commit inactivity").
+pub const DEFAULT_COMMIT_INACTIVITY_DURATION: Duration = Duration::from_secs(60);
 
 /// Lifetime of a voting proposal before it expires unvoted
 /// (RFC §Creating Voting Proposal).
@@ -20,9 +20,10 @@ pub const DEFAULT_PROPOSAL_EXPIRATION: Duration = Duration::from_secs(600);
 /// vote can stay open. MUST be `> voting_delay`.
 pub const DEFAULT_CONSENSUS_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Inactivity window during recovery. Reset to `epoch_duration` after a
-/// successful commit.
-pub const DEFAULT_RETRY_INACTIVITY_DURATION: Duration = Duration::from_secs(5);
+/// Inactivity window during Layer 2 / Layer 3 recovery
+/// (RFC §Inactivity Timer #2, "Recovery inactivity"). Typically shorter
+/// than `commit_inactivity_duration` so retries don't burn a full epoch.
+pub const DEFAULT_RECOVERY_INACTIVITY_DURATION: Duration = Duration::from_secs(5);
 
 /// Per-member window to cast a manual vote before the app auto-votes
 /// using `liveness_criteria_yes`. MUST be `< consensus_timeout`.
@@ -44,12 +45,15 @@ fn default_protocol_config() -> StewardListConfig {
 /// App-layer timing + embedded core-layer [`StewardListConfig`].
 #[derive(Debug, Clone)]
 pub struct GroupConfig {
-    pub epoch_duration: Duration,
-    /// Freeze window before deterministic selection. Defaults to `epoch_duration / 2`.
+    /// RFC §Inactivity Timer #1: how long the epoch steward has to commit
+    /// approved proposals before honest members enter the freeze round.
+    pub commit_inactivity_duration: Duration,
+    /// Freeze window before deterministic selection. Defaults to
+    /// `commit_inactivity_duration / 2`.
     pub freeze_duration: Duration,
-    /// Inactivity window during recovery. Much shorter than
-    /// `epoch_duration` so retries don't burn another full epoch.
-    pub retry_inactivity_duration: Duration,
+    /// RFC §Inactivity Timer #2: shorter inactivity window applied during
+    /// Layer 2 / Layer 3 recovery so retries don't burn a full epoch.
+    pub recovery_inactivity_duration: Duration,
     /// How long a proposal stays active before expiring (RFC §Creating Voting Proposal).
     pub proposal_expiration: Duration,
     pub consensus_timeout: Duration,
@@ -62,7 +66,7 @@ pub struct GroupConfig {
     pub max_reelection_attempts: u32,
     /// Per-member window to cast a manual vote before the app auto-casts
     /// using `liveness_criteria_yes`. Relationship invariant:
-    /// `voting_delay < consensus_timeout < epoch_duration`. See
+    /// `voting_delay < consensus_timeout < commit_inactivity_duration`. See
     /// [`DEFAULT_VOTING_DELAY`].
     pub voting_delay: Duration,
     /// Auto-vote delay for steward-election proposals (see
@@ -82,9 +86,9 @@ pub struct GroupConfig {
 impl Default for GroupConfig {
     fn default() -> Self {
         Self {
-            epoch_duration: DEFAULT_EPOCH_DURATION,
-            freeze_duration: DEFAULT_EPOCH_DURATION / 2,
-            retry_inactivity_duration: DEFAULT_RETRY_INACTIVITY_DURATION,
+            commit_inactivity_duration: DEFAULT_COMMIT_INACTIVITY_DURATION,
+            freeze_duration: DEFAULT_COMMIT_INACTIVITY_DURATION / 2,
+            recovery_inactivity_duration: DEFAULT_RECOVERY_INACTIVITY_DURATION,
             proposal_expiration: DEFAULT_PROPOSAL_EXPIRATION,
             consensus_timeout: DEFAULT_CONSENSUS_TIMEOUT,
             pending_update_max_epochs: DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
@@ -100,11 +104,12 @@ impl Default for GroupConfig {
 }
 
 impl GroupConfig {
-    /// Default config with a custom epoch; freeze becomes `epoch_duration / 2`.
-    pub fn with_epoch_duration(epoch_duration: Duration) -> Self {
+    /// Default config with a custom commit-inactivity window; freeze becomes
+    /// `commit_inactivity_duration / 2`.
+    pub fn with_commit_inactivity_duration(commit_inactivity_duration: Duration) -> Self {
         Self {
-            epoch_duration,
-            freeze_duration: epoch_duration / 2,
+            commit_inactivity_duration,
+            freeze_duration: commit_inactivity_duration / 2,
             ..Self::default()
         }
     }

@@ -133,7 +133,7 @@ impl<
     /// Bypass the inactivity timer so the urgent commit fires now.
     async fn force_freezing_for_urgent_commit(&self, group_name: &str) {
         let transitioned = match self.lookup_entry(group_name).await {
-            Some(entry_arc) => entry_arc.write().await.state_machine.force_freezing(),
+            Some(entry_arc) => entry_arc.write().await.force_freezing(),
             None => false,
         };
         if transitioned {
@@ -211,8 +211,8 @@ impl<
             // the immediate post-election inactivity check uses the
             // short retry window.
             entry.group.exit_recovery_mode();
-            if entry.state_machine.current_state() == GroupState::Reelection {
-                entry.state_machine.start_working();
+            if entry.current_state() == GroupState::Reelection {
+                entry.start_working();
                 true
             } else {
                 false
@@ -302,8 +302,8 @@ impl<
             Some(entry_arc) => {
                 let mut entry = entry_arc.write().await;
                 entry.group.resolve_emergency(proposal_id);
-                if entry.state_machine.current_state() == GroupState::Reelection {
-                    entry.state_machine.start_working();
+                if entry.current_state() == GroupState::Reelection {
+                    entry.start_working();
                     true
                 } else {
                     false

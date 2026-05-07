@@ -19,7 +19,7 @@ impl<
 > User<P, M, Sc, St, I, H, SCH>
 {
     pub async fn get_group_state(&self, group_name: &str) -> Result<GroupState, UserError> {
-        self.with_entry(group_name, |e| e.state_machine.current_state())
+        self.with_entry(group_name, |e| e.current_state())
             .await
             .ok_or(UserError::GroupNotFound)
     }

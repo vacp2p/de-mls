@@ -31,10 +31,7 @@ impl<
     pub async fn check_pending_join(&self, group_name: &str) -> Result<bool, UserError> {
         let (state, expired) = match self
             .with_entry(group_name, |entry| {
-                (
-                    entry.state_machine.current_state(),
-                    entry.state_machine.is_pending_join_expired(),
-                )
+                (entry.current_state(), entry.is_pending_join_expired())
             })
             .await
         {
@@ -71,7 +68,7 @@ impl<
         let has_proposals = {
             let mut entry = entry_arc.write().await;
 
-            let state = entry.state_machine.current_state();
+            let state = entry.current_state();
             if state != GroupState::Freezing {
                 return Ok(FreezeTimeoutStatus::NotFreezing);
             }
@@ -83,11 +80,11 @@ impl<
                 .current_list()
                 .is_some_and(|list| entry.group.freeze_candidate_count() >= list.len());
 
-            if !all_candidates_in && !entry.state_machine.is_freeze_timed_out() {
+            if !all_candidates_in && !entry.is_freeze_timed_out() {
                 return Ok(FreezeTimeoutStatus::StillFreezing);
             }
 
-            entry.state_machine.start_selection();
+            entry.start_selection();
             entry.group.approved_proposals_count() > 0
         };
 
@@ -173,8 +170,7 @@ impl<
                         // Approved batch (and in-flight votes) survive so
                         // the recovered steward commits the same proposals
                         // once the next election lands.
-                        entry.state_machine.clear_proposal_timer();
-                        entry.state_machine.start_reelection();
+                        entry.start_reelection();
 
                         // Local observation → direct peer-score penalty,
                         // no ECP round-trip. Each honest member records
@@ -208,7 +204,7 @@ impl<
                         (GroupState::Reelection, cross)
                     } else {
                         entry.group.clear_freeze_round();
-                        entry.state_machine.start_working();
+                        entry.start_working();
                         (GroupState::Working, false)
                     }
                 };
@@ -240,8 +236,8 @@ impl<
     }
 
     /// Drives Working → Freezing when the steward has sat on approved
-    /// proposals for more than `epoch_duration`. Any member polls — not
-    /// just the steward — so a fault gets picked up group-wide.
+    /// proposals for more than `commit_inactivity_duration`. Any member
+    /// polls — not just the steward — so a fault gets picked up group-wide.
     pub async fn check_member_freeze(&self, group_name: &str) -> Result<bool, UserError> {
         let entry_arc = self
             .lookup_entry(group_name)
@@ -249,7 +245,7 @@ impl<
             .ok_or(UserError::GroupNotFound)?;
         let mut entry = entry_arc.write().await;
 
-        let state = entry.state_machine.current_state();
+        let state = entry.current_state();
         if state == GroupState::PendingJoin || state == GroupState::Leaving {
             return Ok(false);
         }
@@ -264,13 +260,11 @@ impl<
         // burn another full epoch waiting for a steward to commit.
         let in_recovery = entry.group.is_in_recovery_mode() || entry.steward.retry_round() > 0;
         let inactivity = if in_recovery {
-            entry.state_machine.retry_inactivity_duration()
+            entry.phase_timer.recovery_inactivity_duration()
         } else {
-            entry.state_machine.epoch_duration()
+            entry.phase_timer.commit_inactivity_duration()
         };
-        let entered_freezing = entry
-            .state_machine
-            .check_steward_inactivity(proposal_count, inactivity);
+        let entered_freezing = entry.check_steward_inactivity(proposal_count, inactivity);
         if entered_freezing {
             let epoch = entry.expect_mls()?.current_epoch()?;
             entry.group.ensure_freeze_round(epoch);
@@ -295,7 +289,7 @@ impl<
                 None
             };
 
-            let new_state = entry.state_machine.current_state();
+            let new_state = entry.current_state();
             info!(
                 group = group_name,
                 state = %new_state,
