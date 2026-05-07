@@ -23,6 +23,7 @@ mod process_result;
 mod proposal_kind;
 mod provider;
 mod steward_list;
+mod steward_list_plugin;
 
 // ── Core group operations ──
 pub use api::{
@@ -58,6 +59,9 @@ pub use proposal_kind::ProposalKind;
 
 // ── Steward list ──
 pub use steward_list::{ProtocolConfig, StewardList};
+pub use steward_list_plugin::{
+    DEFAULT_MAX_RETRIES, DeterministicStewardList, StewardListEvent, StewardListPlugin,
+};
 
 // ── Provider traits ──
 pub use provider::{DeMlsProvider, DefaultProvider, ProviderConsensus};

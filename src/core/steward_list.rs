@@ -190,7 +190,13 @@ impl StewardList {
         (epoch_steward, backup)
     }
 
-    fn live_steward_from<F: Fn(&[u8]) -> bool>(
+    /// Walk the rotation starting at `offset` past `eligible == false`
+    /// and return the first eligible steward. `offset = 0` resolves the
+    /// epoch steward; `offset = 1` resolves the backup. Returns `None`
+    /// when the list is exhausted at `epoch` or no candidate is eligible.
+    /// Public so plug-in impls can avoid the wrapper-hop chain through
+    /// `live_epoch_steward` / `responsible_election_proposer`.
+    pub fn live_steward_from<F: Fn(&[u8]) -> bool>(
         &self,
         epoch: u64,
         offset: usize,
