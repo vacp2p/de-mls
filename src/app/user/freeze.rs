@@ -3,10 +3,11 @@
 use tracing::{error, info};
 
 use crate::{
-    app::{FreezeTimeoutStatus, GroupState, StateChangeHandler, User, UserError},
+    app::{FreezeTimeoutStatus, GroupState, StateChangeHandler, User, UserError, user::GroupEntry},
     core::{
         DeMlsProvider, FreezeFinalizeResult, FreezeOutcome, GroupEventHandler, PeerScoringPlugin,
-        ScoreEvent, ScoreOp, create_commit_candidate, finalize_freeze_round, group_members,
+        ScoreEvent, ScoreOp, StewardListPlugin, create_commit_candidate, finalize_freeze_round,
+        group_members,
     },
     ds::WELCOME_SUBTOPIC,
     identity::Identity,
@@ -19,10 +20,11 @@ impl<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, I, H, SCH>
+> User<P, M, Sc, St, I, H, SCH>
 {
     /// Poll a `PendingJoin` group. Returns `true` while still waiting,
     /// `false` once joined or once the join attempt has been torn down
@@ -78,8 +80,8 @@ impl<
             // Early selection: skip remaining freeze time if all expected
             // stewards have submitted candidates.
             let all_candidates_in = entry
-                .group
-                .steward_list()
+                .steward
+                .current_list()
                 .is_some_and(|list| entry.group.freeze_candidate_count() >= list.len());
 
             if !all_candidates_in && !entry.state_machine.is_freeze_timed_out() {
@@ -98,7 +100,8 @@ impl<
             let mut entry = entry_arc.write().await;
             let allow_subset = entry.group.allow_subset_candidates();
             let result = if entry.group.mls().is_some() {
-                match finalize_freeze_round(&mut entry.group, allow_subset, &self.app_id) {
+                let GroupEntry { group, steward, .. } = &mut *entry;
+                match finalize_freeze_round(group, steward, allow_subset, &self.app_id) {
                     Ok(result) => result,
                     Err(e) => {
                         error!(group = group_name, error = %e, "freeze finalize failed");
@@ -185,9 +188,10 @@ impl<
                                 let violation_epoch = mls.current_epoch()?;
                                 let self_identity = self.identity().identity_bytes();
                                 let members = group_members(&entry.group)?;
+                                let eligible = entry.group.steward_eligibility(&members);
                                 entry
-                                    .group
-                                    .live_epoch_steward(violation_epoch, &members)
+                                    .steward
+                                    .epoch_steward(violation_epoch, &eligible)
                                     .filter(|id| !id.is_empty() && *id != self_identity)
                                     .map(|id| id.to_vec())
                             }
@@ -260,7 +264,7 @@ impl<
         }
         // Recovery uses the shorter retry inactivity window so we don't
         // burn another full epoch waiting for a steward to commit.
-        let in_recovery = entry.group.is_in_recovery_mode() || entry.group.reelection_round() > 0;
+        let in_recovery = entry.group.is_in_recovery_mode() || entry.steward.retry_round() > 0;
         let inactivity = if in_recovery {
             entry.state_machine.retry_inactivity_duration()
         } else {
@@ -276,8 +280,10 @@ impl<
             // Stewards build their own candidate under the same lock.
             // Candidate-build failure must not block the freeze transition —
             // peers' candidates still get processed.
-            let outbound = if entry.group.is_steward() {
-                match create_commit_candidate(&mut entry.group, &self.app_id) {
+            let self_identity = self.identity().identity_bytes().to_vec();
+            let outbound = if entry.steward.is_steward(&self_identity) {
+                let GroupEntry { group, steward, .. } = &mut *entry;
+                match create_commit_candidate(group, steward, &self_identity, &self.app_id) {
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(

@@ -22,13 +22,12 @@ mod peer_scoring;
 mod process_result;
 mod proposal_kind;
 mod provider;
-mod steward_list;
+mod steward_list_plugin;
 
 // ── Core group operations ──
 pub use api::{
-    ElectionDecision, FreezeFinalizeResult, FreezeOutcome, build_create_proposal_request,
-    build_key_package_message, create_commit_candidate, evaluate_election_initiation,
-    finalize_freeze_round, group_members, is_deadlock_ecp_proposer, process_inbound,
+    FreezeFinalizeResult, FreezeOutcome, build_create_proposal_request, build_key_package_message,
+    create_commit_candidate, finalize_freeze_round, group_members, process_inbound,
 };
 
 // ── Consensus result application (pure, synchronous) ──
@@ -48,16 +47,18 @@ pub use events::{CallbackError, GroupEventHandler};
 // ── Group state ──
 pub(crate) use group::member_set;
 pub use group::{
-    DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_MAX_REELECTION_ATTEMPTS,
-    DEFAULT_PENDING_UPDATE_MAX_EPOCHS, Group, PendingUpdate, ProposalId,
-    auto_approved_leave_proposal_id, target_identity_of,
+    DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_PENDING_UPDATE_MAX_EPOCHS, Group, PendingUpdate,
+    ProposalId, auto_approved_leave_proposal_id, target_identity_of,
 };
 
 // ── Proposal classification ──
 pub use proposal_kind::ProposalKind;
 
 // ── Steward list ──
-pub use steward_list::{ProtocolConfig, StewardList};
+pub use steward_list_plugin::{
+    DEFAULT_MAX_RETRIES, DeterministicStewardList, ElectionDecision, StewardList,
+    StewardListConfig, StewardListEvent, StewardListPlugin,
+};
 
 // ── Provider traits ──
 pub use provider::{DeMlsProvider, DefaultProvider, ProviderConsensus};

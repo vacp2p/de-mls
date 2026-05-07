@@ -7,7 +7,7 @@ use tracing::info;
 
 use crate::{
     core::{
-        CoreError, Group, ProcessResult, ProposalId, ScoreEvent, ScoreOp,
+        CoreError, Group, ProcessResult, ProposalId, ScoreEvent, ScoreOp, StewardListPlugin,
         api::lifecycle::build_invitation_packet, group::BufferedCommitCandidate,
     },
     ds::OutboundPacket,
@@ -153,6 +153,7 @@ where
 ///    MLS staging rejects the current one.
 pub fn finalize_freeze_round<M>(
     group: &mut Group<M>,
+    steward: &dyn StewardListPlugin,
     allow_subset_candidates: bool,
     app_id: &[u8],
 ) -> Result<FreezeFinalizeResult, CoreError>
@@ -178,7 +179,7 @@ where
         return Ok(FreezeFinalizeResult::default());
     }
 
-    let ctx = RoundContext::snapshot(group, current_epoch)?;
+    let ctx = RoundContext::snapshot(group, steward, current_epoch)?;
     let sorted = rank_applicable_candidates(candidates, &ctx, allow_subset_candidates);
 
     if sorted.is_empty() {
@@ -188,7 +189,7 @@ where
         return Ok(FreezeFinalizeResult::default());
     }
 
-    apply_in_priority_order(group, sorted, &ctx, app_id)
+    apply_in_priority_order(group, steward, sorted, &ctx, app_id)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -217,7 +218,11 @@ struct RoundContext {
 }
 
 impl RoundContext {
-    fn snapshot<M>(group: &Group<M>, current_epoch: u64) -> Result<Self, CoreError>
+    fn snapshot<M>(
+        group: &Group<M>,
+        steward: &dyn StewardListPlugin,
+        current_epoch: u64,
+    ) -> Result<Self, CoreError>
     where
         M: MlsService,
     {
@@ -240,8 +245,9 @@ impl RoundContext {
         let mls_count = mls_actions.len();
 
         let members = mls.members()?;
-        let live_epoch_steward_id = group
-            .live_epoch_steward(current_epoch, &members)
+        let eligible = group.steward_eligibility(&members);
+        let live_epoch_steward_id = steward
+            .epoch_steward(current_epoch, &eligible)
             .map(|s| s.to_vec());
 
         Ok(Self {
@@ -308,6 +314,7 @@ enum CandidateOutcome {
 /// lower-priority local candidate afterwards has nothing to apply.
 fn apply_in_priority_order<M>(
     group: &mut Group<M>,
+    steward: &dyn StewardListPlugin,
     sorted: Vec<BufferedCommitCandidate>,
     ctx: &RoundContext,
     app_id: &[u8],
@@ -331,14 +338,14 @@ where
             }
             apply_local_candidate(group, chosen, ctx.self_remove_pending, app_id)?
         } else {
-            if !own_commit_discarded && group.is_steward() {
+            if !own_commit_discarded && steward.is_steward(&ctx.self_identity) {
                 // A failure here leaves an old pending commit in MLS and
                 // would sabotage every subsequent staging attempt — bubble
                 // the error out of the round instead of pressing on.
                 group.expect_mls()?.discard_own_commit()?;
                 own_commit_discarded = true;
             }
-            apply_incoming_candidate(group, chosen, &ctx.mls_actions, ctx.current_epoch)?
+            apply_incoming_candidate(group, steward, chosen, &ctx.mls_actions, ctx.current_epoch)?
         };
 
         match apply_result {
@@ -375,7 +382,7 @@ where
                 // claim from a non-steward earns no credit.
                 for loser in remaining {
                     let claimed = loser.candidate_msg.steward_identity;
-                    let on_list = group.steward_list().is_some_and(|l| l.contains(&claimed));
+                    let on_list = steward.is_steward(&claimed);
                     if on_list {
                         score_ops.push(ScoreOp {
                             member_id: claimed,
@@ -512,6 +519,7 @@ where
 /// only one per group at a time.
 fn apply_incoming_candidate<M>(
     group: &mut Group<M>,
+    steward: &dyn StewardListPlugin,
     chosen: BufferedCommitCandidate,
     expected_actions: &[MlsProposalOutput],
     current_epoch: u64,
@@ -548,7 +556,9 @@ where
         };
 
     // Commit sender must be on the steward list (RFC §"Commit validation service").
-    if let Some(violation) = check_commit_sender_authorized(group, &commit_sender, current_epoch) {
+    if let Some(violation) =
+        check_commit_sender_authorized(group, steward, &commit_sender, current_epoch)
+    {
         mls.discard_staged_commit()?;
         return Ok(CandidateOutcome::Drop(
             violation
@@ -728,17 +738,18 @@ fn expected_action_for_request(req: &GroupUpdateRequest) -> Option<MlsProposalOu
 /// the relaxed gate in `create_commit_candidate`).
 fn check_commit_sender_authorized<M: MlsService>(
     group: &Group<M>,
+    steward: &dyn StewardListPlugin,
     commit_sender: &[u8],
     epoch: u64,
 ) -> Option<ViolationEvidence> {
     if group.is_in_recovery_mode() {
         return None;
     }
-    let list = group.steward_list()?;
-    if list.is_exhausted(epoch) {
+    steward.current_list()?;
+    if steward.is_exhausted(epoch) {
         return None;
     }
-    if list.contains(commit_sender) {
+    if steward.is_steward(commit_sender) {
         return None;
     }
     tracing::warn!(

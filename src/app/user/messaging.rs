@@ -2,7 +2,10 @@
 
 use crate::{
     app::{GroupState, StateChangeHandler, User, UserError},
-    core::{DeMlsProvider, GroupEventHandler, PeerScoringPlugin, build_key_package_message},
+    core::{
+        DeMlsProvider, GroupEventHandler, PeerScoringPlugin, StewardListPlugin,
+        build_key_package_message,
+    },
     identity::{Identity, parse_wallet_to_bytes},
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
@@ -15,10 +18,11 @@ impl<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, I, H, SCH>
+> User<P, M, Sc, St, I, H, SCH>
 {
     /// Broadcast our key-package on the welcome subtopic so the steward
     /// can invite us.

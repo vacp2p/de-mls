@@ -23,7 +23,7 @@ mod user;
 
 pub use config::{
     DEFAULT_CONSENSUS_TIMEOUT, DEFAULT_ELECTION_VOTING_DELAY, DEFAULT_EPOCH_DURATION,
-    DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_MAX_REELECTION_ATTEMPTS, DEFAULT_PEER_SCORE,
+    DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_MAX_RETRIES, DEFAULT_PEER_SCORE,
     DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION,
     DEFAULT_RETRY_INACTIVITY_DURATION, DEFAULT_THRESHOLD_PEER_SCORE, DEFAULT_VOTING_DELAY,
     GroupConfig,
@@ -39,6 +39,6 @@ pub use error::UserError;
 pub use peer_scoring::{FixedScoringProvider, InMemoryPeerScoreStorage};
 pub use state_machine::{FreezeTimeoutStatus, GroupState, GroupStateMachine, StateChangeHandler};
 pub use user::{
-    DefaultMlsService, DefaultPeerScoring, KeyPackageGenerator, MlsCreatorFactory,
-    MlsWelcomeFactory, ScoringFactory, User,
+    DefaultMlsService, DefaultPeerScoring, DefaultStewardList, KeyPackageGenerator,
+    MlsCreatorFactory, MlsWelcomeFactory, ScoringFactory, StewardFactory, User,
 };

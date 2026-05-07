@@ -6,9 +6,8 @@ use tracing::{error, info};
 use crate::{
     app::{StateChangeHandler, User, UserError},
     core::{
-        DeMlsProvider, ElectionDecision, GroupEventHandler, PeerScoringPlugin, StewardList,
-        evaluate_election_initiation, group_members, is_deadlock_ecp_proposer, member_set,
-        scoring_member_diff, target_identity_of,
+        DeMlsProvider, ElectionDecision, GroupEventHandler, PeerScoringPlugin, StewardListPlugin,
+        group_members, member_set, scoring_member_diff, target_identity_of,
     },
     identity::{Identity, ShortId},
     mls_crypto::MlsService,
@@ -22,10 +21,11 @@ impl<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, I, H, SCH>
+> User<P, M, Sc, St, I, H, SCH>
 {
     /// Add any MLS members not yet tracked in scoring, and drop scored
     /// entries for identities no longer in MLS. Diffing is delegated to
@@ -54,37 +54,20 @@ impl<
         }
     }
 
-    /// RFC rule: when `member_count < sn_min`, every member is a steward.
-    /// Re-derive the list to cover that case after a membership-changing commit.
+    /// Plug-in decides whether the current list still satisfies its
+    /// policy (the deterministic impl re-installs when membership drops
+    /// below `sn_min`). Coordinator just supplies `epoch` + `members`
+    /// and drains events.
     async fn try_auto_fill_steward_list(&self, group_name: &str) -> Result<(), UserError> {
         let entry_arc = self
             .lookup_entry(group_name)
             .await
             .ok_or(UserError::GroupNotFound)?;
-        let (needs_fill, members, epoch) = {
-            let entry = entry_arc.read().await;
-            let mls = entry.group.expect_mls()?;
-            let members = group_members(&entry.group)?;
-            let needs = members.len() < entry.group.protocol_config().sn_min;
-            let epoch = mls.current_epoch()?;
-            (needs, members, epoch)
-        };
-
-        if !needs_fill {
-            return Ok(());
-        }
-        {
-            let mut entry = entry_arc.write().await;
-            let sn = entry
-                .group
-                .protocol_config()
-                .compute_list_size(members.len());
-            // sn_min auto-fill isn't an election outcome — no retry seed.
-            entry
-                .group
-                .generate_and_set_steward_list(epoch, &members, sn, 0)?;
-        }
-
+        let mut entry = entry_arc.write().await;
+        let mls = entry.group.expect_mls()?;
+        let epoch = mls.current_epoch()?;
+        let members = group_members(&entry.group)?;
+        let _events = entry.steward.maybe_auto_fill(epoch, &members)?;
         Ok(())
     }
 
@@ -105,20 +88,45 @@ impl<
             .lookup_entry(group_name)
             .await
             .ok_or(UserError::GroupNotFound)?;
-        let (members, election_epoch, retry_round, config) = {
+        let (proposed_stewards, election_epoch, retry_round) = {
             let entry = entry_arc.read().await;
             let mls = entry.group.expect_mls()?;
             let epoch = mls.current_epoch()?;
             let mls_members = group_members(&entry.group)?;
             let self_identity = self.identity().identity_bytes();
-            match evaluate_election_initiation(
-                &entry.group,
-                &mls_members,
-                self_identity,
+
+            // `has_election_in_flight` is a proposal-queue check, not a
+            // steward-list one — gated here, before the plug-in call.
+            if entry.group.has_election_in_flight() {
+                return Ok(());
+            }
+
+            // Build the candidate pool: MLS members minus pending
+            // removals (recovery only) minus any explicit exclude.
+            let candidate_pool: Vec<Vec<u8>> = mls_members
+                .iter()
+                .filter(|m| {
+                    if extra_exclude.is_some_and(|x| x == m.as_slice()) {
+                        return false;
+                    }
+                    if recovery && entry.group.is_pending_removal(m) {
+                        return false;
+                    }
+                    true
+                })
+                .cloned()
+                .collect();
+            let pool_set: std::collections::HashSet<&[u8]> =
+                candidate_pool.iter().map(Vec::as_slice).collect();
+            let eligible = |c: &[u8]| pool_set.contains(c);
+
+            match entry.steward.propose_election(
                 epoch,
+                &candidate_pool,
+                self_identity,
+                &eligible,
                 recovery,
-                extra_exclude,
-            ) {
+            )? {
                 ElectionDecision::Skip(reason) => {
                     if matches!(reason, "no eligible candidates after filter") {
                         info!(group = group_name, "skipping election: {reason}");
@@ -126,28 +134,18 @@ impl<
                     return Ok(());
                 }
                 ElectionDecision::Proposed {
-                    candidate_pool,
+                    proposed_stewards,
                     election_epoch,
                     retry_round,
-                    protocol_config,
-                } => (candidate_pool, election_epoch, retry_round, protocol_config),
+                } => (proposed_stewards, election_epoch, retry_round),
             }
         };
 
-        let sn = config.compute_list_size(members.len());
-        let proposed_list = StewardList::generate(
-            election_epoch,
-            group_name.as_bytes(),
-            &members,
-            sn,
-            config,
-            retry_round,
-        )?;
-
+        let stewards_len = proposed_stewards.len();
         let request = GroupUpdateRequest {
             payload: Some(group_update_request::Payload::StewardElection(
                 StewardElectionProposal {
-                    proposed_stewards: proposed_list.members().to_vec(),
+                    proposed_stewards,
                     election_epoch,
                     retry_round,
                 },
@@ -158,7 +156,7 @@ impl<
             group = group_name,
             epoch = election_epoch,
             retry_round,
-            stewards = proposed_list.len(),
+            stewards = stewards_len,
             recovery,
             "initiating steward election"
         );
@@ -187,7 +185,17 @@ impl<
             let mls = entry.group.expect_mls()?;
             let mls_members = group_members(&entry.group)?;
             let self_id = self.identity().identity_bytes();
-            let authorized = is_deadlock_ecp_proposer(&entry.group, &mls_members, self_id);
+            // Deadlock proposer = election proposer with the stricter
+            // predicate (MLS-present and not queued for removal).
+            let mls_set: std::collections::HashSet<&[u8]> =
+                mls_members.iter().map(Vec::as_slice).collect();
+            let group_ref = &entry.group;
+            let authorized = entry
+                .steward
+                .election_proposer(&|c: &[u8]| {
+                    mls_set.contains(c) && !group_ref.is_pending_removal(c)
+                })
+                .is_some_and(|proposer| proposer == self_id);
             let epoch = mls.current_epoch()?;
             (authorized, self_id, epoch)
         };
@@ -241,14 +249,9 @@ impl<
         };
 
         let mut entry = entry_arc.write().await;
-        let sn = entry
-            .group
-            .protocol_config()
-            .compute_list_size(members.len());
+        let sn = entry.steward.config().compute_list_size(members.len());
         // Test/admin regenerate — no election, no retry seed.
-        entry
-            .group
-            .generate_and_set_steward_list(current_epoch, &members, sn, 0)?;
+        let _events = entry.steward.install_list(current_epoch, &members, sn, 0)?;
         Ok(())
     }
 
@@ -307,7 +310,13 @@ impl<
                 Some(mls) => (mls.current_epoch()?, group_members(&entry.group)?),
                 None => (0, Vec::new()),
             };
-            if !entry.group.is_live_epoch_steward(current_epoch, &members) {
+            let self_identity = self.identity().identity_bytes();
+            let eligible = entry.group.steward_eligibility(&members);
+            let is_live = entry
+                .steward
+                .epoch_steward(current_epoch, &eligible)
+                .is_some_and(|es| es == self_identity);
+            if !is_live {
                 return Ok(());
             }
 
@@ -388,7 +397,7 @@ impl<
                 })
                 .collect();
 
-            let list = match entry.group.steward_list() {
+            let list = match entry.steward.current_list() {
                 Some(l) => l,
                 None => return Ok(()),
             };
@@ -410,12 +419,13 @@ impl<
             // first epoch.
             let mls = entry.group.expect_mls()?;
             let mls_members = group_members(&entry.group)?;
-            let steward_members = entry.group.live_steward_members(&mls_members);
+            let eligible = entry.group.steward_eligibility(&mls_members);
+            let steward_members = entry.steward.steward_members(&eligible);
 
             // `retry_round` is the seed that produced the *stored* list —
-            // a frozen tag on `StewardList`, not `Group::reelection_round`
-            // (the dynamic counter for the next attempt, which resets to 0
-            // on accept). Joiners re-derive the ordering from this seed.
+            // a frozen tag on `StewardList`, not the plug-in's dynamic
+            // counter for the next attempt (which resets to 0 on accept).
+            // Joiners re-derive the ordering from this seed.
             let sync = GroupSync {
                 steward_members,
                 election_epoch: list.election_epoch(),
@@ -425,7 +435,7 @@ impl<
                 peer_scores: scores,
                 timing: Some(timing),
                 retry_round: list.retry_round(),
-                max_reelection_attempts: entry.group.max_reelection_attempts(),
+                max_reelection_attempts: entry.steward.max_retries(),
                 liveness_criteria_yes: entry.group.liveness_criteria_yes(),
                 threshold_peer_score: entry.scoring.threshold(),
                 pending_update_max_epochs: entry.group.pending_update_max_epochs(),
@@ -460,7 +470,7 @@ impl<
         let (is_steward, epoch, to_remove): (bool, u64, Vec<(Vec<u8>, i64)>) = {
             let mut entry = entry_arc.write().await;
             let mls = entry.group.expect_mls()?;
-            let is_steward = entry.group.is_steward();
+            let is_steward = entry.steward.is_steward(self_id);
             let epoch = mls.current_epoch()?;
             if !is_steward {
                 return Ok(());

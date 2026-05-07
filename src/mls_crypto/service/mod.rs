@@ -17,7 +17,7 @@ use crate::mls_crypto::{DeMlsStorage, KeyPackageBytes, MlsCredentials, MlsError}
 mod api;
 mod backend;
 
-pub use api::{CIPHERSUITE, MlsService};
+pub use api::{CIPHERSUITE, DEFAULT_COMMIT_BATCH_MAX, MlsService};
 use backend::MlsProvider;
 
 /// OpenMLS-backed MLS service, scoped to a single group.

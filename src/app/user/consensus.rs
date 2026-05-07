@@ -16,8 +16,8 @@ use crate::{
         GroupState, ProposalParams, StateChangeHandler, User, UserError, cast_vote, submit_proposal,
     },
     core::{
-        DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProposalKind, group_members,
-        target_identity_of,
+        DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProposalKind, StewardListPlugin,
+        group_members, target_identity_of,
     },
     identity::Identity,
     mls_crypto::MlsService,
@@ -45,10 +45,11 @@ impl<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, I, H, SCH>
+> User<P, M, Sc, St, I, H, SCH>
 {
     /// Check that the group state allows creating a proposal of this kind and
     /// return the expected voter count.
@@ -396,9 +397,12 @@ impl<
 
             // Only the epoch steward proposes immediately. The buffer
             // survives freeze rounds so a later steward can retry.
+            let self_identity = self.identity().identity_bytes();
+            let eligible = entry.group.steward_eligibility(&members_for_rotation);
             let is_es = entry
-                .group
-                .is_live_epoch_steward(current_epoch, &members_for_rotation);
+                .steward
+                .epoch_steward(current_epoch, &eligible)
+                .is_some_and(|es| es == self_identity);
             let state = entry.state_machine.current_state();
             let total = entry.group.pending_update_count();
             let should = is_es && state == GroupState::Working;

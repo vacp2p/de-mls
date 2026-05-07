@@ -11,7 +11,7 @@ use crate::{
     app::{GroupState, StateChangeHandler, User, UserError},
     core::{
         DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProposalKind, ScoreOp,
-        apply_consensus_result, emergency_score_ops, group_members, target_identity_of,
+        StewardListPlugin, apply_consensus_result, emergency_score_ops, target_identity_of,
     },
     identity::Identity,
     mls_crypto::MlsService,
@@ -24,10 +24,11 @@ impl<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, I, H, SCH>
+> User<P, M, Sc, St, I, H, SCH>
 {
     /// Entry point from the consensus service: decode the proposal, apply the
     /// result to the group, and dispatch to the correct follow-up handler
@@ -146,12 +147,7 @@ impl<
     /// in parallel so the next epoch keeps a healthy ES + BS.
     async fn refresh_stewards_after_removal(&self, group_name: &str, target: &[u8]) {
         let target_was_steward = self
-            .with_entry(group_name, |entry| {
-                entry
-                    .group
-                    .steward_list()
-                    .is_some_and(|l| l.contains(target))
-            })
+            .with_entry(group_name, |entry| entry.steward.is_steward(target))
             .await
             .unwrap_or(false);
         if !target_was_steward {
@@ -185,11 +181,13 @@ impl<
         let is_valid = {
             let entry = entry_arc.read().await;
             entry.group.expect_mls()?;
-            let members = group_members(&entry.group)?;
-            entry.group.validate_steward_list_proposal(
+            // Election proposals carry the candidate pool implicitly:
+            // `proposed_stewards` is the full set the proposer sorted, so
+            // `candidate_pool == proposed_stewards` for validation.
+            entry.steward.validate_proposed(
                 &election.proposed_stewards,
                 election.election_epoch,
-                &members,
+                &election.proposed_stewards,
                 election.retry_round,
             )?
         };
@@ -203,15 +201,15 @@ impl<
 
         let resumed_from_reelection = {
             let mut entry = entry_arc.write().await;
-            entry.group.generate_and_set_steward_list(
+            let _events = entry.steward.install_list(
                 election.election_epoch,
                 &election.proposed_stewards,
                 election.proposed_stewards.len(),
                 election.retry_round,
             )?;
-            // `reelection_round` stays > 0 until the next successful
-            // commit so the immediate post-election inactivity check uses
-            // the short retry window.
+            // `retry_round` stays > 0 until the next successful commit so
+            // the immediate post-election inactivity check uses the
+            // short retry window.
             entry.group.exit_recovery_mode();
             if entry.state_machine.current_state() == GroupState::Reelection {
                 entry.state_machine.start_working();
@@ -242,13 +240,10 @@ impl<
         let (round, max) = match self.lookup_entry(group_name).await {
             Some(entry_arc) => {
                 let mut entry = entry_arc.write().await;
-                entry.group.bump_reelection_round();
-                // Read the ceiling from the group, not the user-level default:
+                let _events = entry.steward.bump_retry();
+                // Read the ceiling from the plug-in, not the user-level default:
                 // joiners honor the group's configured policy via `GroupSync`.
-                (
-                    entry.group.reelection_round(),
-                    entry.group.max_reelection_attempts(),
-                )
+                (entry.steward.retry_round(), entry.steward.max_retries())
             }
             None => return,
         };

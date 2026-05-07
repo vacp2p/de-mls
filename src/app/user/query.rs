@@ -2,7 +2,7 @@
 
 use crate::{
     app::{GroupState, MemberRole, StateChangeHandler, User, UserError},
-    core::{DeMlsProvider, GroupEventHandler, PeerScoringPlugin, group_members},
+    core::{DeMlsProvider, GroupEventHandler, PeerScoringPlugin, StewardListPlugin, group_members},
     identity::{Identity, format_wallet_address},
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::GroupUpdateRequest,
@@ -12,10 +12,11 @@ impl<
     P: DeMlsProvider,
     M: MlsService,
     Sc: PeerScoringPlugin,
+    St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler + 'static,
     SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, I, H, SCH>
+> User<P, M, Sc, St, I, H, SCH>
 {
     pub async fn get_group_state(&self, group_name: &str) -> Result<GroupState, UserError> {
         self.with_entry(group_name, |e| e.state_machine.current_state())
@@ -35,7 +36,7 @@ impl<
             Some(mls) => mls.current_epoch()?,
             None => 0,
         };
-        Ok((epoch, entry.group.reelection_round()))
+        Ok((epoch, entry.steward.retry_round()))
     }
 
     pub async fn list_groups(&self) -> Vec<String> {
@@ -59,7 +60,7 @@ impl<
     ) -> Result<(usize, usize), UserError> {
         self.with_entry(group_name, |e| {
             let received = e.group.freeze_candidate_count();
-            let expected = e.group.steward_list().map(|l| l.len()).unwrap_or(0);
+            let expected = e.steward.current_list().map(|l| l.len()).unwrap_or(0);
             (received, expected)
         })
         .await
@@ -67,7 +68,8 @@ impl<
     }
 
     pub async fn is_steward_for_group(&self, group_name: &str) -> Result<bool, UserError> {
-        self.with_entry(group_name, |e| e.group.is_steward())
+        let self_id = self.identity().identity_bytes().to_vec();
+        self.with_entry(group_name, |e| e.steward.is_steward(&self_id))
             .await
             .ok_or(UserError::GroupNotFound)
     }
@@ -135,26 +137,30 @@ impl<
         let epoch = mls.current_epoch()?;
         let members = group_members(&entry.group)?;
 
-        let list = entry.group.steward_list();
-        let (live_epoch, live_backup) = entry.group.live_epoch_and_backup(epoch, &members);
+        let eligible = entry.group.steward_eligibility(&members);
+        let (live_epoch, live_backup) = entry.steward.epoch_and_backup(epoch, &eligible);
+        let live_epoch = live_epoch.map(|s| s.to_vec());
+        let live_backup = live_backup.map(|s| s.to_vec());
+        let exhausted = entry.steward.is_exhausted(epoch);
+        let has_list = entry.steward.current_list().is_some();
         let roles = members
             .iter()
             .cloned()
             .map(|id| {
-                let role = match list {
-                    Some(l) if !l.is_exhausted(epoch) => {
-                        if live_epoch.is_some_and(|es| es == id) {
-                            MemberRole::EpochSteward
-                        } else if live_backup.is_some_and(|bs| bs == id) {
-                            MemberRole::BackupSteward
-                        } else if l.contains(&id) {
-                            MemberRole::Steward
-                        } else {
-                            MemberRole::Member
-                        }
+                let role = if has_list && !exhausted {
+                    if live_epoch.as_deref().is_some_and(|es| es == id) {
+                        MemberRole::EpochSteward
+                    } else if live_backup.as_deref().is_some_and(|bs| bs == id) {
+                        MemberRole::BackupSteward
+                    } else if entry.steward.is_steward(&id) {
+                        MemberRole::Steward
+                    } else {
+                        MemberRole::Member
                     }
-                    Some(l) if l.contains(&id) => MemberRole::Steward,
-                    _ => MemberRole::Member,
+                } else if has_list && entry.steward.is_steward(&id) {
+                    MemberRole::Steward
+                } else {
+                    MemberRole::Member
                 };
                 (id, role)
             })

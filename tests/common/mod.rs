@@ -16,9 +16,9 @@ use async_trait::async_trait;
 use de_mls::app::{FixedScoringProvider, InMemoryPeerScoreStorage};
 use de_mls::core::PeerScoringService;
 use de_mls::core::{
-    CallbackError, FreezeOutcome, Group, GroupEventHandler, ProcessResult, ProtocolConfig,
-    ScoringConfig, build_key_package_message, create_commit_candidate, finalize_freeze_round,
-    process_inbound,
+    CallbackError, DeterministicStewardList, FreezeOutcome, Group, GroupEventHandler,
+    ProcessResult, ScoringConfig, StewardListConfig, StewardListPlugin, build_key_package_message,
+    create_commit_candidate, finalize_freeze_round, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
 use de_mls::identity::{Identity, WalletIdentity, parse_wallet_address};
@@ -130,8 +130,8 @@ impl GroupEventHandler for MockHandler {
 
 // ─────────────────────────── MLS + group setup ───────────────────────────
 
-pub fn default_steward_config() -> ProtocolConfig {
-    ProtocolConfig::new(1, 5).unwrap()
+pub fn default_steward_config() -> StewardListConfig {
+    StewardListConfig::new(1, 5).unwrap()
 }
 
 /// Build a fresh identity, MLS credentials, and storage. Both
@@ -221,20 +221,63 @@ pub fn process_inbound_compat(
     }
 }
 
-pub fn setup_steward(group_name: &str, wallet_hex: &str) -> Group<TestMls> {
+/// Test handle: bundles `Group<TestMls>` with the per-group steward
+/// plug-in. Replaces the bare `Group<TestMls>` returned by setup helpers
+/// before the plug-in extraction. Tests access `handle.group` and
+/// `handle.steward` explicitly.
+pub struct StewardHandle {
+    pub group: Group<TestMls>,
+    pub steward: DeterministicStewardList,
+    pub identity: Vec<u8>,
+}
+
+impl StewardHandle {
+    /// Self-identity bytes for plug-in queries.
+    pub fn self_id(&self) -> &[u8] {
+        &self.identity
+    }
+}
+
+/// Test ergonomics: deref to the embedded `Group<TestMls>` so existing
+/// proposal-queue calls (`insert_approved_proposal`, `mls`, etc.) keep
+/// working unchanged. Steward-list calls go through `handle.steward`.
+impl std::ops::Deref for StewardHandle {
+    type Target = Group<TestMls>;
+    fn deref(&self) -> &Group<TestMls> {
+        &self.group
+    }
+}
+
+impl std::ops::DerefMut for StewardHandle {
+    fn deref_mut(&mut self) -> &mut Group<TestMls> {
+        &mut self.group
+    }
+}
+
+pub fn setup_steward(group_name: &str, wallet_hex: &str) -> StewardHandle {
     setup_steward_with_config(group_name, wallet_hex, default_steward_config())
 }
 
 pub fn setup_steward_with_config(
     group_name: &str,
     wallet_hex: &str,
-    config: ProtocolConfig,
-) -> Group<TestMls> {
+    config: StewardListConfig,
+) -> StewardHandle {
     let (identity, credentials, storage) = setup_identity_storage(wallet_hex);
     let mls =
         OpenMlsService::new_as_creator(group_name.to_string(), storage, Arc::clone(&credentials))
             .unwrap();
-    Group::create_group(group_name, identity.identity_bytes().to_vec(), config, mls).unwrap()
+    let identity_bytes = identity.identity_bytes().to_vec();
+    let group = Group::create_group(group_name, identity_bytes.clone(), config.clone(), mls);
+    let mut steward = DeterministicStewardList::empty(group_name.as_bytes().to_vec(), config);
+    let _events = steward
+        .install_list(0, std::slice::from_ref(&identity_bytes), 1, 0)
+        .expect("bootstrap list install");
+    StewardHandle {
+        group,
+        steward,
+        identity: identity_bytes,
+    }
 }
 
 /// Pre-join handle for a joiner: the joiner has no MLS service yet (they
@@ -246,6 +289,7 @@ pub struct JoinerHandle {
     pub credentials: Arc<MlsCredentials>,
     pub storage: Arc<MemoryDeMlsStorage>,
     pub group: Group<TestMls>,
+    pub steward: DeterministicStewardList,
     pub kp_packet: OutboundPacket,
 }
 
@@ -289,11 +333,15 @@ pub fn setup_joiner(group_name: &str, wallet_hex: &str) -> JoinerHandle {
 pub fn setup_joiner_with_config(
     group_name: &str,
     wallet_hex: &str,
-    config: ProtocolConfig,
+    config: StewardListConfig,
 ) -> JoinerHandle {
     let (identity, credentials, storage) = setup_identity_storage(wallet_hex);
-    let group: Group<TestMls> =
-        Group::prepare_to_join(group_name, identity.identity_bytes().to_vec(), config);
+    let group: Group<TestMls> = Group::prepare_to_join(
+        group_name,
+        identity.identity_bytes().to_vec(),
+        config.clone(),
+    );
+    let steward = DeterministicStewardList::empty(group_name.as_bytes().to_vec(), config);
     let key_package =
         OpenMlsService::<Arc<MemoryDeMlsStorage>>::generate_key_package(&storage, &credentials)
             .unwrap();
@@ -303,6 +351,7 @@ pub fn setup_joiner_with_config(
         credentials,
         storage,
         group,
+        steward,
         kp_packet,
     }
 }
@@ -315,7 +364,7 @@ pub fn setup_joiner_with_config(
 /// high enough not to collide with the manually-picked IDs test code uses
 /// for direct `insert_approved_proposal` calls.
 pub fn steward_add_joiner(
-    steward_handle: &mut Group<TestMls>,
+    steward_handle: &mut StewardHandle,
     joiner_kp_packet: &OutboundPacket,
 ) -> (OutboundPacket, OutboundPacket) {
     static PROPOSAL_COUNTER: AtomicU32 = AtomicU32::new(100);
@@ -331,7 +380,10 @@ pub fn steward_add_joiner(
     };
     let (key_package_bytes, identity) =
         key_package_bytes_from_json(user_kp.key_package_bytes).unwrap();
-    let already_member = steward_handle.mls().is_some_and(|m| m.is_member(&identity));
+    let already_member = steward_handle
+        .group
+        .mls()
+        .is_some_and(|m| m.is_member(&identity));
     if already_member {
         panic!("Expected key package skipped for already-member");
     }
@@ -343,10 +395,25 @@ pub fn steward_add_joiner(
     };
 
     let proposal_id = PROPOSAL_COUNTER.fetch_add(1, Ordering::Relaxed);
-    steward_handle.insert_approved_proposal(proposal_id, gur);
-    let packets = create_commit_candidate(steward_handle, b"test-app-id").unwrap();
+    steward_handle
+        .group
+        .insert_approved_proposal(proposal_id, gur);
+    let self_id = steward_handle.identity.clone();
+    let packets = create_commit_candidate(
+        &mut steward_handle.group,
+        &steward_handle.steward,
+        &self_id,
+        b"test-app-id",
+    )
+    .unwrap();
 
-    let finalize = finalize_freeze_round(steward_handle, false, b"test-app-id").unwrap();
+    let finalize = finalize_freeze_round(
+        &mut steward_handle.group,
+        &steward_handle.steward,
+        false,
+        b"test-app-id",
+    )
+    .unwrap();
     let welcome_packet = match finalize.outcome {
         FreezeOutcome::Applied { result, outbound } => {
             assert!(

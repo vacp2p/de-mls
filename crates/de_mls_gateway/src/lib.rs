@@ -46,6 +46,7 @@ type UserRef = Arc<
             DefaultProvider,
             de_mls::app::DefaultMlsService,
             de_mls::app::DefaultPeerScoring,
+            de_mls::app::DefaultStewardList,
             de_mls::identity::WalletIdentity,
             GatewayEventHandler<WakuDeliveryService>,
             GatewayEventHandler<WakuDeliveryService>,
