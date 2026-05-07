@@ -130,11 +130,11 @@ message PeerScore {
 }
 
 message TimingConfig {
-  uint64 epoch_duration_ms = 1;
+  uint64 commit_inactivity_duration_ms = 1; // RFC §Inactivity Timer #1
   uint64 freeze_duration_ms = 2;
   uint64 proposal_expiration_ms = 3;
   uint64 consensus_timeout_ms = 4;
-  uint64 retry_inactivity_duration_ms = 5; // Inactivity window during recovery
+  uint64 recovery_inactivity_duration_ms = 5; // RFC §Inactivity Timer #2
 }
 
 enum Outcome {

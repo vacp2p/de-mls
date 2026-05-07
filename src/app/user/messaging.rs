@@ -55,7 +55,7 @@ impl<
             .ok_or(UserError::GroupNotFound)?;
         let packet = {
             let entry = entry_arc.read().await;
-            let state = entry.phase_timer.current_state();
+            let state = entry.current_state();
             if matches!(
                 state,
                 GroupState::PendingJoin | GroupState::Freezing | GroupState::Selection
@@ -91,7 +91,7 @@ impl<
                 .await
                 .ok_or(UserError::GroupNotFound)?;
             let entry = entry_arc.read().await;
-            let state = entry.phase_timer.current_state();
+            let state = entry.current_state();
             if state != GroupState::Working {
                 return Err(UserError::GroupBlocked(state.to_string()));
             }

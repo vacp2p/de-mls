@@ -67,7 +67,7 @@ impl<
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        let state = entry.phase_timer.current_state();
+        let state = entry.current_state();
 
         match state {
             GroupState::Reelection => {
@@ -370,7 +370,7 @@ impl<
 
         let (pending_join, members_for_rotation, current_epoch) = {
             let entry = entry_arc.read().await;
-            let pending = entry.phase_timer.current_state() == GroupState::PendingJoin;
+            let pending = entry.current_state() == GroupState::PendingJoin;
             match (pending, entry.mls()) {
                 (true, _) | (false, None) => (pending, Vec::new(), 0u64),
                 (false, Some(mls)) => (false, entry.group_members()?, mls.current_epoch()?),
@@ -400,7 +400,7 @@ impl<
                 .steward
                 .epoch_steward(current_epoch, &eligible)
                 .is_some_and(|es| es == self_identity);
-            let state = entry.phase_timer.current_state();
+            let state = entry.current_state();
             let total = entry.group.pending_update_count();
             let should = is_es && state == GroupState::Working;
             (inserted, is_es, state, total, should)
@@ -445,7 +445,7 @@ impl<
             .ok_or(UserError::GroupNotFound)?;
         {
             let entry = entry_arc.read().await;
-            let state = entry.phase_timer.current_state();
+            let state = entry.current_state();
             if state == GroupState::Freezing || state == GroupState::Selection {
                 return Err(UserError::GroupBlocked(state.to_string()));
             }

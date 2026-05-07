@@ -403,13 +403,16 @@ impl<
             };
 
             let timing = TimingConfig {
-                epoch_duration_ms: entry.phase_timer.epoch_duration().as_millis() as u64,
+                commit_inactivity_duration_ms: entry
+                    .phase_timer
+                    .commit_inactivity_duration()
+                    .as_millis() as u64,
                 freeze_duration_ms: entry.phase_timer.freeze_duration().as_millis() as u64,
                 proposal_expiration_ms: entry.phase_timer.proposal_expiration().as_millis() as u64,
                 consensus_timeout_ms: entry.phase_timer.consensus_timeout().as_millis() as u64,
-                retry_inactivity_duration_ms: entry
+                recovery_inactivity_duration_ms: entry
                     .phase_timer
-                    .retry_inactivity_duration()
+                    .recovery_inactivity_duration()
                     .as_millis() as u64,
             };
 

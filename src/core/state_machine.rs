@@ -1,20 +1,14 @@
-//! Passive per-group state machine.
+//! Per-group state machine.
 //!
-//! Holds the [`GroupState`] enum and exposes named transition
-//! methods. Nothing else — no timing, no I/O, no timers, no logging.
-//! The app layer wraps this with a timer-driven controller (phase
-//! timer, freeze-window checks, inactivity threshold) — see
+//! Holds the [`GroupState`] enum and exposes named transition methods.
+//! The app layer wraps this with a timer-driven controller — see
 //! [`crate::app::PhaseTimer`].
 
 use std::fmt::Display;
 
-/// The lifecycle state of a per-group session.
-///
-/// Transitions are driven by the app layer through the named methods
-/// on [`GroupStateMachine`]. The protocol rules (e.g. "force-freezing
-/// only fires from Working or Reelection") are enforced here; timing
-/// rules ("freeze times out after `freeze_duration`") live in the app
-/// layer's wrapper.
+/// The lifecycle state of a per-group session. Transitions are driven
+/// by the app layer through the named methods on [`GroupStateMachine`];
+/// timing rules live in [`crate::app::PhaseTimer`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupState {
     /// Joiner waiting for a welcome.
@@ -47,9 +41,8 @@ impl Display for GroupState {
     }
 }
 
-/// Passive state machine — just the state enum + named transitions.
-/// No timer, no I/O. The app layer wraps this with timer-driven
-/// behaviour.
+/// State enum + named transitions. The app layer wraps this with
+/// timer-driven behaviour through [`crate::app::PhaseTimer`].
 #[derive(Debug, Clone)]
 pub struct GroupStateMachine {
     state: GroupState,
@@ -109,9 +102,7 @@ impl GroupStateMachine {
         self.state = GroupState::Reelection;
     }
 
-    /// Caller must ensure a valid transition. The leave path handles
-    /// `PendingJoin` and already-`Leaving` cases separately at the app
-    /// layer.
+    /// Caller must ensure a valid transition.
     pub fn start_leaving(&mut self) {
         self.state = GroupState::Leaving;
     }

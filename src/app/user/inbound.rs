@@ -173,8 +173,8 @@ impl<
 
         let state = {
             let mut entry = entry_arc.write().await;
-            entry.phase_timer.start_working();
-            entry.phase_timer.current_state()
+            entry.start_working();
+            entry.current_state()
         };
         self.state_handler.on_state_changed(name, state).await;
         Ok(())
@@ -205,7 +205,7 @@ impl<
             Some(entry_arc) => {
                 let mut entry = entry_arc.write().await;
                 entry.steward.reset_retry();
-                let state = entry.phase_timer.current_state();
+                let state = entry.current_state();
                 if matches!(
                     state,
                     GroupState::Working
@@ -213,7 +213,7 @@ impl<
                         | GroupState::Selection
                         | GroupState::Reelection
                 ) {
-                    entry.phase_timer.start_working();
+                    entry.start_working();
                     true
                 } else {
                     false
@@ -281,11 +281,11 @@ impl<
         };
         let (transitioned, outbound) = {
             let mut entry = entry_arc.write().await;
-            if entry.phase_timer.current_state() != GroupState::Working {
+            if entry.current_state() != GroupState::Working {
                 return Ok(());
             }
 
-            entry.phase_timer.start_freezing();
+            entry.start_freezing();
             let epoch = entry.expect_mls()?.current_epoch()?;
             entry.group.ensure_freeze_round(epoch);
 
@@ -405,16 +405,18 @@ impl<
             .group
             .set_pending_update_max_epochs(sync.pending_update_max_epochs);
         if let Some(timing) = &sync.timing {
-            let sm = &mut entry.phase_timer;
-            sm.set_epoch_duration(std::time::Duration::from_millis(timing.epoch_duration_ms));
-            sm.set_freeze_duration(std::time::Duration::from_millis(timing.freeze_duration_ms));
-            sm.set_retry_inactivity_duration(std::time::Duration::from_millis(
-                timing.retry_inactivity_duration_ms,
+            let pt = &mut entry.phase_timer;
+            pt.set_commit_inactivity_duration(std::time::Duration::from_millis(
+                timing.commit_inactivity_duration_ms,
             ));
-            sm.set_proposal_expiration(std::time::Duration::from_millis(
+            pt.set_freeze_duration(std::time::Duration::from_millis(timing.freeze_duration_ms));
+            pt.set_recovery_inactivity_duration(std::time::Duration::from_millis(
+                timing.recovery_inactivity_duration_ms,
+            ));
+            pt.set_proposal_expiration(std::time::Duration::from_millis(
                 timing.proposal_expiration_ms,
             ));
-            sm.set_consensus_timeout(std::time::Duration::from_millis(
+            pt.set_consensus_timeout(std::time::Duration::from_millis(
                 timing.consensus_timeout_ms,
             ));
         }
@@ -617,21 +619,21 @@ fn validate_group_sync(
 
 /// Name of the first zero-valued field in `timing`, or `None` if all
 /// fields are non-zero. Zero in any timing field would short-circuit the
-/// timer it drives (consensus_timeout firing immediately, epoch_duration
-/// breaking the inactivity tracker, etc.).
+/// timer it drives (consensus_timeout firing immediately,
+/// commit_inactivity breaking the inactivity tracker, etc.).
 fn first_zero_timing_field(
     timing: &crate::protos::de_mls::messages::v1::TimingConfig,
 ) -> Option<&'static str> {
-    if timing.epoch_duration_ms == 0 {
-        Some("epoch_duration_ms")
+    if timing.commit_inactivity_duration_ms == 0 {
+        Some("commit_inactivity_duration_ms")
     } else if timing.freeze_duration_ms == 0 {
         Some("freeze_duration_ms")
     } else if timing.proposal_expiration_ms == 0 {
         Some("proposal_expiration_ms")
     } else if timing.consensus_timeout_ms == 0 {
         Some("consensus_timeout_ms")
-    } else if timing.retry_inactivity_duration_ms == 0 {
-        Some("retry_inactivity_duration_ms")
+    } else if timing.recovery_inactivity_duration_ms == 0 {
+        Some("recovery_inactivity_duration_ms")
     } else {
         None
     }
@@ -644,11 +646,11 @@ mod tests {
 
     fn nonzero_timing() -> TimingConfig {
         TimingConfig {
-            epoch_duration_ms: 60_000,
+            commit_inactivity_duration_ms: 60_000,
             freeze_duration_ms: 30_000,
             proposal_expiration_ms: 3_600_000,
             consensus_timeout_ms: 30_000,
-            retry_inactivity_duration_ms: 5_000,
+            recovery_inactivity_duration_ms: 5_000,
         }
     }
 
@@ -703,9 +705,9 @@ mod tests {
     fn each_zero_field_is_detected() {
         let cases = [
             (
-                "epoch_duration_ms",
+                "commit_inactivity_duration_ms",
                 TimingConfig {
-                    epoch_duration_ms: 0,
+                    commit_inactivity_duration_ms: 0,
                     ..nonzero_timing()
                 },
             ),
@@ -731,9 +733,9 @@ mod tests {
                 },
             ),
             (
-                "retry_inactivity_duration_ms",
+                "recovery_inactivity_duration_ms",
                 TimingConfig {
-                    retry_inactivity_duration_ms: 0,
+                    recovery_inactivity_duration_ms: 0,
                     ..nonzero_timing()
                 },
             ),

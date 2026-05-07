@@ -107,7 +107,7 @@ async fn settle() {
 async fn concurrent_joins_leave_joiners_with_empty_buffer() {
     let group = "recovery-test";
     let cfg = GroupConfig {
-        epoch_duration: Duration::from_millis(50),
+        commit_inactivity_duration: Duration::from_millis(50),
         freeze_duration: Duration::from_millis(10),
         protocol: StewardListConfig::new(1, 5).unwrap(),
         ..GroupConfig::default()
