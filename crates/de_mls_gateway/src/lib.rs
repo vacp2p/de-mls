@@ -11,12 +11,16 @@ pub(crate) mod forwarder;
 mod group;
 pub mod handler;
 
-use std::sync::{Arc, atomic::AtomicBool};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{Arc, atomic::AtomicBool},
+};
 
 use de_mls::{
     app::User,
     core::DefaultProvider,
     ds::{DeliveryService, WakuDeliveryService},
+    protos::de_mls::messages::v1::GroupUpdateRequest,
 };
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 use futures::{
@@ -62,6 +66,15 @@ pub fn init_core(core: Arc<CoreCtx<WakuDeliveryService>>) {
     GATEWAY.set_core(core);
 }
 
+/// Cap on the per-group rolling history of committed batches kept on the gateway.
+pub(crate) const MAX_EPOCH_HISTORY: usize = 10;
+
+/// Per-group rolling history of committed batches, populated by
+/// `on_commit_applied` and consumed by the History tab via
+/// `Gateway::get_epoch_history`. Cap is [`MAX_EPOCH_HISTORY`].
+pub(crate) type EpochHistoryStore =
+    Arc<parking_lot::Mutex<HashMap<String, VecDeque<Vec<GroupUpdateRequest>>>>>;
+
 pub struct Gateway<DS: DeliveryService> {
     // UI events (gateway -> UI)
     evt_tx: UnboundedSender<AppEvent>,
@@ -78,6 +91,10 @@ pub struct Gateway<DS: DeliveryService> {
 
     // Guards against spawning forwarders more than once
     started: AtomicBool,
+
+    // Per-group committed-batch history (UI cache). Shared by Arc with the
+    // gateway's GroupEventHandler so `on_commit_applied` can append.
+    epoch_history: EpochHistoryStore,
 }
 
 impl<DS: DeliveryService> Gateway<DS> {
@@ -90,6 +107,7 @@ impl<DS: DeliveryService> Gateway<DS> {
             core: RwLock::new(None),
             user: RwLock::new(None),
             started: AtomicBool::new(false),
+            epoch_history: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -156,6 +174,7 @@ impl Gateway<WakuDeliveryService> {
             delivery: Arc::new(core.app_state.delivery.clone()),
             evt_tx: self.evt_tx.clone(),
             topics: core.topics.clone(),
+            epoch_history: self.epoch_history.clone(),
         });
 
         let user = User::with_private_key(

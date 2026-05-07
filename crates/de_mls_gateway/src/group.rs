@@ -252,13 +252,15 @@ impl Gateway<WakuDeliveryService> {
 
     /// Get epoch history for a group (past batches of approved proposals).
     ///
-    /// Returns up to the last 10 epochs, each as a list of `(action, identity)` pairs.
+    /// Returns up to the last 10 epochs, each as a list of `(action, identity)` pairs.ƒ
     pub async fn get_epoch_history(
         &self,
         group_name: String,
     ) -> anyhow::Result<Vec<Vec<(String, String)>>> {
-        let user_ref = self.user()?;
-        let history = user_ref.read().await.get_epoch_history(&group_name).await?;
-        Ok(history.iter().map(|batch| display_batch(batch)).collect())
+        let store = self.epoch_history.lock();
+        Ok(store
+            .get(&group_name)
+            .map(|history| history.iter().map(|b| display_batch(b)).collect())
+            .unwrap_or_default())
     }
 }

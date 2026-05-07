@@ -11,7 +11,7 @@
 //! tasks just take their own handle via `self.clone()`.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
@@ -32,8 +32,8 @@ use crate::{
         BufferedCommitCandidate, CoreError, DeMlsProvider, DefaultProvider,
         DeterministicStewardList, FreezeFinalizeResult, Group, GroupEventHandler, GroupState,
         GroupStateMachine, PeerScoringEvent, PeerScoringPlugin, PeerScoringService, ProcessResult,
-        ProposalId, ProposalKind, ProviderConsensus, ScoringConfig, StewardListConfig,
-        StewardListPlugin, compute_commit_hash, finalize_freeze_round, member_set, process_inbound,
+        ProposalKind, ProviderConsensus, ScoringConfig, StewardListConfig, StewardListPlugin,
+        compute_commit_hash, finalize_freeze_round, member_set, process_inbound,
     },
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     identity::{Identity, WalletIdentity},
@@ -41,9 +41,7 @@ use crate::{
         CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MemoryDeMlsStorage, MlsCommitInput,
         MlsCredentials, MlsError, MlsService, OpenMlsService,
     },
-    protos::de_mls::messages::v1::{
-        AppMessage, CommitCandidate, GroupUpdateRequest, group_update_request::Payload,
-    },
+    protos::de_mls::messages::v1::{AppMessage, CommitCandidate, group_update_request::Payload},
 };
 
 mod consensus;
@@ -54,10 +52,6 @@ mod lifecycle;
 mod messaging;
 mod query;
 mod steward;
-
-/// Cap on the per-group UI history of committed batches. App-layer
-/// concern only; protocol logic in `core::Group` is history-agnostic.
-const MAX_EPOCH_HISTORY: usize = 10;
 
 pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> {
     group: Group,
@@ -80,11 +74,6 @@ pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin, St: StewardLi
     /// eligibility from MLS members + `Group::is_pending_removal` and
     /// passes it on every position query.
     steward: St,
-    /// Per-group rolling history of committed batches, most recent last.
-    /// Bounded at [`MAX_EPOCH_HISTORY`]. Populated by
-    /// [`GroupEntry::archive_committed_batch`] from the snapshot
-    /// returned by `Group::clear_approved_proposals`.
-    epoch_history: VecDeque<HashMap<ProposalId, GroupUpdateRequest>>,
 }
 
 impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, Sc, St> {
@@ -105,7 +94,6 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
             phase_timer,
             scoring,
             steward,
-            epoch_history: VecDeque::new(),
         }
     }
 
@@ -400,17 +388,6 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
     pub(crate) fn process_inbound(&mut self, payload: &[u8]) -> Result<ProcessResult, CoreError> {
         let mls = self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)?;
         process_inbound(&mut self.group, mls, payload)
-    }
-
-    /// Append a just-committed batch to the bounded UI history.
-    fn archive_committed_batch(&mut self, snapshot: HashMap<ProposalId, GroupUpdateRequest>) {
-        if snapshot.is_empty() {
-            return;
-        }
-        if self.epoch_history.len() >= MAX_EPOCH_HISTORY {
-            self.epoch_history.pop_front();
-        }
-        self.epoch_history.push_back(snapshot);
     }
 }
 

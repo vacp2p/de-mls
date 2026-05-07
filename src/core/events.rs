@@ -64,4 +64,17 @@ pub trait GroupEventHandler: Send + Sync {
     ) -> Result<(), CallbackError> {
         Ok(())
     }
+
+    /// A freeze round just merged a commit; `batch` is the set of approved
+    /// proposals that landed in that commit. Fired once per accepted commit
+    /// (whether the local node was the steward or not), in insertion order
+    /// of the approved queue. Integrators that maintain a UI history view
+    /// or audit log consume this; the default impl is a no-op.
+    async fn on_commit_applied(
+        &self,
+        _group_name: &str,
+        _batch: Vec<GroupUpdateRequest>,
+    ) -> Result<(), CallbackError> {
+        Ok(())
+    }
 }
