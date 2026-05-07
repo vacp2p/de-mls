@@ -7,12 +7,11 @@ use tracing::{error, info};
 use crate::{
     app::{
         GroupState, StateChangeHandler, User, UserError, forward_incoming_proposal,
-        forward_incoming_vote, user::GroupEntry,
+        forward_incoming_vote,
     },
     core::{
         DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProcessResult, ProposalKind,
-        ScoreSnapshot, StewardList, StewardListConfig, StewardListPlugin, create_commit_candidate,
-        group_members, member_set, process_inbound,
+        ScoreSnapshot, StewardList, StewardListConfig, StewardListPlugin, member_set,
     },
     ds::{APP_MSG_SUBTOPIC, InboundPacket, WELCOME_SUBTOPIC},
     identity::{Identity, ShortId},
@@ -53,7 +52,7 @@ impl<
                     .await
                     .ok_or(UserError::GroupNotFound)?;
                 let entry = entry_arc.read().await;
-                forward_incoming_vote::<P, M>(&entry.group, vote, &*self.consensus_service).await?;
+                forward_incoming_vote::<P>(&entry.group, vote, &*self.consensus_service).await?;
                 Ok(())
             }
             ProcessResult::MembershipChangeReceived(request) => {
@@ -92,7 +91,7 @@ impl<
             && let Some(entry_arc) = self.lookup_entry(group_name).await
         {
             let mut entry = entry_arc.write().await;
-            let current_epoch = match entry.group.mls() {
+            let current_epoch = match entry.mls() {
                 Some(mls) => mls.current_epoch()?,
                 None => 0,
             };
@@ -163,9 +162,9 @@ impl<
         };
         let (packet, mls_members) = {
             let entry = entry_arc.read().await;
-            let mls = entry.group.expect_mls()?;
+            let mls = entry.expect_mls()?;
             let packet = mls.build_message(&msg, &self.app_id)?;
-            let members = group_members(&entry.group).unwrap_or_default();
+            let members = entry.group_members().unwrap_or_default();
             (packet, members)
         };
         self.handler.on_outbound(name, packet).await?;
@@ -189,8 +188,8 @@ impl<
         if let Some(entry_arc) = self.lookup_entry(group_name).await {
             let mls_members = {
                 let entry = entry_arc.read().await;
-                if entry.group.mls().is_some() {
-                    group_members(&entry.group).unwrap_or_default()
+                if entry.mls().is_some() {
+                    entry.group_members().unwrap_or_default()
                 } else {
                     Vec::new()
                 }
@@ -264,7 +263,7 @@ impl<
             // of the Group so its `delete()` runs before the entry drops.
             // Per-group scoring is dropped when the entry leaves the
             // registry below.
-            if let Some(mls) = entry.write().await.group.take_mls() {
+            if let Some(mls) = entry.write().await.take_mls() {
                 let _ = mls.delete();
             }
         }
@@ -287,13 +286,12 @@ impl<
             }
 
             entry.state_machine.start_freezing();
-            let epoch = entry.group.expect_mls()?.current_epoch()?;
+            let epoch = entry.expect_mls()?.current_epoch()?;
             entry.group.ensure_freeze_round(epoch);
 
             let self_identity = self.identity().identity_bytes().to_vec();
             let outbound = if entry.steward.is_steward(&self_identity) {
-                let GroupEntry { group, steward, .. } = &mut *entry;
-                match create_commit_candidate(group, steward, &self_identity, &self.app_id) {
+                match entry.create_commit_candidate(&self_identity, &self.app_id) {
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(
@@ -335,8 +333,8 @@ impl<
             if entry.steward.current_list().is_some() {
                 return Ok(());
             }
-            let mls = entry.group.expect_mls()?;
-            (group_members(&entry.group)?, mls.current_epoch()?)
+            let mls = entry.expect_mls()?;
+            (entry.group_members()?, mls.current_epoch()?)
         };
         let local_default_peer_score = self.default_group_config.default_peer_score;
         if !validate_group_sync(
@@ -378,14 +376,13 @@ impl<
         };
         let mut entry = entry_arc.write().await;
         let sn = sync.steward_members.len();
-        entry.steward.set_config(protocol_config.clone());
+        entry.steward.set_config(protocol_config);
         let _events = entry.steward.install_list(
             sync.election_epoch,
             &sync.steward_members,
             sn,
             sync.retry_round,
         )?;
-        entry.group.set_protocol_config(protocol_config);
         entry.steward.set_max_retries(sync.max_reelection_attempts);
         entry.scoring.set_threshold(sync.threshold_peer_score);
         let snapshot = ScoreSnapshot {
@@ -446,11 +443,11 @@ impl<
             APP_MSG_SUBTOPIC => {
                 let result = {
                     let mut entry = entry_arc.write().await;
-                    if entry.group.mls().is_none() {
+                    if entry.mls().is_none() {
                         // App messages on a group we haven't joined yet → ignore.
                         return Ok(());
                     }
-                    process_inbound(&mut entry.group, &packet.payload)?
+                    entry.process_inbound(&packet.payload)?
                 };
                 self.dispatch_inbound_result(&group_name, result).await
             }
@@ -483,11 +480,7 @@ impl<
                     .ok_or(UserError::GroupNotFound)?;
                 let already_member = {
                     let entry = entry_arc.read().await;
-                    entry
-                        .group
-                        .mls()
-                        .map(|m| m.is_member(&identity))
-                        .unwrap_or(false)
+                    entry.mls().map(|m| m.is_member(&identity)).unwrap_or(false)
                 };
                 if already_member {
                     info!(
@@ -520,7 +513,7 @@ impl<
                 let self_id = self.identity().identity_bytes().to_vec();
                 let already_in = {
                     let entry = entry_arc.read().await;
-                    entry.steward.is_steward(&self_id) || entry.group.mls().is_some()
+                    entry.steward.is_steward(&self_id) || entry.mls().is_some()
                 };
                 if already_in {
                     return Ok(());
@@ -534,7 +527,7 @@ impl<
                 let joined_name = svc.group_id().to_string();
                 {
                     let mut entry = entry_arc.write().await;
-                    entry.group.attach_mls(svc);
+                    entry.attach_mls(svc);
                 }
                 info!(group = group_name, "joined group via welcome");
                 self.dispatch_inbound_result(

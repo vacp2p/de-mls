@@ -5,10 +5,11 @@
 use prost::Message;
 
 use de_mls::core::{
-    Group, PeerScoringPlugin, PeerScoringService, ScoreEvent, ScoreOp, apply_consensus_result,
-    emergency_score_ops, group_members,
+    PeerScoringPlugin, PeerScoringService, ScoreEvent, ScoreOp, apply_consensus_result,
+    emergency_score_ops,
 };
 use de_mls::ds::WELCOME_SUBTOPIC;
+use de_mls::mls_crypto::MlsService;
 
 mod common;
 use common::{
@@ -22,9 +23,9 @@ fn sync_scoring_members<
     P: de_mls::core::ScoringProvider + Send + Sync + 'static,
 >(
     scoring: &mut PeerScoringService<S, P>,
-    group: &Group<TestMls>,
+    mls: Option<&TestMls>,
 ) {
-    let mls_members = group_members(group).unwrap();
+    let mls_members = mls.map(|m| m.members().unwrap()).unwrap_or_default();
     let scored = scoring.all_members_with_scores();
     let scored_ids: std::collections::HashSet<Vec<u8>> =
         scored.iter().map(|(id, _)| id.clone()).collect();
@@ -104,7 +105,7 @@ fn test_new_joiner_starts_with_default_scores() {
 
     // Bob builds his scoring from MLS members — gets defaults.
     let mut bob_scoring = make_scoring();
-    sync_scoring_members(&mut bob_scoring, &bob.group);
+    sync_scoring_members(&mut bob_scoring, bob.mls.as_ref());
 
     assert_eq!(bob_scoring.score_for(&alice_id), Some(DEFAULT_SCORE));
 }

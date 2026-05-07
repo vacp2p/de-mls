@@ -27,7 +27,7 @@ mod steward_list_plugin;
 // ── Core group operations ──
 pub use api::{
     FreezeFinalizeResult, FreezeOutcome, build_create_proposal_request, build_key_package_message,
-    create_commit_candidate, finalize_freeze_round, group_members, process_inbound,
+    compute_commit_hash, finalize_freeze_round, process_inbound,
 };
 
 // ── Consensus result application (pure, synchronous) ──
@@ -45,10 +45,10 @@ pub use error::CoreError;
 pub use events::{CallbackError, GroupEventHandler};
 
 // ── Group state ──
-pub(crate) use group::member_set;
 pub use group::{
-    DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_PENDING_UPDATE_MAX_EPOCHS, Group, PendingUpdate,
-    ProposalId, auto_approved_leave_proposal_id, target_identity_of,
+    BufferedCommitCandidate, DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
+    Group, PendingUpdate, ProposalId, auto_approved_leave_proposal_id, member_set,
+    target_identity_of,
 };
 
 // ── Proposal classification ──

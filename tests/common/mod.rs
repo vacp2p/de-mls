@@ -16,18 +16,20 @@ use async_trait::async_trait;
 use de_mls::app::{FixedScoringProvider, InMemoryPeerScoreStorage};
 use de_mls::core::PeerScoringService;
 use de_mls::core::{
-    CallbackError, DeterministicStewardList, FreezeOutcome, Group, GroupEventHandler,
-    ProcessResult, ScoringConfig, StewardListConfig, StewardListPlugin, build_key_package_message,
-    create_commit_candidate, finalize_freeze_round, process_inbound,
+    BufferedCommitCandidate, CallbackError, CoreError, DeterministicStewardList, FreezeOutcome,
+    Group, GroupEventHandler, ProcessResult, ProposalKind, ScoringConfig, StewardListConfig,
+    StewardListPlugin, build_key_package_message, compute_commit_hash, finalize_freeze_round,
+    member_set, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
 use de_mls::identity::{Identity, WalletIdentity, parse_wallet_address};
 use de_mls::mls_crypto::{
-    MemoryDeMlsStorage, MlsCredentials, MlsService, OpenMlsService, key_package_bytes_from_json,
+    CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MemoryDeMlsStorage, MlsCommitInput,
+    MlsCredentials, MlsService, OpenMlsService, key_package_bytes_from_json,
 };
 use de_mls::protos::de_mls::messages::v1::{
-    AppMessage, GroupUpdateRequest, InviteMember, WelcomeMessage, group_update_request,
-    welcome_message,
+    AppMessage, CommitCandidate, GroupUpdateRequest, InviteMember, WelcomeMessage,
+    group_update_request, welcome_message,
 };
 use prost::Message as _;
 
@@ -128,6 +130,133 @@ impl GroupEventHandler for MockHandler {
     }
 }
 
+// ─────────────────────────── Test-only protocol helper ───────────────────────────
+
+/// Test-side mirror of `GroupEntry::create_commit_candidate`.
+///
+/// Production callers go through `GroupEntry::create_commit_candidate`,
+/// which pulls `group`, `mls`, and `steward` from `&mut self`. Tests
+/// keep these as separate fields on `StewardHandle` / `JoinerHandle`
+/// (no `state_machine` / `scoring`), so we can't use the entry method
+/// directly. This helper takes the same fields as parameters and runs
+/// identical logic. **Keep in sync with `GroupEntry::create_commit_candidate`.**
+pub fn build_commit_candidate(
+    group: &mut Group,
+    mls: &TestMls,
+    steward: &DeterministicStewardList,
+    self_identity: &[u8],
+    app_id: &[u8],
+) -> Result<Option<OutboundPacket>, CoreError> {
+    if !steward.is_steward(self_identity) && !group.is_in_recovery_mode() {
+        return Err(CoreError::NotASteward);
+    }
+    if group.approved_proposals().is_empty() {
+        return Err(CoreError::NoProposals);
+    }
+
+    let self_removal_pending = group.approved_proposals().values().any(|req| {
+        matches!(
+            req.payload.as_ref(),
+            Some(group_update_request::Payload::RemoveMember(r))
+                if r.identity == self_identity
+        )
+    });
+    if self_removal_pending {
+        return Ok(None);
+    }
+
+    let non_mls_ids: Vec<u32> = group
+        .approved_proposals()
+        .iter()
+        .filter(|(_, req)| ProposalKind::of(req).is_governance())
+        .map(|(&id, _)| id)
+        .collect();
+    if !non_mls_ids.is_empty() {
+        return Err(CoreError::UnexpectedNonMlsProposals {
+            proposal_ids: non_mls_ids,
+        });
+    }
+
+    let current_members = mls.members()?;
+    let current_members_set = member_set(&current_members);
+    let is_member = |id: &[u8]| current_members_set.contains(id);
+    let urgent_target = group.urgent_commit_target().map(|t| t.to_vec());
+
+    let k_max = mls.commit_batch_max();
+    let mut updates = Vec::with_capacity(group.approved_order().len().min(k_max));
+    for pid in group.approved_order() {
+        if updates.len() >= k_max {
+            break;
+        }
+        let Some(proposal) = group.approved_proposals().get(pid) else {
+            continue;
+        };
+        match proposal.payload.as_ref() {
+            Some(group_update_request::Payload::InviteMember(im)) => {
+                if urgent_target.is_some() {
+                    continue;
+                }
+                if is_member(&im.identity) {
+                    continue;
+                }
+                updates.push(MlsCommitInput::Add(KeyPackageBytes::new(
+                    im.key_package_bytes.clone(),
+                    im.identity.clone(),
+                )));
+            }
+            Some(group_update_request::Payload::RemoveMember(rm)) => {
+                if let Some(target) = urgent_target.as_deref()
+                    && rm.identity != target
+                {
+                    continue;
+                }
+                if !is_member(&rm.identity) {
+                    continue;
+                }
+                updates.push(MlsCommitInput::Remove(rm.identity.clone()));
+            }
+            _ => return Err(CoreError::InvalidGroupUpdateRequest),
+        }
+    }
+
+    if updates.is_empty() {
+        return Ok(None);
+    }
+
+    let MlsCommitCandidate {
+        proposals: mls_proposals,
+        commit,
+        welcome,
+    } = mls.create_commit_candidate(&updates)?;
+
+    let candidate = CommitCandidate {
+        group_name: group.group_name_bytes().to_vec(),
+        mls_proposals,
+        commit_message: commit,
+        steward_identity: self_identity.to_vec(),
+    };
+
+    let commit_hash = compute_commit_hash(&candidate.commit_message);
+    let epoch = mls.current_epoch()?;
+    let _ = group.add_freeze_candidate(
+        BufferedCommitCandidate {
+            candidate_msg: candidate.clone(),
+            commit_hash,
+            is_local_candidate: true,
+            welcome_bytes: welcome,
+        },
+        epoch,
+    );
+
+    let candidate_msg: AppMessage = candidate.into();
+    Ok(Some(OutboundPacket::new(
+        candidate_msg.encode_to_vec(),
+        APP_MSG_SUBTOPIC,
+        group.group_name(),
+        app_id,
+    )))
+}
+
 // ─────────────────────────── MLS + group setup ───────────────────────────
 
 pub fn default_steward_config() -> StewardListConfig {
@@ -175,7 +304,8 @@ pub fn setup_mls_for_group(group_name: &str, wallet_hex: &str) -> TestMls {
 /// accepted via [`JoinerHandle::accept_welcome_packet`], which constructs
 /// a fresh MLS service and attaches it to the joiner's group.
 pub fn process_inbound_compat(
-    group: &mut Group<TestMls>,
+    group: &mut Group,
+    mls: Option<&TestMls>,
     payload: &[u8],
     subtopic: &str,
 ) -> Result<ProcessResult, de_mls::core::CoreError> {
@@ -185,7 +315,7 @@ pub fn process_inbound_compat(
             Some(welcome_message::Payload::UserKeyPackage(user_kp)) => {
                 let (key_package_bytes, identity) =
                     key_package_bytes_from_json(user_kp.key_package_bytes)?;
-                if let Some(mls) = group.mls()
+                if let Some(mls) = mls
                     && mls.is_member(&identity)
                 {
                     return Ok(ProcessResult::Noop);
@@ -208,12 +338,12 @@ pub fn process_inbound_compat(
             None => Ok(ProcessResult::Noop),
         }
     } else if subtopic == APP_MSG_SUBTOPIC {
-        if group.mls().is_none() {
+        let Some(mls) = mls else {
             // Pre-refactor behaviour: app messages on a group with no MLS
             // state are silently ignored. Mirrors the User-layer dispatch.
             return Ok(ProcessResult::Noop);
-        }
-        process_inbound(group, payload)
+        };
+        process_inbound(group, mls, payload)
     } else {
         Err(de_mls::core::CoreError::InvalidSubtopic(
             subtopic.to_string(),
@@ -221,12 +351,13 @@ pub fn process_inbound_compat(
     }
 }
 
-/// Test handle: bundles `Group<TestMls>` with the per-group steward
-/// plug-in. Replaces the bare `Group<TestMls>` returned by setup helpers
-/// before the plug-in extraction. Tests access `handle.group` and
-/// `handle.steward` explicitly.
+/// Test handle: bundles `Group`, the per-group MLS service, the
+/// steward-list plug-in, and the self identity. Tests access them as
+/// individual fields; `Deref<Target = Group>` keeps proposal-queue calls
+/// working unchanged (e.g. `handle.insert_approved_proposal(...)`).
 pub struct StewardHandle {
-    pub group: Group<TestMls>,
+    pub group: Group,
+    pub mls: TestMls,
     pub steward: DeterministicStewardList,
     pub identity: Vec<u8>,
 }
@@ -238,18 +369,15 @@ impl StewardHandle {
     }
 }
 
-/// Test ergonomics: deref to the embedded `Group<TestMls>` so existing
-/// proposal-queue calls (`insert_approved_proposal`, `mls`, etc.) keep
-/// working unchanged. Steward-list calls go through `handle.steward`.
 impl std::ops::Deref for StewardHandle {
-    type Target = Group<TestMls>;
-    fn deref(&self) -> &Group<TestMls> {
+    type Target = Group;
+    fn deref(&self) -> &Group {
         &self.group
     }
 }
 
 impl std::ops::DerefMut for StewardHandle {
-    fn deref_mut(&mut self) -> &mut Group<TestMls> {
+    fn deref_mut(&mut self) -> &mut Group {
         &mut self.group
     }
 }
@@ -268,13 +396,14 @@ pub fn setup_steward_with_config(
         OpenMlsService::new_as_creator(group_name.to_string(), storage, Arc::clone(&credentials))
             .unwrap();
     let identity_bytes = identity.identity_bytes().to_vec();
-    let group = Group::create_group(group_name, identity_bytes.clone(), config.clone(), mls);
+    let group = Group::create_group(group_name, identity_bytes.clone());
     let mut steward = DeterministicStewardList::empty(group_name.as_bytes().to_vec(), config);
     let _events = steward
         .install_list(0, std::slice::from_ref(&identity_bytes), 1, 0)
         .expect("bootstrap list install");
     StewardHandle {
         group,
+        mls,
         steward,
         identity: identity_bytes,
     }
@@ -288,7 +417,8 @@ pub struct JoinerHandle {
     pub identity: Arc<WalletIdentity>,
     pub credentials: Arc<MlsCredentials>,
     pub storage: Arc<MemoryDeMlsStorage>,
-    pub group: Group<TestMls>,
+    pub group: Group,
+    pub mls: Option<TestMls>,
     pub steward: DeterministicStewardList,
     pub kp_packet: OutboundPacket,
 }
@@ -309,7 +439,7 @@ impl JoinerHandle {
     }
 
     /// Accept a welcome `OutboundPacket` (the kind `steward_add_joiner`
-    /// returns) and attach the resulting MLS service to `self.group`.
+    /// returns) and store the resulting MLS service on the handle.
     /// Panics if the packet isn't an `InvitationToJoin` or doesn't match
     /// this joiner's key package — both indicate a test setup bug.
     pub fn accept_welcome_packet(&mut self, welcome_packet: &OutboundPacket) {
@@ -322,7 +452,7 @@ impl JoinerHandle {
             .try_accept_welcome(&invitation.mls_message_out_bytes)
             .unwrap()
             .expect("welcome did not match this joiner's KP");
-        self.group.attach_mls(svc);
+        self.mls = Some(svc);
     }
 }
 
@@ -336,11 +466,7 @@ pub fn setup_joiner_with_config(
     config: StewardListConfig,
 ) -> JoinerHandle {
     let (identity, credentials, storage) = setup_identity_storage(wallet_hex);
-    let group: Group<TestMls> = Group::prepare_to_join(
-        group_name,
-        identity.identity_bytes().to_vec(),
-        config.clone(),
-    );
+    let group = Group::prepare_to_join(group_name, identity.identity_bytes().to_vec());
     let steward = DeterministicStewardList::empty(group_name.as_bytes().to_vec(), config);
     let key_package =
         OpenMlsService::<Arc<MemoryDeMlsStorage>>::generate_key_package(&storage, &credentials)
@@ -351,6 +477,7 @@ pub fn setup_joiner_with_config(
         credentials,
         storage,
         group,
+        mls: None,
         steward,
         kp_packet,
     }
@@ -380,10 +507,7 @@ pub fn steward_add_joiner(
     };
     let (key_package_bytes, identity) =
         key_package_bytes_from_json(user_kp.key_package_bytes).unwrap();
-    let already_member = steward_handle
-        .group
-        .mls()
-        .is_some_and(|m| m.is_member(&identity));
+    let already_member = steward_handle.mls.is_member(&identity);
     if already_member {
         panic!("Expected key package skipped for already-member");
     }
@@ -399,8 +523,9 @@ pub fn steward_add_joiner(
         .group
         .insert_approved_proposal(proposal_id, gur);
     let self_id = steward_handle.identity.clone();
-    let packets = create_commit_candidate(
+    let packets = build_commit_candidate(
         &mut steward_handle.group,
+        &steward_handle.mls,
         &steward_handle.steward,
         &self_id,
         b"test-app-id",
@@ -409,6 +534,7 @@ pub fn steward_add_joiner(
 
     let finalize = finalize_freeze_round(
         &mut steward_handle.group,
+        &steward_handle.mls,
         &steward_handle.steward,
         false,
         b"test-app-id",

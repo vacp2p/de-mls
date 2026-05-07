@@ -3,11 +3,10 @@
 use tracing::{error, info};
 
 use crate::{
-    app::{FreezeTimeoutStatus, GroupState, StateChangeHandler, User, UserError, user::GroupEntry},
+    app::{FreezeTimeoutStatus, GroupState, StateChangeHandler, User, UserError},
     core::{
         DeMlsProvider, FreezeFinalizeResult, FreezeOutcome, GroupEventHandler, PeerScoringPlugin,
-        ScoreEvent, ScoreOp, StewardListPlugin, create_commit_candidate, finalize_freeze_round,
-        group_members,
+        ScoreEvent, ScoreOp, StewardListPlugin,
     },
     ds::WELCOME_SUBTOPIC,
     identity::Identity,
@@ -98,10 +97,9 @@ impl<
 
         let (finalize_result, downward_cross) = {
             let mut entry = entry_arc.write().await;
-            let allow_subset = entry.group.allow_subset_candidates();
-            let result = if entry.group.mls().is_some() {
-                let GroupEntry { group, steward, .. } = &mut *entry;
-                match finalize_freeze_round(group, steward, allow_subset, &self.app_id) {
+            let allow_subset = entry.steward.config().allow_subset_candidates;
+            let result = if entry.mls().is_some() {
+                match entry.finalize_freeze_round(allow_subset, &self.app_id) {
                     Ok(result) => result,
                     Err(e) => {
                         error!(group = group_name, error = %e, "freeze finalize failed");
@@ -183,11 +181,11 @@ impl<
                         // the same event independently; threshold-crossing
                         // removal still goes through SCORE_BELOW_THRESHOLD
                         // consensus in steward.rs.
-                        let accuse_target = match entry.group.mls() {
+                        let accuse_target = match entry.mls() {
                             Some(mls) => {
                                 let violation_epoch = mls.current_epoch()?;
                                 let self_identity = self.identity().identity_bytes();
-                                let members = group_members(&entry.group)?;
+                                let members = entry.group_members()?;
                                 let eligible = entry.group.steward_eligibility(&members);
                                 entry
                                     .steward
@@ -274,7 +272,7 @@ impl<
             .state_machine
             .check_steward_inactivity(proposal_count, inactivity);
         if entered_freezing {
-            let epoch = entry.group.expect_mls()?.current_epoch()?;
+            let epoch = entry.expect_mls()?.current_epoch()?;
             entry.group.ensure_freeze_round(epoch);
 
             // Stewards build their own candidate under the same lock.
@@ -282,8 +280,7 @@ impl<
             // peers' candidates still get processed.
             let self_identity = self.identity().identity_bytes().to_vec();
             let outbound = if entry.steward.is_steward(&self_identity) {
-                let GroupEntry { group, steward, .. } = &mut *entry;
-                match create_commit_candidate(group, steward, &self_identity, &self.app_id) {
+                match entry.create_commit_candidate(&self_identity, &self.app_id) {
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(
