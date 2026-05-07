@@ -396,7 +396,7 @@ pub fn setup_steward_with_config(
         OpenMlsService::new_as_creator(group_name.to_string(), storage, Arc::clone(&credentials))
             .unwrap();
     let identity_bytes = identity.identity_bytes().to_vec();
-    let group = Group::create_group(group_name, identity_bytes.clone(), config.clone());
+    let group = Group::create_group(group_name, identity_bytes.clone());
     let mut steward = DeterministicStewardList::empty(group_name.as_bytes().to_vec(), config);
     let _events = steward
         .install_list(0, std::slice::from_ref(&identity_bytes), 1, 0)
@@ -466,11 +466,7 @@ pub fn setup_joiner_with_config(
     config: StewardListConfig,
 ) -> JoinerHandle {
     let (identity, credentials, storage) = setup_identity_storage(wallet_hex);
-    let group = Group::prepare_to_join(
-        group_name,
-        identity.identity_bytes().to_vec(),
-        config.clone(),
-    );
+    let group = Group::prepare_to_join(group_name, identity.identity_bytes().to_vec());
     let steward = DeterministicStewardList::empty(group_name.as_bytes().to_vec(), config);
     let key_package =
         OpenMlsService::<Arc<MemoryDeMlsStorage>>::generate_key_package(&storage, &credentials)

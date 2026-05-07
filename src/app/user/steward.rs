@@ -431,7 +431,7 @@ impl<
                 election_epoch: list.election_epoch(),
                 sn_min: list.config().sn_min as u32,
                 sn_max: list.config().sn_max as u32,
-                allow_subset_candidates: entry.group.allow_subset_candidates(),
+                allow_subset_candidates: entry.steward.config().allow_subset_candidates,
                 peer_scores: scores,
                 timing: Some(timing),
                 retry_round: list.retry_round(),

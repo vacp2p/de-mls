@@ -97,7 +97,7 @@ impl<
 
         let (finalize_result, downward_cross) = {
             let mut entry = entry_arc.write().await;
-            let allow_subset = entry.group.allow_subset_candidates();
+            let allow_subset = entry.steward.config().allow_subset_candidates;
             let result = if entry.mls().is_some() {
                 match entry.finalize_freeze_round(allow_subset, &self.app_id) {
                     Ok(result) => result,

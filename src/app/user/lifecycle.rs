@@ -58,19 +58,11 @@ impl<
         let self_identity_bytes = self.identity().identity_bytes().to_vec();
         let (mut group, mls_opt, state_machine) = if is_creation {
             let mls = (self.mls_creator_factory)(group_name.to_string())?;
-            let group = Group::create_group(
-                group_name,
-                self_identity_bytes.clone(),
-                config.protocol.clone(),
-            );
+            let group = Group::create_group(group_name, self_identity_bytes.clone());
             let state_machine = GroupStateMachine::new_as_member_with_config(config.clone());
             (group, Some(mls), state_machine)
         } else {
-            let group = Group::prepare_to_join(
-                group_name,
-                self_identity_bytes.clone(),
-                config.protocol.clone(),
-            );
+            let group = Group::prepare_to_join(group_name, self_identity_bytes.clone());
             let state_machine = GroupStateMachine::new_as_pending_join_with_config(config.clone());
             (group, None, state_machine)
         };

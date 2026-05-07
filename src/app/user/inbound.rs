@@ -376,14 +376,13 @@ impl<
         };
         let mut entry = entry_arc.write().await;
         let sn = sync.steward_members.len();
-        entry.steward.set_config(protocol_config.clone());
+        entry.steward.set_config(protocol_config);
         let _events = entry.steward.install_list(
             sync.election_epoch,
             &sync.steward_members,
             sn,
             sync.retry_round,
         )?;
-        entry.group.set_protocol_config(protocol_config);
         entry.steward.set_max_retries(sync.max_reelection_attempts);
         entry.scoring.set_threshold(sync.threshold_peer_score);
         let snapshot = ScoreSnapshot {

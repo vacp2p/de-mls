@@ -46,11 +46,7 @@ fn test_process_inbound_app_msg_before_mls_init() {
     // Joiner-side handle with no MLS service attached yet.
     let (identity, _credentials, _storage) =
         setup_identity_storage("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let mut group: Group = Group::prepare_to_join(
-        "test-group",
-        identity.identity_bytes().to_vec(),
-        default_steward_config(),
-    );
+    let mut group: Group = Group::prepare_to_join("test-group", identity.identity_bytes().to_vec());
 
     let result =
         process_inbound_compat(&mut group, None, b"some payload", APP_MSG_SUBTOPIC).unwrap();
@@ -134,11 +130,7 @@ fn test_process_inbound_welcome_non_steward_buffers_key_package() {
     // same; promotion to a voting proposal is the app's decision.
     let (identity, _credentials, _storage) =
         setup_identity_storage("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let mut group: Group = Group::prepare_to_join(
-        group_name,
-        identity.identity_bytes().to_vec(),
-        default_steward_config(),
-    );
+    let mut group: Group = Group::prepare_to_join(group_name, identity.identity_bytes().to_vec());
 
     let other = setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
 
@@ -545,7 +537,7 @@ fn test_auto_fill_never_triggers_with_default_config() {
     let members = steward_handle.mls.members().unwrap();
     assert_eq!(members.len(), 1);
     assert!(
-        members.len() >= steward_handle.protocol_config().sn_min,
+        members.len() >= steward_handle.steward.config().sn_min,
         "default config (sn_min=1) should never trigger auto-fill"
     );
 }
@@ -694,8 +686,8 @@ fn test_group_sync_propagates_divergent_per_group_config() {
         joiner.group.pending_update_max_epochs(),
         STEWARD_PENDING_MAX_EPOCHS
     );
-    assert_ne!(joiner.group.protocol_config().sn_min, STEWARD_SN_MIN);
-    assert_ne!(joiner.group.protocol_config().sn_max, STEWARD_SN_MAX);
+    assert_ne!(joiner.steward.config().sn_min, STEWARD_SN_MIN);
+    assert_ne!(joiner.steward.config().sn_max, STEWARD_SN_MAX);
 
     let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
     joiner.accept_welcome_packet(&welcome_packet);
@@ -708,7 +700,7 @@ fn test_group_sync_propagates_divergent_per_group_config() {
         election_epoch: steward_list.election_epoch(),
         sn_min: steward_list.config().sn_min as u32,
         sn_max: steward_list.config().sn_max as u32,
-        allow_subset_candidates: steward_handle.allow_subset_candidates(),
+        allow_subset_candidates: steward_handle.steward.config().allow_subset_candidates,
         peer_scores: vec![
             PeerScore {
                 member_id: alice.clone(),
@@ -756,7 +748,7 @@ fn test_group_sync_propagates_divergent_per_group_config() {
     let mut applied_protocol =
         StewardListConfig::new(received.sn_min as usize, received.sn_max as usize).unwrap();
     applied_protocol.allow_subset_candidates = received.allow_subset_candidates;
-    joiner.group.set_protocol_config(applied_protocol);
+    joiner.steward.set_config(applied_protocol);
     joiner
         .group
         .set_liveness_criteria_yes(received.liveness_criteria_yes);
@@ -769,8 +761,8 @@ fn test_group_sync_propagates_divergent_per_group_config() {
         joiner.group.pending_update_max_epochs(),
         STEWARD_PENDING_MAX_EPOCHS
     );
-    assert_eq!(joiner.group.protocol_config().sn_min, STEWARD_SN_MIN);
-    assert_eq!(joiner.group.protocol_config().sn_max, STEWARD_SN_MAX);
+    assert_eq!(joiner.steward.config().sn_min, STEWARD_SN_MIN);
+    assert_eq!(joiner.steward.config().sn_max, STEWARD_SN_MAX);
 
     let mut scoring = PeerScoringService::new(
         InMemoryPeerScoreStorage::new(),

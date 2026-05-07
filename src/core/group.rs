@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    core::{proposal_kind::ProposalKind, steward_list_plugin::StewardListConfig},
+    core::proposal_kind::ProposalKind,
     protos::de_mls::messages::v1::{CommitCandidate, GroupUpdateRequest, group_update_request},
 };
 
@@ -109,10 +109,6 @@ pub struct Group {
     approved_order: Vec<ProposalId>,
     /// Proposals waiting on consensus voting (created by this user).
     voting_proposals: HashMap<ProposalId, GroupUpdateRequest>,
-    /// Protocol configuration. Currently bundles steward list bounds
-    /// (also held on the steward plug-in) with `k_max` (commit batch
-    /// ceiling). Pending split into per-concern config types.
-    protocol_config: StewardListConfig,
     /// Active emergency criteria proposals not yet finalized by consensus.
     /// While non-empty, lower-priority proposals MUST be blocked (RFC §Partial Freeze).
     active_emergency_ids: HashSet<ProposalId>,
@@ -152,18 +148,13 @@ pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
 pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
 
 impl Group {
-    fn new_base(
-        group_name: &str,
-        self_identity: Vec<u8>,
-        protocol_config: StewardListConfig,
-    ) -> Self {
+    fn new_base(group_name: &str, self_identity: Vec<u8>) -> Self {
         Self {
             group_name: group_name.to_string(),
             self_identity,
             approved_proposals: HashMap::new(),
             approved_order: Vec::new(),
             voting_proposals: HashMap::new(),
-            protocol_config,
             active_emergency_ids: HashSet::new(),
             pending_removal_targets: HashSet::new(),
             committed_batch_hashes: VecDeque::new(),
@@ -195,23 +186,15 @@ impl Group {
     /// Build a joiner-side handle for an existing group. The MLS service
     /// is held on `GroupEntry`; the lifecycle layer attaches it via
     /// `entry.attach_mls(...)` once the welcome arrives.
-    pub fn prepare_to_join(
-        group_name: &str,
-        self_identity: Vec<u8>,
-        protocol_config: StewardListConfig,
-    ) -> Self {
-        Self::new_base(group_name, self_identity, protocol_config)
+    pub fn prepare_to_join(group_name: &str, self_identity: Vec<u8>) -> Self {
+        Self::new_base(group_name, self_identity)
     }
 
     /// Build a creator-side handle. The steward list and MLS service
     /// are owned by `GroupEntry`; this constructor only initializes the
     /// proposal-queue and freeze-round state.
-    pub fn create_group(
-        group_name: &str,
-        creator_identity: Vec<u8>,
-        protocol_config: StewardListConfig,
-    ) -> Self {
-        Self::new_base(group_name, creator_identity, protocol_config)
+    pub fn create_group(group_name: &str, creator_identity: Vec<u8>) -> Self {
+        Self::new_base(group_name, creator_identity)
     }
 
     pub fn group_name(&self) -> &str {
@@ -220,10 +203,6 @@ impl Group {
 
     pub fn group_name_bytes(&self) -> &[u8] {
         self.group_name.as_bytes()
-    }
-
-    pub fn allow_subset_candidates(&self) -> bool {
-        self.protocol_config.allow_subset_candidates
     }
 
     /// Build the eligibility predicate that the steward plug-in's "live"
@@ -433,16 +412,6 @@ impl Group {
 
     pub fn exit_recovery_mode(&mut self) {
         self.recovery_mode = false;
-    }
-
-    // ─────────────────────────── Protocol Config ───────────────────────────
-
-    pub fn protocol_config(&self) -> &StewardListConfig {
-        &self.protocol_config
-    }
-
-    pub fn set_protocol_config(&mut self, config: StewardListConfig) {
-        self.protocol_config = config;
     }
 
     /// Cheap idempotence check for auto-retry: don't submit a second election
@@ -766,16 +735,12 @@ mod tests {
         ids.iter().map(|&id| member(id)).collect()
     }
 
-    fn default_config() -> StewardListConfig {
-        StewardListConfig::new(1, 5).unwrap()
-    }
-
     /// Test convenience: build a creator-side `Group`. Steward
     /// list is owned by the per-group plug-in (covered separately in
     /// `core::steward_list_plugin::tests`); these tests focus on
     /// proposal-queue + dedup + freeze-round logic on `Group`.
-    fn creator_group(name: &str, identity: Vec<u8>, config: StewardListConfig) -> Group {
-        Group::create_group(name, identity, config)
+    fn creator_group(name: &str, identity: Vec<u8>) -> Group {
+        Group::create_group(name, identity)
     }
 
     fn insert_self_leave(group: &mut Group, identity: &[u8]) {
@@ -789,8 +754,7 @@ mod tests {
 
     #[test]
     fn test_reject_all_approved_preserves_self_leave_entry() {
-        let config = StewardListConfig::new(1, 3).unwrap();
-        let mut group = creator_group("test-group", member(1), config);
+        let mut group = creator_group("test-group", member(1));
 
         let leaver = member(2);
         insert_self_leave(&mut group, &leaver);
@@ -816,8 +780,7 @@ mod tests {
 
     #[test]
     fn test_prune_clears_self_leave_entry_when_member_gone() {
-        let config = StewardListConfig::new(1, 3).unwrap();
-        let mut group = creator_group("test-group", member(1), config);
+        let mut group = creator_group("test-group", member(1));
 
         let leaver = member(2);
         insert_self_leave(&mut group, &leaver);
@@ -870,7 +833,7 @@ mod tests {
 
     #[test]
     fn mark_consensus_outcome_persists_in_resolved_cache() {
-        let mut group = creator_group("g", member(1), default_config());
+        let mut group = creator_group("g", member(1));
         assert!(!group.is_consensus_outcome_applied(42));
         group.mark_consensus_outcome_applied(42);
         assert!(group.is_consensus_outcome_applied(42));
@@ -889,8 +852,7 @@ mod tests {
     /// source; Add proposals are dropped.
     #[test]
     fn test_reject_all_approved_preserves_all_remove_member() {
-        let config = StewardListConfig::new(1, 3).unwrap();
-        let mut group = creator_group("test-group", member(1), config);
+        let mut group = creator_group("test-group", member(1));
 
         let ban_id: ProposalId = 0x1111_2222;
         let ecp_id: ProposalId = 0x3333_4444;
@@ -917,7 +879,7 @@ mod tests {
     /// `approved_order` is FIFO regardless of proposal-id ordering.
     #[test]
     fn test_approved_order_preserves_fifo_across_mutations() {
-        let mut group = creator_group("g", member(1), default_config());
+        let mut group = creator_group("g", member(1));
 
         insert_remove_member(&mut group, &member(2), 500);
         insert_remove_member(&mut group, &member(3), 100);
@@ -937,7 +899,7 @@ mod tests {
 
     #[test]
     fn test_urgent_commit_target_set_take_clears() {
-        let mut group = creator_group("g", member(1), default_config());
+        let mut group = creator_group("g", member(1));
         assert!(group.urgent_commit_target().is_none());
 
         let target = member(7);
@@ -951,7 +913,7 @@ mod tests {
 
     #[test]
     fn test_drop_approved_removals_for_target() {
-        let mut group = creator_group("g", member(1), default_config());
+        let mut group = creator_group("g", member(1));
         let victim = member(7);
         let bystander = member(9);
 
@@ -983,7 +945,7 @@ mod tests {
     /// `first_seen_epoch < cutoff` are dropped.
     #[test]
     fn test_expire_pending_updates_drops_entries_older_than_max_age() {
-        let mut group = creator_group("g", member(1), default_config());
+        let mut group = creator_group("g", member(1));
         let stale = member(7);
         let fresh = member(9);
 
@@ -1003,7 +965,7 @@ mod tests {
     /// boundary case a tightened sync hits when shrinking the window.
     #[test]
     fn test_expire_pending_updates_max_age_zero_keeps_only_current_epoch() {
-        let mut group = creator_group("g", member(1), default_config());
+        let mut group = creator_group("g", member(1));
         let prior = member(7);
         let current = member(9);
 
