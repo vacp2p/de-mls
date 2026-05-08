@@ -271,7 +271,7 @@ pub fn apply_consensus_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::steward_list_plugin::{StewardList, StewardListConfig};
+    use crate::core::steward_list::{StewardList, StewardListConfig};
     use crate::protos::de_mls::messages::v1::{
         GroupUpdateRequest, StewardElectionProposal, group_update_request,
     };

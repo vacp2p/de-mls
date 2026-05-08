@@ -25,7 +25,7 @@ mod process_result;
 mod proposal_kind;
 mod provider;
 mod state_machine;
-mod steward_list_plugin;
+mod steward_list;
 
 // ── Core group operations ──
 pub use api::{
@@ -71,7 +71,7 @@ pub use proposal_kind::ProposalKind;
 pub use state_machine::{GroupState, GroupStateMachine, OperatingMode};
 
 // ── Steward list ──
-pub use steward_list_plugin::{
+pub use steward_list::{
     DEFAULT_MAX_RETRIES, DeterministicStewardList, ElectionDecision, StewardList,
     StewardListConfig, StewardListEvent, StewardListPlugin,
 };
