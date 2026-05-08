@@ -1,6 +1,6 @@
 //! Pure consensus result application.
 //!
-//! Updates a [`Group`]'s proposal queues in response to a consensus
+//! Updates a [`Conversation`]'s proposal queues in response to a consensus
 //! outcome. No I/O, no service calls. Score deltas for emergency outcomes
 //! are derived alongside in [`crate::core::emergency_score_ops`].
 //!
@@ -12,11 +12,11 @@ use prost::Message;
 use tracing::info;
 
 use crate::{
-    core::{CoreError, Group},
+    core::{Conversation, CoreError},
     identity::ShortId,
     protos::de_mls::messages::v1::{
-        GroupUpdateRequest, RemoveMember, StewardElectionProposal, ViolationEvidence,
-        ViolationType, group_update_request,
+        ConversationUpdateRequest, RemoveMember, StewardElectionProposal, ViolationEvidence,
+        ViolationType, conversation_update_request,
     },
 };
 
@@ -36,18 +36,18 @@ pub struct ConsensusApplyResult {
     pub enter_recovery_mode: bool,
 }
 
-/// Extract emergency evidence from a `GroupUpdateRequest`, if present.
-fn extract_emergency_evidence(req: &GroupUpdateRequest) -> Option<&ViolationEvidence> {
+/// Extract emergency evidence from a `ConversationUpdateRequest`, if present.
+fn extract_emergency_evidence(req: &ConversationUpdateRequest) -> Option<&ViolationEvidence> {
     match &req.payload {
-        Some(group_update_request::Payload::EmergencyCriteria(ec)) => ec.evidence.as_ref(),
+        Some(conversation_update_request::Payload::EmergencyCriteria(ec)) => ec.evidence.as_ref(),
         _ => None,
     }
 }
 
-/// Extract a steward election proposal from a `GroupUpdateRequest`, if present.
-fn extract_election_proposal(req: &GroupUpdateRequest) -> Option<&StewardElectionProposal> {
+/// Extract a steward election proposal from a `ConversationUpdateRequest`, if present.
+fn extract_election_proposal(req: &ConversationUpdateRequest) -> Option<&StewardElectionProposal> {
     match &req.payload {
-        Some(group_update_request::Payload::StewardElection(se)) => Some(se),
+        Some(conversation_update_request::Payload::StewardElection(se)) => Some(se),
         _ => None,
     }
 }
@@ -62,12 +62,14 @@ fn is_deadlock(evidence: &ViolationEvidence) -> bool {
     ViolationType::try_from(evidence.violation_type) == Ok(ViolationType::Deadlock)
 }
 
-/// Build a `RemoveMember` `GroupUpdateRequest` for the target in score-below-threshold evidence.
-fn removal_request_for(evidence: &ViolationEvidence) -> GroupUpdateRequest {
-    GroupUpdateRequest {
-        payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
-            identity: evidence.target_member_id.clone(),
-        })),
+/// Build a `RemoveMember` `ConversationUpdateRequest` for the target in score-below-threshold evidence.
+fn removal_request_for(evidence: &ViolationEvidence) -> ConversationUpdateRequest {
+    ConversationUpdateRequest {
+        payload: Some(conversation_update_request::Payload::RemoveMember(
+            RemoveMember {
+                identity: evidence.target_member_id.clone(),
+            },
+        )),
     }
 }
 
@@ -76,7 +78,7 @@ fn removal_request_for(evidence: &ViolationEvidence) -> GroupUpdateRequest {
 /// ECP that transforms into one. Returns `None` for elections, non-removal
 /// emergencies, non-removal regular proposals, and rejections.
 fn pending_removal_target(
-    request: &GroupUpdateRequest,
+    request: &ConversationUpdateRequest,
     evidence: Option<&ViolationEvidence>,
     approved: bool,
     is_emergency: bool,
@@ -92,7 +94,7 @@ fn pending_removal_target(
         return None;
     }
     match request.payload.as_ref() {
-        Some(group_update_request::Payload::RemoveMember(r)) => Some(r.identity.clone()),
+        Some(conversation_update_request::Payload::RemoveMember(r)) => Some(r.identity.clone()),
         _ => None,
     }
 }
@@ -101,7 +103,7 @@ fn pending_removal_target(
 /// back to the app for validation and install; NO drops the owner's
 /// voting-queue entry.
 fn apply_election_outcome(
-    group: &mut Group,
+    group: &mut Conversation,
     proposal_id: u32,
     approved: bool,
     election: StewardElectionProposal,
@@ -148,13 +150,13 @@ fn apply_election_outcome(
 /// - **Rejected (any kind)** — dropped from the voting queue if we
 ///   owned it.
 pub fn apply_consensus_result(
-    group: &mut Group,
+    group: &mut Conversation,
     proposal_id: u32,
     approved: bool,
     payload: &[u8],
 ) -> Result<ConsensusApplyResult, CoreError> {
     let is_owner = group.is_owner_of_proposal(proposal_id);
-    let request = GroupUpdateRequest::decode(payload)?;
+    let request = ConversationUpdateRequest::decode(payload)?;
     let evidence = extract_emergency_evidence(&request).cloned();
     let is_emergency = evidence.is_some();
 
@@ -234,7 +236,7 @@ pub fn apply_consensus_result(
             force_freezing = true;
         } else if evidence.as_ref().is_some_and(is_deadlock) {
             // Layer 3: relax the steward gate so any member can produce
-            // the next commit. App caller calls `GroupHandle::enter_recovery_mode()`
+            // the next commit. App caller calls `ConversationHandle::enter_recovery_mode()`
             // when it sees this flag; cleared when a fresh election lands.
             enter_recovery_mode = true;
             force_freezing = true;
@@ -273,7 +275,7 @@ mod tests {
     use super::*;
     use crate::core::steward_list::{StewardList, StewardListConfig};
     use crate::protos::de_mls::messages::v1::{
-        GroupUpdateRequest, StewardElectionProposal, group_update_request,
+        ConversationUpdateRequest, StewardElectionProposal, conversation_update_request,
     };
     use prost::Message;
 
@@ -285,13 +287,13 @@ mod tests {
         ids.iter().map(|&id| member(id)).collect()
     }
 
-    fn make_group(name: &str, identity: Vec<u8>) -> Group {
-        Group::create_group(name, identity)
+    fn make_group(name: &str, identity: Vec<u8>) -> Conversation {
+        Conversation::create(name, identity)
     }
 
-    fn election_request(stewards: Vec<Vec<u8>>, epoch: u64) -> GroupUpdateRequest {
-        GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::StewardElection(
+    fn election_request(stewards: Vec<Vec<u8>>, epoch: u64) -> ConversationUpdateRequest {
+        ConversationUpdateRequest {
+            payload: Some(conversation_update_request::Payload::StewardElection(
                 StewardElectionProposal {
                     proposed_stewards: stewards,
                     election_epoch: epoch,
@@ -360,11 +362,11 @@ mod tests {
         assert_eq!(group.approved_proposals_count(), 0);
     }
 
-    fn remove_request(target: Vec<u8>) -> GroupUpdateRequest {
-        GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
-                identity: target,
-            })),
+    fn remove_request(target: Vec<u8>) -> ConversationUpdateRequest {
+        ConversationUpdateRequest {
+            payload: Some(conversation_update_request::Payload::RemoveMember(
+                RemoveMember { identity: target },
+            )),
         }
     }
 
@@ -427,7 +429,10 @@ mod tests {
         );
     }
 
-    fn score_below_threshold_request(target: Vec<u8>, creator: Vec<u8>) -> GroupUpdateRequest {
+    fn score_below_threshold_request(
+        target: Vec<u8>,
+        creator: Vec<u8>,
+    ) -> ConversationUpdateRequest {
         ViolationEvidence::score_below_threshold(target, 0, -10)
             .with_creator(creator)
             .into_update_request()
@@ -467,7 +472,7 @@ mod tests {
         assert_eq!(group.approved_proposals_count(), 0);
     }
 
-    fn deadlock_request(creator: Vec<u8>) -> GroupUpdateRequest {
+    fn deadlock_request(creator: Vec<u8>) -> ConversationUpdateRequest {
         ViolationEvidence::deadlock(0)
             .with_creator(creator)
             .into_update_request()

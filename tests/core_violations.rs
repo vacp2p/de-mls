@@ -10,8 +10,8 @@ use de_mls::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 use de_mls::identity::Identity;
 use de_mls::mls_crypto::MlsService;
 use de_mls::protos::de_mls::messages::v1::{
-    AppMessage, GroupUpdateRequest, ViolationEvidence, ViolationType, app_message,
-    group_update_request,
+    AppMessage, ConversationUpdateRequest, ViolationEvidence, ViolationType, app_message,
+    conversation_update_request,
 };
 use prost::Message;
 
@@ -30,7 +30,7 @@ fn test_violation_detected_produces_emergency_proposal() {
     let request = evidence.into_update_request().unwrap();
 
     match request.payload {
-        Some(group_update_request::Payload::EmergencyCriteria(ec)) => {
+        Some(conversation_update_request::Payload::EmergencyCriteria(ec)) => {
             let ev = ec.evidence.expect("Expected evidence");
             assert_eq!(ev.violation_type, 1);
             assert_eq!(ev.target_member_id, vec![0xAA, 0xBB]);
@@ -43,8 +43,11 @@ fn test_violation_detected_produces_emergency_proposal() {
 /// Test: create_commit_candidate rejects emergency criteria proposals in the approved queue.
 #[test]
 fn test_emergency_in_approved_queue_returns_error() {
-    let group_name = "emergency-only-batch";
-    let mut group = setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let conversation_name = "emergency-only-batch";
+    let mut group = setup_steward(
+        conversation_name,
+        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    );
 
     let emergency_request = ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new())
         .with_creator(vec![0x01])
@@ -73,8 +76,11 @@ fn test_emergency_in_approved_queue_returns_error() {
 /// Test: remove_approved_proposal correctly removes a single proposal.
 #[test]
 fn test_remove_approved_proposal() {
-    let group_name = "remove-approved";
-    let mut group = setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let conversation_name = "remove-approved";
+    let mut group = setup_steward(
+        conversation_name,
+        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    );
 
     let emergency_request = ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new())
         .with_creator(vec![0x01])
@@ -100,20 +106,26 @@ fn test_violation_evidence_carries_steward_id_and_epoch() {
 /// Test: epoch starts at 0 for a freshly created group.
 #[test]
 fn test_mls_epoch_accessible_after_group_creation() {
-    let group_name = "epoch-mls";
-    let group = setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let conversation_name = "epoch-mls";
+    let group = setup_steward(
+        conversation_name,
+        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    );
     let epoch = group.mls.current_epoch().unwrap();
     assert_eq!(epoch, 0);
 }
 
 #[test]
 fn test_clear_approved_proposals_does_not_change_mls_epoch() {
-    let group_name = "epoch-no-change";
-    let mut group = setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let conversation_name = "epoch-no-change";
+    let mut group = setup_steward(
+        conversation_name,
+        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    );
 
     assert_eq!(group.mls.current_epoch().unwrap(), 0);
 
-    group.insert_approved_proposal(1, GroupUpdateRequest { payload: None });
+    group.insert_approved_proposal(1, ConversationUpdateRequest { payload: None });
     group.clear_approved_proposals();
     // MLS epoch only advances on actual commit merge, not on clear_approved_proposals
     assert_eq!(group.mls.current_epoch().unwrap(), 0);
@@ -122,8 +134,11 @@ fn test_clear_approved_proposals_does_not_change_mls_epoch() {
 /// Test: apply_consensus_result errors on invalid (unparseable) payload.
 #[test]
 fn test_apply_consensus_result_invalid_payload() {
-    let group_name = "invalid-payload";
-    let mut group = setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let conversation_name = "invalid-payload";
+    let mut group = setup_steward(
+        conversation_name,
+        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    );
 
     let result = apply_consensus_result(&mut group, 999, true, &[0xFF, 0xFF]);
     assert!(result.is_err());
@@ -133,15 +148,23 @@ fn test_apply_consensus_result_invalid_payload() {
 /// causes an error.
 #[test]
 fn test_emergency_mixed_with_regular_returns_error() {
-    let group_name = "emergency-digest-filter";
-    let mut steward_handle =
-        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let mut joiner = setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+    let conversation_name = "emergency-digest-filter";
+    let mut steward_handle = setup_steward(
+        conversation_name,
+        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    );
+    let mut joiner = setup_joiner(
+        conversation_name,
+        "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    );
 
     let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
     joiner.accept_welcome_packet(&welcome_packet);
 
-    let joiner2 = setup_joiner(group_name, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
+    let joiner2 = setup_joiner(
+        conversation_name,
+        "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    );
     let result = process_inbound_compat(
         &mut steward_handle.group,
         Some(&steward_handle.mls),
@@ -187,16 +210,24 @@ fn test_emergency_mixed_with_regular_returns_error() {
 /// Test: same batch received twice hits dedup and returns Noop.
 #[test]
 fn test_duplicate_batch_returns_noop() {
-    let group_name = "dedup-batch";
+    let conversation_name = "dedup-batch";
 
-    let mut steward_handle =
-        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let mut joiner = setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+    let mut steward_handle = setup_steward(
+        conversation_name,
+        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    );
+    let mut joiner = setup_joiner(
+        conversation_name,
+        "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    );
 
     let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
     joiner.accept_welcome_packet(&welcome_packet);
 
-    let joiner2 = setup_joiner(group_name, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
+    let joiner2 = setup_joiner(
+        conversation_name,
+        "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    );
 
     let result = process_inbound_compat(
         &mut steward_handle.group,
@@ -263,11 +294,16 @@ fn test_duplicate_batch_returns_noop() {
 /// Test: after a join, MLS members are accessible from the joiner side.
 #[test]
 fn test_violation_does_not_corrupt_mls_state() {
-    let group_name = "violation-no-corrupt";
+    let conversation_name = "violation-no-corrupt";
 
-    let mut steward_handle =
-        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let mut joiner = setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+    let mut steward_handle = setup_steward(
+        conversation_name,
+        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    );
+    let mut joiner = setup_joiner(
+        conversation_name,
+        "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    );
 
     let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
     joiner.accept_welcome_packet(&welcome_packet);
@@ -284,16 +320,24 @@ fn test_violation_does_not_corrupt_mls_state() {
 /// Test: candidate arriving without a freeze round is ignored.
 #[test]
 fn test_candidate_ignored_without_freeze_round() {
-    let group_name = "no-freeze-round";
+    let conversation_name = "no-freeze-round";
 
-    let mut steward_handle =
-        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let mut joiner = setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+    let mut steward_handle = setup_steward(
+        conversation_name,
+        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    );
+    let mut joiner = setup_joiner(
+        conversation_name,
+        "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    );
 
     let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
     joiner.accept_welcome_packet(&welcome_packet);
 
-    let joiner2 = setup_joiner(group_name, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
+    let joiner2 = setup_joiner(
+        conversation_name,
+        "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    );
 
     let result = process_inbound_compat(
         &mut steward_handle.group,
@@ -342,17 +386,25 @@ fn test_candidate_ignored_without_freeze_round() {
 /// uses MLS-authenticated sender identity from the staged commit.
 #[test]
 fn test_commit_candidate_roundtrip_sender_identity() {
-    let group_name = "candidate-sender-id";
+    let conversation_name = "candidate-sender-id";
 
-    let mut steward_handle =
-        setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let mut joiner = setup_joiner(group_name, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+    let mut steward_handle = setup_steward(
+        conversation_name,
+        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    );
+    let mut joiner = setup_joiner(
+        conversation_name,
+        "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    );
 
     let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
     joiner.accept_welcome_packet(&welcome_packet);
 
     // Add a third member proposal
-    let joiner2 = setup_joiner(group_name, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
+    let joiner2 = setup_joiner(
+        conversation_name,
+        "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    );
     let result = process_inbound_compat(
         &mut steward_handle.group,
         Some(&steward_handle.mls),
@@ -413,11 +465,11 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     .unwrap();
     let matched = matches!(
         &finalize.outcome,
-        FreezeOutcome::Applied { result, .. } if matches!(**result, ProcessResult::GroupUpdated)
+        FreezeOutcome::Applied { result, .. } if matches!(**result, ProcessResult::ConversationUpdated)
     );
     assert!(
         matched,
-        "Expected GroupUpdated after finalize, got {finalize:?}"
+        "Expected ConversationUpdated after finalize, got {finalize:?}"
     );
 
     // After finalization, verify the steward list on the creator group
@@ -442,13 +494,13 @@ fn test_commit_candidate_roundtrip_sender_identity() {
 /// skip keeps the score-op list free of `CensorshipInactivity`.
 #[test]
 fn test_backup_commit_scores_absent_steward() {
-    let group_name = "absent-steward";
+    let conversation_name = "absent-steward";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
     let bob_hex = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
     let charlie_hex = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
 
-    let mut alice_group = setup_steward(group_name, alice_hex);
-    let mut bob = setup_joiner(group_name, bob_hex);
+    let mut alice_group = setup_steward(conversation_name, alice_hex);
+    let mut bob = setup_joiner(conversation_name, bob_hex);
     let alice_id = alice_group.self_identity().to_vec();
     let bob_id = bob.group.self_identity().to_vec();
 
@@ -466,7 +518,7 @@ fn test_backup_commit_scores_absent_steward() {
     bob.steward.install_list(epoch, &members, 2, 0).unwrap();
 
     // Produce an approved proposal (invite Charlie) on both sides.
-    let charlie = setup_joiner(group_name, charlie_hex);
+    let charlie = setup_joiner(conversation_name, charlie_hex);
     let gur = match process_inbound_compat(
         &mut alice_group.group,
         Some(&alice_group.mls),
@@ -513,9 +565,13 @@ fn test_backup_commit_scores_absent_steward() {
 
     let matched = matches!(
         &result.outcome,
-        FreezeOutcome::Applied { result: r, .. } if matches!(**r, ProcessResult::GroupUpdated)
+        FreezeOutcome::Applied { result: r, .. } if matches!(**r, ProcessResult::ConversationUpdated)
     );
-    assert!(matched, "Expected GroupUpdated, got {:?}", result.outcome);
+    assert!(
+        matched,
+        "Expected ConversationUpdated, got {:?}",
+        result.outcome
+    );
 
     let events: Vec<(Vec<u8>, ScoreEvent)> = result
         .score_ops
@@ -553,12 +609,15 @@ fn test_backup_commit_scores_absent_steward() {
 /// Test: reject_all_voting_proposals clears voting queue.
 #[test]
 fn test_reject_all_voting_proposals_clears_queue() {
-    let group_name = "reject-voting";
-    let mut group = setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let conversation_name = "reject-voting";
+    let mut group = setup_steward(
+        conversation_name,
+        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    );
 
     // Store proposals in voting queue
-    group.store_voting_proposal(1, GroupUpdateRequest { payload: None });
-    group.store_voting_proposal(2, GroupUpdateRequest { payload: None });
+    group.store_voting_proposal(1, ConversationUpdateRequest { payload: None });
+    group.store_voting_proposal(2, ConversationUpdateRequest { payload: None });
     assert!(group.is_owner_of_proposal(1));
     assert!(group.is_owner_of_proposal(2));
 
@@ -575,19 +634,19 @@ fn test_reject_all_voting_proposals_clears_queue() {
 /// attributed to the actual MLS sender, not the forged wire claim.
 #[test]
 fn test_forged_steward_identity_scores_mls_sender() {
-    let group_name = "forged-steward-id";
+    let conversation_name = "forged-steward-id";
 
     let steward_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
     let joiner_hex = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
     let third_hex = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
 
-    let mut steward_handle = setup_steward(group_name, steward_hex);
-    let mut joiner = setup_joiner(group_name, joiner_hex);
+    let mut steward_handle = setup_steward(conversation_name, steward_hex);
+    let mut joiner = setup_joiner(conversation_name, joiner_hex);
 
     let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
     joiner.accept_welcome_packet(&welcome_packet);
 
-    let third = setup_joiner(group_name, third_hex);
+    let third = setup_joiner(conversation_name, third_hex);
     let result = process_inbound_compat(
         &mut steward_handle.group,
         Some(&steward_handle.mls),
@@ -686,12 +745,15 @@ fn test_forged_steward_identity_scores_mls_sender() {
 /// Test: no valid candidate triggers NoCandidate result.
 #[test]
 fn test_no_valid_candidate_triggers_no_candidate() {
-    let group_name = "no-candidate";
+    let conversation_name = "no-candidate";
 
-    let mut group = setup_steward(group_name, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let mut group = setup_steward(
+        conversation_name,
+        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    );
 
     // Start freeze round with no candidates
-    group.insert_approved_proposal(1, GroupUpdateRequest { payload: None });
+    group.insert_approved_proposal(1, ConversationUpdateRequest { payload: None });
     let epoch = group.mls.current_epoch().unwrap();
     group.start_freeze_round(epoch);
 

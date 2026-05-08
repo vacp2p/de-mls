@@ -7,50 +7,59 @@ use tracing::info;
 
 use crate::{
     app::{
-        GroupPlugins, GroupState, PhaseTimer, ProposalParams, SessionRunner, User, UserError,
-        submit_self_leave_proposal,
+        ConversationPlugins, ConversationState, PhaseTimer, ProposalParams, SessionRunner, User,
+        UserError, submit_self_leave_proposal,
     },
     core::{
-        DeMlsProvider, Group, GroupConfig, GroupEventHandler, GroupStateMachine, PeerScoringPlugin,
-        StewardListPlugin, self_leave_proposal_id,
+        Conversation, ConversationConfig, ConversationEventHandler, ConversationStateMachine,
+        DeMlsProvider, PeerScoringPlugin, StewardListPlugin, self_leave_proposal_id,
     },
     mls_crypto::MlsService,
-    protos::de_mls::messages::v1::{GroupUpdateRequest, RemoveMember, group_update_request},
+    protos::de_mls::messages::v1::{
+        ConversationUpdateRequest, RemoveMember, conversation_update_request,
+    },
 };
 
-impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P, GP, H> {
+impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 'static>
+    User<P, GP, H>
+{
     /// Create (`is_creation = true`) or join (`false`) a group using the
     /// user's default config.
-    pub async fn create_group(
+    pub async fn create_conversation(
         &mut self,
-        group_name: &str,
+        conversation_name: &str,
         is_creation: bool,
     ) -> Result<(), UserError> {
-        self.create_group_with_config(group_name, is_creation, self.default_group_config.clone())
-            .await
+        self.create_conversation_with_config(
+            conversation_name,
+            is_creation,
+            self.default_conversation_config.clone(),
+        )
+        .await
     }
 
-    /// Like [`Self::create_group`] but with a per-group config override.
-    pub async fn create_group_with_config(
+    /// Like [`Self::create_conversation`] but with a per-conversation config override.
+    pub async fn create_conversation_with_config(
         &mut self,
-        group_name: &str,
+        conversation_name: &str,
         is_creation: bool,
-        config: GroupConfig,
+        config: ConversationConfig,
     ) -> Result<(), UserError> {
         let mut groups = self.groups.write().await;
-        if groups.contains_key(group_name) {
-            return Err(UserError::GroupAlreadyExists);
+        if groups.contains_key(conversation_name) {
+            return Err(UserError::ConversationAlreadyExists);
         }
 
         let self_identity_bytes = self.identity().identity_bytes().to_vec();
         let (group, mls_opt, state_machine, phase_timer) = if is_creation {
-            let mls = self.plugins.create_mls(group_name.to_string())?;
-            let group = Group::create_group(group_name, self_identity_bytes.clone());
-            let state_machine = GroupStateMachine::new_as_member();
+            let mls = self.plugins.create_mls(conversation_name.to_string())?;
+            let group = Conversation::create(conversation_name, self_identity_bytes.clone());
+            let state_machine = ConversationStateMachine::new_as_member();
             (group, Some(mls), state_machine, PhaseTimer::new())
         } else {
-            let group = Group::prepare_to_join(group_name, self_identity_bytes.clone());
-            let state_machine = GroupStateMachine::new_as_pending_join();
+            let group =
+                Conversation::prepare_to_join(conversation_name, self_identity_bytes.clone());
+            let state_machine = ConversationStateMachine::new_as_pending_join();
             // Anchor the timer at "now" so `is_pending_join_expired` can
             // detect the 3× commit-inactivity timeout.
             let mut phase_timer = PhaseTimer::new();
@@ -58,17 +67,17 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             (group, None, state_machine, phase_timer)
         };
 
-        let mut steward = self.make_steward_plugin(group_name, &config.protocol);
+        let mut steward = self.make_steward_plugin(conversation_name, &config.protocol);
         steward.set_max_retries(config.max_reelection_attempts);
         // Creator path: bootstrap the list with self as sole steward at
-        // epoch 0. Joiner path leaves the plug-in empty until `GroupSync`.
+        // epoch 0. Joiner path leaves the plug-in empty until `ConversationSync`.
         if is_creation {
             let _events =
                 steward.install_list(0, std::slice::from_ref(&self_identity_bytes), 1, 0)?;
         }
 
         let mut scoring = self.make_scoring_service();
-        // Joiners start tracked at `JoinedGroup` time (once members are known).
+        // Joiners start tracked at `JoinedConversation` time (once members are known).
         if is_creation {
             // Creator is self at `default_score`; under standard config
             // (`default > threshold`) no cross event fires, so we drop
@@ -77,15 +86,15 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         }
 
         let initial_state = state_machine.current_state();
-        if initial_state == GroupState::PendingJoin {
+        if initial_state == ConversationState::PendingJoin {
             info!(
-                group = group_name,
+                group = conversation_name,
                 timeout_s = config.commit_inactivity_duration.as_secs() * 3,
                 "pending join, awaiting welcome"
             );
         }
         groups.insert(
-            group_name.to_string(),
+            conversation_name.to_string(),
             Arc::new(RwLock::new(SessionRunner::new(
                 group,
                 mls_opt,
@@ -99,7 +108,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         drop(groups);
 
         self.handler
-            .on_phase_change(group_name, initial_state)
+            .on_phase_change(conversation_name, initial_state)
             .await;
 
         Ok(())
@@ -108,22 +117,24 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// Submit `RemoveMember(self)` as an `expected_voters = 1` proposal with
     /// the leaver's YES bundled, so the session resolves on submit. We stay
     /// active until the next steward commit merges the removal; on that
-    /// commit `ProcessResult::LeaveGroup` fires. A failed commit leaves us
+    /// commit `ProcessResult::LeaveConversation` fires. A failed commit leaves us
     /// a member and a later one picks the leave up.
     /// `PendingJoin` short-circuits to local teardown.
-    pub async fn leave_group(&mut self, group_name: &str) -> Result<(), UserError> {
-        info!(group = group_name, "leaving group");
+    pub async fn leave_conversation(&mut self, conversation_name: &str) -> Result<(), UserError> {
+        info!(group = conversation_name, "leaving group");
 
         let is_pending_join = self
-            .with_entry(group_name, |entry| {
-                entry.handle.current_state() == GroupState::PendingJoin
+            .with_entry(conversation_name, |entry| {
+                entry.handle.current_state() == ConversationState::PendingJoin
             })
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
         if is_pending_join {
-            self.groups.write().await.remove(group_name);
-            self.cleanup_consensus_scope(group_name).await?;
-            self.handler.on_leave_group(group_name).await?;
+            self.groups.write().await.remove(conversation_name);
+            self.cleanup_consensus_scope(conversation_name).await?;
+            self.handler
+                .on_leave_conversation(conversation_name)
+                .await?;
             return Ok(());
         }
 
@@ -132,23 +143,25 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         // Idempotent: a second click after a successful submit finds the
         // approved entry and short-circuits.
         let already_pending = self
-            .with_entry(group_name, |entry| {
+            .with_entry(conversation_name, |entry| {
                 entry.handle.group.is_pending_self_leave(&self_identity)
             })
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
         if already_pending {
             info!(
-                group = group_name,
+                group = conversation_name,
                 "self-leave already in flight, ignoring duplicate"
             );
             return Ok(());
         }
 
-        let request = GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
-                identity: self_identity.clone(),
-            })),
+        let request = ConversationUpdateRequest {
+            payload: Some(conversation_update_request::Payload::RemoveMember(
+                RemoveMember {
+                    identity: self_identity.clone(),
+                },
+            )),
         };
 
         // Register ownership BEFORE the session opens — the bundled YES
@@ -157,9 +170,9 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         let proposal_id = self_leave_proposal_id(&self_identity);
         let (proposal_expiration, consensus_timeout) = {
             let entry_arc = self
-                .lookup_entry(group_name)
+                .lookup_entry(conversation_name)
                 .await
-                .ok_or(UserError::GroupNotFound)?;
+                .ok_or(UserError::ConversationNotFound)?;
             let mut entry = entry_arc.write().await;
             entry
                 .handle
@@ -172,7 +185,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         };
 
         let submitted = submit_self_leave_proposal::<P, _>(
-            group_name,
+            conversation_name,
             &self_identity,
             &self.consensus_service,
             self.eth_signer.clone(),
@@ -193,16 +206,16 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
 
         let packet = {
             let entry_arc = self
-                .lookup_entry(group_name)
+                .lookup_entry(conversation_name)
                 .await
-                .ok_or(UserError::GroupNotFound)?;
+                .ok_or(UserError::ConversationNotFound)?;
             let entry = entry_arc.read().await;
             entry
                 .handle
                 .expect_mls()?
                 .build_message(&app_msg, &self.app_id)?
         };
-        self.handler.on_outbound(group_name, packet).await?;
+        self.handler.on_outbound(conversation_name, packet).await?;
 
         Ok(())
     }

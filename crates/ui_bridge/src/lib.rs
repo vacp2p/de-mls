@@ -66,8 +66,10 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 GATEWAY.push_event(AppEvent::Groups(groups));
             }
 
-            AppCmd::CreateGroup { group_id: name } => {
-                if let Err(e) = GATEWAY.create_group(name.clone()).await {
+            AppCmd::CreateGroup {
+                conversation_id: name,
+            } => {
+                if let Err(e) = GATEWAY.create_conversation(name.clone()).await {
                     GATEWAY.push_event(AppEvent::Error(format!("Create group failed: {e}")));
                     continue;
                 }
@@ -78,14 +80,14 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 // Push initial state (Working for steward)
                 if let Ok(state) = GATEWAY.get_group_state(name.clone()).await {
                     GATEWAY.push_event(AppEvent::GroupStateChanged {
-                        group_id: name,
+                        conversation_id: name,
                         state,
                     });
                 }
             }
 
-            AppCmd::JoinGroup { group_id } => {
-                if let Err(e) = GATEWAY.join_group(group_id.clone()).await {
+            AppCmd::JoinGroup { conversation_id } => {
+                if let Err(e) = GATEWAY.join_group(conversation_id.clone()).await {
                     GATEWAY.push_event(AppEvent::Error(format!("Join group failed: {e}")));
                     continue;
                 }
@@ -94,32 +96,44 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 GATEWAY.push_event(AppEvent::Groups(groups));
 
                 // Push initial state (PendingJoin for joining member)
-                if let Ok(state) = GATEWAY.get_group_state(group_id.clone()).await {
-                    GATEWAY.push_event(AppEvent::GroupStateChanged { group_id, state });
+                if let Ok(state) = GATEWAY.get_group_state(conversation_id.clone()).await {
+                    GATEWAY.push_event(AppEvent::GroupStateChanged {
+                        conversation_id,
+                        state,
+                    });
                 }
             }
 
-            AppCmd::EnterGroup { group_id } => {
+            AppCmd::EnterGroup { conversation_id } => {
                 GATEWAY.push_event(AppEvent::EnteredGroup {
-                    group_id: group_id.clone(),
+                    conversation_id: conversation_id.clone(),
                 });
 
                 // Push current state when entering group
-                if let Ok(state) = GATEWAY.get_group_state(group_id.clone()).await {
-                    GATEWAY.push_event(AppEvent::GroupStateChanged { group_id, state });
+                if let Ok(state) = GATEWAY.get_group_state(conversation_id.clone()).await {
+                    GATEWAY.push_event(AppEvent::GroupStateChanged {
+                        conversation_id,
+                        state,
+                    });
                 }
             }
 
-            AppCmd::LeaveGroup { group_id } => {
-                if let Err(e) = GATEWAY.leave_group(group_id.clone()).await {
+            AppCmd::LeaveConversation { conversation_id } => {
+                if let Err(e) = GATEWAY.leave_conversation(conversation_id.clone()).await {
                     GATEWAY.push_event(AppEvent::Error(format!("Leave group failed: {e}")));
                 }
             }
 
-            AppCmd::GetGroupMembers { group_id } => {
-                match GATEWAY.get_group_members(group_id.clone()).await {
+            AppCmd::GetGroupMembers { conversation_id } => {
+                match GATEWAY
+                    .get_conversation_members(conversation_id.clone())
+                    .await
+                {
                     Ok(members) => {
-                        GATEWAY.push_event(AppEvent::GroupMembers { group_id, members });
+                        GATEWAY.push_event(AppEvent::GroupMembers {
+                            conversation_id,
+                            members,
+                        });
                     }
                     Err(e) => {
                         GATEWAY
@@ -129,11 +143,11 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
             }
 
             AppCmd::SendBanRequest {
-                group_id,
+                conversation_id,
                 user_to_ban,
             } => {
                 if let Err(e) = GATEWAY
-                    .send_ban_request(group_id.clone(), user_to_ban.clone())
+                    .send_ban_request(conversation_id.clone(), user_to_ban.clone())
                     .await
                 {
                     GATEWAY.push_event(AppEvent::Error(format!("Send ban request failed: {e}")));
@@ -143,7 +157,7 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                             .to_string()
                             .into_bytes(),
                         sender: "system".to_string(),
-                        group_name: group_id.clone(),
+                        conversation_name: conversation_id.clone(),
                     }));
                 }
             }
@@ -155,13 +169,19 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
             // when sends are blocked). A send failure is surfaced as an
             // Error alert and must NOT tear down `ui_loop` — the UI stays
             // responsive for every other command.
-            AppCmd::SendMessage { group_id, body } => {
-                match GATEWAY.send_message(group_id.clone(), body.clone()).await {
+            AppCmd::SendMessage {
+                conversation_id,
+                body,
+            } => {
+                match GATEWAY
+                    .send_message(conversation_id.clone(), body.clone())
+                    .await
+                {
                     Ok(()) => {
                         GATEWAY.push_event(AppEvent::ChatMessage(ConversationMessage {
                             message: body.into_bytes(),
                             sender: "me".to_string(),
-                            group_name: group_id,
+                            conversation_name: conversation_id,
                         }));
                     }
                     Err(e) => {
@@ -170,18 +190,18 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 }
             }
 
-            AppCmd::LoadHistory { group_id } => {
+            AppCmd::LoadHistory { conversation_id } => {
                 // TODO: load from storage; stub:
                 GATEWAY.push_event(AppEvent::ChatMessage(ConversationMessage {
                     message: "History loaded (stub)".as_bytes().to_vec(),
                     sender: "system".to_string(),
-                    group_name: group_id.clone(),
+                    conversation_name: conversation_id.clone(),
                 }));
             }
 
             // ───────────── Consensus ─────────────
             AppCmd::Vote {
-                group_id,
+                conversation_id,
                 proposal_id,
                 choice,
             } => {
@@ -190,13 +210,13 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 // Silently drop so the user doesn't see a surprising error
                 // popup; their vote is on record regardless.
                 if let Err(e) = GATEWAY
-                    .process_user_vote(group_id.clone(), proposal_id, choice)
+                    .process_user_vote(conversation_id.clone(), proposal_id, choice)
                     .await
                 {
                     let msg = e.to_string();
                     if msg.contains("already voted") {
                         tracing::debug!(
-                            group = %group_id,
+                            group = %conversation_id,
                             proposal_id,
                             "manual vote ignored: already voted (auto-vote won the race)"
                         );
@@ -213,15 +233,18 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                     .as_bytes()
                     .to_vec(),
                     sender: "system".to_string(),
-                    group_name: group_id.clone(),
+                    conversation_name: conversation_id.clone(),
                 }));
             }
 
-            AppCmd::GetCurrentEpochProposals { group_id } => {
-                match GATEWAY.get_current_epoch_proposals(group_id.clone()).await {
+            AppCmd::GetCurrentEpochProposals { conversation_id } => {
+                match GATEWAY
+                    .get_current_epoch_proposals(conversation_id.clone())
+                    .await
+                {
                     Ok(proposals) => {
                         GATEWAY.push_event(AppEvent::CurrentEpochProposals {
-                            group_id,
+                            conversation_id,
                             proposals,
                         });
                     }
@@ -231,11 +254,11 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 }
             }
 
-            AppCmd::GetStewardStatus { group_id } => {
-                match GATEWAY.get_steward_status(group_id.clone()).await {
+            AppCmd::GetStewardStatus { conversation_id } => {
+                match GATEWAY.get_steward_status(conversation_id.clone()).await {
                     Ok(is_steward) => {
                         GATEWAY.push_event(AppEvent::StewardStatus {
-                            group_id,
+                            conversation_id,
                             is_steward,
                         });
                     }
@@ -244,10 +267,13 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 }
             }
 
-            AppCmd::GetGroupState { group_id } => {
-                match GATEWAY.get_group_state(group_id.clone()).await {
+            AppCmd::GetGroupState { conversation_id } => {
+                match GATEWAY.get_group_state(conversation_id.clone()).await {
                     Ok(state) => {
-                        GATEWAY.push_event(AppEvent::GroupStateChanged { group_id, state });
+                        GATEWAY.push_event(AppEvent::GroupStateChanged {
+                            conversation_id,
+                            state,
+                        });
                     }
                     Err(e) => {
                         GATEWAY.push_event(AppEvent::Error(format!("Get group state failed: {e}")));
@@ -255,10 +281,13 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 }
             }
 
-            AppCmd::GetEpochHistory { group_id } => {
-                match GATEWAY.get_epoch_history(group_id.clone()).await {
+            AppCmd::GetEpochHistory { conversation_id } => {
+                match GATEWAY.get_epoch_history(conversation_id.clone()).await {
                     Ok(epochs) => {
-                        GATEWAY.push_event(AppEvent::EpochHistory { group_id, epochs });
+                        GATEWAY.push_event(AppEvent::EpochHistory {
+                            conversation_id,
+                            epochs,
+                        });
                     }
                     Err(e) => {
                         GATEWAY

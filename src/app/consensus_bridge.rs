@@ -17,15 +17,16 @@ use tracing::info;
 use crate::{
     app::error::UserError,
     core::{
-        CoreError, DeMlsProvider, Group, GroupEventHandler, ProviderConsensus,
+        Conversation, ConversationEventHandler, CoreError, DeMlsProvider, ProviderConsensus,
         build_create_proposal_request, self_leave_proposal_id,
     },
     protos::de_mls::messages::v1::{
-        AppMessage, GroupUpdateRequest, RemoveMember, VotePayload, group_update_request,
+        AppMessage, ConversationUpdateRequest, RemoveMember, VotePayload,
+        conversation_update_request,
     },
 };
 
-/// Consensus-session parameters that come from `GroupConfig`. Grouped so
+/// Consensus-session parameters that come from `ConversationConfig`. Grouped so
 /// [`submit_proposal`]'s argument list stays readable.
 pub struct ProposalParams {
     pub expected_voters: u32,
@@ -45,10 +46,10 @@ pub struct ProposalParams {
 ///
 /// In both cases the caller must record ownership in the group *before*
 /// casting, so a single-voter consensus transition can't fire before
-/// `Group::is_owner_of_proposal` is true.
+/// `Conversation::is_owner_of_proposal` is true.
 pub async fn submit_proposal<P: DeMlsProvider>(
-    group_name: &str,
-    request: &GroupUpdateRequest,
+    conversation_name: &str,
+    request: &ConversationUpdateRequest,
     creator_id: &[u8],
     consensus: &ProviderConsensus<P>,
     params: ProposalParams,
@@ -61,7 +62,7 @@ pub async fn submit_proposal<P: DeMlsProvider>(
         params.liveness_criteria_yes,
     )?;
 
-    let scope = P::Scope::from(group_name.to_string());
+    let scope = P::Scope::from(conversation_name.to_string());
     let proposal = consensus
         .create_proposal_with_config(
             &scope,
@@ -71,7 +72,7 @@ pub async fn submit_proposal<P: DeMlsProvider>(
         .await?;
 
     info!(
-        group = group_name,
+        group = conversation_name,
         proposal_id = proposal.proposal_id,
         voters = params.expected_voters,
         "proposal opened"
@@ -94,7 +95,7 @@ pub async fn submit_proposal<P: DeMlsProvider>(
 /// because that is the only legitimate case for broadcasting proposal +
 /// vote atomically as a single wire message.
 pub async fn cast_vote<P, SN>(
-    group_name: &str,
+    conversation_name: &str,
     proposal_id: u32,
     vote: bool,
     consensus: &ProviderConsensus<P>,
@@ -104,10 +105,10 @@ where
     P: DeMlsProvider,
     SN: Signer + Send + Sync,
 {
-    let scope = P::Scope::from(group_name.to_string());
+    let scope = P::Scope::from(conversation_name.to_string());
 
     let choice = if vote { "YES" } else { "NO" };
-    info!(group = group_name, proposal_id, choice, "vote cast");
+    info!(group = conversation_name, proposal_id, choice, "vote cast");
 
     let vote_msg = consensus
         .cast_vote(&scope, proposal_id, vote, signer)
@@ -120,12 +121,12 @@ where
 /// pending vote. Fast-path proposals (`expected_voters_count == 1`)
 /// self-resolve on arrival and skip the banner.
 pub async fn relay_incoming_proposal<P: DeMlsProvider>(
-    group_name: &str,
+    conversation_name: &str,
     proposal: Proposal,
     consensus: &ProviderConsensus<P>,
-    handler: &dyn GroupEventHandler,
+    handler: &dyn ConversationEventHandler,
 ) -> Result<(), UserError> {
-    let scope = P::Scope::from(group_name.to_string());
+    let scope = P::Scope::from(conversation_name.to_string());
     let expected_voters = proposal.expected_voters_count;
     consensus
         .process_incoming_proposal(&scope, proposal.clone())
@@ -136,7 +137,7 @@ pub async fn relay_incoming_proposal<P: DeMlsProvider>(
     }
 
     let vote_notification: AppMessage = VotePayload {
-        group_id: group_name.to_string(),
+        conversation_id: conversation_name.to_string(),
         proposal_id: proposal.proposal_id,
         payload: proposal.payload.clone(),
         timestamp: std::time::SystemTime::now()
@@ -146,14 +147,14 @@ pub async fn relay_incoming_proposal<P: DeMlsProvider>(
     .into();
 
     handler
-        .on_app_message(group_name, vote_notification)
+        .on_app_message(conversation_name, vote_notification)
         .await?;
     Ok(())
 }
 
 /// Forward a peer's vote into the local consensus service.
 ///
-/// Late-arrival classification uses the `Group::is_consensus_outcome_applied`
+/// Late-arrival classification uses the `Conversation::is_consensus_outcome_applied`
 /// cache to tell benign late packets from suspicious unknowns:
 /// - `SessionNotActive` — session exists but already resolved. Benign, debug.
 /// - `SessionNotFound` with id in the resolved-proposals cache — session
@@ -164,18 +165,18 @@ pub async fn relay_incoming_proposal<P: DeMlsProvider>(
 ///
 /// Other consensus errors propagate.
 pub async fn forward_incoming_vote<P: DeMlsProvider>(
-    group: &Group,
+    group: &Conversation,
     vote: Vote,
     consensus: &ProviderConsensus<P>,
 ) -> Result<(), CoreError> {
     let proposal_id = vote.proposal_id;
-    let group_name = group.group_name();
-    let scope = P::Scope::from(group_name.to_string());
+    let conversation_name = group.name();
+    let scope = P::Scope::from(conversation_name.to_string());
     match consensus.process_incoming_vote(&scope, vote).await {
         Ok(()) => Ok(()),
         Err(ConsensusError::SessionNotActive) => {
             tracing::debug!(
-                group = group_name,
+                group = conversation_name,
                 proposal_id,
                 "late vote dropped: consensus session already resolved"
             );
@@ -184,13 +185,13 @@ pub async fn forward_incoming_vote<P: DeMlsProvider>(
         Err(ConsensusError::SessionNotFound) => {
             if group.is_consensus_outcome_applied(proposal_id) {
                 tracing::debug!(
-                    group = group_name,
+                    group = conversation_name,
                     proposal_id,
                     "late vote dropped: session trimmed after local resolution"
                 );
             } else {
                 tracing::warn!(
-                    group = group_name,
+                    group = conversation_name,
                     proposal_id,
                     "vote for unknown proposal id dropped: no local session and not in resolved cache"
                 );
@@ -220,7 +221,7 @@ pub async fn forward_incoming_vote<P: DeMlsProvider>(
 /// exists (e.g. the user double-clicked Leave and the dedup fired) — no
 /// broadcast needed. Other consensus errors propagate.
 pub async fn submit_self_leave_proposal<P, SN>(
-    group_name: &str,
+    conversation_name: &str,
     self_identity: &[u8],
     consensus: &ProviderConsensus<P>,
     signer: SN,
@@ -230,10 +231,12 @@ where
     P: DeMlsProvider,
     SN: Signer + Send + Sync,
 {
-    let request = GroupUpdateRequest {
-        payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
-            identity: self_identity.to_vec(),
-        })),
+    let request = ConversationUpdateRequest {
+        payload: Some(conversation_update_request::Payload::RemoveMember(
+            RemoveMember {
+                identity: self_identity.to_vec(),
+            },
+        )),
     };
     let payload = request.encode_to_vec();
 
@@ -262,21 +265,21 @@ where
         .map_err(CoreError::from)?;
     proposal.votes.push(yes_vote);
 
-    let scope = P::Scope::from(group_name.to_string());
+    let scope = P::Scope::from(conversation_name.to_string());
     match consensus
         .process_incoming_proposal(&scope, proposal.clone())
         .await
     {
         Ok(()) => {
             info!(
-                group = group_name,
+                group = conversation_name,
                 proposal_id, "self-leave proposal opened (expected_voters=1, bundled YES)"
             );
             Ok(Some((proposal_id, proposal.into())))
         }
         Err(ConsensusError::ProposalAlreadyExist) => {
             info!(
-                group = group_name,
+                group = conversation_name,
                 proposal_id, "self-leave already in flight, skipping retransmit"
             );
             Ok(None)

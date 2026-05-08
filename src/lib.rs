@@ -35,7 +35,7 @@
 //! ## Getting Started
 //!
 //! Most developers should start with the [`core`] module documentation, which explains:
-//! - What traits you need to implement ([`core::GroupEventHandler`])
+//! - What traits you need to implement ([`core::ConversationEventHandler`])
 //! - Core operations (create group, join, send messages)
 //! - The `ProcessResult` matching flow
 //!
@@ -45,7 +45,7 @@
 //! ## Quick Example
 //!
 //! ```ignore
-//! use de_mls::core::{DefaultProvider, GroupEventHandler, ProcessResult};
+//! use de_mls::core::{DefaultProvider, ConversationEventHandler, ProcessResult};
 //! use de_mls::app::User;
 //!
 //! // Create a user with an Ethereum private key. The convenience
@@ -54,11 +54,11 @@
 //! let user = User::with_private_key(
 //!     "0xac0974...",   // Private key
 //!     consensus,       // Consensus service
-//!     event_handler,   // Your GroupEventHandler implementation
+//!     event_handler,   // Your ConversationEventHandler implementation
 //! )?;
 //!
 //! // Create a group (as steward)
-//! user.create_group("my-group", true).await?;
+//! user.create_conversation("my-group", true).await?;
 //!
 //! // Send a message
 //! user.send_app_message("my-group", b"Hello, world!".to_vec()).await?;

@@ -29,7 +29,7 @@ pub enum ElectionDecision {
 pub enum StewardListEvent {
     /// A new list has been installed (creator bootstrap, joiner sync,
     /// successful election, or `sn_min` auto-fill). Coordinator chains
-    /// into pending-update drain and `GroupSync` broadcast.
+    /// into pending-update drain and `ConversationSync` broadcast.
     ListInstalled {
         epoch: u64,
         retry_round: u32,
@@ -59,7 +59,7 @@ pub trait StewardListPlugin: Send + Sync + 'static {
     /// `install_list` calls use the new bounds.
     fn set_config(&mut self, config: StewardListConfig);
 
-    /// Borrow the active list. `None` for joiners pre-`GroupSync`.
+    /// Borrow the active list. `None` for joiners pre-`ConversationSync`.
     fn current_list(&self) -> Option<&StewardList>;
 
     /// Epoch at which the active list was elected. `None` if no list.
@@ -70,8 +70,8 @@ pub trait StewardListPlugin: Send + Sync + 'static {
     /// list's frozen `retry_round` historical tag.
     fn retry_round(&self) -> u32;
 
-    /// Group-configured ceiling on steward-election retries. Joiners
-    /// pick this up via `GroupSync`.
+    /// Conversation-configured ceiling on steward-election retries. Joiners
+    /// pick this up via `ConversationSync`.
     fn max_retries(&self) -> u32;
     fn set_max_retries(&mut self, max: u32);
 
@@ -108,7 +108,7 @@ pub trait StewardListPlugin: Send + Sync + 'static {
     ) -> (Option<&[u8]>, Option<&[u8]>);
 
     /// Steward roster filtered by `eligible`. Used by the coordinator
-    /// to build `GroupSync.steward_members` so joiners don't inherit
+    /// to build `ConversationSync.steward_members` so joiners don't inherit
     /// ghosts or members queued for removal.
     fn steward_members(&self, eligible: &dyn Fn(&[u8]) -> bool) -> Vec<Vec<u8>>;
 

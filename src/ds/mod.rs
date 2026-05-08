@@ -42,7 +42,7 @@
 //! let rx = ds.subscribe();
 //! std::thread::spawn(move || {
 //!     while let Ok(pkt) = rx.recv() {
-//!         println!("got {} bytes for group {}", pkt.payload.len(), pkt.group_id);
+//!         println!("got {} bytes for group {}", pkt.payload.len(), pkt.conversation_id);
 //!     }
 //! });
 //!

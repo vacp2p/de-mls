@@ -13,7 +13,7 @@ use std::{
 use de_mls::{
     app::format_group_request,
     identity::parse_wallet_address,
-    protos::de_mls::messages::v1::{ConversationMessage, GroupUpdateRequest, VotePayload},
+    protos::de_mls::messages::v1::{ConversationMessage, ConversationUpdateRequest, VotePayload},
 };
 use de_mls_gateway::{GATEWAY, bootstrap_core_from_env};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent, MemberInfo};
@@ -355,15 +355,18 @@ fn Home() -> Element {
             loop {
                 match GATEWAY.next_event().await {
                     Some(AppEvent::StewardStatus {
-                        group_id,
+                        conversation_id,
                         is_steward,
                     }) => {
-                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
+                        if chat.read().opened_group.as_deref() == Some(conversation_id.as_str()) {
                             cons.write().is_steward = is_steward;
                         }
                     }
-                    Some(AppEvent::GroupStateChanged { group_id, state }) => {
-                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
+                    Some(AppEvent::GroupStateChanged {
+                        conversation_id,
+                        state,
+                    }) => {
+                        if chat.read().opened_group.as_deref() == Some(conversation_id.as_str()) {
                             {
                                 let mut c = cons.write();
                                 c.group_state = state.clone();
@@ -372,64 +375,72 @@ fn Home() -> Element {
                                 }
                             }
                             if state == "Working" {
-                                let gid = group_id.clone();
+                                let gid = conversation_id.clone();
                                 spawn(async move {
                                     let _ = GATEWAY
                                         .send(AppCmd::GetCurrentEpochProposals {
-                                            group_id: gid.clone(),
+                                            conversation_id: gid.clone(),
                                         })
                                         .await;
                                     let _ = GATEWAY
-                                        .send(AppCmd::GetGroupMembers { group_id: gid })
+                                        .send(AppCmd::GetGroupMembers {
+                                            conversation_id: gid,
+                                        })
                                         .await;
                                 });
                             }
                         }
                     }
                     Some(AppEvent::CurrentEpochProposals {
-                        group_id,
+                        conversation_id,
                         proposals,
                     }) => {
-                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
+                        if chat.read().opened_group.as_deref() == Some(conversation_id.as_str()) {
                             cons.write().approved_queue = proposals;
                         }
                     }
-                    Some(AppEvent::GroupMembers { group_id, members }) => {
-                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
+                    Some(AppEvent::GroupMembers {
+                        conversation_id,
+                        members,
+                    }) => {
+                        if chat.read().opened_group.as_deref() == Some(conversation_id.as_str()) {
                             chat.write().members = members;
                         }
                     }
                     Some(AppEvent::FreezeCandidates {
-                        group_id,
+                        conversation_id,
                         received,
                         expected,
                     }) => {
-                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
+                        if chat.read().opened_group.as_deref() == Some(conversation_id.as_str()) {
                             cons.write().freeze_candidates = (received, expected);
                         }
                     }
-                    Some(AppEvent::EpochHistory { group_id, epochs }) => {
-                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
+                    Some(AppEvent::EpochHistory {
+                        conversation_id,
+                        epochs,
+                    }) => {
+                        if chat.read().opened_group.as_deref() == Some(conversation_id.as_str()) {
                             cons.write().epoch_history = epochs;
                         }
                     }
                     Some(AppEvent::GroupEpoch {
-                        group_id,
+                        conversation_id,
                         epoch,
                         retry_round,
                     }) => {
-                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
+                        if chat.read().opened_group.as_deref() == Some(conversation_id.as_str()) {
                             let mut c = cons.write();
                             c.epoch = epoch;
                             c.retry_round = retry_round;
                         }
                     }
                     Some(AppEvent::ProposalAdded {
-                        group_id,
+                        conversation_id,
                         action,
                         address,
                     }) => {
-                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
+                        if chat.read().opened_group.as_deref() == Some(conversation_id.as_str()) {
                             let exists = {
                                 cons.read().approved_queue.iter().any(|(a, addr)| {
                                     a == &action && addr.eq_ignore_ascii_case(&address)
@@ -440,18 +451,20 @@ fn Home() -> Element {
                             }
                         }
                     }
-                    Some(AppEvent::CurrentEpochProposalsCleared { group_id }) => {
-                        if chat.read().opened_group.as_deref() == Some(group_id.as_str()) {
+                    Some(AppEvent::CurrentEpochProposalsCleared { conversation_id }) => {
+                        if chat.read().opened_group.as_deref() == Some(conversation_id.as_str()) {
                             cons.write().approved_queue.clear();
-                            let gid = group_id.clone();
+                            let gid = conversation_id.clone();
                             spawn(async move {
                                 let _ = GATEWAY
                                     .send(AppCmd::GetEpochHistory {
-                                        group_id: gid.clone(),
+                                        conversation_id: gid.clone(),
                                     })
                                     .await;
                                 let _ = GATEWAY
-                                    .send(AppCmd::GetGroupMembers { group_id: gid })
+                                    .send(AppCmd::GetGroupMembers {
+                                        conversation_id: gid,
+                                    })
                                     .await;
                             });
                         }
@@ -465,9 +478,9 @@ fn Home() -> Element {
                     }
                     Some(AppEvent::VoteRequested(vp)) => {
                         let opened = chat.read().opened_group.clone();
-                        if opened.as_deref() == Some(vp.group_id.as_str()) {
+                        if opened.as_deref() == Some(vp.conversation_id.as_str()) {
                             let (action, address) =
-                                GroupUpdateRequest::decode(vp.payload.as_slice())
+                                ConversationUpdateRequest::decode(vp.payload.as_slice())
                                     .map(|req| format_group_request(&req))
                                     .unwrap_or_else(|_| {
                                         ("Invalid".to_string(), "malformed payload".to_string())
@@ -484,22 +497,22 @@ fn Home() -> Element {
                         }
                     }
                     Some(AppEvent::OwnProposalSubmitted {
-                        group_id,
+                        conversation_id,
                         proposal_id,
                         action,
                         address,
                     }) => {
                         let is_current =
-                            chat.read().opened_group.as_deref() == Some(group_id.as_str());
+                            chat.read().opened_group.as_deref() == Some(conversation_id.as_str());
                         if is_current {
                             cons.write()
                                 .proposal_cache
                                 .insert(proposal_id, (action, address));
                         }
                     }
-                    Some(AppEvent::ProposalDecided(group_id, consensus_event)) => {
+                    Some(AppEvent::ProposalDecided(conversation_id, consensus_event)) => {
                         let is_current =
-                            chat.read().opened_group.as_deref() == Some(group_id.as_str());
+                            chat.read().opened_group.as_deref() == Some(conversation_id.as_str());
                         let mut c = cons.write();
                         if is_current {
                             let (accepted, reason) = match &consensus_event {
@@ -620,7 +633,7 @@ fn StatusStrip() -> Element {
     let session = use_context::<Signal<SessionState>>();
 
     let opened = chat.read().opened_group.clone();
-    let Some(group_name) = opened else {
+    let Some(conversation_name) = opened else {
         return rsx! {};
     };
 
@@ -644,7 +657,7 @@ fn StatusStrip() -> Element {
 
     rsx! {
         div { class: "status-strip",
-            span { class: "status-group", "{group_name}" }
+            span { class: "status-group", "{conversation_name}" }
             span { class: "status-sep" }
             span { class: "status-label", "State" }
             span { class: "state-pill {state_cls}", "{state_text}" }
@@ -679,41 +692,41 @@ fn GroupListSection() -> Element {
             chat.write().opened_group = Some(name.clone());
             chat.write().members.clear();
             cons.write().group_state.clear();
-            let group_id = name.clone();
+            let conversation_id = name.clone();
             spawn(async move {
                 let _ = GATEWAY
                     .send(AppCmd::EnterGroup {
-                        group_id: group_id.clone(),
+                        conversation_id: conversation_id.clone(),
                     })
                     .await;
                 let _ = GATEWAY
                     .send(AppCmd::LoadHistory {
-                        group_id: group_id.clone(),
+                        conversation_id: conversation_id.clone(),
                     })
                     .await;
                 let _ = GATEWAY
                     .send(AppCmd::GetStewardStatus {
-                        group_id: group_id.clone(),
+                        conversation_id: conversation_id.clone(),
                     })
                     .await;
                 let _ = GATEWAY
                     .send(AppCmd::GetGroupState {
-                        group_id: group_id.clone(),
+                        conversation_id: conversation_id.clone(),
                     })
                     .await;
                 let _ = GATEWAY
                     .send(AppCmd::GetCurrentEpochProposals {
-                        group_id: group_id.clone(),
+                        conversation_id: conversation_id.clone(),
                     })
                     .await;
                 let _ = GATEWAY
                     .send(AppCmd::GetGroupMembers {
-                        group_id: group_id.clone(),
+                        conversation_id: conversation_id.clone(),
                     })
                     .await;
                 let _ = GATEWAY
                     .send(AppCmd::GetEpochHistory {
-                        group_id: group_id.clone(),
+                        conversation_id: conversation_id.clone(),
                     })
                     .await;
             });
@@ -731,7 +744,7 @@ fn GroupListSection() -> Element {
                 spawn(async move {
                     let _ = GATEWAY
                         .send(AppCmd::CreateGroup {
-                            group_id: action_name.clone(),
+                            conversation_id: action_name.clone(),
                         })
                         .await;
                     let _ = GATEWAY.send(AppCmd::ListGroups).await;
@@ -740,7 +753,7 @@ fn GroupListSection() -> Element {
                 spawn(async move {
                     let _ = GATEWAY
                         .send(AppCmd::JoinGroup {
-                            group_id: action_name.clone(),
+                            conversation_id: action_name.clone(),
                         })
                         .await;
                     let _ = GATEWAY.send(AppCmd::ListGroups).await;
@@ -784,10 +797,10 @@ fn GroupListSection() -> Element {
 
             if *show_modal.read() {
                 Modal {
-                    title: if *create_mode.read() { "Create Group".to_string() } else { "Join Group".to_string() },
+                    title: if *create_mode.read() { "Create Conversation".to_string() } else { "Join Conversation".to_string() },
                     on_close: move || { show_modal.set(false); },
                     div { class: "form-row",
-                        label { "Group name" }
+                        label { "Conversation name" }
                         input {
                             r#type: "text",
                             value: "{new_name}",
@@ -839,7 +852,7 @@ fn ChatSection() -> Element {
             spawn(async move {
                 let _ = GATEWAY
                     .send(AppCmd::SendMessage {
-                        group_id: gid,
+                        conversation_id: gid,
                         body: text,
                     })
                     .await;
@@ -853,7 +866,7 @@ fn ChatSection() -> Element {
                 spawn(async move {
                     let _ = GATEWAY
                         .send(AppCmd::GetGroupMembers {
-                            group_id: gid.clone(),
+                            conversation_id: gid.clone(),
                         })
                         .await;
                 });
@@ -875,7 +888,7 @@ fn ChatSection() -> Element {
             };
 
             let opened = chat.read().opened_group.clone();
-            let Some(group_id) = opened else {
+            let Some(conversation_id) = opened else {
                 return;
             };
 
@@ -887,7 +900,7 @@ fn ChatSection() -> Element {
             spawn(async move {
                 let _ = GATEWAY
                     .send(AppCmd::SendBanRequest {
-                        group_id: group_id.clone(),
+                        conversation_id: conversation_id.clone(),
                         user_to_ban: addr_to_ban,
                     })
                     .await;
@@ -923,7 +936,7 @@ fn ChatSection() -> Element {
         chat.read()
             .messages
             .iter()
-            .filter(|m| Some(m.group_name.as_str()) == opened.as_deref())
+            .filter(|m| Some(m.conversation_name.as_str()) == opened.as_deref())
             .cloned()
             .collect::<Vec<_>>()
     };
@@ -955,10 +968,10 @@ fn ChatSection() -> Element {
                         button {
                             class: "ghost mini",
                             onclick: move |_| {
-                                let group_id = gid.clone();
+                                let conversation_id = gid.clone();
                                 spawn(async move {
                                     let _ = GATEWAY
-                                        .send(AppCmd::LeaveGroup { group_id })
+                                        .send(AppCmd::LeaveConversation { conversation_id })
                                         .await;
                                 });
                             },
@@ -1078,7 +1091,7 @@ fn ActiveVotesBanner() -> Element {
         .read()
         .pending_votes
         .iter()
-        .filter(|p| Some(p.group_id.as_str()) == opened.as_deref())
+        .filter(|p| Some(p.conversation_id.as_str()) == opened.as_deref())
         .cloned()
         .collect();
 
@@ -1100,7 +1113,7 @@ fn ActiveVotesBanner() -> Element {
             spawn(async move {
                 let _ = GATEWAY
                     .send(AppCmd::Vote {
-                        group_id: v.group_id.clone(),
+                        conversation_id: v.conversation_id.clone(),
                         proposal_id: v.proposal_id,
                         choice,
                     })
@@ -1123,7 +1136,7 @@ fn ActiveVotesBanner() -> Element {
                 for vp in pending_votes.iter() {
                     {
                         let proposal_id = vp.proposal_id;
-                        let (action, id) = GroupUpdateRequest::decode(vp.payload.as_slice())
+                        let (action, id) = ConversationUpdateRequest::decode(vp.payload.as_slice())
                             .map(|req| format_group_request(&req))
                             .unwrap_or_else(|_| (
                                 "Invalid".to_string(),

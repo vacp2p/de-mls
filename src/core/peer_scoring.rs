@@ -8,7 +8,7 @@ use prost::Message;
 use std::collections::HashSet;
 
 use crate::protos::de_mls::messages::v1::{
-    GroupUpdateRequest, ViolationEvidence, group_update_request::Payload,
+    ConversationUpdateRequest, ViolationEvidence, conversation_update_request::Payload,
 };
 
 // ── Score events ────────────────────────────────────────────────────
@@ -97,7 +97,7 @@ pub enum PeerScoringEvent {
     ThresholdCrossedUp { member_id: Vec<u8>, score: i64 },
 }
 
-// ── GroupSync snapshot ──────────────────────────────────────────────
+// ── ConversationSync snapshot ──────────────────────────────────────────────
 
 /// Sparse snapshot of per-member scores for joiner bootstrap. Carries
 /// only members whose score has diverged from `default_score`; the
@@ -156,7 +156,7 @@ pub fn scoring_member_diff(scored: &[Vec<u8>], mls_members: &[Vec<u8>]) -> Scori
 /// - accepted `SCORE_BELOW_THRESHOLD` or `DEADLOCK` → creator reward only.
 /// - rejected emergency → creator penalty.
 pub fn emergency_score_ops(payload: &[u8], approved: bool) -> Vec<ScoreOp> {
-    let Ok(req) = GroupUpdateRequest::decode(payload) else {
+    let Ok(req) = ConversationUpdateRequest::decode(payload) else {
         return Vec::new();
     };
     let Some(Payload::EmergencyCriteria(ec)) = req.payload else {
@@ -231,7 +231,7 @@ pub trait PeerScoringPlugin: Send + Sync + 'static {
     #[must_use]
     fn apply_ops(&mut self, ops: &[ScoreOp]) -> Vec<PeerScoringEvent>;
 
-    /// Apply a [`ScoreSnapshot`] (GroupSync receive). Each entry is an
+    /// Apply a [`ScoreSnapshot`] (ConversationSync receive). Each entry is an
     /// absolute-score replacement that auto-tracks members not already
     /// known to the plug-in (treating "untracked → tracked" as crossing
     /// from above for cross-detection — see [`PeerScoringEvent`]). This
@@ -245,7 +245,7 @@ pub trait PeerScoringPlugin: Send + Sync + 'static {
     #[must_use]
     fn apply_snapshot(&mut self, snapshot: &ScoreSnapshot) -> Vec<PeerScoringEvent>;
 
-    /// Sparse snapshot of non-default scores for GroupSync send.
+    /// Sparse snapshot of non-default scores for ConversationSync send.
     fn snapshot(&self) -> ScoreSnapshot;
 
     fn score_for(&self, member_id: &[u8]) -> Option<i64>;
@@ -253,7 +253,7 @@ pub trait PeerScoringPlugin: Send + Sync + 'static {
     fn all_members_with_scores(&self) -> Vec<(Vec<u8>, i64)>;
 
     /// Current removal threshold. Coordinator reads this when building
-    /// `GroupSync` so joiners adopt the same value.
+    /// `ConversationSync` so joiners adopt the same value.
     fn threshold(&self) -> i64;
 
     /// Update the threshold in place. Emits NO events — even though a
@@ -828,7 +828,7 @@ mod tests {
             epoch: 0,
             creator_member_id: creator,
         };
-        let req = GroupUpdateRequest {
+        let req = ConversationUpdateRequest {
             payload: Some(Payload::EmergencyCriteria(EmergencyCriteriaProposal {
                 evidence: Some(evidence),
             })),

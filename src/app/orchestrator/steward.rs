@@ -4,26 +4,28 @@
 use tracing::{error, info};
 
 use crate::{
-    app::{GroupPlugins, User, UserError},
+    app::{ConversationPlugins, User, UserError},
     core::{
-        DeMlsProvider, ElectionDecision, GroupEventHandler, PeerScoringPlugin, StewardListPlugin,
-        member_set, scoring_member_diff, target_identity_of,
+        ConversationEventHandler, DeMlsProvider, ElectionDecision, PeerScoringPlugin,
+        StewardListPlugin, member_set, scoring_member_diff, target_identity_of,
     },
     identity::ShortId,
     protos::de_mls::messages::v1::{
-        AppMessage, GroupSync, GroupUpdateRequest, PeerScore, StewardElectionProposal,
-        TimingConfig, ViolationEvidence, group_update_request,
+        AppMessage, ConversationSync, ConversationUpdateRequest, PeerScore,
+        StewardElectionProposal, TimingConfig, ViolationEvidence, conversation_update_request,
     },
 };
 
 use crate::mls_crypto::MlsService;
 
-impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P, GP, H> {
+impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 'static>
+    User<P, GP, H>
+{
     /// Add any MLS members not yet tracked in scoring, and drop scored
     /// entries for identities no longer in MLS. Diffing is delegated to
     /// [`scoring_member_diff`]; this method only applies the diff.
-    pub async fn sync_scoring_members(&self, group_name: &str, mls_members: &[Vec<u8>]) {
-        let Some(entry_arc) = self.lookup_entry(group_name).await else {
+    pub async fn sync_scoring_members(&self, conversation_name: &str, mls_members: &[Vec<u8>]) {
+        let Some(entry_arc) = self.lookup_entry(conversation_name).await else {
             return;
         };
         let mut entry = entry_arc.write().await;
@@ -51,15 +53,15 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// policy (the deterministic impl re-installs when membership drops
     /// below `sn_min`). Coordinator just supplies `epoch` + `members`
     /// and drains events.
-    async fn try_auto_fill_steward_list(&self, group_name: &str) -> Result<(), UserError> {
+    async fn try_auto_fill_steward_list(&self, conversation_name: &str) -> Result<(), UserError> {
         let entry_arc = self
-            .lookup_entry(group_name)
+            .lookup_entry(conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
         let mut entry = entry_arc.write().await;
         let mls = entry.handle.expect_mls()?;
         let epoch = mls.current_epoch()?;
-        let members = entry.handle.group_members()?;
+        let members = entry.handle.conversation_members()?;
         let _events = entry.handle.steward.maybe_auto_fill(epoch, &members)?;
         Ok(())
     }
@@ -73,19 +75,19 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// drops one more identity not yet in `approved_proposals`.
     pub(super) async fn try_initiate_steward_election(
         &self,
-        group_name: &str,
+        conversation_name: &str,
         recovery: bool,
         extra_exclude: Option<&[u8]>,
     ) -> Result<(), UserError> {
         let entry_arc = self
-            .lookup_entry(group_name)
+            .lookup_entry(conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
         let (proposed_stewards, election_epoch, retry_round) = {
             let entry = entry_arc.read().await;
             let mls = entry.handle.expect_mls()?;
             let epoch = mls.current_epoch()?;
-            let mls_members = entry.handle.group_members()?;
+            let mls_members = entry.handle.conversation_members()?;
             let self_identity = self.identity().identity_bytes();
 
             // `has_election_in_flight` is a proposal-queue check, not a
@@ -122,7 +124,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             )? {
                 ElectionDecision::Skip(reason) => {
                     if matches!(reason, "no eligible candidates after filter") {
-                        info!(group = group_name, "skipping election: {reason}");
+                        info!(group = conversation_name, "skipping election: {reason}");
                     }
                     return Ok(());
                 }
@@ -135,8 +137,8 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         };
 
         let stewards_len = proposed_stewards.len();
-        let request = GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::StewardElection(
+        let request = ConversationUpdateRequest {
+            payload: Some(conversation_update_request::Payload::StewardElection(
                 StewardElectionProposal {
                     proposed_stewards,
                     election_epoch,
@@ -146,7 +148,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         };
 
         info!(
-            group = group_name,
+            group = conversation_name,
             epoch = election_epoch,
             retry_round,
             stewards = stewards_len,
@@ -156,7 +158,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
 
         // Elections are group decisions — broadcast unbundled so the
         // responsible proposer still votes via the banner.
-        self.initiate_proposal(group_name.to_string(), request, None)
+        self.initiate_proposal(conversation_name.to_string(), request, None)
             .await?;
 
         Ok(())
@@ -167,16 +169,16 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// others no-op. On YES the ECP opens `recovery_mode`.
     pub(super) async fn try_initiate_deadlock_ecp(
         &self,
-        group_name: &str,
+        conversation_name: &str,
     ) -> Result<(), UserError> {
         let entry_arc = self
-            .lookup_entry(group_name)
+            .lookup_entry(conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
         let (is_authorized, self_id, epoch) = {
             let entry = entry_arc.read().await;
             let mls = entry.handle.expect_mls()?;
-            let mls_members = entry.handle.group_members()?;
+            let mls_members = entry.handle.conversation_members()?;
             let self_id = self.identity().identity_bytes();
             // Deadlock proposer = election proposer with the stricter
             // predicate (MLS-present and not queued for removal).
@@ -202,11 +204,11 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             .with_creator(self_id.to_vec())
             .into_update_request()?;
 
-        info!(group = group_name, epoch, "initiating Deadlock ECP");
+        info!(group = conversation_name, epoch, "initiating Deadlock ECP");
 
         // Bundle YES — the proposer's observation that the deadlock is
         // real is their vote.
-        self.initiate_proposal(group_name.to_string(), request, Some(true))
+        self.initiate_proposal(conversation_name.to_string(), request, Some(true))
             .await?;
         Ok(())
     }
@@ -215,13 +217,16 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// below `sn_min`, (2) kick off an election if the list is exhausted.
     /// Election-initiate failures are logged, not surfaced — group state
     /// may legitimately reject a new proposal right now.
-    pub async fn steward_list_housekeeping(&self, group_name: &str) -> Result<(), UserError> {
-        self.try_auto_fill_steward_list(group_name).await?;
+    pub async fn steward_list_housekeeping(
+        &self,
+        conversation_name: &str,
+    ) -> Result<(), UserError> {
+        self.try_auto_fill_steward_list(conversation_name).await?;
         if let Err(e) = self
-            .try_initiate_steward_election(group_name, false, None)
+            .try_initiate_steward_election(conversation_name, false, None)
             .await
         {
-            info!(group = group_name, error = %e, "election initiation deferred");
+            info!(group = conversation_name, error = %e, "election initiation deferred");
         }
         Ok(())
     }
@@ -229,16 +234,16 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// Regenerate the steward list at the current epoch against the current
     /// MLS member set — same effect as a successful election. Intended for
     /// tests and administrative tooling.
-    pub async fn regenerate_steward_list(&self, group_name: &str) -> Result<(), UserError> {
+    pub async fn regenerate_steward_list(&self, conversation_name: &str) -> Result<(), UserError> {
         let entry_arc = self
-            .lookup_entry(group_name)
+            .lookup_entry(conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
         let (current_epoch, members) = {
             let entry = entry_arc.read().await;
             let mls = entry.handle.expect_mls()?;
             let current_epoch = mls.current_epoch()?;
-            let members = entry.handle.group_members()?;
+            let members = entry.handle.conversation_members()?;
             (current_epoch, members)
         };
 
@@ -261,12 +266,12 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// `pending_update_max_epochs`.
     pub async fn prune_pending_updates_after_commit(
         &self,
-        group_name: &str,
+        conversation_name: &str,
     ) -> Result<(), UserError> {
         let entry_arc = self
-            .lookup_entry(group_name)
+            .lookup_entry(conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
         let (current_epoch, members, max_age) = {
             let entry = entry_arc.read().await;
             let Some(mls) = entry.handle.mls() else {
@@ -274,7 +279,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             };
             (
                 mls.current_epoch()?,
-                entry.handle.group_members()?,
+                entry.handle.conversation_members()?,
                 entry.handle.config.pending_update_max_epochs,
             )
         };
@@ -292,7 +297,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         let after = entry.handle.group.pending_update_count();
         if before != after {
             info!(
-                group = group_name,
+                group = conversation_name,
                 before,
                 after,
                 expired = expired.len(),
@@ -305,16 +310,16 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// On epoch advance, the new live epoch steward drains the pending-update
     /// buffer into voting proposals. Skips entries already covered by the
     /// current voting/approved queues so we don't double-propose.
-    pub async fn process_buffered_updates(&self, group_name: &str) -> Result<(), UserError> {
+    pub async fn process_buffered_updates(&self, conversation_name: &str) -> Result<(), UserError> {
         let entry_arc = self
-            .lookup_entry(group_name)
+            .lookup_entry(conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
-        let (current_epoch, to_propose): (u64, Vec<GroupUpdateRequest>) = {
+            .ok_or(UserError::ConversationNotFound)?;
+        let (current_epoch, to_propose): (u64, Vec<ConversationUpdateRequest>) = {
             let entry = entry_arc.read().await;
 
             let (current_epoch, members) = match entry.handle.mls() {
-                Some(mls) => (mls.current_epoch()?, entry.handle.group_members()?),
+                Some(mls) => (mls.current_epoch()?, entry.handle.conversation_members()?),
                 None => (0, Vec::new()),
             };
             let self_identity = self.identity().identity_bytes();
@@ -335,7 +340,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 approved.values().filter_map(target_identity_of).collect();
             let members_set = member_set(&members);
 
-            let to_propose: Vec<GroupUpdateRequest> = entry
+            let to_propose: Vec<ConversationUpdateRequest> = entry
                 .handle
                 .group
                 .pending_updates()
@@ -345,8 +350,8 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                     // Drop Add for already-member and Remove for non-member.
                     let is_member = members_set.contains(id.as_slice());
                     match p.request.payload.as_ref() {
-                        Some(group_update_request::Payload::InviteMember(_)) => !is_member,
-                        Some(group_update_request::Payload::RemoveMember(_)) => is_member,
+                        Some(conversation_update_request::Payload::InviteMember(_)) => !is_member,
+                        Some(conversation_update_request::Payload::RemoveMember(_)) => is_member,
                         _ => false,
                     }
                 })
@@ -360,7 +365,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         }
 
         info!(
-            group = group_name,
+            group = conversation_name,
             epoch = current_epoch,
             count = to_propose.len(),
             "promoting buffered updates to proposals"
@@ -370,24 +375,24 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         // steward-auto-propose — the steward still decides per proposal.
         for request in to_propose {
             if let Err(e) = self
-                .initiate_proposal(group_name.to_string(), request, None)
+                .initiate_proposal(conversation_name.to_string(), request, None)
                 .await
             {
-                info!(group = group_name, error = %e, "buffered proposal deferred");
+                info!(group = conversation_name, error = %e, "buffered proposal deferred");
             }
         }
         Ok(())
     }
 
     /// Broadcast steward list + protocol config + peer scores + timing as
-    /// an encrypted `GroupSync`. Steward calls this after an Add-bearing
+    /// an encrypted `ConversationSync`. Steward calls this after an Add-bearing
     /// commit so new joiners can fully participate. Idempotent for members
     /// who already have a steward list.
-    pub async fn send_group_sync(&self, group_name: &str) -> Result<(), UserError> {
+    pub async fn send_group_sync(&self, conversation_name: &str) -> Result<(), UserError> {
         let entry_arc = self
-            .lookup_entry(group_name)
+            .lookup_entry(conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
         let packet = {
             let entry = entry_arc.read().await;
             // Sparse snapshot — only members whose score has diverged
@@ -432,7 +437,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             // inherit stewards they would have to walk past on the very
             // first epoch.
             let mls = entry.handle.expect_mls()?;
-            let mls_members = entry.handle.group_members()?;
+            let mls_members = entry.handle.conversation_members()?;
             let eligible = entry.handle.group.steward_eligibility(&mls_members);
             let steward_members = entry.handle.steward.steward_members(&eligible);
 
@@ -440,7 +445,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             // a frozen tag on `StewardList`, not the plug-in's dynamic
             // counter for the next attempt (which resets to 0 on accept).
             // Joiners re-derive the ordering from this seed.
-            let sync = GroupSync {
+            let sync = ConversationSync {
                 steward_members,
                 election_epoch: list.election_epoch(),
                 sn_min: list.config().sn_min as u32,
@@ -459,8 +464,8 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             mls.build_message(&app_msg, &self.app_id)?
         };
 
-        self.handler.on_outbound(group_name, packet).await?;
-        info!(group = group_name, "group sync sent");
+        self.handler.on_outbound(conversation_name, packet).await?;
+        info!(group = conversation_name, "group sync sent");
         Ok(())
     }
 
@@ -469,12 +474,12 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// target already covered by a pending removal.
     pub async fn check_and_initiate_score_removals(
         &self,
-        group_name: &str,
+        conversation_name: &str,
     ) -> Result<(), UserError> {
         let entry_arc = self
-            .lookup_entry(group_name)
+            .lookup_entry(conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
         let self_id = self.identity().identity_bytes();
 
         // Reactive entry: callers chain into this after a scoring apply
@@ -531,7 +536,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             let request = evidence.into_update_request()?;
 
             info!(
-                group = group_name,
+                group = conversation_name,
                 target = %ShortId(&target_id),
                 score = current_score,
                 "initiating SCORE_BELOW_THRESHOLD removal"
@@ -540,15 +545,15 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             // member must be removed. The steward's vote is YES by
             // protocol, so we bundle it at submit and skip the banner.
             if let Err(e) = self
-                .initiate_proposal(group_name.to_string(), request, Some(true))
+                .initiate_proposal(conversation_name.to_string(), request, Some(true))
                 .await
             {
-                if let Some(entry_arc) = self.lookup_entry(group_name).await {
+                if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
                     let mut entry = entry_arc.write().await;
                     entry.handle.group.resolve_pending_removal(&target_id);
                 }
                 error!(
-                    group = group_name,
+                    group = conversation_name,
                     target = %ShortId(&target_id),
                     error = %e,
                     "SCORE_BELOW_THRESHOLD vote failed to start"

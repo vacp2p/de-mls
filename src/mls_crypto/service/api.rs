@@ -6,7 +6,7 @@
 //! are set at construction and every method operates on that implicit
 //! group.
 //!
-//! Group construction is intentionally *not* on the trait — concrete impls
+//! Conversation construction is intentionally *not* on the trait — concrete impls
 //! expose their own constructors (e.g. `OpenMlsService::new_as_creator` /
 //! `new_from_welcome`), and key-package generation is also off the trait
 //! because a joiner needs to publish a key package before any group exists.
@@ -33,13 +33,13 @@ pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_
 
 /// Default ceiling on MLS proposals per commit batch. Defends against
 /// runaway batch growth when freeze recovery preserves work across
-/// multiple failed cycles. Per-node config; not synced via `GroupSync`.
+/// multiple failed cycles. Per-node config; not synced via `ConversationSync`.
 pub const DEFAULT_COMMIT_BATCH_MAX: usize = 50;
 
 /// Per-group MLS backend. Each instance corresponds to one MLS group.
 pub trait MlsService: Send + Sync + 'static {
     /// The group id this service is scoped to.
-    fn group_id(&self) -> &str;
+    fn conversation_id(&self) -> &str;
 
     /// Maximum number of MLS proposals the steward will pack into one
     /// commit batch. Defaults to [`DEFAULT_COMMIT_BATCH_MAX`]; impls may
@@ -48,7 +48,7 @@ pub trait MlsService: Send + Sync + 'static {
         DEFAULT_COMMIT_BATCH_MAX
     }
 
-    // ── Group lifecycle ──
+    // ── Conversation lifecycle ──
 
     /// Tear down all local MLS state for this group. Idempotent so
     /// repeated leave / cleanup is safe.

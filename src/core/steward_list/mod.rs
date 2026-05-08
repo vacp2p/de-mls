@@ -8,7 +8,7 @@
 //! position query.
 //!
 //! Mutators return [`StewardListEvent`]s so the coordinator can chain
-//! protocol actions (broadcast `GroupSync` after install, escalate to a
+//! protocol actions (broadcast `ConversationSync` after install, escalate to a
 //! Layer-3 `Deadlock` ECP after retry exhaustion).
 //!
 //! Layout:

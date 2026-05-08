@@ -31,7 +31,7 @@ pub struct OpenMlsService<S: DeMlsStorage> {
     pub(super) storage: S,
     pub(super) crypto: RustCrypto,
     pub(super) credentials: Arc<MlsCredentials>,
-    pub(super) group_id: String,
+    pub(super) conversation_id: String,
     pub(super) mls_group: RwLock<MlsGroup>,
     pub(super) pending_staged_commit: RwLock<Option<StagedCommit>>,
 }
@@ -39,7 +39,7 @@ pub struct OpenMlsService<S: DeMlsStorage> {
 impl<S: DeMlsStorage> OpenMlsService<S> {
     /// Create a fresh MLS group as the sole initial member ("creator").
     pub fn new_as_creator(
-        group_id: String,
+        conversation_id: String,
         storage: S,
         credentials: Arc<MlsCredentials>,
     ) -> Result<Self, MlsError> {
@@ -53,7 +53,7 @@ impl<S: DeMlsStorage> OpenMlsService<S> {
                 &provider,
                 credentials.signer(),
                 &config,
-                GroupId::from_slice(group_id.as_bytes()),
+                GroupId::from_slice(conversation_id.as_bytes()),
                 credentials.credential().clone(),
             )?
         };
@@ -62,7 +62,7 @@ impl<S: DeMlsStorage> OpenMlsService<S> {
             storage,
             crypto,
             credentials,
-            group_id,
+            conversation_id,
             mls_group: RwLock::new(group),
             pending_staged_commit: RwLock::new(None),
         })
@@ -109,12 +109,12 @@ impl<S: DeMlsStorage> OpenMlsService<S> {
                 .into_group(&provider)?
         };
 
-        let group_id = String::from_utf8_lossy(group.group_id().as_slice()).to_string();
+        let conversation_id = String::from_utf8_lossy(group.group_id().as_slice()).to_string();
         Ok(Some(Self {
             storage,
             crypto,
             credentials,
-            group_id,
+            conversation_id,
             mls_group: RwLock::new(group),
             pending_staged_commit: RwLock::new(None),
         }))

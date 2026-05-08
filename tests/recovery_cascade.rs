@@ -11,8 +11,8 @@ use async_trait::async_trait;
 
 use hashgraph_like_consensus::service::DefaultConsensusService;
 
-use de_mls::app::{GroupConfig, User};
-use de_mls::core::{CallbackError, DefaultProvider, GroupEventHandler, StewardListConfig};
+use de_mls::app::{ConversationConfig, User};
+use de_mls::core::{CallbackError, ConversationEventHandler, DefaultProvider, StewardListConfig};
 use de_mls::ds::{InboundPacket, OutboundPacket};
 use de_mls::protos::de_mls::messages::v1::AppMessage;
 
@@ -33,7 +33,7 @@ impl H {
 }
 
 #[async_trait]
-impl GroupEventHandler for H {
+impl ConversationEventHandler for H {
     async fn on_outbound(&self, _: &str, p: OutboundPacket) -> Result<String, CallbackError> {
         self.packets.lock().unwrap().push(p);
         Ok("ok".into())
@@ -41,10 +41,10 @@ impl GroupEventHandler for H {
     async fn on_app_message(&self, _: &str, _m: AppMessage) -> Result<(), CallbackError> {
         Ok(())
     }
-    async fn on_leave_group(&self, _: &str) -> Result<(), CallbackError> {
+    async fn on_leave_conversation(&self, _: &str) -> Result<(), CallbackError> {
         Ok(())
     }
-    async fn on_joined_group(&self, _: &str) -> Result<(), CallbackError> {
+    async fn on_joined_conversation(&self, _: &str) -> Result<(), CallbackError> {
         Ok(())
     }
     async fn on_error(&self, _: &str, _: &str, _: &str) {}
@@ -57,7 +57,7 @@ const DAVE_KEY: &str = "7c852118294e51e653712a81e05800f419141751be58f605c371e151
 
 type TU = User<DefaultProvider, de_mls::app::DefaultGroupPlugins, H>;
 
-fn make(key: &str, cs: Arc<DefaultConsensusService>, cfg: GroupConfig) -> (TU, H) {
+fn make(key: &str, cs: Arc<DefaultConsensusService>, cfg: ConversationConfig) -> (TU, H) {
     let h = H::new();
     let u = User::with_private_key_and_config(key, cs, Arc::new(h.clone()), cfg).unwrap();
     (u, h)
@@ -67,7 +67,7 @@ fn to_in(p: &OutboundPacket) -> InboundPacket {
     InboundPacket::new(
         p.payload.clone(),
         &p.subtopic,
-        &p.group_id,
+        &p.conversation_id,
         p.app_id.clone(),
         0,
     )
@@ -90,11 +90,11 @@ async fn settle() {
 #[tokio::test]
 async fn concurrent_joins_leave_joiners_with_empty_buffer() {
     let group = "recovery-test";
-    let cfg = GroupConfig {
+    let cfg = ConversationConfig {
         commit_inactivity_duration: Duration::from_millis(50),
         freeze_duration: Duration::from_millis(10),
         protocol: StewardListConfig::new(1, 5).unwrap(),
-        ..GroupConfig::default()
+        ..ConversationConfig::default()
     };
     let cs = Arc::new(DefaultConsensusService::new_with_max_sessions(100));
 
@@ -104,10 +104,10 @@ async fn concurrent_joins_leave_joiners_with_empty_buffer() {
     let (mut dave, dh) = make(DAVE_KEY, cs.clone(), cfg.clone());
 
     // Step 1: alice creates the group. Bob/Charlie/Dave register as joiners.
-    alice.create_group(group, true).await.unwrap();
-    bob.create_group(group, false).await.unwrap();
-    charlie.create_group(group, false).await.unwrap();
-    dave.create_group(group, false).await.unwrap();
+    alice.create_conversation(group, true).await.unwrap();
+    bob.create_conversation(group, false).await.unwrap();
+    charlie.create_conversation(group, false).await.unwrap();
+    dave.create_conversation(group, false).await.unwrap();
 
     // Step 2: All three joiners send KPs nearly simultaneously. Before the
     // buffer-hygiene fix, each joiner would buffer the others' KPs observed

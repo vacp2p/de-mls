@@ -1,4 +1,4 @@
-//! [`GroupPlugins`] trait — bundle of per-group plug-in types and the
+//! [`ConversationPlugins`] trait — bundle of per-group plug-in types and the
 //! construction methods for each. The trait is the single thing
 //! integrators implement to swap any of the per-group plug-ins; the
 //! convenience [`DefaultGroupPlugins`] supplies an in-memory build used
@@ -21,13 +21,13 @@ use crate::{
 /// (`Mls`, `Scoring`, `Steward`) plus the construction methods for each.
 /// Identity is intentionally **not** part of this bundle — it lives
 /// parallel to the group registry as `Arc<dyn Identity>` on `User`.
-pub trait GroupPlugins: Send + Sync + 'static {
+pub trait ConversationPlugins: Send + Sync + 'static {
     type Mls: MlsService;
     type Scoring: PeerScoringPlugin;
     type Steward: StewardListPlugin;
 
     /// Build an MLS service for a brand-new group as its sole creator.
-    fn create_mls(&self, group_id: String) -> Result<Self::Mls, MlsError>;
+    fn create_mls(&self, conversation_id: String) -> Result<Self::Mls, MlsError>;
 
     /// Try to build an MLS service from a serialized MLS welcome.
     /// Returns `Ok(None)` when the welcome isn't for us.
@@ -43,7 +43,7 @@ pub trait GroupPlugins: Send + Sync + 'static {
     /// Build a fresh steward-list plug-in for a new group entry.
     /// Returns an empty plug-in; lifecycle creator path bootstraps via
     /// [`StewardListPlugin::install_list`].
-    fn make_steward(&self, group_id: &[u8], config: StewardListConfig) -> Self::Steward;
+    fn make_steward(&self, conversation_id: &[u8], config: StewardListConfig) -> Self::Steward;
 }
 
 /// MLS service type for the default `DefaultProvider`-backed `User`. Uses
@@ -69,14 +69,14 @@ pub struct DefaultGroupPlugins {
     pub(crate) credentials: Arc<MlsCredentials>,
 }
 
-impl GroupPlugins for DefaultGroupPlugins {
+impl ConversationPlugins for DefaultGroupPlugins {
     type Mls = DefaultMlsService;
     type Scoring = DefaultPeerScoring;
     type Steward = DefaultStewardList;
 
-    fn create_mls(&self, group_id: String) -> Result<Self::Mls, MlsError> {
+    fn create_mls(&self, conversation_id: String) -> Result<Self::Mls, MlsError> {
         OpenMlsService::new_as_creator(
-            group_id,
+            conversation_id,
             Arc::clone(&self.storage),
             Arc::clone(&self.credentials),
         )
@@ -105,7 +105,7 @@ impl GroupPlugins for DefaultGroupPlugins {
         )
     }
 
-    fn make_steward(&self, group_id: &[u8], config: StewardListConfig) -> Self::Steward {
-        DeterministicStewardList::empty(group_id.to_vec(), config)
+    fn make_steward(&self, conversation_id: &[u8], config: StewardListConfig) -> Self::Steward {
+        DeterministicStewardList::empty(conversation_id.to_vec(), config)
     }
 }

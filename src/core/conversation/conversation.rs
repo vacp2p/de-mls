@@ -1,7 +1,7 @@
 //! Per-group protocol-queue state: approved/voting proposal queues,
 //! freeze-round candidate buffer, pending-update buffer, urgent-commit
 //! target, recovery-mode flag, ECP dedup. MLS crypto state and the
-//! steward-list plug-in live alongside on `GroupHandle`.
+//! steward-list plug-in live alongside on `ConversationHandle`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -9,7 +9,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     core::proposal_kind::ProposalKind,
-    protos::de_mls::messages::v1::{CommitCandidate, GroupUpdateRequest, group_update_request},
+    protos::de_mls::messages::v1::{
+        CommitCandidate, ConversationUpdateRequest, conversation_update_request,
+    },
 };
 
 /// Consensus proposal identifier (assigned by the consensus service).
@@ -28,9 +30,9 @@ pub fn self_leave_proposal_id(identity: &[u8]) -> u32 {
 
 /// True iff the `(proposal_id, request)` pair is an auto-approved self-leave
 /// (identified by the deterministic ID signature).
-pub fn is_auto_approved_entry(proposal_id: u32, request: &GroupUpdateRequest) -> bool {
+pub fn is_auto_approved_entry(proposal_id: u32, request: &ConversationUpdateRequest) -> bool {
     match request.payload.as_ref() {
-        Some(group_update_request::Payload::RemoveMember(r)) => {
+        Some(conversation_update_request::Payload::RemoveMember(r)) => {
             proposal_id == self_leave_proposal_id(&r.identity)
         }
         _ => false,
@@ -43,15 +45,15 @@ pub fn member_set(members: &[Vec<u8>]) -> HashSet<&[u8]> {
     members.iter().map(|m| m.as_slice()).collect()
 }
 
-/// Return the target identity of a membership-changing `GroupUpdateRequest`.
+/// Return the target identity of a membership-changing `ConversationUpdateRequest`.
 ///
 /// Used as the stable key for buffering pending updates so duplicates don't
 /// stack when the same KP is re-broadcast. Returns `None` for non-membership
 /// requests (emergency criteria, steward election).
-pub fn target_identity_of(request: &GroupUpdateRequest) -> Option<&[u8]> {
+pub fn target_identity_of(request: &ConversationUpdateRequest) -> Option<&[u8]> {
     match request.payload.as_ref()? {
-        group_update_request::Payload::InviteMember(m) => Some(&m.identity),
-        group_update_request::Payload::RemoveMember(m) => Some(&m.identity),
+        conversation_update_request::Payload::InviteMember(m) => Some(&m.identity),
+        conversation_update_request::Payload::RemoveMember(m) => Some(&m.identity),
         _ => None,
     }
 }
@@ -64,8 +66,8 @@ pub fn target_identity_of(request: &GroupUpdateRequest) -> Option<&[u8]> {
 /// `max_age_epochs` epochs have elapsed since the entry was first seen.
 #[derive(Clone, Debug)]
 pub struct PendingUpdate {
-    /// The `GroupUpdateRequest` carrying either `InviteMember` or `RemoveMember`.
-    pub request: GroupUpdateRequest,
+    /// The `ConversationUpdateRequest` carrying either `InviteMember` or `RemoveMember`.
+    pub request: ConversationUpdateRequest,
     /// MLS epoch at which this update was first observed locally.
     pub first_seen_epoch: u64,
 }
@@ -89,26 +91,26 @@ pub(crate) struct FreezeRound {
     pub candidates: Vec<BufferedCommitCandidate>,
 }
 
-/// Per-group protocol state. Stewards batch commits; members vote.
-/// Construct with [`Self::create_group`] or [`Self::prepare_to_join`].
+/// Per-conversation protocol state. Stewards batch commits; members vote.
+/// Construct with [`Conversation::create`] or [`Conversation::prepare_to_join`].
 ///
 /// Pure proposal-queue and freeze-round bookkeeping — MLS state lives
 /// on the per-group [`crate::mls_crypto::MlsService`] instance held on
-/// `GroupHandle`, alongside the steward-list plug-in. `Group` itself has
+/// `ConversationHandle`, alongside the steward-list plug-in. `Conversation` itself has
 /// no `M` generic.
-pub struct Group {
+pub struct Conversation {
     /// The name of the group.
-    group_name: String,
+    conversation_name: String,
     /// This user's identity bytes (set at construction; matches the
     /// MLS leaf credential).
     self_identity: Vec<u8>,
     /// Proposals that passed consensus, waiting for steward to commit.
-    approved_proposals: HashMap<ProposalId, GroupUpdateRequest>,
+    approved_proposals: HashMap<ProposalId, ConversationUpdateRequest>,
     /// Insertion order of `approved_proposals` (FIFO). Library proposal
     /// IDs are content-derived hashes, so sort-by-id is not temporal.
     approved_order: Vec<ProposalId>,
     /// Proposals waiting on consensus voting (created by this user).
-    voting_proposals: HashMap<ProposalId, GroupUpdateRequest>,
+    voting_proposals: HashMap<ProposalId, ConversationUpdateRequest>,
     /// Active emergency criteria proposals not yet finalized by consensus.
     /// While non-empty, lower-priority proposals MUST be blocked (RFC §Partial Freeze).
     active_emergency_ids: HashSet<ProposalId>,
@@ -133,10 +135,10 @@ pub struct Group {
     urgent_commit_target: Option<Vec<u8>>,
 }
 
-impl Group {
-    fn new_base(group_name: &str, self_identity: Vec<u8>) -> Self {
+impl Conversation {
+    fn new_base(conversation_name: &str, self_identity: Vec<u8>) -> Self {
         Self {
-            group_name: group_name.to_string(),
+            conversation_name: conversation_name.to_string(),
             self_identity,
             approved_proposals: HashMap::new(),
             approved_order: Vec::new(),
@@ -167,25 +169,25 @@ impl Group {
     }
 
     /// Build a joiner-side handle for an existing group. The MLS service
-    /// is held on `GroupHandle`; the lifecycle layer attaches it via
+    /// is held on `ConversationHandle`; the lifecycle layer attaches it via
     /// `entry.attach_mls(...)` once the welcome arrives.
-    pub fn prepare_to_join(group_name: &str, self_identity: Vec<u8>) -> Self {
-        Self::new_base(group_name, self_identity)
+    pub fn prepare_to_join(conversation_name: &str, self_identity: Vec<u8>) -> Self {
+        Self::new_base(conversation_name, self_identity)
     }
 
     /// Build a creator-side handle. The steward list and MLS service
-    /// are owned by `GroupHandle`; this constructor only initializes the
+    /// are owned by `ConversationHandle`; this constructor only initializes the
     /// proposal-queue and freeze-round state.
-    pub fn create_group(group_name: &str, creator_identity: Vec<u8>) -> Self {
-        Self::new_base(group_name, creator_identity)
+    pub fn create(conversation_name: &str, creator_identity: Vec<u8>) -> Self {
+        Self::new_base(conversation_name, creator_identity)
     }
 
-    pub fn group_name(&self) -> &str {
-        &self.group_name
+    pub fn name(&self) -> &str {
+        &self.conversation_name
     }
 
-    pub fn group_name_bytes(&self) -> &[u8] {
-        self.group_name.as_bytes()
+    pub fn name_bytes(&self) -> &[u8] {
+        self.conversation_name.as_bytes()
     }
 
     /// Build the eligibility predicate that the steward plug-in's "live"
@@ -212,7 +214,7 @@ impl Group {
         self.approved_proposals.values().any(|req| {
             matches!(
                 req.payload.as_ref(),
-                Some(group_update_request::Payload::RemoveMember(r)) if r.identity == identity
+                Some(conversation_update_request::Payload::RemoveMember(r)) if r.identity == identity
             )
         })
     }
@@ -228,7 +230,7 @@ impl Group {
         self.approved_proposals.len()
     }
 
-    pub fn approved_proposals(&self) -> &HashMap<ProposalId, GroupUpdateRequest> {
+    pub fn approved_proposals(&self) -> &HashMap<ProposalId, ConversationUpdateRequest> {
         &self.approved_proposals
     }
 
@@ -238,7 +240,7 @@ impl Group {
     }
 
     /// Re-inserting an existing id preserves the original position.
-    fn push_approved(&mut self, proposal_id: ProposalId, proposal: GroupUpdateRequest) {
+    fn push_approved(&mut self, proposal_id: ProposalId, proposal: ConversationUpdateRequest) {
         if self
             .approved_proposals
             .insert(proposal_id, proposal)
@@ -261,7 +263,11 @@ impl Group {
     }
 
     /// Add a newly-created proposal to the voting queue.
-    pub fn store_voting_proposal(&mut self, proposal_id: ProposalId, proposal: GroupUpdateRequest) {
+    pub fn store_voting_proposal(
+        &mut self,
+        proposal_id: ProposalId,
+        proposal: ConversationUpdateRequest,
+    ) {
         self.voting_proposals.insert(proposal_id, proposal);
     }
 
@@ -269,7 +275,7 @@ impl Group {
     pub fn insert_approved_proposal(
         &mut self,
         proposal_id: ProposalId,
-        proposal: GroupUpdateRequest,
+        proposal: ConversationUpdateRequest,
     ) {
         self.push_approved(proposal_id, proposal);
     }
@@ -288,7 +294,7 @@ impl Group {
     /// MLS advances the epoch itself on commit merge, so no counter bump
     /// here. Per-node epoch history is an app-layer concern; this method
     /// surfaces the snapshot but does not retain it.
-    pub fn clear_approved_proposals(&mut self) -> HashMap<ProposalId, GroupUpdateRequest> {
+    pub fn clear_approved_proposals(&mut self) -> HashMap<ProposalId, ConversationUpdateRequest> {
         self.approved_order.clear();
         std::mem::take(&mut self.approved_proposals)
     }
@@ -300,7 +306,7 @@ impl Group {
         self.approved_proposals.retain(|_pid, req| {
             matches!(
                 req.payload.as_ref(),
-                Some(group_update_request::Payload::RemoveMember(_))
+                Some(conversation_update_request::Payload::RemoveMember(_))
             )
         });
         self.approved_order
@@ -374,7 +380,7 @@ impl Group {
         self.approved_proposals.retain(|_pid, req| {
             !matches!(
                 req.payload.as_ref(),
-                Some(group_update_request::Payload::RemoveMember(r)) if r.identity == target
+                Some(conversation_update_request::Payload::RemoveMember(r)) if r.identity == target
             )
         });
         self.approved_order
@@ -507,14 +513,14 @@ impl Group {
 
     // ─────────────────────────── Pending Update Buffer ───────────────────────────
 
-    /// Insert a `GroupUpdateRequest` into the pending-updates buffer.
+    /// Insert a `ConversationUpdateRequest` into the pending-updates buffer.
     ///
     /// Keyed by target identity — a second insertion for the same identity
     /// keeps the original `first_seen_epoch` so it can still expire on schedule.
     /// Returns `true` if this is a new entry, `false` if already buffered.
     pub fn buffer_pending_update(
         &mut self,
-        request: GroupUpdateRequest,
+        request: ConversationUpdateRequest,
         current_epoch: u64,
     ) -> bool {
         let Some(identity) = target_identity_of(&request) else {
@@ -599,8 +605,12 @@ impl Group {
                 None => return false,
             };
             match payload {
-                group_update_request::Payload::InviteMember(_) => !in_group.contains(identity),
-                group_update_request::Payload::RemoveMember(_) => in_group.contains(identity),
+                conversation_update_request::Payload::InviteMember(_) => {
+                    !in_group.contains(identity)
+                }
+                conversation_update_request::Payload::RemoveMember(_) => {
+                    in_group.contains(identity)
+                }
                 _ => false,
             }
         });
@@ -611,7 +621,7 @@ impl Group {
                 return true;
             }
             match req.payload.as_ref() {
-                Some(group_update_request::Payload::RemoveMember(r)) => {
+                Some(conversation_update_request::Payload::RemoveMember(r)) => {
                     in_group.contains(&r.identity)
                 }
                 _ => true,
@@ -684,19 +694,21 @@ mod tests {
         ids.iter().map(|&id| member(id)).collect()
     }
 
-    /// Test convenience: build a creator-side `Group`. Steward
+    /// Test convenience: build a creator-side `Conversation`. Steward
     /// list is owned by the per-group plug-in (covered separately in
     /// `core::steward_list_plugin::tests`); these tests focus on
-    /// proposal-queue + dedup + freeze-round logic on `Group`.
-    fn creator_group(name: &str, identity: Vec<u8>) -> Group {
-        Group::create_group(name, identity)
+    /// proposal-queue + dedup + freeze-round logic on `Conversation`.
+    fn creator_group(name: &str, identity: Vec<u8>) -> Conversation {
+        Conversation::create(name, identity)
     }
 
-    fn insert_self_leave(group: &mut Group, identity: &[u8]) {
-        let remove = GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
-                identity: identity.to_vec(),
-            })),
+    fn insert_self_leave(group: &mut Conversation, identity: &[u8]) {
+        let remove = ConversationUpdateRequest {
+            payload: Some(conversation_update_request::Payload::RemoveMember(
+                RemoveMember {
+                    identity: identity.to_vec(),
+                },
+            )),
         };
         group.insert_approved_proposal(self_leave_proposal_id(identity), remove);
     }
@@ -708,11 +720,13 @@ mod tests {
         let leaver = member(2);
         insert_self_leave(&mut group, &leaver);
         let ban_id: ProposalId = 0xdead_beef;
-        let ban = GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::InviteMember(InviteMember {
-                key_package_bytes: vec![0; 8],
-                identity: member(99),
-            })),
+        let ban = ConversationUpdateRequest {
+            payload: Some(conversation_update_request::Payload::InviteMember(
+                InviteMember {
+                    key_package_bytes: vec![0; 8],
+                    identity: member(99),
+                },
+            )),
         };
         group.insert_approved_proposal(ban_id, ban);
         assert_eq!(group.approved_proposals_count(), 2);
@@ -788,11 +802,13 @@ mod tests {
         assert!(group.is_consensus_outcome_applied(42));
     }
 
-    fn insert_remove_member(group: &mut Group, target: &[u8], proposal_id: ProposalId) {
-        let remove = GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
-                identity: target.to_vec(),
-            })),
+    fn insert_remove_member(group: &mut Conversation, target: &[u8], proposal_id: ProposalId) {
+        let remove = ConversationUpdateRequest {
+            payload: Some(conversation_update_request::Payload::RemoveMember(
+                RemoveMember {
+                    identity: target.to_vec(),
+                },
+            )),
         };
         group.insert_approved_proposal(proposal_id, remove);
     }
@@ -808,11 +824,13 @@ mod tests {
         let add_id: ProposalId = 0x5555_6666;
         insert_remove_member(&mut group, &member(2), ban_id);
         insert_remove_member(&mut group, &member(3), ecp_id);
-        let add = GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::InviteMember(InviteMember {
-                key_package_bytes: vec![0; 8],
-                identity: member(99),
-            })),
+        let add = ConversationUpdateRequest {
+            payload: Some(conversation_update_request::Payload::InviteMember(
+                InviteMember {
+                    key_package_bytes: vec![0; 8],
+                    identity: member(99),
+                },
+            )),
         };
         group.insert_approved_proposal(add_id, add);
         assert_eq!(group.approved_proposals_count(), 3);
@@ -879,17 +897,19 @@ mod tests {
         assert!(!group.approved_proposals().contains_key(&101));
     }
 
-    fn buffer_remove_at(group: &mut Group, target: &[u8], epoch: u64) {
-        let request = GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
-                identity: target.to_vec(),
-            })),
+    fn buffer_remove_at(group: &mut Conversation, target: &[u8], epoch: u64) {
+        let request = ConversationUpdateRequest {
+            payload: Some(conversation_update_request::Payload::RemoveMember(
+                RemoveMember {
+                    identity: target.to_vec(),
+                },
+            )),
         };
         assert!(group.buffer_pending_update(request, epoch));
     }
 
     /// Reducing `pending_update_max_epochs` (e.g. via a tightened
-    /// `GroupSync`) must expire entries whose age now exceeds the new max.
+    /// `ConversationSync`) must expire entries whose age now exceeds the new max.
     /// Cutoff math: `current_epoch - max_age`; entries with
     /// `first_seen_epoch < cutoff` are dropped.
     #[test]

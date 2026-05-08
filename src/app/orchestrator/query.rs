@@ -1,28 +1,36 @@
 //! Read-only queries over a group's state (UI and diagnostics).
 
 use crate::{
-    app::{GroupPlugins, GroupState, MemberRole, User, UserError},
-    core::{DeMlsProvider, GroupEventHandler, PeerScoringPlugin, StewardListPlugin},
+    app::{ConversationPlugins, ConversationState, MemberRole, User, UserError},
+    core::{ConversationEventHandler, DeMlsProvider, PeerScoringPlugin, StewardListPlugin},
     identity::format_wallet_address,
-    protos::de_mls::messages::v1::GroupUpdateRequest,
+    protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 
 use crate::mls_crypto::MlsService;
 
-impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P, GP, H> {
-    pub async fn get_group_state(&self, group_name: &str) -> Result<GroupState, UserError> {
-        self.with_entry(group_name, |e| e.handle.current_state())
+impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 'static>
+    User<P, GP, H>
+{
+    pub async fn get_group_state(
+        &self,
+        conversation_name: &str,
+    ) -> Result<ConversationState, UserError> {
+        self.with_entry(conversation_name, |e| e.handle.current_state())
             .await
-            .ok_or(UserError::GroupNotFound)
+            .ok_or(UserError::ConversationNotFound)
     }
 
     /// Current MLS epoch + reelection retry round. `(0, 0)` if the group has
     /// no MLS state yet (pending join). Intended for UI status display.
-    pub async fn get_epoch_and_retry(&self, group_name: &str) -> Result<(u64, u32), UserError> {
+    pub async fn get_epoch_and_retry(
+        &self,
+        conversation_name: &str,
+    ) -> Result<(u64, u32), UserError> {
         let entry_arc = self
-            .lookup_entry(group_name)
+            .lookup_entry(conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
         let entry = entry_arc.read().await;
         let epoch = match entry.handle.mls() {
             Some(mls) => mls.current_epoch()?,
@@ -38,19 +46,22 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// Count of buffered pending membership updates. Used by tests and the UI
     /// to verify buffer hygiene (e.g., that a joiner's buffer is empty right
     /// after they receive the welcome).
-    pub async fn get_pending_update_count(&self, group_name: &str) -> Result<usize, UserError> {
-        self.with_entry(group_name, |e| e.handle.group.pending_update_count())
+    pub async fn get_pending_update_count(
+        &self,
+        conversation_name: &str,
+    ) -> Result<usize, UserError> {
+        self.with_entry(conversation_name, |e| e.handle.group.pending_update_count())
             .await
-            .ok_or(UserError::GroupNotFound)
+            .ok_or(UserError::ConversationNotFound)
     }
 
     /// Freeze round progress: `(received, expected)`. Returns `(0, 0)` if not
     /// in freeze or no steward list is known.
     pub async fn get_freeze_candidate_count(
         &self,
-        group_name: &str,
+        conversation_name: &str,
     ) -> Result<(usize, usize), UserError> {
-        self.with_entry(group_name, |e| {
+        self.with_entry(conversation_name, |e| {
             let received = e.handle.group.freeze_candidate_count();
             let expected = e
                 .handle
@@ -61,34 +72,37 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             (received, expected)
         })
         .await
-        .ok_or(UserError::GroupNotFound)
+        .ok_or(UserError::ConversationNotFound)
     }
 
-    pub async fn is_steward_for_group(&self, group_name: &str) -> Result<bool, UserError> {
+    pub async fn is_steward_for_group(&self, conversation_name: &str) -> Result<bool, UserError> {
         let self_id = self.identity().identity_bytes().to_vec();
-        self.with_entry(group_name, |e| e.handle.steward.is_steward(&self_id))
+        self.with_entry(conversation_name, |e| e.handle.steward.is_steward(&self_id))
             .await
-            .ok_or(UserError::GroupNotFound)
+            .ok_or(UserError::ConversationNotFound)
     }
 
-    pub async fn get_group_members(&self, group_name: &str) -> Result<Vec<String>, UserError> {
+    pub async fn get_conversation_members(
+        &self,
+        conversation_name: &str,
+    ) -> Result<Vec<String>, UserError> {
         let entry_arc = self
-            .lookup_entry(group_name)
+            .lookup_entry(conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
         let entry = entry_arc.read().await;
         if entry.handle.mls().is_none() {
             return Ok(Vec::new());
         }
-        let members = entry.handle.group_members()?;
+        let members = entry.handle.conversation_members()?;
         Ok(members
             .into_iter()
             .map(|raw| format_wallet_address(raw.as_slice()).to_string())
             .collect())
     }
 
-    pub async fn get_member_scores(&self, group_name: &str) -> Vec<(Vec<u8>, i64)> {
-        match self.lookup_entry(group_name).await {
+    pub async fn get_member_scores(&self, conversation_name: &str) -> Vec<(Vec<u8>, i64)> {
+        match self.lookup_entry(conversation_name).await {
             Some(entry_arc) => entry_arc
                 .read()
                 .await
@@ -99,8 +113,8 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         }
     }
 
-    pub async fn get_member_score(&self, group_name: &str, member_id: &[u8]) -> Option<i64> {
-        let entry_arc = self.lookup_entry(group_name).await?;
+    pub async fn get_member_score(&self, conversation_name: &str, member_id: &[u8]) -> Option<i64> {
+        let entry_arc = self.lookup_entry(conversation_name).await?;
         let entry = entry_arc.read().await;
         entry.handle.scoring.score_for(member_id)
     }
@@ -109,15 +123,15 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// to render a "pending leave" indicator.
     pub async fn get_pending_leave_identities(
         &self,
-        group_name: &str,
+        conversation_name: &str,
     ) -> Result<Vec<Vec<u8>>, UserError> {
         let entry_arc = self
-            .lookup_entry(group_name)
+            .lookup_entry(conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
         let entry = entry_arc.read().await;
         entry.handle.expect_mls()?;
-        let members = entry.handle.group_members()?;
+        let members = entry.handle.conversation_members()?;
         Ok(members
             .into_iter()
             .filter(|id| entry.handle.group.is_pending_self_leave(id))
@@ -128,16 +142,16 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// pending-leave stewards are skipped in role display.
     pub async fn get_member_roles(
         &self,
-        group_name: &str,
+        conversation_name: &str,
     ) -> Result<Vec<(Vec<u8>, MemberRole)>, UserError> {
         let entry_arc = self
-            .lookup_entry(group_name)
+            .lookup_entry(conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
         let entry = entry_arc.read().await;
         let mls = entry.handle.expect_mls()?;
         let epoch = mls.current_epoch()?;
-        let members = entry.handle.group_members()?;
+        let members = entry.handle.conversation_members()?;
 
         let eligible = entry.handle.group.steward_eligibility(&members);
         let (live_epoch, live_backup) = entry.handle.steward.epoch_and_backup(epoch, &eligible);
@@ -172,9 +186,9 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
 
     pub async fn get_approved_proposal_for_current_epoch(
         &self,
-        group_name: &str,
-    ) -> Result<Vec<GroupUpdateRequest>, UserError> {
-        self.with_entry(group_name, |e| {
+        conversation_name: &str,
+    ) -> Result<Vec<ConversationUpdateRequest>, UserError> {
+        self.with_entry(conversation_name, |e| {
             e.handle
                 .group
                 .approved_proposals()
@@ -183,6 +197,6 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 .collect()
         })
         .await
-        .ok_or(UserError::GroupNotFound)
+        .ok_or(UserError::ConversationNotFound)
     }
 }

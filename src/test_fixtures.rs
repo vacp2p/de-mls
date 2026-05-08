@@ -1,5 +1,5 @@
 //! Crate-internal test fixtures: minimal trait impls for tests that need
-//! to construct a [`crate::core::GroupHandle`] or [`crate::app::SessionRunner`]
+//! to construct a [`crate::core::ConversationHandle`] or [`crate::app::SessionRunner`]
 //! without standing up real MLS / scoring / steward backends.
 //!
 //! Most methods are `unreachable!()` — tests should only exercise the
@@ -21,11 +21,11 @@ use crate::{
 };
 
 /// MLS service that errors on every operation. Lets tests construct a
-/// `GroupHandle` whose early-return paths never invoke MLS.
+/// `ConversationHandle` whose early-return paths never invoke MLS.
 pub(crate) struct UnusedMls;
 
 impl MlsService for UnusedMls {
-    fn group_id(&self) -> &str {
+    fn conversation_id(&self) -> &str {
         "unused"
     }
     fn delete(&self) -> Result<(), MlsError> {

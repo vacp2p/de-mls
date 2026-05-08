@@ -7,11 +7,11 @@ use std::collections::HashMap;
 use super::round::{FreezeFinalizeResult, FreezeOutcome, RoundContext};
 use crate::{
     core::{
-        CoreError, Group, ProcessResult, ProposalId, ScoreEvent, ScoreOp, StewardListPlugin,
-        group::BufferedCommitCandidate, proposal_framing::build_invitation_packet,
+        Conversation, CoreError, ProcessResult, ProposalId, ScoreEvent, ScoreOp, StewardListPlugin,
+        conversation::BufferedCommitCandidate, proposal_framing::build_invitation_packet,
     },
     mls_crypto::{MlsProposalOutput, MlsService, StagedCandidateResult},
-    protos::de_mls::messages::v1::{CommitCandidate, GroupUpdateRequest, ViolationEvidence},
+    protos::de_mls::messages::v1::{CommitCandidate, ConversationUpdateRequest, ViolationEvidence},
 };
 
 /// Result of trying to apply one candidate. `Terminal` ends the round;
@@ -24,7 +24,7 @@ enum CandidateOutcome {
     Terminal {
         outcome: FreezeOutcome,
         committer: Vec<u8>,
-        committed_batch: HashMap<ProposalId, GroupUpdateRequest>,
+        committed_batch: HashMap<ProposalId, ConversationUpdateRequest>,
     },
     Drop(ScoreOp),
 }
@@ -38,7 +38,7 @@ enum CandidateOutcome {
 /// first incoming attempt wipes our own pending commit, so a
 /// lower-priority local candidate afterwards has nothing to apply.
 pub(super) fn apply_in_priority_order<M: MlsService>(
-    group: &mut Group,
+    group: &mut Conversation,
     mls: &M,
     steward: &dyn StewardListPlugin,
     in_recovery: bool,
@@ -48,14 +48,14 @@ pub(super) fn apply_in_priority_order<M: MlsService>(
 ) -> Result<FreezeFinalizeResult, CoreError> {
     let mut score_ops: Vec<ScoreOp> = Vec::new();
     let mut own_commit_discarded = false;
-    let group_name = group.group_name().to_owned();
+    let conversation_name = group.name().to_owned();
 
     let mut remaining = sorted.into_iter();
     while let Some(chosen) = remaining.next() {
         let apply_result = if chosen.is_local_candidate {
             if own_commit_discarded {
                 tracing::debug!(
-                    group = %group_name,
+                    group = %conversation_name,
                     "own pending commit is discarded; skipping local candidate"
                 );
                 continue;
@@ -122,7 +122,7 @@ pub(super) fn apply_in_priority_order<M: MlsService>(
                         });
                     } else {
                         tracing::debug!(
-                            group = %group_name,
+                            group = %conversation_name,
                             "dropping HonestCommitAttempt: claimed identity not on steward list"
                         );
                     }
@@ -157,7 +157,7 @@ pub(super) fn apply_in_priority_order<M: MlsService>(
 /// Validation happened at commit-creation time, so no re-staging is needed.
 /// Always returns `Terminal(Applied)` on a clean merge.
 fn apply_local_candidate<M: MlsService>(
-    group: &mut Group,
+    group: &mut Conversation,
     mls: &M,
     chosen: BufferedCommitCandidate,
     self_removed: bool,
@@ -172,14 +172,14 @@ fn apply_local_candidate<M: MlsService>(
     // Welcomes go out only after our merge — joiners must not race ahead of the steward's epoch.
     let outbound = chosen
         .welcome_bytes
-        .map(|bytes| build_invitation_packet(bytes, group.group_name(), app_id));
+        .map(|bytes| build_invitation_packet(bytes, group.name(), app_id));
 
     let committed_batch = record_applied_commit(group, chosen.commit_hash);
 
     let result = if self_removed {
-        ProcessResult::LeaveGroup
+        ProcessResult::LeaveConversation
     } else {
-        ProcessResult::GroupUpdated
+        ProcessResult::ConversationUpdated
     };
     Ok(CandidateOutcome::Terminal {
         outcome: FreezeOutcome::Applied {
@@ -199,7 +199,7 @@ fn apply_local_candidate<M: MlsService>(
 /// Caller must have discarded any own pending commit first — MLS allows
 /// only one per group at a time.
 fn apply_incoming_candidate<M: MlsService>(
-    group: &mut Group,
+    group: &mut Conversation,
     mls: &M,
     steward: &dyn StewardListPlugin,
     in_recovery: bool,
@@ -207,32 +207,36 @@ fn apply_incoming_candidate<M: MlsService>(
     expected_actions: &[MlsProposalOutput],
     current_epoch: u64,
 ) -> Result<CandidateOutcome, CoreError> {
-    let group_name = group.group_name().to_owned();
+    let conversation_name = group.name().to_owned();
 
-    let (commit_sender, self_removed, commit_actions) =
-        match stage_candidate(mls, &group_name, &chosen.candidate_msg, current_epoch)? {
-            StagingOutcome::Staged {
-                commit_sender,
-                self_removed,
-                commit_actions,
-            } => (commit_sender, self_removed, commit_actions),
-            StagingOutcome::Abort => {
-                // Wire-valid but MLS-invalid — penalize the author; the
-                // loop will try the next candidate.
-                mls.discard_staged_commit()?;
-                return Ok(CandidateOutcome::Drop(ScoreOp {
-                    member_id: chosen.candidate_msg.steward_identity,
-                    event: ScoreEvent::MisbehavingCommit,
-                }));
-            }
-            StagingOutcome::Violation(v) => {
-                mls.discard_staged_commit()?;
-                return Ok(CandidateOutcome::Drop(
-                    v.target_score_op()
-                        .expect("staged-violation always has a target-side score"),
-                ));
-            }
-        };
+    let (commit_sender, self_removed, commit_actions) = match stage_candidate(
+        mls,
+        &conversation_name,
+        &chosen.candidate_msg,
+        current_epoch,
+    )? {
+        StagingOutcome::Staged {
+            commit_sender,
+            self_removed,
+            commit_actions,
+        } => (commit_sender, self_removed, commit_actions),
+        StagingOutcome::Abort => {
+            // Wire-valid but MLS-invalid — penalize the author; the
+            // loop will try the next candidate.
+            mls.discard_staged_commit()?;
+            return Ok(CandidateOutcome::Drop(ScoreOp {
+                member_id: chosen.candidate_msg.steward_identity,
+                event: ScoreEvent::MisbehavingCommit,
+            }));
+        }
+        StagingOutcome::Violation(v) => {
+            mls.discard_staged_commit()?;
+            return Ok(CandidateOutcome::Drop(
+                v.target_score_op()
+                    .expect("staged-violation always has a target-side score"),
+            ));
+        }
+    };
 
     // Commit sender must be on the steward list (RFC §"Commit validation service").
     if let Some(violation) =
@@ -267,9 +271,9 @@ fn apply_incoming_candidate<M: MlsService>(
 
     // Remote candidates never carry welcome bytes — only the author sends those.
     let result = if self_removed {
-        ProcessResult::LeaveGroup
+        ProcessResult::LeaveConversation
     } else {
-        ProcessResult::GroupUpdated
+        ProcessResult::ConversationUpdated
     };
     Ok(CandidateOutcome::Terminal {
         outcome: FreezeOutcome::Applied {
@@ -302,7 +306,7 @@ enum StagingOutcome {
 /// `discard_and_*` for `Abort` / `Violation`.
 fn stage_candidate<M>(
     mls: &M,
-    group_name: &str,
+    conversation_name: &str,
     candidate: &CommitCandidate,
     current_epoch: u64,
 ) -> Result<StagingOutcome, CoreError>
@@ -317,7 +321,7 @@ where
     }) = mls
         .stage_remote_commit(&candidate.mls_proposals, &candidate.commit_message)
         .inspect_err(|e| {
-            tracing::debug!(group = group_name, error = %e, "candidate failed to stage");
+            tracing::debug!(group = conversation_name, error = %e, "candidate failed to stage");
         })
     else {
         return Ok(StagingOutcome::Abort);
@@ -328,7 +332,7 @@ where
     // violation list) and is attributed to the actual signer.
     if candidate.steward_identity != commit_sender {
         tracing::warn!(
-            group = group_name,
+            group = conversation_name,
             "violation: wire steward_identity doesn't match MLS commit_sender"
         );
         return Ok(StagingOutcome::Violation(ViolationEvidence::broken_commit(
@@ -345,7 +349,7 @@ where
     // accused).
     if proposal_senders.iter().any(|s| s != &commit_sender) {
         tracing::warn!(
-            group = group_name,
+            group = conversation_name,
             "violation: bundled proposals don't match the commit sender"
         );
         return Ok(StagingOutcome::Violation(ViolationEvidence::broken_commit(
@@ -367,13 +371,13 @@ where
 /// Check that a commit's MLS actions match the voted-approved set.
 /// `Some(evidence)` on mismatch.
 fn validate_commit_candidate(
-    group: &Group,
+    group: &Conversation,
     expected_actions: &[MlsProposalOutput],
     sender_id: &[u8],
     mls_actions: &[MlsProposalOutput],
     epoch: u64,
 ) -> Result<Option<ViolationEvidence>, CoreError> {
-    let group_name = group.group_name();
+    let conversation_name = group.name();
 
     let mut expected_actions = expected_actions.to_vec();
     let mut actual_actions = mls_actions.to_vec();
@@ -383,7 +387,7 @@ fn validate_commit_candidate(
 
     if actual_actions != expected_actions {
         tracing::warn!(
-            group = group_name,
+            group = conversation_name,
             actual = ?actual_actions,
             expected = ?expected_actions,
             "violation: MLS actions don't match voted proposals"
@@ -406,7 +410,7 @@ fn validate_commit_candidate(
 /// §Anti-Deadlock: any member MAY commit to restore liveness; mirrors
 /// the relaxed gate in `create_commit_candidate`).
 fn check_commit_sender_authorized(
-    group: &Group,
+    group: &Conversation,
     steward: &dyn StewardListPlugin,
     in_recovery: bool,
     commit_sender: &[u8],
@@ -423,7 +427,7 @@ fn check_commit_sender_authorized(
         return None;
     }
     tracing::warn!(
-        group = group.group_name(),
+        group = group.name(),
         "violation: commit from unauthorized sender"
     );
     Some(ViolationEvidence::broken_commit(
@@ -440,9 +444,9 @@ fn check_commit_sender_authorized(
 /// dropped). Caller surfaces the batch through `FreezeFinalizeResult` so
 /// the app layer can archive it for UI history.
 fn record_applied_commit(
-    group: &mut Group,
+    group: &mut Conversation,
     commit_hash: Vec<u8>,
-) -> HashMap<ProposalId, GroupUpdateRequest> {
+) -> HashMap<ProposalId, ConversationUpdateRequest> {
     group.record_committed_batch(commit_hash);
     let snapshot = if let Some(target) = group.take_urgent_commit_target() {
         // Urgent commit: leave the rest of the queue for the next cycle.

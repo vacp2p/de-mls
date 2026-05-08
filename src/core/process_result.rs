@@ -10,10 +10,10 @@ use crate::{
     core::{CoreError, ScoreEvent, ScoreOp},
     identity::parse_wallet_to_bytes,
     protos::de_mls::messages::v1::{
-        AppMessage, BanRequest, CommitCandidate, ConversationMessage, EmergencyCriteriaProposal,
-        GroupSync, GroupUpdateRequest, InvitationToJoin, Outcome, ProposalAdded, RemoveMember,
-        UserKeyPackage, UserVote, ViolationEvidence, ViolationType, VotePayload, WelcomeMessage,
-        app_message, group_update_request, welcome_message,
+        AppMessage, BanRequest, CommitCandidate, ConversationMessage, ConversationSync,
+        ConversationUpdateRequest, EmergencyCriteriaProposal, InvitationToJoin, Outcome,
+        ProposalAdded, RemoveMember, UserKeyPackage, UserVote, ViolationEvidence, ViolationType,
+        VotePayload, WelcomeMessage, app_message, conversation_update_request, welcome_message,
     },
 };
 
@@ -31,23 +31,23 @@ pub enum ProcessResult {
     Vote(Vote),
 
     /// We were removed from the group.
-    LeaveGroup,
+    LeaveConversation,
 
     /// Steward received a membership change (invite KP / ban) — start a vote.
-    MembershipChangeReceived(GroupUpdateRequest),
+    MembershipChangeReceived(ConversationUpdateRequest),
 
     /// Successfully joined via a welcome message; carries the group name.
-    JoinedGroup(String),
+    JoinedConversation(String),
 
     /// MLS state advanced (batch commit applied).
-    GroupUpdated,
+    ConversationUpdated,
 
     /// Remote commit candidate was buffered in the active freeze round.
     CommitCandidateReceived,
 
-    /// Group-sync message from the steward (steward list, scores, timing,
+    /// Conversation-sync message from the steward (steward list, scores, timing,
     /// protocol flags). Meaningful only for joiners with no steward list yet.
-    GroupSyncReceived(GroupSync),
+    GroupSyncReceived(ConversationSync),
 
     /// Nothing to do (not for us, duplicate, or already handled).
     Noop,
@@ -120,16 +120,16 @@ impl ViolationEvidence {
         self
     }
 
-    /// Wrap this evidence into a `GroupUpdateRequest` for consensus voting.
+    /// Wrap this evidence into a `ConversationUpdateRequest` for consensus voting.
     ///
     /// Returns an error if `creator_member_id` is empty. Call `.with_creator()` before this
     /// method — every ECP must carry the creator identity for peer scoring (RFC §"Peer Scoring").
-    pub fn into_update_request(self) -> Result<GroupUpdateRequest, CoreError> {
+    pub fn into_update_request(self) -> Result<ConversationUpdateRequest, CoreError> {
         if self.creator_member_id.is_empty() {
             return Err(CoreError::InvalidGroupUpdateRequest);
         }
-        Ok(GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::EmergencyCriteria(
+        Ok(ConversationUpdateRequest {
+            payload: Some(conversation_update_request::Payload::EmergencyCriteria(
                 EmergencyCriteriaProposal {
                     evidence: Some(self),
                 },
@@ -192,7 +192,7 @@ impl_payload_from!(
     BanRequest          => app_message::Payload::BanRequest,
     Proposal            => app_message::Payload::Proposal,
     Vote                => app_message::Payload::Vote,
-    GroupSync           => app_message::Payload::GroupSync,
+    ConversationSync           => app_message::Payload::ConversationSync,
     ProposalAdded       => app_message::Payload::ProposalAdded,
 );
 
@@ -218,13 +218,15 @@ impl TryFrom<AppMessage> for ProcessResult {
             }
             Some(app_message::Payload::Vote(vote)) => Ok(ProcessResult::Vote(vote.clone())),
             Some(app_message::Payload::BanRequest(ban_request)) => Ok(
-                ProcessResult::MembershipChangeReceived(GroupUpdateRequest {
-                    payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
-                        identity: parse_wallet_to_bytes(ban_request.user_to_ban.as_str())?,
-                    })),
+                ProcessResult::MembershipChangeReceived(ConversationUpdateRequest {
+                    payload: Some(conversation_update_request::Payload::RemoveMember(
+                        RemoveMember {
+                            identity: parse_wallet_to_bytes(ban_request.user_to_ban.as_str())?,
+                        },
+                    )),
                 }),
             ),
-            Some(app_message::Payload::GroupSync(sync)) => {
+            Some(app_message::Payload::ConversationSync(sync)) => {
                 Ok(ProcessResult::GroupSyncReceived(sync.clone()))
             }
             _ => Ok(ProcessResult::Noop),

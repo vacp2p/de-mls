@@ -1,4 +1,4 @@
-//! App-side per-group runner: wraps a [`crate::core::GroupHandle`]
+//! App-side per-group runner: wraps a [`crate::core::ConversationHandle`]
 //! together with a [`crate::app::PhaseTimer`] and the per-proposal
 //! auto-vote timer registry. Coordinator methods compose state-machine
 //! transitions with phase-timer anchors so callers don't have to manage
@@ -16,8 +16,8 @@ use tracing::info;
 use crate::{
     app::PhaseTimer,
     core::{
-        Group, GroupConfig, GroupHandle, GroupState, GroupStateMachine, PeerScoringPlugin,
-        StewardListPlugin,
+        Conversation, ConversationConfig, ConversationHandle, ConversationState,
+        ConversationStateMachine, PeerScoringPlugin, StewardListPlugin,
     },
     mls_crypto::MlsService,
 };
@@ -28,7 +28,7 @@ use crate::{
 pub(crate) type AutoVoteTimers = Arc<Mutex<HashMap<u32, JoinHandle<()>>>>;
 
 pub struct SessionRunner<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> {
-    pub(crate) handle: GroupHandle<M, Sc, St>,
+    pub(crate) handle: ConversationHandle<M, Sc, St>,
     /// Wall-clock anchor combined with `handle.state_machine` by
     /// coordinator methods. App-only: no equivalent in core.
     pub(crate) phase_timer: PhaseTimer,
@@ -42,16 +42,16 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> SessionRunner<
     /// Build a fresh runner. Creator path passes `Some(mls)`; joiner
     /// path passes `None` and attaches later via `handle.attach_mls`.
     pub(crate) fn new(
-        group: Group,
+        group: Conversation,
         mls: Option<M>,
-        state_machine: GroupStateMachine,
+        state_machine: ConversationStateMachine,
         phase_timer: PhaseTimer,
-        config: GroupConfig,
+        config: ConversationConfig,
         scoring: Sc,
         steward: St,
     ) -> Self {
         Self {
-            handle: GroupHandle::new(group, mls, state_machine, config, scoring, steward),
+            handle: ConversationHandle::new(group, mls, state_machine, config, scoring, steward),
             phase_timer,
             auto_vote_timers: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -81,44 +81,44 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> SessionRunner<
 
     // ── State-machine + phase-timer coordinators ────────────────────
 
-    pub(crate) fn start_working(&mut self) -> GroupState {
+    pub(crate) fn start_working(&mut self) -> ConversationState {
         self.handle.state_machine.start_working();
         self.phase_timer.clear();
         info!(state = "Working", "state transition");
-        GroupState::Working
+        ConversationState::Working
     }
 
-    pub(crate) fn start_freezing(&mut self) -> GroupState {
+    pub(crate) fn start_freezing(&mut self) -> ConversationState {
         self.handle.state_machine.start_freezing();
         self.phase_timer.start();
         info!(state = "Freezing", "state transition");
-        GroupState::Freezing
+        ConversationState::Freezing
     }
 
     /// Bypass the inactivity timer and enter Freezing immediately. Returns
     /// `Some(Freezing)` on transition (only fires from Working or
     /// Reelection); `None` from other states.
-    pub(crate) fn force_freezing(&mut self) -> Option<GroupState> {
+    pub(crate) fn force_freezing(&mut self) -> Option<ConversationState> {
         if self.handle.state_machine.force_freezing() {
             self.phase_timer.start();
             info!(state = "Freezing", "state transition (forced)");
-            Some(GroupState::Freezing)
+            Some(ConversationState::Freezing)
         } else {
             None
         }
     }
 
-    pub(crate) fn start_selection(&mut self) -> GroupState {
+    pub(crate) fn start_selection(&mut self) -> ConversationState {
         self.handle.state_machine.start_selection();
         info!(state = "Selection", "state transition");
-        GroupState::Selection
+        ConversationState::Selection
     }
 
-    pub(crate) fn start_reelection(&mut self) -> GroupState {
+    pub(crate) fn start_reelection(&mut self) -> ConversationState {
         self.handle.state_machine.start_reelection();
         self.phase_timer.clear();
         info!(state = "Reelection", "state transition");
-        GroupState::Reelection
+        ConversationState::Reelection
     }
 
     /// `true` once 3× `commit_inactivity_duration` has passed in
@@ -127,7 +127,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> SessionRunner<
     /// Pipeline: consensus (~15s) + commit_inactivity + freeze (≈ commit/2)
     /// = ~1.5× commit-inactivity + consensus overhead. Use 3× for safety margin.
     pub(crate) fn is_pending_join_expired(&self) -> bool {
-        self.handle.current_state() == GroupState::PendingJoin
+        self.handle.current_state() == ConversationState::PendingJoin
             && self
                 .phase_timer
                 .elapsed_since_anchor(self.handle.config.commit_inactivity_duration * 3)
@@ -135,7 +135,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> SessionRunner<
 
     /// `true` once the freeze window elapsed while in `Freezing`.
     pub(crate) fn is_freeze_timed_out(&self) -> bool {
-        self.handle.current_state() == GroupState::Freezing
+        self.handle.current_state() == ConversationState::Freezing
             && self
                 .phase_timer
                 .elapsed_since_anchor(self.handle.config.freeze_duration)
@@ -150,8 +150,10 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> SessionRunner<
         &mut self,
         approved_proposals_count: usize,
         inactivity_duration: Duration,
-    ) -> Option<GroupState> {
-        if self.handle.current_state() != GroupState::Working || approved_proposals_count == 0 {
+    ) -> Option<ConversationState> {
+        if self.handle.current_state() != ConversationState::Working
+            || approved_proposals_count == 0
+        {
             return None;
         }
         if self.phase_timer.started_at().is_none() {
@@ -178,21 +180,21 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> SessionRunner<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::Group;
+    use crate::core::Conversation;
     use crate::test_fixtures::{StubScoring, StubSteward, UnusedMls};
     use std::time::Instant;
 
     fn make_runner_pending_join(
         commit_inactivity: Duration,
     ) -> SessionRunner<UnusedMls, StubScoring, StubSteward> {
-        let config = GroupConfig {
+        let config = ConversationConfig {
             commit_inactivity_duration: commit_inactivity,
-            ..GroupConfig::default()
+            ..ConversationConfig::default()
         };
         let mut runner = SessionRunner::new(
-            Group::prepare_to_join("g", b"me".to_vec()),
+            Conversation::prepare_to_join("g", b"me".to_vec()),
             Some(UnusedMls),
-            GroupStateMachine::new_as_pending_join(),
+            ConversationStateMachine::new_as_pending_join(),
             PhaseTimer::new(),
             config,
             StubScoring,
@@ -204,11 +206,11 @@ mod tests {
 
     fn make_runner_working() -> SessionRunner<UnusedMls, StubScoring, StubSteward> {
         SessionRunner::new(
-            Group::create_group("g", b"me".to_vec()),
+            Conversation::create("g", b"me".to_vec()),
             Some(UnusedMls),
-            GroupStateMachine::new_as_member(),
+            ConversationStateMachine::new_as_member(),
             PhaseTimer::new(),
-            GroupConfig::default(),
+            ConversationConfig::default(),
             StubScoring,
             StubSteward::member(),
         )
@@ -265,7 +267,7 @@ mod tests {
     #[test]
     fn check_steward_inactivity_first_tick_anchors_and_returns_none() {
         let mut runner = make_runner_working();
-        assert_eq!(runner.handle.current_state(), GroupState::Working);
+        assert_eq!(runner.handle.current_state(), ConversationState::Working);
         assert!(
             runner.phase_timer.started_at().is_none(),
             "fresh runner has no anchor"
@@ -281,7 +283,7 @@ mod tests {
         );
         assert_eq!(
             runner.handle.current_state(),
-            GroupState::Working,
+            ConversationState::Working,
             "state must stay Working until inactivity actually elapses"
         );
 

@@ -34,47 +34,47 @@ pub mod v1 {
         },
         ListGroups,
         CreateGroup {
-            group_id: String,
+            conversation_id: String,
         },
         JoinGroup {
-            group_id: String,
+            conversation_id: String,
         },
         EnterGroup {
-            group_id: String,
+            conversation_id: String,
         },
         SendMessage {
-            group_id: String,
+            conversation_id: String,
             body: String,
         },
         LoadHistory {
-            group_id: String,
+            conversation_id: String,
         },
         Vote {
-            group_id: String,
+            conversation_id: String,
             proposal_id: u32,
             choice: bool,
         },
-        LeaveGroup {
-            group_id: String,
+        LeaveConversation {
+            conversation_id: String,
         },
         GetStewardStatus {
-            group_id: String,
+            conversation_id: String,
         },
         GetGroupState {
-            group_id: String,
+            conversation_id: String,
         },
         GetCurrentEpochProposals {
-            group_id: String,
+            conversation_id: String,
         },
         SendBanRequest {
-            group_id: String,
+            conversation_id: String,
             user_to_ban: String,
         },
         GetGroupMembers {
-            group_id: String,
+            conversation_id: String,
         },
         GetEpochHistory {
-            group_id: String,
+            conversation_id: String,
         },
     }
 
@@ -86,27 +86,27 @@ pub mod v1 {
         GroupCreated(String),
         GroupRemoved(String),
         EnteredGroup {
-            group_id: String,
+            conversation_id: String,
         },
         ChatMessage(ConversationMessage),
-        LeaveGroup {
-            group_id: String,
+        LeaveConversation {
+            conversation_id: String,
         },
 
         StewardStatus {
-            group_id: String,
+            conversation_id: String,
             is_steward: bool,
         },
 
         GroupStateChanged {
-            group_id: String,
+            conversation_id: String,
             state: String,
         },
         /// Current MLS epoch + reelection retry round. Pushed alongside
         /// other consensus-state refreshes so the UI can display live
         /// epoch/retry for debugging.
         GroupEpoch {
-            group_id: String,
+            conversation_id: String,
             epoch: u64,
             retry_round: u32,
         },
@@ -117,35 +117,35 @@ pub mod v1 {
         /// records the proposal for history but must not offer a "please
         /// vote" banner for it.
         OwnProposalSubmitted {
-            group_id: String,
+            conversation_id: String,
             proposal_id: u32,
             action: String,
             address: String,
         },
         ProposalDecided(String, ConsensusEvent),
         CurrentEpochProposals {
-            group_id: String,
+            conversation_id: String,
             proposals: Vec<(String, String)>,
         },
         ProposalAdded {
-            group_id: String,
+            conversation_id: String,
             action: String,
             address: String,
         },
         CurrentEpochProposalsCleared {
-            group_id: String,
+            conversation_id: String,
         },
         GroupMembers {
-            group_id: String,
+            conversation_id: String,
             members: Vec<MemberInfo>,
         },
         FreezeCandidates {
-            group_id: String,
+            conversation_id: String,
             received: usize,
             expected: usize,
         },
         EpochHistory {
-            group_id: String,
+            conversation_id: String,
             epochs: Vec<Vec<(String, String)>>,
         },
         Error(String),
@@ -156,7 +156,7 @@ pub mod v1 {
             let request = proposal_added.request.unwrap();
             let address = format_group_request_target(&request);
             AppEvent::ProposalAdded {
-                group_id: proposal_added.group_id.clone(),
+                conversation_id: proposal_added.conversation_id.clone(),
                 action: request.message_type().to_string(),
                 address,
             }
@@ -166,7 +166,7 @@ pub mod v1 {
     impl From<BanRequest> for AppEvent {
         fn from(ban_request: BanRequest) -> Self {
             AppEvent::ProposalAdded {
-                group_id: ban_request.group_name.clone(),
+                conversation_id: ban_request.conversation_name.clone(),
                 action: "Remove Member".to_string(),
                 address: ban_request.user_to_ban.clone(),
             }

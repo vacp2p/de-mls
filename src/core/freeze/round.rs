@@ -10,12 +10,12 @@ use tracing::info;
 use super::apply::apply_in_priority_order;
 use crate::{
     core::{
-        CoreError, Group, ProcessResult, ProposalId, ScoreOp, StewardListPlugin,
-        group::BufferedCommitCandidate,
+        Conversation, CoreError, ProcessResult, ProposalId, ScoreOp, StewardListPlugin,
+        conversation::BufferedCommitCandidate,
     },
     mls_crypto::{MlsMessageKind, MlsProposalOutput, MlsService},
     protos::de_mls::messages::v1::{
-        CommitCandidate, GroupUpdateRequest, group_update_request::Payload,
+        CommitCandidate, ConversationUpdateRequest, conversation_update_request::Payload,
     },
 };
 
@@ -36,10 +36,10 @@ pub struct FreezeFinalizeResult {
     pub outcome: FreezeOutcome,
     pub score_ops: Vec<ScoreOp>,
     /// The approved-proposal batch that was just committed and cleared
-    /// from `Group::approved_proposals`. Empty when no commit applied or
+    /// from `Conversation::approved_proposals`. Empty when no commit applied or
     /// when an urgent-target commit drops only the targeted entry. App
     /// layer typically archives this for UI history.
-    pub committed_batch: HashMap<ProposalId, GroupUpdateRequest>,
+    pub committed_batch: HashMap<ProposalId, ConversationUpdateRequest>,
 }
 
 /// Terminal outcome of a freeze round: either a dispatchable result or no
@@ -72,17 +72,17 @@ pub fn compute_commit_hash(commit_message: &[u8]) -> Vec<u8> {
 /// proposals/commit, valid MLS wire kinds, non-empty `steward_identity`,
 /// not already committed. No MLS state is mutated here.
 pub fn process_commit_candidate<M: MlsService>(
-    group: &mut Group,
+    group: &mut Conversation,
     mls: &M,
     candidate_msg: CommitCandidate,
 ) -> Result<ProcessResult, CoreError> {
-    let group_name = group.group_name().to_owned();
+    let conversation_name = group.name().to_owned();
 
     // Auto-start a freeze round if we already have approved proposals —
     // otherwise the candidate would be silently dropped.
     if group.freeze_round().is_none() {
         if group.approved_proposals_count() == 0 {
-            tracing::debug!(group = %group_name, "candidate ignored: no approved proposals");
+            tracing::debug!(group = %conversation_name, "candidate ignored: no approved proposals");
             return Ok(ProcessResult::Noop);
         }
         let epoch = mls.current_epoch()?;
@@ -91,17 +91,17 @@ pub fn process_commit_candidate<M: MlsService>(
 
     let commit_hash = compute_commit_hash(&candidate_msg.commit_message);
     if group.is_duplicate_commit_candidate(&commit_hash) {
-        tracing::debug!(group = %group_name, "candidate ignored: already committed");
+        tracing::debug!(group = %conversation_name, "candidate ignored: already committed");
         return Ok(ProcessResult::Noop);
     }
 
     if candidate_msg.mls_proposals.is_empty() || candidate_msg.commit_message.is_empty() {
-        tracing::debug!(group = %group_name, "candidate ignored: empty proposals or commit");
+        tracing::debug!(group = %conversation_name, "candidate ignored: empty proposals or commit");
         return Ok(ProcessResult::Noop);
     }
 
     if candidate_msg.steward_identity.is_empty() {
-        tracing::debug!(group = %group_name, "candidate ignored: empty steward_identity");
+        tracing::debug!(group = %conversation_name, "candidate ignored: empty steward_identity");
         return Ok(ProcessResult::Noop);
     }
 
@@ -133,7 +133,7 @@ pub fn process_commit_candidate<M: MlsService>(
     }
 
     info!(
-        group = %group_name,
+        group = %conversation_name,
         epoch,
         total_candidates = group.freeze_candidate_count(),
         "remote candidate buffered"
@@ -150,7 +150,7 @@ pub fn process_commit_candidate<M: MlsService>(
 /// 3. Apply in priority order, falling back on the next candidate when
 ///    MLS staging rejects the current one.
 pub fn finalize_freeze_round<M: MlsService>(
-    group: &mut Group,
+    group: &mut Conversation,
     mls: &M,
     steward: &dyn StewardListPlugin,
     in_recovery: bool,
@@ -193,7 +193,7 @@ pub fn finalize_freeze_round<M: MlsService>(
 ///
 /// `mls_actions` is the expected MLS action set (non-MLS payloads
 /// filtered out). `self_remove_pending` flips the local apply's terminal
-/// result to `LeaveGroup` when our removal is in the batch.
+/// result to `LeaveConversation` when our removal is in the batch.
 /// `live_epoch_steward_id` is the pre-merge eligibility-filtered steward
 /// expected to have committed at `current_epoch`; used to penalise an
 /// absent steward when a backup commits in their place.
@@ -208,7 +208,7 @@ pub(super) struct RoundContext {
 
 impl RoundContext {
     fn snapshot<M: MlsService>(
-        group: &Group,
+        group: &Conversation,
         mls: &M,
         steward: &dyn StewardListPlugin,
         current_epoch: u64,
@@ -249,7 +249,7 @@ impl RoundContext {
 
 /// The MLS action a voted request should map to, or `None` for non-MLS
 /// payloads (emergency/election) — doubles as the "MLS-producing" filter.
-fn expected_action_for_request(req: &GroupUpdateRequest) -> Option<MlsProposalOutput> {
+fn expected_action_for_request(req: &ConversationUpdateRequest) -> Option<MlsProposalOutput> {
     match &req.payload {
         Some(Payload::InviteMember(im)) => Some(MlsProposalOutput::Add(im.identity.clone())),
         Some(Payload::RemoveMember(rm)) => Some(MlsProposalOutput::Remove(rm.identity.clone())),
@@ -354,7 +354,7 @@ mod tests {
     ) -> BufferedCommitCandidate {
         BufferedCommitCandidate {
             candidate_msg: CommitCandidate {
-                group_name: b"test-group".to_vec(),
+                conversation_name: b"test-group".to_vec(),
                 mls_proposals: vec![vec![0xFF; 10]; actions_count],
                 commit_message: commit_hash.clone(),
                 steward_identity,

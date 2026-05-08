@@ -11,11 +11,11 @@ use crate::{
 /// Errors from User operations.
 #[derive(Debug, thiserror::Error)]
 pub enum UserError {
-    #[error("Group already exists")]
-    GroupAlreadyExists,
+    #[error("Conversation already exists")]
+    ConversationAlreadyExists,
 
-    #[error("Group not found")]
-    GroupNotFound,
+    #[error("Conversation not found")]
+    ConversationNotFound,
 
     #[error("Already leaving this group")]
     AlreadyLeaving,
@@ -28,7 +28,7 @@ pub enum UserError {
     )]
     PartialFreeze,
 
-    /// Returned when a [`crate::core::GroupEventHandler`] callback fails.
+    /// Returned when a [`crate::core::ConversationEventHandler`] callback fails.
     #[error("Handler callback error: {0}")]
     Callback(#[from] CallbackError),
 
@@ -53,6 +53,9 @@ pub enum UserError {
 
 impl UserError {
     pub fn is_fatal(&self) -> bool {
-        matches!(self, UserError::GroupNotFound | UserError::AlreadyLeaving)
+        matches!(
+            self,
+            UserError::ConversationNotFound | UserError::AlreadyLeaving
+        )
     }
 }

@@ -1,7 +1,7 @@
 //! App-side phase timer.
 //!
 //! Holds only the wall-clock anchor (`started_at`). Phase-anchor durations
-//! live in [`crate::core::GroupConfig`] (single source of truth);
+//! live in [`crate::core::ConversationConfig`] (single source of truth);
 //! [`crate::app::SessionRunner`] reads durations off the handle's config
 //! and passes them to this timer's pure elapsed-checks.
 
@@ -23,9 +23,9 @@ pub enum FreezeTimeoutStatus {
 }
 
 /// Wall-clock anchor for the active phase. Pure timer state — no
-/// durations, no `GroupState` awareness. Queries take the relevant
+/// durations, no `ConversationState` awareness. Queries take the relevant
 /// `Duration` as a parameter; [`crate::app::SessionRunner`] composes
-/// them with state machine + `GroupConfig`.
+/// them with state machine + `ConversationConfig`.
 #[derive(Debug, Clone, Default)]
 pub struct PhaseTimer {
     /// Meaning depends on the orchestrator's intent at start time:

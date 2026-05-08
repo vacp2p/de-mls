@@ -31,7 +31,7 @@ impl KeyPackageBytes {
 ///
 /// | Shape | Where | Carries |
 /// |-------|-------|---------|
-/// | [`crate::protos::de_mls::messages::v1::GroupUpdateRequest`] | consensus wire | wire payload, also covers governance kinds (emergency / election) |
+/// | [`crate::protos::de_mls::messages::v1::ConversationUpdateRequest`] | consensus wire | wire payload, also covers governance kinds (emergency / election) |
 /// | [`MlsCommitInput`] | input to [`super::MlsService::create_commit_candidate`] | Add carries the full key package; Remove carries the wallet bytes |
 /// | [`MlsProposalOutput`] | output of MLS staging / decryption | identity-only, plus `Other` for proposal kinds we don't construct |
 #[derive(Clone, Debug)]

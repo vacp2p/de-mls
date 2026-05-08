@@ -10,13 +10,13 @@ use tracing::{info, warn};
 
 use crate::{
     core::{
-        error::CoreError, freeze::process_commit_candidate, group::Group,
+        conversation::Conversation, error::CoreError, freeze::process_commit_candidate,
         process_result::ProcessResult,
     },
     identity::{ShortId, parse_wallet_to_bytes},
     mls_crypto::{DecryptResult, MlsService},
     protos::de_mls::messages::v1::{
-        AppMessage, GroupUpdateRequest, app_message, group_update_request,
+        AppMessage, ConversationUpdateRequest, app_message, conversation_update_request,
     },
 };
 
@@ -34,19 +34,19 @@ fn authorize_fast_path_proposal(proposal: &Proposal, mls_sender: &[u8]) -> bool 
     if proposal.proposal_owner != mls_sender {
         return false;
     }
-    let Ok(request) = GroupUpdateRequest::decode(proposal.payload.as_slice()) else {
+    let Ok(request) = ConversationUpdateRequest::decode(proposal.payload.as_slice()) else {
         return false;
     };
     matches!(
         request.payload,
-        Some(group_update_request::Payload::RemoveMember(ref r)) if r.identity == mls_sender
+        Some(conversation_update_request::Payload::RemoveMember(ref r)) if r.identity == mls_sender
     )
 }
 
 /// Process an inbound packet on the app subtopic and decide what action is
 /// needed. Welcome-subtopic packets are handled at the app layer.
 pub fn process_inbound<M: MlsService>(
-    group: &mut Group,
+    group: &mut Conversation,
     mls: &M,
     payload: &[u8],
 ) -> Result<ProcessResult, CoreError> {
@@ -69,7 +69,7 @@ pub fn process_inbound<M: MlsService>(
                 && !authorize_fast_path_proposal(proposal, &sender)
             {
                 warn!(
-                    group = group.group_name(),
+                    group = group.name(),
                     proposal_id = proposal.proposal_id,
                     sender = %ShortId(&sender),
                     owner = %ShortId(&proposal.proposal_owner),
@@ -83,7 +83,7 @@ pub fn process_inbound<M: MlsService>(
                 let target = parse_wallet_to_bytes(&ban.user_to_ban)?;
                 if !mls.is_member(&target) {
                     info!(
-                        group = group.group_name(),
+                        group = group.name(),
                         target = %ShortId(&target),
                         "ban request skipped: target not a member"
                     );
@@ -92,17 +92,17 @@ pub fn process_inbound<M: MlsService>(
             }
             app_msg.try_into()
         }
-        DecryptResult::Removed(_) => Ok(ProcessResult::LeaveGroup),
+        DecryptResult::Removed(_) => Ok(ProcessResult::LeaveConversation),
         DecryptResult::Ignored => {
             tracing::debug!(
-                group = group.group_name(),
+                group = group.name(),
                 "app message ignored (wrong epoch/group)"
             );
             Ok(ProcessResult::Noop)
         }
         _ => {
             warn!(
-                group = group.group_name(),
+                group = group.name(),
                 "unexpected MLS message type on app subtopic"
             );
             Ok(ProcessResult::Noop)
@@ -113,7 +113,7 @@ pub fn process_inbound<M: MlsService>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::group::self_leave_proposal_id;
+    use crate::core::conversation::self_leave_proposal_id;
     use crate::protos::de_mls::messages::v1::RemoveMember;
 
     fn member(id: u8) -> Vec<u8> {
@@ -121,10 +121,12 @@ mod tests {
     }
 
     fn remove_payload(identity: &[u8]) -> Vec<u8> {
-        GroupUpdateRequest {
-            payload: Some(group_update_request::Payload::RemoveMember(RemoveMember {
-                identity: identity.to_vec(),
-            })),
+        ConversationUpdateRequest {
+            payload: Some(conversation_update_request::Payload::RemoveMember(
+                RemoveMember {
+                    identity: identity.to_vec(),
+                },
+            )),
         }
         .encode_to_vec()
     }

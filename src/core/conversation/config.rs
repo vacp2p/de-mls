@@ -46,7 +46,7 @@ fn default_protocol_config() -> StewardListConfig {
 
 /// Per-group timing + embedded [`StewardListConfig`].
 #[derive(Debug, Clone)]
-pub struct GroupConfig {
+pub struct ConversationConfig {
     /// RFC §Inactivity Timer #1: how long the epoch steward has to commit
     /// approved proposals before honest members enter the freeze round.
     pub commit_inactivity_duration: Duration,
@@ -85,7 +85,7 @@ pub struct GroupConfig {
     pub protocol: StewardListConfig,
 }
 
-impl Default for GroupConfig {
+impl Default for ConversationConfig {
     fn default() -> Self {
         Self {
             commit_inactivity_duration: DEFAULT_COMMIT_INACTIVITY_DURATION,
@@ -105,7 +105,7 @@ impl Default for GroupConfig {
     }
 }
 
-impl GroupConfig {
+impl ConversationConfig {
     /// Auto-vote delay for the given proposal kind.
     pub fn voting_delay_for(&self, kind: ProposalKind) -> Duration {
         if kind.is_steward_election() {
@@ -124,10 +124,10 @@ mod tests {
     /// other kinds get `voting_delay`.
     #[test]
     fn voting_delay_dispatch_on_proposal_kind() {
-        let config = GroupConfig {
+        let config = ConversationConfig {
             voting_delay: Duration::from_secs(7),
             election_voting_delay: Duration::from_secs(3),
-            ..GroupConfig::default()
+            ..ConversationConfig::default()
         };
         assert_eq!(
             config.voting_delay_for(ProposalKind::Commit),

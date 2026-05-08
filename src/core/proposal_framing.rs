@@ -1,7 +1,7 @@
 //! Wire framing helpers: welcome-subtopic packets and consensus
-//! `CreateProposalRequest` construction. Group construction lives on
-//! [`Group::create_group`](crate::core::Group::create_group) and
-//! [`Group::prepare_to_join`](crate::core::Group::prepare_to_join);
+//! `CreateProposalRequest` construction. Conversation construction lives on
+//! [`Conversation::create`](crate::core::Conversation::create) and
+//! [`Conversation::prepare_to_join`](crate::core::Conversation::prepare_to_join);
 //! application-message framing lives on
 //! [`MlsService::build_message`](crate::mls_crypto::MlsService::build_message).
 
@@ -13,7 +13,7 @@ use crate::{
     ds::{OutboundPacket, WELCOME_SUBTOPIC},
     mls_crypto::KeyPackageBytes,
     protos::de_mls::messages::v1::{
-        GroupUpdateRequest, InvitationToJoin, UserKeyPackage, WelcomeMessage,
+        ConversationUpdateRequest, InvitationToJoin, UserKeyPackage, WelcomeMessage,
     },
 };
 
@@ -25,7 +25,7 @@ use crate::{
 /// `OpenMlsService::generate_key_package`) so a joiner can publish a key
 /// package before any MLS service for the target group exists.
 pub fn build_key_package_message(
-    group_name: &str,
+    conversation_name: &str,
     key_package: KeyPackageBytes,
     app_id: &[u8],
 ) -> OutboundPacket {
@@ -37,7 +37,7 @@ pub fn build_key_package_message(
     OutboundPacket::new(
         welcome_msg.encode_to_vec(),
         WELCOME_SUBTOPIC,
-        group_name,
+        conversation_name,
         app_id,
     )
 }
@@ -45,7 +45,7 @@ pub fn build_key_package_message(
 /// Wrap raw MLS welcome bytes into an `OutboundPacket` on the welcome subtopic.
 pub(crate) fn build_invitation_packet(
     welcome_bytes: Vec<u8>,
-    group_name: &str,
+    conversation_name: &str,
     app_id: &[u8],
 ) -> OutboundPacket {
     let welcome_msg: WelcomeMessage = InvitationToJoin {
@@ -55,7 +55,7 @@ pub(crate) fn build_invitation_packet(
     OutboundPacket::new(
         welcome_msg.encode_to_vec(),
         WELCOME_SUBTOPIC,
-        group_name,
+        conversation_name,
         app_id,
     )
 }
@@ -63,11 +63,11 @@ pub(crate) fn build_invitation_packet(
 // ─────────────────────────── Consensus Proposal Building ───────────────────────────
 
 /// Build the consensus-library `CreateProposalRequest` for a
-/// `GroupUpdateRequest`. Pure — no async, no I/O. The caller (app
+/// `ConversationUpdateRequest`. Pure — no async, no I/O. The caller (app
 /// layer) submits the resulting request via
 /// `ProviderConsensus::create_proposal_with_config`.
 pub fn build_create_proposal_request(
-    request: &GroupUpdateRequest,
+    request: &ConversationUpdateRequest,
     creator_id: &[u8],
     expected_voters: u32,
     proposal_expiration_secs: u64,

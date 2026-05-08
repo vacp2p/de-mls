@@ -2,47 +2,50 @@
 //! service, plug-ins, state machine, durable config, and operating mode.
 //! Pure data + protocol-function wrappers — no timers, no spawned tasks,
 //! no I/O. App-side wiring (phase timer, auto-vote handles) lives on
-//! [`crate::app::SessionRunner`], which owns one `GroupHandle` by value.
+//! [`crate::app::SessionRunner`], which owns one `ConversationHandle` by value.
 
 use prost::Message;
 use tracing::info;
 
 use crate::{
     core::{
-        BufferedCommitCandidate, CoreError, FreezeFinalizeResult, Group, GroupConfig, GroupState,
-        GroupStateMachine, OperatingMode, PeerScoringPlugin, ProcessResult, ProposalKind,
-        StewardListPlugin, compute_commit_hash, finalize_freeze_round, member_set, process_inbound,
+        BufferedCommitCandidate, Conversation, ConversationConfig, ConversationState,
+        ConversationStateMachine, CoreError, FreezeFinalizeResult, OperatingMode,
+        PeerScoringPlugin, ProcessResult, ProposalKind, StewardListPlugin, compute_commit_hash,
+        finalize_freeze_round, member_set, process_inbound,
     },
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     mls_crypto::{
         CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MlsCommitInput, MlsService,
     },
-    protos::de_mls::messages::v1::{AppMessage, CommitCandidate, group_update_request::Payload},
+    protos::de_mls::messages::v1::{
+        AppMessage, CommitCandidate, conversation_update_request::Payload,
+    },
 };
 
 /// Per-group aggregate. Fields with simple direct semantics
 /// (`group`, `state_machine`, `config`, `scoring`, `steward`) are exposed
 /// as fields; fields with attach/detach lifecycle (`mls`) or RFC-defined
 /// invariants (`operating_mode`) go through controlled accessors.
-pub struct GroupHandle<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> {
-    pub(crate) group: Group,
+pub struct ConversationHandle<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> {
+    pub(crate) group: Conversation,
     /// Per-group MLS service. `None` for joiners in `PendingJoin` who
     /// haven't accepted a welcome yet; once attached via
     /// [`Self::attach_mls`] it stays `Some` for the handle's lifetime.
     mls: Option<M>,
     /// Per-group state machine. The orchestrator updates this together
     /// with the phase timer so the two never drift.
-    pub(crate) state_machine: GroupStateMachine,
+    pub(crate) state_machine: ConversationStateMachine,
     /// Per-group durable config: voting/consensus durations,
     /// `liveness_criteria_yes`, `pending_update_max_epochs`. Read by
     /// orchestrators; joiner-sync writes through this directly.
-    pub(crate) config: GroupConfig,
+    pub(crate) config: ConversationConfig,
     /// Per-group peer-score plug-in. Read by protocol decisions under
     /// the orchestrator's per-handle lock; no separate `Mutex` needed.
     pub(crate) scoring: Sc,
     /// Per-group steward list plug-in. Holds the active list, retry
     /// counter, and election retry policy. Orchestrator composes
-    /// eligibility from MLS members + `Group::is_pending_removal` and
+    /// eligibility from MLS members + `Conversation::is_pending_removal` and
     /// passes it on every position query.
     pub(crate) steward: St,
     /// Authorization mode (RFC §Layer 3 Anti-Deadlock ECP). `Recovery` is
@@ -53,14 +56,14 @@ pub struct GroupHandle<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlug
     operating_mode: OperatingMode,
 }
 
-impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupHandle<M, Sc, St> {
+impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHandle<M, Sc, St> {
     /// Build a fresh handle. Creator path passes `Some(mls)`; joiner
     /// path passes `None` and attaches later via [`Self::attach_mls`].
     pub(crate) fn new(
-        group: Group,
+        group: Conversation,
         mls: Option<M>,
-        state_machine: GroupStateMachine,
-        config: GroupConfig,
+        state_machine: ConversationStateMachine,
+        config: ConversationConfig,
         scoring: Sc,
         steward: St,
     ) -> Self {
@@ -91,7 +94,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupHandle<M,
 
     // ── State accessor ──────────────────────────────────────────────
 
-    pub(crate) fn current_state(&self) -> GroupState {
+    pub(crate) fn current_state(&self) -> ConversationState {
         self.state_machine.current_state()
     }
 
@@ -132,7 +135,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupHandle<M,
     /// Current MLS members; errors with
     /// [`CoreError::MlsGroupNotInitialized`] when no service is attached
     /// (joiner pre-welcome).
-    pub(crate) fn group_members(&self) -> Result<Vec<Vec<u8>>, CoreError> {
+    pub(crate) fn conversation_members(&self) -> Result<Vec<Vec<u8>>, CoreError> {
         match &self.mls {
             Some(mls) => Ok(mls.members()?),
             None => Err(CoreError::MlsGroupNotInitialized),
@@ -168,7 +171,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupHandle<M,
         });
         if self_removal_pending {
             info!(
-                group = self.group.group_name(),
+                group = self.group.name(),
                 "commit candidate skipped: approved batch contains self-remove"
             );
             return Ok(None);
@@ -198,7 +201,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupHandle<M,
         let is_member = |id: &[u8]| current_members_set.contains(id);
 
         // Urgent (ECP-driven) freeze: restrict the batch to just the target's
-        // RemoveMember. See `Group::urgent_commit_target`.
+        // RemoveMember. See `Conversation::urgent_commit_target`.
         let urgent_target = self.group.urgent_commit_target().map(|t| t.to_vec());
 
         // Iterate in insertion order (FIFO): library proposal IDs are
@@ -251,7 +254,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupHandle<M,
         } = mls.create_commit_candidate(&updates)?;
 
         let candidate = CommitCandidate {
-            group_name: self.group.group_name_bytes().to_vec(),
+            conversation_name: self.group.name_bytes().to_vec(),
             mls_proposals,
             commit_message: commit,
             steward_identity: self_identity.to_vec(),
@@ -272,7 +275,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupHandle<M,
         );
 
         info!(
-            group = self.group.group_name(),
+            group = self.group.name(),
             epoch,
             proposals = updates.len(),
             "commit candidate created"
@@ -282,7 +285,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupHandle<M,
         Ok(Some(OutboundPacket::new(
             candidate_msg.encode_to_vec(),
             APP_MSG_SUBTOPIC,
-            self.group.group_name(),
+            self.group.name(),
             app_id,
         )))
     }
@@ -321,12 +324,14 @@ mod tests {
     use super::*;
     use crate::test_fixtures::{StubScoring, StubSteward, UnusedMls};
 
-    fn make_handle(steward: StubSteward) -> GroupHandle<UnusedMls, StubScoring, StubSteward> {
-        GroupHandle::new(
-            Group::create_group("g", b"me".to_vec()),
+    fn make_handle(
+        steward: StubSteward,
+    ) -> ConversationHandle<UnusedMls, StubScoring, StubSteward> {
+        ConversationHandle::new(
+            Conversation::create("g", b"me".to_vec()),
             Some(UnusedMls),
-            GroupStateMachine::new_as_member(),
-            GroupConfig::default(),
+            ConversationStateMachine::new_as_member(),
+            ConversationConfig::default(),
             StubScoring,
             steward,
         )

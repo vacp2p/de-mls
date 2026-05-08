@@ -12,9 +12,15 @@ use prost::Message;
 use tracing::{error, info};
 
 use crate::{
-    app::{GroupPlugins, GroupState, ProposalParams, User, UserError, cast_vote, submit_proposal},
-    core::{DeMlsProvider, GroupEventHandler, ProposalKind, StewardListPlugin, target_identity_of},
-    protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest, VotePayload},
+    app::{
+        ConversationPlugins, ConversationState, ProposalParams, User, UserError, cast_vote,
+        submit_proposal,
+    },
+    core::{
+        ConversationEventHandler, DeMlsProvider, ProposalKind, StewardListPlugin,
+        target_identity_of,
+    },
+    protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest, VotePayload},
 };
 
 /// Per-call arguments for a new outgoing proposal. Bundled so the spawned
@@ -27,8 +33,8 @@ use crate::{
 /// normal banner like any other member" — used for steward auto-propose
 /// paths where the steward still holds a judgement call.
 struct NewProposal {
-    group_name: String,
-    request: GroupUpdateRequest,
+    conversation_name: String,
+    request: ConversationUpdateRequest,
     expected_voters: u32,
     kind: ProposalKind,
     creator_vote: Option<bool>,
@@ -36,7 +42,9 @@ struct NewProposal {
 
 use crate::mls_crypto::MlsService;
 
-impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P, GP, H> {
+impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 'static>
+    User<P, GP, H>
+{
     /// Check that the group state allows creating a proposal of this kind and
     /// return the expected voter count.
     ///
@@ -45,18 +53,18 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// block everything. Other states defer to `partial_freeze_blocks`.
     async fn check_proposal_allowed(
         &self,
-        group_name: &str,
+        conversation_name: &str,
         kind: ProposalKind,
     ) -> Result<u32, UserError> {
         let entry_arc = self
-            .lookup_entry(group_name)
+            .lookup_entry(conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
         let entry = entry_arc.read().await;
         let state = entry.handle.current_state();
 
         match state {
-            GroupState::Reelection => {
+            ConversationState::Reelection => {
                 if !kind.is_emergency() && !kind.is_steward_election() {
                     return Err(UserError::GroupBlocked(state.to_string()));
                 }
@@ -64,7 +72,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                     return Err(UserError::PartialFreeze);
                 }
             }
-            GroupState::Freezing | GroupState::Selection => {
+            ConversationState::Freezing | ConversationState::Selection => {
                 return Err(UserError::GroupBlocked(state.to_string()));
             }
             _ => {
@@ -75,7 +83,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         }
 
         entry.handle.expect_mls()?;
-        let members = entry.handle.group_members()?;
+        let members = entry.handle.conversation_members()?;
         Ok(members.len() as u32)
     }
 
@@ -97,14 +105,16 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// drives the proposal through its lifecycle.
     pub async fn initiate_proposal(
         &self,
-        group_name: String,
-        request: GroupUpdateRequest,
+        conversation_name: String,
+        request: ConversationUpdateRequest,
         creator_vote: Option<bool>,
     ) -> Result<(), UserError> {
         let kind = ProposalKind::of(&request);
-        let expected_voters = self.check_proposal_allowed(&group_name, kind).await?;
+        let expected_voters = self
+            .check_proposal_allowed(&conversation_name, kind)
+            .await?;
         self.spawn_proposal_submission(NewProposal {
-            group_name,
+            conversation_name,
             request,
             expected_voters,
             kind,
@@ -121,10 +131,10 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// Proposal background task: register (which broadcasts proposal +
     /// creator's vote in one bundle) → sleep `consensus_timeout` → resolve.
     /// Never returns an error — submission failures are surfaced through
-    /// `GroupEventHandler::on_error` and everything after that is best-effort.
+    /// `ConversationEventHandler::on_error` and everything after that is best-effort.
     async fn run_proposal_lifecycle(self, np: NewProposal) {
         let NewProposal {
-            group_name,
+            conversation_name,
             request,
             expected_voters,
             kind,
@@ -132,27 +142,34 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         } = np;
 
         let proposal_id = match self
-            .register_new_proposal(&group_name, request, expected_voters, kind, creator_vote)
+            .register_new_proposal(
+                &conversation_name,
+                request,
+                expected_voters,
+                kind,
+                creator_vote,
+            )
             .await
         {
             Ok(pid) => pid,
             Err(err) => {
-                error!(group = %group_name, error = %err, "proposal submission failed");
+                error!(group = %conversation_name, error = %err, "proposal submission failed");
                 self.handler
-                    .on_error(&group_name, "Start voting", &err.to_string())
+                    .on_error(&conversation_name, "Start voting", &err.to_string())
                     .await;
                 return;
             }
         };
 
         let Some(consensus_timeout) = self
-            .with_entry(&group_name, |e| e.handle.config.consensus_timeout)
+            .with_entry(&conversation_name, |e| e.handle.config.consensus_timeout)
             .await
         else {
             return;
         };
         tokio::time::sleep(consensus_timeout).await;
-        self.resolve_on_timeout(&group_name, proposal_id).await;
+        self.resolve_on_timeout(&conversation_name, proposal_id)
+            .await;
     }
 
     /// Open the consensus session, record ownership, then either bundle
@@ -167,14 +184,14 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// forwarder picks it up.
     async fn register_new_proposal(
         &self,
-        group_name: &str,
-        request: GroupUpdateRequest,
+        conversation_name: &str,
+        request: ConversationUpdateRequest,
         expected_voters: u32,
         kind: ProposalKind,
         creator_vote: Option<bool>,
     ) -> Result<u32, UserError> {
         let (proposal_expiration, consensus_timeout, liveness_criteria_yes, voting_delay) = self
-            .with_entry(group_name, |e| {
+            .with_entry(conversation_name, |e| {
                 (
                     e.handle.config.proposal_expiration,
                     e.handle.config.consensus_timeout,
@@ -183,10 +200,10 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 )
             })
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
 
         let (proposal_id, unbundled) = submit_proposal::<P>(
-            group_name,
+            conversation_name,
             &request,
             self.identity().identity_bytes(),
             &self.consensus_service,
@@ -201,9 +218,9 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
 
         {
             let entry_arc = self
-                .lookup_entry(group_name)
+                .lookup_entry(conversation_name)
                 .await
-                .ok_or(UserError::GroupNotFound)?;
+                .ok_or(UserError::ConversationNotFound)?;
             let mut entry = entry_arc.write().await;
             entry
                 .handle
@@ -221,13 +238,13 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 // library's owner-bundling API directly — the normal
                 // `cast_vote` helper sends Vote-only messages, which would
                 // leave peers without the proposal.
-                let scope = P::Scope::from(group_name.to_string());
+                let scope = P::Scope::from(conversation_name.to_string());
                 let proposal = self
                     .consensus_service
                     .cast_vote_and_get_proposal(&scope, proposal_id, vote, self.eth_signer.clone())
                     .await?;
                 info!(
-                    group = group_name,
+                    group = conversation_name,
                     proposal_id,
                     choice = if vote { "YES" } else { "NO" },
                     actor = "owner",
@@ -240,22 +257,22 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
 
         let packet = {
             let entry_arc = self
-                .lookup_entry(group_name)
+                .lookup_entry(conversation_name)
                 .await
-                .ok_or(UserError::GroupNotFound)?;
+                .ok_or(UserError::ConversationNotFound)?;
             let entry = entry_arc.read().await;
             entry
                 .handle
                 .expect_mls()?
                 .build_message(&outbound, &self.app_id)?
         };
-        self.handler.on_outbound(group_name, packet).await?;
+        self.handler.on_outbound(conversation_name, packet).await?;
 
         match creator_vote {
             Some(_) => {
                 // Creator already voted — populate history cache, no banner.
                 self.handler
-                    .on_own_proposal_submitted(group_name, proposal_id, &request)
+                    .on_own_proposal_submitted(conversation_name, proposal_id, &request)
                     .await?;
             }
             None => {
@@ -264,7 +281,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 // proposal via wire and run their own timers locally.
                 let payload = request.encode_to_vec();
                 let vote_notification: AppMessage = VotePayload {
-                    group_id: group_name.to_string(),
+                    conversation_id: conversation_name.to_string(),
                     proposal_id,
                     payload,
                     timestamp: std::time::SystemTime::now()
@@ -274,10 +291,15 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 }
                 .into();
                 self.handler
-                    .on_app_message(group_name, vote_notification)
+                    .on_app_message(conversation_name, vote_notification)
                     .await?;
-                self.spawn_auto_vote(group_name, proposal_id, voting_delay, liveness_criteria_yes)
-                    .await;
+                self.spawn_auto_vote(
+                    conversation_name,
+                    proposal_id,
+                    voting_delay,
+                    liveness_criteria_yes,
+                )
+                .await;
             }
         }
 
@@ -294,8 +316,8 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// as the proposal is in our resolved-proposals cache — we downgrade the
     /// log accordingly and warn only for truly unknown IDs (indicates a logic
     /// bug, not a race).
-    async fn resolve_on_timeout(&self, group_name: &str, proposal_id: u32) {
-        let scope = P::Scope::from(group_name.to_string());
+    async fn resolve_on_timeout(&self, conversation_name: &str, proposal_id: u32) {
+        let scope = P::Scope::from(conversation_name.to_string());
         let still_active = self
             .consensus_service
             .storage()
@@ -314,20 +336,20 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             Ok(_) => {}
             Err(ConsensusError::SessionNotFound) | Err(ConsensusError::SessionNotActive) => {
                 let resolved_locally = self
-                    .with_entry(group_name, |entry| {
+                    .with_entry(conversation_name, |entry| {
                         entry.handle.group.is_consensus_outcome_applied(proposal_id)
                     })
                     .await
                     .unwrap_or(false);
                 if resolved_locally {
                     tracing::debug!(
-                        group = group_name,
+                        group = conversation_name,
                         proposal_id,
                         "timeout fired for already-resolved proposal: ignoring"
                     );
                 } else {
                     tracing::warn!(
-                        group = group_name,
+                        group = conversation_name,
                         proposal_id,
                         "timeout fired for unknown proposal id: no session and not in resolved cache"
                     );
@@ -345,26 +367,30 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// steward and the group accepts new proposals.
     pub async fn handle_incoming_update_request(
         &self,
-        group_name: &str,
-        request: GroupUpdateRequest,
+        conversation_name: &str,
+        request: ConversationUpdateRequest,
     ) -> Result<(), UserError> {
         // Joiners in PendingJoin aren't active participants: buffering KPs
         // would just fill their queue with entries already covered by the
         // welcome they're waiting on. Checked *before* the MLS epoch lookup
         // because a PendingJoin member has no MLS group yet —
-        // `current_epoch()` would fail with `GroupNotFound` and surface as
+        // `current_epoch()` would fail with `ConversationNotFound` and surface as
         // a spurious error in the gateway's inbound forwarder.
         let entry_arc = self
-            .lookup_entry(group_name)
+            .lookup_entry(conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
 
         let (pending_join, members_for_rotation, current_epoch) = {
             let entry = entry_arc.read().await;
-            let pending = entry.handle.current_state() == GroupState::PendingJoin;
+            let pending = entry.handle.current_state() == ConversationState::PendingJoin;
             match (pending, entry.handle.mls()) {
                 (true, _) | (false, None) => (pending, Vec::new(), 0u64),
-                (false, Some(mls)) => (false, entry.handle.group_members()?, mls.current_epoch()?),
+                (false, Some(mls)) => (
+                    false,
+                    entry.handle.conversation_members()?,
+                    mls.current_epoch()?,
+                ),
             }
         };
         if pending_join {
@@ -398,12 +424,12 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 .is_some_and(|es| es == self_identity);
             let state = entry.handle.current_state();
             let total = entry.handle.group.pending_update_count();
-            let should = is_es && state == GroupState::Working;
+            let should = is_es && state == ConversationState::Working;
             (inserted, is_es, state, total, should)
         };
 
         info!(
-            group = group_name,
+            group = conversation_name,
             epoch = current_epoch,
             inserted,
             buffer_total,
@@ -420,10 +446,10 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             // `check_proposal_allowed` may still reject (active emergency
             // etc.) — leave the entry in the buffer for next rotation.
             if let Err(e) = self
-                .initiate_proposal(group_name.to_string(), request, None)
+                .initiate_proposal(conversation_name.to_string(), request, None)
                 .await
             {
-                info!(group = group_name, error = %e, "proposal deferred");
+                info!(group = conversation_name, error = %e, "proposal deferred");
             }
         }
         Ok(())
@@ -431,28 +457,28 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
 
     pub async fn process_user_vote(
         &mut self,
-        group_name: &str,
+        conversation_name: &str,
         proposal_id: u32,
         vote: bool,
     ) -> Result<(), UserError> {
         let entry_arc = self
-            .lookup_entry(group_name)
+            .lookup_entry(conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
         {
             let entry = entry_arc.read().await;
             let state = entry.handle.current_state();
-            if state == GroupState::Freezing || state == GroupState::Selection {
+            if state == ConversationState::Freezing || state == ConversationState::Selection {
                 return Err(UserError::GroupBlocked(state.to_string()));
             }
         }
         let app_id = self.app_id.clone();
 
         // Manual vote takes precedence over the pending auto-vote timer.
-        self.cancel_auto_vote(group_name, proposal_id).await;
+        self.cancel_auto_vote(conversation_name, proposal_id).await;
 
         let app_message = cast_vote::<P, _>(
-            group_name,
+            conversation_name,
             proposal_id,
             vote,
             &self.consensus_service,
@@ -466,22 +492,22 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 .expect_mls()?
                 .build_message(&app_message, &app_id)?
         };
-        self.handler.on_outbound(group_name, packet).await?;
+        self.handler.on_outbound(conversation_name, packet).await?;
         Ok(())
     }
 
-    /// Spawn an auto-vote timer for `(group_name, proposal_id)`. Idempotent
+    /// Spawn an auto-vote timer for `(conversation_name, proposal_id)`. Idempotent
     /// — an existing handle for the same key is aborted and replaced.
-    /// `vote` is captured before the sleep so a `GroupSync` during the
+    /// `vote` is captured before the sleep so a `ConversationSync` during the
     /// delay can't change it.
     pub(crate) async fn spawn_auto_vote(
         &self,
-        group_name: &str,
+        conversation_name: &str,
         proposal_id: u32,
         delay: Duration,
         vote: bool,
     ) {
-        let timers = match self.lookup_entry(group_name).await {
+        let timers = match self.lookup_entry(conversation_name).await {
             Some(entry_arc) => entry_arc.read().await.auto_vote_timers.clone(),
             None => return,
         };
@@ -494,7 +520,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         }
 
         let user = self.clone();
-        let group_name_owned = group_name.to_string();
+        let group_name_owned = conversation_name.to_string();
         let timers_for_task = Arc::clone(&timers);
         let handle = tokio::spawn(async move {
             tokio::time::sleep(delay).await;
@@ -528,18 +554,18 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         }
     }
 
-    /// Abort the auto-vote timer for `(group_name, proposal_id)` if one is
+    /// Abort the auto-vote timer for `(conversation_name, proposal_id)` if one is
     /// registered. No-op otherwise.
-    pub(crate) async fn cancel_auto_vote(&self, group_name: &str, proposal_id: u32) {
-        if let Some(entry_arc) = self.lookup_entry(group_name).await {
+    pub(crate) async fn cancel_auto_vote(&self, conversation_name: &str, proposal_id: u32) {
+        if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
             entry_arc.read().await.cancel_auto_vote(proposal_id);
         }
     }
 
-    /// Abort every auto-vote timer belonging to `group_name`. Called on
+    /// Abort every auto-vote timer belonging to `conversation_name`. Called on
     /// group leave so no stale timers fire against a group we've left.
-    pub(crate) async fn cancel_group_auto_votes(&self, group_name: &str) {
-        if let Some(entry_arc) = self.lookup_entry(group_name).await {
+    pub(crate) async fn cancel_group_auto_votes(&self, conversation_name: &str) {
+        if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
             entry_arc.read().await.cancel_all_auto_votes();
         }
     }
@@ -548,16 +574,16 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// path as a manual vote — the library sees the two identically.
     async fn cast_auto_vote(
         &self,
-        group_name: &str,
+        conversation_name: &str,
         proposal_id: u32,
         vote: bool,
     ) -> Result<(), UserError> {
         let entry_arc = self
-            .lookup_entry(group_name)
+            .lookup_entry(conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
         let app_message = cast_vote::<P, _>(
-            group_name,
+            conversation_name,
             proposal_id,
             vote,
             &self.consensus_service,
@@ -571,7 +597,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 .expect_mls()?
                 .build_message(&app_message, &self.app_id)?
         };
-        self.handler.on_outbound(group_name, packet).await?;
+        self.handler.on_outbound(conversation_name, packet).await?;
         Ok(())
     }
 }

@@ -3,10 +3,10 @@
 use tracing::{error, info};
 
 use crate::{
-    app::{FreezeTimeoutStatus, GroupPlugins, GroupState, User, UserError},
+    app::{ConversationPlugins, ConversationState, FreezeTimeoutStatus, User, UserError},
     core::{
-        DeMlsProvider, FreezeFinalizeResult, FreezeOutcome, GroupEventHandler, PeerScoringPlugin,
-        ScoreEvent, ScoreOp, StewardListPlugin,
+        ConversationEventHandler, DeMlsProvider, FreezeFinalizeResult, FreezeOutcome,
+        PeerScoringPlugin, ScoreEvent, ScoreOp, StewardListPlugin,
     },
     ds::WELCOME_SUBTOPIC,
     mls_crypto::MlsService,
@@ -14,13 +14,15 @@ use crate::{
 
 use crate::app::orchestrator::has_downward_cross;
 
-impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P, GP, H> {
+impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 'static>
+    User<P, GP, H>
+{
     /// Poll a `PendingJoin` group. Returns `true` while still waiting,
     /// `false` once joined or once the join attempt has been torn down
     /// after timing out.
-    pub async fn check_pending_join(&self, group_name: &str) -> Result<bool, UserError> {
+    pub async fn check_pending_join(&self, conversation_name: &str) -> Result<bool, UserError> {
         let (state, expired) = match self
-            .with_entry(group_name, |entry| {
+            .with_entry(conversation_name, |entry| {
                 (
                     entry.handle.current_state(),
                     entry.is_pending_join_expired(),
@@ -32,15 +34,15 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             None => return Ok(false),
         };
 
-        if state != GroupState::PendingJoin {
+        if state != ConversationState::PendingJoin {
             return Ok(false);
         }
 
         if expired {
-            info!(group = group_name, "pending join timed out");
-            self.groups.write().await.remove(group_name);
-            self.cleanup_consensus_scope(group_name).await?;
-            let _ = self.handler.on_leave_group(group_name).await;
+            info!(group = conversation_name, "pending join timed out");
+            self.groups.write().await.remove(conversation_name);
+            self.cleanup_consensus_scope(conversation_name).await?;
+            let _ = self.handler.on_leave_conversation(conversation_name).await;
             return Ok(false);
         }
 
@@ -51,18 +53,18 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// are all in or the freeze window elapses, then finalises and dispatches.
     pub async fn poll_freeze_status(
         &self,
-        group_name: &str,
+        conversation_name: &str,
     ) -> Result<FreezeTimeoutStatus, UserError> {
         let entry_arc = self
-            .lookup_entry(group_name)
+            .lookup_entry(conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
 
         let (has_proposals, selection_event) = {
             let mut entry = entry_arc.write().await;
 
             let state = entry.handle.current_state();
-            if state != GroupState::Freezing {
+            if state != ConversationState::Freezing {
                 return Ok(FreezeTimeoutStatus::NotFreezing);
             }
 
@@ -83,7 +85,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         };
 
         self.handler
-            .on_phase_change(group_name, selection_event)
+            .on_phase_change(conversation_name, selection_event)
             .await;
 
         let (finalize_result, downward_cross) = {
@@ -96,7 +98,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 {
                     Ok(result) => result,
                     Err(e) => {
-                        error!(group = group_name, error = %e, "freeze finalize failed");
+                        error!(group = conversation_name, error = %e, "freeze finalize failed");
                         FreezeFinalizeResult::default()
                     }
                 }
@@ -122,8 +124,12 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         // can take its own locks without deadlock risk.
         if !finalize_result.committed_batch.is_empty() {
             let batch: Vec<_> = finalize_result.committed_batch.values().cloned().collect();
-            if let Err(e) = self.handler.on_commit_applied(group_name, batch).await {
-                error!(group = group_name, error = %e, "on_commit_applied callback failed");
+            if let Err(e) = self
+                .handler
+                .on_commit_applied(conversation_name, batch)
+                .await
+            {
+                error!(group = conversation_name, error = %e, "on_commit_applied callback failed");
             }
         }
 
@@ -132,8 +138,12 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         // which `.await`s on the consensus service. Holding the entry
         // lock across that await would block other operations on this
         // group, so we drop the lock above before chaining.
-        if downward_cross && let Err(e) = self.check_and_initiate_score_removals(group_name).await {
-            error!(group = group_name, error = %e, "score-removal check failed (freeze finalize)");
+        if downward_cross
+            && let Err(e) = self
+                .check_and_initiate_score_removals(conversation_name)
+                .await
+        {
+            error!(group = conversation_name, error = %e, "score-removal check failed (freeze finalize)");
         }
 
         match finalize_result.outcome {
@@ -144,22 +154,25 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                     .as_ref()
                     .is_some_and(|p| p.subtopic == WELCOME_SUBTOPIC);
                 if let Some(packet) = outbound {
-                    if let Err(e) = self.handler.on_outbound(group_name, packet).await {
-                        error!(group = group_name, error = %e, "deferred welcome send failed");
+                    if let Err(e) = self.handler.on_outbound(conversation_name, packet).await {
+                        error!(group = conversation_name, error = %e, "deferred welcome send failed");
                     }
                 }
 
-                // GroupSync carries the steward list + timing + scores to
+                // ConversationSync carries the steward list + timing + scores to
                 // new joiners; send it only after the welcome they'll use
                 // to catch up.
                 if has_welcome {
-                    if let Err(e) = self.send_group_sync(group_name).await {
-                        error!(group = group_name, error = %e, "group sync send failed");
+                    if let Err(e) = self.send_group_sync(conversation_name).await {
+                        error!(group = conversation_name, error = %e, "group sync send failed");
                     }
                 }
 
-                if let Err(e) = self.dispatch_inbound_result(group_name, *result).await {
-                    error!(group = group_name, error = %e, "finalize result dispatch failed");
+                if let Err(e) = self
+                    .dispatch_inbound_result(conversation_name, *result)
+                    .await
+                {
+                    error!(group = conversation_name, error = %e, "finalize result dispatch failed");
                 }
                 return Ok(FreezeTimeoutStatus::Applied);
             }
@@ -187,7 +200,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                             Some(mls) => {
                                 let violation_epoch = mls.current_epoch()?;
                                 let self_identity = self.identity().identity_bytes();
-                                let members = entry.handle.group_members()?;
+                                let members = entry.handle.conversation_members()?;
                                 let eligible = entry.handle.group.steward_eligibility(&members);
                                 entry
                                     .handle
@@ -217,24 +230,26 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 };
 
                 if downward_cross
-                    && let Err(e) = self.check_and_initiate_score_removals(group_name).await
+                    && let Err(e) = self
+                        .check_and_initiate_score_removals(conversation_name)
+                        .await
                 {
-                    error!(group = group_name, error = %e, "score-removal check failed (freeze timeout)");
+                    error!(group = conversation_name, error = %e, "score-removal check failed (freeze timeout)");
                 }
 
-                let entered_reelection = transition_event == GroupState::Reelection;
+                let entered_reelection = transition_event == ConversationState::Reelection;
                 self.handler
-                    .on_phase_change(group_name, transition_event)
+                    .on_phase_change(conversation_name, transition_event)
                     .await;
 
                 // Layer 2 recovery: regenerate the steward list. Only the
                 // responsible proposer's call actually submits.
                 if entered_reelection
                     && let Err(e) = self
-                        .try_initiate_steward_election(group_name, true, None)
+                        .try_initiate_steward_election(conversation_name, true, None)
                         .await
                 {
-                    info!(group = group_name, error = %e, "recovery election deferred");
+                    info!(group = conversation_name, error = %e, "recovery election deferred");
                 }
             }
         }
@@ -245,15 +260,15 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// Drives Working → Freezing when the steward has sat on approved
     /// proposals for more than `commit_inactivity_duration`. Any member
     /// polls — not just the steward — so a fault gets picked up group-wide.
-    pub async fn check_member_freeze(&self, group_name: &str) -> Result<bool, UserError> {
+    pub async fn check_member_freeze(&self, conversation_name: &str) -> Result<bool, UserError> {
         let entry_arc = self
-            .lookup_entry(group_name)
+            .lookup_entry(conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
         let mut entry = entry_arc.write().await;
 
         let state = entry.handle.current_state();
-        if state == GroupState::PendingJoin {
+        if state == ConversationState::PendingJoin {
             return Ok(false);
         }
 
@@ -289,7 +304,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(
-                            group = group_name,
+                            group = conversation_name,
                             error = %e,
                             "commit candidate build failed"
                         );
@@ -301,16 +316,16 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             };
 
             info!(
-                group = group_name,
+                group = conversation_name,
                 approved = proposal_count,
                 "steward inactivity transition"
             );
 
             // Drop lock before any async calls.
             drop(entry);
-            self.handler.on_phase_change(group_name, event).await;
+            self.handler.on_phase_change(conversation_name, event).await;
             if let Some(message) = outbound {
-                self.handler.on_outbound(group_name, message).await?;
+                self.handler.on_outbound(conversation_name, message).await?;
             }
         }
 

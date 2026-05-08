@@ -6,57 +6,64 @@ use tracing::{error, info};
 
 use crate::{
     app::{
-        GroupPlugins, GroupState, User, UserError, forward_incoming_vote, relay_incoming_proposal,
+        ConversationPlugins, ConversationState, User, UserError, forward_incoming_vote,
+        relay_incoming_proposal,
     },
     core::{
-        CoreError, DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProcessResult,
+        ConversationEventHandler, CoreError, DeMlsProvider, PeerScoringPlugin, ProcessResult,
         ProposalKind, ScoreSnapshot, StewardList, StewardListConfig, StewardListPlugin, member_set,
     },
     ds::{APP_MSG_SUBTOPIC, InboundPacket, WELCOME_SUBTOPIC},
     identity::ShortId,
     mls_crypto::{MlsService, key_package_bytes_from_json},
     protos::de_mls::messages::v1::{
-        AppMessage, ConversationMessage, GroupSync, GroupUpdateRequest, InviteMember, TimingConfig,
-        WelcomeMessage, group_update_request, welcome_message,
+        AppMessage, ConversationMessage, ConversationSync, ConversationUpdateRequest, InviteMember,
+        TimingConfig, WelcomeMessage, conversation_update_request, welcome_message,
     },
 };
 
-impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P, GP, H> {
+impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 'static>
+    User<P, GP, H>
+{
     /// Dispatches a single ProcessResult to the appropriate handler/consensus/state-machine action.
     pub async fn dispatch_inbound_result(
         &self,
-        group_name: &str,
+        conversation_name: &str,
         result: ProcessResult,
     ) -> Result<(), UserError> {
         match result {
             ProcessResult::AppMessage(msg) => {
-                self.handler.on_app_message(group_name, msg).await?;
+                self.handler.on_app_message(conversation_name, msg).await?;
                 Ok(())
             }
             ProcessResult::Proposal(proposal) => {
-                self.on_incoming_proposal(group_name, proposal).await
+                self.on_incoming_proposal(conversation_name, proposal).await
             }
             ProcessResult::Vote(vote) => {
                 let entry_arc = self
-                    .lookup_entry(group_name)
+                    .lookup_entry(conversation_name)
                     .await
-                    .ok_or(UserError::GroupNotFound)?;
+                    .ok_or(UserError::ConversationNotFound)?;
                 let entry = entry_arc.read().await;
                 forward_incoming_vote::<P>(&entry.handle.group, vote, &*self.consensus_service)
                     .await?;
                 Ok(())
             }
             ProcessResult::MembershipChangeReceived(request) => {
-                self.handle_incoming_update_request(group_name, request)
+                self.handle_incoming_update_request(conversation_name, request)
                     .await
             }
-            ProcessResult::JoinedGroup(name) => self.on_joined_group(&name).await,
-            ProcessResult::GroupUpdated => self.on_group_updated(group_name).await,
-            ProcessResult::LeaveGroup => self.on_leave_group(group_name).await,
-            ProcessResult::CommitCandidateReceived => {
-                self.on_commit_candidate_received(group_name).await
+            ProcessResult::JoinedConversation(name) => self.on_joined_conversation(&name).await,
+            ProcessResult::ConversationUpdated => {
+                self.on_conversation_updated(conversation_name).await
             }
-            ProcessResult::GroupSyncReceived(sync) => self.on_group_sync(group_name, sync).await,
+            ProcessResult::LeaveConversation => self.on_leave_conversation(conversation_name).await,
+            ProcessResult::CommitCandidateReceived => {
+                self.on_commit_candidate_received(conversation_name).await
+            }
+            ProcessResult::GroupSyncReceived(sync) => {
+                self.on_group_sync(conversation_name, sync).await
+            }
             ProcessResult::Noop => Ok(()),
         }
     }
@@ -74,12 +81,12 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// tracked as a backlog item in `docs/ROADMAP.md`.
     async fn on_incoming_proposal(
         &self,
-        group_name: &str,
+        conversation_name: &str,
         proposal: Proposal,
     ) -> Result<(), UserError> {
-        let decoded = GroupUpdateRequest::decode(proposal.payload.as_slice()).ok();
+        let decoded = ConversationUpdateRequest::decode(proposal.payload.as_slice()).ok();
         if let Some(req) = decoded.as_ref()
-            && let Some(entry_arc) = self.lookup_entry(group_name).await
+            && let Some(entry_arc) = self.lookup_entry(conversation_name).await
         {
             let mut entry = entry_arc.write().await;
             let current_epoch = match entry.handle.mls() {
@@ -87,11 +94,11 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 None => 0,
             };
             match &req.payload {
-                Some(group_update_request::Payload::EmergencyCriteria(_)) => {
+                Some(conversation_update_request::Payload::EmergencyCriteria(_)) => {
                     entry.handle.group.observe_emergency(proposal.proposal_id);
                 }
-                Some(group_update_request::Payload::InviteMember(_))
-                | Some(group_update_request::Payload::RemoveMember(_)) => {
+                Some(conversation_update_request::Payload::InviteMember(_))
+                | Some(conversation_update_request::Payload::RemoveMember(_)) => {
                     entry
                         .handle
                         .group
@@ -107,7 +114,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             .map(ProposalKind::of)
             .unwrap_or(ProposalKind::Commit);
         relay_incoming_proposal::<P>(
-            group_name,
+            conversation_name,
             proposal,
             &*self.consensus_service,
             &*self.handler,
@@ -118,7 +125,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         // closed session.
         if expected_voters > 1 {
             let Some((delay, vote)) = self
-                .with_entry(group_name, |e| {
+                .with_entry(conversation_name, |e| {
                     (
                         e.handle.config.voting_delay_for(kind),
                         e.handle.config.liveness_criteria_yes,
@@ -128,7 +135,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             else {
                 return Ok(());
             };
-            self.spawn_auto_vote(group_name, proposal_id, delay, vote)
+            self.spawn_auto_vote(conversation_name, proposal_id, delay, vote)
                 .await;
         }
         Ok(())
@@ -137,7 +144,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// We just joined via welcome. Broadcast a system "joined" chat message,
     /// sync scoring, and transition to Working. Pending-update pruning is
     /// defensive — PendingJoin doesn't buffer, but paths may change.
-    async fn on_joined_group(&self, name: &str) -> Result<(), UserError> {
+    async fn on_joined_conversation(&self, name: &str) -> Result<(), UserError> {
         self.prune_pending_updates_after_commit(name).await?;
 
         let msg: AppMessage = ConversationMessage {
@@ -147,7 +154,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             )
             .into_bytes(),
             sender: "SYSTEM".to_string(),
-            group_name: name.to_string(),
+            conversation_name: name.to_string(),
         }
         .into();
         let Some(entry_arc) = self.lookup_entry(name).await else {
@@ -157,11 +164,11 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             let entry = entry_arc.read().await;
             let mls = entry.handle.expect_mls()?;
             let packet = mls.build_message(&msg, &self.app_id)?;
-            let members = entry.handle.group_members().unwrap_or_default();
+            let members = entry.handle.conversation_members().unwrap_or_default();
             (packet, members)
         };
         self.handler.on_outbound(name, packet).await?;
-        self.handler.on_joined_group(name).await?;
+        self.handler.on_joined_conversation(name).await?;
         self.sync_scoring_members(name, &mls_members).await;
 
         let event = {
@@ -176,34 +183,36 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// Working, and run steward housekeeping (auto-fill, election kick-off,
     /// buffered-update drain). The commit author's `SuccessfulCommit`
     /// reward is emitted by `finalize_freeze_round`, not here.
-    async fn on_group_updated(&self, group_name: &str) -> Result<(), UserError> {
-        if let Some(entry_arc) = self.lookup_entry(group_name).await {
+    async fn on_conversation_updated(&self, conversation_name: &str) -> Result<(), UserError> {
+        if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
             let mls_members = {
                 let entry = entry_arc.read().await;
                 if entry.handle.mls().is_some() {
-                    entry.handle.group_members().unwrap_or_default()
+                    entry.handle.conversation_members().unwrap_or_default()
                 } else {
                     Vec::new()
                 }
             };
-            self.sync_scoring_members(group_name, &mls_members).await;
+            self.sync_scoring_members(conversation_name, &mls_members)
+                .await;
         }
-        self.prune_pending_updates_after_commit(group_name).await?;
+        self.prune_pending_updates_after_commit(conversation_name)
+            .await?;
 
         // Transition to Working BEFORE steward checks (election needs Working
         // state). Reset reelection_round: this commit advanced the epoch,
         // so whatever retry cycle we were in belongs to the previous epoch.
-        let working_event = match self.lookup_entry(group_name).await {
+        let working_event = match self.lookup_entry(conversation_name).await {
             Some(entry_arc) => {
                 let mut entry = entry_arc.write().await;
                 entry.handle.steward.reset_retry();
                 let state = entry.handle.current_state();
                 if matches!(
                     state,
-                    GroupState::Working
-                        | GroupState::Freezing
-                        | GroupState::Selection
-                        | GroupState::Reelection
+                    ConversationState::Working
+                        | ConversationState::Freezing
+                        | ConversationState::Selection
+                        | ConversationState::Reelection
                 ) {
                     Some(entry.start_working())
                 } else {
@@ -213,64 +222,68 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             None => None,
         };
 
-        self.steward_list_housekeeping(group_name).await?;
-        self.process_buffered_updates(group_name).await?;
-        self.maybe_close_recovery_window(group_name).await;
+        self.steward_list_housekeeping(conversation_name).await?;
+        self.process_buffered_updates(conversation_name).await?;
+        self.maybe_close_recovery_window(conversation_name).await;
 
         if let Some(event) = working_event {
-            self.handler.on_phase_change(group_name, event).await;
+            self.handler.on_phase_change(conversation_name, event).await;
         }
         Ok(())
     }
 
     /// Fire a steward election while `recovery_mode` is set so the next
     /// list installs and closes the window.
-    async fn maybe_close_recovery_window(&self, group_name: &str) {
+    async fn maybe_close_recovery_window(&self, conversation_name: &str) {
         let in_recovery_mode = self
-            .with_entry(group_name, |entry| entry.handle.is_in_recovery_mode())
+            .with_entry(conversation_name, |entry| {
+                entry.handle.is_in_recovery_mode()
+            })
             .await
             .unwrap_or(false);
         if !in_recovery_mode {
             return;
         }
         if let Err(e) = self
-            .try_initiate_steward_election(group_name, true, None)
+            .try_initiate_steward_election(conversation_name, true, None)
             .await
         {
             info!(
-                group = group_name,
+                group = conversation_name,
                 error = %e,
                 "post-recovery election deferred"
             );
         }
     }
 
-    async fn on_leave_group(&self, group_name: &str) -> Result<(), UserError> {
-        let entry = self.groups.write().await.remove(group_name);
+    async fn on_leave_conversation(&self, conversation_name: &str) -> Result<(), UserError> {
+        let entry = self.groups.write().await.remove(conversation_name);
         if let Some(entry) = entry {
             // Drop MLS state for the departing group: take the service out
-            // of the Group so its `delete()` runs before the entry drops.
+            // of the Conversation so its `delete()` runs before the entry drops.
             // Per-group scoring is dropped when the entry leaves the
             // registry below.
             if let Some(mls) = entry.write().await.handle.take_mls() {
                 let _ = mls.delete();
             }
         }
-        self.cleanup_consensus_scope(group_name).await?;
-        self.handler.on_leave_group(group_name).await?;
+        self.cleanup_consensus_scope(conversation_name).await?;
+        self.handler
+            .on_leave_conversation(conversation_name)
+            .await?;
         Ok(())
     }
 
     /// Peer broadcast a commit candidate. If we were in Working, enter
     /// Freezing and — if we're a steward — build our own candidate too.
-    async fn on_commit_candidate_received(&self, group_name: &str) -> Result<(), UserError> {
-        let entry_arc = match self.lookup_entry(group_name).await {
+    async fn on_commit_candidate_received(&self, conversation_name: &str) -> Result<(), UserError> {
+        let entry_arc = match self.lookup_entry(conversation_name).await {
             Some(e) => e,
             None => return Ok(()),
         };
         let (event, outbound) = {
             let mut entry = entry_arc.write().await;
-            if entry.handle.current_state() != GroupState::Working {
+            if entry.handle.current_state() != ConversationState::Working {
                 return Ok(());
             }
 
@@ -287,7 +300,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(
-                            group = group_name,
+                            group = conversation_name,
                             error = %e,
                             "own commit candidate build failed"
                         );
@@ -300,20 +313,24 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             (event, outbound)
         };
 
-        self.handler.on_phase_change(group_name, event).await;
+        self.handler.on_phase_change(conversation_name, event).await;
         if let Some(message) = outbound {
-            self.handler.on_outbound(group_name, message).await?;
+            self.handler.on_outbound(conversation_name, message).await?;
         }
         Ok(())
     }
 
-    /// Apply a steward's `GroupSync` when we're a joiner without a steward
+    /// Apply a steward's `ConversationSync` when we're a joiner without a steward
     /// list. Validates the proposed list against the members it carries
     /// (not the full MLS set — the list may have been generated before we
     /// existed), then applies list + protocol flags + timing + peer scores.
-    async fn on_group_sync(&self, group_name: &str, sync: GroupSync) -> Result<(), UserError> {
+    async fn on_group_sync(
+        &self,
+        conversation_name: &str,
+        sync: ConversationSync,
+    ) -> Result<(), UserError> {
         let (members, current_epoch) = {
-            let entry_arc = match self.lookup_entry(group_name).await {
+            let entry_arc = match self.lookup_entry(conversation_name).await {
                 Some(e) => e,
                 None => return Ok(()),
             };
@@ -322,11 +339,11 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 return Ok(());
             }
             let mls = entry.handle.expect_mls()?;
-            (entry.handle.group_members()?, mls.current_epoch()?)
+            (entry.handle.conversation_members()?, mls.current_epoch()?)
         };
-        let local_default_peer_score = self.default_group_config.default_peer_score;
+        let local_default_peer_score = self.default_conversation_config.default_peer_score;
         if !validate_group_sync(
-            group_name,
+            conversation_name,
             &sync,
             current_epoch,
             &members,
@@ -336,10 +353,11 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         }
 
         let sn = sync.steward_members.len();
-        self.apply_group_sync_to_entry(group_name, &sync).await?;
+        self.apply_group_sync_to_entry(conversation_name, &sync)
+            .await?;
 
         info!(
-            group = group_name,
+            group = conversation_name,
             election_epoch = sync.election_epoch,
             stewards = sn,
             scores = sync.peer_scores.len(),
@@ -351,14 +369,14 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
 
     async fn apply_group_sync_to_entry(
         &self,
-        group_name: &str,
-        sync: &GroupSync,
+        conversation_name: &str,
+        sync: &ConversationSync,
     ) -> Result<(), UserError> {
         let mut protocol_config =
             StewardListConfig::new(sync.sn_min as usize, sync.sn_max as usize)?;
         protocol_config.allow_subset_candidates = sync.allow_subset_candidates;
 
-        let entry_arc = match self.lookup_entry(group_name).await {
+        let entry_arc = match self.lookup_entry(conversation_name).await {
             Some(e) => e,
             None => return Ok(()),
         };
@@ -386,7 +404,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 .map(|ps| (ps.member_id.clone(), ps.score))
                 .collect(),
         };
-        // The GroupSync sender (an existing steward) holds the same
+        // The ConversationSync sender (an existing steward) holds the same
         // scores and is the canonical actor for any below-threshold
         // member in this snapshot — they'll submit
         // `SCORE_BELOW_THRESHOLD` from their own event chain. Drop our
@@ -410,7 +428,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
 
     /// Process an inbound packet.
     pub async fn process_inbound_packet(&self, packet: InboundPacket) -> Result<(), UserError> {
-        let group_name = packet.group_id.clone();
+        let conversation_name = packet.conversation_id.clone();
 
         // Echo dedup: drop our own messages received back from pub/sub
         if packet.app_id == self.app_id {
@@ -418,13 +436,13 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         }
 
         let entry_arc = self
-            .lookup_entry(&group_name)
+            .lookup_entry(&conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
 
         match packet.subtopic.as_str() {
             WELCOME_SUBTOPIC => {
-                self.process_welcome_packet(&group_name, &packet.payload)
+                self.process_welcome_packet(&conversation_name, &packet.payload)
                     .await
             }
             APP_MSG_SUBTOPIC => {
@@ -436,7 +454,8 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                     }
                     entry.handle.process_inbound(&packet.payload)?
                 };
-                self.dispatch_inbound_result(&group_name, result).await
+                self.dispatch_inbound_result(&conversation_name, result)
+                    .await
             }
             other => Err(UserError::Core(CoreError::InvalidSubtopic(
                 other.to_string(),
@@ -452,7 +471,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     ///   `Some(svc)`, attach to the entry and fire the join flow.
     async fn process_welcome_packet(
         &self,
-        group_name: &str,
+        conversation_name: &str,
         payload: &[u8],
     ) -> Result<(), UserError> {
         let welcome_msg = WelcomeMessage::decode(payload)?;
@@ -462,9 +481,9 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                     key_package_bytes_from_json(user_kp.key_package_bytes)?;
 
                 let entry_arc = self
-                    .lookup_entry(group_name)
+                    .lookup_entry(conversation_name)
                     .await
-                    .ok_or(UserError::GroupNotFound)?;
+                    .ok_or(UserError::ConversationNotFound)?;
                 let already_member = {
                     let entry = entry_arc.read().await;
                     entry
@@ -475,7 +494,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 };
                 if already_member {
                     info!(
-                        group = group_name,
+                        group = conversation_name,
                         identity = %ShortId(&identity),
                         "key package skipped: already a member"
                     );
@@ -483,24 +502,27 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 }
 
                 info!(
-                    group = group_name,
+                    group = conversation_name,
                     identity = %ShortId(&identity),
                     "key package received"
                 );
 
-                let gur = GroupUpdateRequest {
-                    payload: Some(group_update_request::Payload::InviteMember(InviteMember {
-                        key_package_bytes,
-                        identity,
-                    })),
+                let gur = ConversationUpdateRequest {
+                    payload: Some(conversation_update_request::Payload::InviteMember(
+                        InviteMember {
+                            key_package_bytes,
+                            identity,
+                        },
+                    )),
                 };
-                self.handle_incoming_update_request(group_name, gur).await
+                self.handle_incoming_update_request(conversation_name, gur)
+                    .await
             }
             Some(welcome_message::Payload::InvitationToJoin(invitation)) => {
                 let entry_arc = self
-                    .lookup_entry(group_name)
+                    .lookup_entry(conversation_name)
                     .await
-                    .ok_or(UserError::GroupNotFound)?;
+                    .ok_or(UserError::ConversationNotFound)?;
                 let self_id = self.identity().identity_bytes().to_vec();
                 let already_in = {
                     let entry = entry_arc.read().await;
@@ -517,14 +539,17 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                     // Welcome wasn't for us.
                     return Ok(());
                 };
-                let joined_name = svc.group_id().to_string();
+                let joined_name = svc.conversation_id().to_string();
                 {
                     let mut entry = entry_arc.write().await;
                     entry.handle.attach_mls(svc);
                 }
-                info!(group = group_name, "joined group via welcome");
-                self.dispatch_inbound_result(group_name, ProcessResult::JoinedGroup(joined_name))
-                    .await
+                info!(group = conversation_name, "joined group via welcome");
+                self.dispatch_inbound_result(
+                    conversation_name,
+                    ProcessResult::JoinedConversation(joined_name),
+                )
+                .await
             }
             None => Ok(()),
         }
@@ -543,15 +568,15 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
 /// or below the synced threshold prevents a misconfiguration where every
 /// new member added by this joiner starts already eligible for removal.
 fn validate_group_sync(
-    group_name: &str,
-    sync: &GroupSync,
+    conversation_name: &str,
+    sync: &ConversationSync,
     current_epoch: u64,
     members: &[Vec<u8>],
     local_default_peer_score: i64,
 ) -> Result<bool, UserError> {
     if sync.election_epoch > current_epoch {
         info!(
-            group = group_name,
+            group = conversation_name,
             election_epoch = sync.election_epoch,
             current_epoch,
             "group sync rejected: election_epoch > current_epoch"
@@ -567,14 +592,14 @@ fn validate_group_sync(
     let ordering_valid = StewardList::validate(
         &sync.steward_members,
         sync.election_epoch,
-        group_name.as_bytes(),
+        conversation_name.as_bytes(),
         &sync.steward_members,
         &StewardListConfig::new(sync.sn_min as usize, sync.sn_max as usize)?,
         sync.retry_round,
     )?;
     if !(any_present && ordering_valid) {
         info!(
-            group = group_name,
+            group = conversation_name,
             any_present,
             ordering = ordering_valid,
             "group sync rejected: invalid"
@@ -586,7 +611,7 @@ fn validate_group_sync(
         && let Some(zero_field) = first_zero_timing_field(timing)
     {
         info!(
-            group = group_name,
+            group = conversation_name,
             field = zero_field,
             "group sync rejected: zero-valued timing field"
         );
@@ -595,7 +620,7 @@ fn validate_group_sync(
 
     if local_default_peer_score <= sync.threshold_peer_score {
         info!(
-            group = group_name,
+            group = conversation_name,
             local_default_peer_score,
             threshold_peer_score = sync.threshold_peer_score,
             "group sync rejected: default_peer_score at or below threshold would mark new members removable on add"
@@ -645,8 +670,8 @@ mod tests {
         assert!(first_zero_timing_field(&nonzero_timing()).is_none());
     }
 
-    fn valid_sync_with(threshold: i64) -> GroupSync {
-        GroupSync {
+    fn valid_sync_with(threshold: i64) -> ConversationSync {
+        ConversationSync {
             steward_members: vec![b"alice".to_vec()],
             election_epoch: 0,
             sn_min: 1,

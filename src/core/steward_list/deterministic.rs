@@ -10,19 +10,19 @@ use crate::core::error::CoreError;
 pub struct DeterministicStewardList {
     list: Option<StewardList>,
     config: StewardListConfig,
-    group_id: Vec<u8>,
+    conversation_id: Vec<u8>,
     retry_round: u32,
     max_retries: u32,
 }
 
 impl DeterministicStewardList {
     /// Joiner-side: empty list. The coordinator fills it from the
-    /// `GroupSync` it receives after the welcome.
-    pub fn empty(group_id: impl Into<Vec<u8>>, config: StewardListConfig) -> Self {
+    /// `ConversationSync` it receives after the welcome.
+    pub fn empty(conversation_id: impl Into<Vec<u8>>, config: StewardListConfig) -> Self {
         Self {
             list: None,
             config,
-            group_id: group_id.into(),
+            conversation_id: conversation_id.into(),
             retry_round: 0,
             max_retries: DEFAULT_MAX_RETRIES,
         }
@@ -31,16 +31,23 @@ impl DeterministicStewardList {
     /// Creator-side: bootstrap with the creator as the sole steward at
     /// epoch 0. No election, no retries.
     pub fn with_creator(
-        group_id: impl Into<Vec<u8>>,
+        conversation_id: impl Into<Vec<u8>>,
         creator_identity: Vec<u8>,
         config: StewardListConfig,
     ) -> Result<Self, CoreError> {
-        let group_id = group_id.into();
-        let list = StewardList::generate(0, &group_id, &[creator_identity], 1, config.clone(), 0)?;
+        let conversation_id = conversation_id.into();
+        let list = StewardList::generate(
+            0,
+            &conversation_id,
+            &[creator_identity],
+            1,
+            config.clone(),
+            0,
+        )?;
         Ok(Self {
             list: Some(list),
             config,
-            group_id,
+            conversation_id,
             retry_round: 0,
             max_retries: DEFAULT_MAX_RETRIES,
         })
@@ -140,7 +147,7 @@ impl StewardListPlugin for DeterministicStewardList {
     ) -> Result<Vec<StewardListEvent>, CoreError> {
         let list = StewardList::generate(
             epoch,
-            &self.group_id,
+            &self.conversation_id,
             candidate_pool,
             sn,
             self.config.clone(),
@@ -165,7 +172,7 @@ impl StewardListPlugin for DeterministicStewardList {
         StewardList::validate(
             proposed,
             epoch,
-            &self.group_id,
+            &self.conversation_id,
             candidate_pool,
             &self.config,
             retry_round,
@@ -199,7 +206,7 @@ impl StewardListPlugin for DeterministicStewardList {
         let sn = self.config.compute_list_size(candidate_pool.len());
         let list = StewardList::generate(
             epoch,
-            &self.group_id,
+            &self.conversation_id,
             candidate_pool,
             sn,
             self.config.clone(),

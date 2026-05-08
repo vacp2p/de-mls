@@ -20,7 +20,7 @@ use de_mls::{
     app::User,
     core::DefaultProvider,
     ds::{DeliveryService, WakuDeliveryService},
-    protos::de_mls::messages::v1::GroupUpdateRequest,
+    protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 use futures::{
@@ -69,7 +69,7 @@ pub(crate) const MAX_EPOCH_HISTORY: usize = 10;
 /// `on_commit_applied` and consumed by the History tab via
 /// `Gateway::get_epoch_history`. Cap is [`MAX_EPOCH_HISTORY`].
 pub(crate) type EpochHistoryStore =
-    Arc<parking_lot::Mutex<HashMap<String, VecDeque<Vec<GroupUpdateRequest>>>>>;
+    Arc<parking_lot::Mutex<HashMap<String, VecDeque<Vec<ConversationUpdateRequest>>>>>;
 
 pub struct Gateway<DS: DeliveryService> {
     // UI events (gateway -> UI)
@@ -89,7 +89,7 @@ pub struct Gateway<DS: DeliveryService> {
     started: AtomicBool,
 
     // Per-group committed-batch history (UI cache). Shared by Arc with the
-    // gateway's GroupEventHandler so `on_commit_applied` can append.
+    // gateway's ConversationEventHandler so `on_commit_applied` can append.
     epoch_history: EpochHistoryStore,
 }
 
