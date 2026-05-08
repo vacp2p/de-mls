@@ -366,7 +366,8 @@ mod tests {
 
         let base = StewardList::generate(0, b"conversation", &mems, 5, config.clone(), 0).unwrap();
         let any_diff = (1..10).any(|e| {
-            let other = StewardList::generate(e, b"conversation", &mems, 5, config.clone(), 0).unwrap();
+            let other =
+                StewardList::generate(e, b"conversation", &mems, 5, config.clone(), 0).unwrap();
             other.members() != base.members()
         });
         assert!(any_diff);
@@ -388,7 +389,8 @@ mod tests {
         let mems_a = members(&[1, 2, 3, 4, 5]);
         let mems_b = members(&[5, 3, 1, 4, 2]);
 
-        let list_a = StewardList::generate(0, b"conversation", &mems_a, 3, config.clone(), 0).unwrap();
+        let list_a =
+            StewardList::generate(0, b"conversation", &mems_a, 3, config.clone(), 0).unwrap();
         let list_b = StewardList::generate(0, b"conversation", &mems_b, 3, config, 0).unwrap();
 
         assert_eq!(list_a.members(), list_b.members());
@@ -460,7 +462,8 @@ mod tests {
         let config = StewardListConfig::new(2, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
-        let mut list = StewardList::generate(0, b"conversation", &mems, 3, config.clone(), 0).unwrap();
+        let mut list =
+            StewardList::generate(0, b"conversation", &mems, 3, config.clone(), 0).unwrap();
         // Swap first two members
         list.members.swap(0, 1);
 
@@ -478,12 +481,20 @@ mod tests {
         // Find an epoch that produces a different ordering
         let diff_epoch = (1..100u64)
             .find(|&e| {
-                let o = StewardList::generate(e, b"conversation", &mems, 5, config.clone(), 0).unwrap();
+                let o =
+                    StewardList::generate(e, b"conversation", &mems, 5, config.clone(), 0).unwrap();
                 o.members() != list.members()
             })
             .expect("should differ within 100 epochs");
 
-        let valid = StewardList::validate(list.members(), diff_epoch, b"conversation", &mems, &config, 0);
+        let valid = StewardList::validate(
+            list.members(),
+            diff_epoch,
+            b"conversation",
+            &mems,
+            &config,
+            0,
+        );
         assert!(valid.is_ok());
         assert!(!valid.unwrap());
     }
@@ -497,7 +508,8 @@ mod tests {
         let other_mems = members(&[1, 2, 3, 4, 6]);
 
         let list = StewardList::generate(0, b"conversation", &mems, 5, config.clone(), 0).unwrap();
-        let valid = StewardList::validate(list.members(), 0, b"conversation", &other_mems, &config, 0);
+        let valid =
+            StewardList::validate(list.members(), 0, b"conversation", &other_mems, &config, 0);
         assert!(valid.is_ok());
         assert!(!valid.unwrap())
     }
@@ -641,7 +653,8 @@ mod tests {
 
         let base = StewardList::generate(1, b"conversation", &mems, 2, config.clone(), 0).unwrap();
         let any_diff = (1..10u32).any(|r| {
-            let other = StewardList::generate(1, b"conversation", &mems, 2, config.clone(), r).unwrap();
+            let other =
+                StewardList::generate(1, b"conversation", &mems, 2, config.clone(), r).unwrap();
             other.members() != base.members()
         });
         assert!(
