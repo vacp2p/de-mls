@@ -15,20 +15,17 @@
 //! `events` ([`crate::core::GroupEventHandler`]), `provider`
 //! ([`crate::core::DeMlsProvider`] + [`crate::core::DefaultProvider`]).
 
-mod config;
 mod consensus;
 mod error;
 mod events;
 mod freeze;
 mod group;
-mod group_handle;
 mod inbound;
 mod peer_scoring;
 mod process_result;
 mod proposal_framing;
 mod proposal_kind;
 mod provider;
-mod state_machine;
 mod steward_list;
 
 // ── Core group operations ──
@@ -36,16 +33,15 @@ pub use freeze::{FreezeFinalizeResult, FreezeOutcome, compute_commit_hash, final
 pub use inbound::process_inbound;
 pub use proposal_framing::{build_create_proposal_request, build_key_package_message};
 
-// ── Per-group config ──
-pub use config::{
-    DEFAULT_COMMIT_INACTIVITY_DURATION, DEFAULT_CONSENSUS_TIMEOUT, DEFAULT_ELECTION_VOTING_DELAY,
-    DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_PEER_SCORE, DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
-    DEFAULT_PROPOSAL_EXPIRATION, DEFAULT_RECOVERY_INACTIVITY_DURATION, DEFAULT_VOTING_DELAY,
-    GroupConfig,
+// ── Per-conversation types: state, handle, state machine, config ──
+pub use group::{
+    BufferedCommitCandidate, DEFAULT_COMMIT_INACTIVITY_DURATION, DEFAULT_CONSENSUS_TIMEOUT,
+    DEFAULT_ELECTION_VOTING_DELAY, DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_PEER_SCORE,
+    DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION,
+    DEFAULT_RECOVERY_INACTIVITY_DURATION, DEFAULT_VOTING_DELAY, Group, GroupConfig, GroupHandle,
+    GroupState, GroupStateMachine, OperatingMode, PendingUpdate, ProposalId, member_set,
+    self_leave_proposal_id, target_identity_of,
 };
-
-// ── Per-group handle ──
-pub use group_handle::GroupHandle;
 
 // ── Consensus result application (pure, synchronous) ──
 pub use consensus::{ConsensusApplyResult, apply_consensus_result};
@@ -61,17 +57,8 @@ pub use error::CoreError;
 // ── Event handler trait and callback error ──
 pub use events::{CallbackError, GroupEventHandler};
 
-// ── Group state ──
-pub use group::{
-    BufferedCommitCandidate, Group, PendingUpdate, ProposalId, member_set, self_leave_proposal_id,
-    target_identity_of,
-};
-
 // ── Proposal classification ──
 pub use proposal_kind::ProposalKind;
-
-// ── State machine (passive: state enum + named transitions) ──
-pub use state_machine::{GroupState, GroupStateMachine, OperatingMode};
 
 // ── Steward list ──
 pub use steward_list::{

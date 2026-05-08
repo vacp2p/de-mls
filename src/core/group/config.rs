@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
-use super::{DEFAULT_MAX_RETRIES, DEFAULT_THRESHOLD_PEER_SCORE, ProposalKind, StewardListConfig};
+use crate::core::{
+    DEFAULT_MAX_RETRIES, DEFAULT_THRESHOLD_PEER_SCORE, ProposalKind, StewardListConfig,
+};
 
 /// Wall-clock window the steward waits before batching approved proposals
 /// into a commit (RFC §Inactivity Timer #1, "Commit inactivity").

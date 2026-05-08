@@ -7,12 +7,12 @@
 use prost::Message;
 use tracing::info;
 
-use super::{
-    BufferedCommitCandidate, CoreError, FreezeFinalizeResult, Group, GroupConfig, GroupState,
-    GroupStateMachine, OperatingMode, PeerScoringPlugin, ProcessResult, ProposalKind,
-    StewardListPlugin, compute_commit_hash, finalize_freeze_round, member_set, process_inbound,
-};
 use crate::{
+    core::{
+        BufferedCommitCandidate, CoreError, FreezeFinalizeResult, Group, GroupConfig, GroupState,
+        GroupStateMachine, OperatingMode, PeerScoringPlugin, ProcessResult, ProposalKind,
+        StewardListPlugin, compute_commit_hash, finalize_freeze_round, member_set, process_inbound,
+    },
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     mls_crypto::{
         CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MlsCommitInput, MlsService,
