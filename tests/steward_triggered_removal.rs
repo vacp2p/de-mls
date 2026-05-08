@@ -11,7 +11,7 @@ use de_mls::core::{
     apply_consensus_result, emergency_score_ops,
 };
 use de_mls::protos::de_mls::messages::v1::{
-    ViolationEvidence, ViolationType, group_update_request,
+    ViolationEvidence, ViolationType, conversation_update_request,
 };
 
 mod common;
@@ -22,9 +22,9 @@ use common::{make_scoring, setup_steward};
 /// ECP YES for SCORE_BELOW_THRESHOLD: RemoveMember appears in approved queue + correct score ops.
 #[test]
 fn test_score_below_threshold_yes_transforms_to_remove_member() {
-    let group_name = "removal-yes";
+    let conversation_name = "removal-yes";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-    let mut group = setup_steward(group_name, alice_hex);
+    let mut group = setup_steward(conversation_name, alice_hex);
     let steward_id = group.self_identity().to_vec();
 
     let target_id = vec![0xBB];
@@ -53,7 +53,7 @@ fn test_score_below_threshold_yes_transforms_to_remove_member() {
     let approved = group.approved_proposals();
     let (_, gur) = approved.iter().next().unwrap();
     match &gur.payload {
-        Some(group_update_request::Payload::RemoveMember(rm)) => {
+        Some(conversation_update_request::Payload::RemoveMember(rm)) => {
             assert_eq!(rm.identity, target_id);
         }
         other => panic!("Expected RemoveMember, got {:?}", other),
@@ -63,9 +63,9 @@ fn test_score_below_threshold_yes_transforms_to_remove_member() {
 /// ECP YES for SCORE_BELOW_THRESHOLD (non-owner path): RemoveMember in approved queue.
 #[test]
 fn test_score_below_threshold_yes_non_owner() {
-    let group_name = "removal-yes-nonowner";
+    let conversation_name = "removal-yes-nonowner";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-    let mut group = setup_steward(group_name, alice_hex);
+    let mut group = setup_steward(conversation_name, alice_hex);
 
     let target_id = vec![0xBB];
     let creator_id = vec![0xCC]; // someone else
@@ -89,7 +89,7 @@ fn test_score_below_threshold_yes_non_owner() {
     let approved = group.approved_proposals();
     let (_, gur) = approved.iter().next().unwrap();
     match &gur.payload {
-        Some(group_update_request::Payload::RemoveMember(rm)) => {
+        Some(conversation_update_request::Payload::RemoveMember(rm)) => {
             assert_eq!(rm.identity, target_id);
         }
         other => panic!("Expected RemoveMember, got {:?}", other),
@@ -99,9 +99,9 @@ fn test_score_below_threshold_yes_non_owner() {
 /// ECP NO for SCORE_BELOW_THRESHOLD: no RemoveMember, creator penalized.
 #[test]
 fn test_score_below_threshold_no_penalizes_creator() {
-    let group_name = "removal-no";
+    let conversation_name = "removal-no";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-    let mut group = setup_steward(group_name, alice_hex);
+    let mut group = setup_steward(conversation_name, alice_hex);
     let steward_id = group.self_identity().to_vec();
 
     let target_id = vec![0xBB];
@@ -137,9 +137,9 @@ fn test_score_below_threshold_no_penalizes_creator() {
 /// together gate the next-pass scan.
 #[test]
 fn test_below_threshold_target_queued_for_removal_is_not_re_proposed() {
-    let group_name = "removal-no-duplicate";
+    let conversation_name = "removal-no-duplicate";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-    let mut group = setup_steward(group_name, alice_hex);
+    let mut group = setup_steward(conversation_name, alice_hex);
     let steward_id = group.self_identity().to_vec();
     let target_id = vec![0xEE];
 
@@ -178,9 +178,9 @@ fn test_below_threshold_target_queued_for_removal_is_not_re_proposed() {
 /// Full pipeline: penalties → below threshold → ECP → YES → RemoveMember in queue.
 #[test]
 fn test_full_pipeline_penalties_to_removal() {
-    let group_name = "removal-pipeline";
+    let conversation_name = "removal-pipeline";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-    let mut group = setup_steward(group_name, alice_hex);
+    let mut group = setup_steward(conversation_name, alice_hex);
     let steward_id = group.self_identity().to_vec();
     let target_id = vec![0xDD];
 
@@ -228,14 +228,14 @@ fn test_full_pipeline_penalties_to_removal() {
     let approved = group.approved_proposals();
     let (_, gur) = approved.iter().next().unwrap();
     match &gur.payload {
-        Some(group_update_request::Payload::RemoveMember(rm)) => {
+        Some(conversation_update_request::Payload::RemoveMember(rm)) => {
             assert_eq!(rm.identity, target_id);
         }
         other => panic!("Expected RemoveMember, got {:?}", other),
     }
 }
 
-/// Dedup: Group prevents duplicate ECP for same target.
+/// Dedup: Conversation prevents duplicate ECP for same target.
 #[test]
 fn test_dedup_pending_removal_targets() {
     let mut group = setup_steward("dedup-group", "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
@@ -258,9 +258,9 @@ fn test_dedup_pending_removal_targets() {
 /// Self-guard: steward skips itself when checking members below threshold.
 #[test]
 fn test_steward_skips_self_for_removal() {
-    let group_name = "removal-self-guard";
+    let conversation_name = "removal-self-guard";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-    let _group = setup_steward(group_name, alice_hex);
+    let _group = setup_steward(conversation_name, alice_hex);
 
     let mut scoring = make_scoring();
 
@@ -370,7 +370,7 @@ fn test_members_below_threshold_uses_per_group_value() {
     assert!(!strict.contains(&bob));
     assert!(!strict.contains(&alice));
 
-    // Loose threshold (-25, e.g. after a GroupSync reduced strictness):
+    // Loose threshold (-25, e.g. after a ConversationSync reduced strictness):
     // both Bob and Carol qualify; Alice still safe.
     scoring.set_threshold(-25);
     let loose = scoring.members_below_threshold();
@@ -402,7 +402,7 @@ fn test_violation_evidence_score_below_threshold_constructor() {
     // into_update_request works
     let gur = ev.into_update_request().unwrap();
     match &gur.payload {
-        Some(group_update_request::Payload::EmergencyCriteria(ec)) => {
+        Some(conversation_update_request::Payload::EmergencyCriteria(ec)) => {
             let inner_ev = ec.evidence.as_ref().unwrap();
             assert_eq!(
                 inner_ev.violation_type,
@@ -417,9 +417,9 @@ fn test_violation_evidence_score_below_threshold_constructor() {
 /// Regular (non-score) emergency YES still removes from approved queue (no transform).
 #[test]
 fn test_regular_emergency_yes_no_transform() {
-    let group_name = "no-transform";
+    let conversation_name = "no-transform";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-    let mut group = setup_steward(group_name, alice_hex);
+    let mut group = setup_steward(conversation_name, alice_hex);
     let creator_id = group.self_identity().to_vec();
 
     let target_id = vec![0xBB];

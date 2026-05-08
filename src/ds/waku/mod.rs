@@ -13,7 +13,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use tracing::{debug, error, info};
 
 use crate::ds::{
-    DeliveryServiceError, GROUP_VERSION, SUBTOPICS,
+    CONVERSATION_VERSION, DeliveryServiceError, SUBTOPICS,
     transport::{DeliveryService, InboundPacket, OutboundPacket},
     waku::wrapper::WakuNodeCtx,
 };
@@ -23,17 +23,21 @@ pub fn pubsub_topic() -> String {
     "/waku/2/rs/15/1".to_string()
 }
 
-/// Build the content topics for a group.
-pub fn build_content_topics(group_name: &str) -> Vec<String> {
+/// Build the content topics for a conversation.
+pub fn build_content_topics(conversation_name: &str) -> Vec<String> {
     SUBTOPICS
         .iter()
-        .map(|subtopic| build_content_topic(group_name, GROUP_VERSION, subtopic))
+        .map(|subtopic| build_content_topic(conversation_name, CONVERSATION_VERSION, subtopic))
         .collect()
 }
 
-/// Build the content topic string: `/{group_name}/{version}/{subtopic}/proto`
-pub fn build_content_topic(group_name: &str, group_version: &str, subtopic: &str) -> String {
-    format!("/{group_name}/{group_version}/{subtopic}/proto")
+/// Build the content topic string: `/{conversation_name}/{version}/{subtopic}/proto`
+pub fn build_content_topic(
+    conversation_name: &str,
+    conversation_version: &str,
+    subtopic: &str,
+) -> String {
+    format!("/{conversation_name}/{conversation_version}/{subtopic}/proto")
 }
 
 // ── Outbound command ────────────────────────────────────────────────────────
@@ -260,7 +264,8 @@ impl WakuDeliveryService {
         pubsub_topic: &str,
         pkt: OutboundPacket,
     ) -> Result<String, DeliveryServiceError> {
-        let content_topic = build_content_topic(&pkt.group_id, GROUP_VERSION, &pkt.subtopic);
+        let content_topic =
+            build_content_topic(&pkt.conversation_id, CONVERSATION_VERSION, &pkt.subtopic);
         let payload_b64 = BASE64.encode(&pkt.payload);
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -303,32 +308,32 @@ impl WakuDeliveryService {
             .and_then(|m| BASE64.decode(m).ok())
             .unwrap_or_default();
 
-        // Parse content topic: /{group_name}/{version}/{subtopic}/proto
-        let (group_id, subtopic) = Self::parse_content_topic(content_topic)?;
+        // Parse content topic: /{conversation_name}/{version}/{subtopic}/proto
+        let (conversation_id, subtopic) = Self::parse_content_topic(content_topic)?;
 
-        debug!("Inbound message: group={group_id} subtopic={subtopic}");
+        debug!("Inbound message: conversation={conversation_id} subtopic={subtopic}");
 
         Some(InboundPacket {
             payload,
             subtopic,
-            group_id,
+            conversation_id,
             app_id: meta,
             timestamp,
         })
     }
 
-    /// Parse `/{group_name}/{version}/{subtopic}/proto` into (group_id, subtopic).
+    /// Parse `/{conversation_name}/{version}/{subtopic}/proto` into (conversation_id, subtopic).
     fn parse_content_topic(ct: &str) -> Option<(String, String)> {
-        // Expected: "/{group_name}/{version}/{subtopic}/proto"
+        // Expected: "/{conversation_name}/{version}/{subtopic}/proto"
         let mut parts = ct.split('/');
         let _empty = parts.next()?; // leading ""
-        let group_id = parts.next()?;
+        let conversation_id = parts.next()?;
         let _version = parts.next()?;
         let subtopic = parts.next()?;
-        if group_id.is_empty() || subtopic.is_empty() {
+        if conversation_id.is_empty() || subtopic.is_empty() {
             return None;
         }
-        Some((group_id.to_owned(), subtopic.to_owned()))
+        Some((conversation_id.to_owned(), subtopic.to_owned()))
     }
 }
 

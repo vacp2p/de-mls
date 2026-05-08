@@ -8,7 +8,7 @@ use prost::Message;
 use std::collections::HashSet;
 
 use crate::protos::de_mls::messages::v1::{
-    GroupUpdateRequest, ViolationEvidence, group_update_request::Payload,
+    ConversationUpdateRequest, ViolationEvidence, conversation_update_request::Payload,
 };
 
 // ── Score events ────────────────────────────────────────────────────
@@ -97,7 +97,7 @@ pub enum PeerScoringEvent {
     ThresholdCrossedUp { member_id: Vec<u8>, score: i64 },
 }
 
-// ── GroupSync snapshot ──────────────────────────────────────────────
+// ── ConversationSync snapshot ──────────────────────────────────────────────
 
 /// Sparse snapshot of per-member scores for joiner bootstrap. Carries
 /// only members whose score has diverged from `default_score`; the
@@ -109,8 +109,8 @@ pub struct ScoreSnapshot {
     pub diverged: Vec<(Vec<u8>, i64)>,
 }
 
-/// Per-member score persistence for a single group. One storage
-/// instance per group; the app layer ships an in-memory default impl.
+/// Per-member score persistence for a single conversation. One storage
+/// instance per conversation; the app layer ships an in-memory default impl.
 pub trait PeerScoreStorage {
     fn get(&self, member_id: &[u8]) -> Option<i64>;
     fn set(&mut self, member_id: &[u8], score: i64);
@@ -156,7 +156,7 @@ pub fn scoring_member_diff(scored: &[Vec<u8>], mls_members: &[Vec<u8>]) -> Scori
 /// - accepted `SCORE_BELOW_THRESHOLD` or `DEADLOCK` → creator reward only.
 /// - rejected emergency → creator penalty.
 pub fn emergency_score_ops(payload: &[u8], approved: bool) -> Vec<ScoreOp> {
-    let Ok(req) = GroupUpdateRequest::decode(payload) else {
+    let Ok(req) = ConversationUpdateRequest::decode(payload) else {
         return Vec::new();
     };
     let Some(Payload::EmergencyCriteria(ec)) = req.payload else {
@@ -193,7 +193,7 @@ fn creator_penalty(ev: &ViolationEvidence) -> ScoreOp {
 
 // ── Plug-in trait ───────────────────────────────────────────────────
 
-/// Per-group peer-scoring plug-in. Mutating methods return any
+/// Per-conversation peer-scoring plug-in. Mutating methods return any
 /// [`PeerScoringEvent`]s the call produced; the coordinator drains them
 /// at safe points and turns threshold crossings into protocol actions.
 /// The plug-in itself owns no I/O — storage backends and event
@@ -231,7 +231,7 @@ pub trait PeerScoringPlugin: Send + Sync + 'static {
     #[must_use]
     fn apply_ops(&mut self, ops: &[ScoreOp]) -> Vec<PeerScoringEvent>;
 
-    /// Apply a [`ScoreSnapshot`] (GroupSync receive). Each entry is an
+    /// Apply a [`ScoreSnapshot`] (ConversationSync receive). Each entry is an
     /// absolute-score replacement that auto-tracks members not already
     /// known to the plug-in (treating "untracked → tracked" as crossing
     /// from above for cross-detection — see [`PeerScoringEvent`]). This
@@ -245,7 +245,7 @@ pub trait PeerScoringPlugin: Send + Sync + 'static {
     #[must_use]
     fn apply_snapshot(&mut self, snapshot: &ScoreSnapshot) -> Vec<PeerScoringEvent>;
 
-    /// Sparse snapshot of non-default scores for GroupSync send.
+    /// Sparse snapshot of non-default scores for ConversationSync send.
     fn snapshot(&self) -> ScoreSnapshot;
 
     fn score_for(&self, member_id: &[u8]) -> Option<i64>;
@@ -253,7 +253,7 @@ pub trait PeerScoringPlugin: Send + Sync + 'static {
     fn all_members_with_scores(&self) -> Vec<(Vec<u8>, i64)>;
 
     /// Current removal threshold. Coordinator reads this when building
-    /// `GroupSync` so joiners adopt the same value.
+    /// `ConversationSync` so joiners adopt the same value.
     fn threshold(&self) -> i64;
 
     /// Update the threshold in place. Emits NO events — even though a
@@ -295,8 +295,8 @@ fn cross_event(
 
 // ── Reference scoring service ───────────────────────────────────────
 
-/// Per-group, per-member score tracker. Reference [`PeerScoringPlugin`]
-/// implementation. One instance per group; threshold travels with
+/// Per-conversation, per-member score tracker. Reference [`PeerScoringPlugin`]
+/// implementation. One instance per conversation; threshold travels with
 /// [`ScoringConfig`]. Storage is abstracted via [`PeerScoreStorage`] so
 /// app-layer backends (in-memory, on-disk, …) plug in without touching
 /// this protocol logic.
@@ -828,7 +828,7 @@ mod tests {
             epoch: 0,
             creator_member_id: creator,
         };
-        let req = GroupUpdateRequest {
+        let req = ConversationUpdateRequest {
             payload: Some(Payload::EmergencyCriteria(EmergencyCriteriaProposal {
                 evidence: Some(evidence),
             })),

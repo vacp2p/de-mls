@@ -1,8 +1,8 @@
 use std::sync::{Arc, atomic::Ordering};
 
 use de_mls::{
-    app::format_group_request, ds::WakuDeliveryService, identity::format_wallet_address,
-    protos::de_mls::messages::v1::GroupUpdateRequest,
+    app::format_conversation_request, ds::WakuDeliveryService, identity::format_wallet_address,
+    protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
 use futures::channel::mpsc::UnboundedSender;
@@ -12,26 +12,29 @@ use crate::{CoreCtx, Gateway, UserRef};
 
 /// Render a batch of approved proposals as `(action, identity)` pairs,
 /// dropping any entry with an empty payload.
-pub(crate) fn display_batch(batch: &[GroupUpdateRequest]) -> Vec<(String, String)> {
+pub(crate) fn display_batch(batch: &[ConversationUpdateRequest]) -> Vec<(String, String)> {
     batch
         .iter()
         .filter(|p| p.payload.is_some())
-        .map(format_group_request)
+        .map(format_conversation_request)
         .collect()
 }
 
-/// Load the member roster for `group_name`, joining addresses with scores,
+/// Load the member roster for `conversation_name`, joining addresses with scores,
 /// roles, and pending-leave markers into `MemberInfo` records.
 pub(crate) async fn load_member_info(
     user: &UserRef,
-    group_name: &str,
+    conversation_name: &str,
 ) -> anyhow::Result<Vec<MemberInfo>> {
     let user = user.read().await;
-    let addresses = user.get_group_members(group_name).await?;
-    let scores = user.get_member_scores(group_name).await;
-    let roles = user.get_member_roles(group_name).await.unwrap_or_default();
+    let addresses = user.get_conversation_members(conversation_name).await?;
+    let scores = user.get_member_scores(conversation_name).await;
+    let roles = user
+        .get_member_roles(conversation_name)
+        .await
+        .unwrap_or_default();
     let pending_leavers: Vec<String> = user
-        .get_pending_leave_identities(group_name)
+        .get_pending_leave_identities(conversation_name)
         .await
         .unwrap_or_default()
         .into_iter()
@@ -66,23 +69,28 @@ pub(crate) async fn load_member_info(
 pub(crate) async fn push_consensus_state(
     user: &UserRef,
     evt_tx: &UnboundedSender<AppEvent>,
-    group_name: &str,
+    conversation_name: &str,
 ) {
     if let Ok(proposals) = user
         .read()
         .await
-        .get_approved_proposal_for_current_epoch(group_name)
+        .get_approved_proposal_for_current_epoch(conversation_name)
         .await
     {
         let _ = evt_tx.unbounded_send(AppEvent::CurrentEpochProposals {
-            group_id: group_name.to_string(),
+            conversation_id: conversation_name.to_string(),
             proposals: display_batch(&proposals),
         });
     }
 
-    if let Ok((epoch, retry_round)) = user.read().await.get_epoch_and_retry(group_name).await {
+    if let Ok((epoch, retry_round)) = user
+        .read()
+        .await
+        .get_epoch_and_retry(conversation_name)
+        .await
+    {
         let _ = evt_tx.unbounded_send(AppEvent::GroupEpoch {
-            group_id: group_name.to_string(),
+            conversation_id: conversation_name.to_string(),
             epoch,
             retry_round,
         });
@@ -96,24 +104,24 @@ pub(crate) async fn push_consensus_state(
 pub(crate) async fn push_member_scores(
     user: &UserRef,
     evt_tx: &UnboundedSender<AppEvent>,
-    group_name: &str,
+    conversation_name: &str,
 ) {
-    let Ok(members) = load_member_info(user, group_name).await else {
+    let Ok(members) = load_member_info(user, conversation_name).await else {
         return;
     };
     let _ = evt_tx.unbounded_send(AppEvent::GroupMembers {
-        group_id: group_name.to_string(),
+        conversation_id: conversation_name.to_string(),
         members,
     });
 
     let is_steward = user
         .read()
         .await
-        .is_steward_for_group(group_name)
+        .is_steward_for_conversation(conversation_name)
         .await
         .unwrap_or(false);
     let _ = evt_tx.unbounded_send(AppEvent::StewardStatus {
-        group_id: group_name.to_string(),
+        conversation_id: conversation_name.to_string(),
         is_steward,
     });
 }
@@ -133,23 +141,25 @@ impl Gateway<WakuDeliveryService> {
 
         tokio::spawn(async move {
             tracing::info!("consensus forwarder started");
-            while let Ok((group_name, event)) = rx.recv().await {
+            while let Ok((conversation_name, event)) = rx.recv().await {
                 // Forward to UI
-                let _ = evt_tx
-                    .unbounded_send(AppEvent::ProposalDecided(group_name.clone(), event.clone()));
+                let _ = evt_tx.unbounded_send(AppEvent::ProposalDecided(
+                    conversation_name.clone(),
+                    event.clone(),
+                ));
 
                 if let Err(e) = user
                     .write()
                     .await
-                    .apply_consensus_outcome(&group_name, event)
+                    .apply_consensus_outcome(&conversation_name, event)
                     .await
                 {
-                    tracing::warn!(group = %group_name, error = %e, "apply_consensus_outcome failed");
+                    tracing::warn!(group = %conversation_name, error = %e, "apply_consensus_outcome failed");
                 }
 
                 // Push refreshed approved queue, epoch history, and member scores
-                push_consensus_state(&user, &evt_tx, &group_name).await;
-                push_member_scores(&user, &evt_tx, &group_name).await;
+                push_consensus_state(&user, &evt_tx, &conversation_name).await;
+                push_member_scores(&user, &evt_tx, &conversation_name).await;
             }
             tracing::info!("consensus forwarder ended");
         });
@@ -183,19 +193,23 @@ impl Gateway<WakuDeliveryService> {
                     }
                     Err(_) => break,
                 };
-                if !core.topics.contains(&pkt.group_id, &pkt.subtopic).await {
+                if !core
+                    .topics
+                    .contains(&pkt.conversation_id, &pkt.subtopic)
+                    .await
+                {
                     continue;
                 }
 
-                let group_id = pkt.group_id.clone();
+                let conversation_id = pkt.conversation_id.clone();
 
                 if let Err(e) = user.write().await.process_inbound_packet(pkt).await {
-                    tracing::error!(group = %group_id, error = %e, "process_inbound_packet failed");
+                    tracing::error!(group = %conversation_id, error = %e, "process_inbound_packet failed");
                 }
 
                 // Push refreshed approved queue + epoch history + members.
-                push_consensus_state(&user, &evt_tx, &group_id).await;
-                push_member_scores(&user, &evt_tx, &group_id).await;
+                push_consensus_state(&user, &evt_tx, &conversation_id).await;
+                push_member_scores(&user, &evt_tx, &conversation_id).await;
             }
 
             tracing::info!("pubsub forwarder ended");

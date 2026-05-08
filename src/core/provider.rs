@@ -17,7 +17,7 @@ pub trait DeMlsProvider: 'static {
     /// MLS + DE-MLS state persistence (default: `MemoryDeMlsStorage`).
     type Storage: DeMlsStorage + Send + Sync + 'static;
 
-    /// Group-identifier type used as consensus scope (default: `String`).
+    /// Conversation-identifier type used as consensus scope (default: `String`).
     type Scope: ConsensusScope + From<String> + Send + Sync + 'static;
 
     /// Proposal/vote persistence (default: `InMemoryConsensusStorage<String>`).

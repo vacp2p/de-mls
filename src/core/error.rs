@@ -22,11 +22,11 @@ pub enum CoreError {
     #[error("JSON error: {0}")]
     JsonError(#[from] serde_json::Error),
 
-    /// MLS group is not initialized for this group.
+    /// MLS group is not initialized for this conversation.
     #[error("MLS group not initialized")]
     MlsGroupNotInitialized,
 
-    /// Caller is not a steward of this group.
+    /// Caller is not a steward of this conversation.
     #[error("caller is not a steward")]
     NotASteward,
 
@@ -34,8 +34,8 @@ pub enum CoreError {
     #[error("No proposals available")]
     NoProposals,
 
-    #[error("Invalid group update request")]
-    InvalidGroupUpdateRequest,
+    #[error("Invalid conversation update request")]
+    InvalidConversationUpdateRequest,
 
     #[error("Invalid subtopic: {0}")]
     InvalidSubtopic(String),

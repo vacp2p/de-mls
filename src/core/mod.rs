@@ -1,34 +1,51 @@
 //! Reusable core for building DE-MLS chat applications.
 //!
-//! This module wraps MLS cryptography, consensus voting, and message routing.
-//! Transport, UI, and state management live in the app layer.
+//! Wraps MLS cryptography, consensus voting, and message routing. Transport,
+//! UI, and state management live in the app layer.
 //!
-//! Integrators implement [`crate::core::GroupEventHandler`] (transport + UI
-//! delivery) and feed inbound packets to [`crate::core::process_inbound`],
+//! Integrators implement [`crate::core::ConversationEventHandler`] (transport
+//! + UI delivery) and feed inbound packets to [`crate::core::process_inbound`],
 //! then dispatch the returned [`crate::core::ProcessResult`].
-//! [`crate::core::DefaultProvider`] bundles in-memory backends for testing
+//! [`crate::core::DefaultProvider`] bundles in-memory backends for tests
 //! and simple deployments.
 //!
-//! Submodules: `api` (group operations), `consensus` (pure consensus
-//! application), `events` ([`crate::core::GroupEventHandler`]), `provider`
-//! ([`crate::core::DeMlsProvider`] + [`crate::core::DefaultProvider`]).
+//! Submodules: `conversation` (per-group state, handle, state machine,
+//! config), `consensus` (pure consensus result application), `events`
+//! ([`crate::core::ConversationEventHandler`]), `freeze` (round selection
+//! + apply), `inbound` (app-subtopic packet routing), `peer_scoring`
+//! (scoring plug-in contract), `process_result`
+//! ([`crate::core::ProcessResult`]), `proposal_framing` (welcome-subtopic
+//! + consensus-library framing helpers), `proposal_kind`
+//! ([`crate::core::ProposalKind`] classifier), `provider`
+//! ([`crate::core::DeMlsProvider`] + [`crate::core::DefaultProvider`]),
+//! `steward_list` (steward-list plug-in).
 
-mod api;
 mod consensus;
+mod conversation;
 mod error;
 mod events;
-mod group;
+mod freeze;
+mod inbound;
 mod peer_scoring;
 mod process_result;
+mod proposal_framing;
 mod proposal_kind;
 mod provider;
-mod state_machine;
-mod steward_list_plugin;
+mod steward_list;
 
-// ── Core group operations ──
-pub use api::{
-    FreezeFinalizeResult, FreezeOutcome, build_create_proposal_request, build_key_package_message,
-    compute_commit_hash, finalize_freeze_round, process_inbound,
+// ── Core conversation operations ──
+pub use freeze::{FreezeFinalizeResult, FreezeOutcome, compute_commit_hash, finalize_freeze_round};
+pub use inbound::process_inbound;
+pub use proposal_framing::{build_create_proposal_request, build_key_package_message};
+
+// ── Per-conversation types: state, handle, state machine, config ──
+pub use conversation::{
+    BufferedCommitCandidate, Conversation, ConversationConfig, ConversationHandle,
+    ConversationState, ConversationStateMachine, DEFAULT_COMMIT_INACTIVITY_DURATION,
+    DEFAULT_CONSENSUS_TIMEOUT, DEFAULT_ELECTION_VOTING_DELAY, DEFAULT_LIVENESS_CRITERIA_YES,
+    DEFAULT_PEER_SCORE, DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION,
+    DEFAULT_RECOVERY_INACTIVITY_DURATION, DEFAULT_VOTING_DELAY, OperatingMode, PendingUpdate,
+    ProposalId, member_set, self_leave_proposal_id, target_identity_of,
 };
 
 // ── Consensus result application (pure, synchronous) ──
@@ -43,23 +60,13 @@ pub use peer_scoring::{
 pub use error::CoreError;
 
 // ── Event handler trait and callback error ──
-pub use events::{CallbackError, GroupEventHandler};
-
-// ── Group state ──
-pub use group::{
-    BufferedCommitCandidate, DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
-    Group, PendingUpdate, ProposalId, auto_approved_leave_proposal_id, member_set,
-    target_identity_of,
-};
+pub use events::{CallbackError, ConversationEventHandler};
 
 // ── Proposal classification ──
 pub use proposal_kind::ProposalKind;
 
-// ── State machine (passive: state enum + named transitions) ──
-pub use state_machine::{GroupState, GroupStateMachine};
-
 // ── Steward list ──
-pub use steward_list_plugin::{
+pub use steward_list::{
     DEFAULT_MAX_RETRIES, DeterministicStewardList, ElectionDecision, StewardList,
     StewardListConfig, StewardListEvent, StewardListPlugin,
 };

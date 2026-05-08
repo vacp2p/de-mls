@@ -8,34 +8,25 @@ use prost::Message;
 use tracing::{error, info};
 
 use crate::{
-    app::{GroupState, StateChangeHandler, User, UserError},
+    app::{ConversationPlugins, ConversationState, User, UserError},
     core::{
-        DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProposalKind, ScoreOp,
+        ConversationEventHandler, DeMlsProvider, PeerScoringPlugin, ProposalKind, ScoreOp,
         StewardListPlugin, apply_consensus_result, emergency_score_ops, target_identity_of,
     },
-    identity::Identity,
-    mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
-        GroupUpdateRequest, StewardElectionProposal, group_update_request,
+        ConversationUpdateRequest, StewardElectionProposal, conversation_update_request,
     },
 };
 
-impl<
-    P: DeMlsProvider,
-    M: MlsService,
-    Sc: PeerScoringPlugin,
-    St: StewardListPlugin,
-    I: Identity,
-    H: GroupEventHandler + 'static,
-    SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, St, I, H, SCH>
+impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 'static>
+    User<P, GP, H>
 {
     /// Entry point from the consensus service: decode the proposal, apply the
-    /// result to the group, and dispatch to the correct follow-up handler
+    /// result to the conversation, and dispatch to the correct follow-up handler
     /// (election-accepted / election-rejected / emergency-scored).
     pub async fn apply_consensus_outcome(
         &mut self,
-        group_name: &str,
+        conversation_name: &str,
         event: ConsensusEvent,
     ) -> Result<(), UserError> {
         let (proposal_id, approved) = match &event {
@@ -48,27 +39,30 @@ impl<
         };
 
         // Proposal resolved — any pending auto-vote timer for it is moot.
-        self.cancel_auto_vote(group_name, proposal_id);
+        self.cancel_auto_vote(conversation_name, proposal_id).await;
 
         // Drop re-emissions from the consensus library (timeout-path race)
         // so we don't re-apply state or double-fire UI events.
         let already_applied = self
-            .with_entry(group_name, |entry| {
-                entry.group.is_consensus_outcome_applied(proposal_id)
+            .with_entry(conversation_name, |entry| {
+                entry
+                    .handle
+                    .conversation
+                    .is_consensus_outcome_applied(proposal_id)
             })
             .await
             .unwrap_or(false);
         if already_applied {
             tracing::debug!(
-                group = group_name,
+                conversation = conversation_name,
                 proposal_id,
                 "duplicate consensus outcome dropped"
             );
             return Ok(());
         }
 
-        // Fetch payload from consensus service (no group lock held).
-        let scope = P::Scope::from(group_name.to_string());
+        // Fetch payload from consensus service.
+        let scope = P::Scope::from(conversation_name.to_string());
         let proposal = self
             .consensus_service
             .storage()
@@ -79,57 +73,64 @@ impl<
         // The inactivity timer is self-started by `check_steward_inactivity`
         // on the next poll — no explicit notification needed here.
         let entry_arc = self
-            .lookup_entry(group_name)
+            .lookup_entry(conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
         let consensus_apply = {
             let mut entry = entry_arc.write().await;
             info!(
-                group = group_name,
+                conversation = conversation_name,
                 proposal_id, approved, "consensus reached"
             );
-            entry.group.mark_consensus_outcome_applied(proposal_id);
-            apply_consensus_result(&mut entry.group, proposal_id, approved, &payload)?
+            entry
+                .handle
+                .conversation
+                .mark_consensus_outcome_applied(proposal_id);
+            apply_consensus_result(
+                &mut entry.handle.conversation,
+                proposal_id,
+                approved,
+                &payload,
+            )?
         };
 
         if let Some(election) = consensus_apply.election {
-            return self.handle_election_accepted(group_name, election).await;
+            return self
+                .handle_election_accepted(conversation_name, election)
+                .await;
         }
 
         if consensus_apply.enter_recovery_mode {
-            if let Some(entry_arc) = self.lookup_entry(group_name).await {
-                entry_arc.write().await.enter_recovery_mode();
+            if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
+                entry_arc.write().await.handle.enter_recovery_mode();
             }
         }
 
         if consensus_apply.force_freezing {
-            self.force_freezing_for_urgent_commit(group_name).await;
-        }
-
-        if let Some(target) = &consensus_apply.queued_remove_target {
-            self.refresh_stewards_after_removal(group_name, target)
+            self.force_freezing_for_urgent_commit(conversation_name)
                 .await;
         }
 
-        if !approved && let Ok(req) = GroupUpdateRequest::decode(payload.as_slice()) {
+        if let Some(target) = &consensus_apply.queued_remove_target {
+            self.refresh_stewards_after_removal(conversation_name, target)
+                .await;
+        }
+
+        if !approved && let Ok(req) = ConversationUpdateRequest::decode(payload.as_slice()) {
             if ProposalKind::of(&req).is_steward_election() {
-                self.handle_election_rejected(group_name).await;
+                self.handle_election_rejected(conversation_name).await;
             } else if let Some(target) = target_identity_of(&req) {
-                // A rejected membership change is the group's decision, not a
-                // transient liveness failure: the request author must resend
-                // if circumstances change. Drop the buffered entry so the
-                // next epoch steward doesn't auto-repromote it.
                 let target = target.to_vec();
-                if let Some(entry_arc) = self.lookup_entry(group_name).await {
+                if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
                     let mut entry = entry_arc.write().await;
-                    entry.group.remove_pending_update(&target);
+                    entry.handle.conversation.remove_pending_update(&target);
                 }
             }
         }
 
         let score_ops = emergency_score_ops(&payload, approved);
         if !score_ops.is_empty() {
-            self.handle_emergency_scored(group_name, proposal_id, &payload, &score_ops)
+            self.handle_emergency_scored(conversation_name, proposal_id, &payload, &score_ops)
                 .await?;
         }
 
@@ -137,34 +138,34 @@ impl<
     }
 
     /// Bypass the inactivity timer so the urgent commit fires now.
-    async fn force_freezing_for_urgent_commit(&self, group_name: &str) {
-        let transitioned = match self.lookup_entry(group_name).await {
+    async fn force_freezing_for_urgent_commit(&self, conversation_name: &str) {
+        let event = match self.lookup_entry(conversation_name).await {
             Some(entry_arc) => entry_arc.write().await.force_freezing(),
-            None => false,
+            None => None,
         };
-        if transitioned {
-            self.state_handler
-                .on_state_changed(group_name, GroupState::Freezing)
-                .await;
+        if let Some(event) = event {
+            self.handler.on_phase_change(conversation_name, event).await;
         }
     }
 
     /// When the removal target is a current steward, fire a fresh election
     /// in parallel so the next epoch keeps a healthy ES + BS.
-    async fn refresh_stewards_after_removal(&self, group_name: &str, target: &[u8]) {
+    async fn refresh_stewards_after_removal(&self, conversation_name: &str, target: &[u8]) {
         let target_was_steward = self
-            .with_entry(group_name, |entry| entry.steward.is_steward(target))
+            .with_entry(conversation_name, |entry| {
+                entry.handle.steward.is_steward(target)
+            })
             .await
             .unwrap_or(false);
         if !target_was_steward {
             return;
         }
         if let Err(e) = self
-            .try_initiate_steward_election(group_name, true, Some(target))
+            .try_initiate_steward_election(conversation_name, true, Some(target))
             .await
         {
             info!(
-                group = group_name,
+                conversation = conversation_name,
                 error = %e,
                 "post-removal steward-list refresh deferred"
             );
@@ -176,21 +177,21 @@ impl<
     /// buffered updates so the fresh epoch steward picks them up.
     async fn handle_election_accepted(
         &self,
-        group_name: &str,
+        conversation_name: &str,
         election: StewardElectionProposal,
     ) -> Result<(), UserError> {
         let entry_arc = self
-            .lookup_entry(group_name)
+            .lookup_entry(conversation_name)
             .await
-            .ok_or(UserError::GroupNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
 
         let is_valid = {
             let entry = entry_arc.read().await;
-            entry.expect_mls()?;
+            entry.handle.expect_mls()?;
             // Election proposals carry the candidate pool implicitly:
             // `proposed_stewards` is the full set the proposer sorted, so
             // `candidate_pool == proposed_stewards` for validation.
-            entry.steward.validate_proposed(
+            entry.handle.steward.validate_proposed(
                 &election.proposed_stewards,
                 election.election_epoch,
                 &election.proposed_stewards,
@@ -199,7 +200,7 @@ impl<
         };
         if !is_valid {
             info!(
-                group = group_name,
+                conversation = conversation_name,
                 "steward election rejected: invalid list"
             );
             return Ok(());
@@ -207,7 +208,7 @@ impl<
 
         let resumed_from_reelection = {
             let mut entry = entry_arc.write().await;
-            let _events = entry.steward.install_list(
+            let _events = entry.handle.steward.install_list(
                 election.election_epoch,
                 &election.proposed_stewards,
                 election.proposed_stewards.len(),
@@ -216,65 +217,63 @@ impl<
             // `retry_round` stays > 0 until the next successful commit so
             // the immediate post-election inactivity check uses the
             // short retry window.
-            entry.exit_recovery_mode();
-            if entry.current_state() == GroupState::Reelection {
-                entry.start_working();
-                true
+            entry.handle.exit_recovery_mode();
+            if entry.handle.current_state() == ConversationState::Reelection {
+                Some(entry.start_working())
             } else {
-                false
+                None
             }
         };
-        if resumed_from_reelection {
-            self.state_handler
-                .on_state_changed(group_name, GroupState::Working)
-                .await;
+        if let Some(event) = resumed_from_reelection {
+            self.handler.on_phase_change(conversation_name, event).await;
         }
         info!(
-            group = group_name,
+            conversation = conversation_name,
             epoch = election.election_epoch,
             stewards = election.proposed_stewards.len(),
             retry_round = election.retry_round,
             "steward election applied"
         );
 
-        self.process_buffered_updates(group_name).await
+        self.process_buffered_updates(conversation_name).await
     }
 
     /// Rejected election: bump the retry round and retry under the max
     /// (idempotent), or escalate to a `Deadlock` ECP once exhausted.
-    async fn handle_election_rejected(&self, group_name: &str) {
-        let (round, max) = match self.lookup_entry(group_name).await {
+    async fn handle_election_rejected(&self, conversation_name: &str) {
+        let (round, max) = match self.lookup_entry(conversation_name).await {
             Some(entry_arc) => {
                 let mut entry = entry_arc.write().await;
-                let _events = entry.steward.bump_retry();
-                // Read the ceiling from the plug-in, not the user-level default:
-                // joiners honor the group's configured policy via `GroupSync`.
-                (entry.steward.retry_round(), entry.steward.max_retries())
+                let _events = entry.handle.steward.bump_retry();
+                (
+                    entry.handle.steward.retry_round(),
+                    entry.handle.steward.max_retries(),
+                )
             }
             None => return,
         };
         if round > max {
             info!(
-                group = group_name,
+                conversation = conversation_name,
                 round, max, "election retries exhausted; escalating to Layer 3"
             );
-            if let Err(e) = self.try_initiate_deadlock_ecp(group_name).await {
-                error!(group = group_name, error = %e, "Deadlock ECP filing failed");
+            if let Err(e) = self.try_initiate_deadlock_ecp(conversation_name).await {
+                error!(conversation = conversation_name, error = %e, "Deadlock ECP filing failed");
                 self.handler
-                    .on_error(group_name, "Reelection stuck", &e.to_string())
+                    .on_error(conversation_name, "Reelection stuck", &e.to_string())
                     .await;
             }
             return;
         }
         info!(
-            group = group_name,
+            conversation = conversation_name,
             round, max, "steward election rejected, retrying"
         );
         if let Err(e) = self
-            .try_initiate_steward_election(group_name, true, None)
+            .try_initiate_steward_election(conversation_name, true, None)
             .await
         {
-            info!(group = group_name, error = %e, "election retry deferred");
+            info!(conversation = conversation_name, error = %e, "election retry deferred");
         }
     }
 
@@ -284,47 +283,51 @@ impl<
     /// below-threshold removals.
     async fn handle_emergency_scored(
         &self,
-        group_name: &str,
+        conversation_name: &str,
         proposal_id: u32,
         payload: &[u8],
         score_ops: &[ScoreOp],
     ) -> Result<(), UserError> {
-        if let Some(entry_arc) = self.lookup_entry(group_name).await {
+        if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
             let mut entry = entry_arc.write().await;
             // Events from this apply chain into the score-removal pass
             // below (after `handle_emergency_scored` returns into its
             // caller). The terminal `check_and_initiate_score_removals`
             // call covers it, so we only need to drop the events here.
-            let _events = entry.scoring.apply_ops(score_ops);
-            if let Ok(req) = GroupUpdateRequest::decode(payload)
-                && let Some(group_update_request::Payload::EmergencyCriteria(ec)) = &req.payload
+            let _events = entry.handle.scoring.apply_ops(score_ops);
+            if let Ok(req) = ConversationUpdateRequest::decode(payload)
+                && let Some(conversation_update_request::Payload::EmergencyCriteria(ec)) =
+                    &req.payload
                 && let Some(ev) = &ec.evidence
             {
-                entry.group.resolve_pending_removal(&ev.target_member_id);
+                entry
+                    .handle
+                    .conversation
+                    .resolve_pending_removal(&ev.target_member_id);
             }
         }
 
-        let resumed_from_reelection = match self.lookup_entry(group_name).await {
+        let resumed_event = match self.lookup_entry(conversation_name).await {
             Some(entry_arc) => {
                 let mut entry = entry_arc.write().await;
-                entry.group.resolve_emergency(proposal_id);
-                if entry.current_state() == GroupState::Reelection {
-                    entry.start_working();
-                    true
+                entry.handle.conversation.resolve_emergency(proposal_id);
+                if entry.handle.current_state() == ConversationState::Reelection {
+                    Some(entry.start_working())
                 } else {
-                    false
+                    None
                 }
             }
-            None => false,
+            None => None,
         };
-        if resumed_from_reelection {
-            self.state_handler
-                .on_state_changed(group_name, GroupState::Working)
-                .await;
+        if let Some(event) = resumed_event {
+            self.handler.on_phase_change(conversation_name, event).await;
         }
 
-        if let Err(e) = self.check_and_initiate_score_removals(group_name).await {
-            error!(group = group_name, error = %e, "score-removal check failed");
+        if let Err(e) = self
+            .check_and_initiate_score_removals(conversation_name)
+            .await
+        {
+            error!(conversation = conversation_name, error = %e, "score-removal check failed");
         }
         Ok(())
     }

@@ -3,13 +3,14 @@
 use crate::{
     identity::format_wallet_address,
     protos::de_mls::messages::v1::{
-        GroupUpdateRequest, ViolationEvidence, ViolationType, app_message, group_update_request,
+        ConversationUpdateRequest, ViolationEvidence, ViolationType, app_message,
+        conversation_update_request,
     },
 };
 
 // ─────────────────────────── Member Role ───────────────────────────
 
-/// A member's steward role at a given epoch.
+/// A member's steward-list role for a given epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemberRole {
     /// Epoch steward for this epoch.
@@ -45,7 +46,7 @@ pub mod message_types {
     pub const USER_VOTE: &str = "UserVote";
     pub const PROPOSAL_ADDED: &str = "ProposalAdded";
     pub const COMMIT_CANDIDATE: &str = "CommitCandidate";
-    pub const GROUP_SYNC: &str = "GroupSync";
+    pub const CONVERSATION_SYNC: &str = "ConversationSync";
     pub const UNKNOWN: &str = "Unknown";
 }
 
@@ -65,17 +66,17 @@ impl MessageType for app_message::Payload {
             app_message::Payload::UserVote(_) => message_types::USER_VOTE,
             app_message::Payload::ProposalAdded(_) => message_types::PROPOSAL_ADDED,
             app_message::Payload::CommitCandidate(_) => message_types::COMMIT_CANDIDATE,
-            app_message::Payload::GroupSync(_) => message_types::GROUP_SYNC,
+            app_message::Payload::ConversationSync(_) => message_types::CONVERSATION_SYNC,
         }
     }
 }
 
-impl MessageType for GroupUpdateRequest {
+impl MessageType for ConversationUpdateRequest {
     fn message_type(&self) -> &'static str {
         match &self.payload {
-            Some(group_update_request::Payload::InviteMember(_)) => "Add Member",
-            Some(group_update_request::Payload::RemoveMember(_)) => "Remove Member",
-            Some(group_update_request::Payload::EmergencyCriteria(ec)) => ec
+            Some(conversation_update_request::Payload::InviteMember(_)) => "Add Member",
+            Some(conversation_update_request::Payload::RemoveMember(_)) => "Remove Member",
+            Some(conversation_update_request::Payload::EmergencyCriteria(ec)) => ec
                 .evidence
                 .as_ref()
                 .map(|e| match ViolationType::try_from(e.violation_type) {
@@ -86,7 +87,7 @@ impl MessageType for GroupUpdateRequest {
                     _ => "Emergency: Unknown Violation",
                 })
                 .unwrap_or("Emergency: Unknown Violation"),
-            Some(group_update_request::Payload::StewardElection(_)) => "Steward Election",
+            Some(conversation_update_request::Payload::StewardElection(_)) => "Steward Election",
             _ => "Unknown",
         }
     }
@@ -112,20 +113,20 @@ impl ViolationEvidence {
 /// Wallet address for membership / emergency-evidence targets, or
 /// `"epoch E | s1, s2, ..."` for elections (with `, retry R` appended
 /// when `R > 0`). `"unknown"` otherwise.
-pub fn format_group_request_target(request: &GroupUpdateRequest) -> String {
+pub fn format_conversation_request_target(request: &ConversationUpdateRequest) -> String {
     match &request.payload {
-        Some(group_update_request::Payload::InviteMember(im)) => {
+        Some(conversation_update_request::Payload::InviteMember(im)) => {
             format_wallet_address(&im.identity)
         }
-        Some(group_update_request::Payload::RemoveMember(rm)) => {
+        Some(conversation_update_request::Payload::RemoveMember(rm)) => {
             format_wallet_address(&rm.identity)
         }
-        Some(group_update_request::Payload::EmergencyCriteria(ec)) => ec
+        Some(conversation_update_request::Payload::EmergencyCriteria(ec)) => ec
             .evidence
             .as_ref()
             .map(|e| format_wallet_address(&e.target_member_id))
             .unwrap_or_else(|| "unknown".to_string()),
-        Some(group_update_request::Payload::StewardElection(se)) => {
+        Some(conversation_update_request::Payload::StewardElection(se)) => {
             let stewards: Vec<String> = se
                 .proposed_stewards
                 .iter()
@@ -143,9 +144,9 @@ pub fn format_group_request_target(request: &GroupUpdateRequest) -> String {
 }
 
 /// `(action, target)` pair suitable for UI rendering.
-pub fn format_group_request(request: &GroupUpdateRequest) -> (String, String) {
+pub fn format_conversation_request(request: &ConversationUpdateRequest) -> (String, String) {
     (
         request.message_type().to_string(),
-        format_group_request_target(request),
+        format_conversation_request_target(request),
     )
 }

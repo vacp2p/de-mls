@@ -97,12 +97,12 @@ impl<S> MlsService for OpenMlsService<S>
 where
     S: DeMlsStorage + Send + Sync + 'static,
 {
-    fn group_id(&self) -> &str {
-        &self.group_id
+    fn conversation_id(&self) -> &str {
+        &self.conversation_id
     }
 
     // ══════════════════════════════════════════════════════════
-    // Group lifecycle
+    // Conversation lifecycle
     // ══════════════════════════════════════════════════════════
 
     fn delete(&self) -> Result<(), MlsError> {
@@ -241,7 +241,7 @@ where
                     }
                     _ => {
                         tracing::debug!(
-                            group = %self.group_id,
+                            group = %self.conversation_id,
                             index = i,
                             "stage_remote_commit: non-proposal in proposal slot",
                         );
@@ -257,7 +257,7 @@ where
             if protocol_message.group_id().as_slice() != group.group_id().as_slice() {
                 tracing::debug!(
                     "stage_remote_commit: ignoring commit for wrong group ID (expected {})",
-                    self.group_id,
+                    self.conversation_id,
                 );
                 return Ok(StagedCandidateResult::Aborted);
             }
@@ -306,7 +306,7 @@ where
                 _ => {
                     tracing::debug!(
                         "stage_remote_commit: ignoring non-commit message for group {}",
-                        self.group_id,
+                        self.conversation_id,
                     );
                     None
                 }
@@ -334,7 +334,7 @@ where
             .pending_staged_commit
             .write()?
             .take()
-            .ok_or_else(|| MlsError::NoPendingStagedCommit(self.group_id.clone()))?;
+            .ok_or_else(|| MlsError::NoPendingStagedCommit(self.conversation_id.clone()))?;
 
         let mut group = self.mls_group.write()?;
         group.merge_staged_commit(&provider, staged)?;
@@ -372,7 +372,7 @@ where
         Ok(OutboundPacket::new(
             bytes,
             APP_MSG_SUBTOPIC,
-            self.group_id(),
+            self.conversation_id(),
             app_id,
         ))
     }
@@ -442,7 +442,7 @@ where
         if protocol_message.content_type() == ContentType::Commit {
             tracing::debug!(
                 "Ignoring commit on decrypt() path for group {}: use stage_remote_commit() instead",
-                self.group_id,
+                self.conversation_id,
             );
             return Ok(DecryptResult::Ignored);
         }

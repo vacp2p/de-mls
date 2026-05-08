@@ -42,7 +42,7 @@
 //! let rx = ds.subscribe();
 //! std::thread::spawn(move || {
 //!     while let Ok(pkt) = rx.recv() {
-//!         println!("got {} bytes for group {}", pkt.payload.len(), pkt.group_id);
+//!         println!("got {} bytes for conversation {}", pkt.payload.len(), pkt.conversation_id);
 //!     }
 //! });
 //!
@@ -50,7 +50,7 @@
 //! ds.send(OutboundPacket::new(
 //!     b"hello".to_vec(),
 //!     "app_msg",
-//!     "my-group",
+//!     "my-conversation",
 //!     b"app-instance-id",
 //! ))?;
 //!
@@ -74,12 +74,12 @@ mod transport;
 mod waku;
 
 /// Protocol version embedded in content topics.
-pub const GROUP_VERSION: &str = "1";
+pub const CONVERSATION_VERSION: &str = "1";
 /// Subtopic identifier for application messages.
 pub const APP_MSG_SUBTOPIC: &str = "app_msg";
 /// Subtopic identifier for MLS welcome messages.
 pub const WELCOME_SUBTOPIC: &str = "welcome";
-/// All subtopics that each group subscribes to.
+/// All subtopics that each conversation subscribes to.
 pub const SUBTOPICS: [&str; 2] = [APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC];
 
 pub use error::DeliveryServiceError;

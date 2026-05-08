@@ -1,13 +1,15 @@
-//! Classification of [`GroupUpdateRequest`]s by protocol role.
+//! Classification of [`ConversationUpdateRequest`]s by protocol role.
 //!
-//! `ProposalKind` replaces seven hand-rolled `matches!(EmergencyCriteria(_)
-//! | StewardElection(_))` sites with one canonical classifier. The ordinal
-//! order encodes RFC partial-freeze priority (Commit < StewardElection <
-//! Emergency), used by [`Group::partial_freeze_blocks`](crate::core::Group::partial_freeze_blocks).
+//! `ProposalKind` is the canonical classifier for membership-vs-governance
+//! proposals. The ordinal order encodes RFC partial-freeze priority
+//! (Commit < StewardElection < Emergency), used by
+//! [`Conversation::partial_freeze_blocks`](crate::core::Conversation::partial_freeze_blocks).
 
-use crate::protos::de_mls::messages::v1::{GroupUpdateRequest, group_update_request::Payload};
+use crate::protos::de_mls::messages::v1::{
+    ConversationUpdateRequest, conversation_update_request::Payload,
+};
 
-/// Protocol role of a `GroupUpdateRequest`. Ordinal order is RFC priority
+/// Protocol role of a `ConversationUpdateRequest`. Ordinal order is RFC priority
 /// (higher variant beats lower when both are in flight).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ProposalKind {
@@ -20,8 +22,8 @@ pub enum ProposalKind {
 }
 
 impl ProposalKind {
-    /// Classify a `GroupUpdateRequest`. `None` / unknown payloads map to [`Self::Commit`].
-    pub fn of(req: &GroupUpdateRequest) -> Self {
+    /// Classify a `ConversationUpdateRequest`. `None` / unknown payloads map to [`Self::Commit`].
+    pub fn of(req: &ConversationUpdateRequest) -> Self {
         match &req.payload {
             Some(Payload::EmergencyCriteria(_)) => Self::Emergency,
             Some(Payload::StewardElection(_)) => Self::StewardElection,
@@ -57,8 +59,8 @@ mod tests {
         ViolationEvidence,
     };
 
-    fn req(payload: Payload) -> GroupUpdateRequest {
-        GroupUpdateRequest {
+    fn req(payload: Payload) -> ConversationUpdateRequest {
+        ConversationUpdateRequest {
             payload: Some(payload),
         }
     }
@@ -101,8 +103,8 @@ mod tests {
     }
 
     /// RFC partial-freeze priority: Emergency > StewardElection > Commit.
-    /// Preserved so that [`Group::partial_freeze_blocks`] and any future
-    /// cross-kind priority check keeps a meaningful ordering.
+    /// [`Conversation::partial_freeze_blocks`] and any future cross-kind
+    /// priority check rely on this ordering.
     #[test]
     fn priority_ordering() {
         assert!(ProposalKind::Emergency > ProposalKind::StewardElection);

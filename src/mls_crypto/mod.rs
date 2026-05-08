@@ -1,14 +1,14 @@
 //! MLS cryptographic operations for DE-MLS.
 //!
 //! Each `OpenMlsService` instance is scoped to a single MLS group. The
-//! `MlsService` trait defines the per-group surface; constructors for the
+//! `MlsService` trait defines the per-conversation surface; constructors for the
 //! OpenMLS impl live as inherent methods on `OpenMlsService`.
 //!
 //! Identity and MLS credentials are split: [`crate::identity::Identity`]
 //! is the user-level abstraction (just `identity_bytes` + display);
 //! `MlsCredentials` (re-exported here) holds the MLS-specific signing keypair and
 //! credential, built from an `Identity` at User init and shared across
-//! every per-group service.
+//! every per-conversation service.
 //!
 //! # Quick Start
 //!

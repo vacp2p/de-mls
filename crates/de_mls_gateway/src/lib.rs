@@ -20,7 +20,7 @@ use de_mls::{
     app::User,
     core::DefaultProvider,
     ds::{DeliveryService, WakuDeliveryService},
-    protos::de_mls::messages::v1::GroupUpdateRequest,
+    protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 use futures::{
@@ -48,11 +48,7 @@ type UserRef = Arc<
     tokio::sync::RwLock<
         User<
             DefaultProvider,
-            de_mls::app::DefaultMlsService,
-            de_mls::app::DefaultPeerScoring,
-            de_mls::app::DefaultStewardList,
-            de_mls::identity::WalletIdentity,
-            GatewayEventHandler<WakuDeliveryService>,
+            de_mls::app::DefaultConversationPlugins,
             GatewayEventHandler<WakuDeliveryService>,
         >,
     >,
@@ -73,7 +69,7 @@ pub(crate) const MAX_EPOCH_HISTORY: usize = 10;
 /// `on_commit_applied` and consumed by the History tab via
 /// `Gateway::get_epoch_history`. Cap is [`MAX_EPOCH_HISTORY`].
 pub(crate) type EpochHistoryStore =
-    Arc<parking_lot::Mutex<HashMap<String, VecDeque<Vec<GroupUpdateRequest>>>>>;
+    Arc<parking_lot::Mutex<HashMap<String, VecDeque<Vec<ConversationUpdateRequest>>>>>;
 
 pub struct Gateway<DS: DeliveryService> {
     // UI events (gateway -> UI)
@@ -93,7 +89,7 @@ pub struct Gateway<DS: DeliveryService> {
     started: AtomicBool,
 
     // Per-group committed-batch history (UI cache). Shared by Arc with the
-    // gateway's GroupEventHandler so `on_commit_applied` can append.
+    // gateway's ConversationEventHandler so `on_commit_applied` can append.
     epoch_history: EpochHistoryStore,
 }
 
@@ -169,7 +165,6 @@ impl Gateway<WakuDeliveryService> {
         let core = self.core();
         let consensus_service = core.consensus.clone();
 
-        // Create handler that implements both GroupEventHandler and StateChangeHandler
         let handler = Arc::new(GatewayEventHandler {
             delivery: Arc::new(core.app_state.delivery.clone()),
             evt_tx: self.evt_tx.clone(),
@@ -177,12 +172,8 @@ impl Gateway<WakuDeliveryService> {
             epoch_history: self.epoch_history.clone(),
         });
 
-        let user = User::with_private_key(
-            private_key.as_str(),
-            Arc::new(consensus_service),
-            handler.clone(),
-            handler, // Same handler implements StateChangeHandler
-        )?;
+        let user =
+            User::with_private_key(private_key.as_str(), Arc::new(consensus_service), handler)?;
 
         let user_address = user.identity_string();
         let user_ref: UserRef = Arc::new(tokio::sync::RwLock::new(user));

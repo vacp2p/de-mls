@@ -2,46 +2,51 @@
 //! app with consensus, state machine, peer scoring, and freeze/commit timing.
 //!
 //! Integrate by constructing a [`crate::app::User`] with your
-//! [`crate::core::GroupEventHandler`] and [`crate::app::StateChangeHandler`],
-//! then drive it from a transport receive loop
-//! ([`crate::app::User::process_inbound_packet`]) and a periodic poll
-//! ([`crate::app::User::check_member_freeze`],
+//! [`crate::core::ConversationEventHandler`], then drive it from a transport
+//! receive loop ([`crate::app::User::process_inbound_packet`]) and a
+//! periodic poll ([`crate::app::User::check_member_freeze`],
 //! [`crate::app::User::poll_freeze_status`]).
-//! [`crate::core::GroupStateMachine`] holds the per-group state enum
-//! (`PendingJoin → Working → Freezing → Selection → Reelection → Leaving`)
-//! and [`crate::app::PhaseTimer`] holds the wall-clock anchor + duration
-//! knobs; `GroupEntry` composes them through coordinator methods.
 //!
-//! Use directly for epoch-based steward chat; build a custom app layer if you
-//! need a different consensus model, state machine, or epoch timing.
+//! [`crate::core::ConversationStateMachine`] owns the per-conversation state
+//! enum (`PendingJoin → Working → Freezing → Selection → Reelection`);
+//! [`crate::app::PhaseTimer`] owns the wall-clock anchor;
+//! [`crate::app::SessionRunner`] composes a [`crate::core::ConversationHandle`]
+//! with that timer through coordinator methods that update both atomically.
+//! State transitions return the new [`crate::core::ConversationState`]; the
+//! orchestrator dispatches it via
+//! [`crate::core::ConversationEventHandler::on_phase_change`].
+//!
+//! Use this layer directly for epoch-based steward chat; write a custom app
+//! layer if you need a different consensus model, state machine, or epoch
+//! timing.
 
-mod config;
 mod consensus_bridge;
 mod display;
 mod error;
-mod peer_scoring;
+mod orchestrator;
+mod peer_scoring_backends;
 mod phase_timer;
-mod user;
+mod session_runner;
 
-pub use crate::core::GroupState;
-pub use config::{
-    DEFAULT_COMMIT_INACTIVITY_DURATION, DEFAULT_CONSENSUS_TIMEOUT, DEFAULT_ELECTION_VOTING_DELAY,
-    DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_MAX_RETRIES, DEFAULT_PEER_SCORE,
-    DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION,
-    DEFAULT_RECOVERY_INACTIVITY_DURATION, DEFAULT_THRESHOLD_PEER_SCORE, DEFAULT_VOTING_DELAY,
-    GroupConfig,
+pub use crate::core::{
+    ConversationConfig, ConversationState, DEFAULT_COMMIT_INACTIVITY_DURATION,
+    DEFAULT_CONSENSUS_TIMEOUT, DEFAULT_ELECTION_VOTING_DELAY, DEFAULT_MAX_RETRIES,
+    DEFAULT_PEER_SCORE, DEFAULT_PROPOSAL_EXPIRATION, DEFAULT_RECOVERY_INACTIVITY_DURATION,
+    DEFAULT_THRESHOLD_PEER_SCORE, DEFAULT_VOTING_DELAY,
 };
 pub use consensus_bridge::{
-    ProposalParams, cast_vote, forward_incoming_proposal, forward_incoming_vote, submit_proposal,
+    ProposalParams, cast_vote, forward_incoming_vote, relay_incoming_proposal, submit_proposal,
     submit_self_leave_proposal,
 };
 pub use display::{
-    MemberRole, MessageType, format_group_request, format_group_request_target, message_types,
+    MemberRole, MessageType, format_conversation_request, format_conversation_request_target,
+    message_types,
 };
 pub use error::UserError;
-pub use peer_scoring::{FixedScoringProvider, InMemoryPeerScoreStorage};
-pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer, StateChangeHandler};
-pub use user::{
-    DefaultMlsService, DefaultPeerScoring, DefaultStewardList, KeyPackageGenerator,
-    MlsCreatorFactory, MlsWelcomeFactory, ScoringFactory, StewardFactory, User,
+pub use orchestrator::{
+    ConversationPlugins, DefaultConversationPlugins, DefaultMlsService, DefaultPeerScoring,
+    DefaultStewardList, User,
 };
+pub use peer_scoring_backends::{FixedScoringProvider, InMemoryPeerScoreStorage};
+pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer};
+pub use session_runner::SessionRunner;

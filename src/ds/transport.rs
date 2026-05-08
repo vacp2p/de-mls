@@ -5,18 +5,18 @@ use crate::ds::DeliveryServiceError;
 pub struct OutboundPacket {
     pub payload: Vec<u8>,
     pub subtopic: String,
-    pub group_id: String,
+    pub conversation_id: String,
     /// Application instance identifier. Transported as the `meta` field on the
     /// wire (Waku message JSON). Used for self-message filtering.
     pub app_id: Vec<u8>,
 }
 
 impl OutboundPacket {
-    pub fn new(payload: Vec<u8>, subtopic: &str, group_id: &str, app_id: &[u8]) -> Self {
+    pub fn new(payload: Vec<u8>, subtopic: &str, conversation_id: &str, app_id: &[u8]) -> Self {
         Self {
             payload,
             subtopic: subtopic.to_string(),
-            group_id: group_id.to_string(),
+            conversation_id: conversation_id.to_string(),
             app_id: app_id.to_vec(),
         }
     }
@@ -27,7 +27,7 @@ impl OutboundPacket {
 pub struct InboundPacket {
     pub payload: Vec<u8>,
     pub subtopic: String,
-    pub group_id: String,
+    pub conversation_id: String,
     /// Transport-provided app instance id / metadata (used for self-message filtering).
     pub app_id: Vec<u8>,
     pub timestamp: i64,
@@ -37,14 +37,14 @@ impl InboundPacket {
     pub fn new(
         payload: Vec<u8>,
         subtopic: &str,
-        group_id: &str,
+        conversation_id: &str,
         app_id: Vec<u8>,
         timestamp: i64,
     ) -> Self {
         Self {
             payload,
             subtopic: subtopic.to_string(),
-            group_id: group_id.to_string(),
+            conversation_id: conversation_id.to_string(),
             app_id,
             timestamp,
         }

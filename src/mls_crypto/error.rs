@@ -95,8 +95,8 @@ pub enum MlsError {
     #[error("Unexpected MLS message type")]
     UnexpectedMessageType,
 
-    #[error("Group not found: {0}")]
-    GroupNotFound(String),
+    #[error("Conversation not found: {0}")]
+    ConversationNotFound(String),
 
     #[error("No pending staged commit for group: {0}")]
     NoPendingStagedCommit(String),

@@ -48,14 +48,14 @@ fn sync_scoring_members<
 /// Non-emergency proposal produces no score ops.
 #[test]
 fn test_scoring_no_ops_for_regular_proposal() {
-    let group_name = "scoring-regular";
+    let conversation_name = "scoring-regular";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 
-    let mut alice_handle = setup_steward(group_name, alice_hex);
+    let mut alice_handle = setup_steward(conversation_name, alice_hex);
 
-    let regular_request = de_mls::protos::de_mls::messages::v1::GroupUpdateRequest {
+    let regular_request = de_mls::protos::de_mls::messages::v1::ConversationUpdateRequest {
         payload: Some(
-            de_mls::protos::de_mls::messages::v1::group_update_request::Payload::RemoveMember(
+            de_mls::protos::de_mls::messages::v1::conversation_update_request::Payload::RemoveMember(
                 de_mls::protos::de_mls::messages::v1::RemoveMember {
                     identity: vec![0xCC],
                 },
@@ -76,14 +76,14 @@ fn test_scoring_no_ops_for_regular_proposal() {
 
 /// Core-level contract: a joiner's scoring starts from MLS membership and
 /// has no way to reconstruct peers' prior scores at this layer. The
-/// User-layer `GroupSync` app message closes that gap separately.
+/// User-layer `ConversationSync` app message closes that gap separately.
 #[test]
 fn test_new_joiner_starts_with_default_scores() {
-    let group_name = "scoring-join-gap";
+    let conversation_name = "scoring-join-gap";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
     let bob_hex = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 
-    let mut alice_handle = setup_steward(group_name, alice_hex);
+    let mut alice_handle = setup_steward(conversation_name, alice_hex);
     let alice_id = alice_handle.self_identity().to_vec();
 
     // Alice's scoring has her at a non-default score (simulating prior events).
@@ -96,7 +96,7 @@ fn test_new_joiner_starts_with_default_scores() {
     assert_eq!(alice_scoring.score_for(&alice_id), Some(DEFAULT_SCORE + 20));
 
     // Bob joins.
-    let mut bob = setup_joiner(group_name, bob_hex);
+    let mut bob = setup_joiner(conversation_name, bob_hex);
     let (welcome, _batch) = steward_add_joiner(&mut alice_handle, &bob.kp_packet);
     bob.accept_welcome_packet(&welcome);
     // Sanity-check that the welcome path still surfaces only the
