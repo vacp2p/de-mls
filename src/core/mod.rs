@@ -63,8 +63,8 @@ pub use events::{CallbackError, GroupEventHandler};
 
 // ── Group state ──
 pub use group::{
-    BufferedCommitCandidate, Group, PendingUpdate, ProposalId, auto_approved_leave_proposal_id,
-    member_set, target_identity_of,
+    BufferedCommitCandidate, Group, PendingUpdate, ProposalId, member_set, self_leave_proposal_id,
+    target_identity_of,
 };
 
 // ── Proposal classification ──

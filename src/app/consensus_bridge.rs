@@ -18,7 +18,7 @@ use crate::{
     app::error::UserError,
     core::{
         CoreError, DeMlsProvider, Group, GroupEventHandler, ProviderConsensus,
-        auto_approved_leave_proposal_id, build_create_proposal_request,
+        build_create_proposal_request, self_leave_proposal_id,
     },
     protos::de_mls::messages::v1::{
         AppMessage, GroupUpdateRequest, RemoveMember, VotePayload, group_update_request,
@@ -119,7 +119,7 @@ where
 /// regular proposals, emit a `VotePayload` so the UI can surface the
 /// pending vote. Fast-path proposals (`expected_voters_count == 1`)
 /// self-resolve on arrival and skip the banner.
-pub async fn forward_incoming_proposal<P: DeMlsProvider>(
+pub async fn relay_incoming_proposal<P: DeMlsProvider>(
     group_name: &str,
     proposal: Proposal,
     consensus: &ProviderConsensus<P>,
@@ -205,7 +205,7 @@ pub async fn forward_incoming_vote<P: DeMlsProvider>(
 /// and `expected_voters_count = 1`.
 ///
 /// Unlike [`submit_proposal`], this hand-crafts the `Proposal` so it carries
-/// the deterministic `auto_approved_leave_proposal_id(identity)`. Every node
+/// the deterministic `self_leave_proposal_id(identity)`. Every node
 /// derives the same id from the MLS-authenticated sender, so a
 /// retransmitted self-leave dedupes natively via `ProposalAlreadyExist` and
 /// every node's `approved_proposals` entry ends up under the same key.
@@ -243,7 +243,7 @@ where
         .as_secs();
     let expiration = now.saturating_add(params.proposal_expiration.as_secs());
 
-    let proposal_id = auto_approved_leave_proposal_id(self_identity);
+    let proposal_id = self_leave_proposal_id(self_identity);
     let mut proposal = Proposal {
         name: format!("self-leave:{proposal_id}"),
         payload,

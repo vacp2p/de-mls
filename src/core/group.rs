@@ -21,7 +21,7 @@ pub type ProposalId = u32;
 /// a second session that would land a duplicate `RemoveMember` in the next
 /// commit batch. It also doubles as the self-leave signature used by
 /// `is_auto_approved_entry` and `reject_all_approved_proposals`.
-pub fn auto_approved_leave_proposal_id(identity: &[u8]) -> u32 {
+pub fn self_leave_proposal_id(identity: &[u8]) -> u32 {
     let hash = Sha256::digest(identity);
     u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
 }
@@ -31,7 +31,7 @@ pub fn auto_approved_leave_proposal_id(identity: &[u8]) -> u32 {
 pub fn is_auto_approved_entry(proposal_id: u32, request: &GroupUpdateRequest) -> bool {
     match request.payload.as_ref() {
         Some(group_update_request::Payload::RemoveMember(r)) => {
-            proposal_id == auto_approved_leave_proposal_id(&r.identity)
+            proposal_id == self_leave_proposal_id(&r.identity)
         }
         _ => false,
     }
@@ -538,7 +538,7 @@ impl Group {
     /// an approved `RemoveMember(identity)` under the deterministic
     /// self-leave ID. Used by live rotation to skip the leaver.
     pub fn is_pending_self_leave(&self, identity: &[u8]) -> bool {
-        let pid = auto_approved_leave_proposal_id(identity);
+        let pid = self_leave_proposal_id(identity);
         self.approved_proposals
             .get(&pid)
             .is_some_and(|req| is_auto_approved_entry(pid, req))
@@ -698,7 +698,7 @@ mod tests {
                 identity: identity.to_vec(),
             })),
         };
-        group.insert_approved_proposal(auto_approved_leave_proposal_id(identity), remove);
+        group.insert_approved_proposal(self_leave_proposal_id(identity), remove);
     }
 
     #[test]
@@ -722,7 +722,7 @@ mod tests {
 
         // Self-leave entry (deterministic id) survives; unrelated approvals drop.
         assert_eq!(group.approved_proposals_count(), 1);
-        let leave_id = auto_approved_leave_proposal_id(&leaver);
+        let leave_id = self_leave_proposal_id(&leaver);
         assert!(group.approved_proposals().contains_key(&leave_id));
         assert!(!group.approved_proposals().contains_key(&ban_id));
     }

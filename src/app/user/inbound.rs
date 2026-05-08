@@ -6,7 +6,7 @@ use tracing::{error, info};
 
 use crate::{
     app::{
-        GroupPlugins, GroupState, User, UserError, forward_incoming_proposal, forward_incoming_vote,
+        GroupPlugins, GroupState, User, UserError, forward_incoming_vote, relay_incoming_proposal,
     },
     core::{
         CoreError, DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProcessResult,
@@ -106,7 +106,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             .as_ref()
             .map(ProposalKind::of)
             .unwrap_or(ProposalKind::Commit);
-        forward_incoming_proposal::<P>(
+        relay_incoming_proposal::<P>(
             group_name,
             proposal,
             &*self.consensus_service,

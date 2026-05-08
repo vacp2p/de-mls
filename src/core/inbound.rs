@@ -113,7 +113,7 @@ pub fn process_inbound<M: MlsService>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::group::auto_approved_leave_proposal_id;
+    use crate::core::group::self_leave_proposal_id;
     use crate::protos::de_mls::messages::v1::RemoveMember;
 
     fn member(id: u8) -> Vec<u8> {
@@ -133,7 +133,7 @@ mod tests {
         Proposal {
             name: "test".into(),
             payload: remove_payload(sender),
-            proposal_id: auto_approved_leave_proposal_id(sender),
+            proposal_id: self_leave_proposal_id(sender),
             proposal_owner: sender.to_vec(),
             votes: Vec::new(),
             expected_voters_count: expected_voters,

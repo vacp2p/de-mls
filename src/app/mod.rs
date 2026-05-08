@@ -21,7 +21,7 @@
 mod consensus_bridge;
 mod display;
 mod error;
-mod peer_scoring;
+mod peer_scoring_backends;
 mod phase_timer;
 mod session_runner;
 mod user;
@@ -33,14 +33,14 @@ pub use crate::core::{
     GroupConfig, GroupState,
 };
 pub use consensus_bridge::{
-    ProposalParams, cast_vote, forward_incoming_proposal, forward_incoming_vote, submit_proposal,
+    ProposalParams, cast_vote, forward_incoming_vote, relay_incoming_proposal, submit_proposal,
     submit_self_leave_proposal,
 };
 pub use display::{
     MemberRole, MessageType, format_group_request, format_group_request_target, message_types,
 };
 pub use error::UserError;
-pub use peer_scoring::{FixedScoringProvider, InMemoryPeerScoreStorage};
+pub use peer_scoring_backends::{FixedScoringProvider, InMemoryPeerScoreStorage};
 pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer};
 pub use session_runner::SessionRunner;
 pub use user::{

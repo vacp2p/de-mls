@@ -5,7 +5,7 @@
 //! are derived alongside in [`crate::core::emergency_score_ops`].
 //!
 //! App-layer helpers that wire consensus events to the UI and transport
-//! (`submit_proposal`, `cast_vote`, `forward_incoming_proposal`,
+//! (`submit_proposal`, `cast_vote`, `relay_incoming_proposal`,
 //! `forward_incoming_vote`) live in `crate::app::consensus_bridge`.
 
 use prost::Message;

@@ -12,7 +12,7 @@ use crate::{
     },
     core::{
         DeMlsProvider, Group, GroupConfig, GroupEventHandler, GroupStateMachine, PeerScoringPlugin,
-        StewardListPlugin, auto_approved_leave_proposal_id,
+        StewardListPlugin, self_leave_proposal_id,
     },
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{GroupUpdateRequest, RemoveMember, group_update_request},
@@ -154,7 +154,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         // Register ownership BEFORE the session opens — the bundled YES
         // fires `ConsensusReached` on submit, and `apply_consensus_result`
         // needs `is_owner_of_proposal` to be true by then.
-        let proposal_id = auto_approved_leave_proposal_id(&self_identity);
+        let proposal_id = self_leave_proposal_id(&self_identity);
         let (proposal_expiration, consensus_timeout) = {
             let entry_arc = self
                 .lookup_entry(group_name)
