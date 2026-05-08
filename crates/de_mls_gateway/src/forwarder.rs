@@ -62,7 +62,7 @@ pub(crate) async fn load_member_info(
         .collect())
 }
 
-/// Push refreshed approved-queue and epoch-history events to the UI.
+/// Push refreshed approved-queue and current-epoch state to the UI.
 pub(crate) async fn push_consensus_state(
     user: &UserRef,
     evt_tx: &UnboundedSender<AppEvent>,
@@ -77,15 +77,6 @@ pub(crate) async fn push_consensus_state(
         let _ = evt_tx.unbounded_send(AppEvent::CurrentEpochProposals {
             group_id: group_name.to_string(),
             proposals: display_batch(&proposals),
-        });
-    }
-
-    if let Ok(history) = user.read().await.get_epoch_history(group_name).await {
-        let epochs: Vec<Vec<(String, String)>> =
-            history.iter().map(|batch| display_batch(batch)).collect();
-        let _ = evt_tx.unbounded_send(AppEvent::EpochHistory {
-            group_id: group_name.to_string(),
-            epochs,
         });
     }
 

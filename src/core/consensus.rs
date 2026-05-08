@@ -30,6 +30,10 @@ pub struct ConsensusApplyResult {
     pub election: Option<StewardElectionProposal>,
     pub force_freezing: bool,
     pub queued_remove_target: Option<Vec<u8>>,
+    /// `true` when an accepted Layer-3 Deadlock ECP signals "open recovery
+    /// mode." Caller flips the recovery-mode flag on; cleared on the next
+    /// accepted election.
+    pub enter_recovery_mode: bool,
 }
 
 /// Extract emergency evidence from a `GroupUpdateRequest`, if present.
@@ -199,6 +203,7 @@ pub fn apply_consensus_result(
     }
 
     let mut force_freezing = false;
+    let mut enter_recovery_mode = false;
 
     if approved {
         if is_owner {
@@ -229,8 +234,9 @@ pub fn apply_consensus_result(
             force_freezing = true;
         } else if evidence.as_ref().is_some_and(is_deadlock) {
             // Layer 3: relax the steward gate so any member can produce
-            // the next commit. Cleared when a fresh election lands.
-            group.enter_recovery_mode();
+            // the next commit. App caller flips `GroupEntry::recovery_mode`
+            // when it sees this flag; cleared when a fresh election lands.
+            enter_recovery_mode = true;
             force_freezing = true;
         }
     } else if is_owner {
@@ -258,6 +264,7 @@ pub fn apply_consensus_result(
         election: None,
         force_freezing,
         queued_remove_target: removal_target,
+        enter_recovery_mode,
     })
 }
 
@@ -468,9 +475,8 @@ mod tests {
     }
 
     #[test]
-    fn ecp_deadlock_yes_opens_recovery_mode_and_force_freezes() {
+    fn ecp_deadlock_yes_signals_recovery_mode_and_force_freezes() {
         let mut group = make_group("deadlock-yes", member(1));
-        assert!(!group.is_in_recovery_mode());
 
         let request = deadlock_request(member(1));
         let payload = request.encode_to_vec();
@@ -480,7 +486,10 @@ mod tests {
             result.force_freezing,
             "Deadlock YES must signal force-Freezing"
         );
-        assert!(group.is_in_recovery_mode(), "recovery_mode must be open");
+        assert!(
+            result.enter_recovery_mode,
+            "Deadlock YES must signal recovery-mode open"
+        );
         assert_eq!(
             group.approved_proposals_count(),
             0,
@@ -490,7 +499,7 @@ mod tests {
     }
 
     #[test]
-    fn ecp_deadlock_no_does_not_open_recovery_mode() {
+    fn ecp_deadlock_no_does_not_signal_recovery_mode() {
         let mut group = make_group("deadlock-no", member(1));
 
         let request = deadlock_request(member(1));
@@ -498,6 +507,6 @@ mod tests {
         let result = apply_consensus_result(&mut group, 201, false, &payload).unwrap();
 
         assert!(!result.force_freezing);
-        assert!(!group.is_in_recovery_mode());
+        assert!(!result.enter_recovery_mode);
     }
 }

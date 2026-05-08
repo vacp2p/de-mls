@@ -19,6 +19,8 @@ use de_mls::{
 };
 use de_mls_ui_protocol::v1::AppEvent;
 
+use crate::{EpochHistoryStore, MAX_EPOCH_HISTORY, forwarder::display_batch};
+
 /// Event handler for the gateway layer.
 ///
 /// Sends outbound packets via the delivery service and forwards
@@ -27,6 +29,7 @@ pub struct GatewayEventHandler<DS: DeliveryService> {
     pub delivery: Arc<DS>,
     pub evt_tx: UnboundedSender<AppEvent>,
     pub topics: Arc<TopicFilter>,
+    pub epoch_history: EpochHistoryStore,
 }
 
 #[async_trait]
@@ -56,6 +59,7 @@ impl<DS: DeliveryService> GroupEventHandler for GatewayEventHandler<DS> {
 
     async fn on_leave_group(&self, group_name: &str) -> Result<(), CallbackError> {
         self.topics.remove_many(group_name).await;
+        self.epoch_history.lock().remove(group_name);
 
         let _ = self
             .evt_tx
@@ -94,6 +98,30 @@ impl<DS: DeliveryService> GroupEventHandler for GatewayEventHandler<DS> {
             proposal_id,
             action,
             address,
+        });
+        Ok(())
+    }
+
+    async fn on_commit_applied(
+        &self,
+        group_name: &str,
+        batch: Vec<GroupUpdateRequest>,
+    ) -> Result<(), CallbackError> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let formatted: Vec<Vec<(String, String)>> = {
+            let mut store = self.epoch_history.lock();
+            let entry = store.entry(group_name.to_string()).or_default();
+            if entry.len() >= MAX_EPOCH_HISTORY {
+                entry.pop_front();
+            }
+            entry.push_back(batch);
+            entry.iter().map(|b| display_batch(b)).collect()
+        };
+        let _ = self.evt_tx.unbounded_send(AppEvent::EpochHistory {
+            group_id: group_name.to_string(),
+            epochs: formatted,
         });
         Ok(())
     }

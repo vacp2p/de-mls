@@ -11,7 +11,7 @@
 //! tasks just take their own handle via `self.clone()`.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
@@ -32,8 +32,8 @@ use crate::{
         BufferedCommitCandidate, CoreError, DeMlsProvider, DefaultProvider,
         DeterministicStewardList, FreezeFinalizeResult, Group, GroupEventHandler, GroupState,
         GroupStateMachine, PeerScoringEvent, PeerScoringPlugin, PeerScoringService, ProcessResult,
-        ProposalId, ProposalKind, ProviderConsensus, ScoringConfig, StewardListConfig,
-        StewardListPlugin, compute_commit_hash, finalize_freeze_round, member_set, process_inbound,
+        ProposalKind, ProviderConsensus, ScoringConfig, StewardListConfig, StewardListPlugin,
+        compute_commit_hash, finalize_freeze_round, member_set, process_inbound,
     },
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     identity::{Identity, WalletIdentity},
@@ -41,9 +41,7 @@ use crate::{
         CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MemoryDeMlsStorage, MlsCommitInput,
         MlsCredentials, MlsError, MlsService, OpenMlsService,
     },
-    protos::de_mls::messages::v1::{
-        AppMessage, CommitCandidate, GroupUpdateRequest, group_update_request::Payload,
-    },
+    protos::de_mls::messages::v1::{AppMessage, CommitCandidate, group_update_request::Payload},
 };
 
 mod consensus;
@@ -55,10 +53,6 @@ mod messaging;
 mod query;
 mod steward;
 
-/// Cap on the per-group UI history of committed batches. App-layer
-/// concern only; protocol logic in `core::Group` is history-agnostic.
-const MAX_EPOCH_HISTORY: usize = 10;
-
 pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> {
     group: Group,
     /// Per-group MLS service. `None` for joiners in `PendingJoin` who
@@ -68,9 +62,13 @@ pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin, St: StewardLi
     /// Per-group state machine. Coordinator methods on this entry update
     /// it together with `phase_timer` so the two never drift.
     state_machine: GroupStateMachine,
-    /// Wall-clock anchor + duration knobs combined with `state_machine`
-    /// by the entry's coordinator methods.
+    /// Wall-clock anchor + phase-anchor durations combined with
+    /// `state_machine` by the entry's coordinator methods.
     phase_timer: PhaseTimer,
+    /// Per-group durable config: voting/consensus durations,
+    /// `liveness_criteria_yes`, `pending_update_max_epochs`. Read by
+    /// app-layer coordinators; joiner-sync writes through this directly.
+    pub(crate) config: GroupConfig,
     /// Per-group peer-score plug-in. Lives next to `state_machine` as
     /// app-layer wiring; protocol decisions read it via the entry's
     /// `RwLock`, no separate `Mutex` needed.
@@ -80,11 +78,12 @@ pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin, St: StewardLi
     /// eligibility from MLS members + `Group::is_pending_removal` and
     /// passes it on every position query.
     steward: St,
-    /// Per-group rolling history of committed batches, most recent last.
-    /// Bounded at [`MAX_EPOCH_HISTORY`]. Populated by
-    /// [`GroupEntry::archive_committed_batch`] from the snapshot
-    /// returned by `Group::clear_approved_proposals`.
-    epoch_history: VecDeque<HashMap<ProposalId, GroupUpdateRequest>>,
+    /// Recovery flag (RFC §Layer 3 Anti-Deadlock ECP). Set when an
+    /// accepted Deadlock ECP relaxes the steward gate so any member may
+    /// produce the next commit; cleared when a fresh election lands.
+    /// Read by the freeze coordinator, the create-commit path, and
+    /// `core::finalize_freeze_round` (via `in_recovery` parameter).
+    recovery_mode: bool,
 }
 
 impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, Sc, St> {
@@ -95,6 +94,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
         mls: Option<M>,
         state_machine: GroupStateMachine,
         phase_timer: PhaseTimer,
+        config: GroupConfig,
         scoring: Sc,
         steward: St,
     ) -> Self {
@@ -103,10 +103,25 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
             mls,
             state_machine,
             phase_timer,
+            config,
             scoring,
             steward,
-            epoch_history: VecDeque::new(),
+            recovery_mode: false,
         }
+    }
+
+    // ── Recovery-mode flag (Layer 3 Anti-Deadlock) ──────────────────
+
+    pub(crate) fn is_in_recovery_mode(&self) -> bool {
+        self.recovery_mode
+    }
+
+    pub(crate) fn enter_recovery_mode(&mut self) {
+        self.recovery_mode = true;
+    }
+
+    pub(crate) fn exit_recovery_mode(&mut self) {
+        self.recovery_mode = false;
     }
 
     // ── State-machine + phase-timer coordinators ────────────────────
@@ -236,7 +251,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
         app_id: &[u8],
     ) -> Result<Option<OutboundPacket>, CoreError> {
         let mls = self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)?;
-        if !self.steward.is_steward(self_identity) && !self.group.is_in_recovery_mode() {
+        if !self.steward.is_steward(self_identity) && !self.recovery_mode {
             return Err(CoreError::NotASteward);
         }
 
@@ -389,6 +404,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
             &mut self.group,
             mls,
             &self.steward,
+            self.recovery_mode,
             allow_subset_candidates,
             app_id,
         )
@@ -400,17 +416,6 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
     pub(crate) fn process_inbound(&mut self, payload: &[u8]) -> Result<ProcessResult, CoreError> {
         let mls = self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)?;
         process_inbound(&mut self.group, mls, payload)
-    }
-
-    /// Append a just-committed batch to the bounded UI history.
-    fn archive_committed_batch(&mut self, snapshot: HashMap<ProposalId, GroupUpdateRequest>) {
-        if snapshot.is_empty() {
-            return;
-        }
-        if self.epoch_history.len() >= MAX_EPOCH_HISTORY {
-            self.epoch_history.pop_front();
-        }
-        self.epoch_history.push_back(snapshot);
     }
 }
 

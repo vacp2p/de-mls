@@ -106,7 +106,6 @@ impl<
             } else {
                 FreezeFinalizeResult::default()
             };
-            entry.archive_committed_batch(result.committed_batch.clone());
             // Apply locally-observed score events before releasing the
             // entry lock. These come from dropped candidates in the
             // phase-3 loop (RFC §Peer Scoring: direct local observation,
@@ -120,6 +119,16 @@ impl<
             };
             (result, cross)
         };
+
+        // Notify the integrator of the just-committed batch (UI history,
+        // audit logs, etc.). Fired outside the entry lock so the handler
+        // can take its own locks without deadlock risk.
+        if !finalize_result.committed_batch.is_empty() {
+            let batch: Vec<_> = finalize_result.committed_batch.values().cloned().collect();
+            if let Err(e) = self.handler.on_commit_applied(group_name, batch).await {
+                error!(group = group_name, error = %e, "on_commit_applied callback failed");
+            }
+        }
 
         // Lock split is intentional: `check_and_initiate_score_removals`
         // re-acquires the entry write lock and calls `initiate_proposal`
@@ -258,7 +267,7 @@ impl<
         }
         // Recovery uses the shorter retry inactivity window so we don't
         // burn another full epoch waiting for a steward to commit.
-        let in_recovery = entry.group.is_in_recovery_mode() || entry.steward.retry_round() > 0;
+        let in_recovery = entry.is_in_recovery_mode() || entry.steward.retry_round() > 0;
         let inactivity = if in_recovery {
             entry.phase_timer.recovery_inactivity_duration()
         } else {

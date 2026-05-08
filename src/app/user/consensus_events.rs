@@ -96,6 +96,12 @@ impl<
             return self.handle_election_accepted(group_name, election).await;
         }
 
+        if consensus_apply.enter_recovery_mode {
+            if let Some(entry_arc) = self.lookup_entry(group_name).await {
+                entry_arc.write().await.enter_recovery_mode();
+            }
+        }
+
         if consensus_apply.force_freezing {
             self.force_freezing_for_urgent_commit(group_name).await;
         }
@@ -210,7 +216,7 @@ impl<
             // `retry_round` stays > 0 until the next successful commit so
             // the immediate post-election inactivity check uses the
             // short retry window.
-            entry.group.exit_recovery_mode();
+            entry.exit_recovery_mode();
             if entry.current_state() == GroupState::Reelection {
                 entry.start_working();
                 true

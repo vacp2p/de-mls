@@ -128,8 +128,8 @@ impl<
             let Some((delay, vote)) = self
                 .with_entry(group_name, |e| {
                     (
-                        e.phase_timer.voting_delay_for(kind),
-                        e.group.liveness_criteria_yes(),
+                        e.config.voting_delay_for(kind),
+                        e.config.liveness_criteria_yes,
                     )
                 })
                 .await
@@ -238,7 +238,7 @@ impl<
     /// list installs and closes the window.
     async fn maybe_close_recovery_window(&self, group_name: &str) {
         let in_recovery_mode = self
-            .with_entry(group_name, |entry| entry.group.is_in_recovery_mode())
+            .with_entry(group_name, |entry| entry.is_in_recovery_mode())
             .await
             .unwrap_or(false);
         if !in_recovery_mode {
@@ -398,12 +398,8 @@ impl<
         // `SCORE_BELOW_THRESHOLD` from their own event chain. Drop our
         // events to avoid duplicate proposals from joiners.
         let _events = entry.scoring.apply_snapshot(&snapshot);
-        entry
-            .group
-            .set_liveness_criteria_yes(sync.liveness_criteria_yes);
-        entry
-            .group
-            .set_pending_update_max_epochs(sync.pending_update_max_epochs);
+        entry.config.liveness_criteria_yes = sync.liveness_criteria_yes;
+        entry.config.pending_update_max_epochs = sync.pending_update_max_epochs;
         if let Some(timing) = &sync.timing {
             let pt = &mut entry.phase_timer;
             pt.set_commit_inactivity_duration(std::time::Duration::from_millis(
@@ -413,12 +409,10 @@ impl<
             pt.set_recovery_inactivity_duration(std::time::Duration::from_millis(
                 timing.recovery_inactivity_duration_ms,
             ));
-            pt.set_proposal_expiration(std::time::Duration::from_millis(
-                timing.proposal_expiration_ms,
-            ));
-            pt.set_consensus_timeout(std::time::Duration::from_millis(
-                timing.consensus_timeout_ms,
-            ));
+            entry.config.proposal_expiration =
+                std::time::Duration::from_millis(timing.proposal_expiration_ms);
+            entry.config.consensus_timeout =
+                std::time::Duration::from_millis(timing.consensus_timeout_ms);
         }
         Ok(())
     }

@@ -229,6 +229,7 @@ fn test_process_inbound_leave_group() {
         &mut steward_handle.group,
         &steward_handle.mls,
         &steward_handle.steward,
+        false,
         &steward_handle.identity,
         b"test-app-id",
     )
@@ -261,6 +262,7 @@ fn test_process_inbound_leave_group() {
         &mut joiner.group,
         joiner.mls.as_ref().unwrap(),
         &joiner.steward,
+        false,
         false,
         b"test-app-id",
     )
@@ -314,6 +316,7 @@ fn test_rejoin_after_eviction() {
         &mut steward_handle.group,
         &steward_handle.mls,
         &steward_handle.steward,
+        false,
         &steward_handle.identity,
         b"test-app-id",
     )
@@ -338,6 +341,7 @@ fn test_rejoin_after_eviction() {
         joiner.mls.as_ref().unwrap(),
         &joiner.steward,
         false,
+        false,
         b"test-app-id",
     )
     .unwrap();
@@ -352,6 +356,7 @@ fn test_rejoin_after_eviction() {
         &mut steward_handle.group,
         &steward_handle.mls,
         &steward_handle.steward,
+        false,
         false,
         b"test-app-id",
     )
@@ -440,6 +445,7 @@ fn test_process_inbound_raw_commit_payload_is_ignored() {
         &mut steward_handle.group,
         &steward_handle.mls,
         &steward_handle.steward,
+        false,
         &steward_handle.identity,
         b"test-app-id",
     )
@@ -678,14 +684,11 @@ fn test_group_sync_propagates_divergent_per_group_config() {
     let mut steward_handle = setup_steward_with_config(group_name, steward_hex, steward_protocol);
     let mut joiner = setup_joiner_with_config(group_name, joiner_hex, default_steward_config());
 
-    steward_handle.set_liveness_criteria_yes(STEWARD_LIVENESS_YES);
-    steward_handle.set_pending_update_max_epochs(STEWARD_PENDING_MAX_EPOCHS);
+    steward_handle.liveness_criteria_yes = STEWARD_LIVENESS_YES;
+    steward_handle.pending_update_max_epochs = STEWARD_PENDING_MAX_EPOCHS;
 
-    assert_ne!(joiner.group.liveness_criteria_yes(), STEWARD_LIVENESS_YES);
-    assert_ne!(
-        joiner.group.pending_update_max_epochs(),
-        STEWARD_PENDING_MAX_EPOCHS
-    );
+    assert_ne!(joiner.liveness_criteria_yes, STEWARD_LIVENESS_YES);
+    assert_ne!(joiner.pending_update_max_epochs, STEWARD_PENDING_MAX_EPOCHS);
     assert_ne!(joiner.steward.config().sn_min, STEWARD_SN_MIN);
     assert_ne!(joiner.steward.config().sn_max, STEWARD_SN_MAX);
 
@@ -714,9 +717,9 @@ fn test_group_sync_propagates_divergent_per_group_config() {
         timing: None,
         retry_round: steward_list.retry_round(),
         max_reelection_attempts: steward_handle.steward.max_retries(),
-        liveness_criteria_yes: steward_handle.liveness_criteria_yes(),
+        liveness_criteria_yes: steward_handle.liveness_criteria_yes,
         threshold_peer_score: STEWARD_THRESHOLD,
-        pending_update_max_epochs: steward_handle.pending_update_max_epochs(),
+        pending_update_max_epochs: steward_handle.pending_update_max_epochs,
     };
     let app_msg: AppMessage = sync.clone().into();
     let sync_packet = steward_handle
@@ -749,18 +752,11 @@ fn test_group_sync_propagates_divergent_per_group_config() {
         StewardListConfig::new(received.sn_min as usize, received.sn_max as usize).unwrap();
     applied_protocol.allow_subset_candidates = received.allow_subset_candidates;
     joiner.steward.set_config(applied_protocol);
-    joiner
-        .group
-        .set_liveness_criteria_yes(received.liveness_criteria_yes);
-    joiner
-        .group
-        .set_pending_update_max_epochs(received.pending_update_max_epochs);
+    joiner.liveness_criteria_yes = received.liveness_criteria_yes;
+    joiner.pending_update_max_epochs = received.pending_update_max_epochs;
 
-    assert_eq!(joiner.group.liveness_criteria_yes(), STEWARD_LIVENESS_YES);
-    assert_eq!(
-        joiner.group.pending_update_max_epochs(),
-        STEWARD_PENDING_MAX_EPOCHS
-    );
+    assert_eq!(joiner.liveness_criteria_yes, STEWARD_LIVENESS_YES);
+    assert_eq!(joiner.pending_update_max_epochs, STEWARD_PENDING_MAX_EPOCHS);
     assert_eq!(joiner.steward.config().sn_min, STEWARD_SN_MIN);
     assert_eq!(joiner.steward.config().sn_max, STEWARD_SN_MAX);
 

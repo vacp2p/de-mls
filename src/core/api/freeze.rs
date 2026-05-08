@@ -151,6 +151,7 @@ pub fn finalize_freeze_round<M: MlsService>(
     group: &mut Group,
     mls: &M,
     steward: &dyn StewardListPlugin,
+    in_recovery: bool,
     allow_subset_candidates: bool,
     app_id: &[u8],
 ) -> Result<FreezeFinalizeResult, CoreError> {
@@ -177,7 +178,7 @@ pub fn finalize_freeze_round<M: MlsService>(
         return Ok(FreezeFinalizeResult::default());
     }
 
-    apply_in_priority_order(group, mls, steward, sorted, &ctx, app_id)
+    apply_in_priority_order(group, mls, steward, in_recovery, sorted, &ctx, app_id)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -301,6 +302,7 @@ fn apply_in_priority_order<M: MlsService>(
     group: &mut Group,
     mls: &M,
     steward: &dyn StewardListPlugin,
+    in_recovery: bool,
     sorted: Vec<BufferedCommitCandidate>,
     ctx: &RoundContext,
     app_id: &[u8],
@@ -332,6 +334,7 @@ fn apply_in_priority_order<M: MlsService>(
                 group,
                 mls,
                 steward,
+                in_recovery,
                 chosen,
                 &ctx.mls_actions,
                 ctx.current_epoch,
@@ -509,6 +512,7 @@ fn apply_incoming_candidate<M: MlsService>(
     group: &mut Group,
     mls: &M,
     steward: &dyn StewardListPlugin,
+    in_recovery: bool,
     chosen: BufferedCommitCandidate,
     expected_actions: &[MlsProposalOutput],
     current_epoch: u64,
@@ -542,7 +546,7 @@ fn apply_incoming_candidate<M: MlsService>(
 
     // Commit sender must be on the steward list (RFC §"Commit validation service").
     if let Some(violation) =
-        check_commit_sender_authorized(group, steward, &commit_sender, current_epoch)
+        check_commit_sender_authorized(group, steward, in_recovery, &commit_sender, current_epoch)
     {
         mls.discard_staged_commit()?;
         return Ok(CandidateOutcome::Drop(
@@ -724,10 +728,11 @@ fn expected_action_for_request(req: &GroupUpdateRequest) -> Option<MlsProposalOu
 fn check_commit_sender_authorized(
     group: &Group,
     steward: &dyn StewardListPlugin,
+    in_recovery: bool,
     commit_sender: &[u8],
     epoch: u64,
 ) -> Option<ViolationEvidence> {
-    if group.is_in_recovery_mode() {
+    if in_recovery {
         return None;
     }
     steward.current_list()?;
