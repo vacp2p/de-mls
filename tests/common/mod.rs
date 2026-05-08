@@ -216,7 +216,7 @@ pub fn build_commit_candidate(
                 }
                 updates.push(MlsCommitInput::Remove(rm.identity.clone()));
             }
-            _ => return Err(CoreError::InvalidGroupUpdateRequest),
+            _ => return Err(CoreError::InvalidConversationUpdateRequest),
         }
     }
 

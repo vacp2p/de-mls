@@ -6,17 +6,19 @@
 //! receive loop ([`crate::app::User::process_inbound_packet`]) and a
 //! periodic poll ([`crate::app::User::check_member_freeze`],
 //! [`crate::app::User::poll_freeze_status`]).
-//! [`crate::core::ConversationStateMachine`] holds the per-group state enum
-//! (`PendingJoin → Working → Freezing → Selection → Reelection`) and
-//! [`crate::app::PhaseTimer`] holds the wall-clock anchor;
+//!
+//! [`crate::core::ConversationStateMachine`] owns the per-conversation state
+//! enum (`PendingJoin → Working → Freezing → Selection → Reelection`);
+//! [`crate::app::PhaseTimer`] owns the wall-clock anchor;
 //! [`crate::app::SessionRunner`] composes a [`crate::core::ConversationHandle`]
-//! with the timer through coordinator methods.
+//! with that timer through coordinator methods that update both atomically.
 //! State transitions return the new [`crate::core::ConversationState`]; the
 //! orchestrator dispatches it via
 //! [`crate::core::ConversationEventHandler::on_phase_change`].
 //!
-//! Use directly for epoch-based steward chat; build a custom app layer if you
-//! need a different consensus model, state machine, or epoch timing.
+//! Use this layer directly for epoch-based steward chat; write a custom app
+//! layer if you need a different consensus model, state machine, or epoch
+//! timing.
 
 mod consensus_bridge;
 mod display;
@@ -37,11 +39,12 @@ pub use consensus_bridge::{
     submit_self_leave_proposal,
 };
 pub use display::{
-    MemberRole, MessageType, format_group_request, format_group_request_target, message_types,
+    MemberRole, MessageType, format_conversation_request, format_conversation_request_target,
+    message_types,
 };
 pub use error::UserError;
 pub use orchestrator::{
-    ConversationPlugins, DefaultGroupPlugins, DefaultMlsService, DefaultPeerScoring,
+    ConversationPlugins, DefaultConversationPlugins, DefaultMlsService, DefaultPeerScoring,
     DefaultStewardList, User,
 };
 pub use peer_scoring_backends::{FixedScoringProvider, InMemoryPeerScoreStorage};

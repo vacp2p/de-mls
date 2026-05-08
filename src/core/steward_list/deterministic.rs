@@ -5,7 +5,6 @@ use super::list::{StewardList, StewardListConfig};
 use super::plugin::{DEFAULT_MAX_RETRIES, ElectionDecision, StewardListEvent, StewardListPlugin};
 use crate::core::error::CoreError;
 
-/// One instance per group.
 #[derive(Debug)]
 pub struct DeterministicStewardList {
     list: Option<StewardList>,

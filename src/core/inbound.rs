@@ -46,14 +46,14 @@ fn authorize_fast_path_proposal(proposal: &Proposal, mls_sender: &[u8]) -> bool 
 /// Process an inbound packet on the app subtopic and decide what action is
 /// needed. Welcome-subtopic packets are handled at the app layer.
 pub fn process_inbound<M: MlsService>(
-    group: &mut Conversation,
+    conversation: &mut Conversation,
     mls: &M,
     payload: &[u8],
 ) -> Result<ProcessResult, CoreError> {
     // 1. Try plaintext CommitCandidate (sent as plaintext AppMessage)
     if let Ok(app_message) = AppMessage::decode(payload) {
         if let Some(app_message::Payload::CommitCandidate(candidate)) = app_message.payload {
-            return process_commit_candidate(group, mls, candidate);
+            return process_commit_candidate(conversation, mls, candidate);
         }
     }
 
@@ -69,7 +69,7 @@ pub fn process_inbound<M: MlsService>(
                 && !authorize_fast_path_proposal(proposal, &sender)
             {
                 warn!(
-                    group = group.name(),
+                    conversation = conversation.name(),
                     proposal_id = proposal.proposal_id,
                     sender = %ShortId(&sender),
                     owner = %ShortId(&proposal.proposal_owner),
@@ -77,13 +77,13 @@ pub fn process_inbound<M: MlsService>(
                 );
                 return Ok(ProcessResult::Noop);
             }
-            // Drop BanRequests whose target isn't in the group — saves a
+            // Drop BanRequests whose target isn't in the conversation — saves a
             // useless consensus round.
             if let Some(app_message::Payload::BanRequest(ban)) = &app_msg.payload {
                 let target = parse_wallet_to_bytes(&ban.user_to_ban)?;
                 if !mls.is_member(&target) {
                     info!(
-                        group = group.name(),
+                        conversation = conversation.name(),
                         target = %ShortId(&target),
                         "ban request skipped: target not a member"
                     );
@@ -95,14 +95,14 @@ pub fn process_inbound<M: MlsService>(
         DecryptResult::Removed(_) => Ok(ProcessResult::LeaveConversation),
         DecryptResult::Ignored => {
             tracing::debug!(
-                group = group.name(),
-                "app message ignored (wrong epoch/group)"
+                conversation = conversation.name(),
+                "app message ignored (wrong epoch/conversation)"
             );
             Ok(ProcessResult::Noop)
         }
         _ => {
             warn!(
-                group = group.name(),
+                conversation = conversation.name(),
                 "unexpected MLS message type on app subtopic"
             );
             Ok(ProcessResult::Noop)

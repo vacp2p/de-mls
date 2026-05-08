@@ -16,7 +16,7 @@ impl Gateway<WakuDeliveryService> {
         user_ref
             .write()
             .await
-            .create_conversation(&conversation_name, true)
+            .start_conversation(&conversation_name, true)
             .await?;
         core.topics.add_many(&conversation_name).await;
         tracing::info!(group = %conversation_name, "group ready, subtopics subscribed");
@@ -40,7 +40,7 @@ impl Gateway<WakuDeliveryService> {
         user_ref
             .write()
             .await
-            .create_conversation(&conversation_name, false)
+            .start_conversation(&conversation_name, false)
             .await?;
         core.topics.add_many(&conversation_name).await;
         user_ref
@@ -78,7 +78,7 @@ impl Gateway<WakuDeliveryService> {
             let joined = user_clone
                 .read()
                 .await
-                .get_group_state(&group_name_clone)
+                .get_conversation_state(&group_name_clone)
                 .await
                 .map(|s| s == de_mls::app::ConversationState::Working)
                 .unwrap_or(false);
@@ -237,7 +237,7 @@ impl Gateway<WakuDeliveryService> {
 
     pub async fn group_list(&self) -> Vec<String> {
         match self.user() {
-            Ok(user_ref) => user_ref.read().await.list_groups().await,
+            Ok(user_ref) => user_ref.read().await.list_conversations().await,
             Err(_) => Vec::new(),
         }
     }
@@ -247,7 +247,7 @@ impl Gateway<WakuDeliveryService> {
         let is_steward = user_ref
             .read()
             .await
-            .is_steward_for_group(&conversation_name)
+            .is_steward_for_conversation(&conversation_name)
             .await?;
         Ok(is_steward)
     }
@@ -257,7 +257,7 @@ impl Gateway<WakuDeliveryService> {
         let state = user_ref
             .read()
             .await
-            .get_group_state(&conversation_name)
+            .get_conversation_state(&conversation_name)
             .await?;
         Ok(state.to_string())
     }

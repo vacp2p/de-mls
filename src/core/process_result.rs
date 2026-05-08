@@ -30,13 +30,13 @@ pub enum ProcessResult {
     /// Consensus vote from a peer — forward to the consensus service.
     Vote(Vote),
 
-    /// We were removed from the group.
+    /// We were removed from the conversation.
     LeaveConversation,
 
     /// Steward received a membership change (invite KP / ban) — start a vote.
     MembershipChangeReceived(ConversationUpdateRequest),
 
-    /// Successfully joined via a welcome message; carries the group name.
+    /// Successfully joined via a welcome message; carries the conversation name.
     JoinedConversation(String),
 
     /// MLS state advanced (batch commit applied).
@@ -47,7 +47,7 @@ pub enum ProcessResult {
 
     /// Conversation-sync message from the steward (steward list, scores, timing,
     /// protocol flags). Meaningful only for joiners with no steward list yet.
-    GroupSyncReceived(ConversationSync),
+    ConversationSyncReceived(ConversationSync),
 
     /// Nothing to do (not for us, duplicate, or already handled).
     Noop,
@@ -126,7 +126,7 @@ impl ViolationEvidence {
     /// method — every ECP must carry the creator identity for peer scoring (RFC §"Peer Scoring").
     pub fn into_update_request(self) -> Result<ConversationUpdateRequest, CoreError> {
         if self.creator_member_id.is_empty() {
-            return Err(CoreError::InvalidGroupUpdateRequest);
+            return Err(CoreError::InvalidConversationUpdateRequest);
         }
         Ok(ConversationUpdateRequest {
             payload: Some(conversation_update_request::Payload::EmergencyCriteria(
@@ -227,7 +227,7 @@ impl TryFrom<AppMessage> for ProcessResult {
                 }),
             ),
             Some(app_message::Payload::ConversationSync(sync)) => {
-                Ok(ProcessResult::GroupSyncReceived(sync.clone()))
+                Ok(ProcessResult::ConversationSyncReceived(sync.clone()))
             }
             _ => Ok(ProcessResult::Noop),
         }

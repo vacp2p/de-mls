@@ -1,6 +1,6 @@
 //! # DE-MLS: Decentralized MLS Chat Protocol
 //!
-//! A library for building decentralized, end-to-end encrypted group chat applications
+//! A library for building decentralized, end-to-end encrypted chat applications
 //! using the MLS (Messaging Layer Security) protocol with consensus-based membership management.
 //!
 //! ## Architecture
@@ -29,18 +29,18 @@
 //! - **[`core`]** - Protocol implementation (message processing, consensus integration)
 //! - **[`mls_crypto`]** - MLS cryptographic operations (OpenMLS wrapper)
 //! - **[`ds`]** - Delivery service abstraction (Waku transport)
-//! - **[`app`]** - Reference application layer (multi-group management, state machine)
+//! - **[`app`]** - Reference application layer (multi-conversation management, state machine)
 //! - **[`protos`]** - Protobuf message definitions
 //!
 //! ## Getting Started
 //!
 //! Most developers should start with the [`core`] module documentation, which explains:
 //! - What traits you need to implement ([`core::ConversationEventHandler`])
-//! - Core operations (create group, join, send messages)
+//! - Core operations (start conversation, join, send messages)
 //! - The `ProcessResult` matching flow
 //!
 //! If you want a ready-to-use solution, see [`app::User`] which provides complete
-//! group management with state machine and epoch handling.
+//! conversation management with state machine and epoch handling.
 //!
 //! ## Quick Example
 //!
@@ -48,26 +48,26 @@
 //! use de_mls::core::{DefaultProvider, ConversationEventHandler, ProcessResult};
 //! use de_mls::app::User;
 //!
-//! // Create a user with an Ethereum private key. The convenience
-//! // constructor anchors all User generics, so type inference picks
-//! // up the right defaults — no annotation needed at the call site.
+//! // Build a user from an Ethereum private key. The convenience
+//! // constructor pins every `User` generic to the default provider
+//! // and plug-in bundle, so type inference works without annotation.
 //! let user = User::with_private_key(
 //!     "0xac0974...",   // Private key
 //!     consensus,       // Consensus service
 //!     event_handler,   // Your ConversationEventHandler implementation
 //! )?;
 //!
-//! // Create a group (as steward)
-//! user.create_conversation("my-group", true).await?;
+//! // Start a conversation (as steward).
+//! user.start_conversation("de-mls-test", true).await?;
 //!
-//! // Send a message
-//! user.send_app_message("my-group", b"Hello, world!".to_vec()).await?;
+//! // Send a message.
+//! user.send_app_message("de-mls-test", b"Hello, world!".to_vec()).await?;
 //! ```
 
-/// Protocol implementation: message processing, consensus, and group operations.
+/// Protocol implementation.
 pub mod core;
 
-/// Reference application layer: multi-group management and state machine.
+/// Reference application layer.
 pub mod app;
 
 /// Delivery service: transport-agnostic messaging.

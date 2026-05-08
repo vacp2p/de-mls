@@ -1,15 +1,15 @@
-//! Pluggable MLS backend trait, scoped per group.
+//! Pluggable MLS backend trait, scoped per conversation.
 //!
 //! [`MlsService`] is the swap point for MLS implementations. The default
 //! impl is [`OpenMlsService`](super::OpenMlsService). One service instance
-//! corresponds to one MLS group; the user's MLS credentials and group id
+//! corresponds to one MLS group; the user's MLS credentials and conversation id
 //! are set at construction and every method operates on that implicit
-//! group.
+//! conversation.
 //!
 //! Conversation construction is intentionally *not* on the trait — concrete impls
 //! expose their own constructors (e.g. `OpenMlsService::new_as_creator` /
 //! `new_from_welcome`), and key-package generation is also off the trait
-//! because a joiner needs to publish a key package before any group exists.
+//! because a joiner needs to publish a key package before any conversation exists.
 //!
 //! The trait surface uses only opaque boundary types: no `openmls::*`
 //! types appear here, so swapping in a different MLS engine is purely a
@@ -36,9 +36,9 @@ pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_
 /// multiple failed cycles. Per-node config; not synced via `ConversationSync`.
 pub const DEFAULT_COMMIT_BATCH_MAX: usize = 50;
 
-/// Per-group MLS backend. Each instance corresponds to one MLS group.
+/// Per-conversation MLS backend. Each instance corresponds to one MLS group.
 pub trait MlsService: Send + Sync + 'static {
-    /// The group id this service is scoped to.
+    /// The conversation id this service is scoped to.
     fn conversation_id(&self) -> &str;
 
     /// Maximum number of MLS proposals the steward will pack into one
@@ -50,13 +50,13 @@ pub trait MlsService: Send + Sync + 'static {
 
     // ── Conversation lifecycle ──
 
-    /// Tear down all local MLS state for this group. Idempotent so
+    /// Tear down all local MLS state for this conversation. Idempotent so
     /// repeated leave / cleanup is safe.
     fn delete(&self) -> Result<(), MlsError>;
 
     // ── Membership / state queries ──
 
-    /// Current group members as serialized credential bytes (one entry
+    /// Current conversation members as serialized credential bytes (one entry
     /// per leaf, in MLS leaf order).
     fn members(&self) -> Result<Vec<Vec<u8>>, MlsError>;
 
@@ -107,7 +107,7 @@ pub trait MlsService: Send + Sync + 'static {
     /// to roll back proposals + staged commit together.
     ///
     /// Returns [`StagedCandidateResult::Aborted`] for benign rejections
-    /// (stale epoch, wrong group id, wire-shape mismatch). The caller
+    /// (stale epoch, wrong conversation id, wire-shape mismatch). The caller
     /// must still call `discard_staged_commit` to clean up any partial
     /// state before trying the next candidate.
     fn stage_remote_commit(
@@ -127,7 +127,7 @@ pub trait MlsService: Send + Sync + 'static {
 
     // ── Application messages ──
 
-    /// Encrypt an application message for the group, returning the raw
+    /// Encrypt an application message for the conversation, returning the raw
     /// MLS wire bytes.
     fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, MlsError>;
 

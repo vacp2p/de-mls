@@ -22,7 +22,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
     User<P, GP, H>
 {
     /// Entry point from the consensus service: decode the proposal, apply the
-    /// result to the group, and dispatch to the correct follow-up handler
+    /// result to the conversation, and dispatch to the correct follow-up handler
     /// (election-accepted / election-rejected / emergency-scored).
     pub async fn apply_consensus_outcome(
         &mut self,
@@ -45,20 +45,23 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         // so we don't re-apply state or double-fire UI events.
         let already_applied = self
             .with_entry(conversation_name, |entry| {
-                entry.handle.group.is_consensus_outcome_applied(proposal_id)
+                entry
+                    .handle
+                    .conversation
+                    .is_consensus_outcome_applied(proposal_id)
             })
             .await
             .unwrap_or(false);
         if already_applied {
             tracing::debug!(
-                group = conversation_name,
+                conversation = conversation_name,
                 proposal_id,
                 "duplicate consensus outcome dropped"
             );
             return Ok(());
         }
 
-        // Fetch payload from consensus service (no group lock held).
+        // Fetch payload from consensus service.
         let scope = P::Scope::from(conversation_name.to_string());
         let proposal = self
             .consensus_service
@@ -76,14 +79,19 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         let consensus_apply = {
             let mut entry = entry_arc.write().await;
             info!(
-                group = conversation_name,
+                conversation = conversation_name,
                 proposal_id, approved, "consensus reached"
             );
             entry
                 .handle
-                .group
+                .conversation
                 .mark_consensus_outcome_applied(proposal_id);
-            apply_consensus_result(&mut entry.handle.group, proposal_id, approved, &payload)?
+            apply_consensus_result(
+                &mut entry.handle.conversation,
+                proposal_id,
+                approved,
+                &payload,
+            )?
         };
 
         if let Some(election) = consensus_apply.election {
@@ -112,14 +120,10 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             if ProposalKind::of(&req).is_steward_election() {
                 self.handle_election_rejected(conversation_name).await;
             } else if let Some(target) = target_identity_of(&req) {
-                // A rejected membership change is the group's decision, not a
-                // transient liveness failure: the request author must resend
-                // if circumstances change. Drop the buffered entry so the
-                // next epoch steward doesn't auto-repromote it.
                 let target = target.to_vec();
                 if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
                     let mut entry = entry_arc.write().await;
-                    entry.handle.group.remove_pending_update(&target);
+                    entry.handle.conversation.remove_pending_update(&target);
                 }
             }
         }
@@ -161,7 +165,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             .await
         {
             info!(
-                group = conversation_name,
+                conversation = conversation_name,
                 error = %e,
                 "post-removal steward-list refresh deferred"
             );
@@ -196,7 +200,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         };
         if !is_valid {
             info!(
-                group = conversation_name,
+                conversation = conversation_name,
                 "steward election rejected: invalid list"
             );
             return Ok(());
@@ -224,7 +228,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             self.handler.on_phase_change(conversation_name, event).await;
         }
         info!(
-            group = conversation_name,
+            conversation = conversation_name,
             epoch = election.election_epoch,
             stewards = election.proposed_stewards.len(),
             retry_round = election.retry_round,
@@ -241,8 +245,6 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             Some(entry_arc) => {
                 let mut entry = entry_arc.write().await;
                 let _events = entry.handle.steward.bump_retry();
-                // Read the ceiling from the plug-in, not the user-level default:
-                // joiners honor the group's configured policy via `ConversationSync`.
                 (
                     entry.handle.steward.retry_round(),
                     entry.handle.steward.max_retries(),
@@ -252,11 +254,11 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         };
         if round > max {
             info!(
-                group = conversation_name,
+                conversation = conversation_name,
                 round, max, "election retries exhausted; escalating to Layer 3"
             );
             if let Err(e) = self.try_initiate_deadlock_ecp(conversation_name).await {
-                error!(group = conversation_name, error = %e, "Deadlock ECP filing failed");
+                error!(conversation = conversation_name, error = %e, "Deadlock ECP filing failed");
                 self.handler
                     .on_error(conversation_name, "Reelection stuck", &e.to_string())
                     .await;
@@ -264,14 +266,14 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             return;
         }
         info!(
-            group = conversation_name,
+            conversation = conversation_name,
             round, max, "steward election rejected, retrying"
         );
         if let Err(e) = self
             .try_initiate_steward_election(conversation_name, true, None)
             .await
         {
-            info!(group = conversation_name, error = %e, "election retry deferred");
+            info!(conversation = conversation_name, error = %e, "election retry deferred");
         }
     }
 
@@ -300,7 +302,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             {
                 entry
                     .handle
-                    .group
+                    .conversation
                     .resolve_pending_removal(&ev.target_member_id);
             }
         }
@@ -308,7 +310,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         let resumed_event = match self.lookup_entry(conversation_name).await {
             Some(entry_arc) => {
                 let mut entry = entry_arc.write().await;
-                entry.handle.group.resolve_emergency(proposal_id);
+                entry.handle.conversation.resolve_emergency(proposal_id);
                 if entry.handle.current_state() == ConversationState::Reelection {
                     Some(entry.start_working())
                 } else {
@@ -325,7 +327,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             .check_and_initiate_score_removals(conversation_name)
             .await
         {
-            error!(group = conversation_name, error = %e, "score-removal check failed");
+            error!(conversation = conversation_name, error = %e, "score-removal check failed");
         }
         Ok(())
     }

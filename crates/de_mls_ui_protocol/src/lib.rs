@@ -4,7 +4,7 @@ pub mod v1 {
     use serde::{Deserialize, Serialize};
 
     use de_mls::{
-        app::{MessageType, format_group_request_target},
+        app::{MessageType, format_conversation_request_target},
         protos::de_mls::messages::v1::{
             BanRequest, ConversationMessage, ProposalAdded, VotePayload,
         },
@@ -154,7 +154,7 @@ pub mod v1 {
     impl From<ProposalAdded> for AppEvent {
         fn from(proposal_added: ProposalAdded) -> Self {
             let request = proposal_added.request.unwrap();
-            let address = format_group_request_target(&request);
+            let address = format_conversation_request_target(&request);
             AppEvent::ProposalAdded {
                 conversation_id: proposal_added.conversation_id.clone(),
                 action: request.message_type().to_string(),

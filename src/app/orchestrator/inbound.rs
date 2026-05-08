@@ -45,8 +45,12 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                     .await
                     .ok_or(UserError::ConversationNotFound)?;
                 let entry = entry_arc.read().await;
-                forward_incoming_vote::<P>(&entry.handle.group, vote, &*self.consensus_service)
-                    .await?;
+                forward_incoming_vote::<P>(
+                    &entry.handle.conversation,
+                    vote,
+                    &*self.consensus_service,
+                )
+                .await?;
                 Ok(())
             }
             ProcessResult::MembershipChangeReceived(request) => {
@@ -61,8 +65,8 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             ProcessResult::CommitCandidateReceived => {
                 self.on_commit_candidate_received(conversation_name).await
             }
-            ProcessResult::GroupSyncReceived(sync) => {
-                self.on_group_sync(conversation_name, sync).await
+            ProcessResult::ConversationSyncReceived(sync) => {
+                self.on_conversation_sync(conversation_name, sync).await
             }
             ProcessResult::Noop => Ok(()),
         }
@@ -95,13 +99,16 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             };
             match &req.payload {
                 Some(conversation_update_request::Payload::EmergencyCriteria(_)) => {
-                    entry.handle.group.observe_emergency(proposal.proposal_id);
+                    entry
+                        .handle
+                        .conversation
+                        .observe_emergency(proposal.proposal_id);
                 }
                 Some(conversation_update_request::Payload::InviteMember(_))
                 | Some(conversation_update_request::Payload::RemoveMember(_)) => {
                     entry
                         .handle
-                        .group
+                        .conversation
                         .buffer_pending_update(req.clone(), current_epoch);
                 }
                 _ => {}
@@ -149,7 +156,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
 
         let msg: AppMessage = ConversationMessage {
             message: format!(
-                "User {} joined the group",
+                "User {} joined the conversation",
                 self.identity().identity_display()
             )
             .into_bytes(),
@@ -249,7 +256,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             .await
         {
             info!(
-                group = conversation_name,
+                conversation = conversation_name,
                 error = %e,
                 "post-recovery election deferred"
             );
@@ -257,12 +264,8 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
     }
 
     async fn on_leave_conversation(&self, conversation_name: &str) -> Result<(), UserError> {
-        let entry = self.groups.write().await.remove(conversation_name);
+        let entry = self.conversations.write().await.remove(conversation_name);
         if let Some(entry) = entry {
-            // Drop MLS state for the departing group: take the service out
-            // of the Conversation so its `delete()` runs before the entry drops.
-            // Per-group scoring is dropped when the entry leaves the
-            // registry below.
             if let Some(mls) = entry.write().await.handle.take_mls() {
                 let _ = mls.delete();
             }
@@ -289,7 +292,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
 
             let event = entry.start_freezing();
             let epoch = entry.handle.expect_mls()?.current_epoch()?;
-            entry.handle.group.ensure_freeze_round(epoch);
+            entry.handle.conversation.ensure_freeze_round(epoch);
 
             let self_identity = self.identity().identity_bytes().to_vec();
             let outbound = if entry.handle.steward.is_steward(&self_identity) {
@@ -300,7 +303,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(
-                            group = conversation_name,
+                            conversation = conversation_name,
                             error = %e,
                             "own commit candidate build failed"
                         );
@@ -324,7 +327,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
     /// list. Validates the proposed list against the members it carries
     /// (not the full MLS set — the list may have been generated before we
     /// existed), then applies list + protocol flags + timing + peer scores.
-    async fn on_group_sync(
+    async fn on_conversation_sync(
         &self,
         conversation_name: &str,
         sync: ConversationSync,
@@ -342,7 +345,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             (entry.handle.conversation_members()?, mls.current_epoch()?)
         };
         let local_default_peer_score = self.default_conversation_config.default_peer_score;
-        if !validate_group_sync(
+        if !validate_conversation_sync(
             conversation_name,
             &sync,
             current_epoch,
@@ -353,21 +356,21 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         }
 
         let sn = sync.steward_members.len();
-        self.apply_group_sync_to_entry(conversation_name, &sync)
+        self.apply_conversation_sync_to_entry(conversation_name, &sync)
             .await?;
 
         info!(
-            group = conversation_name,
+            conversation = conversation_name,
             election_epoch = sync.election_epoch,
             stewards = sn,
             scores = sync.peer_scores.len(),
             timing = sync.timing.is_some(),
-            "group sync applied"
+            "conversation sync applied"
         );
         Ok(())
     }
 
-    async fn apply_group_sync_to_entry(
+    async fn apply_conversation_sync_to_entry(
         &self,
         conversation_name: &str,
         sync: &ConversationSync,
@@ -449,7 +452,6 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 let result = {
                     let mut entry = entry_arc.write().await;
                     if entry.handle.mls().is_none() {
-                        // App messages on a group we haven't joined yet → ignore.
                         return Ok(());
                     }
                     entry.handle.process_inbound(&packet.payload)?
@@ -465,10 +467,10 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
 
     /// Welcome-subtopic dispatch. Two payload kinds:
     /// - `UserKeyPackage` — a peer wants to join. If we already have an MLS
-    ///   service for this group and the candidate isn't a member, surface
+    ///   service for this conversation and the candidate isn't a member, surface
     ///   it as a membership-change request.
     /// - `InvitationToJoin` — try the welcome factory. If it returns
-    ///   `Some(svc)`, attach to the entry and fire the join flow.
+    ///   `Some(svc)`, attach to the runner and fire the join flow.
     async fn process_welcome_packet(
         &self,
         conversation_name: &str,
@@ -494,7 +496,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 };
                 if already_member {
                     info!(
-                        group = conversation_name,
+                        conversation = conversation_name,
                         identity = %ShortId(&identity),
                         "key package skipped: already a member"
                     );
@@ -502,7 +504,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 }
 
                 info!(
-                    group = conversation_name,
+                    conversation = conversation_name,
                     identity = %ShortId(&identity),
                     "key package received"
                 );
@@ -544,7 +546,10 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                     let mut entry = entry_arc.write().await;
                     entry.handle.attach_mls(svc);
                 }
-                info!(group = conversation_name, "joined group via welcome");
+                info!(
+                    conversation = conversation_name,
+                    "joined conversation via welcome"
+                );
                 self.dispatch_inbound_result(
                     conversation_name,
                     ProcessResult::JoinedConversation(joined_name),
@@ -567,7 +572,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
 /// for new members (not synced; per-node). Rejecting when it sits at
 /// or below the synced threshold prevents a misconfiguration where every
 /// new member added by this joiner starts already eligible for removal.
-fn validate_group_sync(
+fn validate_conversation_sync(
     conversation_name: &str,
     sync: &ConversationSync,
     current_epoch: u64,
@@ -576,10 +581,10 @@ fn validate_group_sync(
 ) -> Result<bool, UserError> {
     if sync.election_epoch > current_epoch {
         info!(
-            group = conversation_name,
+            conversation = conversation_name,
             election_epoch = sync.election_epoch,
             current_epoch,
-            "group sync rejected: election_epoch > current_epoch"
+            "conversation sync rejected: election_epoch > current_epoch"
         );
         return Ok(false);
     }
@@ -599,10 +604,10 @@ fn validate_group_sync(
     )?;
     if !(any_present && ordering_valid) {
         info!(
-            group = conversation_name,
+            conversation = conversation_name,
             any_present,
             ordering = ordering_valid,
-            "group sync rejected: invalid"
+            "conversation sync rejected: invalid"
         );
         return Ok(false);
     }
@@ -611,19 +616,19 @@ fn validate_group_sync(
         && let Some(zero_field) = first_zero_timing_field(timing)
     {
         info!(
-            group = conversation_name,
+            conversation = conversation_name,
             field = zero_field,
-            "group sync rejected: zero-valued timing field"
+            "conversation sync rejected: zero-valued timing field"
         );
         return Ok(false);
     }
 
     if local_default_peer_score <= sync.threshold_peer_score {
         info!(
-            group = conversation_name,
+            conversation = conversation_name,
             local_default_peer_score,
             threshold_peer_score = sync.threshold_peer_score,
-            "group sync rejected: default_peer_score at or below threshold would mark new members removable on add"
+            "conversation sync rejected: default_peer_score at or below threshold would mark new members removable on add"
         );
         return Ok(false);
     }
@@ -692,7 +697,7 @@ mod tests {
     #[test]
     fn validate_accepts_default_above_threshold() {
         let sync = valid_sync_with(0);
-        assert!(validate_group_sync("g", &sync, 0, &[b"alice".to_vec()], 100).unwrap());
+        assert!(validate_conversation_sync("g", &sync, 0, &[b"alice".to_vec()], 100).unwrap());
     }
 
     /// Joiner's `default_peer_score` equal to the threshold — new members
@@ -701,7 +706,7 @@ mod tests {
     #[test]
     fn validate_rejects_default_equal_to_threshold() {
         let sync = valid_sync_with(50);
-        assert!(!validate_group_sync("g", &sync, 0, &[b"alice".to_vec()], 50).unwrap());
+        assert!(!validate_conversation_sync("g", &sync, 0, &[b"alice".to_vec()], 50).unwrap());
     }
 
     /// Joiner's `default_peer_score` below the threshold — every new
@@ -709,7 +714,7 @@ mod tests {
     #[test]
     fn validate_rejects_default_below_threshold() {
         let sync = valid_sync_with(100);
-        assert!(!validate_group_sync("g", &sync, 0, &[b"alice".to_vec()], 50).unwrap());
+        assert!(!validate_conversation_sync("g", &sync, 0, &[b"alice".to_vec()], 50).unwrap());
     }
 
     #[test]

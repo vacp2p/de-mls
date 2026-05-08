@@ -1,4 +1,4 @@
-//! Read-only queries over a group's state (UI and diagnostics).
+//! Read-only queries over a conversation's state (UI and diagnostics).
 
 use crate::{
     app::{ConversationPlugins, ConversationState, MemberRole, User, UserError},
@@ -12,7 +12,7 @@ use crate::mls_crypto::MlsService;
 impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 'static>
     User<P, GP, H>
 {
-    pub async fn get_group_state(
+    pub async fn get_conversation_state(
         &self,
         conversation_name: &str,
     ) -> Result<ConversationState, UserError> {
@@ -21,8 +21,9 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             .ok_or(UserError::ConversationNotFound)
     }
 
-    /// Current MLS epoch + reelection retry round. `(0, 0)` if the group has
-    /// no MLS state yet (pending join). Intended for UI status display.
+    /// Current MLS epoch + reelection retry round. `(0, 0)` when the
+    /// conversation has no MLS state yet (pending join). Intended for UI
+    /// status display.
     pub async fn get_epoch_and_retry(
         &self,
         conversation_name: &str,
@@ -39,8 +40,8 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         Ok((epoch, entry.handle.steward.retry_round()))
     }
 
-    pub async fn list_groups(&self) -> Vec<String> {
-        self.groups.read().await.keys().cloned().collect()
+    pub async fn list_conversations(&self) -> Vec<String> {
+        self.conversations.read().await.keys().cloned().collect()
     }
 
     /// Count of buffered pending membership updates. Used by tests and the UI
@@ -50,9 +51,11 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         &self,
         conversation_name: &str,
     ) -> Result<usize, UserError> {
-        self.with_entry(conversation_name, |e| e.handle.group.pending_update_count())
-            .await
-            .ok_or(UserError::ConversationNotFound)
+        self.with_entry(conversation_name, |e| {
+            e.handle.conversation.pending_update_count()
+        })
+        .await
+        .ok_or(UserError::ConversationNotFound)
     }
 
     /// Freeze round progress: `(received, expected)`. Returns `(0, 0)` if not
@@ -62,7 +65,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         conversation_name: &str,
     ) -> Result<(usize, usize), UserError> {
         self.with_entry(conversation_name, |e| {
-            let received = e.handle.group.freeze_candidate_count();
+            let received = e.handle.conversation.freeze_candidate_count();
             let expected = e
                 .handle
                 .steward
@@ -75,7 +78,10 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         .ok_or(UserError::ConversationNotFound)
     }
 
-    pub async fn is_steward_for_group(&self, conversation_name: &str) -> Result<bool, UserError> {
+    pub async fn is_steward_for_conversation(
+        &self,
+        conversation_name: &str,
+    ) -> Result<bool, UserError> {
         let self_id = self.identity().identity_bytes().to_vec();
         self.with_entry(conversation_name, |e| e.handle.steward.is_steward(&self_id))
             .await
@@ -134,7 +140,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         let members = entry.handle.conversation_members()?;
         Ok(members
             .into_iter()
-            .filter(|id| entry.handle.group.is_pending_self_leave(id))
+            .filter(|id| entry.handle.conversation.is_pending_self_leave(id))
             .collect())
     }
 
@@ -153,7 +159,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         let epoch = mls.current_epoch()?;
         let members = entry.handle.conversation_members()?;
 
-        let eligible = entry.handle.group.steward_eligibility(&members);
+        let eligible = entry.handle.conversation.steward_eligibility(&members);
         let (live_epoch, live_backup) = entry.handle.steward.epoch_and_backup(epoch, &eligible);
         let live_epoch = live_epoch.map(|s| s.to_vec());
         let live_backup = live_backup.map(|s| s.to_vec());
@@ -190,7 +196,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
     ) -> Result<Vec<ConversationUpdateRequest>, UserError> {
         self.with_entry(conversation_name, |e| {
             e.handle
-                .group
+                .conversation
                 .approved_proposals()
                 .values()
                 .cloned()

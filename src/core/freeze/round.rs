@@ -72,36 +72,36 @@ pub fn compute_commit_hash(commit_message: &[u8]) -> Vec<u8> {
 /// proposals/commit, valid MLS wire kinds, non-empty `steward_identity`,
 /// not already committed. No MLS state is mutated here.
 pub fn process_commit_candidate<M: MlsService>(
-    group: &mut Conversation,
+    conversation: &mut Conversation,
     mls: &M,
     candidate_msg: CommitCandidate,
 ) -> Result<ProcessResult, CoreError> {
-    let conversation_name = group.name().to_owned();
+    let conversation_name = conversation.name().to_owned();
 
     // Auto-start a freeze round if we already have approved proposals —
     // otherwise the candidate would be silently dropped.
-    if group.freeze_round().is_none() {
-        if group.approved_proposals_count() == 0 {
-            tracing::debug!(group = %conversation_name, "candidate ignored: no approved proposals");
+    if conversation.freeze_round().is_none() {
+        if conversation.approved_proposals_count() == 0 {
+            tracing::debug!(conversation = %conversation_name, "candidate ignored: no approved proposals");
             return Ok(ProcessResult::Noop);
         }
         let epoch = mls.current_epoch()?;
-        group.ensure_freeze_round(epoch);
+        conversation.ensure_freeze_round(epoch);
     }
 
     let commit_hash = compute_commit_hash(&candidate_msg.commit_message);
-    if group.is_duplicate_commit_candidate(&commit_hash) {
-        tracing::debug!(group = %conversation_name, "candidate ignored: already committed");
+    if conversation.is_duplicate_commit_candidate(&commit_hash) {
+        tracing::debug!(conversation = %conversation_name, "candidate ignored: already committed");
         return Ok(ProcessResult::Noop);
     }
 
     if candidate_msg.mls_proposals.is_empty() || candidate_msg.commit_message.is_empty() {
-        tracing::debug!(group = %conversation_name, "candidate ignored: empty proposals or commit");
+        tracing::debug!(conversation = %conversation_name, "candidate ignored: empty proposals or commit");
         return Ok(ProcessResult::Noop);
     }
 
     if candidate_msg.steward_identity.is_empty() {
-        tracing::debug!(group = %conversation_name, "candidate ignored: empty steward_identity");
+        tracing::debug!(conversation = %conversation_name, "candidate ignored: empty steward_identity");
         return Ok(ProcessResult::Noop);
     }
 
@@ -119,7 +119,7 @@ pub fn process_commit_candidate<M: MlsService>(
     }
 
     let epoch = mls.current_epoch()?;
-    let buffered = group.add_freeze_candidate(
+    let buffered = conversation.add_freeze_candidate(
         BufferedCommitCandidate {
             candidate_msg,
             commit_hash,
@@ -133,9 +133,9 @@ pub fn process_commit_candidate<M: MlsService>(
     }
 
     info!(
-        group = %conversation_name,
+        conversation = %conversation_name,
         epoch,
-        total_candidates = group.freeze_candidate_count(),
+        total_candidates = conversation.freeze_candidate_count(),
         "remote candidate buffered"
     );
     Ok(ProcessResult::CommitCandidateReceived)
@@ -150,7 +150,7 @@ pub fn process_commit_candidate<M: MlsService>(
 /// 3. Apply in priority order, falling back on the next candidate when
 ///    MLS staging rejects the current one.
 pub fn finalize_freeze_round<M: MlsService>(
-    group: &mut Conversation,
+    conversation: &mut Conversation,
     mls: &M,
     steward: &dyn StewardListPlugin,
     in_recovery: bool,
@@ -158,9 +158,9 @@ pub fn finalize_freeze_round<M: MlsService>(
     app_id: &[u8],
 ) -> Result<FreezeFinalizeResult, CoreError> {
     let current_epoch = mls.current_epoch()?;
-    group.lock_freeze_round_selection(current_epoch);
+    conversation.lock_freeze_round_selection(current_epoch);
 
-    let Some(candidates) = group.take_round_candidates(current_epoch) else {
+    let Some(candidates) = conversation.take_round_candidates(current_epoch) else {
         // Drop any local pending commit so the next MLS encrypt
         // doesn't trip on "pending proposal exists".
         let _ = mls.discard_own_commit();
@@ -172,7 +172,7 @@ pub fn finalize_freeze_round<M: MlsService>(
         return Ok(FreezeFinalizeResult::default());
     }
 
-    let ctx = RoundContext::snapshot(group, mls, steward, current_epoch)?;
+    let ctx = RoundContext::snapshot(conversation, mls, steward, current_epoch)?;
     let sorted = rank_applicable_candidates(candidates, &ctx, allow_subset_candidates);
 
     if sorted.is_empty() {
@@ -180,7 +180,15 @@ pub fn finalize_freeze_round<M: MlsService>(
         return Ok(FreezeFinalizeResult::default());
     }
 
-    apply_in_priority_order(group, mls, steward, in_recovery, sorted, &ctx, app_id)
+    apply_in_priority_order(
+        conversation,
+        mls,
+        steward,
+        in_recovery,
+        sorted,
+        &ctx,
+        app_id,
+    )
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -208,16 +216,16 @@ pub(super) struct RoundContext {
 
 impl RoundContext {
     fn snapshot<M: MlsService>(
-        group: &Conversation,
+        conversation: &Conversation,
         mls: &M,
         steward: &dyn StewardListPlugin,
         current_epoch: u64,
     ) -> Result<Self, CoreError> {
-        let self_identity = group.self_identity().to_vec();
+        let self_identity = conversation.self_identity().to_vec();
 
         let mut mls_actions: Vec<MlsProposalOutput> = Vec::new();
         let mut self_remove_pending = false;
-        for req in group.approved_proposals().values() {
+        for req in conversation.approved_proposals().values() {
             if let Some(action) = expected_action_for_request(req) {
                 mls_actions.push(action);
             }
@@ -231,7 +239,7 @@ impl RoundContext {
         let mls_count = mls_actions.len();
 
         let members = mls.members()?;
-        let eligible = group.steward_eligibility(&members);
+        let eligible = conversation.steward_eligibility(&members);
         let live_epoch_steward_id = steward
             .epoch_steward(current_epoch, &eligible)
             .map(|s| s.to_vec());
@@ -354,7 +362,7 @@ mod tests {
     ) -> BufferedCommitCandidate {
         BufferedCommitCandidate {
             candidate_msg: CommitCandidate {
-                conversation_name: b"test-group".to_vec(),
+                conversation_name: b"test-conversation".to_vec(),
                 mls_proposals: vec![vec![0xFF; 10]; actions_count],
                 commit_message: commit_hash.clone(),
                 steward_identity,

@@ -48,7 +48,7 @@ type UserRef = Arc<
     tokio::sync::RwLock<
         User<
             DefaultProvider,
-            de_mls::app::DefaultGroupPlugins,
+            de_mls::app::DefaultConversationPlugins,
             GatewayEventHandler<WakuDeliveryService>,
         >,
     >,

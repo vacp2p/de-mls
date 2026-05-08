@@ -10,7 +10,7 @@ use crate::{
 
 // ─────────────────────────── Member Role ───────────────────────────
 
-/// A member's steward role at a given epoch.
+/// A member's steward-list role for a given epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemberRole {
     /// Epoch steward for this epoch.
@@ -46,7 +46,7 @@ pub mod message_types {
     pub const USER_VOTE: &str = "UserVote";
     pub const PROPOSAL_ADDED: &str = "ProposalAdded";
     pub const COMMIT_CANDIDATE: &str = "CommitCandidate";
-    pub const GROUP_SYNC: &str = "ConversationSync";
+    pub const CONVERSATION_SYNC: &str = "ConversationSync";
     pub const UNKNOWN: &str = "Unknown";
 }
 
@@ -66,7 +66,7 @@ impl MessageType for app_message::Payload {
             app_message::Payload::UserVote(_) => message_types::USER_VOTE,
             app_message::Payload::ProposalAdded(_) => message_types::PROPOSAL_ADDED,
             app_message::Payload::CommitCandidate(_) => message_types::COMMIT_CANDIDATE,
-            app_message::Payload::ConversationSync(_) => message_types::GROUP_SYNC,
+            app_message::Payload::ConversationSync(_) => message_types::CONVERSATION_SYNC,
         }
     }
 }
@@ -113,7 +113,7 @@ impl ViolationEvidence {
 /// Wallet address for membership / emergency-evidence targets, or
 /// `"epoch E | s1, s2, ..."` for elections (with `, retry R` appended
 /// when `R > 0`). `"unknown"` otherwise.
-pub fn format_group_request_target(request: &ConversationUpdateRequest) -> String {
+pub fn format_conversation_request_target(request: &ConversationUpdateRequest) -> String {
     match &request.payload {
         Some(conversation_update_request::Payload::InviteMember(im)) => {
             format_wallet_address(&im.identity)
@@ -144,9 +144,9 @@ pub fn format_group_request_target(request: &ConversationUpdateRequest) -> Strin
 }
 
 /// `(action, target)` pair suitable for UI rendering.
-pub fn format_group_request(request: &ConversationUpdateRequest) -> (String, String) {
+pub fn format_conversation_request(request: &ConversationUpdateRequest) -> (String, String) {
     (
         request.message_type().to_string(),
-        format_group_request_target(request),
+        format_conversation_request_target(request),
     )
 }

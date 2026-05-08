@@ -1,4 +1,4 @@
-//! Per-group timing + protocol configuration with sensible defaults.
+//! Per-conversation timing + protocol configuration with sensible defaults.
 
 use std::time::Duration;
 
@@ -38,13 +38,13 @@ pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
 
 pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
 
-/// Fallback [`StewardListConfig`] for a group created without explicit bounds —
-/// tiny groups with `sn ∈ [1, 2]`.
+/// Fallback [`StewardListConfig`] for a conversation created without explicit bounds —
+/// tiny conversations with `sn ∈ [1, 2]`.
 fn default_protocol_config() -> StewardListConfig {
     StewardListConfig::new(1, 2).expect("1..=2 is always a valid StewardListConfig range")
 }
 
-/// Per-group timing + embedded [`StewardListConfig`].
+/// Per-conversation timing + embedded [`StewardListConfig`].
 #[derive(Debug, Clone)]
 pub struct ConversationConfig {
     /// RFC §Inactivity Timer #1: how long the epoch steward has to commit

@@ -1,9 +1,9 @@
 //! Classification of [`ConversationUpdateRequest`]s by protocol role.
 //!
-//! `ProposalKind` replaces seven hand-rolled `matches!(EmergencyCriteria(_)
-//! | StewardElection(_))` sites with one canonical classifier. The ordinal
-//! order encodes RFC partial-freeze priority (Commit < StewardElection <
-//! Emergency), used by [`Conversation::partial_freeze_blocks`](crate::core::Conversation::partial_freeze_blocks).
+//! `ProposalKind` is the canonical classifier for membership-vs-governance
+//! proposals. The ordinal order encodes RFC partial-freeze priority
+//! (Commit < StewardElection < Emergency), used by
+//! [`Conversation::partial_freeze_blocks`](crate::core::Conversation::partial_freeze_blocks).
 
 use crate::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, conversation_update_request::Payload,
@@ -103,8 +103,8 @@ mod tests {
     }
 
     /// RFC partial-freeze priority: Emergency > StewardElection > Commit.
-    /// Preserved so that [`Conversation::partial_freeze_blocks`] and any future
-    /// cross-kind priority check keeps a meaningful ordering.
+    /// [`Conversation::partial_freeze_blocks`] and any future cross-kind
+    /// priority check rely on this ordering.
     #[test]
     fn priority_ordering() {
         assert!(ProposalKind::Emergency > ProposalKind::StewardElection);

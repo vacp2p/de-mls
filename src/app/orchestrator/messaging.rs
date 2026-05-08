@@ -17,9 +17,6 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
     /// Broadcast our key-package on the welcome subtopic so the steward
     /// can invite us.
     pub async fn send_kp_message(&self, conversation_name: &str) -> Result<(), UserError> {
-        // Existence-check on the group; the packet itself is built from
-        // `conversation_name` and a freshly-generated KP, neither of which need
-        // the entry guard.
         let _ = self
             .lookup_entry(conversation_name)
             .await
@@ -52,7 +49,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                     | ConversationState::Freezing
                     | ConversationState::Selection
             ) {
-                return Err(UserError::GroupBlocked(state.to_string()));
+                return Err(UserError::ConversationBlocked(state.to_string()));
             }
 
             let app_msg: AppMessage = ConversationMessage {
@@ -88,7 +85,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             let entry = entry_arc.read().await;
             let state = entry.handle.current_state();
             if state != ConversationState::Working {
-                return Err(UserError::GroupBlocked(state.to_string()));
+                return Err(UserError::ConversationBlocked(state.to_string()));
             }
         }
 

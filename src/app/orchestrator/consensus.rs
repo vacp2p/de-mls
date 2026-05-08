@@ -45,12 +45,8 @@ use crate::mls_crypto::MlsService;
 impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 'static>
     User<P, GP, H>
 {
-    /// Check that the group state allows creating a proposal of this kind and
-    /// return the expected voter count.
-    ///
-    /// `Reelection` allows only ECP + StewardElection (the recovery itself),
-    /// further filtered by `partial_freeze_blocks`. `Freezing` / `Selection`
-    /// block everything. Other states defer to `partial_freeze_blocks`.
+    /// Check that the conversation state allows creating a proposal of this
+    /// kind and return the expected voter count.
     async fn check_proposal_allowed(
         &self,
         conversation_name: &str,
@@ -66,17 +62,17 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         match state {
             ConversationState::Reelection => {
                 if !kind.is_emergency() && !kind.is_steward_election() {
-                    return Err(UserError::GroupBlocked(state.to_string()));
+                    return Err(UserError::ConversationBlocked(state.to_string()));
                 }
-                if entry.handle.group.partial_freeze_blocks(kind) {
+                if entry.handle.conversation.partial_freeze_blocks(kind) {
                     return Err(UserError::PartialFreeze);
                 }
             }
             ConversationState::Freezing | ConversationState::Selection => {
-                return Err(UserError::GroupBlocked(state.to_string()));
+                return Err(UserError::ConversationBlocked(state.to_string()));
             }
             _ => {
-                if entry.handle.group.partial_freeze_blocks(kind) {
+                if entry.handle.conversation.partial_freeze_blocks(kind) {
                     return Err(UserError::PartialFreeze);
                 }
             }
@@ -87,7 +83,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         Ok(members.len() as u32)
     }
 
-    /// Start a consensus vote for a group update request.
+    /// Start a consensus vote for a conversation update request.
     ///
     /// `creator_vote` captures the creator's intent:
     /// - `Some(v)` — bundle `v` into the outbound proposal at submit time.
@@ -100,9 +96,6 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
     ///   at consensus timeout, same as for peer silence. Used for
     ///   steward auto-propose paths (election, incoming KP, buffered
     ///   update) where the creator still exercises judgement.
-    ///
-    /// Validates the group state synchronously, then spawns a task that
-    /// drives the proposal through its lifecycle.
     pub async fn initiate_proposal(
         &self,
         conversation_name: String,
@@ -153,7 +146,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         {
             Ok(pid) => pid,
             Err(err) => {
-                error!(group = %conversation_name, error = %err, "proposal submission failed");
+                error!(conversation = %conversation_name, error = %err, "proposal submission failed");
                 self.handler
                     .on_error(&conversation_name, "Start voting", &err.to_string())
                     .await;
@@ -224,10 +217,10 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             let mut entry = entry_arc.write().await;
             entry
                 .handle
-                .group
+                .conversation
                 .store_voting_proposal(proposal_id, request.clone());
             if kind.is_emergency() {
-                entry.handle.group.observe_emergency(proposal_id);
+                entry.handle.conversation.observe_emergency(proposal_id);
             }
         }
 
@@ -244,7 +237,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                     .cast_vote_and_get_proposal(&scope, proposal_id, vote, self.eth_signer.clone())
                     .await?;
                 info!(
-                    group = conversation_name,
+                    conversation = conversation_name,
                     proposal_id,
                     choice = if vote { "YES" } else { "NO" },
                     actor = "owner",
@@ -337,19 +330,22 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             Err(ConsensusError::SessionNotFound) | Err(ConsensusError::SessionNotActive) => {
                 let resolved_locally = self
                     .with_entry(conversation_name, |entry| {
-                        entry.handle.group.is_consensus_outcome_applied(proposal_id)
+                        entry
+                            .handle
+                            .conversation
+                            .is_consensus_outcome_applied(proposal_id)
                     })
                     .await
                     .unwrap_or(false);
                 if resolved_locally {
                     tracing::debug!(
-                        group = conversation_name,
+                        conversation = conversation_name,
                         proposal_id,
                         "timeout fired for already-resolved proposal: ignoring"
                     );
                 } else {
                     tracing::warn!(
-                        group = conversation_name,
+                        conversation = conversation_name,
                         proposal_id,
                         "timeout fired for unknown proposal id: no session and not in resolved cache"
                     );
@@ -364,18 +360,12 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
     /// Handle an incoming membership update (KP-derived `InviteMember` or
     /// `RemoveMember`): buffer it so every member has a durable record, then
     /// promote it to a voting proposal if this node is the current epoch
-    /// steward and the group accepts new proposals.
+    /// steward and the conversation accepts new proposals.
     pub async fn handle_incoming_update_request(
         &self,
         conversation_name: &str,
         request: ConversationUpdateRequest,
     ) -> Result<(), UserError> {
-        // Joiners in PendingJoin aren't active participants: buffering KPs
-        // would just fill their queue with entries already covered by the
-        // welcome they're waiting on. Checked *before* the MLS epoch lookup
-        // because a PendingJoin member has no MLS group yet —
-        // `current_epoch()` would fail with `ConversationNotFound` and surface as
-        // a spurious error in the gateway's inbound forwarder.
         let entry_arc = self
             .lookup_entry(conversation_name)
             .await
@@ -407,7 +397,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
 
             let inserted = entry
                 .handle
-                .group
+                .conversation
                 .buffer_pending_update(request.clone(), current_epoch);
 
             // Only the epoch steward proposes immediately. The buffer
@@ -415,7 +405,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             let self_identity = self.identity().identity_bytes();
             let eligible = entry
                 .handle
-                .group
+                .conversation
                 .steward_eligibility(&members_for_rotation);
             let is_es = entry
                 .handle
@@ -423,13 +413,13 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 .epoch_steward(current_epoch, &eligible)
                 .is_some_and(|es| es == self_identity);
             let state = entry.handle.current_state();
-            let total = entry.handle.group.pending_update_count();
+            let total = entry.handle.conversation.pending_update_count();
             let should = is_es && state == ConversationState::Working;
             (inserted, is_es, state, total, should)
         };
 
         info!(
-            group = conversation_name,
+            conversation = conversation_name,
             epoch = current_epoch,
             inserted,
             buffer_total,
@@ -449,7 +439,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 .initiate_proposal(conversation_name.to_string(), request, None)
                 .await
             {
-                info!(group = conversation_name, error = %e, "proposal deferred");
+                info!(conversation = conversation_name, error = %e, "proposal deferred");
             }
         }
         Ok(())
@@ -469,7 +459,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             let entry = entry_arc.read().await;
             let state = entry.handle.current_state();
             if state == ConversationState::Freezing || state == ConversationState::Selection {
-                return Err(UserError::GroupBlocked(state.to_string()));
+                return Err(UserError::ConversationBlocked(state.to_string()));
             }
         }
         let app_id = self.app_id.clone();
@@ -520,23 +510,20 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         }
 
         let user = self.clone();
-        let group_name_owned = conversation_name.to_string();
+        let cname_owned = conversation_name.to_string();
         let timers_for_task = Arc::clone(&timers);
         let handle = tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            if let Err(e) = user
-                .cast_auto_vote(&group_name_owned, proposal_id, vote)
-                .await
-            {
+            if let Err(e) = user.cast_auto_vote(&cname_owned, proposal_id, vote).await {
                 tracing::debug!(
-                    group = %group_name_owned,
+                    conversation = %cname_owned,
                     proposal_id,
                     error = %e,
                     "auto-vote skipped (already voted or session resolved)"
                 );
             } else {
                 info!(
-                    group = %group_name_owned,
+                    conversation = %cname_owned,
                     proposal_id,
                     vote,
                     "auto-vote cast on timer"
@@ -563,8 +550,8 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
     }
 
     /// Abort every auto-vote timer belonging to `conversation_name`. Called on
-    /// group leave so no stale timers fire against a group we've left.
-    pub(crate) async fn cancel_group_auto_votes(&self, conversation_name: &str) {
+    /// conversation leave so no stale timers fire against a conversation we've left.
+    pub(crate) async fn cancel_conversation_auto_votes(&self, conversation_name: &str) {
         if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
             entry_arc.read().await.cancel_all_auto_votes();
         }

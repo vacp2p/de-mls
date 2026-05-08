@@ -1,9 +1,9 @@
-//! [`User`] — multi-group facade over core. One node owns one `User`, which
-//! holds the consensus service, event handler, and per-group state map.
-//! Each group's MLS service and peer-scoring service live on the
-//! [`SessionRunner`] (one instance per group), which in turn owns a
-//! [`crate::core::ConversationHandle`]. Methods split across the
-//! submodules: `lifecycle` (create/leave), `query` (read-only getters),
+//! [`User`] — multi-conversation facade over core. One node owns one `User`, which
+//! holds the consensus service, event handler, and per-conversation registry.
+//! Each conversation's MLS service, peer-scoring plug-in, and steward-list
+//! plug-in live on the [`SessionRunner`] (one instance per conversation),
+//! which owns a [`crate::core::ConversationHandle`]. Methods split across
+//! the submodules: `lifecycle` (create/leave), `query` (read-only getters),
 //! `messaging` (send/ban), `consensus` (voting), `consensus_events`
 //! (outcome dispatch), `inbound` (packet dispatch), `freeze` (timers),
 //! `steward` (steward-side housekeeping).
@@ -38,41 +38,40 @@ mod query;
 mod steward;
 
 pub use plugins::{
-    ConversationPlugins, DefaultGroupPlugins, DefaultMlsService, DefaultPeerScoring,
+    ConversationPlugins, DefaultConversationPlugins, DefaultMlsService, DefaultPeerScoring,
     DefaultStewardList,
 };
 
 /// `true` iff `events` contains at least one downward threshold cross —
 /// the signal coordinators react to by chaining into score-removal
-/// initiation. Helper kept here so every callsite uses the same
-/// triggering rule.
+/// initiation. One helper so every callsite uses the same triggering rule.
 pub(crate) fn has_downward_cross(events: &[PeerScoringEvent]) -> bool {
     events
         .iter()
         .any(|e| matches!(e, PeerScoringEvent::ThresholdCrossedDown { .. }))
 }
 
-/// Per-user registry of group runners, with one outer lock for map CRUD
-/// and one inner lock per runner so writes on one group don't block reads
-/// on another.
+/// Per-user registry of conversation runners, with one outer lock for map
+/// CRUD and one inner lock per runner so writes on one conversation don't
+/// block reads on another.
 type ConversationRegistry<M, Sc, St> =
     Arc<RwLock<HashMap<String, Arc<RwLock<SessionRunner<M, Sc, St>>>>>>;
 
 pub struct User<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler> {
-    /// Local user-level identity, shared across all this user's groups.
-    /// Source of truth for "who am I"; MLS state lives in the per-group
-    /// service, MLS credentials are captured by the plug-in bundle (built
-    /// once from this identity at User init).
+    /// User-level identity, shared across every conversation this user is in.
+    /// Source of truth for "who am I"; MLS state lives in each per-conversation
+    /// service, and MLS credentials are captured by the plug-in bundle (built
+    /// once from this identity at `User` init).
     identity: Arc<dyn Identity>,
     /// Per-user plug-in bundle: builds MLS services + key packages, plus
-    /// per-group scoring and steward-list plug-ins on demand.
+    /// per-conversation scoring and steward-list plug-ins on demand.
     plugins: Arc<GP>,
     /// Outer lock: map CRUD (insert / remove / iterate names).
-    /// Inner per-entry lock: per-group reads and mutations. A write on
-    /// group A doesn't block reads on group B. Per-group peer scoring
-    /// lives inside the entry, so scoring access is guarded by the same
-    /// `RwLock` — no separate scoring lock.
-    groups: ConversationRegistry<GP::Mls, GP::Scoring, GP::Steward>,
+    /// Inner per-runner lock: per-conversation reads and mutations. A write
+    /// on conversation A doesn't block reads on conversation B. Per-conversation
+    /// peer scoring lives inside the runner, so scoring access is guarded
+    /// by the same `RwLock` — no separate scoring lock.
+    conversations: ConversationRegistry<GP::Mls, GP::Scoring, GP::Steward>,
     consensus_service: Arc<ProviderConsensus<P>>,
     eth_signer: PrivateKeySigner,
     handler: Arc<H>,
@@ -89,7 +88,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler> Clo
         Self {
             identity: Arc::clone(&self.identity),
             plugins: Arc::clone(&self.plugins),
-            groups: Arc::clone(&self.groups),
+            conversations: Arc::clone(&self.conversations),
             consensus_service: Arc::clone(&self.consensus_service),
             eth_signer: self.eth_signer.clone(),
             handler: Arc::clone(&self.handler),
@@ -113,7 +112,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         Self {
             identity,
             plugins,
-            groups: Arc::new(RwLock::new(HashMap::new())),
+            conversations: Arc::new(RwLock::new(HashMap::new())),
             consensus_service,
             eth_signer,
             handler,
@@ -122,8 +121,8 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         }
     }
 
-    /// Build a fresh per-group scoring plug-in from the user's default
-    /// scoring config. Used by entry construction in lifecycle / welcome
+    /// Build a fresh per-conversation scoring plug-in from the user's default
+    /// scoring config. Used by runner construction in lifecycle / welcome
     /// paths.
     pub(crate) fn make_scoring_service(&self) -> GP::Scoring {
         let scoring_config = ScoringConfig {
@@ -133,9 +132,9 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         self.plugins.make_scoring(&scoring_config)
     }
 
-    /// Build a fresh per-group steward-list plug-in. Returns an empty
-    /// plug-in; lifecycle creator path bootstraps via `install_list`,
-    /// joiner path leaves it empty until `ConversationSync` arrives.
+    /// Build a fresh per-conversation steward-list plug-in. Returns an empty
+    /// plug-in; the lifecycle creator path bootstraps it via `install_list`,
+    /// the joiner path leaves it empty until `ConversationSync` arrives.
     pub(crate) fn make_steward_plugin(
         &self,
         conversation_name: &str,
@@ -145,14 +144,19 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             .make_steward(conversation_name.as_bytes(), config.clone())
     }
 
-    /// Look up a group runner. Returns `None` when the entry isn't present.
-    /// Takes the outer read lock briefly to clone the inner `Arc`, then
-    /// releases it before the caller acquires the runner's own lock.
+    /// Look up a conversation runner. Returns `None` when no runner is
+    /// registered for `conversation_name`. Takes the outer read lock briefly
+    /// to clone the inner `Arc`, then releases it before the caller
+    /// acquires the runner's own lock.
     pub(crate) async fn lookup_entry(
         &self,
         conversation_name: &str,
     ) -> Option<Arc<RwLock<SessionRunner<GP::Mls, GP::Scoring, GP::Steward>>>> {
-        self.groups.read().await.get(conversation_name).cloned()
+        self.conversations
+            .read()
+            .await
+            .get(conversation_name)
+            .cloned()
     }
 
     /// Run `f` under the runner's own read lock. Returns `None` if the
@@ -183,11 +187,11 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         self.plugins.generate_key_package()
     }
 
-    /// Drop all proposals / votes / sessions for this group from the
+    /// Drop all proposals / votes / sessions for this conversation from the
     /// consensus service and abort every auto-vote timer belonging to it.
     /// Called on leave, pending-join timeout, and re-creation.
     async fn cleanup_consensus_scope(&self, conversation_name: &str) -> Result<(), UserError> {
-        self.cancel_group_auto_votes(conversation_name).await;
+        self.cancel_conversation_auto_votes(conversation_name).await;
         let scope = P::Scope::from(conversation_name.to_string());
         self.consensus_service
             .storage()
@@ -199,7 +203,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
 
 // ─────────────────────────── DefaultProvider Convenience ───────────────────────────
 
-impl<H: ConversationEventHandler + 'static> User<DefaultProvider, DefaultGroupPlugins, H> {
+impl<H: ConversationEventHandler + 'static> User<DefaultProvider, DefaultConversationPlugins, H> {
     /// Construct a `User` on [`DefaultProvider`] with the default config.
     pub fn with_private_key(
         private_key: &str,
@@ -226,7 +230,7 @@ impl<H: ConversationEventHandler + 'static> User<DefaultProvider, DefaultGroupPl
 
         let identity: Arc<dyn Identity> = Arc::new(WalletIdentity::from_wallet(user_address));
         let credentials = Arc::new(MlsCredentials::from_identity(identity.as_ref())?);
-        let plugins = Arc::new(DefaultGroupPlugins {
+        let plugins = Arc::new(DefaultConversationPlugins {
             storage: Arc::new(MemoryDeMlsStorage::new()),
             credentials,
         });

@@ -1,4 +1,4 @@
-//! Per-group steward-list plug-in trait and event vocabulary.
+//! Per-conversation steward-list plug-in trait and event vocabulary.
 
 use super::list::{StewardList, StewardListConfig};
 use crate::core::error::CoreError;
@@ -40,7 +40,7 @@ pub enum StewardListEvent {
     RetryExhausted { round: u32, max: u32 },
 }
 
-/// Per-group steward list. Passive design — answers questions, does not
+/// Per-conversation steward list. Passive design — answers questions, does not
 /// call out to MLS, consensus, or other plug-ins.
 ///
 /// Eligibility predicates flow in from the coordinator: every "live"
@@ -55,7 +55,7 @@ pub trait StewardListPlugin: Send + Sync + 'static {
     fn config(&self) -> &StewardListConfig;
 
     /// Replace the active config — joiner sync path adopts the
-    /// group-wide values. Preserves list and retry state; subsequent
+    /// conversation-wide values. Preserves list and retry state; subsequent
     /// `install_list` calls use the new bounds.
     fn set_config(&mut self, config: StewardListConfig);
 

@@ -1,4 +1,4 @@
-//! Create and leave operations for a group.
+//! Create and leave operations for a conversation.
 
 use std::sync::Arc;
 
@@ -23,9 +23,7 @@ use crate::{
 impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 'static>
     User<P, GP, H>
 {
-    /// Create (`is_creation = true`) or join (`false`) a group using the
-    /// user's default config.
-    pub async fn create_conversation(
+    pub async fn start_conversation(
         &mut self,
         conversation_name: &str,
         is_creation: bool,
@@ -38,33 +36,33 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         .await
     }
 
-    /// Like [`Self::create_conversation`] but with a per-conversation config override.
+    /// Like [`Self::start_conversation`] but with a per-conversation config override.
     pub async fn create_conversation_with_config(
         &mut self,
         conversation_name: &str,
         is_creation: bool,
         config: ConversationConfig,
     ) -> Result<(), UserError> {
-        let mut groups = self.groups.write().await;
-        if groups.contains_key(conversation_name) {
+        let mut conversations = self.conversations.write().await;
+        if conversations.contains_key(conversation_name) {
             return Err(UserError::ConversationAlreadyExists);
         }
 
         let self_identity_bytes = self.identity().identity_bytes().to_vec();
-        let (group, mls_opt, state_machine, phase_timer) = if is_creation {
+        let (conversation, mls_opt, state_machine, phase_timer) = if is_creation {
             let mls = self.plugins.create_mls(conversation_name.to_string())?;
-            let group = Conversation::create(conversation_name, self_identity_bytes.clone());
+            let conversation = Conversation::create(conversation_name, self_identity_bytes.clone());
             let state_machine = ConversationStateMachine::new_as_member();
-            (group, Some(mls), state_machine, PhaseTimer::new())
+            (conversation, Some(mls), state_machine, PhaseTimer::new())
         } else {
-            let group =
+            let conversation =
                 Conversation::prepare_to_join(conversation_name, self_identity_bytes.clone());
             let state_machine = ConversationStateMachine::new_as_pending_join();
             // Anchor the timer at "now" so `is_pending_join_expired` can
             // detect the 3× commit-inactivity timeout.
             let mut phase_timer = PhaseTimer::new();
             phase_timer.start();
-            (group, None, state_machine, phase_timer)
+            (conversation, None, state_machine, phase_timer)
         };
 
         let mut steward = self.make_steward_plugin(conversation_name, &config.protocol);
@@ -77,7 +75,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         }
 
         let mut scoring = self.make_scoring_service();
-        // Joiners start tracked at `JoinedConversation` time (once members are known).
+        // Joiners get tracked at `JoinedConversation` time, once members are known.
         if is_creation {
             // Creator is self at `default_score`; under standard config
             // (`default > threshold`) no cross event fires, so we drop
@@ -88,15 +86,15 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         let initial_state = state_machine.current_state();
         if initial_state == ConversationState::PendingJoin {
             info!(
-                group = conversation_name,
+                conversation = conversation_name,
                 timeout_s = config.commit_inactivity_duration.as_secs() * 3,
                 "pending join, awaiting welcome"
             );
         }
-        groups.insert(
+        conversations.insert(
             conversation_name.to_string(),
             Arc::new(RwLock::new(SessionRunner::new(
-                group,
+                conversation,
                 mls_opt,
                 state_machine,
                 phase_timer,
@@ -105,7 +103,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 steward,
             ))),
         );
-        drop(groups);
+        drop(conversations);
 
         self.handler
             .on_phase_change(conversation_name, initial_state)
@@ -121,7 +119,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
     /// a member and a later one picks the leave up.
     /// `PendingJoin` short-circuits to local teardown.
     pub async fn leave_conversation(&mut self, conversation_name: &str) -> Result<(), UserError> {
-        info!(group = conversation_name, "leaving group");
+        info!(conversation = conversation_name, "leaving conversation");
 
         let is_pending_join = self
             .with_entry(conversation_name, |entry| {
@@ -130,7 +128,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             .await
             .ok_or(UserError::ConversationNotFound)?;
         if is_pending_join {
-            self.groups.write().await.remove(conversation_name);
+            self.conversations.write().await.remove(conversation_name);
             self.cleanup_consensus_scope(conversation_name).await?;
             self.handler
                 .on_leave_conversation(conversation_name)
@@ -144,13 +142,16 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         // approved entry and short-circuits.
         let already_pending = self
             .with_entry(conversation_name, |entry| {
-                entry.handle.group.is_pending_self_leave(&self_identity)
+                entry
+                    .handle
+                    .conversation
+                    .is_pending_self_leave(&self_identity)
             })
             .await
             .ok_or(UserError::ConversationNotFound)?;
         if already_pending {
             info!(
-                group = conversation_name,
+                conversation = conversation_name,
                 "self-leave already in flight, ignoring duplicate"
             );
             return Ok(());
@@ -176,7 +177,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             let mut entry = entry_arc.write().await;
             entry
                 .handle
-                .group
+                .conversation
                 .store_voting_proposal(proposal_id, request);
             (
                 entry.handle.config.proposal_expiration,

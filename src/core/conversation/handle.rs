@@ -1,4 +1,4 @@
-//! Per-group aggregate owned by the orchestrator: protocol state, MLS
+//! Per-conversation aggregate owned by the orchestrator: protocol state, MLS
 //! service, plug-ins, state machine, durable config, and operating mode.
 //! Pure data + protocol-function wrappers — no timers, no spawned tasks,
 //! no I/O. App-side wiring (phase timer, auto-vote handles) lives on
@@ -23,27 +23,27 @@ use crate::{
     },
 };
 
-/// Per-group aggregate. Fields with simple direct semantics
-/// (`group`, `state_machine`, `config`, `scoring`, `steward`) are exposed
-/// as fields; fields with attach/detach lifecycle (`mls`) or RFC-defined
-/// invariants (`operating_mode`) go through controlled accessors.
+/// Per-conversation aggregate. Fields with simple direct semantics
+/// (`conversation`, `state_machine`, `config`, `scoring`, `steward`) are
+/// exposed as fields; fields with attach/detach lifecycle (`mls`) or
+/// RFC-defined invariants (`operating_mode`) go through controlled accessors.
 pub struct ConversationHandle<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> {
-    pub(crate) group: Conversation,
-    /// Per-group MLS service. `None` for joiners in `PendingJoin` who
+    pub(crate) conversation: Conversation,
+    /// Per-conversation MLS service. `None` for joiners in `PendingJoin` who
     /// haven't accepted a welcome yet; once attached via
     /// [`Self::attach_mls`] it stays `Some` for the handle's lifetime.
     mls: Option<M>,
-    /// Per-group state machine. The orchestrator updates this together
+    /// Per-conversation state machine. The orchestrator updates this together
     /// with the phase timer so the two never drift.
     pub(crate) state_machine: ConversationStateMachine,
-    /// Per-group durable config: voting/consensus durations,
+    /// Per-conversation durable config: voting/consensus durations,
     /// `liveness_criteria_yes`, `pending_update_max_epochs`. Read by
     /// orchestrators; joiner-sync writes through this directly.
     pub(crate) config: ConversationConfig,
-    /// Per-group peer-score plug-in. Read by protocol decisions under
+    /// Per-conversation peer-score plug-in. Read by protocol decisions under
     /// the orchestrator's per-handle lock; no separate `Mutex` needed.
     pub(crate) scoring: Sc,
-    /// Per-group steward list plug-in. Holds the active list, retry
+    /// Per-conversation steward list plug-in. Holds the active list, retry
     /// counter, and election retry policy. Orchestrator composes
     /// eligibility from MLS members + `Conversation::is_pending_removal` and
     /// passes it on every position query.
@@ -60,7 +60,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
     /// Build a fresh handle. Creator path passes `Some(mls)`; joiner
     /// path passes `None` and attaches later via [`Self::attach_mls`].
     pub(crate) fn new(
-        group: Conversation,
+        conversation: Conversation,
         mls: Option<M>,
         state_machine: ConversationStateMachine,
         config: ConversationConfig,
@@ -68,7 +68,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
         steward: St,
     ) -> Self {
         Self {
-            group,
+            conversation,
             mls,
             state_machine,
             config,
@@ -120,7 +120,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
         self.mls = Some(mls);
     }
 
-    /// Drop the attached MLS service and return it. Used on group leave
+    /// Drop the attached MLS service and return it. Used on conversation leave
     /// so the caller can run service-side cleanup (`mls.delete()`).
     pub(crate) fn take_mls(&mut self) -> Option<M> {
         self.mls.take()
@@ -128,9 +128,9 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
 
     // ── Protocol-function wrappers ─────────────────────────────────
     //
-    // Pull `group`, `mls`, and `steward` from `self` so coordinator
-    // callsites don't destructure the entry. Protocol logic stays in
-    // `core::api`; these are pure delegation.
+    // Read `conversation`, `mls`, and `steward` from `self` so coordinator
+    // callsites don't destructure the entry. Protocol logic lives in
+    // sibling `core` modules; these are pure delegation.
 
     /// Current MLS members; errors with
     /// [`CoreError::MlsGroupNotInitialized`] when no service is attached
@@ -155,14 +155,14 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
             return Err(CoreError::NotASteward);
         }
 
-        if self.group.approved_proposals().is_empty() {
+        if self.conversation.approved_proposals().is_empty() {
             return Err(CoreError::NoProposals);
         }
 
         // MLS forbids committing one's own removal. If the approved batch contains
         // RemoveMember(self), skip local candidate creation — another steward will
         // commit the batch (including this node's removal) once they enter freeze.
-        let self_removal_pending = self.group.approved_proposals().values().any(|req| {
+        let self_removal_pending = self.conversation.approved_proposals().values().any(|req| {
             matches!(
                 req.payload.as_ref(),
                 Some(Payload::RemoveMember(r))
@@ -171,7 +171,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
         });
         if self_removal_pending {
             info!(
-                group = self.group.name(),
+                conversation = self.conversation.name(),
                 "commit candidate skipped: approved batch contains self-remove"
             );
             return Ok(None);
@@ -180,7 +180,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
         // Governance proposals (emergency, election) are consensus-only and must
         // not be in the approved queue at batch creation time.
         let non_mls_ids: Vec<u32> = self
-            .group
+            .conversation
             .approved_proposals()
             .iter()
             .filter(|(_, req)| ProposalKind::of(req).is_governance())
@@ -193,26 +193,26 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
             });
         }
 
-        // Drop approved entries already reflected in group state (stale
+        // Drop approved entries already reflected in conversation state (stale
         // rebroadcast KPs, duplicate removes) — without this MLS would reject
-        // the whole batch with "Duplicate signature key in proposals and group".
+        // the whole batch with "Duplicate signature key in proposals and conversation".
         let current_members = mls.members()?;
         let current_members_set = member_set(&current_members);
         let is_member = |id: &[u8]| current_members_set.contains(id);
 
         // Urgent (ECP-driven) freeze: restrict the batch to just the target's
         // RemoveMember. See `Conversation::urgent_commit_target`.
-        let urgent_target = self.group.urgent_commit_target().map(|t| t.to_vec());
+        let urgent_target = self.conversation.urgent_commit_target().map(|t| t.to_vec());
 
         // Iterate in insertion order (FIFO): library proposal IDs are
         // content-derived hashes, so sort-by-id is not temporal.
         let k_max = mls.commit_batch_max();
-        let mut updates = Vec::with_capacity(self.group.approved_order().len().min(k_max));
-        for pid in self.group.approved_order() {
+        let mut updates = Vec::with_capacity(self.conversation.approved_order().len().min(k_max));
+        for pid in self.conversation.approved_order() {
             if updates.len() >= k_max {
                 break;
             }
-            let Some(proposal) = self.group.approved_proposals().get(pid) else {
+            let Some(proposal) = self.conversation.approved_proposals().get(pid) else {
                 continue;
             };
             match proposal.payload.as_ref() {
@@ -239,7 +239,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
                     }
                     updates.push(MlsCommitInput::Remove(rm.identity.clone()));
                 }
-                _ => return Err(CoreError::InvalidGroupUpdateRequest),
+                _ => return Err(CoreError::InvalidConversationUpdateRequest),
             }
         }
 
@@ -254,7 +254,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
         } = mls.create_commit_candidate(&updates)?;
 
         let candidate = CommitCandidate {
-            conversation_name: self.group.name_bytes().to_vec(),
+            conversation_name: self.conversation.name_bytes().to_vec(),
             mls_proposals,
             commit_message: commit,
             steward_identity: self_identity.to_vec(),
@@ -264,7 +264,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
         // commit merges, so joiners can't advance epoch ahead of the steward.
         let commit_hash = compute_commit_hash(&candidate.commit_message);
         let epoch = mls.current_epoch()?;
-        let _ = self.group.add_freeze_candidate(
+        let _ = self.conversation.add_freeze_candidate(
             BufferedCommitCandidate {
                 candidate_msg: candidate.clone(),
                 commit_hash,
@@ -275,7 +275,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
         );
 
         info!(
-            group = self.group.name(),
+            conversation = self.conversation.name(),
             epoch,
             proposals = updates.len(),
             "commit candidate created"
@@ -285,7 +285,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
         Ok(Some(OutboundPacket::new(
             candidate_msg.encode_to_vec(),
             APP_MSG_SUBTOPIC,
-            self.group.name(),
+            self.conversation.name(),
             app_id,
         )))
     }
@@ -301,7 +301,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
         let mls = self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)?;
         let in_recovery = self.operating_mode == OperatingMode::Recovery;
         finalize_freeze_round(
-            &mut self.group,
+            &mut self.conversation,
             mls,
             &self.steward,
             in_recovery,
@@ -315,7 +315,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
     /// attached — caller should check `mls().is_some()` first.
     pub(crate) fn process_inbound(&mut self, payload: &[u8]) -> Result<ProcessResult, CoreError> {
         let mls = self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)?;
-        process_inbound(&mut self.group, mls, payload)
+        process_inbound(&mut self.conversation, mls, payload)
     }
 }
 

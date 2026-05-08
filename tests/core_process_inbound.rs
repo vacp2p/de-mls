@@ -640,7 +640,7 @@ fn test_group_sync_roundtrip() {
     .unwrap();
 
     match &result {
-        ProcessResult::GroupSyncReceived(received_sync) => {
+        ProcessResult::ConversationSyncReceived(received_sync) => {
             assert_eq!(received_sync.steward_members, sync.steward_members);
             assert_eq!(received_sync.election_epoch, sync.election_epoch);
             assert_eq!(received_sync.sn_min, sync.sn_min);
@@ -649,7 +649,7 @@ fn test_group_sync_roundtrip() {
         other => panic!("Expected GroupSyncReceived, got {:?}", other),
     }
 
-    if let ProcessResult::GroupSyncReceived(sync) = result {
+    if let ProcessResult::ConversationSyncReceived(sync) = result {
         let config = StewardListConfig::new(sync.sn_min as usize, sync.sn_max as usize).unwrap();
         let members = joiner.mls.as_ref().unwrap().members().unwrap();
 
@@ -775,7 +775,7 @@ fn test_group_sync_propagates_divergent_per_group_config() {
     )
     .unwrap();
     let received = match result {
-        ProcessResult::GroupSyncReceived(s) => s,
+        ProcessResult::ConversationSyncReceived(s) => s,
         other => panic!("Expected GroupSyncReceived, got {:?}", other),
     };
 
@@ -882,7 +882,7 @@ fn test_group_sync_idempotent_for_existing_members() {
     )
     .unwrap();
     assert!(
-        matches!(result, ProcessResult::GroupSyncReceived(_)),
+        matches!(result, ProcessResult::ConversationSyncReceived(_)),
         "Core should still return GroupSyncReceived"
     );
 

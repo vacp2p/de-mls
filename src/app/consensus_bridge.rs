@@ -1,6 +1,7 @@
-//! App-layer adapters over the consensus service: proposal submission, vote
-//! casting, and forwarding peer messages in. Not protocol invariants — they
-//! decide how consensus events reach the UI and the transport.
+//! App-layer adapters over the consensus service: proposal submission,
+//! vote casting, and inbound forwarding for peer messages. These helpers
+//! shape how consensus events surface in the UI and on the transport;
+//! they are not protocol invariants.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -44,7 +45,7 @@ pub struct ProposalParams {
 /// - broadcast the unbundled message as-is and let the creator vote later
 ///   like any other member.
 ///
-/// In both cases the caller must record ownership in the group *before*
+/// In both cases the caller must record ownership *before*
 /// casting, so a single-voter consensus transition can't fire before
 /// `Conversation::is_owner_of_proposal` is true.
 pub async fn submit_proposal<P: DeMlsProvider>(
@@ -72,7 +73,7 @@ pub async fn submit_proposal<P: DeMlsProvider>(
         .await?;
 
     info!(
-        group = conversation_name,
+        conversation = conversation_name,
         proposal_id = proposal.proposal_id,
         voters = params.expected_voters,
         "proposal opened"
@@ -86,14 +87,14 @@ pub async fn submit_proposal<P: DeMlsProvider>(
 ///
 /// Always returns a `Vote` wire message — never a full `Proposal`. Every
 /// peer already has the proposal registered in their session (either from
-/// the initial unbundled broadcast or from the bundled-at-submit proposal
-/// both land before anyone votes). Re-broadcasting the full proposal would
-/// get rejected peer-side as `ProposalAlreadyExist`, dropping the vote.
+/// the unbundled broadcast or from a bundled-at-submit proposal — both
+/// land before anyone votes). Re-broadcasting the full proposal would be
+/// rejected peer-side as `ProposalAlreadyExist`, dropping the vote.
 ///
 /// The bundled-at-submit path in `register_new_proposal` calls
-/// `consensus.cast_vote_and_get_proposal` directly — not this helper —
-/// because that is the only legitimate case for broadcasting proposal +
-/// vote atomically as a single wire message.
+/// `consensus.cast_vote_and_get_proposal` directly rather than this
+/// helper, because that is the only legitimate case for broadcasting
+/// proposal + vote atomically in a single wire message.
 pub async fn cast_vote<P, SN>(
     conversation_name: &str,
     proposal_id: u32,
@@ -108,7 +109,10 @@ where
     let scope = P::Scope::from(conversation_name.to_string());
 
     let choice = if vote { "YES" } else { "NO" };
-    info!(group = conversation_name, proposal_id, choice, "vote cast");
+    info!(
+        conversation = conversation_name,
+        proposal_id, choice, "vote cast"
+    );
 
     let vote_msg = consensus
         .cast_vote(&scope, proposal_id, vote, signer)
@@ -165,33 +169,33 @@ pub async fn relay_incoming_proposal<P: DeMlsProvider>(
 ///
 /// Other consensus errors propagate.
 pub async fn forward_incoming_vote<P: DeMlsProvider>(
-    group: &Conversation,
+    conversation: &Conversation,
     vote: Vote,
     consensus: &ProviderConsensus<P>,
 ) -> Result<(), CoreError> {
     let proposal_id = vote.proposal_id;
-    let conversation_name = group.name();
+    let conversation_name = conversation.name();
     let scope = P::Scope::from(conversation_name.to_string());
     match consensus.process_incoming_vote(&scope, vote).await {
         Ok(()) => Ok(()),
         Err(ConsensusError::SessionNotActive) => {
             tracing::debug!(
-                group = conversation_name,
+                conversation = conversation_name,
                 proposal_id,
                 "late vote dropped: consensus session already resolved"
             );
             Ok(())
         }
         Err(ConsensusError::SessionNotFound) => {
-            if group.is_consensus_outcome_applied(proposal_id) {
+            if conversation.is_consensus_outcome_applied(proposal_id) {
                 tracing::debug!(
-                    group = conversation_name,
+                    conversation = conversation_name,
                     proposal_id,
                     "late vote dropped: session trimmed after local resolution"
                 );
             } else {
                 tracing::warn!(
-                    group = conversation_name,
+                    conversation = conversation_name,
                     proposal_id,
                     "vote for unknown proposal id dropped: no local session and not in resolved cache"
                 );
@@ -272,14 +276,14 @@ where
     {
         Ok(()) => {
             info!(
-                group = conversation_name,
+                conversation = conversation_name,
                 proposal_id, "self-leave proposal opened (expected_voters=1, bundled YES)"
             );
             Ok(Some((proposal_id, proposal.into())))
         }
         Err(ConsensusError::ProposalAlreadyExist) => {
             info!(
-                group = conversation_name,
+                conversation = conversation_name,
                 proposal_id, "self-leave already in flight, skipping retransmit"
             );
             Ok(None)

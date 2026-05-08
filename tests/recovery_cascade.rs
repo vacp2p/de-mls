@@ -55,7 +55,7 @@ const BOB_KEY: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6
 const CHARLIE_KEY: &str = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
 const DAVE_KEY: &str = "7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6";
 
-type TU = User<DefaultProvider, de_mls::app::DefaultGroupPlugins, H>;
+type TU = User<DefaultProvider, de_mls::app::DefaultConversationPlugins, H>;
 
 fn make(key: &str, cs: Arc<DefaultConsensusService>, cfg: ConversationConfig) -> (TU, H) {
     let h = H::new();
@@ -104,10 +104,10 @@ async fn concurrent_joins_leave_joiners_with_empty_buffer() {
     let (mut dave, dh) = make(DAVE_KEY, cs.clone(), cfg.clone());
 
     // Step 1: alice creates the group. Bob/Charlie/Dave register as joiners.
-    alice.create_conversation(group, true).await.unwrap();
-    bob.create_conversation(group, false).await.unwrap();
-    charlie.create_conversation(group, false).await.unwrap();
-    dave.create_conversation(group, false).await.unwrap();
+    alice.start_conversation(group, true).await.unwrap();
+    bob.start_conversation(group, false).await.unwrap();
+    charlie.start_conversation(group, false).await.unwrap();
+    dave.start_conversation(group, false).await.unwrap();
 
     // Step 2: All three joiners send KPs nearly simultaneously. Before the
     // buffer-hygiene fix, each joiner would buffer the others' KPs observed

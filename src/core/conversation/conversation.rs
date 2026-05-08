@@ -1,4 +1,4 @@
-//! Per-group protocol-queue state: approved/voting proposal queues,
+//! Per-conversation protocol-queue state: approved/voting proposal queues,
 //! freeze-round candidate buffer, pending-update buffer, urgent-commit
 //! target, recovery-mode flag, ECP dedup. MLS crypto state and the
 //! steward-list plug-in live alongside on `ConversationHandle`.
@@ -62,7 +62,7 @@ pub fn target_identity_of(request: &ConversationUpdateRequest) -> Option<&[u8]> 
 ///
 /// Every member buffers these so that, if the epoch steward fails to commit the
 /// change, the next epoch steward can pick it up. Entries are pruned once the
-/// change has been applied to the group (member added/removed) or after
+/// change has been applied to the conversation (member added/removed) or after
 /// `max_age_epochs` epochs have elapsed since the entry was first seen.
 #[derive(Clone, Debug)]
 pub struct PendingUpdate {
@@ -95,14 +95,13 @@ pub(crate) struct FreezeRound {
 /// Construct with [`Conversation::create`] or [`Conversation::prepare_to_join`].
 ///
 /// Pure proposal-queue and freeze-round bookkeeping — MLS state lives
-/// on the per-group [`crate::mls_crypto::MlsService`] instance held on
+/// on the per-conversation [`crate::mls_crypto::MlsService`] instance held on
 /// `ConversationHandle`, alongside the steward-list plug-in. `Conversation` itself has
 /// no `M` generic.
 pub struct Conversation {
-    /// The name of the group.
+    /// The name of the conversation.
     conversation_name: String,
-    /// This user's identity bytes (set at construction; matches the
-    /// MLS leaf credential).
+    /// This user's identity bytes; matches the MLS leaf credential.
     self_identity: Vec<u8>,
     /// Proposals that passed consensus, waiting for steward to commit.
     approved_proposals: HashMap<ProposalId, ConversationUpdateRequest>,
@@ -153,9 +152,8 @@ impl Conversation {
         }
     }
 
-    /// Local identity bytes for this group's member (this user's wallet
-    /// address). Set at construction; same value MLS will surface on this
-    /// group's leaf credential.
+    /// Local identity bytes for this conversation's member. Set at construction;
+    /// matches the value MLS surfaces on this conversation's leaf credential.
     pub fn self_identity(&self) -> &[u8] {
         &self.self_identity
     }
@@ -168,7 +166,7 @@ impl Conversation {
         self.resolved_proposals.record(proposal_id);
     }
 
-    /// Build a joiner-side handle for an existing group. The MLS service
+    /// Build a joiner-side handle for an existing conversation. The MLS service
     /// is held on `ConversationHandle`; the lifecycle layer attaches it via
     /// `entry.attach_mls(...)` once the welcome arrives.
     pub fn prepare_to_join(conversation_name: &str, self_identity: Vec<u8>) -> Self {
@@ -192,7 +190,7 @@ impl Conversation {
 
     /// Build the eligibility predicate that the steward plug-in's "live"
     /// position queries take. A candidate is eligible when they are an
-    /// MLS member of the group AND don't have a removal queued in
+    /// MLS member of the conversation AND don't have a removal queued in
     /// `approved_proposals`. The closure borrows from `self` and
     /// `mls_members` for the lifetime of the call.
     pub fn steward_eligibility<'a>(
@@ -589,16 +587,16 @@ impl Conversation {
         expired
     }
 
-    /// Drop Add entries whose target is now a group member, and Remove entries
-    /// whose target is no longer a group member. Call after a commit has merged.
+    /// Drop Add entries whose target is now a conversation member, and Remove entries
+    /// whose target is no longer a conversation member. Call after a commit has merged.
     ///
     /// Also drops any auto-approved self-leave in `approved_proposals` whose
-    /// target is no longer a group member (the leave has been applied).
+    /// target is no longer a conversation member (the leave has been applied).
     /// Regular approved entries are normally drained by
     /// `clear_approved_proposals` on the same commit path; this is an extra
     /// sweep to catch auto-approved entries that survived freeze failures.
     pub fn prune_pending_updates_for_members(&mut self, current_members: &[Vec<u8>]) {
-        let in_group: HashSet<&Vec<u8>> = current_members.iter().collect();
+        let in_conversation: HashSet<&Vec<u8>> = current_members.iter().collect();
         self.pending_updates.retain(|identity, entry| {
             let payload = match entry.request.payload.as_ref() {
                 Some(p) => p,
@@ -606,23 +604,23 @@ impl Conversation {
             };
             match payload {
                 conversation_update_request::Payload::InviteMember(_) => {
-                    !in_group.contains(identity)
+                    !in_conversation.contains(identity)
                 }
                 conversation_update_request::Payload::RemoveMember(_) => {
-                    in_group.contains(identity)
+                    in_conversation.contains(identity)
                 }
                 _ => false,
             }
         });
 
-        // Sweep orphaned auto-approved leaves (target no longer in group).
+        // Sweep orphaned auto-approved leaves (target no longer in conversation).
         self.approved_proposals.retain(|pid, req| {
             if !is_auto_approved_entry(*pid, req) {
                 return true;
             }
             match req.payload.as_ref() {
                 Some(conversation_update_request::Payload::RemoveMember(r)) => {
-                    in_group.contains(&r.identity)
+                    in_conversation.contains(&r.identity)
                 }
                 _ => true,
             }
@@ -695,14 +693,14 @@ mod tests {
     }
 
     /// Test convenience: build a creator-side `Conversation`. Steward
-    /// list is owned by the per-group plug-in (covered separately in
-    /// `core::steward_list_plugin::tests`); these tests focus on
+    /// list is owned by the per-conversation plug-in (covered separately in
+    /// `core::steward_list::tests`); these tests focus on
     /// proposal-queue + dedup + freeze-round logic on `Conversation`.
-    fn creator_group(name: &str, identity: Vec<u8>) -> Conversation {
+    fn creator_conversation(name: &str, identity: Vec<u8>) -> Conversation {
         Conversation::create(name, identity)
     }
 
-    fn insert_self_leave(group: &mut Conversation, identity: &[u8]) {
+    fn insert_self_leave(conversation: &mut Conversation, identity: &[u8]) {
         let remove = ConversationUpdateRequest {
             payload: Some(conversation_update_request::Payload::RemoveMember(
                 RemoveMember {
@@ -710,15 +708,15 @@ mod tests {
                 },
             )),
         };
-        group.insert_approved_proposal(self_leave_proposal_id(identity), remove);
+        conversation.insert_approved_proposal(self_leave_proposal_id(identity), remove);
     }
 
     #[test]
     fn test_reject_all_approved_preserves_self_leave_entry() {
-        let mut group = creator_group("test-group", member(1));
+        let mut conversation = creator_conversation("test-conversation", member(1));
 
         let leaver = member(2);
-        insert_self_leave(&mut group, &leaver);
+        insert_self_leave(&mut conversation, &leaver);
         let ban_id: ProposalId = 0xdead_beef;
         let ban = ConversationUpdateRequest {
             payload: Some(conversation_update_request::Payload::InviteMember(
@@ -728,34 +726,34 @@ mod tests {
                 },
             )),
         };
-        group.insert_approved_proposal(ban_id, ban);
-        assert_eq!(group.approved_proposals_count(), 2);
+        conversation.insert_approved_proposal(ban_id, ban);
+        assert_eq!(conversation.approved_proposals_count(), 2);
 
         // Simulate freeze failure.
-        group.reject_all_approved_proposals();
+        conversation.reject_all_approved_proposals();
 
         // Self-leave entry (deterministic id) survives; unrelated approvals drop.
-        assert_eq!(group.approved_proposals_count(), 1);
+        assert_eq!(conversation.approved_proposals_count(), 1);
         let leave_id = self_leave_proposal_id(&leaver);
-        assert!(group.approved_proposals().contains_key(&leave_id));
-        assert!(!group.approved_proposals().contains_key(&ban_id));
+        assert!(conversation.approved_proposals().contains_key(&leave_id));
+        assert!(!conversation.approved_proposals().contains_key(&ban_id));
     }
 
     #[test]
     fn test_prune_clears_self_leave_entry_when_member_gone() {
-        let mut group = creator_group("test-group", member(1));
+        let mut conversation = creator_conversation("test-conversation", member(1));
 
         let leaver = member(2);
-        insert_self_leave(&mut group, &leaver);
-        assert_eq!(group.approved_proposals_count(), 1);
-        assert!(group.is_pending_self_leave(&leaver));
+        insert_self_leave(&mut conversation, &leaver);
+        assert_eq!(conversation.approved_proposals_count(), 1);
+        assert!(conversation.is_pending_self_leave(&leaver));
 
         // Commit merged — leaver is no longer a member.
         let after = members(&[1, 3]);
-        group.prune_pending_updates_for_members(&after);
+        conversation.prune_pending_updates_for_members(&after);
 
-        assert_eq!(group.approved_proposals_count(), 0);
-        assert!(!group.is_pending_self_leave(&leaver));
+        assert_eq!(conversation.approved_proposals_count(), 0);
+        assert!(!conversation.is_pending_self_leave(&leaver));
     }
 
     #[test]
@@ -796,13 +794,17 @@ mod tests {
 
     #[test]
     fn mark_consensus_outcome_persists_in_resolved_cache() {
-        let mut group = creator_group("g", member(1));
-        assert!(!group.is_consensus_outcome_applied(42));
-        group.mark_consensus_outcome_applied(42);
-        assert!(group.is_consensus_outcome_applied(42));
+        let mut conversation = creator_conversation("g", member(1));
+        assert!(!conversation.is_consensus_outcome_applied(42));
+        conversation.mark_consensus_outcome_applied(42);
+        assert!(conversation.is_consensus_outcome_applied(42));
     }
 
-    fn insert_remove_member(group: &mut Conversation, target: &[u8], proposal_id: ProposalId) {
+    fn insert_remove_member(
+        conversation: &mut Conversation,
+        target: &[u8],
+        proposal_id: ProposalId,
+    ) {
         let remove = ConversationUpdateRequest {
             payload: Some(conversation_update_request::Payload::RemoveMember(
                 RemoveMember {
@@ -810,20 +812,20 @@ mod tests {
                 },
             )),
         };
-        group.insert_approved_proposal(proposal_id, remove);
+        conversation.insert_approved_proposal(proposal_id, remove);
     }
 
     /// `RemoveMember` proposals survive a freeze failure regardless of
     /// source; Add proposals are dropped.
     #[test]
     fn test_reject_all_approved_preserves_all_remove_member() {
-        let mut group = creator_group("test-group", member(1));
+        let mut conversation = creator_conversation("test-conversation", member(1));
 
         let ban_id: ProposalId = 0x1111_2222;
         let ecp_id: ProposalId = 0x3333_4444;
         let add_id: ProposalId = 0x5555_6666;
-        insert_remove_member(&mut group, &member(2), ban_id);
-        insert_remove_member(&mut group, &member(3), ecp_id);
+        insert_remove_member(&mut conversation, &member(2), ban_id);
+        insert_remove_member(&mut conversation, &member(3), ecp_id);
         let add = ConversationUpdateRequest {
             payload: Some(conversation_update_request::Payload::InviteMember(
                 InviteMember {
@@ -832,72 +834,72 @@ mod tests {
                 },
             )),
         };
-        group.insert_approved_proposal(add_id, add);
-        assert_eq!(group.approved_proposals_count(), 3);
+        conversation.insert_approved_proposal(add_id, add);
+        assert_eq!(conversation.approved_proposals_count(), 3);
 
-        group.reject_all_approved_proposals();
+        conversation.reject_all_approved_proposals();
 
-        assert_eq!(group.approved_proposals_count(), 2);
-        assert!(group.approved_proposals().contains_key(&ban_id));
-        assert!(group.approved_proposals().contains_key(&ecp_id));
-        assert!(!group.approved_proposals().contains_key(&add_id));
+        assert_eq!(conversation.approved_proposals_count(), 2);
+        assert!(conversation.approved_proposals().contains_key(&ban_id));
+        assert!(conversation.approved_proposals().contains_key(&ecp_id));
+        assert!(!conversation.approved_proposals().contains_key(&add_id));
     }
 
     /// `approved_order` is FIFO regardless of proposal-id ordering.
     #[test]
     fn test_approved_order_preserves_fifo_across_mutations() {
-        let mut group = creator_group("g", member(1));
+        let mut conversation = creator_conversation("g", member(1));
 
-        insert_remove_member(&mut group, &member(2), 500);
-        insert_remove_member(&mut group, &member(3), 100);
-        insert_remove_member(&mut group, &member(4), 300);
-        assert_eq!(group.approved_order(), &[500, 100, 300]);
+        insert_remove_member(&mut conversation, &member(2), 500);
+        insert_remove_member(&mut conversation, &member(3), 100);
+        insert_remove_member(&mut conversation, &member(4), 300);
+        assert_eq!(conversation.approved_order(), &[500, 100, 300]);
 
-        group.remove_approved_proposal(100);
-        assert_eq!(group.approved_order(), &[500, 300]);
+        conversation.remove_approved_proposal(100);
+        assert_eq!(conversation.approved_order(), &[500, 300]);
 
         // Re-inserting an existing id does not duplicate or reorder.
-        insert_remove_member(&mut group, &member(2), 500);
-        assert_eq!(group.approved_order(), &[500, 300]);
+        insert_remove_member(&mut conversation, &member(2), 500);
+        assert_eq!(conversation.approved_order(), &[500, 300]);
 
-        group.clear_approved_proposals();
-        assert!(group.approved_order().is_empty());
+        conversation.clear_approved_proposals();
+        assert!(conversation.approved_order().is_empty());
     }
 
     #[test]
     fn test_urgent_commit_target_set_take_clears() {
-        let mut group = creator_group("g", member(1));
-        assert!(group.urgent_commit_target().is_none());
+        let mut conversation = creator_conversation("g", member(1));
+        assert!(conversation.urgent_commit_target().is_none());
 
         let target = member(7);
-        group.set_urgent_commit_target(target.clone());
-        assert_eq!(group.urgent_commit_target(), Some(target.as_slice()));
+        conversation.set_urgent_commit_target(target.clone());
+        assert_eq!(conversation.urgent_commit_target(), Some(target.as_slice()));
 
-        let taken = group.take_urgent_commit_target().unwrap();
+        let taken = conversation.take_urgent_commit_target().unwrap();
         assert_eq!(taken, target);
-        assert!(group.urgent_commit_target().is_none());
+        assert!(conversation.urgent_commit_target().is_none());
     }
 
     #[test]
     fn test_drop_approved_removals_for_target() {
-        let mut group = creator_group("g", member(1));
+        let mut conversation = creator_conversation("g", member(1));
         let victim = member(7);
         let bystander = member(9);
 
-        insert_remove_member(&mut group, &victim, 100);
-        insert_remove_member(&mut group, &victim, 101);
-        insert_remove_member(&mut group, &bystander, 200);
-        assert_eq!(group.approved_proposals_count(), 3);
+        insert_remove_member(&mut conversation, &victim, 100);
+        insert_remove_member(&mut conversation, &victim, 101);
+        insert_remove_member(&mut conversation, &bystander, 200);
+        assert_eq!(conversation.approved_proposals_count(), 3);
 
-        group.drop_approved_removals_for(&victim);
+        conversation.drop_approved_removals_for(&victim);
 
-        assert_eq!(group.approved_proposals_count(), 1);
-        assert!(group.approved_proposals().contains_key(&200));
-        assert!(!group.approved_proposals().contains_key(&100));
-        assert!(!group.approved_proposals().contains_key(&101));
+        assert_eq!(conversation.approved_proposals_count(), 1);
+        assert!(conversation.approved_proposals().contains_key(&200));
+        assert!(!conversation.approved_proposals().contains_key(&100));
+        assert!(!conversation.approved_proposals().contains_key(&101));
     }
 
-    fn buffer_remove_at(group: &mut Conversation, target: &[u8], epoch: u64) {
+    fn buffer_remove_at(conversation: &mut Conversation, target: &[u8], epoch: u64) {
         let request = ConversationUpdateRequest {
             payload: Some(conversation_update_request::Payload::RemoveMember(
                 RemoveMember {
@@ -905,7 +907,7 @@ mod tests {
                 },
             )),
         };
-        assert!(group.buffer_pending_update(request, epoch));
+        assert!(conversation.buffer_pending_update(request, epoch));
     }
 
     /// Reducing `pending_update_max_epochs` (e.g. via a tightened
@@ -914,37 +916,37 @@ mod tests {
     /// `first_seen_epoch < cutoff` are dropped.
     #[test]
     fn test_expire_pending_updates_drops_entries_older_than_max_age() {
-        let mut group = creator_group("g", member(1));
+        let mut conversation = creator_conversation("g", member(1));
         let stale = member(7);
         let fresh = member(9);
 
-        buffer_remove_at(&mut group, &stale, 0);
-        buffer_remove_at(&mut group, &fresh, 4);
-        assert_eq!(group.pending_update_count(), 2);
+        buffer_remove_at(&mut conversation, &stale, 0);
+        buffer_remove_at(&mut conversation, &fresh, 4);
+        assert_eq!(conversation.pending_update_count(), 2);
 
-        let expired = group.expire_pending_updates(5, 1);
+        let expired = conversation.expire_pending_updates(5, 1);
 
         assert_eq!(expired, vec![stale.clone()]);
-        assert_eq!(group.pending_update_count(), 1);
-        assert!(group.has_pending_update(&fresh));
-        assert!(!group.has_pending_update(&stale));
+        assert_eq!(conversation.pending_update_count(), 1);
+        assert!(conversation.has_pending_update(&fresh));
+        assert!(!conversation.has_pending_update(&stale));
     }
 
     /// `max_age = 0` keeps only entries from the current epoch — the
     /// boundary case a tightened sync hits when shrinking the window.
     #[test]
     fn test_expire_pending_updates_max_age_zero_keeps_only_current_epoch() {
-        let mut group = creator_group("g", member(1));
+        let mut conversation = creator_conversation("g", member(1));
         let prior = member(7);
         let current = member(9);
 
-        buffer_remove_at(&mut group, &prior, 4);
-        buffer_remove_at(&mut group, &current, 5);
+        buffer_remove_at(&mut conversation, &prior, 4);
+        buffer_remove_at(&mut conversation, &current, 5);
 
-        let expired = group.expire_pending_updates(5, 0);
+        let expired = conversation.expire_pending_updates(5, 0);
 
         assert_eq!(expired, vec![prior.clone()]);
-        assert!(group.has_pending_update(&current));
-        assert!(!group.has_pending_update(&prior));
+        assert!(conversation.has_pending_update(&current));
+        assert!(!conversation.has_pending_update(&prior));
     }
 }

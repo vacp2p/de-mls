@@ -17,9 +17,6 @@ use crate::app::orchestrator::has_downward_cross;
 impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 'static>
     User<P, GP, H>
 {
-    /// Poll a `PendingJoin` group. Returns `true` while still waiting,
-    /// `false` once joined or once the join attempt has been torn down
-    /// after timing out.
     pub async fn check_pending_join(&self, conversation_name: &str) -> Result<bool, UserError> {
         let (state, expired) = match self
             .with_entry(conversation_name, |entry| {
@@ -39,8 +36,8 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         }
 
         if expired {
-            info!(group = conversation_name, "pending join timed out");
-            self.groups.write().await.remove(conversation_name);
+            info!(conversation = conversation_name, "pending join timed out");
+            self.conversations.write().await.remove(conversation_name);
             self.cleanup_consensus_scope(conversation_name).await?;
             let _ = self.handler.on_leave_conversation(conversation_name).await;
             return Ok(false);
@@ -70,18 +67,19 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
 
             // Early selection: skip remaining freeze time if all expected
             // stewards have submitted candidates.
-            let all_candidates_in = entry
-                .handle
-                .steward
-                .current_list()
-                .is_some_and(|list| entry.handle.group.freeze_candidate_count() >= list.len());
+            let all_candidates_in = entry.handle.steward.current_list().is_some_and(|list| {
+                entry.handle.conversation.freeze_candidate_count() >= list.len()
+            });
 
             if !all_candidates_in && !entry.is_freeze_timed_out() {
                 return Ok(FreezeTimeoutStatus::StillFreezing);
             }
 
             let event = entry.start_selection();
-            (entry.handle.group.approved_proposals_count() > 0, event)
+            (
+                entry.handle.conversation.approved_proposals_count() > 0,
+                event,
+            )
         };
 
         self.handler
@@ -98,7 +96,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 {
                     Ok(result) => result,
                     Err(e) => {
-                        error!(group = conversation_name, error = %e, "freeze finalize failed");
+                        error!(conversation = conversation_name, error = %e, "freeze finalize failed");
                         FreezeFinalizeResult::default()
                     }
                 }
@@ -106,7 +104,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 FreezeFinalizeResult::default()
             };
             // Apply locally-observed score events before releasing the
-            // entry lock. These come from dropped candidates in the
+            // runner lock. These come from dropped candidates in the
             // phase-3 loop (RFC §Peer Scoring: direct local observation,
             // no ECP needed). A downward threshold cross schedules a
             // removal-init pass below, after the lock drops.
@@ -120,7 +118,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         };
 
         // Notify the integrator of the just-committed batch (UI history,
-        // audit logs, etc.). Fired outside the entry lock so the handler
+        // audit logs, etc.). Fired outside the runner lock so the handler
         // can take its own locks without deadlock risk.
         if !finalize_result.committed_batch.is_empty() {
             let batch: Vec<_> = finalize_result.committed_batch.values().cloned().collect();
@@ -129,21 +127,21 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 .on_commit_applied(conversation_name, batch)
                 .await
             {
-                error!(group = conversation_name, error = %e, "on_commit_applied callback failed");
+                error!(conversation = conversation_name, error = %e, "on_commit_applied callback failed");
             }
         }
 
         // Lock split is intentional: `check_and_initiate_score_removals`
-        // re-acquires the entry write lock and calls `initiate_proposal`
-        // which `.await`s on the consensus service. Holding the entry
+        // re-acquires the runner write lock and calls `initiate_proposal`,
+        // which `.await`s on the consensus service. Holding the runner
         // lock across that await would block other operations on this
-        // group, so we drop the lock above before chaining.
+        // conversation, so we drop the lock above before chaining.
         if downward_cross
             && let Err(e) = self
                 .check_and_initiate_score_removals(conversation_name)
                 .await
         {
-            error!(group = conversation_name, error = %e, "score-removal check failed (freeze finalize)");
+            error!(conversation = conversation_name, error = %e, "score-removal check failed (freeze finalize)");
         }
 
         match finalize_result.outcome {
@@ -155,16 +153,16 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                     .is_some_and(|p| p.subtopic == WELCOME_SUBTOPIC);
                 if let Some(packet) = outbound {
                     if let Err(e) = self.handler.on_outbound(conversation_name, packet).await {
-                        error!(group = conversation_name, error = %e, "deferred welcome send failed");
+                        error!(conversation = conversation_name, error = %e, "deferred welcome send failed");
                     }
                 }
 
-                // ConversationSync carries the steward list + timing + scores to
-                // new joiners; send it only after the welcome they'll use
+                // ConversationSync carries the steward list + timing + scores
+                // to new joiners; send it only after the welcome they'll use
                 // to catch up.
                 if has_welcome {
-                    if let Err(e) = self.send_group_sync(conversation_name).await {
-                        error!(group = conversation_name, error = %e, "group sync send failed");
+                    if let Err(e) = self.send_conversation_sync(conversation_name).await {
+                        error!(conversation = conversation_name, error = %e, "conversation sync send failed");
                     }
                 }
 
@@ -172,7 +170,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                     .dispatch_inbound_result(conversation_name, *result)
                     .await
                 {
-                    error!(group = conversation_name, error = %e, "finalize result dispatch failed");
+                    error!(conversation = conversation_name, error = %e, "finalize result dispatch failed");
                 }
                 return Ok(FreezeTimeoutStatus::Applied);
             }
@@ -201,7 +199,8 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                                 let violation_epoch = mls.current_epoch()?;
                                 let self_identity = self.identity().identity_bytes();
                                 let members = entry.handle.conversation_members()?;
-                                let eligible = entry.handle.group.steward_eligibility(&members);
+                                let eligible =
+                                    entry.handle.conversation.steward_eligibility(&members);
                                 entry
                                     .handle
                                     .steward
@@ -223,7 +222,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
 
                         (event, cross)
                     } else {
-                        entry.handle.group.clear_freeze_round();
+                        entry.handle.conversation.clear_freeze_round();
                         let event = entry.start_working();
                         (event, false)
                     }
@@ -234,7 +233,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                         .check_and_initiate_score_removals(conversation_name)
                         .await
                 {
-                    error!(group = conversation_name, error = %e, "score-removal check failed (freeze timeout)");
+                    error!(conversation = conversation_name, error = %e, "score-removal check failed (freeze timeout)");
                 }
 
                 let entered_reelection = transition_event == ConversationState::Reelection;
@@ -249,7 +248,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                         .try_initiate_steward_election(conversation_name, true, None)
                         .await
                 {
-                    info!(group = conversation_name, error = %e, "recovery election deferred");
+                    info!(conversation = conversation_name, error = %e, "recovery election deferred");
                 }
             }
         }
@@ -257,9 +256,6 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         Ok(FreezeTimeoutStatus::TimedOut { has_proposals })
     }
 
-    /// Drives Working → Freezing when the steward has sat on approved
-    /// proposals for more than `commit_inactivity_duration`. Any member
-    /// polls — not just the steward — so a fault gets picked up group-wide.
     pub async fn check_member_freeze(&self, conversation_name: &str) -> Result<bool, UserError> {
         let entry_arc = self
             .lookup_entry(conversation_name)
@@ -272,10 +268,10 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             return Ok(false);
         }
 
-        let proposal_count = entry.handle.group.approved_proposals_count();
+        let proposal_count = entry.handle.conversation.approved_proposals_count();
         // Hold the freeze while an election is in flight — committing on
         // the known-stale list would just produce a NoCandidate.
-        if entry.handle.group.has_election_in_flight() {
+        if entry.handle.conversation.has_election_in_flight() {
             return Ok(false);
         }
         // Recovery uses the shorter retry inactivity window so we don't
@@ -290,7 +286,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         let freeze_event = entry.check_steward_inactivity(proposal_count, inactivity);
         if let Some(event) = freeze_event {
             let epoch = entry.handle.expect_mls()?.current_epoch()?;
-            entry.handle.group.ensure_freeze_round(epoch);
+            entry.handle.conversation.ensure_freeze_round(epoch);
 
             // Stewards build their own candidate under the same lock.
             // Candidate-build failure must not block the freeze transition —
@@ -304,7 +300,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(
-                            group = conversation_name,
+                            conversation = conversation_name,
                             error = %e,
                             "commit candidate build failed"
                         );
@@ -316,7 +312,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             };
 
             info!(
-                group = conversation_name,
+                conversation = conversation_name,
                 approved = proposal_count,
                 "steward inactivity transition"
             );

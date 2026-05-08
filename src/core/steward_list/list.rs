@@ -12,7 +12,7 @@ use crate::core::error::CoreError;
 
 // ── Configuration ───────────────────────────────────────────────────
 
-/// Steward-list configuration set at group creation. The deterministic
+/// Steward-list configuration set at conversation creation. The deterministic
 /// reference impl reads these bounds for size selection and validation;
 /// commit-batch and other unrelated knobs live elsewhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,7 +66,7 @@ impl StewardListConfig {
 
 /// An ordered list of steward identities for a range of epochs.
 ///
-/// Generated deterministically so all group members arrive at the same list.
+/// Generated deterministically so all conversation members arrive at the same list.
 /// The list covers epochs `[election_epoch, election_epoch + len)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StewardList {
@@ -135,7 +135,7 @@ impl StewardList {
 
     /// Nominal epoch steward at index `(epoch - election_epoch) % len`.
     /// Use [`Self::live_steward_from`] with the eligibility predicate to
-    /// skip stewards no longer in the group.
+    /// skip stewards no longer in the conversation.
     pub fn epoch_steward(&self, epoch: u64) -> Option<&[u8]> {
         if self.is_exhausted(epoch) {
             return None;
@@ -326,7 +326,7 @@ mod tests {
     #[test]
     fn test_generate_empty_members() {
         let config = StewardListConfig::new(1, 3).unwrap();
-        assert!(StewardList::generate(0, b"group1", &[], 1, config, 0).is_err());
+        assert!(StewardList::generate(0, b"conversation1", &[], 1, config, 0).is_err());
     }
 
     #[test]
@@ -335,11 +335,11 @@ mod tests {
         let mems = members(&[1, 2, 3, 4, 5]);
 
         assert!(
-            StewardList::generate(0, b"group1", &mems, 1, config.clone(), 0).is_err(),
+            StewardList::generate(0, b"conversation1", &mems, 1, config.clone(), 0).is_err(),
             "below sn_min"
         );
         assert!(
-            StewardList::generate(0, b"group1", &mems, 6, config, 0).is_err(),
+            StewardList::generate(0, b"conversation1", &mems, 6, config, 0).is_err(),
             "above sn_max"
         );
     }
@@ -348,7 +348,7 @@ mod tests {
     fn test_deterministic_generation() {
         let config = StewardListConfig::new(2, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
-        let conversation_id = b"test-group";
+        let conversation_id = b"test-conversation";
 
         let list1 = StewardList::generate(0, conversation_id, &mems, 3, config.clone(), 0).unwrap();
         let list2 = StewardList::generate(0, conversation_id, &mems, 3, config, 0).unwrap();
@@ -364,21 +364,21 @@ mod tests {
         let config = StewardListConfig::new(5, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
-        let base = StewardList::generate(0, b"group", &mems, 5, config.clone(), 0).unwrap();
+        let base = StewardList::generate(0, b"conversation", &mems, 5, config.clone(), 0).unwrap();
         let any_diff = (1..10).any(|e| {
-            let other = StewardList::generate(e, b"group", &mems, 5, config.clone(), 0).unwrap();
+            let other = StewardList::generate(e, b"conversation", &mems, 5, config.clone(), 0).unwrap();
             other.members() != base.members()
         });
         assert!(any_diff);
     }
 
     #[test]
-    fn test_different_group_shuffles() {
+    fn test_different_conversation_shuffles() {
         let config = StewardListConfig::new(5, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
-        let base = StewardList::generate(0, b"group1", &mems, 5, config.clone(), 0).unwrap();
-        let other = StewardList::generate(0, b"group2", &mems, 5, config, 0).unwrap();
+        let base = StewardList::generate(0, b"conversation1", &mems, 5, config.clone(), 0).unwrap();
+        let other = StewardList::generate(0, b"conversation2", &mems, 5, config, 0).unwrap();
         assert_ne!(base.members(), other.members());
     }
 
@@ -388,8 +388,8 @@ mod tests {
         let mems_a = members(&[1, 2, 3, 4, 5]);
         let mems_b = members(&[5, 3, 1, 4, 2]);
 
-        let list_a = StewardList::generate(0, b"group", &mems_a, 3, config.clone(), 0).unwrap();
-        let list_b = StewardList::generate(0, b"group", &mems_b, 3, config, 0).unwrap();
+        let list_a = StewardList::generate(0, b"conversation", &mems_a, 3, config.clone(), 0).unwrap();
+        let list_b = StewardList::generate(0, b"conversation", &mems_b, 3, config, 0).unwrap();
 
         assert_eq!(list_a.members(), list_b.members());
     }
@@ -399,7 +399,7 @@ mod tests {
         let config = StewardListConfig::new(3, 3).unwrap();
         let mems = members(&[1, 2, 3]);
 
-        let list = StewardList::generate(0, b"group", &mems, 3, config, 0).unwrap();
+        let list = StewardList::generate(0, b"conversation", &mems, 3, config, 0).unwrap();
         let s0 = list.epoch_steward(0).unwrap().to_vec();
         let s1 = list.epoch_steward(1).unwrap().to_vec();
         let s2 = list.epoch_steward(2).unwrap().to_vec();
@@ -415,7 +415,7 @@ mod tests {
         let config = StewardListConfig::new(3, 3).unwrap();
         let mems = members(&[1, 2, 3]);
 
-        let list = StewardList::generate(0, b"group", &mems, 3, config, 0).unwrap();
+        let list = StewardList::generate(0, b"conversation", &mems, 3, config, 0).unwrap();
 
         assert_eq!(list.backup_steward(0), list.epoch_steward(1));
         assert_eq!(list.backup_steward(1), list.epoch_steward(2));
@@ -427,7 +427,7 @@ mod tests {
         let config = StewardListConfig::new(2, 3).unwrap();
         let mems = members(&[1, 2, 3]);
 
-        let list = StewardList::generate(5, b"group", &mems, 3, config, 0).unwrap();
+        let list = StewardList::generate(5, b"conversation", &mems, 3, config, 0).unwrap();
         assert_eq!(list.election_epoch(), 5);
 
         // Covered epochs: [5, 8)
@@ -449,8 +449,8 @@ mod tests {
         let config = StewardListConfig::new(2, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
-        let list = StewardList::generate(0, b"group", &mems, 3, config.clone(), 0).unwrap();
-        let valid = StewardList::validate(list.members(), 0, b"group", &mems, &config, 0);
+        let list = StewardList::generate(0, b"conversation", &mems, 3, config.clone(), 0).unwrap();
+        let valid = StewardList::validate(list.members(), 0, b"conversation", &mems, &config, 0);
         assert!(valid.is_ok());
         assert!(valid.unwrap())
     }
@@ -460,11 +460,11 @@ mod tests {
         let config = StewardListConfig::new(2, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
-        let mut list = StewardList::generate(0, b"group", &mems, 3, config.clone(), 0).unwrap();
+        let mut list = StewardList::generate(0, b"conversation", &mems, 3, config.clone(), 0).unwrap();
         // Swap first two members
         list.members.swap(0, 1);
 
-        let valid = StewardList::validate(list.members(), 0, b"group", &mems, &config, 0);
+        let valid = StewardList::validate(list.members(), 0, b"conversation", &mems, &config, 0);
         assert!(valid.is_ok());
         assert!(!valid.unwrap())
     }
@@ -474,16 +474,16 @@ mod tests {
         let config = StewardListConfig::new(5, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
-        let list = StewardList::generate(0, b"group", &mems, 5, config.clone(), 0).unwrap();
+        let list = StewardList::generate(0, b"conversation", &mems, 5, config.clone(), 0).unwrap();
         // Find an epoch that produces a different ordering
         let diff_epoch = (1..100u64)
             .find(|&e| {
-                let o = StewardList::generate(e, b"group", &mems, 5, config.clone(), 0).unwrap();
+                let o = StewardList::generate(e, b"conversation", &mems, 5, config.clone(), 0).unwrap();
                 o.members() != list.members()
             })
             .expect("should differ within 100 epochs");
 
-        let valid = StewardList::validate(list.members(), diff_epoch, b"group", &mems, &config, 0);
+        let valid = StewardList::validate(list.members(), diff_epoch, b"conversation", &mems, &config, 0);
         assert!(valid.is_ok());
         assert!(!valid.unwrap());
     }
@@ -496,8 +496,8 @@ mod tests {
         let mems = members(&[1, 2, 3, 4, 5]);
         let other_mems = members(&[1, 2, 3, 4, 6]);
 
-        let list = StewardList::generate(0, b"group", &mems, 5, config.clone(), 0).unwrap();
-        let valid = StewardList::validate(list.members(), 0, b"group", &other_mems, &config, 0);
+        let list = StewardList::generate(0, b"conversation", &mems, 5, config.clone(), 0).unwrap();
+        let valid = StewardList::validate(list.members(), 0, b"conversation", &other_mems, &config, 0);
         assert!(valid.is_ok());
         assert!(!valid.unwrap())
     }
@@ -507,7 +507,7 @@ mod tests {
         let config = StewardListConfig::new(1, 3).unwrap();
         let mems = members(&[1]);
 
-        let list = StewardList::generate(0, b"group", &mems, 1, config, 0).unwrap();
+        let list = StewardList::generate(0, b"conversation", &mems, 1, config, 0).unwrap();
         assert_eq!(list.len(), 1);
         // With one steward, epoch and backup slots collapse to the same person.
         assert_eq!(list.epoch_steward(0), list.backup_steward(0));
@@ -521,7 +521,7 @@ mod tests {
         let config = StewardListConfig::new(3, 3).unwrap();
         let mems = members(&[1, 2, 3]);
 
-        let list = StewardList::generate(0, b"group", &mems, 3, config, 0).unwrap();
+        let list = StewardList::generate(0, b"conversation", &mems, 3, config, 0).unwrap();
         let nominal = list.epoch_steward(0).unwrap().to_vec();
 
         let all_eligible = |c: &[u8]| mems.iter().any(|m| m == c);
@@ -544,7 +544,7 @@ mod tests {
     fn test_live_epoch_and_backup_all_ineligible_and_single_survivor() {
         let config = StewardListConfig::new(2, 2).unwrap();
         let mems = members(&[1, 2]);
-        let list = StewardList::generate(0, b"group", &mems, 2, config, 0).unwrap();
+        let list = StewardList::generate(0, b"conversation", &mems, 2, config, 0).unwrap();
 
         let (e, b) = list.live_epoch_and_backup(0, |_| false);
         assert!(e.is_none() && b.is_none());
@@ -555,13 +555,13 @@ mod tests {
         assert!(b.is_none());
     }
 
-    /// 3 stewards with the nominal epoch steward leaving: both slots must
-    /// rotate and stay distinct. The pre-fix path would collapse them.
+    /// 3 stewards with the nominal epoch steward ineligible: both slots must
+    /// rotate and stay distinct rather than collapsing onto the same identity.
     #[test]
     fn test_live_epoch_and_backup_rotates_when_epoch_leaves() {
         let config = StewardListConfig::new(3, 3).unwrap();
         let mems = members(&[1, 2, 3]);
-        let list = StewardList::generate(0, b"group", &mems, 3, config, 0).unwrap();
+        let list = StewardList::generate(0, b"conversation", &mems, 3, config, 0).unwrap();
 
         let nominal = list.epoch_steward(0).unwrap().to_vec();
         let (e, b) = list.live_epoch_and_backup(0, |c| c != nominal.as_slice());
@@ -577,7 +577,7 @@ mod tests {
     fn test_live_epoch_and_backup_matches_nominal_when_all_eligible() {
         let config = StewardListConfig::new(3, 3).unwrap();
         let mems = members(&[1, 2, 3]);
-        let list = StewardList::generate(0, b"group", &mems, 3, config, 0).unwrap();
+        let list = StewardList::generate(0, b"conversation", &mems, 3, config, 0).unwrap();
 
         let (e, b) = list.live_epoch_and_backup(0, |_| true);
         assert_eq!(e, list.epoch_steward(0));
@@ -589,11 +589,11 @@ mod tests {
         let config = StewardListConfig::new(5, 5).unwrap();
         let mems = members(&[1, 2, 3, 4, 5]);
 
-        let list = StewardList::generate(0, b"group", &mems, 5, config, 0).unwrap();
+        let list = StewardList::generate(0, b"conversation", &mems, 5, config, 0).unwrap();
         let hashes: Vec<Vec<u8>> = list
             .members()
             .iter()
-            .map(|m| compute_steward_hash(0, 0, m, b"group"))
+            .map(|m| compute_steward_hash(0, 0, m, b"conversation"))
             .collect();
 
         for window in hashes.windows(2) {
@@ -607,7 +607,7 @@ mod tests {
         let mems = members(&[1, 2, 3, 4, 5]);
         let empty: Vec<Vec<u8>> = vec![];
 
-        assert!(StewardList::validate(&empty, 0, b"group", &mems, &config, 0).is_err());
+        assert!(StewardList::validate(&empty, 0, b"conversation", &mems, &config, 0).is_err());
     }
 
     /// `sn_min=5` but only 3 members: `generate` clamps to total available.
@@ -616,16 +616,16 @@ mod tests {
         let config = StewardListConfig::new(5, 10).unwrap();
         let mems = members(&[1, 2, 3]);
 
-        let list = StewardList::generate(0, b"group", &mems, 3, config, 0).unwrap();
+        let list = StewardList::generate(0, b"conversation", &mems, 3, config, 0).unwrap();
         assert_eq!(list.len(), 3);
     }
 
     #[test]
-    fn test_large_group_subset_selection() {
+    fn test_large_conversation_subset_selection() {
         let config = StewardListConfig::new(3, 5).unwrap();
         let mems: Vec<Vec<u8>> = (1..=20).map(member).collect();
 
-        let list = StewardList::generate(0, b"group", &mems, 5, config, 0).unwrap();
+        let list = StewardList::generate(0, b"conversation", &mems, 5, config, 0).unwrap();
         assert_eq!(list.len(), 5);
         for steward in list.members() {
             assert!(mems.contains(steward));
@@ -639,9 +639,9 @@ mod tests {
         let config = StewardListConfig::new(1, 2).unwrap();
         let mems: Vec<Vec<u8>> = (1..=4u8).map(member).collect();
 
-        let base = StewardList::generate(1, b"group", &mems, 2, config.clone(), 0).unwrap();
+        let base = StewardList::generate(1, b"conversation", &mems, 2, config.clone(), 0).unwrap();
         let any_diff = (1..10u32).any(|r| {
-            let other = StewardList::generate(1, b"group", &mems, 2, config.clone(), r).unwrap();
+            let other = StewardList::generate(1, b"conversation", &mems, 2, config.clone(), r).unwrap();
             other.members() != base.members()
         });
         assert!(

@@ -1,19 +1,24 @@
 //! Reusable core for building DE-MLS chat applications.
 //!
-//! This module wraps MLS cryptography, consensus voting, and message routing.
-//! Transport, UI, and state management live in the app layer.
+//! Wraps MLS cryptography, consensus voting, and message routing. Transport,
+//! UI, and state management live in the app layer.
 //!
-//! Integrators implement [`crate::core::ConversationEventHandler`] (transport + UI
-//! delivery) and feed inbound packets to [`crate::core::process_inbound`],
+//! Integrators implement [`crate::core::ConversationEventHandler`] (transport
+//! + UI delivery) and feed inbound packets to [`crate::core::process_inbound`],
 //! then dispatch the returned [`crate::core::ProcessResult`].
-//! [`crate::core::DefaultProvider`] bundles in-memory backends for testing
+//! [`crate::core::DefaultProvider`] bundles in-memory backends for tests
 //! and simple deployments.
 //!
-//! Submodules: `freeze` (round selection + apply), `inbound` (app-subtopic
-//! packet routing), `proposal_framing` (welcome-subtopic + consensus-library
-//! framing helpers), `consensus` (pure consensus result application),
-//! `events` ([`crate::core::ConversationEventHandler`]), `provider`
-//! ([`crate::core::DeMlsProvider`] + [`crate::core::DefaultProvider`]).
+//! Submodules: `conversation` (per-group state, handle, state machine,
+//! config), `consensus` (pure consensus result application), `events`
+//! ([`crate::core::ConversationEventHandler`]), `freeze` (round selection
+//! + apply), `inbound` (app-subtopic packet routing), `peer_scoring`
+//! (scoring plug-in contract), `process_result`
+//! ([`crate::core::ProcessResult`]), `proposal_framing` (welcome-subtopic
+//! + consensus-library framing helpers), `proposal_kind`
+//! ([`crate::core::ProposalKind`] classifier), `provider`
+//! ([`crate::core::DeMlsProvider`] + [`crate::core::DefaultProvider`]),
+//! `steward_list` (steward-list plug-in).
 
 mod consensus;
 mod conversation;

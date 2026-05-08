@@ -31,7 +31,7 @@ impl TopicFilter {
         Self::default()
     }
 
-    /// Add all subtopics for a group.
+    /// Add all subtopics for a conversation.
     pub async fn add_many(&self, conversation_name: &str) {
         let mut w = self.set.write().await;
         for sub in SUBTOPICS {
@@ -39,7 +39,7 @@ impl TopicFilter {
         }
     }
 
-    /// Remove all subtopics for a group.
+    /// Remove all subtopics for a conversation.
     pub async fn remove_many(&self, conversation_name: &str) {
         self.set
             .write()

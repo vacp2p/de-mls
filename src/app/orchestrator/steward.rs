@@ -1,5 +1,5 @@
 //! Post-epoch-advance steward housekeeping: list generation/election,
-//! pending-update drain, scoring sync, group-sync broadcast.
+//! pending-update drain, scoring sync, conversation-sync broadcast.
 
 use tracing::{error, info};
 
@@ -92,7 +92,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
 
             // `has_election_in_flight` is a proposal-queue check, not a
             // steward-list one — gated here, before the plug-in call.
-            if entry.handle.group.has_election_in_flight() {
+            if entry.handle.conversation.has_election_in_flight() {
                 return Ok(());
             }
 
@@ -104,7 +104,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                     if extra_exclude.is_some_and(|x| x == m.as_slice()) {
                         return false;
                     }
-                    if recovery && entry.handle.group.is_pending_removal(m) {
+                    if recovery && entry.handle.conversation.is_pending_removal(m) {
                         return false;
                     }
                     true
@@ -124,7 +124,10 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             )? {
                 ElectionDecision::Skip(reason) => {
                     if matches!(reason, "no eligible candidates after filter") {
-                        info!(group = conversation_name, "skipping election: {reason}");
+                        info!(
+                            conversation = conversation_name,
+                            "skipping election: {reason}"
+                        );
                     }
                     return Ok(());
                 }
@@ -148,7 +151,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         };
 
         info!(
-            group = conversation_name,
+            conversation = conversation_name,
             epoch = election_epoch,
             retry_round,
             stewards = stewards_len,
@@ -156,8 +159,8 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             "initiating steward election"
         );
 
-        // Elections are group decisions — broadcast unbundled so the
-        // responsible proposer still votes via the banner.
+        // Elections are conversation-wide decisions — broadcast unbundled
+        // so the responsible proposer still votes via the banner.
         self.initiate_proposal(conversation_name.to_string(), request, None)
             .await?;
 
@@ -184,12 +187,12 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             // predicate (MLS-present and not queued for removal).
             let mls_set: std::collections::HashSet<&[u8]> =
                 mls_members.iter().map(Vec::as_slice).collect();
-            let group_ref = &entry.handle.group;
+            let conversation_ref = &entry.handle.conversation;
             let authorized = entry
                 .handle
                 .steward
                 .election_proposer(&|c: &[u8]| {
-                    mls_set.contains(c) && !group_ref.is_pending_removal(c)
+                    mls_set.contains(c) && !conversation_ref.is_pending_removal(c)
                 })
                 .is_some_and(|proposer| proposer == self_id);
             let epoch = mls.current_epoch()?;
@@ -204,7 +207,10 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             .with_creator(self_id.to_vec())
             .into_update_request()?;
 
-        info!(group = conversation_name, epoch, "initiating Deadlock ECP");
+        info!(
+            conversation = conversation_name,
+            epoch, "initiating Deadlock ECP"
+        );
 
         // Bundle YES — the proposer's observation that the deadlock is
         // real is their vote.
@@ -215,8 +221,8 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
 
     /// Post-epoch-advance sequence: (1) auto-fill if membership dropped
     /// below `sn_min`, (2) kick off an election if the list is exhausted.
-    /// Election-initiate failures are logged, not surfaced — group state
-    /// may legitimately reject a new proposal right now.
+    /// Election-initiate failures are logged, not surfaced — conversation
+    /// state may legitimately reject a new proposal right now.
     pub async fn steward_list_housekeeping(
         &self,
         conversation_name: &str,
@@ -226,7 +232,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             .try_initiate_steward_election(conversation_name, false, None)
             .await
         {
-            info!(group = conversation_name, error = %e, "election initiation deferred");
+            info!(conversation = conversation_name, error = %e, "election initiation deferred");
         }
         Ok(())
     }
@@ -285,19 +291,19 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         };
 
         let mut entry = entry_arc.write().await;
-        let before = entry.handle.group.pending_update_count();
+        let before = entry.handle.conversation.pending_update_count();
         entry
             .handle
-            .group
+            .conversation
             .prune_pending_updates_for_members(&members);
         let expired = entry
             .handle
-            .group
+            .conversation
             .expire_pending_updates(current_epoch, max_age);
-        let after = entry.handle.group.pending_update_count();
+        let after = entry.handle.conversation.pending_update_count();
         if before != after {
             info!(
-                group = conversation_name,
+                conversation = conversation_name,
                 before,
                 after,
                 expired = expired.len(),
@@ -323,7 +329,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 None => (0, Vec::new()),
             };
             let self_identity = self.identity().identity_bytes();
-            let eligible = entry.handle.group.steward_eligibility(&members);
+            let eligible = entry.handle.conversation.steward_eligibility(&members);
             let is_live = entry
                 .handle
                 .steward
@@ -333,16 +339,17 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 return Ok(());
             }
 
-            // Collect buffered updates whose target isn't already in the
-            // active proposal queues. The approved queue is also in the group.
-            let approved = entry.handle.group.approved_proposals();
+            // Collect buffered updates whose target isn't already in an
+            // active proposal queue. Both the voting and approved queues
+            // live on `Conversation`.
+            let approved = entry.handle.conversation.approved_proposals();
             let approved_targets: std::collections::HashSet<&[u8]> =
                 approved.values().filter_map(target_identity_of).collect();
             let members_set = member_set(&members);
 
             let to_propose: Vec<ConversationUpdateRequest> = entry
                 .handle
-                .group
+                .conversation
                 .pending_updates()
                 .iter()
                 .filter(|(id, _)| !approved_targets.contains(id.as_slice()))
@@ -365,7 +372,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         }
 
         info!(
-            group = conversation_name,
+            conversation = conversation_name,
             epoch = current_epoch,
             count = to_propose.len(),
             "promoting buffered updates to proposals"
@@ -378,7 +385,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 .initiate_proposal(conversation_name.to_string(), request, None)
                 .await
             {
-                info!(group = conversation_name, error = %e, "buffered proposal deferred");
+                info!(conversation = conversation_name, error = %e, "buffered proposal deferred");
             }
         }
         Ok(())
@@ -388,7 +395,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
     /// an encrypted `ConversationSync`. Steward calls this after an Add-bearing
     /// commit so new joiners can fully participate. Idempotent for members
     /// who already have a steward list.
-    pub async fn send_group_sync(&self, conversation_name: &str) -> Result<(), UserError> {
+    pub async fn send_conversation_sync(&self, conversation_name: &str) -> Result<(), UserError> {
         let entry_arc = self
             .lookup_entry(conversation_name)
             .await
@@ -438,7 +445,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             // first epoch.
             let mls = entry.handle.expect_mls()?;
             let mls_members = entry.handle.conversation_members()?;
-            let eligible = entry.handle.group.steward_eligibility(&mls_members);
+            let eligible = entry.handle.conversation.steward_eligibility(&mls_members);
             let steward_members = entry.handle.steward.steward_members(&eligible);
 
             // `retry_round` is the seed that produced the *stored* list —
@@ -465,7 +472,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         };
 
         self.handler.on_outbound(conversation_name, packet).await?;
-        info!(group = conversation_name, "group sync sent");
+        info!(conversation = conversation_name, "conversation sync sent");
         Ok(())
     }
 
@@ -511,15 +518,18 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 .members_below_threshold()
                 .into_iter()
                 .filter(|id| *id != self_id)
-                .filter(|id| !entry.handle.group.has_pending_removal(id))
-                .filter(|id| !entry.handle.group.is_pending_removal(id))
+                .filter(|id| !entry.handle.conversation.has_pending_removal(id))
+                .filter(|id| !entry.handle.conversation.is_pending_removal(id))
                 .filter_map(|id| {
                     let score = entry.handle.scoring.score_for(&id)?;
                     Some((id, score))
                 })
                 .collect::<Vec<_>>();
             for (id, _) in &to_remove {
-                entry.handle.group.observe_pending_removal(id.clone());
+                entry
+                    .handle
+                    .conversation
+                    .observe_pending_removal(id.clone());
             }
             (is_steward, epoch, to_remove)
         };
@@ -536,7 +546,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             let request = evidence.into_update_request()?;
 
             info!(
-                group = conversation_name,
+                conversation = conversation_name,
                 target = %ShortId(&target_id),
                 score = current_score,
                 "initiating SCORE_BELOW_THRESHOLD removal"
@@ -550,10 +560,13 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             {
                 if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
                     let mut entry = entry_arc.write().await;
-                    entry.handle.group.resolve_pending_removal(&target_id);
+                    entry
+                        .handle
+                        .conversation
+                        .resolve_pending_removal(&target_id);
                 }
                 error!(
-                    group = conversation_name,
+                    conversation = conversation_name,
                     target = %ShortId(&target_id),
                     error = %e,
                     "SCORE_BELOW_THRESHOLD vote failed to start"

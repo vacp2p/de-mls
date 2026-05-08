@@ -1,4 +1,4 @@
-//! Steward list plug-in: passive, per-group steward roster.
+//! Steward list plug-in: passive, per-conversation steward roster.
 //!
 //! Answers "who is the steward at epoch N?", "am I a steward?", and
 //! "is the list exhausted?". Stores its own list, election epoch, retry

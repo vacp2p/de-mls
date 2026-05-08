@@ -1,8 +1,7 @@
-//! App-side per-group runner: wraps a [`crate::core::ConversationHandle`]
+//! App-side per-conversation runner: wraps a [`crate::core::ConversationHandle`]
 //! together with a [`crate::app::PhaseTimer`] and the per-proposal
 //! auto-vote timer registry. Coordinator methods compose state-machine
-//! transitions with phase-timer anchors so callers don't have to manage
-//! them in pairs.
+//! transitions with phase-timer anchors so callers update both in one call.
 
 use std::{
     collections::HashMap,
@@ -22,15 +21,15 @@ use crate::{
     mls_crypto::MlsService,
 };
 
-/// Per-group auto-vote timer registry. Spawned when a proposal first
+/// Per-conversation auto-vote timer registry. Spawned when a proposal first
 /// becomes visible locally (own submit or peer inbound); cancelled on
-/// manual vote, consensus resolution, or group leave.
+/// manual vote, consensus resolution, or conversation leave.
 pub(crate) type AutoVoteTimers = Arc<Mutex<HashMap<u32, JoinHandle<()>>>>;
 
 pub struct SessionRunner<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> {
     pub(crate) handle: ConversationHandle<M, Sc, St>,
     /// Wall-clock anchor combined with `handle.state_machine` by
-    /// coordinator methods. App-only: no equivalent in core.
+    /// coordinator methods.
     pub(crate) phase_timer: PhaseTimer,
     /// Per-proposal auto-vote timers. The spawned task holds a clone of
     /// this `Arc` so it can self-clean on completion; coordinators use
@@ -40,9 +39,10 @@ pub struct SessionRunner<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPl
 
 impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> SessionRunner<M, Sc, St> {
     /// Build a fresh runner. Creator path passes `Some(mls)`; joiner
-    /// path passes `None` and attaches later via `handle.attach_mls`.
+    /// path passes `None` and attaches the MLS service later via
+    /// `handle.attach_mls`.
     pub(crate) fn new(
-        group: Conversation,
+        conversation: Conversation,
         mls: Option<M>,
         state_machine: ConversationStateMachine,
         phase_timer: PhaseTimer,
@@ -51,7 +51,14 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> SessionRunner<
         steward: St,
     ) -> Self {
         Self {
-            handle: ConversationHandle::new(group, mls, state_machine, config, scoring, steward),
+            handle: ConversationHandle::new(
+                conversation,
+                mls,
+                state_machine,
+                config,
+                scoring,
+                steward,
+            ),
             phase_timer,
             auto_vote_timers: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -70,7 +77,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> SessionRunner<
     }
 
     /// Abort every auto-vote timer registered on this runner. Called on
-    /// group leave so no stale timers fire against a group we've left.
+    /// conversation leave so no stale timers fire against a conversation we've left.
     pub(crate) fn cancel_all_auto_votes(&self) {
         if let Ok(mut timers) = self.auto_vote_timers.lock() {
             for (_, handle) in timers.drain() {

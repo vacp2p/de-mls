@@ -4,7 +4,7 @@ use openmls::key_packages::KeyPackage as MlsKeyPackage;
 
 use crate::mls_crypto::MlsError;
 
-/// Serialized key package for joining groups.
+/// Serialized key package for joining conversation.
 ///
 /// Contains the TLS-serialized key package bytes and the owner's wallet identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,13 +76,13 @@ pub enum DecryptResult {
     /// Application message decrypted successfully.
     /// Contains `(message_bytes, sender_identity)`.
     Application(Vec<u8>, Vec<u8>),
-    /// We were removed from the group.
+    /// We were removed from the conversation.
     /// Contains the authenticated sender identity.
     Removed(Vec<u8>),
     /// Proposal stored (no action needed).
     /// Contains `(sender_identity, action)`.
     ProposalStored(Vec<u8>, MlsProposalOutput),
-    /// Message ignored (wrong group/epoch).
+    /// Message ignored (wrong conversation/epoch).
     Ignored,
 }
 
@@ -91,7 +91,7 @@ pub enum DecryptResult {
 /// Returned by `MlsService::stage_remote_commit`. The `Staged` variant
 /// carries the MLS-authenticated senders of every staged proposal and of
 /// the commit, plus the membership-change actions extracted from the
-/// commit. `Aborted` signals a benign rejection (stale epoch, wrong group,
+/// commit. `Aborted` signals a benign rejection (stale epoch, wrong conversation,
 /// non-proposal in a proposal slot, non-commit in the commit slot) where
 /// no validated outcome can be produced — the caller must NOT treat it as
 /// a violation but should clean MLS state via `discard_staged_commit`.
@@ -105,7 +105,7 @@ pub enum StagedCandidateResult {
         /// these against the commit sender to detect bundles signed by
         /// non-committers.
         proposal_senders: Vec<Vec<u8>>,
-        /// Whether this commit removes us from the group.
+        /// Whether this commit removes us from the conversation.
         self_removed: bool,
         /// Membership changes (Add/Remove) contained in the commit's proposals.
         actions: Vec<MlsProposalOutput>,

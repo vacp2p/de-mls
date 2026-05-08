@@ -1,7 +1,7 @@
 use std::sync::{Arc, atomic::Ordering};
 
 use de_mls::{
-    app::format_group_request, ds::WakuDeliveryService, identity::format_wallet_address,
+    app::format_conversation_request, ds::WakuDeliveryService, identity::format_wallet_address,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
@@ -16,7 +16,7 @@ pub(crate) fn display_batch(batch: &[ConversationUpdateRequest]) -> Vec<(String,
     batch
         .iter()
         .filter(|p| p.payload.is_some())
-        .map(format_group_request)
+        .map(format_conversation_request)
         .collect()
 }
 
@@ -117,7 +117,7 @@ pub(crate) async fn push_member_scores(
     let is_steward = user
         .read()
         .await
-        .is_steward_for_group(conversation_name)
+        .is_steward_for_conversation(conversation_name)
         .await
         .unwrap_or(false);
     let _ = evt_tx.unbounded_send(AppEvent::StewardStatus {

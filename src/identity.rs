@@ -3,30 +3,22 @@
 //! The `Identity` trait defines a user — the bytes that name them and a
 //! display form. MLS-specific binding (signing keypair, credential)
 //! lives in `MlsCredentials` under [`crate::mls_crypto`], constructed
-//! *from* an `Identity` at User init and held shared (one per user, not
-//! per group). This split mirrors libchat's `MlsContext`: identity is
-//! its own concept, MLS is one of many systems that consumes it.
+//! *from* an `Identity` at User init and held shared.
 //!
 //! The default impl is [`crate::identity::WalletIdentity`], which derives
 //! the canonical identity bytes from a 20-byte Ethereum address. Future
 //! impls (libchat-style `AccountId`, etc.) plug in by implementing the
 //! trait; they do not need to know anything about MLS.
 
-use std::str::FromStr;
-
 use alloy::{hex, primitives::Address};
+use std::str::FromStr;
 
 use crate::mls_crypto::MlsError;
 
 /// Pluggable user identity.
 ///
 /// Bridges an authenticated user (wallet, account id, …) to anything
-/// downstream that needs to name them. Methods take `&self` so the
-/// trait stays object-safe; callers usually hold an `Arc<I>` so one
-/// identity can back many User-level subsystems (peer scoring, UI,
-/// transport addressing). The MLS service does *not* consume `Identity`
-/// directly — it consumes `MlsCredentials` built once from this
-/// identity at User init.
+/// downstream that needs to name them.
 pub trait Identity: Send + Sync + 'static {
     /// Canonical identity bytes — the unique on-the-wire identifier
     /// used by the MLS credential's serialized content, scoring keys,
@@ -123,7 +115,7 @@ pub fn parse_wallet_to_bytes(address: &str) -> Result<Vec<u8>, MlsError> {
 }
 
 /// Short identity prefix for log output. Renders the first 4 bytes as hex
-/// (8 chars) — long enough to be unique across the group, short enough not
+/// (8 chars) — long enough to be unique across the conversation, short enough not
 /// to dominate a log line. Use as `%ShortId(&identity)` in `tracing` macros.
 pub struct ShortId<'a>(pub &'a [u8]);
 

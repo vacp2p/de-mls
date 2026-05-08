@@ -19,11 +19,12 @@ use crate::{
 
 // ─────────────────────────── Welcome-subtopic framing ───────────────────────────
 
-/// Build a key package message for joining a group.
+/// Build a key package message for joining a conversation.
 ///
 /// The key package is supplied by the caller (typically via
 /// `OpenMlsService::generate_key_package`) so a joiner can publish a key
-/// package before any MLS service for the target group exists.
+/// package before any MLS service for the target conversation exists.
+/// package before any MLS service for the target conversation exists.
 pub fn build_key_package_message(
     conversation_name: &str,
     key_package: KeyPackageBytes,

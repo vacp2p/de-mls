@@ -1,9 +1,9 @@
 //! App-side phase timer.
 //!
-//! Holds only the wall-clock anchor (`started_at`). Phase-anchor durations
-//! live in [`crate::core::ConversationConfig`] (single source of truth);
+//! Holds the wall-clock anchor (`started_at`). Phase-anchor durations live
+//! in [`crate::core::ConversationConfig`] (single source of truth);
 //! [`crate::app::SessionRunner`] reads durations off the handle's config
-//! and passes them to this timer's pure elapsed-checks.
+//! and passes them to this timer's elapsed-checks.
 
 use std::time::Instant;
 
@@ -22,10 +22,10 @@ pub enum FreezeTimeoutStatus {
     },
 }
 
-/// Wall-clock anchor for the active phase. Pure timer state — no
-/// durations, no `ConversationState` awareness. Queries take the relevant
-/// `Duration` as a parameter; [`crate::app::SessionRunner`] composes
-/// them with state machine + `ConversationConfig`.
+/// Wall-clock anchor for the active phase. Holds only the anchor
+/// `Instant`; queries take the relevant `Duration` as a parameter.
+/// [`crate::app::SessionRunner`] composes the timer with the state
+/// machine and [`crate::core::ConversationConfig`] durations.
 #[derive(Debug, Clone, Default)]
 pub struct PhaseTimer {
     /// Meaning depends on the orchestrator's intent at start time:

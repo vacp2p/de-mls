@@ -1,7 +1,7 @@
 //! MLS-specific credential bundle: signing keypair + credential.
 //!
 //! Built once per user from an [`crate::identity::Identity`] at User init
-//! and shared across every per-group `MlsService` via
+//! and shared across every per-conversation `MlsService` via
 //! `Arc<MlsCredentials>`. The signing key is the long-lived MLS identity;
 //! the credential's serialized content is the user's identity bytes —
 //! the link back to whatever real-world identifier the
@@ -16,7 +16,7 @@ use crate::{
 };
 
 /// MLS credential + signing keypair for one user, shared across all
-/// groups they belong to.
+/// conversations they belong to.
 #[derive(Debug)]
 pub struct MlsCredentials {
     credential: CredentialWithKey,

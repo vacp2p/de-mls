@@ -1,4 +1,4 @@
-//! Per-group state machine.
+//! Per-conversation state machine.
 //!
 //! Holds the [`ConversationState`] enum and exposes named transition methods.
 //! The app layer wraps this with a timer-driven controller — see
@@ -6,7 +6,7 @@
 
 use std::fmt::Display;
 
-/// The lifecycle state of a per-group session. Transitions are driven
+/// The lifecycle state of a per-conversation session. Transitions are driven
 /// by the app layer through the named methods on [`ConversationStateMachine`];
 /// timing rules live in [`crate::app::PhaseTimer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +25,7 @@ pub enum ConversationState {
     Reelection,
 }
 
-/// Authorization mode for a group, orthogonal to [`ConversationState`].
+/// Authorization mode for a conversation, orthogonal to [`ConversationState`].
 ///
 /// `Normal` is the default: only steward-list members may produce
 /// commits. `Recovery` is set when an accepted Layer-3 Deadlock ECP

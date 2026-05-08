@@ -17,11 +17,11 @@ pub enum UserError {
     #[error("Conversation not found")]
     ConversationNotFound,
 
-    #[error("Already leaving this group")]
+    #[error("Already leaving this conversation")]
     AlreadyLeaving,
 
-    #[error("Cannot send message: group is in {0} state")]
-    GroupBlocked(String),
+    #[error("Cannot send message: conversation is in {0} state")]
+    ConversationBlocked(String),
 
     #[error(
         "Lower-priority proposal blocked: an emergency criteria proposal is active (RFC partial freeze)"

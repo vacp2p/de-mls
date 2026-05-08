@@ -109,8 +109,8 @@ pub struct ScoreSnapshot {
     pub diverged: Vec<(Vec<u8>, i64)>,
 }
 
-/// Per-member score persistence for a single group. One storage
-/// instance per group; the app layer ships an in-memory default impl.
+/// Per-member score persistence for a single conversation. One storage
+/// instance per conversation; the app layer ships an in-memory default impl.
 pub trait PeerScoreStorage {
     fn get(&self, member_id: &[u8]) -> Option<i64>;
     fn set(&mut self, member_id: &[u8], score: i64);
@@ -193,7 +193,7 @@ fn creator_penalty(ev: &ViolationEvidence) -> ScoreOp {
 
 // ── Plug-in trait ───────────────────────────────────────────────────
 
-/// Per-group peer-scoring plug-in. Mutating methods return any
+/// Per-conversation peer-scoring plug-in. Mutating methods return any
 /// [`PeerScoringEvent`]s the call produced; the coordinator drains them
 /// at safe points and turns threshold crossings into protocol actions.
 /// The plug-in itself owns no I/O — storage backends and event
@@ -295,8 +295,8 @@ fn cross_event(
 
 // ── Reference scoring service ───────────────────────────────────────
 
-/// Per-group, per-member score tracker. Reference [`PeerScoringPlugin`]
-/// implementation. One instance per group; threshold travels with
+/// Per-conversation, per-member score tracker. Reference [`PeerScoringPlugin`]
+/// implementation. One instance per conversation; threshold travels with
 /// [`ScoringConfig`]. Storage is abstracted via [`PeerScoreStorage`] so
 /// app-layer backends (in-memory, on-disk, …) plug in without touching
 /// this protocol logic.

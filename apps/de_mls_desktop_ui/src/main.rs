@@ -11,7 +11,7 @@ use std::{
 };
 
 use de_mls::{
-    app::format_group_request,
+    app::format_conversation_request,
     identity::parse_wallet_address,
     protos::de_mls::messages::v1::{ConversationMessage, ConversationUpdateRequest, VotePayload},
 };
@@ -481,7 +481,7 @@ fn Home() -> Element {
                         if opened.as_deref() == Some(vp.conversation_id.as_str()) {
                             let (action, address) =
                                 ConversationUpdateRequest::decode(vp.payload.as_slice())
-                                    .map(|req| format_group_request(&req))
+                                    .map(|req| format_conversation_request(&req))
                                     .unwrap_or_else(|_| {
                                         ("Invalid".to_string(), "malformed payload".to_string())
                                     });
@@ -1137,7 +1137,7 @@ fn ActiveVotesBanner() -> Element {
                     {
                         let proposal_id = vp.proposal_id;
                         let (action, id) = ConversationUpdateRequest::decode(vp.payload.as_slice())
-                            .map(|req| format_group_request(&req))
+                            .map(|req| format_conversation_request(&req))
                             .unwrap_or_else(|_| (
                                 "Invalid".to_string(),
                                 "malformed payload".to_string(),

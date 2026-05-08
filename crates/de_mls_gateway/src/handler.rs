@@ -10,7 +10,7 @@ use futures::channel::mpsc::UnboundedSender;
 use tokio::task::spawn_blocking;
 
 use de_mls::{
-    app::{MessageType, format_group_request, message_types},
+    app::{MessageType, format_conversation_request, message_types},
     core::{CallbackError, ConversationEventHandler, ConversationState},
     ds::{DeliveryService, OutboundPacket, TopicFilter},
     protos::de_mls::messages::v1::{
@@ -92,7 +92,7 @@ impl<DS: DeliveryService> ConversationEventHandler for GatewayEventHandler<DS> {
         proposal_id: u32,
         request: &ConversationUpdateRequest,
     ) -> Result<(), CallbackError> {
-        let (action, address) = format_group_request(request);
+        let (action, address) = format_conversation_request(request);
         let _ = self.evt_tx.unbounded_send(AppEvent::OwnProposalSubmitted {
             conversation_id: conversation_name.to_string(),
             proposal_id,
