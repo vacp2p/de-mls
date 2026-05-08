@@ -80,6 +80,12 @@ pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin, St: StewardLi
     /// eligibility from MLS members + `Group::is_pending_removal` and
     /// passes it on every position query.
     steward: St,
+    /// Cross-cutting recovery flag (RFC §Layer 3 Anti-Deadlock ECP).
+    /// Set when an accepted Deadlock ECP relaxes the steward gate so any
+    /// member may produce the next commit; cleared when a fresh election
+    /// lands. Read by the freeze coordinator, the create-commit path, and
+    /// `core::finalize_freeze_round` (via `in_recovery` parameter).ƒ
+    recovery_mode: bool,
 }
 
 impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, Sc, St> {
@@ -102,7 +108,22 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
             config,
             scoring,
             steward,
+            recovery_mode: false,
         }
+    }
+
+    // ── Recovery-mode flag (Layer 3 Anti-Deadlock) ──────────────────
+
+    pub(crate) fn is_in_recovery_mode(&self) -> bool {
+        self.recovery_mode
+    }
+
+    pub(crate) fn enter_recovery_mode(&mut self) {
+        self.recovery_mode = true;
+    }
+
+    pub(crate) fn exit_recovery_mode(&mut self) {
+        self.recovery_mode = false;
     }
 
     // ── State-machine + phase-timer coordinators ────────────────────
@@ -232,7 +253,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
         app_id: &[u8],
     ) -> Result<Option<OutboundPacket>, CoreError> {
         let mls = self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)?;
-        if !self.steward.is_steward(self_identity) && !self.group.is_in_recovery_mode() {
+        if !self.steward.is_steward(self_identity) && !self.recovery_mode {
             return Err(CoreError::NotASteward);
         }
 
@@ -385,6 +406,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
             &mut self.group,
             mls,
             &self.steward,
+            self.recovery_mode,
             allow_subset_candidates,
             app_id,
         )

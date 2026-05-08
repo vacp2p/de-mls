@@ -57,6 +57,7 @@ fn test_emergency_in_approved_queue_returns_error() {
         &mut group.group,
         &group.mls,
         &group.steward,
+        false,
         &group.identity,
         b"test-app-id",
     );
@@ -168,6 +169,7 @@ fn test_emergency_mixed_with_regular_returns_error() {
         &mut steward_handle.group,
         &steward_handle.mls,
         &steward_handle.steward,
+        false,
         &steward_handle.identity,
         b"test-app-id",
     );
@@ -215,6 +217,7 @@ fn test_duplicate_batch_returns_noop() {
         &mut steward_handle.group,
         &steward_handle.mls,
         &steward_handle.steward,
+        false,
         &steward_handle.identity,
         b"test-app-id",
     )
@@ -310,6 +313,7 @@ fn test_candidate_ignored_without_freeze_round() {
         &mut steward_handle.group,
         &steward_handle.mls,
         &steward_handle.steward,
+        false,
         &steward_handle.identity,
         b"test-app-id",
     )
@@ -369,6 +373,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
         &mut steward_handle.group,
         &steward_handle.mls,
         &steward_handle.steward,
+        false,
         &steward_handle.identity,
         b"test-app-id",
     )
@@ -401,6 +406,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
         &mut joiner.group,
         joiner.mls.as_ref().unwrap(),
         &joiner.steward,
+        false,
         false,
         b"test-app-id",
     )
@@ -482,6 +488,7 @@ fn test_backup_commit_scores_absent_steward() {
         &mut bob.group,
         bob.mls.as_ref().unwrap(),
         &bob.steward,
+        false,
         bob.identity.identity_bytes(),
         b"test-app-id",
     )
@@ -498,6 +505,7 @@ fn test_backup_commit_scores_absent_steward() {
         &mut bob.group,
         bob.mls.as_ref().unwrap(),
         &bob.steward,
+        false,
         false,
         b"test-app-id",
     )
@@ -600,6 +608,7 @@ fn test_forged_steward_identity_scores_mls_sender() {
         &mut steward_handle.group,
         &steward_handle.mls,
         &steward_handle.steward,
+        false,
         &steward_handle.identity,
         b"test-app-id",
     )
@@ -646,6 +655,7 @@ fn test_forged_steward_identity_scores_mls_sender() {
         joiner.mls.as_ref().unwrap(),
         &joiner.steward,
         false,
+        false,
         b"test-app-id",
     )
     .unwrap();
@@ -689,6 +699,7 @@ fn test_no_valid_candidate_triggers_no_candidate() {
         &mut group.group,
         &group.mls,
         &group.steward,
+        false,
         false,
         b"test-app-id",
     )

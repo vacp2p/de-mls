@@ -144,10 +144,11 @@ pub fn build_commit_candidate(
     group: &mut Group,
     mls: &TestMls,
     steward: &DeterministicStewardList,
+    in_recovery: bool,
     self_identity: &[u8],
     app_id: &[u8],
 ) -> Result<Option<OutboundPacket>, CoreError> {
-    if !steward.is_steward(self_identity) && !group.is_in_recovery_mode() {
+    if !steward.is_steward(self_identity) && !in_recovery {
         return Err(CoreError::NotASteward);
     }
     if group.approved_proposals().is_empty() {
@@ -365,6 +366,9 @@ pub struct StewardHandle {
     pub liveness_criteria_yes: bool,
     /// Mirrors `GroupEntry.config.pending_update_max_epochs`.
     pub pending_update_max_epochs: u32,
+    /// Mirrors `GroupEntry.recovery_mode`. Defaults to `false`; tests
+    /// exercising Layer-3 paths flip it directly.
+    pub recovery_mode: bool,
 }
 
 impl StewardHandle {
@@ -413,6 +417,7 @@ pub fn setup_steward_with_config(
         identity: identity_bytes,
         liveness_criteria_yes: de_mls::core::DEFAULT_LIVENESS_CRITERIA_YES,
         pending_update_max_epochs: de_mls::core::DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
+        recovery_mode: false,
     }
 }
 
@@ -432,6 +437,8 @@ pub struct JoinerHandle {
     pub liveness_criteria_yes: bool,
     /// Mirrors `GroupEntry.config.pending_update_max_epochs`.
     pub pending_update_max_epochs: u32,
+    /// Mirrors `GroupEntry.recovery_mode`.
+    pub recovery_mode: bool,
 }
 
 impl JoinerHandle {
@@ -493,6 +500,7 @@ pub fn setup_joiner_with_config(
         kp_packet,
         liveness_criteria_yes: de_mls::core::DEFAULT_LIVENESS_CRITERIA_YES,
         pending_update_max_epochs: de_mls::core::DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
+        recovery_mode: false,
     }
 }
 
@@ -540,6 +548,7 @@ pub fn steward_add_joiner(
         &mut steward_handle.group,
         &steward_handle.mls,
         &steward_handle.steward,
+        steward_handle.recovery_mode,
         &self_id,
         b"test-app-id",
     )
@@ -549,6 +558,7 @@ pub fn steward_add_joiner(
         &mut steward_handle.group,
         &steward_handle.mls,
         &steward_handle.steward,
+        steward_handle.recovery_mode,
         false,
         b"test-app-id",
     )

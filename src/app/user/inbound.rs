@@ -238,7 +238,7 @@ impl<
     /// list installs and closes the window.
     async fn maybe_close_recovery_window(&self, group_name: &str) {
         let in_recovery_mode = self
-            .with_entry(group_name, |entry| entry.group.is_in_recovery_mode())
+            .with_entry(group_name, |entry| entry.is_in_recovery_mode())
             .await
             .unwrap_or(false);
         if !in_recovery_mode {

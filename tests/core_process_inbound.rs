@@ -229,6 +229,7 @@ fn test_process_inbound_leave_group() {
         &mut steward_handle.group,
         &steward_handle.mls,
         &steward_handle.steward,
+        false,
         &steward_handle.identity,
         b"test-app-id",
     )
@@ -261,6 +262,7 @@ fn test_process_inbound_leave_group() {
         &mut joiner.group,
         joiner.mls.as_ref().unwrap(),
         &joiner.steward,
+        false,
         false,
         b"test-app-id",
     )
@@ -314,6 +316,7 @@ fn test_rejoin_after_eviction() {
         &mut steward_handle.group,
         &steward_handle.mls,
         &steward_handle.steward,
+        false,
         &steward_handle.identity,
         b"test-app-id",
     )
@@ -338,6 +341,7 @@ fn test_rejoin_after_eviction() {
         joiner.mls.as_ref().unwrap(),
         &joiner.steward,
         false,
+        false,
         b"test-app-id",
     )
     .unwrap();
@@ -352,6 +356,7 @@ fn test_rejoin_after_eviction() {
         &mut steward_handle.group,
         &steward_handle.mls,
         &steward_handle.steward,
+        false,
         false,
         b"test-app-id",
     )
@@ -440,6 +445,7 @@ fn test_process_inbound_raw_commit_payload_is_ignored() {
         &mut steward_handle.group,
         &steward_handle.mls,
         &steward_handle.steward,
+        false,
         &steward_handle.identity,
         b"test-app-id",
     )

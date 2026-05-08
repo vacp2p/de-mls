@@ -267,7 +267,7 @@ impl<
         }
         // Recovery uses the shorter retry inactivity window so we don't
         // burn another full epoch waiting for a steward to commit.
-        let in_recovery = entry.group.is_in_recovery_mode() || entry.steward.retry_round() > 0;
+        let in_recovery = entry.is_in_recovery_mode() || entry.steward.retry_round() > 0;
         let inactivity = if in_recovery {
             entry.phase_timer.recovery_inactivity_duration()
         } else {

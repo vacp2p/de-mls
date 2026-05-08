@@ -131,10 +131,6 @@ pub struct Group {
     /// `RemoveMember(target)` entry; other approvals wait so they don't
     /// dilute the fast-removal intent.
     urgent_commit_target: Option<Vec<u8>>,
-    /// While `true`, `create_commit_candidate` bypasses the steward gate
-    /// so any member can produce the recovery commit. Set by Layer-3
-    /// Deadlock ECP, cleared on accepted election.
-    recovery_mode: bool,
 }
 
 pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
@@ -156,7 +152,6 @@ impl Group {
             pending_updates: HashMap::new(),
             resolved_proposals: ResolvedProposalCache::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
             urgent_commit_target: None,
-            recovery_mode: false,
         }
     }
 
@@ -388,22 +383,6 @@ impl Group {
         });
         self.approved_order
             .retain(|pid| self.approved_proposals.contains_key(pid));
-    }
-
-    // ─────────────────────────── Layer 3 Recovery Mode ───────────────────────────
-
-    /// While set, `create_commit_candidate` bypasses the `is_steward()`
-    /// gate so any member can produce the recovery commit.
-    pub fn enter_recovery_mode(&mut self) {
-        self.recovery_mode = true;
-    }
-
-    pub fn is_in_recovery_mode(&self) -> bool {
-        self.recovery_mode
-    }
-
-    pub fn exit_recovery_mode(&mut self) {
-        self.recovery_mode = false;
     }
 
     /// Cheap idempotence check for auto-retry: don't submit a second election
