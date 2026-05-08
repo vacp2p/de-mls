@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 use crate::{
     core::{
-        api::process_commit_candidate, error::CoreError, group::Group,
+        error::CoreError, freeze::process_commit_candidate, group::Group,
         process_result::ProcessResult,
     },
     identity::{ShortId, parse_wallet_to_bytes},

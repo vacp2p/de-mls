@@ -9,29 +9,32 @@
 //! [`crate::core::DefaultProvider`] bundles in-memory backends for testing
 //! and simple deployments.
 //!
-//! Submodules: `api` (group operations), `consensus` (pure consensus
-//! application), `events` ([`crate::core::GroupEventHandler`]), `provider`
+//! Submodules: `freeze` (round selection + apply), `inbound` (app-subtopic
+//! packet routing), `proposal_framing` (welcome-subtopic + consensus-library
+//! framing helpers), `consensus` (pure consensus result application),
+//! `events` ([`crate::core::GroupEventHandler`]), `provider`
 //! ([`crate::core::DeMlsProvider`] + [`crate::core::DefaultProvider`]).
 
-mod api;
 mod config;
 mod consensus;
 mod error;
 mod events;
+mod freeze;
 mod group;
 mod group_handle;
+mod inbound;
 mod peer_scoring;
 mod process_result;
+mod proposal_framing;
 mod proposal_kind;
 mod provider;
 mod state_machine;
 mod steward_list;
 
 // ── Core group operations ──
-pub use api::{
-    FreezeFinalizeResult, FreezeOutcome, build_create_proposal_request, build_key_package_message,
-    compute_commit_hash, finalize_freeze_round, process_inbound,
-};
+pub use freeze::{FreezeFinalizeResult, FreezeOutcome, compute_commit_hash, finalize_freeze_round};
+pub use inbound::process_inbound;
+pub use proposal_framing::{build_create_proposal_request, build_key_package_message};
 
 // ── Per-group config ──
 pub use config::{

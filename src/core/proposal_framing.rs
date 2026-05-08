@@ -1,5 +1,5 @@
-//! Group lifecycle helpers: outbound message framing for the welcome
-//! subtopic and consensus proposal building. Group construction lives on
+//! Wire framing helpers: welcome-subtopic packets and consensus
+//! `CreateProposalRequest` construction. Group construction lives on
 //! [`Group::create_group`](crate::core::Group::create_group) and
 //! [`Group::prepare_to_join`](crate::core::Group::prepare_to_join);
 //! application-message framing lives on
