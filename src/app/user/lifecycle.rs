@@ -56,14 +56,13 @@ impl<
             let mls = (self.mls_creator_factory)(group_name.to_string())?;
             let group = Group::create_group(group_name, self_identity_bytes.clone());
             let state_machine = GroupStateMachine::new_as_member();
-            let phase_timer = PhaseTimer::with_config(&config);
-            (group, Some(mls), state_machine, phase_timer)
+            (group, Some(mls), state_machine, PhaseTimer::new())
         } else {
             let group = Group::prepare_to_join(group_name, self_identity_bytes.clone());
             let state_machine = GroupStateMachine::new_as_pending_join();
             // Anchor the timer at "now" so `is_pending_join_expired` can
             // detect the 3× commit-inactivity timeout.
-            let mut phase_timer = PhaseTimer::with_config(&config);
+            let mut phase_timer = PhaseTimer::new();
             phase_timer.start();
             (group, None, state_machine, phase_timer)
         };
@@ -90,7 +89,7 @@ impl<
         if initial_state == GroupState::PendingJoin {
             info!(
                 group = group_name,
-                timeout_s = phase_timer.commit_inactivity_duration().as_secs() * 3,
+                timeout_s = config.commit_inactivity_duration.as_secs() * 3,
                 "pending join, awaiting welcome"
             );
         }

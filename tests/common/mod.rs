@@ -17,9 +17,9 @@ use de_mls::app::{FixedScoringProvider, InMemoryPeerScoreStorage};
 use de_mls::core::PeerScoringService;
 use de_mls::core::{
     BufferedCommitCandidate, CallbackError, CoreError, DeterministicStewardList, FreezeOutcome,
-    Group, GroupEventHandler, ProcessResult, ProposalKind, ScoringConfig, StewardListConfig,
-    StewardListPlugin, build_key_package_message, compute_commit_hash, finalize_freeze_round,
-    member_set, process_inbound,
+    Group, GroupEventHandler, OperatingMode, ProcessResult, ProposalKind, ScoringConfig,
+    StewardListConfig, StewardListPlugin, build_key_package_message, compute_commit_hash,
+    finalize_freeze_round, member_set, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
 use de_mls::identity::{Identity, WalletIdentity, parse_wallet_address};
@@ -363,7 +363,7 @@ pub struct StewardHandle {
     pub identity: Vec<u8>,
     pub liveness_criteria_yes: bool,
     pub pending_update_max_epochs: u32,
-    pub recovery_mode: bool,
+    pub operating_mode: OperatingMode,
 }
 
 impl StewardHandle {
@@ -412,7 +412,7 @@ pub fn setup_steward_with_config(
         identity: identity_bytes,
         liveness_criteria_yes: de_mls::core::DEFAULT_LIVENESS_CRITERIA_YES,
         pending_update_max_epochs: de_mls::core::DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
-        recovery_mode: false,
+        operating_mode: OperatingMode::Normal,
     }
 }
 
@@ -430,7 +430,7 @@ pub struct JoinerHandle {
     pub kp_packet: OutboundPacket,
     pub liveness_criteria_yes: bool,
     pub pending_update_max_epochs: u32,
-    pub recovery_mode: bool,
+    pub operating_mode: OperatingMode,
 }
 
 impl JoinerHandle {
@@ -492,7 +492,7 @@ pub fn setup_joiner_with_config(
         kp_packet,
         liveness_criteria_yes: de_mls::core::DEFAULT_LIVENESS_CRITERIA_YES,
         pending_update_max_epochs: de_mls::core::DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
-        recovery_mode: false,
+        operating_mode: OperatingMode::Normal,
     }
 }
 
@@ -540,7 +540,7 @@ pub fn steward_add_joiner(
         &mut steward_handle.group,
         &steward_handle.mls,
         &steward_handle.steward,
-        steward_handle.recovery_mode,
+        steward_handle.operating_mode == OperatingMode::Recovery,
         &self_id,
         b"test-app-id",
     )
@@ -550,7 +550,7 @@ pub fn steward_add_joiner(
         &mut steward_handle.group,
         &steward_handle.mls,
         &steward_handle.steward,
-        steward_handle.recovery_mode,
+        steward_handle.operating_mode == OperatingMode::Recovery,
         false,
         b"test-app-id",
     )

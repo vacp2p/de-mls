@@ -25,6 +25,21 @@ pub enum GroupState {
     Reelection,
 }
 
+/// Authorization mode for a group, orthogonal to [`GroupState`].
+///
+/// `Normal` is the default: only steward-list members may produce
+/// commits. `Recovery` is set when an accepted Layer-3 Deadlock ECP
+/// relaxes the steward gate so any member may produce the next commit
+/// (RFC §Anti-Deadlock); cleared when a fresh election lands. Lives
+/// alongside `GroupState` because it gates *who can act*, not *what
+/// phase the round is in*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OperatingMode {
+    #[default]
+    Normal,
+    Recovery,
+}
+
 impl Display for GroupState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

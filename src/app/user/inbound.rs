@@ -389,18 +389,15 @@ impl<
         entry.config.liveness_criteria_yes = sync.liveness_criteria_yes;
         entry.config.pending_update_max_epochs = sync.pending_update_max_epochs;
         if let Some(timing) = &sync.timing {
-            let pt = &mut entry.phase_timer;
-            pt.set_commit_inactivity_duration(std::time::Duration::from_millis(
-                timing.commit_inactivity_duration_ms,
-            ));
-            pt.set_freeze_duration(std::time::Duration::from_millis(timing.freeze_duration_ms));
-            pt.set_recovery_inactivity_duration(std::time::Duration::from_millis(
-                timing.recovery_inactivity_duration_ms,
-            ));
-            entry.config.proposal_expiration =
+            let cfg = &mut entry.config;
+            cfg.commit_inactivity_duration =
+                std::time::Duration::from_millis(timing.commit_inactivity_duration_ms);
+            cfg.freeze_duration = std::time::Duration::from_millis(timing.freeze_duration_ms);
+            cfg.recovery_inactivity_duration =
+                std::time::Duration::from_millis(timing.recovery_inactivity_duration_ms);
+            cfg.proposal_expiration =
                 std::time::Duration::from_millis(timing.proposal_expiration_ms);
-            entry.config.consensus_timeout =
-                std::time::Duration::from_millis(timing.consensus_timeout_ms);
+            cfg.consensus_timeout = std::time::Duration::from_millis(timing.consensus_timeout_ms);
         }
         Ok(())
     }

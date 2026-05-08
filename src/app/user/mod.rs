@@ -28,9 +28,9 @@ use crate::{
     core::{
         BufferedCommitCandidate, CoreError, DeMlsProvider, DefaultProvider,
         DeterministicStewardList, FreezeFinalizeResult, Group, GroupEventHandler, GroupState,
-        GroupStateMachine, PeerScoringEvent, PeerScoringPlugin, PeerScoringService, ProcessResult,
-        ProposalKind, ProviderConsensus, ScoringConfig, StewardListConfig, StewardListPlugin,
-        compute_commit_hash, finalize_freeze_round, member_set, process_inbound,
+        GroupStateMachine, OperatingMode, PeerScoringEvent, PeerScoringPlugin, PeerScoringService,
+        ProcessResult, ProposalKind, ProviderConsensus, ScoringConfig, StewardListConfig,
+        StewardListPlugin, compute_commit_hash, finalize_freeze_round, member_set, process_inbound,
     },
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     identity::{Identity, WalletIdentity},
@@ -75,12 +75,12 @@ pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin, St: StewardLi
     /// eligibility from MLS members + `Group::is_pending_removal` and
     /// passes it on every position query.
     steward: St,
-    /// Recovery flag (RFC §Layer 3 Anti-Deadlock ECP). Set when an
-    /// accepted Deadlock ECP relaxes the steward gate so any member may
-    /// produce the next commit; cleared when a fresh election lands.
+    /// Authorization mode (RFC §Layer 3 Anti-Deadlock ECP). `Recovery` is
+    /// set when an accepted Deadlock ECP relaxes the steward gate so any
+    /// member may produce the next commit; cleared on accepted election.
     /// Read by the freeze coordinator, the create-commit path, and
     /// `core::finalize_freeze_round` (via `in_recovery` parameter).
-    recovery_mode: bool,
+    operating_mode: OperatingMode,
 }
 
 impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, Sc, St> {
@@ -103,22 +103,22 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
             config,
             scoring,
             steward,
-            recovery_mode: false,
+            operating_mode: OperatingMode::Normal,
         }
     }
 
-    // ── Recovery-mode flag (Layer 3 Anti-Deadlock) ──────────────────
+    // ── Operating mode (Layer 3 Anti-Deadlock) ──────────────────────
 
     pub(crate) fn is_in_recovery_mode(&self) -> bool {
-        self.recovery_mode
+        self.operating_mode == OperatingMode::Recovery
     }
 
     pub(crate) fn enter_recovery_mode(&mut self) {
-        self.recovery_mode = true;
+        self.operating_mode = OperatingMode::Recovery;
     }
 
     pub(crate) fn exit_recovery_mode(&mut self) {
-        self.recovery_mode = false;
+        self.operating_mode = OperatingMode::Normal;
     }
 
     // ── State-machine + phase-timer coordinators ────────────────────
@@ -169,15 +169,22 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
 
     /// `true` once 3× `commit_inactivity_duration` has passed in
     /// `PendingJoin` without a welcome.
+    ///
+    /// Pipeline: consensus (~15s) + commit_inactivity + freeze (≈ commit/2)
+    /// = ~1.5× commit-inactivity + consensus overhead. Use 3× for safety margin.
     pub(crate) fn is_pending_join_expired(&self) -> bool {
         self.state_machine.current_state() == GroupState::PendingJoin
-            && self.phase_timer.pending_join_elapsed()
+            && self
+                .phase_timer
+                .elapsed_since_anchor(self.config.commit_inactivity_duration * 3)
     }
 
     /// `true` once the freeze window elapsed while in `Freezing`.
     pub(crate) fn is_freeze_timed_out(&self) -> bool {
         self.state_machine.current_state() == GroupState::Freezing
-            && self.phase_timer.freeze_window_elapsed()
+            && self
+                .phase_timer
+                .elapsed_since_anchor(self.config.freeze_duration)
     }
 
     /// Drives the "steward waited too long to commit" transition into
@@ -204,7 +211,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
             );
             return None;
         }
-        if !self.phase_timer.inactivity_elapsed(inactivity_duration) {
+        if !self.phase_timer.elapsed_since_anchor(inactivity_duration) {
             return None;
         }
         info!(
@@ -267,7 +274,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
         app_id: &[u8],
     ) -> Result<Option<OutboundPacket>, CoreError> {
         let mls = self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)?;
-        if !self.steward.is_steward(self_identity) && !self.recovery_mode {
+        if !self.steward.is_steward(self_identity) && !self.is_in_recovery_mode() {
             return Err(CoreError::NotASteward);
         }
 
@@ -415,11 +422,12 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
         app_id: &[u8],
     ) -> Result<FreezeFinalizeResult, CoreError> {
         let mls = self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)?;
+        let in_recovery = self.operating_mode == OperatingMode::Recovery;
         finalize_freeze_round(
             &mut self.group,
             mls,
             &self.steward,
-            self.recovery_mode,
+            in_recovery,
             allow_subset_candidates,
             app_id,
         )

@@ -268,9 +268,9 @@ impl<
         // burn another full epoch waiting for a steward to commit.
         let in_recovery = entry.is_in_recovery_mode() || entry.steward.retry_round() > 0;
         let inactivity = if in_recovery {
-            entry.phase_timer.recovery_inactivity_duration()
+            entry.config.recovery_inactivity_duration
         } else {
-            entry.phase_timer.commit_inactivity_duration()
+            entry.config.commit_inactivity_duration
         };
         let freeze_event = entry.check_steward_inactivity(proposal_count, inactivity);
         if let Some(event) = freeze_event {

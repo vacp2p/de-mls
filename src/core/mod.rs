@@ -56,7 +56,7 @@ pub use group::{
 pub use proposal_kind::ProposalKind;
 
 // ── State machine (passive: state enum + named transitions) ──
-pub use state_machine::{GroupState, GroupStateMachine};
+pub use state_machine::{GroupState, GroupStateMachine, OperatingMode};
 
 // ── Steward list ──
 pub use steward_list_plugin::{

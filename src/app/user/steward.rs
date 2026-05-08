@@ -402,16 +402,14 @@ impl<
             };
 
             let timing = TimingConfig {
-                commit_inactivity_duration_ms: entry
-                    .phase_timer
-                    .commit_inactivity_duration()
-                    .as_millis() as u64,
-                freeze_duration_ms: entry.phase_timer.freeze_duration().as_millis() as u64,
+                commit_inactivity_duration_ms: entry.config.commit_inactivity_duration.as_millis()
+                    as u64,
+                freeze_duration_ms: entry.config.freeze_duration.as_millis() as u64,
                 proposal_expiration_ms: entry.config.proposal_expiration.as_millis() as u64,
                 consensus_timeout_ms: entry.config.consensus_timeout.as_millis() as u64,
                 recovery_inactivity_duration_ms: entry
-                    .phase_timer
-                    .recovery_inactivity_duration()
+                    .config
+                    .recovery_inactivity_duration
                     .as_millis() as u64,
             };
 
