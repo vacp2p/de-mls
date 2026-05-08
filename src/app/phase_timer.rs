@@ -2,24 +2,13 @@
 //!
 //! Holds the wall-clock anchor (`started_at`) and the phase-anchor
 //! `Duration` knobs the timer-driven helpers consult: commit inactivity,
-//! freeze, recovery inactivity. State transitions and the state enum
-//! live in [`crate::core::GroupStateMachine`]; voting/consensus durations
-//! live in [`crate::app::GroupConfig`] on `GroupEntry`. `GroupEntry`
-//! composes the SM and the timer through coordinator methods.
+//! freeze, recovery inactivity. Pure timer state — `GroupState` awareness
+//! lives one layer up where the timer is composed with
+//! [`crate::core::GroupStateMachine`].
 
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
-use tracing::info;
-
-use crate::{app::config::GroupConfig, core::GroupState};
-
-/// Notifies the integrator when a group transitions between [`GroupState`]
-/// variants. Fired from the app layer.
-#[async_trait]
-pub trait StateChangeHandler: Send + Sync {
-    async fn on_state_changed(&self, group_name: &str, state: GroupState);
-}
+use crate::app::config::GroupConfig;
 
 /// What a freeze-timeout poll returned.
 #[derive(Debug, PartialEq)]
@@ -36,24 +25,24 @@ pub enum FreezeTimeoutStatus {
     },
 }
 
-/// App-side phase timer: a wall-clock anchor plus the duration knobs the
-/// timer-driven helpers consult. State queries take the current
-/// [`GroupState`] as a parameter; [`crate::app::User`] composes them
-/// with [`crate::core::GroupStateMachine`] through `GroupEntry`.
+/// Wall-clock anchor + the phase-anchor durations the timer-driven
+/// helpers consult. Pure timer state — `GroupState` is not stored here.
+/// Composition with the state machine happens at the orchestration layer
+/// (`GroupEntry` today; `SessionRunner` after `GroupEntry → core`).
 #[derive(Debug, Clone)]
 pub struct PhaseTimer {
-    /// Meaning depends on the current state (set by the coordinator):
-    /// - `PendingJoin`: time the join was initiated.
-    /// - `Working`: time the first approved proposal arrived (drives the
-    ///   steward-inactivity timer).
-    /// - `Freezing`: time the freeze window started.
+    /// Meaning depends on the orchestrator's intent at start time:
+    /// - PendingJoin: time the join was initiated.
+    /// - Working: time the first approved proposal arrived
+    ///   (drives the steward-inactivity timer).
+    /// - Freezing: time the freeze window started.
     /// - Other states: `None`.
     started_at: Option<Instant>,
     /// RFC §Inactivity Timer #1 — "Commit inactivity" threshold.
     commit_inactivity_duration: Duration,
     freeze_duration: Duration,
     /// RFC §Inactivity Timer #2 — "Recovery inactivity" threshold; caller
-    /// of `poll_steward_inactivity` picks which duration to apply.
+    /// of `inactivity_elapsed` picks which duration to apply.
     recovery_inactivity_duration: Duration,
 }
 
@@ -77,14 +66,14 @@ impl PhaseTimer {
         }
     }
 
-    /// Anchor the timer at "now". Called by the coordinator when entering
+    /// Anchor the timer at "now". Called by the orchestrator when entering
     /// a phase whose timeout matters (PendingJoin, Freezing, on first
     /// approved proposal in Working).
     pub fn start(&mut self) {
         self.started_at = Some(Instant::now());
     }
 
-    /// Drop the anchor. Called by the coordinator when leaving a
+    /// Drop the anchor. Called by the orchestrator when leaving a
     /// time-bounded phase.
     pub fn clear(&mut self) {
         self.started_at = None;
@@ -121,86 +110,39 @@ impl PhaseTimer {
         self.recovery_inactivity_duration = value;
     }
 
-    // ─────────────────────────── State-aware queries ───────────────────────────
+    // ─────────────────────────── Pure timer queries ───────────────────────────
 
-    /// `true` once 3× `commit_inactivity_duration` has passed in
-    /// `PendingJoin` without a welcome — the join attempt is abandoned
-    /// and local state torn down.
-    pub fn is_pending_join_expired(&self, state: GroupState) -> bool {
-        if state != GroupState::PendingJoin {
-            return false;
-        }
-
-        if let Some(started_at) = self.started_at {
+    /// `true` once 3× `commit_inactivity_duration` has elapsed since the
+    /// anchor was set. Caller is responsible for state guarding (i.e.,
+    /// only meaningful in PendingJoin).
+    pub fn pending_join_elapsed(&self) -> bool {
+        match self.started_at {
             // Pipeline: consensus (~15s) + commit_inactivity + freeze (≈ commit/2)
             // = ~1.5× commit-inactivity + consensus overhead. Use 3× for safety margin.
-            let max_wait = self.commit_inactivity_duration * 3;
-            if Instant::now() >= started_at + max_wait {
-                return true;
-            }
+            Some(t) => Instant::now() >= t + self.commit_inactivity_duration * 3,
+            None => false,
         }
-
-        false
     }
 
-    /// `true` once the freeze window elapsed while in `Freezing`.
-    pub fn is_freeze_timed_out(&self, state: GroupState) -> bool {
-        if state != GroupState::Freezing {
-            return false;
+    /// `true` once `freeze_duration` has elapsed since the anchor was set.
+    /// Caller is responsible for state guarding (i.e., only meaningful in
+    /// Freezing).
+    pub fn freeze_window_elapsed(&self) -> bool {
+        match self.started_at {
+            Some(t) => Instant::now() >= t + self.freeze_duration,
+            None => false,
         }
-
-        if let Some(started_at) = self.started_at {
-            return Instant::now() >= started_at + self.freeze_duration;
-        }
-
-        false
     }
 
-    /// Polls the steward-inactivity timer. Returns `true` when the
-    /// inactivity window has elapsed and the caller should transition to
-    /// `Freezing`. Self-starts the timer on the first call with approved
-    /// work; returns `false` outside `Working` or with no approved work.
-    ///
-    /// - The timer anchors on the *first* approved proposal — a burst of
-    ///   approvals doesn't reset it.
-    /// - The coordinator's `start_working` clears the anchor, so the next
-    ///   tick with leftover approved work starts a fresh window (matters
-    ///   for auto-approved self-leaves that survive a reelection round).
-    /// - `inactivity_duration` is supplied by the caller (long during
-    ///   normal operation, short during recovery).
-    pub fn poll_steward_inactivity(
-        &mut self,
-        state: GroupState,
-        approved_proposals_count: usize,
-        inactivity_duration: Duration,
-    ) -> bool {
-        if state != GroupState::Working || approved_proposals_count == 0 {
-            return false;
+    /// `true` once `inactivity_duration` has elapsed since the anchor was
+    /// set. Caller is responsible for state guarding (Working) and for
+    /// having anchored the timer (`start`) at the first approved-proposal
+    /// observation.
+    pub fn inactivity_elapsed(&self, inactivity_duration: Duration) -> bool {
+        match self.started_at {
+            Some(t) => Instant::now() >= t + inactivity_duration,
+            None => false,
         }
-
-        let first_approved = match self.started_at {
-            Some(t) => t,
-            None => {
-                self.started_at = Some(Instant::now());
-                info!(
-                    approved = approved_proposals_count,
-                    inactivity_ms = inactivity_duration.as_millis() as u64,
-                    "inactivity timer started"
-                );
-                return false;
-            }
-        };
-
-        if Instant::now() < first_approved + inactivity_duration {
-            return false;
-        }
-
-        info!(
-            inactivity_ms = inactivity_duration.as_millis() as u64,
-            approved = approved_proposals_count,
-            "inactivity window elapsed, entering freeze"
-        );
-        true
     }
 }
 
@@ -217,96 +159,49 @@ mod tests {
     }
 
     #[test]
-    fn pending_join_not_expired_when_unset() {
+    fn pending_join_not_elapsed_when_unset() {
         let pt = PhaseTimer::with_default_config();
-        assert!(!pt.is_pending_join_expired(GroupState::PendingJoin));
+        assert!(!pt.pending_join_elapsed());
     }
 
     #[test]
-    fn pending_join_expires_after_three_commit_inactivity_windows() {
+    fn pending_join_elapses_after_three_commit_inactivity_windows() {
         let config = GroupConfig::default();
         let mut pt = PhaseTimer::with_config(&config);
         pt.start();
-        assert!(!pt.is_pending_join_expired(GroupState::PendingJoin));
+        assert!(!pt.pending_join_elapsed());
 
-        // Backdate past the 3× commit_inactivity_duration expiration threshold.
         let past = config.commit_inactivity_duration * 3 + Duration::from_secs(1);
         pt.started_at = Some(Instant::now() - past);
-        assert!(pt.is_pending_join_expired(GroupState::PendingJoin));
+        assert!(pt.pending_join_elapsed());
     }
 
     #[test]
-    fn pending_join_check_only_in_pending_join() {
+    fn freeze_window_not_elapsed_fresh() {
         let mut pt = PhaseTimer::with_default_config();
         pt.start();
-        pt.started_at = Some(Instant::now() - Duration::from_secs(100_000));
-        // Even with a stale anchor, non-PendingJoin states never expire.
-        assert!(!pt.is_pending_join_expired(GroupState::Working));
+        assert!(!pt.freeze_window_elapsed());
     }
 
     #[test]
-    fn freeze_timeout_only_in_freezing() {
-        let pt = PhaseTimer::with_default_config();
-        assert!(!pt.is_freeze_timed_out(GroupState::Working));
-    }
-
-    #[test]
-    fn freeze_timeout_fresh_anchor_not_timed_out() {
-        let mut pt = PhaseTimer::with_default_config();
-        pt.start();
-        assert!(!pt.is_freeze_timed_out(GroupState::Freezing));
-    }
-
-    #[test]
-    fn freeze_timeout_expired() {
+    fn freeze_window_elapsed_when_anchor_old() {
         let mut pt = PhaseTimer::with_default_config();
         pt.started_at = Some(Instant::now() - Duration::from_secs(30));
-        assert!(pt.is_freeze_timed_out(GroupState::Freezing));
-    }
-
-    #[test]
-    fn inactivity_self_starts_on_first_check_with_approved() {
-        let mut pt = PhaseTimer::with_default_config();
-        assert!(pt.started_at.is_none());
-
-        // First call with approved work: timer starts, no transition yet.
-        assert!(!pt.poll_steward_inactivity(GroupState::Working, 1, long_inactivity()));
-        assert!(pt.started_at.is_some());
-    }
-
-    #[test]
-    fn inactivity_not_restarted_while_running() {
-        let mut pt = PhaseTimer::with_default_config();
-        pt.poll_steward_inactivity(GroupState::Working, 1, long_inactivity());
-        let first_time = pt.started_at.unwrap();
-
-        std::thread::sleep(Duration::from_millis(5));
-
-        // Same-or-more approved → same timer.
-        pt.poll_steward_inactivity(GroupState::Working, 2, long_inactivity());
-        assert_eq!(pt.started_at.unwrap(), first_time);
-    }
-
-    #[test]
-    fn inactivity_triggers_freeze_signal() {
-        let mut pt = PhaseTimer::with_default_config();
-        pt.started_at = Some(Instant::now() - Duration::from_secs(1));
-        assert!(pt.poll_steward_inactivity(GroupState::Working, 1, Duration::from_millis(50)));
+        assert!(pt.freeze_window_elapsed());
     }
 
     #[test]
     fn inactivity_uses_caller_supplied_duration() {
         let mut pt = PhaseTimer::with_default_config();
         pt.started_at = Some(Instant::now() - Duration::from_millis(100));
-        assert!(!pt.poll_steward_inactivity(GroupState::Working, 1, long_inactivity()));
-        assert!(pt.poll_steward_inactivity(GroupState::Working, 1, Duration::from_millis(50)));
+        assert!(!pt.inactivity_elapsed(long_inactivity()));
+        assert!(pt.inactivity_elapsed(Duration::from_millis(50)));
     }
 
     #[test]
-    fn inactivity_skips_outside_working() {
-        let mut pt = PhaseTimer::with_default_config();
-        pt.started_at = Some(Instant::now() - Duration::from_secs(1));
-        assert!(!pt.poll_steward_inactivity(GroupState::Freezing, 1, Duration::from_millis(50)));
+    fn inactivity_returns_false_when_unset() {
+        let pt = PhaseTimer::with_default_config();
+        assert!(!pt.inactivity_elapsed(Duration::from_millis(50)));
     }
 
     #[test]

@@ -53,7 +53,6 @@ type UserRef = Arc<
             de_mls::app::DefaultStewardList,
             de_mls::identity::WalletIdentity,
             GatewayEventHandler<WakuDeliveryService>,
-            GatewayEventHandler<WakuDeliveryService>,
         >,
     >,
 >;
@@ -169,7 +168,6 @@ impl Gateway<WakuDeliveryService> {
         let core = self.core();
         let consensus_service = core.consensus.clone();
 
-        // Create handler that implements both GroupEventHandler and StateChangeHandler
         let handler = Arc::new(GatewayEventHandler {
             delivery: Arc::new(core.app_state.delivery.clone()),
             evt_tx: self.evt_tx.clone(),
@@ -177,12 +175,8 @@ impl Gateway<WakuDeliveryService> {
             epoch_history: self.epoch_history.clone(),
         });
 
-        let user = User::with_private_key(
-            private_key.as_str(),
-            Arc::new(consensus_service),
-            handler.clone(),
-            handler, // Same handler implements StateChangeHandler
-        )?;
+        let user =
+            User::with_private_key(private_key.as_str(), Arc::new(consensus_service), handler)?;
 
         let user_address = user.identity_string();
         let user_ref: UserRef = Arc::new(tokio::sync::RwLock::new(user));

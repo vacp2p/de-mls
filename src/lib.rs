@@ -49,14 +49,12 @@
 //! use de_mls::app::User;
 //!
 //! // Create a user with an Ethereum private key. The convenience
-//! // constructor anchors all six User generics, so type inference
-//! // picks up the right defaults — no annotation needed at the
-//! // call site.
+//! // constructor anchors all User generics, so type inference picks
+//! // up the right defaults — no annotation needed at the call site.
 //! let user = User::with_private_key(
 //!     "0xac0974...",   // Private key
 //!     consensus,       // Consensus service
 //!     event_handler,   // Your GroupEventHandler implementation
-//!     state_handler,   // Your StateChangeHandler implementation
 //! )?;
 //!
 //! // Create a group (as steward)

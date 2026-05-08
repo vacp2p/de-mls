@@ -2,15 +2,17 @@
 //! app with consensus, state machine, peer scoring, and freeze/commit timing.
 //!
 //! Integrate by constructing a [`crate::app::User`] with your
-//! [`crate::core::GroupEventHandler`] and [`crate::app::StateChangeHandler`],
-//! then drive it from a transport receive loop
-//! ([`crate::app::User::process_inbound_packet`]) and a periodic poll
-//! ([`crate::app::User::check_member_freeze`],
+//! [`crate::core::GroupEventHandler`], then drive it from a transport
+//! receive loop ([`crate::app::User::process_inbound_packet`]) and a
+//! periodic poll ([`crate::app::User::check_member_freeze`],
 //! [`crate::app::User::poll_freeze_status`]).
 //! [`crate::core::GroupStateMachine`] holds the per-group state enum
-//! (`PendingJoin → Working → Freezing → Selection → Reelection → Leaving`)
+//! (`PendingJoin → Working → Freezing → Selection → Reelection`)
 //! and [`crate::app::PhaseTimer`] holds the wall-clock anchor + duration
 //! knobs; `GroupEntry` composes them through coordinator methods.
+//! State transitions return the new [`crate::core::GroupState`]; the
+//! orchestrator dispatches it via
+//! [`crate::core::GroupEventHandler::on_phase_change`].
 //!
 //! Use directly for epoch-based steward chat; build a custom app layer if you
 //! need a different consensus model, state machine, or epoch timing.
@@ -40,7 +42,7 @@ pub use display::{
 };
 pub use error::UserError;
 pub use peer_scoring::{FixedScoringProvider, InMemoryPeerScoreStorage};
-pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer, StateChangeHandler};
+pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer};
 pub use user::{
     DefaultMlsService, DefaultPeerScoring, DefaultStewardList, KeyPackageGenerator,
     MlsCreatorFactory, MlsWelcomeFactory, ScoringFactory, StewardFactory, User,

@@ -4,7 +4,7 @@
 use tracing::{error, info};
 
 use crate::{
-    app::{StateChangeHandler, User, UserError},
+    app::{User, UserError},
     core::{
         DeMlsProvider, ElectionDecision, GroupEventHandler, PeerScoringPlugin, StewardListPlugin,
         member_set, scoring_member_diff, target_identity_of,
@@ -24,8 +24,7 @@ impl<
     St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler + 'static,
-    SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, St, I, H, SCH>
+> User<P, M, Sc, St, I, H>
 {
     /// Add any MLS members not yet tracked in scoring, and drop scored
     /// entries for identities no longer in MLS. Diffing is delegated to

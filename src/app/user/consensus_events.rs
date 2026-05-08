@@ -8,7 +8,7 @@ use prost::Message;
 use tracing::{error, info};
 
 use crate::{
-    app::{GroupState, StateChangeHandler, User, UserError},
+    app::{GroupState, User, UserError},
     core::{
         DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProposalKind, ScoreOp,
         StewardListPlugin, apply_consensus_result, emergency_score_ops, target_identity_of,
@@ -27,8 +27,7 @@ impl<
     St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler + 'static,
-    SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, St, I, H, SCH>
+> User<P, M, Sc, St, I, H>
 {
     /// Entry point from the consensus service: decode the proposal, apply the
     /// result to the group, and dispatch to the correct follow-up handler
@@ -138,14 +137,12 @@ impl<
 
     /// Bypass the inactivity timer so the urgent commit fires now.
     async fn force_freezing_for_urgent_commit(&self, group_name: &str) {
-        let transitioned = match self.lookup_entry(group_name).await {
+        let event = match self.lookup_entry(group_name).await {
             Some(entry_arc) => entry_arc.write().await.force_freezing(),
-            None => false,
+            None => None,
         };
-        if transitioned {
-            self.state_handler
-                .on_state_changed(group_name, GroupState::Freezing)
-                .await;
+        if let Some(event) = event {
+            self.handler.on_phase_change(group_name, event).await;
         }
     }
 
@@ -218,16 +215,13 @@ impl<
             // short retry window.
             entry.exit_recovery_mode();
             if entry.current_state() == GroupState::Reelection {
-                entry.start_working();
-                true
+                Some(entry.start_working())
             } else {
-                false
+                None
             }
         };
-        if resumed_from_reelection {
-            self.state_handler
-                .on_state_changed(group_name, GroupState::Working)
-                .await;
+        if let Some(event) = resumed_from_reelection {
+            self.handler.on_phase_change(group_name, event).await;
         }
         info!(
             group = group_name,
@@ -304,23 +298,20 @@ impl<
             }
         }
 
-        let resumed_from_reelection = match self.lookup_entry(group_name).await {
+        let resumed_event = match self.lookup_entry(group_name).await {
             Some(entry_arc) => {
                 let mut entry = entry_arc.write().await;
                 entry.group.resolve_emergency(proposal_id);
                 if entry.current_state() == GroupState::Reelection {
-                    entry.start_working();
-                    true
+                    Some(entry.start_working())
                 } else {
-                    false
+                    None
                 }
             }
-            None => false,
+            None => None,
         };
-        if resumed_from_reelection {
-            self.state_handler
-                .on_state_changed(group_name, GroupState::Working)
-                .await;
+        if let Some(event) = resumed_event {
+            self.handler.on_phase_change(group_name, event).await;
         }
 
         if let Err(e) = self.check_and_initiate_score_removals(group_name).await {

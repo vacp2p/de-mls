@@ -9,7 +9,7 @@ use std::fmt::Display;
 /// The lifecycle state of a per-group session. Transitions are driven
 /// by the app layer through the named methods on [`GroupStateMachine`];
 /// timing rules live in [`crate::app::PhaseTimer`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupState {
     /// Joiner waiting for a welcome.
     PendingJoin,
@@ -23,9 +23,6 @@ pub enum GroupState {
     Selection,
     /// Recovery: a steward election is in flight after a missed commit.
     Reelection,
-    /// Leaving: this user has filed a self-leave and is awaiting the
-    /// commit that removes them.
-    Leaving,
 }
 
 impl Display for GroupState {
@@ -36,7 +33,6 @@ impl Display for GroupState {
             GroupState::Freezing => write!(f, "Freezing"),
             GroupState::Selection => write!(f, "Selection"),
             GroupState::Reelection => write!(f, "Reelection"),
-            GroupState::Leaving => write!(f, "Leaving"),
         }
     }
 }
@@ -70,7 +66,7 @@ impl GroupStateMachine {
     }
 
     pub fn current_state(&self) -> GroupState {
-        self.state.clone()
+        self.state
     }
 
     pub fn start_working(&mut self) {
@@ -101,11 +97,6 @@ impl GroupStateMachine {
     pub fn start_reelection(&mut self) {
         self.state = GroupState::Reelection;
     }
-
-    /// Caller must ensure a valid transition.
-    pub fn start_leaving(&mut self) {
-        self.state = GroupState::Leaving;
-    }
 }
 
 #[cfg(test)]
@@ -133,8 +124,6 @@ mod tests {
         assert_eq!(sm.current_state(), GroupState::Selection);
         sm.start_reelection();
         assert_eq!(sm.current_state(), GroupState::Reelection);
-        sm.start_leaving();
-        assert_eq!(sm.current_state(), GroupState::Leaving);
         sm.start_working();
         assert_eq!(sm.current_state(), GroupState::Working);
     }
@@ -160,7 +149,6 @@ mod tests {
         for setup in [
             |sm: &mut GroupStateMachine| sm.start_freezing(),
             |sm: &mut GroupStateMachine| sm.start_selection(),
-            |sm: &mut GroupStateMachine| sm.start_leaving(),
         ] {
             let mut sm = GroupStateMachine::new_as_member();
             setup(&mut sm);

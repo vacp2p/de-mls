@@ -24,10 +24,7 @@ use tokio::{sync::RwLock, task::JoinHandle};
 use tracing::info;
 
 use crate::{
-    app::{
-        FixedScoringProvider, GroupConfig, InMemoryPeerScoreStorage, PhaseTimer,
-        StateChangeHandler, UserError,
-    },
+    app::{FixedScoringProvider, GroupConfig, InMemoryPeerScoreStorage, PhaseTimer, UserError},
     core::{
         BufferedCommitCandidate, CoreError, DeMlsProvider, DefaultProvider,
         DeterministicStewardList, FreezeFinalizeResult, Group, GroupEventHandler, GroupState,
@@ -130,73 +127,92 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
         self.state_machine.current_state()
     }
 
-    pub(crate) fn start_working(&mut self) {
+    pub(crate) fn start_working(&mut self) -> GroupState {
         self.state_machine.start_working();
         self.phase_timer.clear();
         info!(state = "Working", "state transition");
+        GroupState::Working
     }
 
-    pub(crate) fn start_freezing(&mut self) {
+    pub(crate) fn start_freezing(&mut self) -> GroupState {
         self.state_machine.start_freezing();
         self.phase_timer.start();
         info!(state = "Freezing", "state transition");
+        GroupState::Freezing
     }
 
     /// Bypass the inactivity timer and enter Freezing immediately. Returns
-    /// `true` on transition (only fires from `Working` or `Reelection`).
-    pub(crate) fn force_freezing(&mut self) -> bool {
+    /// `Some(Freezing)` on transition (only fires from Working or
+    /// Reelection); `None` from other states.
+    pub(crate) fn force_freezing(&mut self) -> Option<GroupState> {
         if self.state_machine.force_freezing() {
             self.phase_timer.start();
             info!(state = "Freezing", "state transition (forced)");
-            true
+            Some(GroupState::Freezing)
         } else {
-            false
+            None
         }
     }
 
-    pub(crate) fn start_selection(&mut self) {
+    pub(crate) fn start_selection(&mut self) -> GroupState {
         self.state_machine.start_selection();
         info!(state = "Selection", "state transition");
+        GroupState::Selection
     }
 
-    pub(crate) fn start_reelection(&mut self) {
+    pub(crate) fn start_reelection(&mut self) -> GroupState {
         self.state_machine.start_reelection();
         self.phase_timer.clear();
         info!(state = "Reelection", "state transition");
+        GroupState::Reelection
     }
 
     /// `true` once 3× `commit_inactivity_duration` has passed in
     /// `PendingJoin` without a welcome.
     pub(crate) fn is_pending_join_expired(&self) -> bool {
-        self.phase_timer
-            .is_pending_join_expired(self.state_machine.current_state())
+        self.state_machine.current_state() == GroupState::PendingJoin
+            && self.phase_timer.pending_join_elapsed()
     }
 
     /// `true` once the freeze window elapsed while in `Freezing`.
     pub(crate) fn is_freeze_timed_out(&self) -> bool {
-        self.phase_timer
-            .is_freeze_timed_out(self.state_machine.current_state())
+        self.state_machine.current_state() == GroupState::Freezing
+            && self.phase_timer.freeze_window_elapsed()
     }
 
     /// Drives the "steward waited too long to commit" transition into
-    /// `Freezing`. Call each poll tick; returns `true` exactly on the tick
-    /// that transitions. Self-starts the timer on the first tick with
-    /// approved work; no-op outside `Working`.
+    /// `Freezing`. Call each poll tick. Returns `Some(Freezing)` exactly
+    /// on the tick that transitions; `None` while still waiting, outside
+    /// Working, or when there's no approved work. Self-starts the
+    /// inactivity anchor on the first tick with approved work.
     pub(crate) fn check_steward_inactivity(
         &mut self,
         approved_proposals_count: usize,
         inactivity_duration: Duration,
-    ) -> bool {
-        let state = self.state_machine.current_state();
-        let should_freeze = self.phase_timer.poll_steward_inactivity(
-            state,
-            approved_proposals_count,
-            inactivity_duration,
-        );
-        if should_freeze {
-            self.start_freezing();
+    ) -> Option<GroupState> {
+        if self.state_machine.current_state() != GroupState::Working
+            || approved_proposals_count == 0
+        {
+            return None;
         }
-        should_freeze
+        if self.phase_timer.started_at().is_none() {
+            self.phase_timer.start();
+            info!(
+                approved = approved_proposals_count,
+                inactivity_ms = inactivity_duration.as_millis() as u64,
+                "inactivity timer started"
+            );
+            return None;
+        }
+        if !self.phase_timer.inactivity_elapsed(inactivity_duration) {
+            return None;
+        }
+        info!(
+            inactivity_ms = inactivity_duration.as_millis() as u64,
+            approved = approved_proposals_count,
+            "inactivity window elapsed, entering freeze"
+        );
+        Some(self.start_freezing())
     }
 
     /// Borrow the MLS service, if attached. `None` for joiners
@@ -388,7 +404,6 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
             self.group.group_name(),
             app_id,
         )))
-        // create_commit_candidate(&mut self.group, mls, &self.steward, self_identity, app_id)
     }
 
     /// Finalize the active freeze round. Errors with
@@ -470,7 +485,6 @@ pub struct User<
     St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler,
-    SCH: StateChangeHandler,
 > {
     /// Local user-level identity, shared across all this user's groups.
     /// Source of truth for "who am I"; MLS state lives in the per-group
@@ -496,7 +510,6 @@ pub struct User<
     consensus_service: Arc<ProviderConsensus<P>>,
     eth_signer: PrivateKeySigner,
     handler: Arc<H>,
-    state_handler: Arc<SCH>,
     default_group_config: GroupConfig,
     /// Per-instance UUID embedded in every outbound packet. Inbound packets
     /// carrying our `app_id` are self-echoes and silently dropped.
@@ -514,8 +527,7 @@ impl<
     St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler,
-    SCH: StateChangeHandler,
-> Clone for User<P, M, Sc, St, I, H, SCH>
+> Clone for User<P, M, Sc, St, I, H>
 {
     fn clone(&self) -> Self {
         Self {
@@ -529,7 +541,6 @@ impl<
             consensus_service: Arc::clone(&self.consensus_service),
             eth_signer: self.eth_signer.clone(),
             handler: Arc::clone(&self.handler),
-            state_handler: Arc::clone(&self.state_handler),
             default_group_config: self.default_group_config.clone(),
             app_id: self.app_id.clone(),
             auto_vote_timers: Arc::clone(&self.auto_vote_timers),
@@ -544,8 +555,7 @@ impl<
     St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler + 'static,
-    SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, St, I, H, SCH>
+> User<P, M, Sc, St, I, H>
 {
     #[allow(clippy::too_many_arguments)]
     fn new_with_config(
@@ -558,7 +568,6 @@ impl<
         consensus_service: Arc<ProviderConsensus<P>>,
         eth_signer: PrivateKeySigner,
         handler: Arc<H>,
-        state_handler: Arc<SCH>,
         default_group_config: GroupConfig,
     ) -> Self {
         Self {
@@ -572,7 +581,6 @@ impl<
             consensus_service,
             eth_signer,
             handler,
-            state_handler,
             default_group_config,
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
             auto_vote_timers: Arc::new(Mutex::new(HashMap::new())),
@@ -666,7 +674,7 @@ pub type DefaultPeerScoring = PeerScoringService<InMemoryPeerScoreStorage, Fixed
 /// reference [`DeterministicStewardList`].
 pub type DefaultStewardList = DeterministicStewardList;
 
-impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
+impl<H: GroupEventHandler + 'static>
     User<
         DefaultProvider,
         DefaultMlsService,
@@ -674,7 +682,6 @@ impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
         DefaultStewardList,
         WalletIdentity,
         H,
-        SCH,
     >
 {
     /// Construct a `User` on [`DefaultProvider`] with the default config.
@@ -682,13 +689,11 @@ impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
         private_key: &str,
         consensus_service: Arc<ProviderConsensus<DefaultProvider>>,
         handler: Arc<H>,
-        state_handler: Arc<SCH>,
     ) -> Result<Self, UserError> {
         Self::with_private_key_and_config(
             private_key,
             consensus_service,
             handler,
-            state_handler,
             GroupConfig::default(),
         )
     }
@@ -698,7 +703,6 @@ impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
         private_key: &str,
         consensus_service: Arc<ProviderConsensus<DefaultProvider>>,
         handler: Arc<H>,
-        state_handler: Arc<SCH>,
         default_group_config: GroupConfig,
     ) -> Result<Self, UserError> {
         let signer = PrivateKeySigner::from_str(private_key)?;
@@ -763,7 +767,6 @@ impl<H: GroupEventHandler + 'static, SCH: StateChangeHandler + 'static>
             consensus_service,
             signer,
             handler,
-            state_handler,
             default_group_config,
         ))
     }

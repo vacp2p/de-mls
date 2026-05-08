@@ -11,7 +11,7 @@ use async_trait::async_trait;
 
 use hashgraph_like_consensus::service::DefaultConsensusService;
 
-use de_mls::app::{GroupConfig, GroupState, StateChangeHandler, User};
+use de_mls::app::{GroupConfig, User};
 use de_mls::core::{CallbackError, DefaultProvider, GroupEventHandler, StewardListConfig};
 use de_mls::ds::{InboundPacket, OutboundPacket};
 use de_mls::protos::de_mls::messages::v1::AppMessage;
@@ -50,13 +50,6 @@ impl GroupEventHandler for H {
     async fn on_error(&self, _: &str, _: &str, _: &str) {}
 }
 
-#[derive(Clone)]
-struct SH;
-#[async_trait]
-impl StateChangeHandler for SH {
-    async fn on_state_changed(&self, _: &str, _: GroupState) {}
-}
-
 const ALICE_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB_KEY: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 const CHARLIE_KEY: &str = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
@@ -69,13 +62,11 @@ type TU = User<
     de_mls::app::DefaultStewardList,
     de_mls::identity::WalletIdentity,
     H,
-    SH,
 >;
 
 fn make(key: &str, cs: Arc<DefaultConsensusService>, cfg: GroupConfig) -> (TU, H) {
     let h = H::new();
-    let u =
-        User::with_private_key_and_config(key, cs, Arc::new(h.clone()), Arc::new(SH), cfg).unwrap();
+    let u = User::with_private_key_and_config(key, cs, Arc::new(h.clone()), cfg).unwrap();
     (u, h)
 }
 

@@ -7,7 +7,7 @@ use tracing::info;
 
 use crate::{
     app::{
-        GroupConfig, GroupState, PhaseTimer, ProposalParams, StateChangeHandler, User, UserError,
+        GroupConfig, GroupState, PhaseTimer, ProposalParams, User, UserError,
         submit_self_leave_proposal, user::GroupEntry,
     },
     core::{
@@ -26,8 +26,7 @@ impl<
     St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler + 'static,
-    SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, St, I, H, SCH>
+> User<P, M, Sc, St, I, H>
 {
     /// Create (`is_creation = true`) or join (`false`) a group using the
     /// user's default config.
@@ -109,8 +108,8 @@ impl<
         );
         drop(groups);
 
-        self.state_handler
-            .on_state_changed(group_name, initial_state)
+        self.handler
+            .on_phase_change(group_name, initial_state)
             .await;
 
         Ok(())

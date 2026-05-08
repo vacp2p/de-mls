@@ -12,9 +12,7 @@ use prost::Message;
 use tracing::{error, info};
 
 use crate::{
-    app::{
-        GroupState, ProposalParams, StateChangeHandler, User, UserError, cast_vote, submit_proposal,
-    },
+    app::{GroupState, ProposalParams, User, UserError, cast_vote, submit_proposal},
     core::{
         DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProposalKind, StewardListPlugin,
         target_identity_of,
@@ -48,8 +46,7 @@ impl<
     St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler + 'static,
-    SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, St, I, H, SCH>
+> User<P, M, Sc, St, I, H>
 {
     /// Check that the group state allows creating a proposal of this kind and
     /// return the expected voter count.

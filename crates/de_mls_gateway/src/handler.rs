@@ -11,7 +11,7 @@ use tokio::task::spawn_blocking;
 
 use de_mls::{
     app::{MessageType, format_group_request, message_types},
-    core::{CallbackError, GroupEventHandler},
+    core::{CallbackError, GroupEventHandler, GroupState},
     ds::{DeliveryService, OutboundPacket, TopicFilter},
     protos::de_mls::messages::v1::{
         AppMessage, ConversationMessage, GroupUpdateRequest, app_message,
@@ -102,6 +102,13 @@ impl<DS: DeliveryService> GroupEventHandler for GatewayEventHandler<DS> {
         Ok(())
     }
 
+    async fn on_phase_change(&self, group_name: &str, state: GroupState) {
+        let _ = self.evt_tx.unbounded_send(AppEvent::GroupStateChanged {
+            group_id: group_name.to_string(),
+            state: state.to_string(),
+        });
+    }
+
     async fn on_commit_applied(
         &self,
         group_name: &str,
@@ -124,19 +131,6 @@ impl<DS: DeliveryService> GroupEventHandler for GatewayEventHandler<DS> {
             epochs: formatted,
         });
         Ok(())
-    }
-}
-
-// Implement StateChangeHandler for app-layer state notifications
-use de_mls::app::{GroupState, StateChangeHandler};
-
-#[async_trait]
-impl<DS: DeliveryService> StateChangeHandler for GatewayEventHandler<DS> {
-    async fn on_state_changed(&self, group_name: &str, state: GroupState) {
-        let _ = self.evt_tx.unbounded_send(AppEvent::GroupStateChanged {
-            group_id: group_name.to_string(),
-            state: state.to_string(),
-        });
     }
 }
 

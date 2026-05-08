@@ -3,7 +3,7 @@
 use tracing::{error, info};
 
 use crate::{
-    app::{FreezeTimeoutStatus, GroupState, StateChangeHandler, User, UserError},
+    app::{FreezeTimeoutStatus, GroupState, User, UserError},
     core::{
         DeMlsProvider, FreezeFinalizeResult, FreezeOutcome, GroupEventHandler, PeerScoringPlugin,
         ScoreEvent, ScoreOp, StewardListPlugin,
@@ -22,8 +22,7 @@ impl<
     St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler + 'static,
-    SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, St, I, H, SCH>
+> User<P, M, Sc, St, I, H>
 {
     /// Poll a `PendingJoin` group. Returns `true` while still waiting,
     /// `false` once joined or once the join attempt has been torn down
@@ -65,7 +64,7 @@ impl<
             .await
             .ok_or(UserError::GroupNotFound)?;
 
-        let has_proposals = {
+        let (has_proposals, selection_event) = {
             let mut entry = entry_arc.write().await;
 
             let state = entry.current_state();
@@ -84,12 +83,12 @@ impl<
                 return Ok(FreezeTimeoutStatus::StillFreezing);
             }
 
-            entry.start_selection();
-            entry.group.approved_proposals_count() > 0
+            let event = entry.start_selection();
+            (entry.group.approved_proposals_count() > 0, event)
         };
 
-        self.state_handler
-            .on_state_changed(group_name, GroupState::Selection)
+        self.handler
+            .on_phase_change(group_name, selection_event)
             .await;
 
         let (finalize_result, downward_cross) = {
@@ -172,14 +171,14 @@ impl<
                 // other than ourselves. Self-penalties are skipped — the
                 // node that failed to commit observes its own state directly
                 // and doesn't need to record a ScoreOp against itself.
-                let (next_state, downward_cross) = {
+                let (transition_event, downward_cross) = {
                     let mut entry = entry_arc.write().await;
 
                     if has_proposals {
                         // Approved batch (and in-flight votes) survive so
                         // the recovered steward commits the same proposals
                         // once the next election lands.
-                        entry.start_reelection();
+                        let event = entry.start_reelection();
 
                         // Local observation → direct peer-score penalty,
                         // no ECP round-trip. Each honest member records
@@ -210,11 +209,11 @@ impl<
                             false
                         };
 
-                        (GroupState::Reelection, cross)
+                        (event, cross)
                     } else {
                         entry.group.clear_freeze_round();
-                        entry.start_working();
-                        (GroupState::Working, false)
+                        let event = entry.start_working();
+                        (event, false)
                     }
                 };
 
@@ -224,9 +223,9 @@ impl<
                     error!(group = group_name, error = %e, "score-removal check failed (freeze timeout)");
                 }
 
-                let entered_reelection = next_state == GroupState::Reelection;
-                self.state_handler
-                    .on_state_changed(group_name, next_state)
+                let entered_reelection = transition_event == GroupState::Reelection;
+                self.handler
+                    .on_phase_change(group_name, transition_event)
                     .await;
 
                 // Layer 2 recovery: regenerate the steward list. Only the
@@ -255,7 +254,7 @@ impl<
         let mut entry = entry_arc.write().await;
 
         let state = entry.current_state();
-        if state == GroupState::PendingJoin || state == GroupState::Leaving {
+        if state == GroupState::PendingJoin {
             return Ok(false);
         }
 
@@ -273,8 +272,8 @@ impl<
         } else {
             entry.phase_timer.commit_inactivity_duration()
         };
-        let entered_freezing = entry.check_steward_inactivity(proposal_count, inactivity);
-        if entered_freezing {
+        let freeze_event = entry.check_steward_inactivity(proposal_count, inactivity);
+        if let Some(event) = freeze_event {
             let epoch = entry.expect_mls()?.current_epoch()?;
             entry.group.ensure_freeze_round(epoch);
 
@@ -298,24 +297,20 @@ impl<
                 None
             };
 
-            let new_state = entry.current_state();
             info!(
                 group = group_name,
-                state = %new_state,
                 approved = proposal_count,
                 "steward inactivity transition"
             );
 
             // Drop lock before any async calls.
             drop(entry);
-            self.state_handler
-                .on_state_changed(group_name, new_state)
-                .await;
+            self.handler.on_phase_change(group_name, event).await;
             if let Some(message) = outbound {
                 self.handler.on_outbound(group_name, message).await?;
             }
         }
 
-        Ok(entered_freezing)
+        Ok(freeze_event.is_some())
     }
 }

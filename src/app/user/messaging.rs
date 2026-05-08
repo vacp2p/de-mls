@@ -1,7 +1,7 @@
 //! Send operations (key packages, app messages, ban requests).
 
 use crate::{
-    app::{GroupState, StateChangeHandler, User, UserError},
+    app::{GroupState, User, UserError},
     core::{
         DeMlsProvider, GroupEventHandler, PeerScoringPlugin, StewardListPlugin,
         build_key_package_message,
@@ -21,8 +21,7 @@ impl<
     St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler + 'static,
-    SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, St, I, H, SCH>
+> User<P, M, Sc, St, I, H>
 {
     /// Broadcast our key-package on the welcome subtopic so the steward
     /// can invite us.

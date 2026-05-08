@@ -5,10 +5,7 @@ use prost::Message;
 use tracing::{error, info};
 
 use crate::{
-    app::{
-        GroupState, StateChangeHandler, User, UserError, forward_incoming_proposal,
-        forward_incoming_vote,
-    },
+    app::{GroupState, User, UserError, forward_incoming_proposal, forward_incoming_vote},
     core::{
         DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProcessResult, ProposalKind,
         ScoreSnapshot, StewardList, StewardListConfig, StewardListPlugin, member_set,
@@ -29,8 +26,7 @@ impl<
     St: StewardListPlugin,
     I: Identity,
     H: GroupEventHandler + 'static,
-    SCH: StateChangeHandler + 'static,
-> User<P, M, Sc, St, I, H, SCH>
+> User<P, M, Sc, St, I, H>
 {
     /// Dispatches a single ProcessResult to the appropriate handler/consensus/state-machine action.
     pub async fn dispatch_inbound_result(
@@ -171,12 +167,11 @@ impl<
         self.handler.on_joined_group(name).await?;
         self.sync_scoring_members(name, &mls_members).await;
 
-        let state = {
+        let event = {
             let mut entry = entry_arc.write().await;
-            entry.start_working();
-            entry.current_state()
+            entry.start_working()
         };
-        self.state_handler.on_state_changed(name, state).await;
+        self.handler.on_phase_change(name, event).await;
         Ok(())
     }
 
@@ -201,7 +196,7 @@ impl<
         // Transition to Working BEFORE steward checks (election needs Working
         // state). Reset reelection_round: this commit advanced the epoch,
         // so whatever retry cycle we were in belongs to the previous epoch.
-        let transitioned = match self.lookup_entry(group_name).await {
+        let working_event = match self.lookup_entry(group_name).await {
             Some(entry_arc) => {
                 let mut entry = entry_arc.write().await;
                 entry.steward.reset_retry();
@@ -213,23 +208,20 @@ impl<
                         | GroupState::Selection
                         | GroupState::Reelection
                 ) {
-                    entry.start_working();
-                    true
+                    Some(entry.start_working())
                 } else {
-                    false
+                    None
                 }
             }
-            None => false,
+            None => None,
         };
 
         self.steward_list_housekeeping(group_name).await?;
         self.process_buffered_updates(group_name).await?;
         self.maybe_close_recovery_window(group_name).await;
 
-        if transitioned {
-            self.state_handler
-                .on_state_changed(group_name, GroupState::Working)
-                .await;
+        if let Some(event) = working_event {
+            self.handler.on_phase_change(group_name, event).await;
         }
         Ok(())
     }
@@ -279,13 +271,13 @@ impl<
             Some(e) => e,
             None => return Ok(()),
         };
-        let (transitioned, outbound) = {
+        let (event, outbound) = {
             let mut entry = entry_arc.write().await;
             if entry.current_state() != GroupState::Working {
                 return Ok(());
             }
 
-            entry.start_freezing();
+            let event = entry.start_freezing();
             let epoch = entry.expect_mls()?.current_epoch()?;
             entry.group.ensure_freeze_round(epoch);
 
@@ -305,16 +297,12 @@ impl<
             } else {
                 None
             };
-            (true, outbound)
+            (event, outbound)
         };
 
-        if transitioned {
-            self.state_handler
-                .on_state_changed(group_name, GroupState::Freezing)
-                .await;
-            if let Some(message) = outbound {
-                self.handler.on_outbound(group_name, message).await?;
-            }
+        self.handler.on_phase_change(group_name, event).await;
+        if let Some(message) = outbound {
+            self.handler.on_outbound(group_name, message).await?;
         }
         Ok(())
     }

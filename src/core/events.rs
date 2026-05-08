@@ -5,6 +5,7 @@
 use async_trait::async_trait;
 
 use crate::{
+    core::GroupState,
     ds::OutboundPacket,
     protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest},
 };
@@ -77,4 +78,10 @@ pub trait GroupEventHandler: Send + Sync {
     ) -> Result<(), CallbackError> {
         Ok(())
     }
+
+    /// A group transitioned into `state`. Caller fires this after a
+    /// coordinator method returns the new state. Integrators surface
+    /// state changes to the UI or audit log; this is a fire-and-forget
+    /// notification (returns `()` like `on_error`). Default impl is a no-op.
+    async fn on_phase_change(&self, _group_name: &str, _state: GroupState) {}
 }
