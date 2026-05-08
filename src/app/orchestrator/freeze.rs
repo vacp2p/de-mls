@@ -12,7 +12,7 @@ use crate::{
     mls_crypto::MlsService,
 };
 
-use crate::app::user::has_downward_cross;
+use crate::app::orchestrator::has_downward_cross;
 
 impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P, GP, H> {
     /// Poll a `PendingJoin` group. Returns `true` while still waiting,

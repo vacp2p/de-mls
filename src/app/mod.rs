@@ -21,10 +21,10 @@
 mod consensus_bridge;
 mod display;
 mod error;
+mod orchestrator;
 mod peer_scoring_backends;
 mod phase_timer;
 mod session_runner;
-mod user;
 
 pub use crate::core::{
     DEFAULT_COMMIT_INACTIVITY_DURATION, DEFAULT_CONSENSUS_TIMEOUT, DEFAULT_ELECTION_VOTING_DELAY,
@@ -40,10 +40,10 @@ pub use display::{
     MemberRole, MessageType, format_group_request, format_group_request_target, message_types,
 };
 pub use error::UserError;
-pub use peer_scoring_backends::{FixedScoringProvider, InMemoryPeerScoreStorage};
-pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer};
-pub use session_runner::SessionRunner;
-pub use user::{
+pub use orchestrator::{
     DefaultGroupPlugins, DefaultMlsService, DefaultPeerScoring, DefaultStewardList, GroupPlugins,
     User,
 };
+pub use peer_scoring_backends::{FixedScoringProvider, InMemoryPeerScoreStorage};
+pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer};
+pub use session_runner::SessionRunner;
