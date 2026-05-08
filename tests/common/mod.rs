@@ -361,13 +361,8 @@ pub struct StewardHandle {
     pub mls: TestMls,
     pub steward: DeterministicStewardList,
     pub identity: Vec<u8>,
-    /// Mirrors `GroupEntry.config.liveness_criteria_yes` from production.
-    /// Tests own this directly because the handle isn't a `GroupEntry`.
     pub liveness_criteria_yes: bool,
-    /// Mirrors `GroupEntry.config.pending_update_max_epochs`.
     pub pending_update_max_epochs: u32,
-    /// Mirrors `GroupEntry.recovery_mode`. Defaults to `false`; tests
-    /// exercising Layer-3 paths flip it directly.
     pub recovery_mode: bool,
 }
 
@@ -433,11 +428,8 @@ pub struct JoinerHandle {
     pub mls: Option<TestMls>,
     pub steward: DeterministicStewardList,
     pub kp_packet: OutboundPacket,
-    /// Mirrors `GroupEntry.config.liveness_criteria_yes` from production.
     pub liveness_criteria_yes: bool,
-    /// Mirrors `GroupEntry.config.pending_update_max_epochs`.
     pub pending_update_max_epochs: u32,
-    /// Mirrors `GroupEntry.recovery_mode`.
     pub recovery_mode: bool,
 }
 

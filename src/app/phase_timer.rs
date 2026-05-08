@@ -107,8 +107,7 @@ impl PhaseTimer {
     }
 
     // Setters below are called by `User::on_group_sync` to apply the
-    // steward's `TimingConfig`. Voting/consensus durations live in
-    // `GroupConfig` on the entry, written there directly.
+    // steward's `TimingConfig`.
 
     pub fn set_commit_inactivity_duration(&mut self, value: Duration) {
         self.commit_inactivity_duration = value;

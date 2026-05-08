@@ -65,11 +65,9 @@ pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin, St: StewardLi
     /// Wall-clock anchor + phase-anchor durations combined with
     /// `state_machine` by the entry's coordinator methods.
     phase_timer: PhaseTimer,
-    /// Per-group durable config — voting/consensus knobs and the two
-    /// `Group`-level flags (`liveness_criteria_yes`,
-    /// `pending_update_max_epochs`). Read by app-layer coordinators;
-    /// joiner-sync writes through this directly. Plug-ins keep their own
-    /// internal config slices (`StewardListConfig`, `ScoringConfig`).
+    /// Per-group durable config: voting/consensus durations,
+    /// `liveness_criteria_yes`, `pending_update_max_epochs`. Read by
+    /// app-layer coordinators; joiner-sync writes through this directly.
     pub(crate) config: GroupConfig,
     /// Per-group peer-score plug-in. Lives next to `state_machine` as
     /// app-layer wiring; protocol decisions read it via the entry's
@@ -80,11 +78,11 @@ pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin, St: StewardLi
     /// eligibility from MLS members + `Group::is_pending_removal` and
     /// passes it on every position query.
     steward: St,
-    /// Cross-cutting recovery flag (RFC §Layer 3 Anti-Deadlock ECP).
-    /// Set when an accepted Deadlock ECP relaxes the steward gate so any
-    /// member may produce the next commit; cleared when a fresh election
-    /// lands. Read by the freeze coordinator, the create-commit path, and
-    /// `core::finalize_freeze_round` (via `in_recovery` parameter).ƒ
+    /// Recovery flag (RFC §Layer 3 Anti-Deadlock ECP). Set when an
+    /// accepted Deadlock ECP relaxes the steward gate so any member may
+    /// produce the next commit; cleared when a fresh election lands.
+    /// Read by the freeze coordinator, the create-commit path, and
+    /// `core::finalize_freeze_round` (via `in_recovery` parameter).
     recovery_mode: bool,
 }
 

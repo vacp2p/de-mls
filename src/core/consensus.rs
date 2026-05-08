@@ -31,10 +31,8 @@ pub struct ConsensusApplyResult {
     pub force_freezing: bool,
     pub queued_remove_target: Option<Vec<u8>>,
     /// `true` when an accepted Layer-3 Deadlock ECP signals "open recovery
-    /// mode." App caller flips `GroupEntry::recovery_mode` on; cleared on
-    /// the next accepted election. Mode flag lives on `GroupEntry`, not
-    /// in `Group` (cross-cutting flag, not plug-in-internal — see
-    /// `plugin-narrow-domain.md`).
+    /// mode." Caller flips the recovery-mode flag on; cleared on the next
+    /// accepted election.
     pub enter_recovery_mode: bool,
 }
 
