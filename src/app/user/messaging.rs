@@ -1,12 +1,9 @@
 //! Send operations (key packages, app messages, ban requests).
 
 use crate::{
-    app::{GroupState, User, UserError},
-    core::{
-        DeMlsProvider, GroupEventHandler, PeerScoringPlugin, StewardListPlugin,
-        build_key_package_message,
-    },
-    identity::{Identity, parse_wallet_to_bytes},
+    app::{GroupPlugins, GroupState, User, UserError},
+    core::{DeMlsProvider, GroupEventHandler, build_key_package_message},
+    identity::parse_wallet_to_bytes,
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, ConversationMessage, GroupUpdateRequest, RemoveMember,
@@ -14,15 +11,7 @@ use crate::{
     },
 };
 
-impl<
-    P: DeMlsProvider,
-    M: MlsService,
-    Sc: PeerScoringPlugin,
-    St: StewardListPlugin,
-    I: Identity,
-    H: GroupEventHandler + 'static,
-> User<P, M, Sc, St, I, H>
-{
+impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P, GP, H> {
     /// Broadcast our key-package on the welcome subtopic so the steward
     /// can invite us.
     pub async fn send_kp_message(&self, group_name: &str) -> Result<(), UserError> {

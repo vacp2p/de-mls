@@ -12,13 +12,8 @@ use prost::Message;
 use tracing::{error, info};
 
 use crate::{
-    app::{GroupState, ProposalParams, User, UserError, cast_vote, submit_proposal},
-    core::{
-        DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProposalKind, StewardListPlugin,
-        target_identity_of,
-    },
-    identity::Identity,
-    mls_crypto::MlsService,
+    app::{GroupPlugins, GroupState, ProposalParams, User, UserError, cast_vote, submit_proposal},
+    core::{DeMlsProvider, GroupEventHandler, ProposalKind, StewardListPlugin, target_identity_of},
     protos::de_mls::messages::v1::{AppMessage, GroupUpdateRequest, VotePayload},
 };
 
@@ -39,15 +34,9 @@ struct NewProposal {
     creator_vote: Option<bool>,
 }
 
-impl<
-    P: DeMlsProvider,
-    M: MlsService,
-    Sc: PeerScoringPlugin,
-    St: StewardListPlugin,
-    I: Identity,
-    H: GroupEventHandler + 'static,
-> User<P, M, Sc, St, I, H>
-{
+use crate::mls_crypto::MlsService;
+
+impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P, GP, H> {
     /// Check that the group state allows creating a proposal of this kind and
     /// return the expected voter count.
     ///
@@ -283,7 +272,8 @@ impl<
                 self.handler
                     .on_app_message(group_name, vote_notification)
                     .await?;
-                self.spawn_auto_vote(group_name, proposal_id, voting_delay, liveness_criteria_yes);
+                self.spawn_auto_vote(group_name, proposal_id, voting_delay, liveness_criteria_yes)
+                    .await;
             }
         }
 
@@ -450,7 +440,7 @@ impl<
         let app_id = self.app_id.clone();
 
         // Manual vote takes precedence over the pending auto-vote timer.
-        self.cancel_auto_vote(group_name, proposal_id);
+        self.cancel_auto_vote(group_name, proposal_id).await;
 
         let app_message = cast_vote::<P, _>(
             group_name,
@@ -472,83 +462,73 @@ impl<
     /// — an existing handle for the same key is aborted and replaced.
     /// `vote` is captured before the sleep so a `GroupSync` during the
     /// delay can't change it.
-    pub(crate) fn spawn_auto_vote(
+    pub(crate) async fn spawn_auto_vote(
         &self,
         group_name: &str,
         proposal_id: u32,
         delay: Duration,
         vote: bool,
     ) {
-        self.cancel_auto_vote(group_name, proposal_id);
+        let timers = match self.lookup_entry(group_name).await {
+            Some(entry_arc) => entry_arc.read().await.auto_vote_timers.clone(),
+            None => return,
+        };
+
+        // Idempotent: abort any existing handle for this proposal.
+        if let Ok(mut t) = timers.lock()
+            && let Some(old) = t.remove(&proposal_id)
+        {
+            old.abort();
+        }
 
         let user = self.clone();
-        let group_key: Arc<str> = Arc::from(group_name);
-        let group_key_for_task = Arc::clone(&group_key);
-
+        let group_name_owned = group_name.to_string();
+        let timers_for_task = Arc::clone(&timers);
         let handle = tokio::spawn(async move {
             tokio::time::sleep(delay).await;
             if let Err(e) = user
-                .cast_auto_vote(&group_key_for_task, proposal_id, vote)
+                .cast_auto_vote(&group_name_owned, proposal_id, vote)
                 .await
             {
                 tracing::debug!(
-                    group = %group_key_for_task,
+                    group = %group_name_owned,
                     proposal_id,
                     error = %e,
                     "auto-vote skipped (already voted or session resolved)"
                 );
             } else {
                 info!(
-                    group = %group_key_for_task,
+                    group = %group_name_owned,
                     proposal_id,
                     vote,
                     "auto-vote cast on timer"
                 );
             }
-            // Remove the handle when the task completes so repeated manual
-            // votes after the timer fires don't try to abort a dead handle.
-            if let Ok(mut timers) = user.auto_vote_timers.lock()
-                && let Some(per_group) = timers.get_mut(&*group_key_for_task)
-            {
-                per_group.remove(&proposal_id);
-                if per_group.is_empty() {
-                    timers.remove(&*group_key_for_task);
-                }
+            // Self-clean so repeated manual votes after the timer fires
+            // don't try to abort a dead handle.
+            if let Ok(mut t) = timers_for_task.lock() {
+                t.remove(&proposal_id);
             }
         });
 
-        if let Ok(mut timers) = self.auto_vote_timers.lock() {
-            timers
-                .entry(group_key)
-                .or_default()
-                .insert(proposal_id, handle);
+        if let Ok(mut t) = timers.lock() {
+            t.insert(proposal_id, handle);
         }
     }
 
     /// Abort the auto-vote timer for `(group_name, proposal_id)` if one is
     /// registered. No-op otherwise.
-    pub(crate) fn cancel_auto_vote(&self, group_name: &str, proposal_id: u32) {
-        if let Ok(mut timers) = self.auto_vote_timers.lock()
-            && let Some(per_group) = timers.get_mut(group_name)
-        {
-            if let Some(handle) = per_group.remove(&proposal_id) {
-                handle.abort();
-            }
-            if per_group.is_empty() {
-                timers.remove(group_name);
-            }
+    pub(crate) async fn cancel_auto_vote(&self, group_name: &str, proposal_id: u32) {
+        if let Some(entry_arc) = self.lookup_entry(group_name).await {
+            entry_arc.read().await.cancel_auto_vote(proposal_id);
         }
     }
 
     /// Abort every auto-vote timer belonging to `group_name`. Called on
     /// group leave so no stale timers fire against a group we've left.
-    pub(crate) fn cancel_group_auto_votes(&self, group_name: &str) {
-        if let Ok(mut timers) = self.auto_vote_timers.lock()
-            && let Some(per_group) = timers.remove(group_name)
-        {
-            for handle in per_group.into_values() {
-                handle.abort();
-            }
+    pub(crate) async fn cancel_group_auto_votes(&self, group_name: &str) {
+        if let Some(entry_arc) = self.lookup_entry(group_name).await {
+            entry_arc.read().await.cancel_all_auto_votes();
         }
     }
 

@@ -4,28 +4,21 @@
 use tracing::{error, info};
 
 use crate::{
-    app::{User, UserError},
+    app::{GroupPlugins, User, UserError},
     core::{
         DeMlsProvider, ElectionDecision, GroupEventHandler, PeerScoringPlugin, StewardListPlugin,
         member_set, scoring_member_diff, target_identity_of,
     },
-    identity::{Identity, ShortId},
-    mls_crypto::MlsService,
+    identity::ShortId,
     protos::de_mls::messages::v1::{
         AppMessage, GroupSync, GroupUpdateRequest, PeerScore, StewardElectionProposal,
         TimingConfig, ViolationEvidence, group_update_request,
     },
 };
 
-impl<
-    P: DeMlsProvider,
-    M: MlsService,
-    Sc: PeerScoringPlugin,
-    St: StewardListPlugin,
-    I: Identity,
-    H: GroupEventHandler + 'static,
-> User<P, M, Sc, St, I, H>
-{
+use crate::mls_crypto::MlsService;
+
+impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P, GP, H> {
     /// Add any MLS members not yet tracked in scoring, and drop scored
     /// entries for identities no longer in MLS. Diffing is delegated to
     /// [`scoring_member_diff`]; this method only applies the diff.

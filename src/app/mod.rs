@@ -44,6 +44,6 @@ pub use error::UserError;
 pub use peer_scoring::{FixedScoringProvider, InMemoryPeerScoreStorage};
 pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer};
 pub use user::{
-    DefaultMlsService, DefaultPeerScoring, DefaultStewardList, KeyPackageGenerator,
-    MlsCreatorFactory, MlsWelcomeFactory, ScoringFactory, StewardFactory, User,
+    DefaultGroupPlugins, DefaultMlsService, DefaultPeerScoring, DefaultStewardList, GroupPlugins,
+    User,
 };

@@ -8,27 +8,17 @@ use prost::Message;
 use tracing::{error, info};
 
 use crate::{
-    app::{GroupState, User, UserError},
+    app::{GroupPlugins, GroupState, User, UserError},
     core::{
         DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProposalKind, ScoreOp,
         StewardListPlugin, apply_consensus_result, emergency_score_ops, target_identity_of,
     },
-    identity::Identity,
-    mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         GroupUpdateRequest, StewardElectionProposal, group_update_request,
     },
 };
 
-impl<
-    P: DeMlsProvider,
-    M: MlsService,
-    Sc: PeerScoringPlugin,
-    St: StewardListPlugin,
-    I: Identity,
-    H: GroupEventHandler + 'static,
-> User<P, M, Sc, St, I, H>
-{
+impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P, GP, H> {
     /// Entry point from the consensus service: decode the proposal, apply the
     /// result to the group, and dispatch to the correct follow-up handler
     /// (election-accepted / election-rejected / emergency-scored).
@@ -47,7 +37,7 @@ impl<
         };
 
         // Proposal resolved — any pending auto-vote timer for it is moot.
-        self.cancel_auto_vote(group_name, proposal_id);
+        self.cancel_auto_vote(group_name, proposal_id).await;
 
         // Drop re-emissions from the consensus library (timeout-path race)
         // so we don't re-apply state or double-fire UI events.

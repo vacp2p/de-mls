@@ -1,22 +1,15 @@
 //! Read-only queries over a group's state (UI and diagnostics).
 
 use crate::{
-    app::{GroupState, MemberRole, User, UserError},
+    app::{GroupPlugins, GroupState, MemberRole, User, UserError},
     core::{DeMlsProvider, GroupEventHandler, PeerScoringPlugin, StewardListPlugin},
-    identity::{Identity, format_wallet_address},
-    mls_crypto::MlsService,
+    identity::format_wallet_address,
     protos::de_mls::messages::v1::GroupUpdateRequest,
 };
 
-impl<
-    P: DeMlsProvider,
-    M: MlsService,
-    Sc: PeerScoringPlugin,
-    St: StewardListPlugin,
-    I: Identity,
-    H: GroupEventHandler + 'static,
-> User<P, M, Sc, St, I, H>
-{
+use crate::mls_crypto::MlsService;
+
+impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P, GP, H> {
     pub async fn get_group_state(&self, group_name: &str) -> Result<GroupState, UserError> {
         self.with_entry(group_name, |e| e.current_state())
             .await

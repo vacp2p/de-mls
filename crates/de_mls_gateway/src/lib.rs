@@ -48,10 +48,7 @@ type UserRef = Arc<
     tokio::sync::RwLock<
         User<
             DefaultProvider,
-            de_mls::app::DefaultMlsService,
-            de_mls::app::DefaultPeerScoring,
-            de_mls::app::DefaultStewardList,
-            de_mls::identity::WalletIdentity,
+            de_mls::app::DefaultGroupPlugins,
             GatewayEventHandler<WakuDeliveryService>,
         >,
     >,

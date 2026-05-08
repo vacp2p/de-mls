@@ -3,27 +3,18 @@
 use tracing::{error, info};
 
 use crate::{
-    app::{FreezeTimeoutStatus, GroupState, User, UserError},
+    app::{FreezeTimeoutStatus, GroupPlugins, GroupState, User, UserError},
     core::{
         DeMlsProvider, FreezeFinalizeResult, FreezeOutcome, GroupEventHandler, PeerScoringPlugin,
         ScoreEvent, ScoreOp, StewardListPlugin,
     },
     ds::WELCOME_SUBTOPIC,
-    identity::Identity,
     mls_crypto::MlsService,
 };
 
-use super::has_downward_cross;
+use crate::app::user::has_downward_cross;
 
-impl<
-    P: DeMlsProvider,
-    M: MlsService,
-    Sc: PeerScoringPlugin,
-    St: StewardListPlugin,
-    I: Identity,
-    H: GroupEventHandler + 'static,
-> User<P, M, Sc, St, I, H>
-{
+impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P, GP, H> {
     /// Poll a `PendingJoin` group. Returns `true` while still waiting,
     /// `false` once joined or once the join attempt has been torn down
     /// after timing out.

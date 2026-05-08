@@ -5,29 +5,23 @@ use prost::Message;
 use tracing::{error, info};
 
 use crate::{
-    app::{GroupState, User, UserError, forward_incoming_proposal, forward_incoming_vote},
+    app::{
+        GroupPlugins, GroupState, User, UserError, forward_incoming_proposal, forward_incoming_vote,
+    },
     core::{
-        DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProcessResult, ProposalKind,
-        ScoreSnapshot, StewardList, StewardListConfig, StewardListPlugin, member_set,
+        CoreError, DeMlsProvider, GroupEventHandler, PeerScoringPlugin, ProcessResult,
+        ProposalKind, ScoreSnapshot, StewardList, StewardListConfig, StewardListPlugin, member_set,
     },
     ds::{APP_MSG_SUBTOPIC, InboundPacket, WELCOME_SUBTOPIC},
-    identity::{Identity, ShortId},
+    identity::ShortId,
     mls_crypto::{MlsService, key_package_bytes_from_json},
     protos::de_mls::messages::v1::{
-        AppMessage, ConversationMessage, GroupSync, GroupUpdateRequest, InviteMember,
+        AppMessage, ConversationMessage, GroupSync, GroupUpdateRequest, InviteMember, TimingConfig,
         WelcomeMessage, group_update_request, welcome_message,
     },
 };
 
-impl<
-    P: DeMlsProvider,
-    M: MlsService,
-    Sc: PeerScoringPlugin,
-    St: StewardListPlugin,
-    I: Identity,
-    H: GroupEventHandler + 'static,
-> User<P, M, Sc, St, I, H>
-{
+impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P, GP, H> {
     /// Dispatches a single ProcessResult to the appropriate handler/consensus/state-machine action.
     pub async fn dispatch_inbound_result(
         &self,
@@ -132,7 +126,8 @@ impl<
             else {
                 return Ok(());
             };
-            self.spawn_auto_vote(group_name, proposal_id, delay, vote);
+            self.spawn_auto_vote(group_name, proposal_id, delay, vote)
+                .await;
         }
         Ok(())
     }
@@ -432,7 +427,7 @@ impl<
                 };
                 self.dispatch_inbound_result(&group_name, result).await
             }
-            other => Err(UserError::Core(crate::core::CoreError::InvalidSubtopic(
+            other => Err(UserError::Core(CoreError::InvalidSubtopic(
                 other.to_string(),
             ))),
         }
@@ -500,7 +495,9 @@ impl<
                     return Ok(());
                 }
 
-                let svc = (self.mls_welcome_factory)(&invitation.mls_message_out_bytes)?;
+                let svc = self
+                    .plugins
+                    .welcome_mls(&invitation.mls_message_out_bytes)?;
                 let Some(svc) = svc else {
                     // Welcome wasn't for us.
                     return Ok(());
@@ -511,11 +508,8 @@ impl<
                     entry.attach_mls(svc);
                 }
                 info!(group = group_name, "joined group via welcome");
-                self.dispatch_inbound_result(
-                    group_name,
-                    crate::core::ProcessResult::JoinedGroup(joined_name),
-                )
-                .await
+                self.dispatch_inbound_result(group_name, ProcessResult::JoinedGroup(joined_name))
+                    .await
             }
             None => Ok(()),
         }
@@ -600,9 +594,7 @@ fn validate_group_sync(
 /// fields are non-zero. Zero in any timing field would short-circuit the
 /// timer it drives (consensus_timeout firing immediately,
 /// commit_inactivity breaking the inactivity tracker, etc.).
-fn first_zero_timing_field(
-    timing: &crate::protos::de_mls::messages::v1::TimingConfig,
-) -> Option<&'static str> {
+fn first_zero_timing_field(timing: &TimingConfig) -> Option<&'static str> {
     if timing.commit_inactivity_duration_ms == 0 {
         Some("commit_inactivity_duration_ms")
     } else if timing.freeze_duration_ms == 0 {

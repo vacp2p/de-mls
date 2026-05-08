@@ -7,27 +7,19 @@ use tracing::info;
 
 use crate::{
     app::{
-        GroupConfig, GroupState, PhaseTimer, ProposalParams, User, UserError,
+        GroupConfig, GroupPlugins, GroupState, PhaseTimer, ProposalParams, User, UserError,
         submit_self_leave_proposal, user::GroupEntry,
     },
     core::{
         DeMlsProvider, Group, GroupEventHandler, GroupStateMachine, PeerScoringPlugin,
         StewardListPlugin, auto_approved_leave_proposal_id,
     },
-    identity::Identity,
-    mls_crypto::MlsService,
     protos::de_mls::messages::v1::{GroupUpdateRequest, RemoveMember, group_update_request},
 };
 
-impl<
-    P: DeMlsProvider,
-    M: MlsService,
-    Sc: PeerScoringPlugin,
-    St: StewardListPlugin,
-    I: Identity,
-    H: GroupEventHandler + 'static,
-> User<P, M, Sc, St, I, H>
-{
+use crate::mls_crypto::MlsService;
+
+impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P, GP, H> {
     /// Create (`is_creation = true`) or join (`false`) a group using the
     /// user's default config.
     pub async fn create_group(
@@ -53,7 +45,7 @@ impl<
 
         let self_identity_bytes = self.identity().identity_bytes().to_vec();
         let (group, mls_opt, state_machine, phase_timer) = if is_creation {
-            let mls = (self.mls_creator_factory)(group_name.to_string())?;
+            let mls = self.plugins.create_mls(group_name.to_string())?;
             let group = Group::create_group(group_name, self_identity_bytes.clone());
             let state_machine = GroupStateMachine::new_as_member();
             (group, Some(mls), state_machine, PhaseTimer::new())
