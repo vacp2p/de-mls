@@ -28,6 +28,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         };
         let mut entry = entry_arc.write().await;
         let scored: Vec<Vec<u8>> = entry
+            .handle
             .scoring
             .all_members_with_scores()
             .into_iter()
@@ -39,10 +40,10 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             // returns no events; an exotic config could surface a fresh
             // member as below-threshold, but the score-removal chain
             // doesn't fire on membership-sync ticks today.
-            let _events = entry.scoring.add_member(member_id);
+            let _events = entry.handle.scoring.add_member(member_id);
         }
         for member_id in &diff.to_remove {
-            entry.scoring.remove_member(member_id);
+            entry.handle.scoring.remove_member(member_id);
         }
     }
 
@@ -56,10 +57,10 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             .await
             .ok_or(UserError::GroupNotFound)?;
         let mut entry = entry_arc.write().await;
-        let mls = entry.expect_mls()?;
+        let mls = entry.handle.expect_mls()?;
         let epoch = mls.current_epoch()?;
-        let members = entry.group_members()?;
-        let _events = entry.steward.maybe_auto_fill(epoch, &members)?;
+        let members = entry.handle.group_members()?;
+        let _events = entry.handle.steward.maybe_auto_fill(epoch, &members)?;
         Ok(())
     }
 
@@ -82,14 +83,14 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             .ok_or(UserError::GroupNotFound)?;
         let (proposed_stewards, election_epoch, retry_round) = {
             let entry = entry_arc.read().await;
-            let mls = entry.expect_mls()?;
+            let mls = entry.handle.expect_mls()?;
             let epoch = mls.current_epoch()?;
-            let mls_members = entry.group_members()?;
+            let mls_members = entry.handle.group_members()?;
             let self_identity = self.identity().identity_bytes();
 
             // `has_election_in_flight` is a proposal-queue check, not a
             // steward-list one — gated here, before the plug-in call.
-            if entry.group.has_election_in_flight() {
+            if entry.handle.group.has_election_in_flight() {
                 return Ok(());
             }
 
@@ -101,7 +102,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                     if extra_exclude.is_some_and(|x| x == m.as_slice()) {
                         return false;
                     }
-                    if recovery && entry.group.is_pending_removal(m) {
+                    if recovery && entry.handle.group.is_pending_removal(m) {
                         return false;
                     }
                     true
@@ -112,7 +113,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 candidate_pool.iter().map(Vec::as_slice).collect();
             let eligible = |c: &[u8]| pool_set.contains(c);
 
-            match entry.steward.propose_election(
+            match entry.handle.steward.propose_election(
                 epoch,
                 &candidate_pool,
                 self_identity,
@@ -174,15 +175,16 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             .ok_or(UserError::GroupNotFound)?;
         let (is_authorized, self_id, epoch) = {
             let entry = entry_arc.read().await;
-            let mls = entry.expect_mls()?;
-            let mls_members = entry.group_members()?;
+            let mls = entry.handle.expect_mls()?;
+            let mls_members = entry.handle.group_members()?;
             let self_id = self.identity().identity_bytes();
             // Deadlock proposer = election proposer with the stricter
             // predicate (MLS-present and not queued for removal).
             let mls_set: std::collections::HashSet<&[u8]> =
                 mls_members.iter().map(Vec::as_slice).collect();
-            let group_ref = &entry.group;
+            let group_ref = &entry.handle.group;
             let authorized = entry
+                .handle
                 .steward
                 .election_proposer(&|c: &[u8]| {
                     mls_set.contains(c) && !group_ref.is_pending_removal(c)
@@ -234,16 +236,23 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             .ok_or(UserError::GroupNotFound)?;
         let (current_epoch, members) = {
             let entry = entry_arc.read().await;
-            let mls = entry.expect_mls()?;
+            let mls = entry.handle.expect_mls()?;
             let current_epoch = mls.current_epoch()?;
-            let members = entry.group_members()?;
+            let members = entry.handle.group_members()?;
             (current_epoch, members)
         };
 
         let mut entry = entry_arc.write().await;
-        let sn = entry.steward.config().compute_list_size(members.len());
+        let sn = entry
+            .handle
+            .steward
+            .config()
+            .compute_list_size(members.len());
         // Test/admin regenerate — no election, no retry seed.
-        let _events = entry.steward.install_list(current_epoch, &members, sn, 0)?;
+        let _events = entry
+            .handle
+            .steward
+            .install_list(current_epoch, &members, sn, 0)?;
         Ok(())
     }
 
@@ -260,21 +269,27 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             .ok_or(UserError::GroupNotFound)?;
         let (current_epoch, members, max_age) = {
             let entry = entry_arc.read().await;
-            let Some(mls) = entry.mls() else {
+            let Some(mls) = entry.handle.mls() else {
                 return Ok(());
             };
             (
                 mls.current_epoch()?,
-                entry.group_members()?,
-                entry.config.pending_update_max_epochs,
+                entry.handle.group_members()?,
+                entry.handle.config.pending_update_max_epochs,
             )
         };
 
         let mut entry = entry_arc.write().await;
-        let before = entry.group.pending_update_count();
-        entry.group.prune_pending_updates_for_members(&members);
-        let expired = entry.group.expire_pending_updates(current_epoch, max_age);
-        let after = entry.group.pending_update_count();
+        let before = entry.handle.group.pending_update_count();
+        entry
+            .handle
+            .group
+            .prune_pending_updates_for_members(&members);
+        let expired = entry
+            .handle
+            .group
+            .expire_pending_updates(current_epoch, max_age);
+        let after = entry.handle.group.pending_update_count();
         if before != after {
             info!(
                 group = group_name,
@@ -298,13 +313,14 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         let (current_epoch, to_propose): (u64, Vec<GroupUpdateRequest>) = {
             let entry = entry_arc.read().await;
 
-            let (current_epoch, members) = match entry.mls() {
-                Some(mls) => (mls.current_epoch()?, entry.group_members()?),
+            let (current_epoch, members) = match entry.handle.mls() {
+                Some(mls) => (mls.current_epoch()?, entry.handle.group_members()?),
                 None => (0, Vec::new()),
             };
             let self_identity = self.identity().identity_bytes();
-            let eligible = entry.group.steward_eligibility(&members);
+            let eligible = entry.handle.group.steward_eligibility(&members);
             let is_live = entry
+                .handle
                 .steward
                 .epoch_steward(current_epoch, &eligible)
                 .is_some_and(|es| es == self_identity);
@@ -314,12 +330,13 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
 
             // Collect buffered updates whose target isn't already in the
             // active proposal queues. The approved queue is also in the group.
-            let approved = entry.group.approved_proposals();
+            let approved = entry.handle.group.approved_proposals();
             let approved_targets: std::collections::HashSet<&[u8]> =
                 approved.values().filter_map(target_identity_of).collect();
             let members_set = member_set(&members);
 
             let to_propose: Vec<GroupUpdateRequest> = entry
+                .handle
                 .group
                 .pending_updates()
                 .iter()
@@ -379,6 +396,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             // missing entries imply default. Saves wire size at scale
             // (Waku message budget concern past ~1k members).
             let scores: Vec<PeerScore> = entry
+                .handle
                 .scoring
                 .snapshot()
                 .diverged
@@ -389,18 +407,22 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 })
                 .collect();
 
-            let list = match entry.steward.current_list() {
+            let list = match entry.handle.steward.current_list() {
                 Some(l) => l,
                 None => return Ok(()),
             };
 
             let timing = TimingConfig {
-                commit_inactivity_duration_ms: entry.config.commit_inactivity_duration.as_millis()
-                    as u64,
-                freeze_duration_ms: entry.config.freeze_duration.as_millis() as u64,
-                proposal_expiration_ms: entry.config.proposal_expiration.as_millis() as u64,
-                consensus_timeout_ms: entry.config.consensus_timeout.as_millis() as u64,
+                commit_inactivity_duration_ms: entry
+                    .handle
+                    .config
+                    .commit_inactivity_duration
+                    .as_millis() as u64,
+                freeze_duration_ms: entry.handle.config.freeze_duration.as_millis() as u64,
+                proposal_expiration_ms: entry.handle.config.proposal_expiration.as_millis() as u64,
+                consensus_timeout_ms: entry.handle.config.consensus_timeout.as_millis() as u64,
                 recovery_inactivity_duration_ms: entry
+                    .handle
                     .config
                     .recovery_inactivity_duration
                     .as_millis() as u64,
@@ -409,10 +431,10 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             // Filter ghosts and queued-removal targets so joiners don't
             // inherit stewards they would have to walk past on the very
             // first epoch.
-            let mls = entry.expect_mls()?;
-            let mls_members = entry.group_members()?;
-            let eligible = entry.group.steward_eligibility(&mls_members);
-            let steward_members = entry.steward.steward_members(&eligible);
+            let mls = entry.handle.expect_mls()?;
+            let mls_members = entry.handle.group_members()?;
+            let eligible = entry.handle.group.steward_eligibility(&mls_members);
+            let steward_members = entry.handle.steward.steward_members(&eligible);
 
             // `retry_round` is the seed that produced the *stored* list —
             // a frozen tag on `StewardList`, not the plug-in's dynamic
@@ -423,14 +445,14 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 election_epoch: list.election_epoch(),
                 sn_min: list.config().sn_min as u32,
                 sn_max: list.config().sn_max as u32,
-                allow_subset_candidates: entry.steward.config().allow_subset_candidates,
+                allow_subset_candidates: entry.handle.steward.config().allow_subset_candidates,
                 peer_scores: scores,
                 timing: Some(timing),
                 retry_round: list.retry_round(),
-                max_reelection_attempts: entry.steward.max_retries(),
-                liveness_criteria_yes: entry.config.liveness_criteria_yes,
-                threshold_peer_score: entry.scoring.threshold(),
-                pending_update_max_epochs: entry.config.pending_update_max_epochs,
+                max_reelection_attempts: entry.handle.steward.max_retries(),
+                liveness_criteria_yes: entry.handle.config.liveness_criteria_yes,
+                threshold_peer_score: entry.handle.scoring.threshold(),
+                pending_update_max_epochs: entry.handle.config.pending_update_max_epochs,
             };
 
             let app_msg: AppMessage = sync.into();
@@ -461,8 +483,8 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         // truth — events just trigger the look.
         let (is_steward, epoch, to_remove): (bool, u64, Vec<(Vec<u8>, i64)>) = {
             let mut entry = entry_arc.write().await;
-            let mls = entry.expect_mls()?;
-            let is_steward = entry.steward.is_steward(self_id);
+            let mls = entry.handle.expect_mls()?;
+            let is_steward = entry.handle.steward.is_steward(self_id);
             let epoch = mls.current_epoch()?;
             if !is_steward {
                 return Ok(());
@@ -479,19 +501,20 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             //     ≤ threshold) would re-fire a duplicate ECP for the
             //     same target before the RemoveMember commits.
             let to_remove = entry
+                .handle
                 .scoring
                 .members_below_threshold()
                 .into_iter()
                 .filter(|id| *id != self_id)
-                .filter(|id| !entry.group.has_pending_removal(id))
-                .filter(|id| !entry.group.is_pending_removal(id))
+                .filter(|id| !entry.handle.group.has_pending_removal(id))
+                .filter(|id| !entry.handle.group.is_pending_removal(id))
                 .filter_map(|id| {
-                    let score = entry.scoring.score_for(&id)?;
+                    let score = entry.handle.scoring.score_for(&id)?;
                     Some((id, score))
                 })
                 .collect::<Vec<_>>();
             for (id, _) in &to_remove {
-                entry.group.observe_pending_removal(id.clone());
+                entry.handle.group.observe_pending_removal(id.clone());
             }
             (is_steward, epoch, to_remove)
         };
@@ -522,7 +545,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             {
                 if let Some(entry_arc) = self.lookup_entry(group_name).await {
                     let mut entry = entry_arc.write().await;
-                    entry.group.resolve_pending_removal(&target_id);
+                    entry.handle.group.resolve_pending_removal(&target_id);
                 }
                 error!(
                     group = group_name,

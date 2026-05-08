@@ -2,11 +2,7 @@
 
 use std::time::Duration;
 
-pub use crate::core::{
-    DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_MAX_RETRIES, DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
-    DEFAULT_THRESHOLD_PEER_SCORE,
-};
-use crate::core::{ProposalKind, StewardListConfig};
+use super::{DEFAULT_MAX_RETRIES, DEFAULT_THRESHOLD_PEER_SCORE, ProposalKind, StewardListConfig};
 
 /// Wall-clock window the steward waits before batching approved proposals
 /// into a commit (RFC §Inactivity Timer #1, "Commit inactivity").
@@ -36,13 +32,17 @@ pub const DEFAULT_ELECTION_VOTING_DELAY: Duration = Duration::from_secs(5);
 /// RFC §Peer Scoring `default_peer_score`: starting score for a new member.
 pub const DEFAULT_PEER_SCORE: i64 = 100;
 
+pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
+
+pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
+
 /// Fallback [`StewardListConfig`] for a group created without explicit bounds —
 /// tiny groups with `sn ∈ [1, 2]`.
 fn default_protocol_config() -> StewardListConfig {
     StewardListConfig::new(1, 2).expect("1..=2 is always a valid StewardListConfig range")
 }
 
-/// App-layer timing + embedded core-layer [`StewardListConfig`].
+/// Per-group timing + embedded [`StewardListConfig`].
 #[derive(Debug, Clone)]
 pub struct GroupConfig {
     /// RFC §Inactivity Timer #1: how long the epoch steward has to commit
@@ -104,16 +104,6 @@ impl Default for GroupConfig {
 }
 
 impl GroupConfig {
-    /// Default config with a custom commit-inactivity window; freeze becomes
-    /// `commit_inactivity_duration / 2`.
-    pub fn with_commit_inactivity_duration(commit_inactivity_duration: Duration) -> Self {
-        Self {
-            commit_inactivity_duration,
-            freeze_duration: commit_inactivity_duration / 2,
-            ..Self::default()
-        }
-    }
-
     /// Auto-vote delay for the given proposal kind.
     pub fn voting_delay_for(&self, kind: ProposalKind) -> Duration {
         if kind.is_steward_election() {

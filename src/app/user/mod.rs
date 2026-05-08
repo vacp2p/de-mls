@@ -1,7 +1,8 @@
 //! [`User`] — multi-group facade over core. One node owns one `User`, which
 //! holds the consensus service, event handler, and per-group state map.
 //! Each group's MLS service and peer-scoring service live on the
-//! [`GroupEntry`] (one instance per group). Methods split across the
+//! [`SessionRunner`] (one instance per group), which in turn owns a
+//! [`crate::core::GroupHandle`]. Methods split across the
 //! submodules: `lifecycle` (create/leave), `query` (read-only getters),
 //! `messaging` (send/ban), `consensus` (voting), `consensus_events`
 //! (outcome dispatch), `inbound` (packet dispatch), `freeze` (timers),
@@ -17,10 +18,10 @@ use hashgraph_like_consensus::storage::ConsensusStorage;
 use tokio::sync::RwLock;
 
 use crate::{
-    app::{GroupConfig, UserError},
+    app::{SessionRunner, UserError},
     core::{
-        DeMlsProvider, DefaultProvider, GroupEventHandler, PeerScoringEvent, ProviderConsensus,
-        ScoringConfig, StewardListConfig,
+        DeMlsProvider, DefaultProvider, GroupConfig, GroupEventHandler, PeerScoringEvent,
+        ProviderConsensus, ScoringConfig, StewardListConfig,
     },
     identity::{Identity, WalletIdentity},
     mls_crypto::{KeyPackageBytes, MemoryDeMlsStorage, MlsCredentials, MlsError},
@@ -29,7 +30,6 @@ use crate::{
 mod consensus;
 mod consensus_events;
 mod freeze;
-mod group_entry;
 mod inbound;
 mod lifecycle;
 mod messaging;
@@ -37,7 +37,6 @@ mod plugins;
 mod query;
 mod steward;
 
-pub(crate) use group_entry::GroupEntry;
 pub use plugins::{
     DefaultGroupPlugins, DefaultMlsService, DefaultPeerScoring, DefaultStewardList, GroupPlugins,
 };
@@ -52,10 +51,10 @@ pub(crate) fn has_downward_cross(events: &[PeerScoringEvent]) -> bool {
         .any(|e| matches!(e, PeerScoringEvent::ThresholdCrossedDown { .. }))
 }
 
-/// Per-user registry of group entries, with one outer lock for map CRUD
-/// and one inner lock per entry so writes on one group don't block reads
+/// Per-user registry of group runners, with one outer lock for map CRUD
+/// and one inner lock per runner so writes on one group don't block reads
 /// on another.
-type GroupRegistry<M, Sc, St> = Arc<RwLock<HashMap<String, Arc<RwLock<GroupEntry<M, Sc, St>>>>>>;
+type GroupRegistry<M, Sc, St> = Arc<RwLock<HashMap<String, Arc<RwLock<SessionRunner<M, Sc, St>>>>>>;
 
 pub struct User<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler> {
     /// Local user-level identity, shared across all this user's groups.
@@ -140,22 +139,22 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             .make_steward(group_name.as_bytes(), config.clone())
     }
 
-    /// Look up a group entry. Returns `None` when the entry isn't present.
+    /// Look up a group runner. Returns `None` when the entry isn't present.
     /// Takes the outer read lock briefly to clone the inner `Arc`, then
-    /// releases it before the caller acquires the entry's own lock.
+    /// releases it before the caller acquires the runner's own lock.
     pub(crate) async fn lookup_entry(
         &self,
         group_name: &str,
-    ) -> Option<Arc<RwLock<GroupEntry<GP::Mls, GP::Scoring, GP::Steward>>>> {
+    ) -> Option<Arc<RwLock<SessionRunner<GP::Mls, GP::Scoring, GP::Steward>>>> {
         self.groups.read().await.get(group_name).cloned()
     }
 
-    /// Run `f` under the entry's own read lock. Returns `None` if the
-    /// entry isn't present.
+    /// Run `f` under the runner's own read lock. Returns `None` if the
+    /// runner isn't present.
     pub(crate) async fn with_entry<R>(
         &self,
         group_name: &str,
-        f: impl FnOnce(&GroupEntry<GP::Mls, GP::Scoring, GP::Steward>) -> R,
+        f: impl FnOnce(&SessionRunner<GP::Mls, GP::Scoring, GP::Steward>) -> R,
     ) -> Option<R> {
         let entry_arc = self.lookup_entry(group_name).await?;
         let entry = entry_arc.read().await;

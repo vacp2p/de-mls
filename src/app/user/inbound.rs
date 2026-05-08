@@ -42,7 +42,8 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                     .await
                     .ok_or(UserError::GroupNotFound)?;
                 let entry = entry_arc.read().await;
-                forward_incoming_vote::<P>(&entry.group, vote, &*self.consensus_service).await?;
+                forward_incoming_vote::<P>(&entry.handle.group, vote, &*self.consensus_service)
+                    .await?;
                 Ok(())
             }
             ProcessResult::MembershipChangeReceived(request) => {
@@ -81,17 +82,18 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             && let Some(entry_arc) = self.lookup_entry(group_name).await
         {
             let mut entry = entry_arc.write().await;
-            let current_epoch = match entry.mls() {
+            let current_epoch = match entry.handle.mls() {
                 Some(mls) => mls.current_epoch()?,
                 None => 0,
             };
             match &req.payload {
                 Some(group_update_request::Payload::EmergencyCriteria(_)) => {
-                    entry.group.observe_emergency(proposal.proposal_id);
+                    entry.handle.group.observe_emergency(proposal.proposal_id);
                 }
                 Some(group_update_request::Payload::InviteMember(_))
                 | Some(group_update_request::Payload::RemoveMember(_)) => {
                     entry
+                        .handle
                         .group
                         .buffer_pending_update(req.clone(), current_epoch);
                 }
@@ -118,8 +120,8 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             let Some((delay, vote)) = self
                 .with_entry(group_name, |e| {
                     (
-                        e.config.voting_delay_for(kind),
-                        e.config.liveness_criteria_yes,
+                        e.handle.config.voting_delay_for(kind),
+                        e.handle.config.liveness_criteria_yes,
                     )
                 })
                 .await
@@ -153,9 +155,9 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         };
         let (packet, mls_members) = {
             let entry = entry_arc.read().await;
-            let mls = entry.expect_mls()?;
+            let mls = entry.handle.expect_mls()?;
             let packet = mls.build_message(&msg, &self.app_id)?;
-            let members = entry.group_members().unwrap_or_default();
+            let members = entry.handle.group_members().unwrap_or_default();
             (packet, members)
         };
         self.handler.on_outbound(name, packet).await?;
@@ -178,8 +180,8 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         if let Some(entry_arc) = self.lookup_entry(group_name).await {
             let mls_members = {
                 let entry = entry_arc.read().await;
-                if entry.mls().is_some() {
-                    entry.group_members().unwrap_or_default()
+                if entry.handle.mls().is_some() {
+                    entry.handle.group_members().unwrap_or_default()
                 } else {
                     Vec::new()
                 }
@@ -194,8 +196,8 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         let working_event = match self.lookup_entry(group_name).await {
             Some(entry_arc) => {
                 let mut entry = entry_arc.write().await;
-                entry.steward.reset_retry();
-                let state = entry.current_state();
+                entry.handle.steward.reset_retry();
+                let state = entry.handle.current_state();
                 if matches!(
                     state,
                     GroupState::Working
@@ -225,7 +227,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// list installs and closes the window.
     async fn maybe_close_recovery_window(&self, group_name: &str) {
         let in_recovery_mode = self
-            .with_entry(group_name, |entry| entry.is_in_recovery_mode())
+            .with_entry(group_name, |entry| entry.handle.is_in_recovery_mode())
             .await
             .unwrap_or(false);
         if !in_recovery_mode {
@@ -250,7 +252,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             // of the Group so its `delete()` runs before the entry drops.
             // Per-group scoring is dropped when the entry leaves the
             // registry below.
-            if let Some(mls) = entry.write().await.take_mls() {
+            if let Some(mls) = entry.write().await.handle.take_mls() {
                 let _ = mls.delete();
             }
         }
@@ -268,17 +270,20 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         };
         let (event, outbound) = {
             let mut entry = entry_arc.write().await;
-            if entry.current_state() != GroupState::Working {
+            if entry.handle.current_state() != GroupState::Working {
                 return Ok(());
             }
 
             let event = entry.start_freezing();
-            let epoch = entry.expect_mls()?.current_epoch()?;
-            entry.group.ensure_freeze_round(epoch);
+            let epoch = entry.handle.expect_mls()?.current_epoch()?;
+            entry.handle.group.ensure_freeze_round(epoch);
 
             let self_identity = self.identity().identity_bytes().to_vec();
-            let outbound = if entry.steward.is_steward(&self_identity) {
-                match entry.create_commit_candidate(&self_identity, &self.app_id) {
+            let outbound = if entry.handle.steward.is_steward(&self_identity) {
+                match entry
+                    .handle
+                    .create_commit_candidate(&self_identity, &self.app_id)
+                {
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(
@@ -313,11 +318,11 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 None => return Ok(()),
             };
             let entry = entry_arc.read().await;
-            if entry.steward.current_list().is_some() {
+            if entry.handle.steward.current_list().is_some() {
                 return Ok(());
             }
-            let mls = entry.expect_mls()?;
-            (entry.group_members()?, mls.current_epoch()?)
+            let mls = entry.handle.expect_mls()?;
+            (entry.handle.group_members()?, mls.current_epoch()?)
         };
         let local_default_peer_score = self.default_group_config.default_peer_score;
         if !validate_group_sync(
@@ -359,15 +364,21 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         };
         let mut entry = entry_arc.write().await;
         let sn = sync.steward_members.len();
-        entry.steward.set_config(protocol_config);
-        let _events = entry.steward.install_list(
+        entry.handle.steward.set_config(protocol_config);
+        let _events = entry.handle.steward.install_list(
             sync.election_epoch,
             &sync.steward_members,
             sn,
             sync.retry_round,
         )?;
-        entry.steward.set_max_retries(sync.max_reelection_attempts);
-        entry.scoring.set_threshold(sync.threshold_peer_score);
+        entry
+            .handle
+            .steward
+            .set_max_retries(sync.max_reelection_attempts);
+        entry
+            .handle
+            .scoring
+            .set_threshold(sync.threshold_peer_score);
         let snapshot = ScoreSnapshot {
             diverged: sync
                 .peer_scores
@@ -380,11 +391,11 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         // member in this snapshot — they'll submit
         // `SCORE_BELOW_THRESHOLD` from their own event chain. Drop our
         // events to avoid duplicate proposals from joiners.
-        let _events = entry.scoring.apply_snapshot(&snapshot);
-        entry.config.liveness_criteria_yes = sync.liveness_criteria_yes;
-        entry.config.pending_update_max_epochs = sync.pending_update_max_epochs;
+        let _events = entry.handle.scoring.apply_snapshot(&snapshot);
+        entry.handle.config.liveness_criteria_yes = sync.liveness_criteria_yes;
+        entry.handle.config.pending_update_max_epochs = sync.pending_update_max_epochs;
         if let Some(timing) = &sync.timing {
-            let cfg = &mut entry.config;
+            let cfg = &mut entry.handle.config;
             cfg.commit_inactivity_duration =
                 std::time::Duration::from_millis(timing.commit_inactivity_duration_ms);
             cfg.freeze_duration = std::time::Duration::from_millis(timing.freeze_duration_ms);
@@ -419,11 +430,11 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             APP_MSG_SUBTOPIC => {
                 let result = {
                     let mut entry = entry_arc.write().await;
-                    if entry.mls().is_none() {
+                    if entry.handle.mls().is_none() {
                         // App messages on a group we haven't joined yet → ignore.
                         return Ok(());
                     }
-                    entry.process_inbound(&packet.payload)?
+                    entry.handle.process_inbound(&packet.payload)?
                 };
                 self.dispatch_inbound_result(&group_name, result).await
             }
@@ -456,7 +467,11 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                     .ok_or(UserError::GroupNotFound)?;
                 let already_member = {
                     let entry = entry_arc.read().await;
-                    entry.mls().map(|m| m.is_member(&identity)).unwrap_or(false)
+                    entry
+                        .handle
+                        .mls()
+                        .map(|m| m.is_member(&identity))
+                        .unwrap_or(false)
                 };
                 if already_member {
                     info!(
@@ -489,7 +504,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 let self_id = self.identity().identity_bytes().to_vec();
                 let already_in = {
                     let entry = entry_arc.read().await;
-                    entry.steward.is_steward(&self_id) || entry.mls().is_some()
+                    entry.handle.steward.is_steward(&self_id) || entry.handle.mls().is_some()
                 };
                 if already_in {
                     return Ok(());
@@ -505,7 +520,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 let joined_name = svc.group_id().to_string();
                 {
                     let mut entry = entry_arc.write().await;
-                    entry.attach_mls(svc);
+                    entry.handle.attach_mls(svc);
                 }
                 info!(group = group_name, "joined group via welcome");
                 self.dispatch_inbound_result(group_name, ProcessResult::JoinedGroup(joined_name))

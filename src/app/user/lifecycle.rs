@@ -7,17 +7,16 @@ use tracing::info;
 
 use crate::{
     app::{
-        GroupConfig, GroupPlugins, GroupState, PhaseTimer, ProposalParams, User, UserError,
-        submit_self_leave_proposal, user::GroupEntry,
+        GroupPlugins, GroupState, PhaseTimer, ProposalParams, SessionRunner, User, UserError,
+        submit_self_leave_proposal,
     },
     core::{
-        DeMlsProvider, Group, GroupEventHandler, GroupStateMachine, PeerScoringPlugin,
+        DeMlsProvider, Group, GroupConfig, GroupEventHandler, GroupStateMachine, PeerScoringPlugin,
         StewardListPlugin, auto_approved_leave_proposal_id,
     },
+    mls_crypto::MlsService,
     protos::de_mls::messages::v1::{GroupUpdateRequest, RemoveMember, group_update_request},
 };
-
-use crate::mls_crypto::MlsService;
 
 impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P, GP, H> {
     /// Create (`is_creation = true`) or join (`false`) a group using the
@@ -87,7 +86,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         }
         groups.insert(
             group_name.to_string(),
-            Arc::new(RwLock::new(GroupEntry::new(
+            Arc::new(RwLock::new(SessionRunner::new(
                 group,
                 mls_opt,
                 state_machine,
@@ -117,7 +116,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
 
         let is_pending_join = self
             .with_entry(group_name, |entry| {
-                entry.current_state() == GroupState::PendingJoin
+                entry.handle.current_state() == GroupState::PendingJoin
             })
             .await
             .ok_or(UserError::GroupNotFound)?;
@@ -134,7 +133,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         // approved entry and short-circuits.
         let already_pending = self
             .with_entry(group_name, |entry| {
-                entry.group.is_pending_self_leave(&self_identity)
+                entry.handle.group.is_pending_self_leave(&self_identity)
             })
             .await
             .ok_or(UserError::GroupNotFound)?;
@@ -162,10 +161,13 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 .await
                 .ok_or(UserError::GroupNotFound)?;
             let mut entry = entry_arc.write().await;
-            entry.group.store_voting_proposal(proposal_id, request);
+            entry
+                .handle
+                .group
+                .store_voting_proposal(proposal_id, request);
             (
-                entry.config.proposal_expiration,
-                entry.config.consensus_timeout,
+                entry.handle.config.proposal_expiration,
+                entry.handle.config.consensus_timeout,
             )
         };
 
@@ -195,7 +197,10 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 .await
                 .ok_or(UserError::GroupNotFound)?;
             let entry = entry_arc.read().await;
-            entry.expect_mls()?.build_message(&app_msg, &self.app_id)?
+            entry
+                .handle
+                .expect_mls()?
+                .build_message(&app_msg, &self.app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
 

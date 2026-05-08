@@ -234,7 +234,7 @@ pub fn apply_consensus_result(
             force_freezing = true;
         } else if evidence.as_ref().is_some_and(is_deadlock) {
             // Layer 3: relax the steward gate so any member can produce
-            // the next commit. App caller flips `GroupEntry::recovery_mode`
+            // the next commit. App caller calls `GroupHandle::enter_recovery_mode()`
             // when it sees this flag; cleared when a fresh election lands.
             enter_recovery_mode = true;
             force_freezing = true;

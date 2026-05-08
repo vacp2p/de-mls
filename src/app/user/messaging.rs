@@ -43,7 +43,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             .ok_or(UserError::GroupNotFound)?;
         let packet = {
             let entry = entry_arc.read().await;
-            let state = entry.current_state();
+            let state = entry.handle.current_state();
             if matches!(
                 state,
                 GroupState::PendingJoin | GroupState::Freezing | GroupState::Selection
@@ -58,7 +58,10 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             }
             .into();
 
-            entry.expect_mls()?.build_message(&app_msg, &self.app_id)?
+            entry
+                .handle
+                .expect_mls()?
+                .build_message(&app_msg, &self.app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
@@ -79,7 +82,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 .await
                 .ok_or(UserError::GroupNotFound)?;
             let entry = entry_arc.read().await;
-            let state = entry.current_state();
+            let state = entry.handle.current_state();
             if state != GroupState::Working {
                 return Err(UserError::GroupBlocked(state.to_string()));
             }

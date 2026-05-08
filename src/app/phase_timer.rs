@@ -1,9 +1,9 @@
 //! App-side phase timer.
 //!
 //! Holds only the wall-clock anchor (`started_at`). Phase-anchor durations
-//! live in [`crate::app::GroupConfig`] (single source of truth); state-aware
-//! queries on `GroupEntry` read durations from config and pass them to this
-//! timer's pure elapsed-checks.
+//! live in [`crate::core::GroupConfig`] (single source of truth);
+//! [`crate::app::SessionRunner`] reads durations off the handle's config
+//! and passes them to this timer's pure elapsed-checks.
 
 use std::time::Instant;
 
@@ -24,8 +24,8 @@ pub enum FreezeTimeoutStatus {
 
 /// Wall-clock anchor for the active phase. Pure timer state — no
 /// durations, no `GroupState` awareness. Queries take the relevant
-/// `Duration` as a parameter; `GroupEntry` composes them with state
-/// machine + `GroupConfig`.
+/// `Duration` as a parameter; [`crate::app::SessionRunner`] composes
+/// them with state machine + `GroupConfig`.
 #[derive(Debug, Clone, Default)]
 pub struct PhaseTimer {
     /// Meaning depends on the orchestrator's intent at start time:
@@ -67,6 +67,13 @@ impl PhaseTimer {
             Some(t) => Instant::now() >= t + duration,
             None => false,
         }
+    }
+
+    /// Test-only: overwrite the anchor with an explicit `Instant`. Lets
+    /// timer-boundary tests synthesize an aged anchor without sleeping.
+    #[cfg(test)]
+    pub(crate) fn set_started_at_for_test(&mut self, anchor: Option<Instant>) {
+        self.started_at = anchor;
     }
 }
 

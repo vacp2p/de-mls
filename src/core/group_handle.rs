@@ -1,25 +1,18 @@
-//! Per-group app-side aggregate: protocol state, MLS service, plug-ins,
-//! state machine, phase timer, and group-level config + operating-mode
-//! flag. Coordinator methods compose state-machine transitions with
-//! phase-timer anchors so callers don't have to manage them in pairs.
-
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+//! Per-group aggregate owned by the orchestrator: protocol state, MLS
+//! service, plug-ins, state machine, durable config, and operating mode.
+//! Pure data + protocol-function wrappers — no timers, no spawned tasks,
+//! no I/O. App-side wiring (phase timer, auto-vote handles) lives on
+//! [`crate::app::SessionRunner`], which owns one `GroupHandle` by value.
 
 use prost::Message;
-use tokio::task::JoinHandle;
 use tracing::info;
 
+use super::{
+    BufferedCommitCandidate, CoreError, FreezeFinalizeResult, Group, GroupConfig, GroupState,
+    GroupStateMachine, OperatingMode, PeerScoringPlugin, ProcessResult, ProposalKind,
+    StewardListPlugin, compute_commit_hash, finalize_freeze_round, member_set, process_inbound,
+};
 use crate::{
-    app::{GroupConfig, PhaseTimer},
-    core::{
-        BufferedCommitCandidate, CoreError, FreezeFinalizeResult, Group, GroupState,
-        GroupStateMachine, OperatingMode, PeerScoringPlugin, ProcessResult, ProposalKind,
-        StewardListPlugin, compute_commit_hash, finalize_freeze_round, member_set, process_inbound,
-    },
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     mls_crypto::{
         CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MlsCommitInput, MlsService,
@@ -27,33 +20,28 @@ use crate::{
     protos::de_mls::messages::v1::{AppMessage, CommitCandidate, group_update_request::Payload},
 };
 
-/// Per-group auto-vote timer registry. Spawned when a proposal first
-/// becomes visible locally (own submit or peer inbound); cancelled on
-/// manual vote, consensus resolution, or group leave.
-pub(crate) type AutoVoteTimers = Arc<Mutex<HashMap<u32, JoinHandle<()>>>>;
-
-pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> {
+/// Per-group aggregate. Fields with simple direct semantics
+/// (`group`, `state_machine`, `config`, `scoring`, `steward`) are exposed
+/// as fields; fields with attach/detach lifecycle (`mls`) or RFC-defined
+/// invariants (`operating_mode`) go through controlled accessors.
+pub struct GroupHandle<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> {
     pub(crate) group: Group,
     /// Per-group MLS service. `None` for joiners in `PendingJoin` who
     /// haven't accepted a welcome yet; once attached via
-    /// [`Self::attach_mls`] it stays `Some` for the entry's lifetime.
+    /// [`Self::attach_mls`] it stays `Some` for the handle's lifetime.
     mls: Option<M>,
-    /// Per-group state machine. Coordinator methods on this entry update
-    /// it together with `phase_timer` so the two never drift.
-    state_machine: GroupStateMachine,
-    /// Wall-clock anchor + phase-anchor durations combined with
-    /// `state_machine` by the entry's coordinator methods.
-    phase_timer: PhaseTimer,
+    /// Per-group state machine. The orchestrator updates this together
+    /// with the phase timer so the two never drift.
+    pub(crate) state_machine: GroupStateMachine,
     /// Per-group durable config: voting/consensus durations,
     /// `liveness_criteria_yes`, `pending_update_max_epochs`. Read by
-    /// app-layer coordinators; joiner-sync writes through this directly.
+    /// orchestrators; joiner-sync writes through this directly.
     pub(crate) config: GroupConfig,
-    /// Per-group peer-score plug-in. Lives next to `state_machine` as
-    /// app-layer wiring; protocol decisions read it via the entry's
-    /// `RwLock`, no separate `Mutex` needed.
+    /// Per-group peer-score plug-in. Read by protocol decisions under
+    /// the orchestrator's per-handle lock; no separate `Mutex` needed.
     pub(crate) scoring: Sc,
     /// Per-group steward list plug-in. Holds the active list, retry
-    /// counter, and election retry policy. Coordinator composes
+    /// counter, and election retry policy. Orchestrator composes
     /// eligibility from MLS members + `Group::is_pending_removal` and
     /// passes it on every position query.
     pub(crate) steward: St,
@@ -63,20 +51,15 @@ pub(crate) struct GroupEntry<M: MlsService, Sc: PeerScoringPlugin, St: StewardLi
     /// Read by the freeze coordinator, the create-commit path, and
     /// `core::finalize_freeze_round` (via `in_recovery` parameter).
     operating_mode: OperatingMode,
-    /// Per-proposal auto-vote timers. The spawned task holds a clone of
-    /// this `Arc` so it can self-clean on completion; coordinators use
-    /// `cancel_auto_vote` / `cancel_all_auto_votes` to abort early.
-    pub(crate) auto_vote_timers: AutoVoteTimers,
 }
 
-impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, Sc, St> {
-    /// Build a fresh entry. Creator path passes `Some(mls)`; joiner
+impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupHandle<M, Sc, St> {
+    /// Build a fresh handle. Creator path passes `Some(mls)`; joiner
     /// path passes `None` and attaches later via [`Self::attach_mls`].
     pub(crate) fn new(
         group: Group,
         mls: Option<M>,
         state_machine: GroupStateMachine,
-        phase_timer: PhaseTimer,
         config: GroupConfig,
         scoring: Sc,
         steward: St,
@@ -85,34 +68,10 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
             group,
             mls,
             state_machine,
-            phase_timer,
             config,
             scoring,
             steward,
             operating_mode: OperatingMode::Normal,
-            auto_vote_timers: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    // ── Auto-vote timers ────────────────────────────────────────────
-
-    /// Abort the auto-vote timer for `proposal_id` if one is registered.
-    /// No-op otherwise.
-    pub(crate) fn cancel_auto_vote(&self, proposal_id: u32) {
-        if let Ok(mut timers) = self.auto_vote_timers.lock()
-            && let Some(handle) = timers.remove(&proposal_id)
-        {
-            handle.abort();
-        }
-    }
-
-    /// Abort every auto-vote timer registered on this entry. Called on
-    /// group leave so no stale timers fire against a group we've left.
-    pub(crate) fn cancel_all_auto_votes(&self) {
-        if let Ok(mut timers) = self.auto_vote_timers.lock() {
-            for (_, handle) in timers.drain() {
-                handle.abort();
-            }
         }
     }
 
@@ -130,106 +89,13 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
         self.operating_mode = OperatingMode::Normal;
     }
 
-    // ── State-machine + phase-timer coordinators ────────────────────
+    // ── State accessor ──────────────────────────────────────────────
 
     pub(crate) fn current_state(&self) -> GroupState {
         self.state_machine.current_state()
     }
 
-    pub(crate) fn start_working(&mut self) -> GroupState {
-        self.state_machine.start_working();
-        self.phase_timer.clear();
-        info!(state = "Working", "state transition");
-        GroupState::Working
-    }
-
-    pub(crate) fn start_freezing(&mut self) -> GroupState {
-        self.state_machine.start_freezing();
-        self.phase_timer.start();
-        info!(state = "Freezing", "state transition");
-        GroupState::Freezing
-    }
-
-    /// Bypass the inactivity timer and enter Freezing immediately. Returns
-    /// `Some(Freezing)` on transition (only fires from Working or
-    /// Reelection); `None` from other states.
-    pub(crate) fn force_freezing(&mut self) -> Option<GroupState> {
-        if self.state_machine.force_freezing() {
-            self.phase_timer.start();
-            info!(state = "Freezing", "state transition (forced)");
-            Some(GroupState::Freezing)
-        } else {
-            None
-        }
-    }
-
-    pub(crate) fn start_selection(&mut self) -> GroupState {
-        self.state_machine.start_selection();
-        info!(state = "Selection", "state transition");
-        GroupState::Selection
-    }
-
-    pub(crate) fn start_reelection(&mut self) -> GroupState {
-        self.state_machine.start_reelection();
-        self.phase_timer.clear();
-        info!(state = "Reelection", "state transition");
-        GroupState::Reelection
-    }
-
-    /// `true` once 3× `commit_inactivity_duration` has passed in
-    /// `PendingJoin` without a welcome.
-    ///
-    /// Pipeline: consensus (~15s) + commit_inactivity + freeze (≈ commit/2)
-    /// = ~1.5× commit-inactivity + consensus overhead. Use 3× for safety margin.
-    pub(crate) fn is_pending_join_expired(&self) -> bool {
-        self.state_machine.current_state() == GroupState::PendingJoin
-            && self
-                .phase_timer
-                .elapsed_since_anchor(self.config.commit_inactivity_duration * 3)
-    }
-
-    /// `true` once the freeze window elapsed while in `Freezing`.
-    pub(crate) fn is_freeze_timed_out(&self) -> bool {
-        self.state_machine.current_state() == GroupState::Freezing
-            && self
-                .phase_timer
-                .elapsed_since_anchor(self.config.freeze_duration)
-    }
-
-    /// Drives the "steward waited too long to commit" transition into
-    /// `Freezing`. Call each poll tick. Returns `Some(Freezing)` exactly
-    /// on the tick that transitions; `None` while still waiting, outside
-    /// Working, or when there's no approved work. Self-starts the
-    /// inactivity anchor on the first tick with approved work.
-    pub(crate) fn check_steward_inactivity(
-        &mut self,
-        approved_proposals_count: usize,
-        inactivity_duration: Duration,
-    ) -> Option<GroupState> {
-        if self.state_machine.current_state() != GroupState::Working
-            || approved_proposals_count == 0
-        {
-            return None;
-        }
-        if self.phase_timer.started_at().is_none() {
-            self.phase_timer.start();
-            info!(
-                approved = approved_proposals_count,
-                inactivity_ms = inactivity_duration.as_millis() as u64,
-                "inactivity timer started"
-            );
-            return None;
-        }
-        if !self.phase_timer.elapsed_since_anchor(inactivity_duration) {
-            return None;
-        }
-        info!(
-            inactivity_ms = inactivity_duration.as_millis() as u64,
-            approved = approved_proposals_count,
-            "inactivity window elapsed, entering freeze"
-        );
-        Some(self.start_freezing())
-    }
+    // ── MLS service ─────────────────────────────────────────────────
 
     /// Borrow the MLS service, if attached. `None` for joiners
     /// pre-welcome.
@@ -238,9 +104,9 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
     }
 
     /// Borrow the MLS service, erroring with
-    /// [`crate::core::CoreError::MlsGroupNotInitialized`] when not
-    /// attached. Use this in code paths where the service must be
-    /// present so the `?` chain stays linear.
+    /// [`CoreError::MlsGroupNotInitialized`] when not attached. Use this
+    /// in code paths where the service must be present so the `?` chain
+    /// stays linear.
     pub(crate) fn expect_mls(&self) -> Result<&M, CoreError> {
         self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)
     }
@@ -263,7 +129,8 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
     // callsites don't destructure the entry. Protocol logic stays in
     // `core::api`; these are pure delegation.
 
-    /// Current MLS members; empty when no service is attached
+    /// Current MLS members; errors with
+    /// [`CoreError::MlsGroupNotInitialized`] when no service is attached
     /// (joiner pre-welcome).
     pub(crate) fn group_members(&self) -> Result<Vec<Vec<u8>>, CoreError> {
         match &self.mls {
@@ -446,5 +313,40 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> GroupEntry<M, 
     pub(crate) fn process_inbound(&mut self, payload: &[u8]) -> Result<ProcessResult, CoreError> {
         let mls = self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)?;
         process_inbound(&mut self.group, mls, payload)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_fixtures::{StubScoring, StubSteward, UnusedMls};
+
+    fn make_handle(steward: StubSteward) -> GroupHandle<UnusedMls, StubScoring, StubSteward> {
+        GroupHandle::new(
+            Group::create_group("g", b"me".to_vec()),
+            Some(UnusedMls),
+            GroupStateMachine::new_as_member(),
+            GroupConfig::default(),
+            StubScoring,
+            steward,
+        )
+    }
+
+    #[test]
+    fn create_commit_candidate_errors_for_non_steward_outside_recovery() {
+        let mut handle = make_handle(StubSteward::member());
+        let err = handle
+            .create_commit_candidate(b"me", b"app")
+            .expect_err("non-steward should be rejected");
+        assert!(matches!(err, CoreError::NotASteward));
+    }
+
+    #[test]
+    fn create_commit_candidate_errors_when_no_approved_proposals() {
+        let mut handle = make_handle(StubSteward::steward());
+        let err = handle
+            .create_commit_candidate(b"me", b"app")
+            .expect_err("empty approved queue should be rejected");
+        assert!(matches!(err, CoreError::NoProposals));
     }
 }

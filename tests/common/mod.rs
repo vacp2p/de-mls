@@ -132,14 +132,14 @@ impl GroupEventHandler for MockHandler {
 
 // ─────────────────────────── Test-only protocol helper ───────────────────────────
 
-/// Test-side mirror of `GroupEntry::create_commit_candidate`.
+/// Test-side mirror of `GroupHandle::create_commit_candidate`.
 ///
-/// Production callers go through `GroupEntry::create_commit_candidate`,
+/// Production callers go through `GroupHandle::create_commit_candidate`,
 /// which pulls `group`, `mls`, and `steward` from `&mut self`. Tests
 /// keep these as separate fields on `StewardHandle` / `JoinerHandle`
 /// (no `state_machine` / `scoring`), so we can't use the entry method
 /// directly. This helper takes the same fields as parameters and runs
-/// identical logic. **Keep in sync with `GroupEntry::create_commit_candidate`.**
+/// identical logic. **Keep in sync with `GroupHandle::create_commit_candidate`.**
 pub fn build_commit_candidate(
     group: &mut Group,
     mls: &TestMls,

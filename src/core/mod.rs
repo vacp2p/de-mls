@@ -14,10 +14,12 @@
 //! ([`crate::core::DeMlsProvider`] + [`crate::core::DefaultProvider`]).
 
 mod api;
+mod config;
 mod consensus;
 mod error;
 mod events;
 mod group;
+mod group_handle;
 mod peer_scoring;
 mod process_result;
 mod proposal_kind;
@@ -30,6 +32,17 @@ pub use api::{
     FreezeFinalizeResult, FreezeOutcome, build_create_proposal_request, build_key_package_message,
     compute_commit_hash, finalize_freeze_round, process_inbound,
 };
+
+// ── Per-group config ──
+pub use config::{
+    DEFAULT_COMMIT_INACTIVITY_DURATION, DEFAULT_CONSENSUS_TIMEOUT, DEFAULT_ELECTION_VOTING_DELAY,
+    DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_PEER_SCORE, DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
+    DEFAULT_PROPOSAL_EXPIRATION, DEFAULT_RECOVERY_INACTIVITY_DURATION, DEFAULT_VOTING_DELAY,
+    GroupConfig,
+};
+
+// ── Per-group handle ──
+pub use group_handle::GroupHandle;
 
 // ── Consensus result application (pure, synchronous) ──
 pub use consensus::{ConsensusApplyResult, apply_consensus_result};
@@ -47,9 +60,8 @@ pub use events::{CallbackError, GroupEventHandler};
 
 // ── Group state ──
 pub use group::{
-    BufferedCommitCandidate, DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
-    Group, PendingUpdate, ProposalId, auto_approved_leave_proposal_id, member_set,
-    target_identity_of,
+    BufferedCommitCandidate, Group, PendingUpdate, ProposalId, auto_approved_leave_proposal_id,
+    member_set, target_identity_of,
 };
 
 // ── Proposal classification ──

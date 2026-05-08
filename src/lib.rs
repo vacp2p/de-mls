@@ -80,6 +80,9 @@ pub mod mls_crypto;
 /// User-level identity, decoupled from MLS state.
 pub mod identity;
 
+#[cfg(test)]
+pub(crate) mod test_fixtures;
+
 /// Protobuf message definitions.
 pub mod protos {
     /// Re-exported consensus protocol messages.

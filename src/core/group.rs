@@ -1,7 +1,7 @@
 //! Per-group protocol-queue state: approved/voting proposal queues,
 //! freeze-round candidate buffer, pending-update buffer, urgent-commit
 //! target, recovery-mode flag, ECP dedup. MLS crypto state and the
-//! steward-list plug-in live alongside on `GroupEntry`.
+//! steward-list plug-in live alongside on `GroupHandle`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -94,7 +94,7 @@ pub(crate) struct FreezeRound {
 ///
 /// Pure proposal-queue and freeze-round bookkeeping — MLS state lives
 /// on the per-group [`crate::mls_crypto::MlsService`] instance held on
-/// `GroupEntry`, alongside the steward-list plug-in. `Group` itself has
+/// `GroupHandle`, alongside the steward-list plug-in. `Group` itself has
 /// no `M` generic.
 pub struct Group {
     /// The name of the group.
@@ -133,10 +133,6 @@ pub struct Group {
     urgent_commit_target: Option<Vec<u8>>,
 }
 
-pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
-
-pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
-
 impl Group {
     fn new_base(group_name: &str, self_identity: Vec<u8>) -> Self {
         Self {
@@ -171,14 +167,14 @@ impl Group {
     }
 
     /// Build a joiner-side handle for an existing group. The MLS service
-    /// is held on `GroupEntry`; the lifecycle layer attaches it via
+    /// is held on `GroupHandle`; the lifecycle layer attaches it via
     /// `entry.attach_mls(...)` once the welcome arrives.
     pub fn prepare_to_join(group_name: &str, self_identity: Vec<u8>) -> Self {
         Self::new_base(group_name, self_identity)
     }
 
     /// Build a creator-side handle. The steward list and MLS service
-    /// are owned by `GroupEntry`; this constructor only initializes the
+    /// are owned by `GroupHandle`; this constructor only initializes the
     /// proposal-queue and freeze-round state.
     pub fn create_group(group_name: &str, creator_identity: Vec<u8>) -> Self {
         Self::new_base(group_name, creator_identity)

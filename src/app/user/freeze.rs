@@ -21,7 +21,10 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     pub async fn check_pending_join(&self, group_name: &str) -> Result<bool, UserError> {
         let (state, expired) = match self
             .with_entry(group_name, |entry| {
-                (entry.current_state(), entry.is_pending_join_expired())
+                (
+                    entry.handle.current_state(),
+                    entry.is_pending_join_expired(),
+                )
             })
             .await
         {
@@ -58,7 +61,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         let (has_proposals, selection_event) = {
             let mut entry = entry_arc.write().await;
 
-            let state = entry.current_state();
+            let state = entry.handle.current_state();
             if state != GroupState::Freezing {
                 return Ok(FreezeTimeoutStatus::NotFreezing);
             }
@@ -66,16 +69,17 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             // Early selection: skip remaining freeze time if all expected
             // stewards have submitted candidates.
             let all_candidates_in = entry
+                .handle
                 .steward
                 .current_list()
-                .is_some_and(|list| entry.group.freeze_candidate_count() >= list.len());
+                .is_some_and(|list| entry.handle.group.freeze_candidate_count() >= list.len());
 
             if !all_candidates_in && !entry.is_freeze_timed_out() {
                 return Ok(FreezeTimeoutStatus::StillFreezing);
             }
 
             let event = entry.start_selection();
-            (entry.group.approved_proposals_count() > 0, event)
+            (entry.handle.group.approved_proposals_count() > 0, event)
         };
 
         self.handler
@@ -84,9 +88,12 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
 
         let (finalize_result, downward_cross) = {
             let mut entry = entry_arc.write().await;
-            let allow_subset = entry.steward.config().allow_subset_candidates;
-            let result = if entry.mls().is_some() {
-                match entry.finalize_freeze_round(allow_subset, &self.app_id) {
+            let allow_subset = entry.handle.steward.config().allow_subset_candidates;
+            let result = if entry.handle.mls().is_some() {
+                match entry
+                    .handle
+                    .finalize_freeze_round(allow_subset, &self.app_id)
+                {
                     Ok(result) => result,
                     Err(e) => {
                         error!(group = group_name, error = %e, "freeze finalize failed");
@@ -102,7 +109,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             // no ECP needed). A downward threshold cross schedules a
             // removal-init pass below, after the lock drops.
             let cross = if !result.score_ops.is_empty() {
-                let events = entry.scoring.apply_ops(&result.score_ops);
+                let events = entry.handle.scoring.apply_ops(&result.score_ops);
                 has_downward_cross(&events)
             } else {
                 false
@@ -176,13 +183,14 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                         // the same event independently; threshold-crossing
                         // removal still goes through SCORE_BELOW_THRESHOLD
                         // consensus in steward.rs.
-                        let accuse_target = match entry.mls() {
+                        let accuse_target = match entry.handle.mls() {
                             Some(mls) => {
                                 let violation_epoch = mls.current_epoch()?;
                                 let self_identity = self.identity().identity_bytes();
-                                let members = entry.group_members()?;
-                                let eligible = entry.group.steward_eligibility(&members);
+                                let members = entry.handle.group_members()?;
+                                let eligible = entry.handle.group.steward_eligibility(&members);
                                 entry
+                                    .handle
                                     .steward
                                     .epoch_steward(violation_epoch, &eligible)
                                     .filter(|id| !id.is_empty() && *id != self_identity)
@@ -191,7 +199,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                             None => None,
                         };
                         let cross = if let Some(steward_id) = accuse_target {
-                            let events = entry.scoring.apply_op(&ScoreOp {
+                            let events = entry.handle.scoring.apply_op(&ScoreOp {
                                 member_id: steward_id,
                                 event: ScoreEvent::CensorshipInactivity,
                             });
@@ -202,7 +210,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
 
                         (event, cross)
                     } else {
-                        entry.group.clear_freeze_round();
+                        entry.handle.group.clear_freeze_round();
                         let event = entry.start_working();
                         (event, false)
                     }
@@ -244,36 +252,40 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             .ok_or(UserError::GroupNotFound)?;
         let mut entry = entry_arc.write().await;
 
-        let state = entry.current_state();
+        let state = entry.handle.current_state();
         if state == GroupState::PendingJoin {
             return Ok(false);
         }
 
-        let proposal_count = entry.group.approved_proposals_count();
+        let proposal_count = entry.handle.group.approved_proposals_count();
         // Hold the freeze while an election is in flight — committing on
         // the known-stale list would just produce a NoCandidate.
-        if entry.group.has_election_in_flight() {
+        if entry.handle.group.has_election_in_flight() {
             return Ok(false);
         }
         // Recovery uses the shorter retry inactivity window so we don't
         // burn another full epoch waiting for a steward to commit.
-        let in_recovery = entry.is_in_recovery_mode() || entry.steward.retry_round() > 0;
+        let in_recovery =
+            entry.handle.is_in_recovery_mode() || entry.handle.steward.retry_round() > 0;
         let inactivity = if in_recovery {
-            entry.config.recovery_inactivity_duration
+            entry.handle.config.recovery_inactivity_duration
         } else {
-            entry.config.commit_inactivity_duration
+            entry.handle.config.commit_inactivity_duration
         };
         let freeze_event = entry.check_steward_inactivity(proposal_count, inactivity);
         if let Some(event) = freeze_event {
-            let epoch = entry.expect_mls()?.current_epoch()?;
-            entry.group.ensure_freeze_round(epoch);
+            let epoch = entry.handle.expect_mls()?.current_epoch()?;
+            entry.handle.group.ensure_freeze_round(epoch);
 
             // Stewards build their own candidate under the same lock.
             // Candidate-build failure must not block the freeze transition —
             // peers' candidates still get processed.
             let self_identity = self.identity().identity_bytes().to_vec();
-            let outbound = if entry.steward.is_steward(&self_identity) {
-                match entry.create_commit_candidate(&self_identity, &self.app_id) {
+            let outbound = if entry.handle.steward.is_steward(&self_identity) {
+                match entry
+                    .handle
+                    .create_commit_candidate(&self_identity, &self.app_id)
+                {
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(

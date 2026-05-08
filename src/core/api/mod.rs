@@ -2,8 +2,7 @@
 //!
 //! Submodules group inbound routing, freeze finalization, and the
 //! welcome- / consensus-message framing helpers. Steward commit-candidate
-//! creation lives on `GroupEntry::create_commit_candidate` in the app
-//! layer, not here.
+//! creation lives on [`crate::core::GroupHandle::create_commit_candidate`].
 
 mod freeze;
 mod inbound;

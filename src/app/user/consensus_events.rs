@@ -43,7 +43,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         // so we don't re-apply state or double-fire UI events.
         let already_applied = self
             .with_entry(group_name, |entry| {
-                entry.group.is_consensus_outcome_applied(proposal_id)
+                entry.handle.group.is_consensus_outcome_applied(proposal_id)
             })
             .await
             .unwrap_or(false);
@@ -77,8 +77,11 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 group = group_name,
                 proposal_id, approved, "consensus reached"
             );
-            entry.group.mark_consensus_outcome_applied(proposal_id);
-            apply_consensus_result(&mut entry.group, proposal_id, approved, &payload)?
+            entry
+                .handle
+                .group
+                .mark_consensus_outcome_applied(proposal_id);
+            apply_consensus_result(&mut entry.handle.group, proposal_id, approved, &payload)?
         };
 
         if let Some(election) = consensus_apply.election {
@@ -87,7 +90,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
 
         if consensus_apply.enter_recovery_mode {
             if let Some(entry_arc) = self.lookup_entry(group_name).await {
-                entry_arc.write().await.enter_recovery_mode();
+                entry_arc.write().await.handle.enter_recovery_mode();
             }
         }
 
@@ -111,7 +114,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 let target = target.to_vec();
                 if let Some(entry_arc) = self.lookup_entry(group_name).await {
                     let mut entry = entry_arc.write().await;
-                    entry.group.remove_pending_update(&target);
+                    entry.handle.group.remove_pending_update(&target);
                 }
             }
         }
@@ -140,7 +143,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// in parallel so the next epoch keeps a healthy ES + BS.
     async fn refresh_stewards_after_removal(&self, group_name: &str, target: &[u8]) {
         let target_was_steward = self
-            .with_entry(group_name, |entry| entry.steward.is_steward(target))
+            .with_entry(group_name, |entry| entry.handle.steward.is_steward(target))
             .await
             .unwrap_or(false);
         if !target_was_steward {
@@ -173,11 +176,11 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
 
         let is_valid = {
             let entry = entry_arc.read().await;
-            entry.expect_mls()?;
+            entry.handle.expect_mls()?;
             // Election proposals carry the candidate pool implicitly:
             // `proposed_stewards` is the full set the proposer sorted, so
             // `candidate_pool == proposed_stewards` for validation.
-            entry.steward.validate_proposed(
+            entry.handle.steward.validate_proposed(
                 &election.proposed_stewards,
                 election.election_epoch,
                 &election.proposed_stewards,
@@ -194,7 +197,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
 
         let resumed_from_reelection = {
             let mut entry = entry_arc.write().await;
-            let _events = entry.steward.install_list(
+            let _events = entry.handle.steward.install_list(
                 election.election_epoch,
                 &election.proposed_stewards,
                 election.proposed_stewards.len(),
@@ -203,8 +206,8 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             // `retry_round` stays > 0 until the next successful commit so
             // the immediate post-election inactivity check uses the
             // short retry window.
-            entry.exit_recovery_mode();
-            if entry.current_state() == GroupState::Reelection {
+            entry.handle.exit_recovery_mode();
+            if entry.handle.current_state() == GroupState::Reelection {
                 Some(entry.start_working())
             } else {
                 None
@@ -230,10 +233,13 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         let (round, max) = match self.lookup_entry(group_name).await {
             Some(entry_arc) => {
                 let mut entry = entry_arc.write().await;
-                let _events = entry.steward.bump_retry();
+                let _events = entry.handle.steward.bump_retry();
                 // Read the ceiling from the plug-in, not the user-level default:
                 // joiners honor the group's configured policy via `GroupSync`.
-                (entry.steward.retry_round(), entry.steward.max_retries())
+                (
+                    entry.handle.steward.retry_round(),
+                    entry.handle.steward.max_retries(),
+                )
             }
             None => return,
         };
@@ -279,20 +285,23 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             // below (after `handle_emergency_scored` returns into its
             // caller). The terminal `check_and_initiate_score_removals`
             // call covers it, so we only need to drop the events here.
-            let _events = entry.scoring.apply_ops(score_ops);
+            let _events = entry.handle.scoring.apply_ops(score_ops);
             if let Ok(req) = GroupUpdateRequest::decode(payload)
                 && let Some(group_update_request::Payload::EmergencyCriteria(ec)) = &req.payload
                 && let Some(ev) = &ec.evidence
             {
-                entry.group.resolve_pending_removal(&ev.target_member_id);
+                entry
+                    .handle
+                    .group
+                    .resolve_pending_removal(&ev.target_member_id);
             }
         }
 
         let resumed_event = match self.lookup_entry(group_name).await {
             Some(entry_arc) => {
                 let mut entry = entry_arc.write().await;
-                entry.group.resolve_emergency(proposal_id);
-                if entry.current_state() == GroupState::Reelection {
+                entry.handle.group.resolve_emergency(proposal_id);
+                if entry.handle.current_state() == GroupState::Reelection {
                     Some(entry.start_working())
                 } else {
                     None

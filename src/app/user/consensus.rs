@@ -53,14 +53,14 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        let state = entry.current_state();
+        let state = entry.handle.current_state();
 
         match state {
             GroupState::Reelection => {
                 if !kind.is_emergency() && !kind.is_steward_election() {
                     return Err(UserError::GroupBlocked(state.to_string()));
                 }
-                if entry.group.partial_freeze_blocks(kind) {
+                if entry.handle.group.partial_freeze_blocks(kind) {
                     return Err(UserError::PartialFreeze);
                 }
             }
@@ -68,14 +68,14 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 return Err(UserError::GroupBlocked(state.to_string()));
             }
             _ => {
-                if entry.group.partial_freeze_blocks(kind) {
+                if entry.handle.group.partial_freeze_blocks(kind) {
                     return Err(UserError::PartialFreeze);
                 }
             }
         }
 
-        entry.expect_mls()?;
-        let members = entry.group_members()?;
+        entry.handle.expect_mls()?;
+        let members = entry.handle.group_members()?;
         Ok(members.len() as u32)
     }
 
@@ -146,7 +146,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         };
 
         let Some(consensus_timeout) = self
-            .with_entry(&group_name, |e| e.config.consensus_timeout)
+            .with_entry(&group_name, |e| e.handle.config.consensus_timeout)
             .await
         else {
             return;
@@ -176,10 +176,10 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         let (proposal_expiration, consensus_timeout, liveness_criteria_yes, voting_delay) = self
             .with_entry(group_name, |e| {
                 (
-                    e.config.proposal_expiration,
-                    e.config.consensus_timeout,
-                    e.config.liveness_criteria_yes,
-                    e.config.voting_delay_for(kind),
+                    e.handle.config.proposal_expiration,
+                    e.handle.config.consensus_timeout,
+                    e.handle.config.liveness_criteria_yes,
+                    e.handle.config.voting_delay_for(kind),
                 )
             })
             .await
@@ -206,10 +206,11 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 .ok_or(UserError::GroupNotFound)?;
             let mut entry = entry_arc.write().await;
             entry
+                .handle
                 .group
                 .store_voting_proposal(proposal_id, request.clone());
             if kind.is_emergency() {
-                entry.group.observe_emergency(proposal_id);
+                entry.handle.group.observe_emergency(proposal_id);
             }
         }
 
@@ -243,7 +244,10 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                 .await
                 .ok_or(UserError::GroupNotFound)?;
             let entry = entry_arc.read().await;
-            entry.expect_mls()?.build_message(&outbound, &self.app_id)?
+            entry
+                .handle
+                .expect_mls()?
+                .build_message(&outbound, &self.app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
 
@@ -311,7 +315,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             Err(ConsensusError::SessionNotFound) | Err(ConsensusError::SessionNotActive) => {
                 let resolved_locally = self
                     .with_entry(group_name, |entry| {
-                        entry.group.is_consensus_outcome_applied(proposal_id)
+                        entry.handle.group.is_consensus_outcome_applied(proposal_id)
                     })
                     .await
                     .unwrap_or(false);
@@ -357,10 +361,10 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
 
         let (pending_join, members_for_rotation, current_epoch) = {
             let entry = entry_arc.read().await;
-            let pending = entry.current_state() == GroupState::PendingJoin;
-            match (pending, entry.mls()) {
+            let pending = entry.handle.current_state() == GroupState::PendingJoin;
+            match (pending, entry.handle.mls()) {
                 (true, _) | (false, None) => (pending, Vec::new(), 0u64),
-                (false, Some(mls)) => (false, entry.group_members()?, mls.current_epoch()?),
+                (false, Some(mls)) => (false, entry.handle.group_members()?, mls.current_epoch()?),
             }
         };
         if pending_join {
@@ -376,19 +380,24 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             }
 
             let inserted = entry
+                .handle
                 .group
                 .buffer_pending_update(request.clone(), current_epoch);
 
             // Only the epoch steward proposes immediately. The buffer
             // survives freeze rounds so a later steward can retry.
             let self_identity = self.identity().identity_bytes();
-            let eligible = entry.group.steward_eligibility(&members_for_rotation);
+            let eligible = entry
+                .handle
+                .group
+                .steward_eligibility(&members_for_rotation);
             let is_es = entry
+                .handle
                 .steward
                 .epoch_steward(current_epoch, &eligible)
                 .is_some_and(|es| es == self_identity);
-            let state = entry.current_state();
-            let total = entry.group.pending_update_count();
+            let state = entry.handle.current_state();
+            let total = entry.handle.group.pending_update_count();
             let should = is_es && state == GroupState::Working;
             (inserted, is_es, state, total, should)
         };
@@ -432,7 +441,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             .ok_or(UserError::GroupNotFound)?;
         {
             let entry = entry_arc.read().await;
-            let state = entry.current_state();
+            let state = entry.handle.current_state();
             if state == GroupState::Freezing || state == GroupState::Selection {
                 return Err(UserError::GroupBlocked(state.to_string()));
             }
@@ -452,7 +461,10 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         .await?;
         let packet = {
             let entry = entry_arc.read().await;
-            entry.expect_mls()?.build_message(&app_message, &app_id)?
+            entry
+                .handle
+                .expect_mls()?
+                .build_message(&app_message, &app_id)?
         };
         self.handler.on_outbound(group_name, packet).await?;
         Ok(())
@@ -555,6 +567,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         let packet = {
             let entry = entry_arc.read().await;
             entry
+                .handle
                 .expect_mls()?
                 .build_message(&app_message, &self.app_id)?
         };

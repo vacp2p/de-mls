@@ -11,7 +11,7 @@ use crate::mls_crypto::MlsService;
 
 impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P, GP, H> {
     pub async fn get_group_state(&self, group_name: &str) -> Result<GroupState, UserError> {
-        self.with_entry(group_name, |e| e.current_state())
+        self.with_entry(group_name, |e| e.handle.current_state())
             .await
             .ok_or(UserError::GroupNotFound)
     }
@@ -24,11 +24,11 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        let epoch = match entry.mls() {
+        let epoch = match entry.handle.mls() {
             Some(mls) => mls.current_epoch()?,
             None => 0,
         };
-        Ok((epoch, entry.steward.retry_round()))
+        Ok((epoch, entry.handle.steward.retry_round()))
     }
 
     pub async fn list_groups(&self) -> Vec<String> {
@@ -39,7 +39,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     /// to verify buffer hygiene (e.g., that a joiner's buffer is empty right
     /// after they receive the welcome).
     pub async fn get_pending_update_count(&self, group_name: &str) -> Result<usize, UserError> {
-        self.with_entry(group_name, |e| e.group.pending_update_count())
+        self.with_entry(group_name, |e| e.handle.group.pending_update_count())
             .await
             .ok_or(UserError::GroupNotFound)
     }
@@ -51,8 +51,13 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         group_name: &str,
     ) -> Result<(usize, usize), UserError> {
         self.with_entry(group_name, |e| {
-            let received = e.group.freeze_candidate_count();
-            let expected = e.steward.current_list().map(|l| l.len()).unwrap_or(0);
+            let received = e.handle.group.freeze_candidate_count();
+            let expected = e
+                .handle
+                .steward
+                .current_list()
+                .map(|l| l.len())
+                .unwrap_or(0);
             (received, expected)
         })
         .await
@@ -61,7 +66,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
 
     pub async fn is_steward_for_group(&self, group_name: &str) -> Result<bool, UserError> {
         let self_id = self.identity().identity_bytes().to_vec();
-        self.with_entry(group_name, |e| e.steward.is_steward(&self_id))
+        self.with_entry(group_name, |e| e.handle.steward.is_steward(&self_id))
             .await
             .ok_or(UserError::GroupNotFound)
     }
@@ -72,10 +77,10 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        if entry.mls().is_none() {
+        if entry.handle.mls().is_none() {
             return Ok(Vec::new());
         }
-        let members = entry.group_members()?;
+        let members = entry.handle.group_members()?;
         Ok(members
             .into_iter()
             .map(|raw| format_wallet_address(raw.as_slice()).to_string())
@@ -84,7 +89,12 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
 
     pub async fn get_member_scores(&self, group_name: &str) -> Vec<(Vec<u8>, i64)> {
         match self.lookup_entry(group_name).await {
-            Some(entry_arc) => entry_arc.read().await.scoring.all_members_with_scores(),
+            Some(entry_arc) => entry_arc
+                .read()
+                .await
+                .handle
+                .scoring
+                .all_members_with_scores(),
             None => Vec::new(),
         }
     }
@@ -92,7 +102,7 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
     pub async fn get_member_score(&self, group_name: &str, member_id: &[u8]) -> Option<i64> {
         let entry_arc = self.lookup_entry(group_name).await?;
         let entry = entry_arc.read().await;
-        entry.scoring.score_for(member_id)
+        entry.handle.scoring.score_for(member_id)
     }
 
     /// Identities that have an in-flight self-leave request. Used by the UI
@@ -106,11 +116,11 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        entry.expect_mls()?;
-        let members = entry.group_members()?;
+        entry.handle.expect_mls()?;
+        let members = entry.handle.group_members()?;
         Ok(members
             .into_iter()
-            .filter(|id| entry.group.is_pending_self_leave(id))
+            .filter(|id| entry.handle.group.is_pending_self_leave(id))
             .collect())
     }
 
@@ -125,16 +135,16 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
             .await
             .ok_or(UserError::GroupNotFound)?;
         let entry = entry_arc.read().await;
-        let mls = entry.expect_mls()?;
+        let mls = entry.handle.expect_mls()?;
         let epoch = mls.current_epoch()?;
-        let members = entry.group_members()?;
+        let members = entry.handle.group_members()?;
 
-        let eligible = entry.group.steward_eligibility(&members);
-        let (live_epoch, live_backup) = entry.steward.epoch_and_backup(epoch, &eligible);
+        let eligible = entry.handle.group.steward_eligibility(&members);
+        let (live_epoch, live_backup) = entry.handle.steward.epoch_and_backup(epoch, &eligible);
         let live_epoch = live_epoch.map(|s| s.to_vec());
         let live_backup = live_backup.map(|s| s.to_vec());
-        let exhausted = entry.steward.is_exhausted(epoch);
-        let has_list = entry.steward.current_list().is_some();
+        let exhausted = entry.handle.steward.is_exhausted(epoch);
+        let has_list = entry.handle.steward.current_list().is_some();
         let roles = members
             .iter()
             .cloned()
@@ -144,12 +154,12 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
                         MemberRole::EpochSteward
                     } else if live_backup.as_deref().is_some_and(|bs| bs == id) {
                         MemberRole::BackupSteward
-                    } else if entry.steward.is_steward(&id) {
+                    } else if entry.handle.steward.is_steward(&id) {
                         MemberRole::Steward
                     } else {
                         MemberRole::Member
                     }
-                } else if has_list && entry.steward.is_steward(&id) {
+                } else if has_list && entry.handle.steward.is_steward(&id) {
                     MemberRole::Steward
                 } else {
                     MemberRole::Member
@@ -165,7 +175,12 @@ impl<P: DeMlsProvider, GP: GroupPlugins, H: GroupEventHandler + 'static> User<P,
         group_name: &str,
     ) -> Result<Vec<GroupUpdateRequest>, UserError> {
         self.with_entry(group_name, |e| {
-            e.group.approved_proposals().values().cloned().collect()
+            e.handle
+                .group
+                .approved_proposals()
+                .values()
+                .cloned()
+                .collect()
         })
         .await
         .ok_or(UserError::GroupNotFound)

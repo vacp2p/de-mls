@@ -7,9 +7,10 @@
 //! periodic poll ([`crate::app::User::check_member_freeze`],
 //! [`crate::app::User::poll_freeze_status`]).
 //! [`crate::core::GroupStateMachine`] holds the per-group state enum
-//! (`PendingJoin → Working → Freezing → Selection → Reelection`)
-//! and [`crate::app::PhaseTimer`] holds the wall-clock anchor + duration
-//! knobs; `GroupEntry` composes them through coordinator methods.
+//! (`PendingJoin → Working → Freezing → Selection → Reelection`) and
+//! [`crate::app::PhaseTimer`] holds the wall-clock anchor;
+//! [`crate::app::SessionRunner`] composes a [`crate::core::GroupHandle`]
+//! with the timer through coordinator methods.
 //! State transitions return the new [`crate::core::GroupState`]; the
 //! orchestrator dispatches it via
 //! [`crate::core::GroupEventHandler::on_phase_change`].
@@ -17,21 +18,19 @@
 //! Use directly for epoch-based steward chat; build a custom app layer if you
 //! need a different consensus model, state machine, or epoch timing.
 
-mod config;
 mod consensus_bridge;
 mod display;
 mod error;
 mod peer_scoring;
 mod phase_timer;
+mod session_runner;
 mod user;
 
-pub use crate::core::GroupState;
-pub use config::{
+pub use crate::core::{
     DEFAULT_COMMIT_INACTIVITY_DURATION, DEFAULT_CONSENSUS_TIMEOUT, DEFAULT_ELECTION_VOTING_DELAY,
-    DEFAULT_LIVENESS_CRITERIA_YES, DEFAULT_MAX_RETRIES, DEFAULT_PEER_SCORE,
-    DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION,
+    DEFAULT_MAX_RETRIES, DEFAULT_PEER_SCORE, DEFAULT_PROPOSAL_EXPIRATION,
     DEFAULT_RECOVERY_INACTIVITY_DURATION, DEFAULT_THRESHOLD_PEER_SCORE, DEFAULT_VOTING_DELAY,
-    GroupConfig,
+    GroupConfig, GroupState,
 };
 pub use consensus_bridge::{
     ProposalParams, cast_vote, forward_incoming_proposal, forward_incoming_vote, submit_proposal,
@@ -43,6 +42,7 @@ pub use display::{
 pub use error::UserError;
 pub use peer_scoring::{FixedScoringProvider, InMemoryPeerScoreStorage};
 pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer};
+pub use session_runner::SessionRunner;
 pub use user::{
     DefaultGroupPlugins, DefaultMlsService, DefaultPeerScoring, DefaultStewardList, GroupPlugins,
     User,
