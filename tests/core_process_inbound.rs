@@ -302,7 +302,7 @@ fn test_process_inbound_leave_group() {
     .unwrap();
     let matched = matches!(
         &finalize.outcome,
-        FreezeOutcome::Applied { result, .. } if matches!(**result, ProcessResult::LeaveConversation)
+        FreezeOutcome::Applied { result, .. } if matches!(*result, ProcessResult::LeaveConversation)
     );
     assert!(
         matched,
@@ -383,7 +383,7 @@ fn test_rejoin_after_eviction() {
     assert!(
         matches!(
             &finalize_joiner.outcome,
-            FreezeOutcome::Applied { result, .. } if matches!(**result, ProcessResult::LeaveConversation)
+            FreezeOutcome::Applied { result, .. } if matches!(*result, ProcessResult::LeaveConversation)
         ),
         "Expected LeaveConversation on joiner finalize, got {finalize_joiner:?}"
     );
@@ -400,7 +400,7 @@ fn test_rejoin_after_eviction() {
     .unwrap();
     assert!(matches!(
         &finalize_steward.outcome,
-        FreezeOutcome::Applied { result, .. } if matches!(**result, ProcessResult::ConversationUpdated)
+        FreezeOutcome::Applied { result, .. } if matches!(*result, ProcessResult::ConversationUpdated)
     ));
     assert!(!steward_handle.mls.is_member(&joiner_id),);
 

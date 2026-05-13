@@ -28,11 +28,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     ) -> Result<(), UserError> {
         match result {
             ProcessResult::AppMessage(msg) => {
-                self.handler.on_app_message(conversation_name, msg).await?;
+                self.handler.on_app_message(conversation_name, *msg).await?;
                 Ok(())
             }
             ProcessResult::Proposal(proposal) => {
-                self.on_incoming_proposal(conversation_name, proposal).await
+                self.on_incoming_proposal(conversation_name, *proposal).await
             }
             ProcessResult::Vote(vote) => {
                 let entry_arc = self
@@ -42,14 +42,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 let entry = entry_arc.read().await;
                 forward_incoming_vote::<P>(
                     &entry.handle.conversation,
-                    vote,
+                    *vote,
                     &*self.consensus_service,
                 )
                 .await?;
                 Ok(())
             }
             ProcessResult::MembershipChangeReceived(request) => {
-                self.handle_incoming_update_request(conversation_name, request)
+                self.handle_incoming_update_request(conversation_name, *request)
                     .await
             }
             ProcessResult::JoinedConversation(name) => self.on_joined_conversation(&name).await,
@@ -62,7 +62,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                     .await
             }
             ProcessResult::ConversationSyncReceived(sync) => {
-                self.on_conversation_sync(conversation_name, sync).await
+                self.on_conversation_sync(conversation_name, *sync).await
             }
             ProcessResult::Noop(reason) => {
                 tracing::debug!(

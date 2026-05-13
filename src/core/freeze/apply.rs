@@ -196,10 +196,7 @@ fn apply_local_candidate<M: MlsService>(
         ProcessResult::ConversationUpdated
     };
     Ok(CandidateOutcome::Terminal {
-        outcome: FreezeOutcome::Applied {
-            result: Box::new(result),
-            outbound,
-        },
+        outcome: FreezeOutcome::Applied { result, outbound },
         committer,
         committed_batch,
     })
@@ -281,7 +278,7 @@ fn apply_incoming_candidate<M: MlsService>(
     };
     Ok(CandidateOutcome::Terminal {
         outcome: FreezeOutcome::Applied {
-            result: Box::new(result),
+            result,
             outbound: None,
         },
         committer: commit_sender,

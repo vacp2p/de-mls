@@ -11,6 +11,7 @@ use crate::{
         Conversation, CoreError, FreezeBufferOutcome, NoopReason, ProcessResult, ScoreOp,
         StewardListPlugin, conversation::BufferedCommitCandidate,
     },
+    ds::OutboundPacket,
     mls_crypto::{MlsMessageKind, MlsService},
     protos::de_mls::messages::v1::{
         CommitCandidate, ConversationUpdateRequest, conversation_update_request::Payload,
@@ -31,14 +32,12 @@ pub struct FreezeFinalizeResult {
     pub committed_batch: Vec<ConversationUpdateRequest>,
 }
 
-/// `result` is boxed because [`ProcessResult`] is a large enum (~240 bytes)
-/// and `NoCandidate` is the common case.
 #[derive(Debug, Clone, Default)]
 pub enum FreezeOutcome {
     Applied {
-        result: Box<ProcessResult>,
+        result: ProcessResult,
         /// Deferred welcomes when our own candidate won.
-        outbound: Option<crate::ds::OutboundPacket>,
+        outbound: Option<OutboundPacket>,
     },
     #[default]
     NoCandidate,

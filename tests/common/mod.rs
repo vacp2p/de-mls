@@ -322,7 +322,7 @@ pub fn process_inbound_compat(
                 {
                     return Ok(ProcessResult::Noop(NoopReason::UnknownAppMessage));
                 }
-                Ok(ProcessResult::MembershipChangeReceived(
+                Ok(ProcessResult::MembershipChangeReceived(Box::new(
                     ConversationUpdateRequest {
                         payload: Some(conversation_update_request::Payload::InviteMember(
                             InviteMember {
@@ -331,7 +331,7 @@ pub fn process_inbound_compat(
                             },
                         )),
                     },
-                ))
+                )))
             }
             Some(welcome_message::Payload::InvitationToJoin(_)) => {
                 panic!(
@@ -581,7 +581,7 @@ pub fn steward_add_joiner(
     let welcome_packet = match finalize.outcome {
         FreezeOutcome::Applied { result, outbound } => {
             assert!(
-                matches!(*result, ProcessResult::ConversationUpdated),
+                matches!(result, ProcessResult::ConversationUpdated),
                 "Expected ConversationUpdated, got {:?}",
                 result
             );

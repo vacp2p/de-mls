@@ -19,22 +19,28 @@ use crate::{
 
 /// Outcome of processing one inbound packet. The app layer matches this
 /// directly and dispatches the side effects.
+///
+/// Heavy protobuf payloads (`AppMessage`, `Proposal`, `Vote`,
+/// `ConversationUpdateRequest`, `ConversationSync` — each 88–144 bytes) are
+/// boxed so the enum stays small. Without boxing the enum is sized to its
+/// largest variant and every return / clone / match-move copies ~150 bytes;
+/// with boxing it drops to ~32 bytes.
 #[derive(Debug, Clone)]
 pub enum ProcessResult {
     /// Decrypted application message ready to deliver to the UI.
-    AppMessage(AppMessage),
+    AppMessage(Box<AppMessage>),
 
     /// Consensus proposal from a peer — forward to the consensus service.
-    Proposal(Proposal),
+    Proposal(Box<Proposal>),
 
     /// Consensus vote from a peer — forward to the consensus service.
-    Vote(Vote),
+    Vote(Box<Vote>),
 
     /// We were removed from the conversation.
     LeaveConversation,
 
     /// Steward received a membership change (invite KP / ban) — start a vote.
-    MembershipChangeReceived(ConversationUpdateRequest),
+    MembershipChangeReceived(Box<ConversationUpdateRequest>),
 
     /// Successfully joined via a welcome message; carries the conversation name.
     JoinedConversation(String),
@@ -49,7 +55,7 @@ pub enum ProcessResult {
 
     /// Conversation-sync message from the steward (steward list, scores, timing,
     /// protocol flags). Meaningful only for joiners with no steward list yet.
-    ConversationSyncReceived(ConversationSync),
+    ConversationSyncReceived(Box<ConversationSync>),
 
     /// Nothing to do. The reason variant names the specific case so the
     /// app layer can match precisely instead of relying on producer-side
@@ -249,24 +255,26 @@ impl TryFrom<AppMessage> for ProcessResult {
     fn try_from(value: AppMessage) -> Result<Self, Self::Error> {
         match &value.payload {
             Some(app_message::Payload::ConversationMessage(_)) => {
-                Ok(ProcessResult::AppMessage(value))
+                Ok(ProcessResult::AppMessage(Box::new(value)))
             }
             Some(app_message::Payload::Proposal(proposal)) => {
-                Ok(ProcessResult::Proposal(proposal.clone()))
+                Ok(ProcessResult::Proposal(Box::new(proposal.clone())))
             }
-            Some(app_message::Payload::Vote(vote)) => Ok(ProcessResult::Vote(vote.clone())),
+            Some(app_message::Payload::Vote(vote)) => {
+                Ok(ProcessResult::Vote(Box::new(vote.clone())))
+            }
             Some(app_message::Payload::BanRequest(ban_request)) => Ok(
-                ProcessResult::MembershipChangeReceived(ConversationUpdateRequest {
+                ProcessResult::MembershipChangeReceived(Box::new(ConversationUpdateRequest {
                     payload: Some(conversation_update_request::Payload::RemoveMember(
                         RemoveMember {
                             identity: parse_wallet_to_bytes(ban_request.user_to_ban.as_str())?,
                         },
                     )),
-                }),
+                })),
             ),
-            Some(app_message::Payload::ConversationSync(sync)) => {
-                Ok(ProcessResult::ConversationSyncReceived(sync.clone()))
-            }
+            Some(app_message::Payload::ConversationSync(sync)) => Ok(
+                ProcessResult::ConversationSyncReceived(Box::new(sync.clone())),
+            ),
             other => {
                 tracing::debug!(
                     payload_kind = ?other.as_ref().map(std::mem::discriminant),
