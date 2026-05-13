@@ -9,7 +9,7 @@
 //! [`crate::core::DefaultProvider`] bundles in-memory backends for tests
 //! and simple deployments.
 //!
-//! Submodules: `conversation` (per-group state, handle, state machine,
+//! Submodules: `conversation` (per-conversation state, handle, state machine,
 //! config), `consensus` (pure consensus result application), `events`
 //! ([`crate::core::ConversationEventHandler`]), `freeze` (round selection
 //! + apply), `inbound` (app-subtopic packet routing), `peer_scoring`

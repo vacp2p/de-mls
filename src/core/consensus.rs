@@ -31,8 +31,8 @@ pub struct ConsensusApplyResult {
     pub force_freezing: bool,
     pub queued_remove_target: Option<Vec<u8>>,
     /// `true` when an accepted Layer-3 Deadlock ECP signals "open recovery
-    /// mode." Caller flips the recovery-mode flag on; cleared on the next
-    /// accepted election.
+    /// mode." Caller switches the handle's [`crate::core::OperatingMode`]
+    /// to `Recovery`; cleared on the next accepted election.
     pub enter_recovery_mode: bool,
 }
 

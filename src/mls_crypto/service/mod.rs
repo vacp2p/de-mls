@@ -20,13 +20,13 @@ mod backend;
 pub use api::{CIPHERSUITE, DEFAULT_COMMIT_BATCH_MAX, MlsService};
 use backend::MlsProvider;
 
-/// OpenMLS-backed MLS service, scoped to a single group.
+/// OpenMLS-backed MLS service, scoped to a single conversation.
 ///
 /// The service owns one `MlsGroup` plus an optional staged-commit slot
 /// for the inbound stage→merge/discard pipeline. MLS credentials and
 /// storage are supplied at construction. Credentials are
-/// `Arc<MlsCredentials>` so one user's credentials back every per-group
-/// service without copying the signing key.
+/// `Arc<MlsCredentials>` so one user's credentials back every
+/// per-conversation service without copying the signing key.
 pub struct OpenMlsService<S: DeMlsStorage> {
     pub(super) storage: S,
     pub(super) crypto: RustCrypto,

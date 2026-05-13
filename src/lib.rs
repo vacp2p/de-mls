@@ -51,7 +51,7 @@
 //! // Build a user from an Ethereum private key. The convenience
 //! // constructor pins every `User` generic to the default provider
 //! // and plug-in bundle, so type inference works without annotation.
-//! let user = User::with_private_key(
+//! let mut user = User::with_private_key(
 //!     "0xac0974...",   // Private key
 //!     consensus,       // Consensus service
 //!     event_handler,   // Your ConversationEventHandler implementation
