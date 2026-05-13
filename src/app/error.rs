@@ -54,4 +54,3 @@ pub enum UserError {
     #[error("Identity error: {0}")]
     Identity(#[from] IdentityError),
 }
-

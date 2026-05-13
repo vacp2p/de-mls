@@ -10,7 +10,9 @@ use tracing::{info, warn};
 
 use crate::{
     core::{
-        conversation::Conversation, error::CoreError, freeze::process_commit_candidate,
+        conversation::Conversation,
+        error::CoreError,
+        freeze::process_commit_candidate,
         process_result::{NoopReason, ProcessResult},
     },
     identity::{ShortId, parse_wallet_to_bytes},

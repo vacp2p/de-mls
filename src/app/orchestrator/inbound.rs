@@ -32,7 +32,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 Ok(())
             }
             ProcessResult::Proposal(proposal) => {
-                self.on_incoming_proposal(conversation_name, *proposal).await
+                self.on_incoming_proposal(conversation_name, *proposal)
+                    .await
             }
             ProcessResult::Vote(vote) => {
                 let entry_arc = self
