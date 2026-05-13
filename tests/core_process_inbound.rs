@@ -14,7 +14,7 @@ use de_mls::core::{
     StewardListPlugin, build_key_package_message, finalize_freeze_round,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
-use de_mls::identity::{Identity, parse_wallet_address};
+use de_mls::identity::parse_wallet_address;
 use de_mls::mls_crypto::{MemoryDeMlsStorage, MlsService, OpenMlsService};
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationMessage, ConversationUpdateRequest, app_message,
@@ -44,10 +44,9 @@ fn test_process_inbound_invalid_subtopic() {
 #[test]
 fn test_process_inbound_app_msg_before_mls_init() {
     // Joiner-side handle with no MLS service attached yet.
-    let (identity, _credentials, _storage) =
+    let (_identity, _credentials, _storage) =
         setup_identity_storage("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let mut group: Conversation =
-        Conversation::prepare_to_join("test-group", identity.identity_bytes().to_vec());
+    let mut group: Conversation = Conversation::prepare_to_join("test-group");
 
     let result =
         process_inbound_compat(&mut group, None, b"some payload", APP_MSG_SUBTOPIC).unwrap();
@@ -139,10 +138,9 @@ fn test_process_inbound_welcome_non_steward_buffers_key_package() {
 
     // Joiner-side handle with no MLS yet — the key-package surfaces all the
     // same; promotion to a voting proposal is the app's decision.
-    let (identity, _credentials, _storage) =
+    let (_identity, _credentials, _storage) =
         setup_identity_storage("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let mut group: Conversation =
-        Conversation::prepare_to_join(conversation_name, identity.identity_bytes().to_vec());
+    let mut group: Conversation = Conversation::prepare_to_join(conversation_name);
 
     let other = setup_joiner(
         conversation_name,
@@ -291,6 +289,7 @@ fn test_process_inbound_leave_group() {
         remove_result
     );
 
+    let joiner_id = joiner.self_identity();
     let finalize = finalize_freeze_round(
         &mut joiner.group,
         joiner.mls.as_ref().unwrap(),
@@ -298,6 +297,7 @@ fn test_process_inbound_leave_group() {
         false,
         false,
         b"test-app-id",
+        &joiner_id,
     )
     .unwrap();
     let matched = matches!(
@@ -369,6 +369,7 @@ fn test_rejoin_after_eviction() {
         APP_MSG_SUBTOPIC,
     )
     .unwrap();
+    let joiner_id = joiner.self_identity();
     let finalize_joiner = finalize_freeze_round(
         &mut joiner.group,
         joiner.mls.as_ref().unwrap(),
@@ -376,6 +377,7 @@ fn test_rejoin_after_eviction() {
         false,
         false,
         b"test-app-id",
+        &joiner_id,
     )
     .unwrap();
     assert!(
@@ -385,6 +387,7 @@ fn test_rejoin_after_eviction() {
         ),
         "Expected LeaveConversation on joiner finalize, got {finalize_joiner:?}"
     );
+    let steward_id = steward_handle.self_identity().to_vec();
     let finalize_steward = finalize_freeze_round(
         &mut steward_handle.group,
         &steward_handle.mls,
@@ -392,6 +395,7 @@ fn test_rejoin_after_eviction() {
         false,
         false,
         b"test-app-id",
+        &steward_id,
     )
     .unwrap();
     assert!(matches!(

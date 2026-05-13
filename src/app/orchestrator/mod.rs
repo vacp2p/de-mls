@@ -63,6 +63,10 @@ pub struct User<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventH
     /// service, and MLS credentials are captured by the plug-in bundle (built
     /// once from this identity at `User` init).
     identity: Arc<dyn Identity>,
+    /// `identity.identity_bytes()` materialised once at construction so every
+    /// orchestrator method that needs the local identity bytes reads them
+    /// without re-walking the `Identity` trait + allocating a fresh `Vec`.
+    self_identity: Arc<[u8]>,
     /// Per-user plug-in bundle: builds MLS services + key packages, plus
     /// per-conversation scoring and steward-list plug-ins on demand.
     plugins: Arc<GP>,
@@ -95,6 +99,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler> Clo
     fn clone(&self) -> Self {
         Self {
             identity: Arc::clone(&self.identity),
+            self_identity: Arc::clone(&self.self_identity),
             plugins: Arc::clone(&self.plugins),
             conversations: Arc::clone(&self.conversations),
             consensus_service: Arc::clone(&self.consensus_service),
@@ -119,8 +124,10 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         handler: Arc<H>,
         default_conversation_config: ConversationConfig,
     ) -> Self {
+        let self_identity: Arc<[u8]> = Arc::from(identity.identity_bytes());
         Self {
             identity,
+            self_identity,
             plugins,
             conversations: Arc::new(RwLock::new(HashMap::new())),
             consensus_service,
@@ -195,6 +202,11 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
     /// User level.
     pub(crate) fn identity(&self) -> &dyn Identity {
         self.identity.as_ref()
+    }
+
+    /// Borrow the local identity bytes. Cached at construction; cheap to call.
+    pub(crate) fn self_identity(&self) -> &[u8] {
+        &self.self_identity
     }
 
     /// Wallet address as checksummed hex.

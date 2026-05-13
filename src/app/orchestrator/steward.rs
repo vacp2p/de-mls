@@ -88,7 +88,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             let mls = entry.handle.expect_mls()?;
             let epoch = mls.current_epoch()?;
             let mls_members = entry.handle.conversation_members()?;
-            let self_identity = self.identity().identity_bytes();
+            let self_identity = self.self_identity();
 
             // `has_election_in_flight` is a proposal-queue check, not a
             // steward-list one — gated here, before the plug-in call.
@@ -182,7 +182,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             let entry = entry_arc.read().await;
             let mls = entry.handle.expect_mls()?;
             let mls_members = entry.handle.conversation_members()?;
-            let self_id = self.identity().identity_bytes();
+            let self_id = self.self_identity();
             // Deadlock proposer = election proposer with the stricter
             // predicate (MLS-present and not queued for removal).
             let mls_set: std::collections::HashSet<&[u8]> =
@@ -328,7 +328,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 Some(mls) => (mls.current_epoch()?, entry.handle.conversation_members()?),
                 None => (0, Vec::new()),
             };
-            let self_identity = self.identity().identity_bytes();
+            let self_identity = self.self_identity();
             let eligible = entry.handle.conversation.steward_eligibility(&members);
             let is_live = entry
                 .handle
@@ -487,7 +487,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             .lookup_entry(conversation_name)
             .await
             .ok_or(UserError::ConversationNotFound)?;
-        let self_id = self.identity().identity_bytes();
+        let self_id = self.self_identity();
 
         // Reactive entry: callers chain into this after a scoring apply
         // emitted a downward cross, so we expect at least one tracked

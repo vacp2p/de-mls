@@ -454,6 +454,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     );
 
     // Finalize: MLS commit staging authenticates the sender
+    let joiner_id = joiner.self_identity();
     let finalize = finalize_freeze_round(
         &mut joiner.group,
         joiner.mls.as_ref().unwrap(),
@@ -461,6 +462,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
         false,
         false,
         b"test-app-id",
+        &joiner_id,
     )
     .unwrap();
     let matched = matches!(
@@ -479,7 +481,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
         .current_list()
         .expect("steward should have a list");
     assert!(
-        steward_list.contains(steward_handle.group.self_identity()),
+        steward_list.contains(steward_handle.self_identity()),
         "Steward should be on the steward list"
     );
 }
@@ -502,7 +504,7 @@ fn test_backup_commit_scores_absent_steward() {
     let mut alice_group = setup_steward(conversation_name, alice_hex);
     let mut bob = setup_joiner(conversation_name, bob_hex);
     let alice_id = alice_group.self_identity().to_vec();
-    let bob_id = bob.group.self_identity().to_vec();
+    let bob_id = bob.self_identity();
 
     let (welcome, _) = steward_add_joiner(&mut alice_group, &bob.kp_packet);
     bob.accept_welcome_packet(&welcome);
@@ -553,6 +555,7 @@ fn test_backup_commit_scores_absent_steward() {
             .to_vec()
     };
 
+    let bob_id = bob.self_identity();
     let result = finalize_freeze_round(
         &mut bob.group,
         bob.mls.as_ref().unwrap(),
@@ -560,6 +563,7 @@ fn test_backup_commit_scores_absent_steward() {
         false,
         false,
         b"test-app-id",
+        &bob_id,
     )
     .unwrap();
 
@@ -709,6 +713,7 @@ fn test_forged_steward_identity_scores_mls_sender() {
         result
     );
 
+    let joiner_id = joiner.self_identity();
     let finalize = finalize_freeze_round(
         &mut joiner.group,
         joiner.mls.as_ref().unwrap(),
@@ -716,6 +721,7 @@ fn test_forged_steward_identity_scores_mls_sender() {
         false,
         false,
         b"test-app-id",
+        &joiner_id,
     )
     .unwrap();
     assert!(
@@ -757,6 +763,7 @@ fn test_no_valid_candidate_triggers_no_candidate() {
     let epoch = group.mls.current_epoch().unwrap();
     group.start_freeze_round(epoch);
 
+    let group_id = group.self_identity().to_vec();
     let finalize = finalize_freeze_round(
         &mut group.group,
         &group.mls,
@@ -764,6 +771,7 @@ fn test_no_valid_candidate_triggers_no_candidate() {
         false,
         false,
         b"test-app-id",
+        &group_id,
     )
     .unwrap();
     assert!(

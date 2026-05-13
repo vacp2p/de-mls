@@ -198,7 +198,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         let (proposal_id, unbundled) = submit_proposal::<P>(
             conversation_name,
             &request,
-            self.identity().identity_bytes(),
+            self.self_identity(),
             &self.consensus_service,
             ProposalParams {
                 expected_voters,
@@ -402,7 +402,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
 
             // Only the epoch steward proposes immediately. The buffer
             // survives freeze rounds so a later steward can retry.
-            let self_identity = self.identity().identity_bytes();
+            let self_identity = self.self_identity();
             let eligible = entry
                 .handle
                 .conversation

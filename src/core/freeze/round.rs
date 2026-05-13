@@ -156,6 +156,7 @@ pub fn finalize_freeze_round<M: MlsService>(
     in_recovery: bool,
     allow_subset_candidates: bool,
     app_id: &[u8],
+    self_identity: &[u8],
 ) -> Result<FreezeFinalizeResult, CoreError> {
     let current_epoch = mls.current_epoch()?;
     conversation.lock_freeze_round_selection(current_epoch);
@@ -172,7 +173,7 @@ pub fn finalize_freeze_round<M: MlsService>(
         return Ok(FreezeFinalizeResult::default());
     }
 
-    let ctx = RoundContext::snapshot(conversation, mls, steward, current_epoch)?;
+    let ctx = RoundContext::snapshot(conversation, mls, steward, current_epoch, self_identity)?;
     let sorted = rank_applicable_candidates(candidates, &ctx, allow_subset_candidates);
 
     if sorted.is_empty() {
@@ -220,9 +221,8 @@ impl RoundContext {
         mls: &M,
         steward: &dyn StewardListPlugin,
         current_epoch: u64,
+        self_identity: &[u8],
     ) -> Result<Self, CoreError> {
-        let self_identity = conversation.self_identity().to_vec();
-
         let mut mls_actions: Vec<MlsProposalOutput> = Vec::new();
         let mut self_remove_pending = false;
         for req in conversation.approved_proposals().values() {
@@ -250,7 +250,7 @@ impl RoundContext {
             self_remove_pending,
             current_epoch,
             live_epoch_steward_id,
-            self_identity,
+            self_identity: self_identity.to_vec(),
         })
     }
 }

@@ -294,7 +294,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             let epoch = entry.handle.expect_mls()?.current_epoch()?;
             entry.handle.conversation.ensure_freeze_round(epoch);
 
-            let self_identity = self.identity().identity_bytes().to_vec();
+            let self_identity = self.self_identity().to_vec();
             let outbound = if entry.handle.steward.is_steward(&self_identity) {
                 match entry
                     .handle
@@ -525,10 +525,10 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                     .lookup_entry(conversation_name)
                     .await
                     .ok_or(UserError::ConversationNotFound)?;
-                let self_id = self.identity().identity_bytes().to_vec();
+                let self_id = self.self_identity();
                 let already_in = {
                     let entry = entry_arc.read().await;
-                    entry.handle.steward.is_steward(&self_id) || entry.handle.mls().is_some()
+                    entry.handle.steward.is_steward(self_id) || entry.handle.mls().is_some()
                 };
                 if already_in {
                     return Ok(());

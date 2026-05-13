@@ -90,10 +90,11 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             let mut entry = entry_arc.write().await;
             let allow_subset = entry.handle.steward.config().allow_subset_candidates;
             let result = if entry.handle.mls().is_some() {
-                match entry
-                    .handle
-                    .finalize_freeze_round(allow_subset, &self.app_id)
-                {
+                match entry.handle.finalize_freeze_round(
+                    allow_subset,
+                    &self.app_id,
+                    self.self_identity(),
+                ) {
                     Ok(result) => result,
                     Err(e) => {
                         error!(conversation = conversation_name, error = %e, "freeze finalize failed");
@@ -197,7 +198,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                         let accuse_target = match entry.handle.mls() {
                             Some(mls) => {
                                 let violation_epoch = mls.current_epoch()?;
-                                let self_identity = self.identity().identity_bytes();
+                                let self_identity = self.self_identity();
                                 let members = entry.handle.conversation_members()?;
                                 let eligible =
                                     entry.handle.conversation.steward_eligibility(&members);
@@ -291,11 +292,11 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             // Stewards build their own candidate under the same lock.
             // Candidate-build failure must not block the freeze transition —
             // peers' candidates still get processed.
-            let self_identity = self.identity().identity_bytes().to_vec();
-            let outbound = if entry.handle.steward.is_steward(&self_identity) {
+            let self_identity = self.self_identity();
+            let outbound = if entry.handle.steward.is_steward(self_identity) {
                 match entry
                     .handle
-                    .create_commit_candidate(&self_identity, &self.app_id)
+                    .create_commit_candidate(self_identity, &self.app_id)
                 {
                     Ok(packets) => packets,
                     Err(e) => {

@@ -199,7 +199,7 @@ mod tests {
             ..ConversationConfig::default()
         };
         let mut runner = SessionRunner::new(
-            Conversation::prepare_to_join("g", b"me".to_vec()),
+            Conversation::prepare_to_join("g"),
             Some(UnusedMls),
             ConversationStateMachine::new_as_pending_join(),
             PhaseTimer::new(),
@@ -213,7 +213,7 @@ mod tests {
 
     fn make_runner_working() -> SessionRunner<UnusedMls, StubScoring, StubSteward> {
         SessionRunner::new(
-            Conversation::create("g", b"me".to_vec()),
+            Conversation::create("g"),
             Some(UnusedMls),
             ConversationStateMachine::new_as_member(),
             PhaseTimer::new(),
