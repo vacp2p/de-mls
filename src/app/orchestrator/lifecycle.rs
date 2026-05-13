@@ -48,15 +48,14 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             return Err(UserError::ConversationAlreadyExists);
         }
 
-        let self_identity_bytes = self.identity().identity_bytes().to_vec();
+        let self_identity_bytes = self.self_identity().to_vec();
         let (conversation, mls_opt, state_machine, phase_timer) = if is_creation {
             let mls = self.plugins.create_mls(conversation_name.to_string())?;
-            let conversation = Conversation::create(conversation_name, self_identity_bytes.clone());
+            let conversation = Conversation::create(conversation_name);
             let state_machine = ConversationStateMachine::new_as_member();
             (conversation, Some(mls), state_machine, PhaseTimer::new())
         } else {
-            let conversation =
-                Conversation::prepare_to_join(conversation_name, self_identity_bytes.clone());
+            let conversation = Conversation::prepare_to_join(conversation_name);
             let state_machine = ConversationStateMachine::new_as_pending_join();
             // Anchor the timer at "now" so `is_pending_join_expired` can
             // detect the 3× commit-inactivity timeout.
@@ -136,7 +135,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             return Ok(());
         }
 
-        let self_identity = self.identity().identity_bytes().to_vec();
+        let self_identity = self.self_identity().to_vec();
 
         // Idempotent: a second click after a successful submit finds the
         // approved entry and short-circuits.

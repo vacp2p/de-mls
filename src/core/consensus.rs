@@ -287,10 +287,6 @@ mod tests {
         ids.iter().map(|&id| member(id)).collect()
     }
 
-    fn make_conversation(name: &str, identity: Vec<u8>) -> Conversation {
-        Conversation::create(name, identity)
-    }
-
     fn election_request(stewards: Vec<Vec<u8>>, epoch: u64) -> ConversationUpdateRequest {
         ConversationUpdateRequest {
             payload: Some(conversation_update_request::Payload::StewardElection(
@@ -308,7 +304,7 @@ mod tests {
     #[test]
     fn election_yes_owner_returns_outcome_and_clears_queue() {
         let config = StewardListConfig::new(2, 5).unwrap();
-        let mut conversation = make_conversation("test-conversation", member(1));
+        let mut conversation = Conversation::create("test-conversation");
         let mems = members(&[1, 2, 3, 4, 5]);
         let sn = mems.len().min(config.sn_max);
         let list = StewardList::generate(10, b"test-conversation", &mems, sn, config, 0).unwrap();
@@ -334,7 +330,7 @@ mod tests {
     /// NO on an election returns no outcome and leaves the approved queue empty.
     #[test]
     fn election_no_returns_empty() {
-        let mut conversation = make_conversation("test-conversation", member(1));
+        let mut conversation = Conversation::create("test-conversation");
         let request = election_request(vec![member(1), member(2)], 10);
 
         let proposal_id = 43;
@@ -356,7 +352,7 @@ mod tests {
     /// (non-owner path), and doesn't touch any proposal queues.
     #[test]
     fn election_yes_nonowner_returns_outcome_without_queue_side_effects() {
-        let mut conversation = make_conversation("test-conversation", member(1));
+        let mut conversation = Conversation::create("test-conversation");
         let request = election_request(vec![member(1), member(2), member(3)], 5);
 
         let proposal_id = 44;
@@ -386,7 +382,7 @@ mod tests {
     /// when an entry for the same target is already in `approved_proposals`.
     #[test]
     fn removal_deduped_when_target_already_pending() {
-        let mut conversation = make_conversation("test-conversation", member(1));
+        let mut conversation = Conversation::create("test-conversation");
         let target = member(7);
 
         // First removal — non-owner path inserts straight into approved.
@@ -417,7 +413,7 @@ mod tests {
     /// queue does not retain an outcome we deliberately discarded.
     #[test]
     fn removal_dedup_clears_owner_voting_entry() {
-        let mut conversation = make_conversation("test-conversation", member(1));
+        let mut conversation = Conversation::create("test-conversation");
         let target = member(7);
 
         // Pre-existing approved removal from an unrelated path.
@@ -459,7 +455,7 @@ mod tests {
 
     #[test]
     fn ecp_score_below_threshold_yes_marks_urgent_and_force_freezes() {
-        let mut conversation = make_conversation("urgent-yes", member(1));
+        let mut conversation = Conversation::create("urgent-yes");
         let target = member(7);
 
         let request = score_below_threshold_request(target.clone(), member(1));
@@ -483,7 +479,7 @@ mod tests {
 
     #[test]
     fn ecp_score_below_threshold_no_does_not_mark_urgent() {
-        let mut conversation = make_conversation("urgent-no", member(1));
+        let mut conversation = Conversation::create("urgent-no");
         let request = score_below_threshold_request(member(7), member(1));
         let payload = request.encode_to_vec();
 
@@ -503,7 +499,7 @@ mod tests {
 
     #[test]
     fn ecp_deadlock_yes_signals_recovery_mode_and_force_freezes() {
-        let mut conversation = make_conversation("deadlock-yes", member(1));
+        let mut conversation = Conversation::create("deadlock-yes");
 
         let request = deadlock_request(member(1));
         let payload = request.encode_to_vec();
@@ -527,7 +523,7 @@ mod tests {
 
     #[test]
     fn ecp_deadlock_no_does_not_signal_recovery_mode() {
-        let mut conversation = make_conversation("deadlock-no", member(1));
+        let mut conversation = Conversation::create("deadlock-no");
 
         let request = deadlock_request(member(1));
         let payload = request.encode_to_vec();

@@ -297,6 +297,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
         &mut self,
         allow_subset_candidates: bool,
         app_id: &[u8],
+        self_identity: &[u8],
     ) -> Result<FreezeFinalizeResult, CoreError> {
         let mls = self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)?;
         let in_recovery = self.operating_mode == OperatingMode::Recovery;
@@ -307,6 +308,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
             in_recovery,
             allow_subset_candidates,
             app_id,
+            self_identity,
         )
     }
 
@@ -328,7 +330,7 @@ mod tests {
         steward: StubSteward,
     ) -> ConversationHandle<UnusedMls, StubScoring, StubSteward> {
         ConversationHandle::new(
-            Conversation::create("g", b"me".to_vec()),
+            Conversation::create("g"),
             Some(UnusedMls),
             ConversationStateMachine::new_as_member(),
             ConversationConfig::default(),

@@ -82,7 +82,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         &self,
         conversation_name: &str,
     ) -> Result<bool, UserError> {
-        let self_id = self.identity().identity_bytes().to_vec();
+        let self_id = self.self_identity().to_vec();
         self.with_entry(conversation_name, |e| e.handle.steward.is_steward(&self_id))
             .await
             .ok_or(UserError::ConversationNotFound)

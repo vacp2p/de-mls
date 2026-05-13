@@ -373,6 +373,12 @@ impl StewardHandle {
     pub fn self_id(&self) -> &[u8] {
         &self.identity
     }
+
+    /// Test convenience: identity bytes stored on the handle; matches the
+    /// value the orchestrator caches at the User level.
+    pub fn self_identity(&self) -> &[u8] {
+        &self.identity
+    }
 }
 
 impl std::ops::Deref for StewardHandle {
@@ -405,7 +411,7 @@ pub fn setup_steward_with_config(
     )
     .unwrap();
     let identity_bytes = identity.identity_bytes().to_vec();
-    let group = Conversation::create(conversation_name, identity_bytes.clone());
+    let group = Conversation::create(conversation_name);
     let mut steward =
         DeterministicStewardList::empty(conversation_name.as_bytes().to_vec(), config);
     let _events = steward
@@ -440,6 +446,12 @@ pub struct JoinerHandle {
 }
 
 impl JoinerHandle {
+    /// Test convenience: identity bytes stored on the handle; matches the
+    /// value the orchestrator caches at the User level.
+    pub fn self_identity(&self) -> Vec<u8> {
+        self.identity.identity_bytes().to_vec()
+    }
+
     /// Try to accept a serialized welcome, materialising the joiner's
     /// MLS service if it addresses our key package. Returns `Ok(None)`
     /// when the welcome isn't for us.
@@ -482,8 +494,7 @@ pub fn setup_joiner_with_config(
     config: StewardListConfig,
 ) -> JoinerHandle {
     let (identity, credentials, storage) = setup_identity_storage(wallet_hex);
-    let group =
-        Conversation::prepare_to_join(conversation_name, identity.identity_bytes().to_vec());
+    let group = Conversation::prepare_to_join(conversation_name);
     let steward = DeterministicStewardList::empty(conversation_name.as_bytes().to_vec(), config);
     let key_package =
         OpenMlsService::<Arc<MemoryDeMlsStorage>>::generate_key_package(&storage, &credentials)
@@ -562,6 +573,7 @@ pub fn steward_add_joiner(
         steward_handle.operating_mode == OperatingMode::Recovery,
         false,
         b"test-app-id",
+        &self_id,
     )
     .unwrap();
     let welcome_packet = match finalize.outcome {
