@@ -2,9 +2,7 @@
 
 use std::time::Duration;
 
-use crate::core::{
-    DEFAULT_MAX_RETRIES, DEFAULT_THRESHOLD_PEER_SCORE, ProposalKind, StewardListConfig,
-};
+use crate::core::ProposalKind;
 
 /// Wall-clock window the steward waits before batching approved proposals
 /// into a commit (RFC §Inactivity Timer #1, "Commit inactivity").
@@ -31,20 +29,16 @@ pub const DEFAULT_VOTING_DELAY: Duration = Duration::from_secs(10);
 /// `DEFAULT_VOTING_DELAY` so recovery elections converge fast.
 pub const DEFAULT_ELECTION_VOTING_DELAY: Duration = Duration::from_secs(5);
 
-/// RFC §Peer Scoring `default_peer_score`: starting score for a new member.
-pub const DEFAULT_PEER_SCORE: i64 = 100;
-
 pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
 
 pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
 
-/// Fallback [`StewardListConfig`] for a conversation created without explicit bounds —
-/// tiny conversations with `sn ∈ [1, 2]`.
-fn default_protocol_config() -> StewardListConfig {
-    StewardListConfig::new(1, 2).expect("1..=2 is always a valid StewardListConfig range")
-}
+/// Default `max_reelection_attempts`. See [`crate::core::DEFAULT_MAX_RETRIES`].
+pub use crate::core::DEFAULT_MAX_RETRIES;
 
-/// Per-conversation timing + embedded [`StewardListConfig`].
+/// Per-conversation timing config. Plug-in domains (scoring, steward list)
+/// own their own configs on the respective plug-ins — see
+/// [`crate::core::ScoringConfig`] and [`crate::core::StewardListConfig`].
 #[derive(Debug, Clone)]
 pub struct ConversationConfig {
     /// RFC §Inactivity Timer #1: how long the epoch steward has to commit
@@ -78,11 +72,6 @@ pub struct ConversationConfig {
     /// §Creating Voting Proposal). See [`DEFAULT_LIVENESS_CRITERIA_YES`].
     /// Also used by the auto-vote timer as the cast value.
     pub liveness_criteria_yes: bool,
-    /// RFC §Peer Scoring `default_peer_score`. See [`DEFAULT_PEER_SCORE`].
-    pub default_peer_score: i64,
-    /// RFC §Peer Scoring `threshold_peer_score`. See [`DEFAULT_THRESHOLD_PEER_SCORE`].
-    pub threshold_peer_score: i64,
-    pub protocol: StewardListConfig,
 }
 
 impl Default for ConversationConfig {
@@ -98,9 +87,6 @@ impl Default for ConversationConfig {
             voting_delay: DEFAULT_VOTING_DELAY,
             election_voting_delay: DEFAULT_ELECTION_VOTING_DELAY,
             liveness_criteria_yes: DEFAULT_LIVENESS_CRITERIA_YES,
-            default_peer_score: DEFAULT_PEER_SCORE,
-            threshold_peer_score: DEFAULT_THRESHOLD_PEER_SCORE,
-            protocol: default_protocol_config(),
         }
     }
 }

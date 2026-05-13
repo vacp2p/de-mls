@@ -70,8 +70,22 @@ pub struct ScoringConfig {
     pub threshold: i64,
 }
 
+/// RFC §Peer Scoring `default_peer_score`: starting score for a new member.
+pub const DEFAULT_PEER_SCORE: i64 = 100;
+
 /// Default removal threshold (RFC §Peer Scoring `threshold_peer_score`).
 pub const DEFAULT_THRESHOLD_PEER_SCORE: i64 = 0;
+
+impl Default for ScoringConfig {
+    /// RFC §Peer Scoring defaults. Adjust at `User` init via
+    /// [`crate::app::User::set_default_scoring_config`].
+    fn default() -> Self {
+        Self {
+            default_score: DEFAULT_PEER_SCORE,
+            threshold: DEFAULT_THRESHOLD_PEER_SCORE,
+        }
+    }
+}
 
 // ── Plug-in events ──────────────────────────────────────────────────
 
@@ -264,6 +278,15 @@ pub trait PeerScoringPlugin: Send + Sync + 'static {
     /// or arrange for a subsequent apply that surfaces the affected
     /// members through normal cross-detection.
     fn set_threshold(&mut self, threshold: i64);
+
+    /// Starting score for a newly tracked member. Called by
+    /// [`Self::add_member`] and on `apply_snapshot` for unknown identities.
+    fn default_score(&self) -> i64;
+
+    /// Update the starting score in place. Applies to future
+    /// [`Self::add_member`] calls; does not retroactively rescore
+    /// already-tracked members.
+    fn set_default_score(&mut self, score: i64);
 }
 
 /// Compute the [`PeerScoringEvent`] for a transition from `prior` to
@@ -414,6 +437,14 @@ impl<S: PeerScoreStorage + Send + Sync + 'static, P: ScoringProvider + Send + Sy
 
     fn set_threshold(&mut self, threshold: i64) {
         self.config.threshold = threshold;
+    }
+
+    fn default_score(&self) -> i64 {
+        self.config.default_score
+    }
+
+    fn set_default_score(&mut self, score: i64) {
+        self.config.default_score = score;
     }
 }
 

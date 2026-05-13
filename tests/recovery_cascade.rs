@@ -57,9 +57,15 @@ const DAVE_KEY: &str = "7c852118294e51e653712a81e05800f419141751be58f605c371e151
 
 type TU = User<DefaultProvider, de_mls::app::DefaultConversationPlugins, H>;
 
-fn make(key: &str, cs: Arc<DefaultConsensusService>, cfg: ConversationConfig) -> (TU, H) {
+fn make(
+    key: &str,
+    cs: Arc<DefaultConsensusService>,
+    cfg: ConversationConfig,
+    steward_cfg: StewardListConfig,
+) -> (TU, H) {
     let h = H::new();
-    let u = User::with_private_key_and_config(key, cs, Arc::new(h.clone()), cfg).unwrap();
+    let mut u = User::with_private_key_and_config(key, cs, Arc::new(h.clone()), cfg).unwrap();
+    u.set_default_steward_config(steward_cfg);
     (u, h)
 }
 
@@ -93,15 +99,15 @@ async fn concurrent_joins_leave_joiners_with_empty_buffer() {
     let cfg = ConversationConfig {
         commit_inactivity_duration: Duration::from_millis(50),
         freeze_duration: Duration::from_millis(10),
-        protocol: StewardListConfig::new(1, 5).unwrap(),
         ..ConversationConfig::default()
     };
     let cs = Arc::new(DefaultConsensusService::new_with_max_sessions(100));
+    let steward_cfg = StewardListConfig::new(1, 5).unwrap();
 
-    let (mut alice, _ah) = make(ALICE_KEY, cs.clone(), cfg.clone());
-    let (mut bob, bh) = make(BOB_KEY, cs.clone(), cfg.clone());
-    let (mut charlie, ch) = make(CHARLIE_KEY, cs.clone(), cfg.clone());
-    let (mut dave, dh) = make(DAVE_KEY, cs.clone(), cfg.clone());
+    let (mut alice, _ah) = make(ALICE_KEY, cs.clone(), cfg.clone(), steward_cfg.clone());
+    let (mut bob, bh) = make(BOB_KEY, cs.clone(), cfg.clone(), steward_cfg.clone());
+    let (mut charlie, ch) = make(CHARLIE_KEY, cs.clone(), cfg.clone(), steward_cfg.clone());
+    let (mut dave, dh) = make(DAVE_KEY, cs.clone(), cfg.clone(), steward_cfg.clone());
 
     // Step 1: alice creates the group. Bob/Charlie/Dave register as joiners.
     alice.start_conversation(group, true).await.unwrap();

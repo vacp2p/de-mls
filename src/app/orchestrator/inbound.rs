@@ -344,7 +344,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             let mls = entry.handle.expect_mls()?;
             (entry.handle.conversation_members()?, mls.current_epoch()?)
         };
-        let local_default_peer_score = self.default_conversation_config.default_peer_score;
+        let local_default_peer_score = self.default_scoring_config.default_score;
         if !validate_conversation_sync(
             conversation_name,
             &sync,
