@@ -422,21 +422,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 None => return Ok(()),
             };
 
-            let timing = TimingConfig {
-                commit_inactivity_duration_ms: entry
-                    .handle
-                    .config
-                    .commit_inactivity_duration
-                    .as_millis() as u64,
-                freeze_duration_ms: entry.handle.config.freeze_duration.as_millis() as u64,
-                proposal_expiration_ms: entry.handle.config.proposal_expiration.as_millis() as u64,
-                consensus_timeout_ms: entry.handle.config.consensus_timeout.as_millis() as u64,
-                recovery_inactivity_duration_ms: entry
-                    .handle
-                    .config
-                    .recovery_inactivity_duration
-                    .as_millis() as u64,
-            };
+            let timing = TimingConfig::from(&entry.handle.config);
 
             // Filter ghosts and queued-removal targets so joiners don't
             // inherit stewards they would have to walk past on the very
