@@ -10,8 +10,8 @@ use tracing::info;
 use super::apply::apply_in_priority_order;
 use crate::{
     core::{
-        Conversation, CoreError, ProcessResult, ProposalId, ScoreOp, StewardListPlugin,
-        conversation::BufferedCommitCandidate,
+        Conversation, CoreError, FreezeBufferOutcome, ProcessResult, ProposalId, ScoreOp,
+        StewardListPlugin, conversation::BufferedCommitCandidate,
     },
     mls_crypto::{MlsMessageKind, MlsProposalOutput, MlsService},
     protos::de_mls::messages::v1::{
@@ -119,7 +119,7 @@ pub fn process_commit_candidate<M: MlsService>(
     }
 
     let epoch = mls.current_epoch()?;
-    let buffered = conversation.add_freeze_candidate(
+    let outcome = conversation.add_freeze_candidate(
         BufferedCommitCandidate {
             candidate_msg,
             commit_hash,
@@ -128,17 +128,23 @@ pub fn process_commit_candidate<M: MlsService>(
         },
         epoch,
     );
-    if !buffered {
-        return Ok(ProcessResult::Noop);
+    match outcome {
+        FreezeBufferOutcome::Buffered => {
+            info!(
+                conversation = %conversation_name,
+                epoch,
+                total_candidates = conversation.freeze_candidate_count(),
+                "remote candidate buffered"
+            );
+            Ok(ProcessResult::CommitCandidateReceived)
+        }
+        // All other outcomes are legitimate runtime states, not errors.
+        // Drop the candidate quietly; the round proceeds with whatever
+        // is already buffered.
+        FreezeBufferOutcome::SelectionLocked
+        | FreezeBufferOutcome::StaleEpoch
+        | FreezeBufferOutcome::DuplicateHash => Ok(ProcessResult::Noop),
     }
-
-    info!(
-        conversation = %conversation_name,
-        epoch,
-        total_candidates = conversation.freeze_candidate_count(),
-        "remote candidate buffered"
-    );
-    Ok(ProcessResult::CommitCandidateReceived)
 }
 
 /// Pick and apply a buffered candidate for the active freeze round.
@@ -164,12 +170,12 @@ pub fn finalize_freeze_round<M: MlsService>(
     let Some(candidates) = conversation.take_round_candidates(current_epoch) else {
         // Drop any local pending commit so the next MLS encrypt
         // doesn't trip on "pending proposal exists".
-        let _ = mls.discard_own_commit();
+        mls.discard_own_commit()?;
         return Ok(FreezeFinalizeResult::default());
     };
 
     if candidates.is_empty() {
-        let _ = mls.discard_own_commit();
+        mls.discard_own_commit()?;
         return Ok(FreezeFinalizeResult::default());
     }
 
@@ -177,7 +183,7 @@ pub fn finalize_freeze_round<M: MlsService>(
     let sorted = rank_applicable_candidates(candidates, &ctx, allow_subset_candidates);
 
     if sorted.is_empty() {
-        let _ = mls.discard_own_commit();
+        mls.discard_own_commit()?;
         return Ok(FreezeFinalizeResult::default());
     }
 

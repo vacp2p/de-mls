@@ -15,10 +15,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Broadcast our key-package on the welcome subtopic so the steward
     /// can invite us.
     pub async fn send_kp_message(&self, conversation_name: &str) -> Result<(), UserError> {
-        let _ = self
-            .lookup_entry(conversation_name)
+        if !self
+            .conversations
+            .read()
             .await
-            .ok_or(UserError::ConversationNotFound)?;
+            .contains_key(conversation_name)
+        {
+            return Err(UserError::ConversationNotFound);
+        }
         let key_package = self.generate_key_package()?;
         let packet = build_key_package_message(conversation_name, key_package, &self.app_id);
         self.handler.on_outbound(conversation_name, packet).await?;

@@ -141,7 +141,7 @@ pub(super) fn apply_in_priority_order<M: MlsService>(
     // merged or discarded along an incoming-wins path — leaving it
     // behind would break the next MLS encrypt.
     if !own_commit_discarded {
-        let _ = mls.discard_own_commit();
+        mls.discard_own_commit()?;
     }
     conversation.clear_freeze_round();
     Ok(FreezeFinalizeResult {

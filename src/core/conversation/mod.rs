@@ -22,8 +22,8 @@ pub use config::{
     DEFAULT_RECOVERY_INACTIVITY_DURATION, DEFAULT_VOTING_DELAY,
 };
 pub use conversation::{
-    BufferedCommitCandidate, Conversation, PendingUpdate, ProposalId, member_set,
-    self_leave_proposal_id, target_identity_of,
+    BufferedCommitCandidate, Conversation, FreezeBufferOutcome, PendingUpdate, ProposalId,
+    member_set, self_leave_proposal_id, target_identity_of,
 };
 pub use handle::ConversationHandle;
 pub use state_machine::{ConversationState, ConversationStateMachine, OperatingMode};

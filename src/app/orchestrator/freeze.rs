@@ -37,7 +37,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             info!(conversation = conversation_name, "pending join timed out");
             self.conversations.write().await.remove(conversation_name);
             self.cleanup_consensus_scope(conversation_name).await?;
-            let _ = self.handler.on_leave_conversation(conversation_name).await;
+            self.handler
+                .on_leave_conversation(conversation_name)
+                .await?;
             return Ok(false);
         }
 

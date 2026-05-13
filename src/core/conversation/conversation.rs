@@ -91,6 +91,24 @@ pub(crate) struct FreezeRound {
     pub candidates: Vec<BufferedCommitCandidate>,
 }
 
+/// Result of [`Conversation::add_freeze_candidate`]. Each non-`Buffered`
+/// variant is a legitimate runtime state, not an error: the round may be
+/// past the buffer phase, the caller may be on a stale epoch, or the
+/// commit hash may already be buffered (peer race / retransmit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FreezeBufferOutcome {
+    /// Candidate stored in the buffer for this epoch.
+    Buffered,
+    /// Selection has been finalized for this round; the buffer no longer
+    /// accepts candidates.
+    SelectionLocked,
+    /// The caller's `epoch` doesn't match the buffered round's epoch
+    /// (e.g. the local node hasn't merged the latest commit yet).
+    StaleEpoch,
+    /// A candidate with the same commit hash is already buffered.
+    DuplicateHash,
+}
+
 /// Per-conversation protocol state. Stewards batch commits; members vote.
 /// Construct with [`Conversation::new`].
 ///
@@ -392,17 +410,22 @@ impl Conversation {
         self.freeze_round = Some(self.build_freeze_round(epoch));
     }
 
-    /// Buffer a validated candidate for the active freeze round. Returns
-    /// `true` when accepted, `false` when ignored (locked round, stale
-    /// epoch, or duplicate commit hash).
-    pub fn add_freeze_candidate(&mut self, candidate: BufferedCommitCandidate, epoch: u64) -> bool {
+    /// Buffer a validated candidate for the active freeze round.
+    pub fn add_freeze_candidate(
+        &mut self,
+        candidate: BufferedCommitCandidate,
+        epoch: u64,
+    ) -> FreezeBufferOutcome {
         self.ensure_freeze_round(epoch);
         let Some(round) = self.freeze_round.as_mut() else {
-            return false;
+            return FreezeBufferOutcome::StaleEpoch;
         };
 
-        if round.epoch != epoch || round.selection_locked {
-            return false;
+        if round.epoch != epoch {
+            return FreezeBufferOutcome::StaleEpoch;
+        }
+        if round.selection_locked {
+            return FreezeBufferOutcome::SelectionLocked;
         }
 
         if round
@@ -410,11 +433,11 @@ impl Conversation {
             .iter()
             .any(|c| c.commit_hash == candidate.commit_hash)
         {
-            return false;
+            return FreezeBufferOutcome::DuplicateHash;
         }
 
         round.candidates.push(candidate);
-        true
+        FreezeBufferOutcome::Buffered
     }
 
     /// Mark the active freeze round as selection-locked.
