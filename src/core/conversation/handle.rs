@@ -1,7 +1,6 @@
 //! Per-conversation aggregate owned by the orchestrator: protocol state, MLS
 //! service, plug-ins, state machine, durable config, and operating mode.
-//! Pure data + protocol-function wrappers — no timers, no spawned tasks,
-//! no I/O. App-side wiring (phase timer, auto-vote handles) lives on
+//! App-side wiring (phase timer, auto-vote handles) lives on
 //! [`crate::app::SessionRunner`], which owns one `ConversationHandle` by value.
 
 use prost::Message;

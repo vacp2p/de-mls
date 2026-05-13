@@ -5,7 +5,7 @@
 //! [`crate::app::SessionRunner`] reads durations off the handle's config
 //! and passes them to this timer's elapsed-checks.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// What a freeze-timeout poll returned.
 #[derive(Debug, PartialEq)]
@@ -59,10 +59,9 @@ impl PhaseTimer {
         self.started_at
     }
 
-    /// `true` once `duration` has elapsed since the anchor was set;
-    /// `false` if no anchor is set. Caller is responsible for state
+    /// `false` when no anchor is set. Caller is responsible for state
     /// guarding and for choosing the right duration for the current phase.
-    pub fn elapsed_since_anchor(&self, duration: std::time::Duration) -> bool {
+    pub fn elapsed_since_anchor(&self, duration: Duration) -> bool {
         match self.started_at {
             Some(t) => Instant::now() >= t + duration,
             None => false,

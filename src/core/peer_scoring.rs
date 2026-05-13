@@ -142,7 +142,7 @@ pub struct ScoringMemberDiff {
     pub to_remove: Vec<Vec<u8>>,
 }
 
-/// Pure diff between a scoring table snapshot and an MLS member roster.
+/// Diff between a scoring table snapshot and an MLS member roster.
 /// Caller applies the diff to its own [`PeerScoringPlugin`].
 pub fn scoring_member_diff(scored: &[Vec<u8>], mls_members: &[Vec<u8>]) -> ScoringMemberDiff {
     let scored_set: HashSet<&[u8]> = scored.iter().map(Vec::as_slice).collect();
@@ -210,8 +210,7 @@ fn creator_penalty(ev: &ViolationEvidence) -> ScoreOp {
 /// Per-conversation peer-scoring plug-in. Mutating methods return any
 /// [`PeerScoringEvent`]s the call produced; the coordinator drains them
 /// at safe points and turns threshold crossings into protocol actions.
-/// The plug-in itself owns no I/O — storage backends and event
-/// publishing are caller concerns.
+/// Storage backends and event publishing are caller concerns.
 pub trait PeerScoringPlugin: Send + Sync + 'static {
     /// Start tracking a member at the plug-in's default score.
     ///

@@ -23,7 +23,6 @@ use crate::{
 /// The key package is supplied by the caller (typically via
 /// `OpenMlsService::generate_key_package`) so a joiner can publish a key
 /// package before any MLS service for the target conversation exists.
-/// package before any MLS service for the target conversation exists.
 pub fn build_key_package_message(
     conversation_name: &str,
     key_package: KeyPackageBytes,
@@ -63,9 +62,8 @@ pub(crate) fn build_invitation_packet(
 // ─────────────────────────── Consensus Proposal Building ───────────────────────────
 
 /// Build the consensus-library `CreateProposalRequest` for a
-/// `ConversationUpdateRequest`. Pure — no async, no I/O. The caller (app
-/// layer) submits the resulting request via
-/// `ProviderConsensus::create_proposal_with_config`.
+/// `ConversationUpdateRequest`. The caller (app layer) submits the
+/// resulting request via `ProviderConsensus::create_proposal_with_config`.
 pub fn build_create_proposal_request(
     request: &ConversationUpdateRequest,
     creator_id: &[u8],

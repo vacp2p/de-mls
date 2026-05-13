@@ -1,6 +1,6 @@
 //! Per-conversation protocol-queue state: approved/voting proposal queues,
 //! freeze-round candidate buffer, pending-update buffer, urgent-commit
-//! target, recovery-mode flag, ECP dedup. MLS crypto state and the
+//! target, ECP dedup. MLS crypto state, the operating mode, and the
 //! steward-list plug-in live alongside on `ConversationHandle`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -378,10 +378,8 @@ impl Conversation {
         }
     }
 
-    /// Ensure a freeze round exists for the given MLS epoch.
-    ///
-    /// If absent or stale, initializes one with the current approved proposal IDs.
-    /// The `epoch` parameter should be the current MLS epoch from `OpenMlsService::current_epoch()`.
+    /// Initialise a freeze round for `epoch` if none exists or the buffered
+    /// one is for a stale epoch.
     pub(crate) fn ensure_freeze_round(&mut self, epoch: u64) {
         if matches!(self.freeze_round, Some(ref round) if round.epoch == epoch) {
             return;
@@ -389,17 +387,14 @@ impl Conversation {
         self.freeze_round = Some(self.build_freeze_round(epoch));
     }
 
-    /// Start a new freeze round for the given MLS epoch.
-    ///
-    /// Existing round state is replaced.
+    /// Replace the active freeze round with a fresh one for `epoch`.
     pub fn start_freeze_round(&mut self, epoch: u64) {
         self.freeze_round = Some(self.build_freeze_round(epoch));
     }
 
-    /// Add a validated candidate to the active freeze round.
-    ///
-    /// Returns `true` if buffered, `false` if ignored (locked round or duplicate).
-    /// The `epoch` parameter should be the current MLS epoch from `OpenMlsService::current_epoch()`.
+    /// Buffer a validated candidate for the active freeze round. Returns
+    /// `true` when accepted, `false` when ignored (locked round, stale
+    /// epoch, or duplicate commit hash).
     pub fn add_freeze_candidate(&mut self, candidate: BufferedCommitCandidate, epoch: u64) -> bool {
         self.ensure_freeze_round(epoch);
         let Some(round) = self.freeze_round.as_mut() else {
@@ -423,7 +418,6 @@ impl Conversation {
     }
 
     /// Mark the active freeze round as selection-locked.
-    /// The `epoch` parameter should be the current MLS epoch from `OpenMlsService::current_epoch()`.
     pub(crate) fn lock_freeze_round_selection(&mut self, epoch: u64) {
         if let Some(round) = self.freeze_round.as_mut() {
             if round.epoch == epoch {
