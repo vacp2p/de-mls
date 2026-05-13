@@ -221,42 +221,35 @@ fn apply_incoming_candidate<M: MlsService>(
 ) -> Result<CandidateOutcome, CoreError> {
     let conversation_name = conversation.name().to_owned();
 
-    let (commit_sender, self_removed, commit_actions) = match stage_candidate(
-        mls,
-        &conversation_name,
-        &chosen.candidate_msg,
-        ctx,
-    )? {
-        StagingOutcome::Staged {
-            commit_sender,
-            self_removed,
-            commit_actions,
-        } => (commit_sender, self_removed, commit_actions),
-        StagingOutcome::Abort => {
-            // Wire-valid but MLS-invalid — penalize the author; the
-            // loop will try the next candidate.
-            mls.discard_staged_commit()?;
-            return Ok(CandidateOutcome::Drop(ScoreOp {
-                member_id: chosen.candidate_msg.steward_identity,
-                event: ScoreEvent::MisbehavingCommit,
-            }));
-        }
-        StagingOutcome::Violation(v) => {
-            mls.discard_staged_commit()?;
-            return Ok(CandidateOutcome::Drop(
-                v.target_score_op()
-                    .expect("staged-violation always has a target-side score"),
-            ));
-        }
-    };
+    let (commit_sender, self_removed, commit_actions) =
+        match stage_candidate(mls, &conversation_name, &chosen.candidate_msg, ctx)? {
+            StagingOutcome::Staged {
+                commit_sender,
+                self_removed,
+                commit_actions,
+            } => (commit_sender, self_removed, commit_actions),
+            StagingOutcome::Abort => {
+                // Wire-valid but MLS-invalid — penalize the author; the
+                // loop will try the next candidate.
+                mls.discard_staged_commit()?;
+                return Ok(CandidateOutcome::Drop(ScoreOp {
+                    member_id: chosen.candidate_msg.steward_identity,
+                    event: ScoreEvent::MisbehavingCommit,
+                }));
+            }
+            StagingOutcome::Violation(v) => {
+                mls.discard_staged_commit()?;
+                return Ok(CandidateOutcome::Drop(
+                    v.target_score_op()
+                        .expect("staged-violation always has a target-side score"),
+                ));
+            }
+        };
 
     // Commit sender must be on the steward list (RFC §"Commit validation service").
-    if let Some(violation) = check_commit_sender_authorized(
-        conversation,
-        steward,
-        &commit_sender,
-        ctx,
-    ) {
+    if let Some(violation) =
+        check_commit_sender_authorized(conversation, steward, &commit_sender, ctx)
+    {
         mls.discard_staged_commit()?;
         return Ok(CandidateOutcome::Drop(
             violation
@@ -266,12 +259,9 @@ fn apply_incoming_candidate<M: MlsService>(
     }
 
     // MLS actions must match the set we voted to approve.
-    if let Some(violation) = validate_commit_candidate(
-        conversation,
-        &commit_sender,
-        &commit_actions,
-        ctx,
-    )? {
+    if let Some(violation) =
+        validate_commit_candidate(conversation, &commit_sender, &commit_actions, ctx)?
+    {
         mls.discard_staged_commit()?;
         return Ok(CandidateOutcome::Drop(
             violation
@@ -398,8 +388,7 @@ fn validate_commit_candidate(
         .values()
         .filter_map(action_projection_from_request)
         .collect();
-    let mut actual: Vec<(u8, &[u8])> =
-        mls_actions.iter().map(action_projection_from_mls).collect();
+    let mut actual: Vec<(u8, &[u8])> = mls_actions.iter().map(action_projection_from_mls).collect();
     expected.sort();
     actual.sort();
 
@@ -422,9 +411,7 @@ fn validate_commit_candidate(
 
 /// `(kind_tag, identity)` projection of an approved voting request.
 /// Returns `None` for non-MLS payloads (emergency/election).
-fn action_projection_from_request(
-    req: &ConversationUpdateRequest,
-) -> Option<(u8, &[u8])> {
+fn action_projection_from_request(req: &ConversationUpdateRequest) -> Option<(u8, &[u8])> {
     match req.payload.as_ref()? {
         Payload::InviteMember(im) => Some((0, &im.identity)),
         Payload::RemoveMember(rm) => Some((1, &rm.identity)),

@@ -151,9 +151,15 @@ mod tests {
         let timing = TimingConfig::from(&original);
         let mut applied = ConversationConfig::default();
         applied.apply_timing(&timing);
-        assert_eq!(applied.commit_inactivity_duration, Duration::from_millis(100));
+        assert_eq!(
+            applied.commit_inactivity_duration,
+            Duration::from_millis(100)
+        );
         assert_eq!(applied.freeze_duration, Duration::from_millis(200));
-        assert_eq!(applied.recovery_inactivity_duration, Duration::from_millis(300));
+        assert_eq!(
+            applied.recovery_inactivity_duration,
+            Duration::from_millis(300)
+        );
         assert_eq!(applied.proposal_expiration, Duration::from_millis(400));
         assert_eq!(applied.consensus_timeout, Duration::from_millis(500));
     }
