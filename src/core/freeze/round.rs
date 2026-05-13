@@ -131,8 +131,8 @@ pub fn process_commit_candidate<M: MlsService>(
 /// Pick and apply a buffered candidate for the active freeze round.
 ///
 /// Three phases:
-/// 1. Snapshot the round context — approved-queue actions, current
-///    epoch, and the pre-merge live epoch steward.
+/// 1. Snapshot the pre-merge round state (counts, epoch, recovery flag,
+///    live epoch steward).
 /// 2. Filter candidates by action count and rank them by RFC priority.
 /// 3. Apply in priority order, falling back on the next candidate when
 ///    MLS staging rejects the current one.
