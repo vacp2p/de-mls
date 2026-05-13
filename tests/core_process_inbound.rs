@@ -806,7 +806,7 @@ fn test_group_sync_propagates_divergent_per_group_config() {
 
     let mut scoring = PeerScoringService::new(
         InMemoryPeerScoreStorage::new(),
-        de_mls::app::FixedScoringProvider::with_default_deltas(),
+        de_mls::core::default_score_deltas(),
         ScoringConfig {
             default_score: 100,
             threshold: 0,

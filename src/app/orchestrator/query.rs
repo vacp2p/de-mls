@@ -1,17 +1,15 @@
 //! Read-only queries over a conversation's state (UI and diagnostics).
 
 use crate::{
-    app::{ConversationPlugins, ConversationState, MemberRole, User, UserError},
-    core::{ConversationEventHandler, DeMlsProvider, PeerScoringPlugin, StewardListPlugin},
+    app::{ConversationState, MemberRole, User, UserError},
+    core::{ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin, StewardListPlugin},
     identity::format_wallet_address,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 
 use crate::mls_crypto::MlsService;
 
-impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 'static>
-    User<P, GP, H>
-{
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     pub async fn get_conversation_state(
         &self,
         conversation_name: &str,

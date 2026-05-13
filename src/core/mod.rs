@@ -6,31 +6,34 @@
 //! Integrators implement [`crate::core::ConversationEventHandler`] (transport
 //! + UI delivery) and feed inbound packets to [`crate::core::process_inbound`],
 //! then dispatch the returned [`crate::core::ProcessResult`].
-//! [`crate::core::DefaultProvider`] bundles in-memory backends for tests
+//! [`crate::core::DefaultConsensusPlugin`] bundles in-memory backends for tests
 //! and simple deployments.
 //!
 //! Submodules: `conversation` (per-conversation state, handle, state machine,
-//! config), `consensus` (pure consensus result application), `events`
+//! config), `consensus` (pure consensus result application),
+//! `consensus_plugin` ([`crate::core::ConsensusPlugin`] +
+//! [`crate::core::DefaultConsensusPlugin`]), `events`
 //! ([`crate::core::ConversationEventHandler`]), `freeze` (round selection
 //! + apply), `inbound` (app-subtopic packet routing), `peer_scoring`
-//! (scoring plug-in contract), `process_result`
+//! (scoring plug-in contract), `plugins`
+//! ([`crate::core::ConversationPluginsFactory`] bundle), `process_result`
 //! ([`crate::core::ProcessResult`]), `proposal_framing` (welcome-subtopic
 //! + consensus-library framing helpers), `proposal_kind`
-//! ([`crate::core::ProposalKind`] classifier), `provider`
-//! ([`crate::core::DeMlsProvider`] + [`crate::core::DefaultProvider`]),
-//! `steward_list` (steward-list plug-in).
+//! ([`crate::core::ProposalKind`] classifier), `steward_list`
+//! (steward-list plug-in).
 
 mod consensus;
+mod consensus_plugin;
 mod conversation;
 mod error;
 mod events;
 mod freeze;
 mod inbound;
 mod peer_scoring;
+mod plugins;
 mod process_result;
 mod proposal_framing;
 mod proposal_kind;
-mod provider;
 mod steward_list;
 
 // ── Core conversation operations ──
@@ -53,7 +56,7 @@ pub use consensus::{ConsensusApplyResult, apply_consensus_result};
 pub use peer_scoring::{
     DEFAULT_PEER_SCORE, DEFAULT_THRESHOLD_PEER_SCORE, PeerScoreStorage, PeerScoringEvent,
     PeerScoringPlugin, PeerScoringService, ScoreEvent, ScoreOp, ScoreSnapshot, ScoringConfig,
-    ScoringMemberDiff, ScoringProvider, emergency_score_ops, scoring_member_diff,
+    ScoringMemberDiff, default_score_deltas, emergency_score_ops, scoring_member_diff,
 };
 
 // ── Error type ──
@@ -71,8 +74,11 @@ pub use steward_list::{
     StewardListConfig, StewardListEvent, StewardListPlugin,
 };
 
-// ── Provider traits ──
-pub use provider::{DeMlsProvider, DefaultProvider, ProviderConsensus};
+// ── Consensus plug-in ──
+pub use consensus_plugin::{ConsensusPlugin, DefaultConsensusPlugin, PluginConsensus};
+
+// ── Per-conversation plug-in bundle ──
+pub use plugins::ConversationPluginsFactory;
 
 // ── Process results ──
 pub use process_result::ProcessResult;

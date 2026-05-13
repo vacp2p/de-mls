@@ -3,9 +3,9 @@
 use tracing::{error, info};
 
 use crate::{
-    app::{ConversationPlugins, ConversationState, FreezeTimeoutStatus, User, UserError},
+    app::{ConversationState, FreezeTimeoutStatus, User, UserError},
     core::{
-        ConversationEventHandler, DeMlsProvider, FreezeFinalizeResult, FreezeOutcome,
+        ConsensusPlugin, ConversationPluginsFactory, FreezeFinalizeResult, FreezeOutcome,
         PeerScoringPlugin, ScoreEvent, ScoreOp, StewardListPlugin,
     },
     ds::WELCOME_SUBTOPIC,
@@ -14,9 +14,7 @@ use crate::{
 
 use crate::app::orchestrator::has_downward_cross;
 
-impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 'static>
-    User<P, GP, H>
-{
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     pub async fn check_pending_join(&self, conversation_name: &str) -> Result<bool, UserError> {
         let (state, expired) = match self
             .with_entry(conversation_name, |entry| {

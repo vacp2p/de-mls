@@ -8,9 +8,9 @@ use tracing::info;
 
 use crate::{
     core::{
-        BufferedCommitCandidate, Conversation, ConversationConfig, ConversationState,
-        ConversationStateMachine, CoreError, FreezeFinalizeResult, OperatingMode,
-        PeerScoringPlugin, ProcessResult, ProposalKind, StewardListPlugin, compute_commit_hash,
+        BufferedCommitCandidate, Conversation, ConversationConfig, ConversationPluginsFactory,
+        ConversationState, ConversationStateMachine, CoreError, FreezeFinalizeResult,
+        OperatingMode, ProcessResult, ProposalKind, StewardListPlugin, compute_commit_hash,
         finalize_freeze_round, member_set, process_inbound,
     },
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
@@ -22,16 +22,18 @@ use crate::{
     },
 };
 
-/// Per-conversation aggregate. Fields with simple direct semantics
-/// (`conversation`, `state_machine`, `config`, `scoring`, `steward`) are
-/// exposed as fields; fields with attach/detach lifecycle (`mls`) or
-/// RFC-defined invariants (`operating_mode`) go through controlled accessors.
-pub struct ConversationHandle<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> {
+/// Per-conversation aggregate. Generic over a single [`ConversationPluginsFactory`]
+/// bundle so callsites name one type parameter instead of three. Fields
+/// with simple direct semantics (`conversation`, `state_machine`, `config`,
+/// `scoring`, `steward_list`) are exposed as fields; fields with
+/// attach/detach lifecycle (`mls`) or RFC-defined invariants
+/// (`operating_mode`) go through controlled accessors.
+pub struct ConversationHandle<CP: ConversationPluginsFactory> {
     pub(crate) conversation: Conversation,
     /// Per-conversation MLS service. `None` for joiners in `PendingJoin` who
     /// haven't accepted a welcome yet; once attached via
     /// [`Self::attach_mls`] it stays `Some` for the handle's lifetime.
-    mls: Option<M>,
+    mls: Option<CP::Mls>,
     /// Per-conversation state machine. The orchestrator updates this together
     /// with the phase timer so the two never drift.
     pub(crate) state_machine: ConversationStateMachine,
@@ -41,12 +43,12 @@ pub struct ConversationHandle<M: MlsService, Sc: PeerScoringPlugin, St: StewardL
     pub(crate) config: ConversationConfig,
     /// Per-conversation peer-score plug-in. Read by protocol decisions under
     /// the orchestrator's per-handle lock; no separate `Mutex` needed.
-    pub(crate) scoring: Sc,
+    pub(crate) scoring: CP::Scoring,
     /// Per-conversation steward-list plug-in. Holds the active list, retry
     /// counter, and election retry policy. Orchestrator composes
     /// eligibility from MLS members + `Conversation::is_pending_removal` and
     /// passes it on every position query.
-    pub(crate) steward_list: St,
+    pub(crate) steward_list: CP::StewardList,
     /// Authorization mode (RFC §Layer 3 Anti-Deadlock ECP). `Recovery` is
     /// set when an accepted Deadlock ECP relaxes the steward gate so any
     /// member may produce the next commit; cleared on accepted election.
@@ -55,16 +57,16 @@ pub struct ConversationHandle<M: MlsService, Sc: PeerScoringPlugin, St: StewardL
     operating_mode: OperatingMode,
 }
 
-impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHandle<M, Sc, St> {
+impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
     /// Build a fresh handle. Creator path passes `Some(mls)`; joiner
     /// path passes `None` and attaches later via [`Self::attach_mls`].
     pub(crate) fn new(
         conversation: Conversation,
-        mls: Option<M>,
+        mls: Option<CP::Mls>,
         state_machine: ConversationStateMachine,
         config: ConversationConfig,
-        scoring: Sc,
-        steward_list: St,
+        scoring: CP::Scoring,
+        steward_list: CP::StewardList,
     ) -> Self {
         Self {
             conversation,
@@ -101,7 +103,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
 
     /// Borrow the MLS service, if attached. `None` for joiners
     /// pre-welcome.
-    pub(crate) fn mls(&self) -> Option<&M> {
+    pub(crate) fn mls(&self) -> Option<&CP::Mls> {
         self.mls.as_ref()
     }
 
@@ -109,19 +111,19 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
     /// [`CoreError::MlsGroupNotInitialized`] when not attached. Use this
     /// in code paths where the service must be present so the `?` chain
     /// stays linear.
-    pub(crate) fn expect_mls(&self) -> Result<&M, CoreError> {
+    pub(crate) fn expect_mls(&self) -> Result<&CP::Mls, CoreError> {
         self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)
     }
 
     /// Attach an MLS service. Called by joiners after the welcome
     /// arrives. Caller is responsible for not double-attaching.
-    pub(crate) fn attach_mls(&mut self, mls: M) {
+    pub(crate) fn attach_mls(&mut self, mls: CP::Mls) {
         self.mls = Some(mls);
     }
 
     /// Drop the attached MLS service and return it. Used on conversation leave
     /// so the caller can run service-side cleanup (`mls.delete()`).
-    pub(crate) fn take_mls(&mut self) -> Option<M> {
+    pub(crate) fn take_mls(&mut self) -> Option<CP::Mls> {
         self.mls.take()
     }
 
@@ -316,11 +318,9 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_fixtures::{StubScoring, StubStewardList, UnusedMls};
+    use crate::test_fixtures::{StubPluginsFactory, StubScoring, StubStewardList, UnusedMls};
 
-    fn make_handle(
-        steward_list: StubStewardList,
-    ) -> ConversationHandle<UnusedMls, StubScoring, StubStewardList> {
+    fn make_handle(steward_list: StubStewardList) -> ConversationHandle<StubPluginsFactory> {
         ConversationHandle::new(
             Conversation::new("g"),
             Some(UnusedMls),

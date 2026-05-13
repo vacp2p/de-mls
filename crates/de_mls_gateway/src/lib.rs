@@ -18,7 +18,7 @@ use std::{
 
 use de_mls::{
     app::User,
-    core::DefaultProvider,
+    core::DefaultConsensusPlugin,
     ds::{DeliveryService, WakuDeliveryService},
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
@@ -46,11 +46,7 @@ pub use crate::bootstrap::{
 /// credentials live on `User` and are passed in at service construction.
 type UserRef = Arc<
     tokio::sync::RwLock<
-        User<
-            DefaultProvider,
-            de_mls::app::DefaultConversationPlugins,
-            GatewayEventHandler<WakuDeliveryService>,
-        >,
+        User<DefaultConsensusPlugin, de_mls::app::DefaultConversationPluginsFactory>,
     >,
 >;
 

@@ -8,9 +8,9 @@ use prost::Message;
 use tracing::{error, info};
 
 use crate::{
-    app::{ConversationPlugins, ConversationState, User, UserError},
+    app::{ConversationState, User, UserError},
     core::{
-        ConversationEventHandler, DeMlsProvider, PeerScoringPlugin, ProposalKind, ScoreOp,
+        ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin, ProposalKind, ScoreOp,
         StewardListPlugin, apply_consensus_result, emergency_score_ops, target_identity_of,
     },
     protos::de_mls::messages::v1::{
@@ -18,9 +18,7 @@ use crate::{
     },
 };
 
-impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 'static>
-    User<P, GP, H>
-{
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Entry point from the consensus service: decode the proposal, apply the
     /// result to the conversation, and dispatch to the correct follow-up handler
     /// (election-accepted / election-rejected / emergency-scored).

@@ -7,12 +7,12 @@ use tracing::info;
 
 use crate::{
     app::{
-        ConversationPlugins, ConversationState, PhaseTimer, ProposalParams, SessionRunner, User,
-        UserError, submit_self_leave_proposal,
+        ConversationState, PhaseTimer, ProposalParams, SessionRunner, User, UserError,
+        submit_self_leave_proposal,
     },
     core::{
-        Conversation, ConversationConfig, ConversationEventHandler, ConversationStateMachine,
-        DeMlsProvider, PeerScoringPlugin, StewardListPlugin, self_leave_proposal_id,
+        ConsensusPlugin, Conversation, ConversationConfig, ConversationPluginsFactory,
+        ConversationStateMachine, PeerScoringPlugin, StewardListPlugin, self_leave_proposal_id,
     },
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
@@ -20,9 +20,7 @@ use crate::{
     },
 };
 
-impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 'static>
-    User<P, GP, H>
-{
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     pub async fn start_conversation(
         &mut self,
         conversation_name: &str,
@@ -50,7 +48,9 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
 
         let self_identity_bytes = self.self_identity().to_vec();
         let (conversation, mls_opt, state_machine, phase_timer) = if is_creation {
-            let mls = self.plugins.create_mls(conversation_name.to_string())?;
+            let mls = self
+                .plugin_factory
+                .create_mls(conversation_name.to_string())?;
             let conversation = Conversation::new(conversation_name);
             let state_machine = ConversationStateMachine::new_as_member();
             (conversation, Some(mls), state_machine, PhaseTimer::new())
@@ -64,7 +64,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             (conversation, None, state_machine, phase_timer)
         };
 
-        let mut steward_list = self.plugins.make_steward_list(
+        let mut steward_list = self.plugin_factory.make_steward_list(
             conversation_name.as_bytes(),
             self.default_steward_list_config.clone(),
         );
@@ -76,7 +76,9 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 steward_list.install_list(0, std::slice::from_ref(&self_identity_bytes), 1, 0)?;
         }
 
-        let mut scoring = self.plugins.make_scoring(&self.default_scoring_config);
+        let mut scoring = self
+            .plugin_factory
+            .make_scoring(&self.default_scoring_config);
         // Joiners get tracked at `JoinedConversation` time, once members are known.
         if is_creation {
             // Creator is self at `default_score`; under standard config

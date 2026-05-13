@@ -18,11 +18,8 @@ use common::{
 
 /// Sync the scoring service's member list with the MLS group's actual members.
 /// Mirrors `User::sync_scoring_members`.
-fn sync_scoring_members<
-    S: de_mls::core::PeerScoreStorage + Send + Sync + 'static,
-    P: de_mls::core::ScoringProvider + Send + Sync + 'static,
->(
-    scoring: &mut PeerScoringService<S, P>,
+fn sync_scoring_members<S: de_mls::core::PeerScoreStorage + Send + Sync + 'static>(
+    scoring: &mut PeerScoringService<S>,
     mls: Option<&TestMls>,
 ) {
     let mls_members = mls.map(|m| m.members().unwrap()).unwrap_or_default();

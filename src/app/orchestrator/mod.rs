@@ -20,8 +20,9 @@ use tokio::sync::RwLock;
 use crate::{
     app::{SessionRunner, UserError},
     core::{
-        ConversationConfig, ConversationEventHandler, DeMlsProvider, DefaultProvider,
-        PeerScoringEvent, ProviderConsensus, ScoringConfig, StewardListConfig,
+        ConsensusPlugin, ConversationConfig, ConversationEventHandler, ConversationPluginsFactory,
+        DefaultConsensusPlugin, PeerScoringEvent, PluginConsensus, ScoringConfig,
+        StewardListConfig,
     },
     identity::{Identity, WalletIdentity},
     mls_crypto::{KeyPackageBytes, MemoryDeMlsStorage, MlsCredentials, MlsError},
@@ -38,8 +39,7 @@ mod query;
 mod steward;
 
 pub use plugins::{
-    ConversationPlugins, DefaultConversationPlugins, DefaultMlsService, DefaultPeerScoring,
-    DefaultStewardList,
+    DefaultConversationPluginsFactory, DefaultMlsService, DefaultPeerScoring, DefaultStewardList,
 };
 
 /// `true` iff `events` contains at least one downward threshold cross —
@@ -54,10 +54,9 @@ pub(crate) fn has_downward_cross(events: &[PeerScoringEvent]) -> bool {
 /// Per-user registry of conversation runners, with one outer lock for map
 /// CRUD and one inner lock per runner so writes on one conversation don't
 /// block reads on another.
-type ConversationRegistry<M, Sc, St> =
-    Arc<RwLock<HashMap<String, Arc<RwLock<SessionRunner<M, Sc, St>>>>>>;
+type ConversationRegistry<CP> = Arc<RwLock<HashMap<String, Arc<RwLock<SessionRunner<CP>>>>>>;
 
-pub struct User<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler> {
+pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// User-level identity, shared across every conversation this user is in.
     /// Source of truth for "who am I"; MLS state lives in each per-conversation
     /// service, and MLS credentials are captured by the plug-in bundle (built
@@ -67,18 +66,20 @@ pub struct User<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventH
     /// orchestrator method that needs the local identity bytes reads them
     /// without re-walking the `Identity` trait + allocating a fresh `Vec`.
     self_identity: Arc<[u8]>,
-    /// Per-user plug-in bundle: builds MLS services + key packages, plus
-    /// per-conversation scoring and steward-list plug-ins on demand.
-    plugins: Arc<GP>,
-    /// Outer lock: map CRUD (insert / remove / iterate names).
-    /// Inner per-runner lock: per-conversation reads and mutations. A write
-    /// on conversation A doesn't block reads on conversation B. Per-conversation
-    /// peer scoring lives inside the runner, so scoring access is guarded
-    /// by the same `RwLock` — no separate scoring lock.
-    conversations: ConversationRegistry<GP::Mls, GP::Scoring, GP::StewardList>,
-    consensus_service: Arc<ProviderConsensus<P>>,
+    /// Builds per-conversation plug-in instances (MLS service, scoring,
+    /// steward list) and the user-level key package on demand. One factory
+    /// per `User`; the instances it mints live on the corresponding
+    /// `SessionRunner` in `conversations` below.
+    plugin_factory: Arc<CP>,
+    /// Per-conversation `SessionRunner`s, each owning the plug-in instances
+    /// built by `plugin_factory` at conversation creation. Outer lock guards
+    /// map CRUD (insert / remove / iterate names); inner per-runner lock
+    /// guards per-conversation reads and mutations, so a write on
+    /// conversation A doesn't block reads on conversation B.
+    conversations: ConversationRegistry<CP>,
+    consensus_service: Arc<PluginConsensus<P>>,
     eth_signer: PrivateKeySigner,
-    handler: Arc<H>,
+    handler: Arc<dyn ConversationEventHandler>,
     default_conversation_config: ConversationConfig,
     /// Seed config for the per-conversation peer-scoring plug-in. Owned at
     /// the User level so every conversation starts from the same defaults;
@@ -93,14 +94,12 @@ pub struct User<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventH
     app_id: Vec<u8>,
 }
 
-impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler> Clone
-    for User<P, GP, H>
-{
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Clone for User<P, CP> {
     fn clone(&self) -> Self {
         Self {
             identity: Arc::clone(&self.identity),
             self_identity: Arc::clone(&self.self_identity),
-            plugins: Arc::clone(&self.plugins),
+            plugin_factory: Arc::clone(&self.plugin_factory),
             conversations: Arc::clone(&self.conversations),
             consensus_service: Arc::clone(&self.consensus_service),
             eth_signer: self.eth_signer.clone(),
@@ -113,22 +112,20 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler> Clo
     }
 }
 
-impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 'static>
-    User<P, GP, H>
-{
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     fn new_with_config(
         identity: Arc<dyn Identity>,
-        plugins: Arc<GP>,
-        consensus_service: Arc<ProviderConsensus<P>>,
+        plugin_factory: Arc<CP>,
+        consensus_service: Arc<PluginConsensus<P>>,
         eth_signer: PrivateKeySigner,
-        handler: Arc<H>,
+        handler: Arc<dyn ConversationEventHandler>,
         default_conversation_config: ConversationConfig,
     ) -> Self {
         let self_identity: Arc<[u8]> = Arc::from(identity.identity_bytes());
         Self {
             identity,
             self_identity,
-            plugins,
+            plugin_factory,
             conversations: Arc::new(RwLock::new(HashMap::new())),
             consensus_service,
             eth_signer,
@@ -161,7 +158,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
     pub(crate) async fn lookup_entry(
         &self,
         conversation_name: &str,
-    ) -> Option<Arc<RwLock<SessionRunner<GP::Mls, GP::Scoring, GP::StewardList>>>> {
+    ) -> Option<Arc<RwLock<SessionRunner<CP>>>> {
         self.conversations
             .read()
             .await
@@ -174,7 +171,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
     pub(crate) async fn with_entry<R>(
         &self,
         conversation_name: &str,
-        f: impl FnOnce(&SessionRunner<GP::Mls, GP::Scoring, GP::StewardList>) -> R,
+        f: impl FnOnce(&SessionRunner<CP>) -> R,
     ) -> Option<R> {
         let entry_arc = self.lookup_entry(conversation_name).await?;
         let entry = entry_arc.read().await;
@@ -199,7 +196,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
 
     /// Generate a single-use key package for our identity.
     pub(crate) fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
-        self.plugins.generate_key_package()
+        self.plugin_factory.generate_key_package()
     }
 
     /// Drop all proposals / votes / sessions for this conversation from the
@@ -216,14 +213,14 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
     }
 }
 
-// ─────────────────────────── DefaultProvider Convenience ───────────────────────────
+// ─────────────────────────── DefaultConsensusPlugin Convenience ───────────────────────────
 
-impl<H: ConversationEventHandler + 'static> User<DefaultProvider, DefaultConversationPlugins, H> {
-    /// Construct a `User` on [`DefaultProvider`] with the default config.
+impl User<DefaultConsensusPlugin, DefaultConversationPluginsFactory> {
+    /// Construct a `User` on [`DefaultConsensusPlugin`] with the default config.
     pub fn with_private_key(
         private_key: &str,
-        consensus_service: Arc<ProviderConsensus<DefaultProvider>>,
-        handler: Arc<H>,
+        consensus_service: Arc<PluginConsensus<DefaultConsensusPlugin>>,
+        handler: Arc<dyn ConversationEventHandler>,
     ) -> Result<Self, UserError> {
         Self::with_private_key_and_config(
             private_key,
@@ -233,11 +230,11 @@ impl<H: ConversationEventHandler + 'static> User<DefaultProvider, DefaultConvers
         )
     }
 
-    /// Construct a `User` on [`DefaultProvider`] with a custom config.
+    /// Construct a `User` on [`DefaultConsensusPlugin`] with a custom config.
     pub fn with_private_key_and_config(
         private_key: &str,
-        consensus_service: Arc<ProviderConsensus<DefaultProvider>>,
-        handler: Arc<H>,
+        consensus_service: Arc<PluginConsensus<DefaultConsensusPlugin>>,
+        handler: Arc<dyn ConversationEventHandler>,
         default_conversation_config: ConversationConfig,
     ) -> Result<Self, UserError> {
         let signer = PrivateKeySigner::from_str(private_key)?;
@@ -245,14 +242,14 @@ impl<H: ConversationEventHandler + 'static> User<DefaultProvider, DefaultConvers
 
         let identity: Arc<dyn Identity> = Arc::new(WalletIdentity::from_wallet(user_address));
         let credentials = Arc::new(MlsCredentials::from_identity(identity.as_ref())?);
-        let plugins = Arc::new(DefaultConversationPlugins {
+        let plugin_factory = Arc::new(DefaultConversationPluginsFactory {
             storage: Arc::new(MemoryDeMlsStorage::new()),
             credentials,
         });
 
         Ok(Self::new_with_config(
             identity,
-            plugins,
+            plugin_factory,
             consensus_service,
             signer,
             handler,
