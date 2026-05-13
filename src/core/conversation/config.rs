@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use crate::core::ProposalKind;
+use crate::protos::de_mls::messages::v1::TimingConfig;
 
 /// Wall-clock window the steward waits before batching approved proposals
 /// into a commit (RFC §Inactivity Timer #1, "Commit inactivity").
@@ -100,11 +101,68 @@ impl ConversationConfig {
             self.voting_delay
         }
     }
+
+    /// Overwrite the duration fields from a wire [`TimingConfig`]. Used on
+    /// the joiner side when applying `ConversationSync`. Non-timing fields
+    /// (`liveness_criteria_yes`, `pending_update_max_epochs`) are not in
+    /// `TimingConfig` and stay untouched.
+    pub fn apply_timing(&mut self, timing: &TimingConfig) {
+        self.commit_inactivity_duration =
+            Duration::from_millis(timing.commit_inactivity_duration_ms);
+        self.freeze_duration = Duration::from_millis(timing.freeze_duration_ms);
+        self.recovery_inactivity_duration =
+            Duration::from_millis(timing.recovery_inactivity_duration_ms);
+        self.proposal_expiration = Duration::from_millis(timing.proposal_expiration_ms);
+        self.consensus_timeout = Duration::from_millis(timing.consensus_timeout_ms);
+    }
+}
+
+/// Build the wire [`TimingConfig`] from a [`ConversationConfig`]. Used on
+/// the steward side when sending `ConversationSync` to joiners.
+impl From<&ConversationConfig> for TimingConfig {
+    fn from(config: &ConversationConfig) -> Self {
+        Self {
+            commit_inactivity_duration_ms: config.commit_inactivity_duration.as_millis() as u64,
+            freeze_duration_ms: config.freeze_duration.as_millis() as u64,
+            recovery_inactivity_duration_ms: config.recovery_inactivity_duration.as_millis() as u64,
+            proposal_expiration_ms: config.proposal_expiration.as_millis() as u64,
+            consensus_timeout_ms: config.consensus_timeout.as_millis() as u64,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `TimingConfig` ↔ `ConversationConfig` round-trip preserves all
+    /// five duration fields. Distinct values per field catch accidental
+    /// swaps in either direction.
+    #[test]
+    fn timing_config_round_trip() {
+        let original = ConversationConfig {
+            commit_inactivity_duration: Duration::from_millis(100),
+            freeze_duration: Duration::from_millis(200),
+            recovery_inactivity_duration: Duration::from_millis(300),
+            proposal_expiration: Duration::from_millis(400),
+            consensus_timeout: Duration::from_millis(500),
+            ..ConversationConfig::default()
+        };
+        let timing = TimingConfig::from(&original);
+        let mut applied = ConversationConfig::default();
+        applied.apply_timing(&timing);
+        assert_eq!(
+            applied.commit_inactivity_duration,
+            Duration::from_millis(100)
+        );
+        assert_eq!(applied.freeze_duration, Duration::from_millis(200));
+        assert_eq!(
+            applied.recovery_inactivity_duration,
+            Duration::from_millis(300)
+        );
+        assert_eq!(applied.proposal_expiration, Duration::from_millis(400));
+        assert_eq!(applied.consensus_timeout, Duration::from_millis(500));
+    }
 
     /// Steward-election proposals get the shorter `election_voting_delay`;
     /// other kinds get `voting_delay`.
