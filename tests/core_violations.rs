@@ -59,7 +59,7 @@ fn test_emergency_in_approved_queue_returns_error() {
     let result = build_commit_candidate(
         &mut group.group,
         &group.mls,
-        &group.steward,
+        &group.steward_list,
         false,
         &group.identity,
         b"test-app-id",
@@ -191,7 +191,7 @@ fn test_emergency_mixed_with_regular_returns_error() {
     let result = build_commit_candidate(
         &mut steward_handle.group,
         &steward_handle.mls,
-        &steward_handle.steward,
+        &steward_handle.steward_list,
         false,
         &steward_handle.identity,
         b"test-app-id",
@@ -247,7 +247,7 @@ fn test_duplicate_batch_returns_noop() {
     let packets = build_commit_candidate(
         &mut steward_handle.group,
         &steward_handle.mls,
-        &steward_handle.steward,
+        &steward_handle.steward_list,
         false,
         &steward_handle.identity,
         b"test-app-id",
@@ -356,7 +356,7 @@ fn test_candidate_ignored_without_freeze_round() {
     let packets = build_commit_candidate(
         &mut steward_handle.group,
         &steward_handle.mls,
-        &steward_handle.steward,
+        &steward_handle.steward_list,
         false,
         &steward_handle.identity,
         b"test-app-id",
@@ -424,7 +424,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     let packets = build_commit_candidate(
         &mut steward_handle.group,
         &steward_handle.mls,
-        &steward_handle.steward,
+        &steward_handle.steward_list,
         false,
         &steward_handle.identity,
         b"test-app-id",
@@ -458,7 +458,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     let finalize = finalize_freeze_round(
         &mut joiner.group,
         joiner.mls.as_ref().unwrap(),
-        &joiner.steward,
+        &joiner.steward_list,
         false,
         false,
         b"test-app-id",
@@ -477,7 +477,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     // After finalization, verify the steward list on the creator group
     // still contains the steward (the list is the source of truth).
     let steward_list = steward_handle
-        .steward
+        .steward_list
         .current_list()
         .expect("steward should have a list");
     assert!(
@@ -486,13 +486,13 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     );
 }
 
-/// Test: when a backup steward commits in place of the live epoch steward,
+/// Test: when a backup steward commits in place of the live epoch steward_list,
 /// finalize emits `CensorshipInactivity` against the absent steward.
 ///
 /// Build a two-steward list over Alice + Bob. If hash rotation places the
 /// OTHER steward at `epoch_steward(epoch)`, Bob's successful commit from
 /// his own node pins the absent steward with `CensorshipInactivity`. If
-/// rotation makes Bob himself the live epoch steward, the self-accusation
+/// rotation makes Bob himself the live epoch steward_list, the self-accusation
 /// skip keeps the score-op list free of `CensorshipInactivity`.
 #[test]
 fn test_backup_commit_scores_absent_steward() {
@@ -514,10 +514,12 @@ fn test_backup_commit_scores_absent_steward() {
     let epoch = alice_group.mls.current_epoch().unwrap();
     let members = vec![alice_id.clone(), bob_id.clone()];
     alice_group
-        .steward
+        .steward_list
         .install_list(epoch, &members, 2, 0)
         .unwrap();
-    bob.steward.install_list(epoch, &members, 2, 0).unwrap();
+    bob.steward_list
+        .install_list(epoch, &members, 2, 0)
+        .unwrap();
 
     // Produce an approved proposal (invite Charlie) on both sides.
     let charlie = setup_joiner(conversation_name, charlie_hex);
@@ -541,7 +543,7 @@ fn test_backup_commit_scores_absent_steward() {
     let _ = build_commit_candidate(
         &mut bob.group,
         bob.mls.as_ref().unwrap(),
-        &bob.steward,
+        &bob.steward_list,
         false,
         bob.identity.identity_bytes(),
         b"test-app-id",
@@ -549,7 +551,7 @@ fn test_backup_commit_scores_absent_steward() {
     .unwrap();
     let live_epoch_steward = {
         let eligible = bob.group.steward_eligibility(&members);
-        bob.steward
+        bob.steward_list
             .epoch_steward(epoch, &eligible)
             .expect("both stewards are eligible")
             .to_vec()
@@ -559,7 +561,7 @@ fn test_backup_commit_scores_absent_steward() {
     let result = finalize_freeze_round(
         &mut bob.group,
         bob.mls.as_ref().unwrap(),
-        &bob.steward,
+        &bob.steward_list,
         false,
         false,
         b"test-app-id",
@@ -605,7 +607,7 @@ fn test_backup_commit_scores_absent_steward() {
             !events
                 .iter()
                 .any(|(_, e)| *e == ScoreEvent::CensorshipInactivity),
-            "No CensorshipInactivity expected when self is the live epoch steward, got {events:?}",
+            "No CensorshipInactivity expected when self is the live epoch steward_list, got {events:?}",
         );
     }
 }
@@ -670,7 +672,7 @@ fn test_forged_steward_identity_scores_mls_sender() {
     let packets = build_commit_candidate(
         &mut steward_handle.group,
         &steward_handle.mls,
-        &steward_handle.steward,
+        &steward_handle.steward_list,
         false,
         &steward_handle.identity,
         b"test-app-id",
@@ -682,7 +684,7 @@ fn test_forged_steward_identity_scores_mls_sender() {
         .expect("Expected batch proposals packet");
 
     // Forge `steward_identity` to impersonate a different identity. The
-    // MLS commit message is still signed by the real steward, so staging
+    // MLS commit message is still signed by the real steward_list, so staging
     // succeeds and the cross-check fires.
     let mut app_msg = AppMessage::decode(batch_packet.payload.as_slice()).unwrap();
     let real_steward_id = steward_handle.self_identity().to_vec();
@@ -717,7 +719,7 @@ fn test_forged_steward_identity_scores_mls_sender() {
     let finalize = finalize_freeze_round(
         &mut joiner.group,
         joiner.mls.as_ref().unwrap(),
-        &joiner.steward,
+        &joiner.steward_list,
         false,
         false,
         b"test-app-id",
@@ -767,7 +769,7 @@ fn test_no_valid_candidate_triggers_no_candidate() {
     let finalize = finalize_freeze_round(
         &mut group.group,
         &group.mls,
-        &group.steward,
+        &group.steward_list,
         false,
         false,
         b"test-app-id",

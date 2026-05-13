@@ -143,12 +143,12 @@ impl ConversationEventHandler for MockHandler {
 pub fn build_commit_candidate(
     group: &mut Conversation,
     mls: &TestMls,
-    steward: &DeterministicStewardList,
+    steward_list: &DeterministicStewardList,
     in_recovery: bool,
     self_identity: &[u8],
     app_id: &[u8],
 ) -> Result<Option<OutboundPacket>, CoreError> {
-    if !steward.is_steward(self_identity) && !in_recovery {
+    if !steward_list.is_steward(self_identity) && !in_recovery {
         return Err(CoreError::NotASteward);
     }
     if group.approved_proposals().is_empty() {
@@ -260,7 +260,7 @@ pub fn build_commit_candidate(
 
 // ─────────────────────────── MLS + group setup ───────────────────────────
 
-pub fn default_steward_config() -> StewardListConfig {
+pub fn default_steward_list_config() -> StewardListConfig {
     StewardListConfig::new(1, 5).unwrap()
 }
 
@@ -361,7 +361,7 @@ pub fn process_inbound_compat(
 pub struct StewardHandle {
     pub group: Conversation,
     pub mls: TestMls,
-    pub steward: DeterministicStewardList,
+    pub steward_list: DeterministicStewardList,
     pub identity: Vec<u8>,
     pub liveness_criteria_yes: bool,
     pub pending_update_max_epochs: u32,
@@ -395,7 +395,7 @@ impl std::ops::DerefMut for StewardHandle {
 }
 
 pub fn setup_steward(conversation_name: &str, wallet_hex: &str) -> StewardHandle {
-    setup_steward_with_config(conversation_name, wallet_hex, default_steward_config())
+    setup_steward_with_config(conversation_name, wallet_hex, default_steward_list_config())
 }
 
 pub fn setup_steward_with_config(
@@ -411,16 +411,16 @@ pub fn setup_steward_with_config(
     )
     .unwrap();
     let identity_bytes = identity.identity_bytes().to_vec();
-    let group = Conversation::create(conversation_name);
-    let mut steward =
+    let group = Conversation::new(conversation_name);
+    let mut steward_list =
         DeterministicStewardList::empty(conversation_name.as_bytes().to_vec(), config);
-    let _events = steward
+    let _events = steward_list
         .install_list(0, std::slice::from_ref(&identity_bytes), 1, 0)
         .expect("bootstrap list install");
     StewardHandle {
         group,
         mls,
-        steward,
+        steward_list,
         identity: identity_bytes,
         liveness_criteria_yes: de_mls::core::DEFAULT_LIVENESS_CRITERIA_YES,
         pending_update_max_epochs: de_mls::core::DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
@@ -438,7 +438,7 @@ pub struct JoinerHandle {
     pub storage: Arc<MemoryDeMlsStorage>,
     pub group: Conversation,
     pub mls: Option<TestMls>,
-    pub steward: DeterministicStewardList,
+    pub steward_list: DeterministicStewardList,
     pub kp_packet: OutboundPacket,
     pub liveness_criteria_yes: bool,
     pub pending_update_max_epochs: u32,
@@ -485,7 +485,7 @@ impl JoinerHandle {
 }
 
 pub fn setup_joiner(conversation_name: &str, wallet_hex: &str) -> JoinerHandle {
-    setup_joiner_with_config(conversation_name, wallet_hex, default_steward_config())
+    setup_joiner_with_config(conversation_name, wallet_hex, default_steward_list_config())
 }
 
 pub fn setup_joiner_with_config(
@@ -494,8 +494,9 @@ pub fn setup_joiner_with_config(
     config: StewardListConfig,
 ) -> JoinerHandle {
     let (identity, credentials, storage) = setup_identity_storage(wallet_hex);
-    let group = Conversation::prepare_to_join(conversation_name);
-    let steward = DeterministicStewardList::empty(conversation_name.as_bytes().to_vec(), config);
+    let group = Conversation::new(conversation_name);
+    let steward_list =
+        DeterministicStewardList::empty(conversation_name.as_bytes().to_vec(), config);
     let key_package =
         OpenMlsService::<Arc<MemoryDeMlsStorage>>::generate_key_package(&storage, &credentials)
             .unwrap();
@@ -506,7 +507,7 @@ pub fn setup_joiner_with_config(
         storage,
         group,
         mls: None,
-        steward,
+        steward_list,
         kp_packet,
         liveness_criteria_yes: de_mls::core::DEFAULT_LIVENESS_CRITERIA_YES,
         pending_update_max_epochs: de_mls::core::DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
@@ -559,7 +560,7 @@ pub fn steward_add_joiner(
     let packets = build_commit_candidate(
         &mut steward_handle.group,
         &steward_handle.mls,
-        &steward_handle.steward,
+        &steward_handle.steward_list,
         steward_handle.operating_mode == OperatingMode::Recovery,
         &self_id,
         b"test-app-id",
@@ -569,7 +570,7 @@ pub fn steward_add_joiner(
     let finalize = finalize_freeze_round(
         &mut steward_handle.group,
         &steward_handle.mls,
-        &steward_handle.steward,
+        &steward_handle.steward_list,
         steward_handle.operating_mode == OperatingMode::Recovery,
         false,
         b"test-app-id",

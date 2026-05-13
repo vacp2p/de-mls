@@ -80,12 +80,12 @@ impl MlsService for UnusedMls {
 }
 
 /// Steward plug-in with controllable `is_steward`. Other methods panic.
-pub(crate) struct StubSteward {
+pub(crate) struct StubStewardList {
     is_steward: bool,
     config: StewardListConfig,
 }
 
-impl StubSteward {
+impl StubStewardList {
     pub(crate) fn member() -> Self {
         Self {
             is_steward: false,
@@ -100,7 +100,7 @@ impl StubSteward {
     }
 }
 
-impl StewardListPlugin for StubSteward {
+impl StewardListPlugin for StubStewardList {
     fn config(&self) -> &StewardListConfig {
         &self.config
     }
@@ -127,9 +127,6 @@ impl StewardListPlugin for StubSteward {
         unreachable!()
     }
     fn epoch_steward(&self, _: u64, _: &dyn Fn(&[u8]) -> bool) -> Option<&[u8]> {
-        unreachable!()
-    }
-    fn backup_steward(&self, _: u64, _: &dyn Fn(&[u8]) -> bool) -> Option<&[u8]> {
         unreachable!()
     }
     fn epoch_and_backup(
@@ -200,9 +197,6 @@ impl PeerScoringPlugin for StubScoring {
         unreachable!()
     }
     fn apply_op(&mut self, _: &ScoreOp) -> Vec<PeerScoringEvent> {
-        unreachable!()
-    }
-    fn apply_ops(&mut self, _: &[ScoreOp]) -> Vec<PeerScoringEvent> {
         unreachable!()
     }
     fn apply_snapshot(&mut self, _: &ScoreSnapshot) -> Vec<PeerScoringEvent> {

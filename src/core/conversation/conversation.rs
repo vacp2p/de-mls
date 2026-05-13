@@ -92,7 +92,7 @@ pub(crate) struct FreezeRound {
 }
 
 /// Per-conversation protocol state. Stewards batch commits; members vote.
-/// Construct with [`Conversation::create`] or [`Conversation::prepare_to_join`].
+/// Construct with [`Conversation::new`].
 ///
 /// Proposal-queue and freeze-round bookkeeping.
 pub struct Conversation {
@@ -130,7 +130,7 @@ pub struct Conversation {
 }
 
 impl Conversation {
-    fn new_base(conversation_name: &str) -> Self {
+    pub fn new(conversation_name: &str) -> Self {
         Self {
             conversation_name: conversation_name.to_string(),
             approved_proposals: HashMap::new(),
@@ -152,20 +152,6 @@ impl Conversation {
 
     pub(crate) fn mark_consensus_outcome_applied(&mut self, proposal_id: ProposalId) {
         self.resolved_proposals.record(proposal_id);
-    }
-
-    /// Build a joiner-side handle for an existing conversation. The MLS service
-    /// is held on `ConversationHandle`; the lifecycle layer attaches it via
-    /// `entry.attach_mls(...)` once the welcome arrives.
-    pub fn prepare_to_join(conversation_name: &str) -> Self {
-        Self::new_base(conversation_name)
-    }
-
-    /// Build a creator-side handle. The steward list and MLS service
-    /// are owned by `ConversationHandle`; this constructor only initializes the
-    /// proposal-queue and freeze-round state.
-    pub fn create(conversation_name: &str) -> Self {
-        Self::new_base(conversation_name)
     }
 
     pub fn name(&self) -> &str {
@@ -693,7 +679,7 @@ mod tests {
 
     #[test]
     fn test_reject_all_approved_preserves_self_leave_entry() {
-        let mut conversation = Conversation::create("test-conversation");
+        let mut conversation = Conversation::new("test-conversation");
 
         let leaver = member(2);
         insert_self_leave(&mut conversation, &leaver);
@@ -721,7 +707,7 @@ mod tests {
 
     #[test]
     fn test_prune_clears_self_leave_entry_when_member_gone() {
-        let mut conversation = Conversation::create("test-conversation");
+        let mut conversation = Conversation::new("test-conversation");
 
         let leaver = member(2);
         insert_self_leave(&mut conversation, &leaver);
@@ -774,7 +760,7 @@ mod tests {
 
     #[test]
     fn mark_consensus_outcome_persists_in_resolved_cache() {
-        let mut conversation = Conversation::create("g");
+        let mut conversation = Conversation::new("g");
         assert!(!conversation.is_consensus_outcome_applied(42));
         conversation.mark_consensus_outcome_applied(42);
         assert!(conversation.is_consensus_outcome_applied(42));
@@ -799,7 +785,7 @@ mod tests {
     /// source; Add proposals are dropped.
     #[test]
     fn test_reject_all_approved_preserves_all_remove_member() {
-        let mut conversation = Conversation::create("test-conversation");
+        let mut conversation = Conversation::new("test-conversation");
 
         let ban_id: ProposalId = 0x1111_2222;
         let ecp_id: ProposalId = 0x3333_4444;
@@ -828,7 +814,7 @@ mod tests {
     /// `approved_order` is FIFO regardless of proposal-id ordering.
     #[test]
     fn test_approved_order_preserves_fifo_across_mutations() {
-        let mut conversation = Conversation::create("g");
+        let mut conversation = Conversation::new("g");
 
         insert_remove_member(&mut conversation, &member(2), 500);
         insert_remove_member(&mut conversation, &member(3), 100);
@@ -848,7 +834,7 @@ mod tests {
 
     #[test]
     fn test_urgent_commit_target_set_take_clears() {
-        let mut conversation = Conversation::create("g");
+        let mut conversation = Conversation::new("g");
         assert!(conversation.urgent_commit_target().is_none());
 
         let target = member(7);
@@ -862,7 +848,7 @@ mod tests {
 
     #[test]
     fn test_drop_approved_removals_for_target() {
-        let mut conversation = Conversation::create("g");
+        let mut conversation = Conversation::new("g");
         let victim = member(7);
         let bystander = member(9);
 
@@ -896,7 +882,7 @@ mod tests {
     /// `first_seen_epoch < cutoff` are dropped.
     #[test]
     fn test_expire_pending_updates_drops_entries_older_than_max_age() {
-        let mut conversation = Conversation::create("g");
+        let mut conversation = Conversation::new("g");
         let stale = member(7);
         let fresh = member(9);
 
@@ -916,7 +902,7 @@ mod tests {
     /// boundary case a tightened sync hits when shrinking the window.
     #[test]
     fn test_expire_pending_updates_max_age_zero_keeps_only_current_epoch() {
-        let mut conversation = Conversation::create("g");
+        let mut conversation = Conversation::new("g");
         let prior = member(7);
         let current = member(9);
 

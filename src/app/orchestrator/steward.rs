@@ -62,7 +62,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         let mls = entry.handle.expect_mls()?;
         let epoch = mls.current_epoch()?;
         let members = entry.handle.conversation_members()?;
-        let _events = entry.handle.steward.maybe_auto_fill(epoch, &members)?;
+        let _events = entry.handle.steward_list.maybe_auto_fill(epoch, &members)?;
         Ok(())
     }
 
@@ -115,7 +115,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 candidate_pool.iter().map(Vec::as_slice).collect();
             let eligible = |c: &[u8]| pool_set.contains(c);
 
-            match entry.handle.steward.propose_election(
+            match entry.handle.steward_list.propose_election(
                 epoch,
                 &candidate_pool,
                 self_identity,
@@ -190,7 +190,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             let conversation_ref = &entry.handle.conversation;
             let authorized = entry
                 .handle
-                .steward
+                .steward_list
                 .election_proposer(&|c: &[u8]| {
                     mls_set.contains(c) && !conversation_ref.is_pending_removal(c)
                 })
@@ -256,13 +256,13 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         let mut entry = entry_arc.write().await;
         let sn = entry
             .handle
-            .steward
+            .steward_list
             .config()
             .compute_list_size(members.len());
         // Test/admin regenerate — no election, no retry seed.
         let _events = entry
             .handle
-            .steward
+            .steward_list
             .install_list(current_epoch, &members, sn, 0)?;
         Ok(())
     }
@@ -332,7 +332,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             let eligible = entry.handle.conversation.steward_eligibility(&members);
             let is_live = entry
                 .handle
-                .steward
+                .steward_list
                 .epoch_steward(current_epoch, &eligible)
                 .is_some_and(|es| es == self_identity);
             if !is_live {
@@ -419,7 +419,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 })
                 .collect();
 
-            let list = match entry.handle.steward.current_list() {
+            let list = match entry.handle.steward_list.current_list() {
                 Some(l) => l,
                 None => return Ok(()),
             };
@@ -446,7 +446,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             let mls = entry.handle.expect_mls()?;
             let mls_members = entry.handle.conversation_members()?;
             let eligible = entry.handle.conversation.steward_eligibility(&mls_members);
-            let steward_members = entry.handle.steward.steward_members(&eligible);
+            let steward_members = entry.handle.steward_list.steward_members(&eligible);
 
             // `retry_round` is the seed that produced the *stored* list —
             // a frozen tag on `StewardList`, not the plug-in's dynamic
@@ -457,11 +457,11 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 election_epoch: list.election_epoch(),
                 sn_min: list.config().sn_min as u32,
                 sn_max: list.config().sn_max as u32,
-                allow_subset_candidates: entry.handle.steward.config().allow_subset_candidates,
+                allow_subset_candidates: entry.handle.steward_list.config().allow_subset_candidates,
                 peer_scores: scores,
                 timing: Some(timing),
                 retry_round: list.retry_round(),
-                max_reelection_attempts: entry.handle.steward.max_retries(),
+                max_reelection_attempts: entry.handle.steward_list.max_retries(),
                 liveness_criteria_yes: entry.handle.config.liveness_criteria_yes,
                 threshold_peer_score: entry.handle.scoring.threshold(),
                 pending_update_max_epochs: entry.handle.config.pending_update_max_epochs,
@@ -496,7 +496,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         let (is_steward, epoch, to_remove): (bool, u64, Vec<(Vec<u8>, i64)>) = {
             let mut entry = entry_arc.write().await;
             let mls = entry.handle.expect_mls()?;
-            let is_steward = entry.handle.steward.is_steward(self_id);
+            let is_steward = entry.handle.steward_list.is_steward(self_id);
             let epoch = mls.current_epoch()?;
             if !is_steward {
                 return Ok(());

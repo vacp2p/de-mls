@@ -107,8 +107,14 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         }
 
         if consensus_apply.force_freezing {
-            self.force_freezing_for_urgent_commit(conversation_name)
-                .await;
+            // Bypass the inactivity timer so the urgent commit fires now.
+            let event = match self.lookup_entry(conversation_name).await {
+                Some(entry_arc) => entry_arc.write().await.force_freezing(),
+                None => None,
+            };
+            if let Some(event) = event {
+                self.handler.on_phase_change(conversation_name, event).await;
+            }
         }
 
         if let Some(target) = &consensus_apply.queued_remove_target {
@@ -137,23 +143,12 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         Ok(())
     }
 
-    /// Bypass the inactivity timer so the urgent commit fires now.
-    async fn force_freezing_for_urgent_commit(&self, conversation_name: &str) {
-        let event = match self.lookup_entry(conversation_name).await {
-            Some(entry_arc) => entry_arc.write().await.force_freezing(),
-            None => None,
-        };
-        if let Some(event) = event {
-            self.handler.on_phase_change(conversation_name, event).await;
-        }
-    }
-
     /// When the removal target is a current steward, fire a fresh election
     /// in parallel so the next epoch keeps a healthy ES + BS.
     async fn refresh_stewards_after_removal(&self, conversation_name: &str, target: &[u8]) {
         let target_was_steward = self
             .with_entry(conversation_name, |entry| {
-                entry.handle.steward.is_steward(target)
+                entry.handle.steward_list.is_steward(target)
             })
             .await
             .unwrap_or(false);
@@ -191,7 +186,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             // Election proposals carry the candidate pool implicitly:
             // `proposed_stewards` is the full set the proposer sorted, so
             // `candidate_pool == proposed_stewards` for validation.
-            entry.handle.steward.validate_proposed(
+            entry.handle.steward_list.validate_proposed(
                 &election.proposed_stewards,
                 election.election_epoch,
                 &election.proposed_stewards,
@@ -208,7 +203,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
 
         let resumed_from_reelection = {
             let mut entry = entry_arc.write().await;
-            let _events = entry.handle.steward.install_list(
+            let _events = entry.handle.steward_list.install_list(
                 election.election_epoch,
                 &election.proposed_stewards,
                 election.proposed_stewards.len(),
@@ -244,10 +239,10 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         let (round, max) = match self.lookup_entry(conversation_name).await {
             Some(entry_arc) => {
                 let mut entry = entry_arc.write().await;
-                let _events = entry.handle.steward.bump_retry();
+                let _events = entry.handle.steward_list.bump_retry();
                 (
-                    entry.handle.steward.retry_round(),
-                    entry.handle.steward.max_retries(),
+                    entry.handle.steward_list.retry_round(),
+                    entry.handle.steward_list.max_retries(),
                 )
             }
             None => return,

@@ -18,13 +18,14 @@ use crate::{
 };
 
 /// Per-conversation plug-in bundle. One trait carries the three plug-in
-/// types (`Mls`, `Scoring`, `Steward`) plus the construction methods for
-/// each. Identity is intentionally **not** part of this bundle — it lives
-/// parallel to the conversation registry as `Arc<dyn Identity>` on `User`.
+/// types (`Mls`, `Scoring`, `StewardList`) plus the construction methods
+/// for each. Identity is intentionally **not** part of this bundle — it
+/// lives parallel to the conversation registry as `Arc<dyn Identity>` on
+/// `User`.
 pub trait ConversationPlugins: Send + Sync + 'static {
     type Mls: MlsService;
     type Scoring: PeerScoringPlugin;
-    type Steward: StewardListPlugin;
+    type StewardList: StewardListPlugin;
 
     /// Build an MLS service for a brand-new conversation as its sole creator.
     fn create_mls(&self, conversation_id: String) -> Result<Self::Mls, MlsError>;
@@ -44,7 +45,11 @@ pub trait ConversationPlugins: Send + Sync + 'static {
     /// Build a fresh steward-list plug-in for a new conversation runner.
     /// Returns an empty plug-in; the lifecycle creator path bootstraps it
     /// via [`StewardListPlugin::install_list`].
-    fn make_steward(&self, conversation_id: &[u8], config: StewardListConfig) -> Self::Steward;
+    fn make_steward_list(
+        &self,
+        conversation_id: &[u8],
+        config: StewardListConfig,
+    ) -> Self::StewardList;
 }
 
 /// MLS service type for the default `DefaultProvider`-backed `User`. Uses
@@ -73,7 +78,7 @@ pub struct DefaultConversationPlugins {
 impl ConversationPlugins for DefaultConversationPlugins {
     type Mls = DefaultMlsService;
     type Scoring = DefaultPeerScoring;
-    type Steward = DefaultStewardList;
+    type StewardList = DefaultStewardList;
 
     fn create_mls(&self, conversation_id: String) -> Result<Self::Mls, MlsError> {
         OpenMlsService::new_as_creator(
@@ -106,7 +111,11 @@ impl ConversationPlugins for DefaultConversationPlugins {
         )
     }
 
-    fn make_steward(&self, conversation_id: &[u8], config: StewardListConfig) -> Self::Steward {
+    fn make_steward_list(
+        &self,
+        conversation_id: &[u8],
+        config: StewardListConfig,
+    ) -> Self::StewardList {
         DeterministicStewardList::empty(conversation_id.to_vec(), config)
     }
 }

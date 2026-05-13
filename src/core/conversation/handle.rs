@@ -43,11 +43,11 @@ pub struct ConversationHandle<M: MlsService, Sc: PeerScoringPlugin, St: StewardL
     /// Per-conversation peer-score plug-in. Read by protocol decisions under
     /// the orchestrator's per-handle lock; no separate `Mutex` needed.
     pub(crate) scoring: Sc,
-    /// Per-conversation steward list plug-in. Holds the active list, retry
+    /// Per-conversation steward-list plug-in. Holds the active list, retry
     /// counter, and election retry policy. Orchestrator composes
     /// eligibility from MLS members + `Conversation::is_pending_removal` and
     /// passes it on every position query.
-    pub(crate) steward: St,
+    pub(crate) steward_list: St,
     /// Authorization mode (RFC §Layer 3 Anti-Deadlock ECP). `Recovery` is
     /// set when an accepted Deadlock ECP relaxes the steward gate so any
     /// member may produce the next commit; cleared on accepted election.
@@ -65,7 +65,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
         state_machine: ConversationStateMachine,
         config: ConversationConfig,
         scoring: Sc,
-        steward: St,
+        steward_list: St,
     ) -> Self {
         Self {
             conversation,
@@ -73,7 +73,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
             state_machine,
             config,
             scoring,
-            steward,
+            steward_list,
             operating_mode: OperatingMode::Normal,
         }
     }
@@ -151,7 +151,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
         app_id: &[u8],
     ) -> Result<Option<OutboundPacket>, CoreError> {
         let mls = self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)?;
-        if !self.steward.is_steward(self_identity) && !self.is_in_recovery_mode() {
+        if !self.steward_list.is_steward(self_identity) && !self.is_in_recovery_mode() {
             return Err(CoreError::NotASteward);
         }
 
@@ -162,14 +162,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
         // MLS forbids committing one's own removal. If the approved batch contains
         // RemoveMember(self), skip local candidate creation — another steward will
         // commit the batch (including this node's removal) once they enter freeze.
-        let self_removal_pending = self.conversation.approved_proposals().values().any(|req| {
-            matches!(
-                req.payload.as_ref(),
-                Some(Payload::RemoveMember(r))
-                    if r.identity == self_identity
-            )
-        });
-        if self_removal_pending {
+        if self.conversation.is_pending_removal(self_identity) {
             info!(
                 conversation = self.conversation.name(),
                 "commit candidate skipped: approved batch contains self-remove"
@@ -304,7 +297,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
         finalize_freeze_round(
             &mut self.conversation,
             mls,
-            &self.steward,
+            &self.steward_list,
             in_recovery,
             allow_subset_candidates,
             app_id,
@@ -324,24 +317,24 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> ConversationHa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_fixtures::{StubScoring, StubSteward, UnusedMls};
+    use crate::test_fixtures::{StubScoring, StubStewardList, UnusedMls};
 
     fn make_handle(
-        steward: StubSteward,
-    ) -> ConversationHandle<UnusedMls, StubScoring, StubSteward> {
+        steward_list: StubStewardList,
+    ) -> ConversationHandle<UnusedMls, StubScoring, StubStewardList> {
         ConversationHandle::new(
-            Conversation::create("g"),
+            Conversation::new("g"),
             Some(UnusedMls),
             ConversationStateMachine::new_as_member(),
             ConversationConfig::default(),
             StubScoring,
-            steward,
+            steward_list,
         )
     }
 
     #[test]
     fn create_commit_candidate_errors_for_non_steward_outside_recovery() {
-        let mut handle = make_handle(StubSteward::member());
+        let mut handle = make_handle(StubStewardList::member());
         let err = handle
             .create_commit_candidate(b"me", b"app")
             .expect_err("non-steward should be rejected");
@@ -350,7 +343,7 @@ mod tests {
 
     #[test]
     fn create_commit_candidate_errors_when_no_approved_proposals() {
-        let mut handle = make_handle(StubSteward::steward());
+        let mut handle = make_handle(StubStewardList::steward());
         let err = handle
             .create_commit_candidate(b"me", b"app")
             .expect_err("empty approved queue should be rejected");
