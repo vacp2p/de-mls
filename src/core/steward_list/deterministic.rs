@@ -96,15 +96,6 @@ impl StewardListPlugin for DeterministicStewardList {
             .and_then(|l| l.live_steward_from(epoch, 0, eligible))
     }
 
-    fn backup_steward(&self, epoch: u64, eligible: &dyn Fn(&[u8]) -> bool) -> Option<&[u8]> {
-        // Resolve as a pair so the backup walk excludes the live epoch
-        // steward — the standalone offset-1 lookup could collapse onto
-        // the same identity once ineligibility shifts the rotation.
-        self.list
-            .as_ref()
-            .and_then(|l| l.live_epoch_and_backup(epoch, eligible).1)
-    }
-
     fn epoch_and_backup(
         &self,
         epoch: u64,

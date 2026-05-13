@@ -48,7 +48,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> SessionRunner<
         phase_timer: PhaseTimer,
         config: ConversationConfig,
         scoring: Sc,
-        steward: St,
+        steward_list: St,
     ) -> Self {
         Self {
             handle: ConversationHandle::new(
@@ -57,7 +57,7 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> SessionRunner<
                 state_machine,
                 config,
                 scoring,
-                steward,
+                steward_list,
             ),
             phase_timer,
             auto_vote_timers: Arc::new(Mutex::new(HashMap::new())),
@@ -188,38 +188,38 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> SessionRunner<
 mod tests {
     use super::*;
     use crate::core::Conversation;
-    use crate::test_fixtures::{StubScoring, StubSteward, UnusedMls};
+    use crate::test_fixtures::{StubScoring, StubStewardList, UnusedMls};
     use std::time::Instant;
 
     fn make_runner_pending_join(
         commit_inactivity: Duration,
-    ) -> SessionRunner<UnusedMls, StubScoring, StubSteward> {
+    ) -> SessionRunner<UnusedMls, StubScoring, StubStewardList> {
         let config = ConversationConfig {
             commit_inactivity_duration: commit_inactivity,
             ..ConversationConfig::default()
         };
         let mut runner = SessionRunner::new(
-            Conversation::prepare_to_join("g"),
+            Conversation::new("g"),
             Some(UnusedMls),
             ConversationStateMachine::new_as_pending_join(),
             PhaseTimer::new(),
             config,
             StubScoring,
-            StubSteward::member(),
+            StubStewardList::member(),
         );
         runner.phase_timer.start();
         runner
     }
 
-    fn make_runner_working() -> SessionRunner<UnusedMls, StubScoring, StubSteward> {
+    fn make_runner_working() -> SessionRunner<UnusedMls, StubScoring, StubStewardList> {
         SessionRunner::new(
-            Conversation::create("g"),
+            Conversation::new("g"),
             Some(UnusedMls),
             ConversationStateMachine::new_as_member(),
             PhaseTimer::new(),
             ConversationConfig::default(),
             StubScoring,
-            StubSteward::member(),
+            StubStewardList::member(),
         )
     }
 

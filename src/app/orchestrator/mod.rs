@@ -75,7 +75,7 @@ pub struct User<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventH
     /// on conversation A doesn't block reads on conversation B. Per-conversation
     /// peer scoring lives inside the runner, so scoring access is guarded
     /// by the same `RwLock` — no separate scoring lock.
-    conversations: ConversationRegistry<GP::Mls, GP::Scoring, GP::Steward>,
+    conversations: ConversationRegistry<GP::Mls, GP::Scoring, GP::StewardList>,
     consensus_service: Arc<ProviderConsensus<P>>,
     eth_signer: PrivateKeySigner,
     handler: Arc<H>,
@@ -87,7 +87,7 @@ pub struct User<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventH
     default_scoring_config: ScoringConfig,
     /// Seed config for the per-conversation steward-list plug-in. Same
     /// ownership story as `default_scoring_config`.
-    default_steward_config: StewardListConfig,
+    default_steward_list_config: StewardListConfig,
     /// Per-instance UUID embedded in every outbound packet. Inbound packets
     /// carrying our `app_id` are self-echoes and silently dropped.
     app_id: Vec<u8>,
@@ -107,7 +107,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler> Clo
             handler: Arc::clone(&self.handler),
             default_conversation_config: self.default_conversation_config.clone(),
             default_scoring_config: self.default_scoring_config.clone(),
-            default_steward_config: self.default_steward_config.clone(),
+            default_steward_list_config: self.default_steward_list_config.clone(),
             app_id: self.app_id.clone(),
         }
     }
@@ -135,7 +135,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             handler,
             default_conversation_config,
             default_scoring_config: ScoringConfig::default(),
-            default_steward_config: StewardListConfig::default(),
+            default_steward_list_config: StewardListConfig::default(),
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
         }
     }
@@ -150,25 +150,8 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
     /// Override the seed [`StewardListConfig`] used for newly-created
     /// per-conversation steward-list plug-ins. Same lifecycle as
     /// [`Self::set_default_scoring_config`].
-    pub fn set_default_steward_config(&mut self, config: StewardListConfig) {
-        self.default_steward_config = config;
-    }
-
-    /// Build a fresh per-conversation scoring plug-in from the user's default
-    /// scoring config. Used by runner construction in lifecycle / welcome
-    /// paths.
-    pub(crate) fn make_scoring_service(&self) -> GP::Scoring {
-        self.plugins.make_scoring(&self.default_scoring_config)
-    }
-
-    /// Build a fresh per-conversation steward-list plug-in. Returns an empty
-    /// plug-in; the lifecycle creator path bootstraps it via `install_list`,
-    /// the joiner path leaves it empty until `ConversationSync` arrives.
-    pub(crate) fn make_steward_plugin(&self, conversation_name: &str) -> GP::Steward {
-        self.plugins.make_steward(
-            conversation_name.as_bytes(),
-            self.default_steward_config.clone(),
-        )
+    pub fn set_default_steward_list_config(&mut self, config: StewardListConfig) {
+        self.default_steward_list_config = config;
     }
 
     /// Look up a conversation runner. Returns `None` when no runner is
@@ -178,7 +161,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
     pub(crate) async fn lookup_entry(
         &self,
         conversation_name: &str,
-    ) -> Option<Arc<RwLock<SessionRunner<GP::Mls, GP::Scoring, GP::Steward>>>> {
+    ) -> Option<Arc<RwLock<SessionRunner<GP::Mls, GP::Scoring, GP::StewardList>>>> {
         self.conversations
             .read()
             .await
@@ -191,7 +174,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
     pub(crate) async fn with_entry<R>(
         &self,
         conversation_name: &str,
-        f: impl FnOnce(&SessionRunner<GP::Mls, GP::Scoring, GP::Steward>) -> R,
+        f: impl FnOnce(&SessionRunner<GP::Mls, GP::Scoring, GP::StewardList>) -> R,
     ) -> Option<R> {
         let entry_arc = self.lookup_entry(conversation_name).await?;
         let entry = entry_arc.read().await;

@@ -409,7 +409,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 .steward_eligibility(&members_for_rotation);
             let is_es = entry
                 .handle
-                .steward
+                .steward_list
                 .epoch_steward(current_epoch, &eligible)
                 .is_some_and(|es| es == self_identity);
             let state = entry.handle.current_state();

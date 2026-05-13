@@ -92,12 +92,6 @@ pub trait StewardListPlugin: Send + Sync + 'static {
     /// for the nominal position.
     fn epoch_steward(&self, epoch: u64, eligible: &dyn Fn(&[u8]) -> bool) -> Option<&[u8]>;
 
-    /// Backup steward for `epoch` — distinct from the live epoch
-    /// steward (resolving them together avoids the rotation collapsing
-    /// both roles onto the same identity when an ineligible nominal
-    /// shifts the walk).
-    fn backup_steward(&self, epoch: u64, eligible: &dyn Fn(&[u8]) -> bool) -> Option<&[u8]>;
-
     /// Live epoch steward + backup, guaranteed distinct when ≥2 are
     /// eligible. Backup is `None` when fewer than two stewards are
     /// eligible.
@@ -172,7 +166,6 @@ pub trait StewardListPlugin: Send + Sync + 'static {
 
     /// Increment the retry round. Emits [`StewardListEvent::RetryExhausted`]
     /// once the new round exceeds `max_retries`.
-    #[must_use]
     fn bump_retry(&mut self) -> Vec<StewardListEvent>;
 
     /// Reset the retry round to 0 (called on accepted election or

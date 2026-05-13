@@ -65,7 +65,7 @@ fn make(
 ) -> (TU, H) {
     let h = H::new();
     let mut u = User::with_private_key_and_config(key, cs, Arc::new(h.clone()), cfg).unwrap();
-    u.set_default_steward_config(steward_cfg);
+    u.set_default_steward_list_config(steward_cfg);
     (u, h)
 }
 

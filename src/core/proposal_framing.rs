@@ -1,7 +1,6 @@
 //! Wire framing helpers: welcome-subtopic packets and consensus
 //! `CreateProposalRequest` construction. Conversation construction lives on
-//! [`Conversation::create`](crate::core::Conversation::create) and
-//! [`Conversation::prepare_to_join`](crate::core::Conversation::prepare_to_join);
+//! [`Conversation::new`](crate::core::Conversation::new);
 //! application-message framing lives on
 //! [`MlsService::build_message`](crate::mls_crypto::MlsService::build_message).
 

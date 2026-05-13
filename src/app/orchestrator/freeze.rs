@@ -67,9 +67,13 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
 
             // Early selection: skip remaining freeze time if all expected
             // stewards have submitted candidates.
-            let all_candidates_in = entry.handle.steward.current_list().is_some_and(|list| {
-                entry.handle.conversation.freeze_candidate_count() >= list.len()
-            });
+            let all_candidates_in = entry
+                .handle
+                .steward_list
+                .current_list()
+                .is_some_and(|list| {
+                    entry.handle.conversation.freeze_candidate_count() >= list.len()
+                });
 
             if !all_candidates_in && !entry.is_freeze_timed_out() {
                 return Ok(FreezeTimeoutStatus::StillFreezing);
@@ -88,7 +92,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
 
         let (finalize_result, downward_cross) = {
             let mut entry = entry_arc.write().await;
-            let allow_subset = entry.handle.steward.config().allow_subset_candidates;
+            let allow_subset = entry.handle.steward_list.config().allow_subset_candidates;
             let result = if entry.handle.mls().is_some() {
                 match entry.handle.finalize_freeze_round(
                     allow_subset,
@@ -204,7 +208,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                                     entry.handle.conversation.steward_eligibility(&members);
                                 entry
                                     .handle
-                                    .steward
+                                    .steward_list
                                     .epoch_steward(violation_epoch, &eligible)
                                     .filter(|id| !id.is_empty() && *id != self_identity)
                                     .map(|id| id.to_vec())
@@ -278,7 +282,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         // Recovery uses the shorter retry inactivity window so we don't
         // burn another full epoch waiting for a steward to commit.
         let in_recovery =
-            entry.handle.is_in_recovery_mode() || entry.handle.steward.retry_round() > 0;
+            entry.handle.is_in_recovery_mode() || entry.handle.steward_list.retry_round() > 0;
         let inactivity = if in_recovery {
             entry.handle.config.recovery_inactivity_duration
         } else {
@@ -293,7 +297,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             // Candidate-build failure must not block the freeze transition —
             // peers' candidates still get processed.
             let self_identity = self.self_identity();
-            let outbound = if entry.handle.steward.is_steward(self_identity) {
+            let outbound = if entry.handle.steward_list.is_steward(self_identity) {
                 match entry
                     .handle
                     .create_commit_candidate(self_identity, &self.app_id)

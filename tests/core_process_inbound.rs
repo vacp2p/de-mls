@@ -22,9 +22,9 @@ use de_mls::protos::de_mls::messages::v1::{
 
 mod common;
 use common::{
-    build_commit_candidate, default_steward_config, process_inbound_compat, setup_identity_storage,
-    setup_joiner, setup_joiner_with_config, setup_steward, setup_steward_with_config,
-    steward_add_joiner,
+    build_commit_candidate, default_steward_list_config, process_inbound_compat,
+    setup_identity_storage, setup_joiner, setup_joiner_with_config, setup_steward,
+    setup_steward_with_config, steward_add_joiner,
 };
 
 // ─────────────────────────── process_inbound tests ───────────────────────────
@@ -46,7 +46,7 @@ fn test_process_inbound_app_msg_before_mls_init() {
     // Joiner-side handle with no MLS service attached yet.
     let (_identity, _credentials, _storage) =
         setup_identity_storage("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let mut group: Conversation = Conversation::prepare_to_join("test-group");
+    let mut group: Conversation = Conversation::new("test-group");
 
     let result =
         process_inbound_compat(&mut group, None, b"some payload", APP_MSG_SUBTOPIC).unwrap();
@@ -140,7 +140,7 @@ fn test_process_inbound_welcome_non_steward_buffers_key_package() {
     // same; promotion to a voting proposal is the app's decision.
     let (_identity, _credentials, _storage) =
         setup_identity_storage("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-    let mut group: Conversation = Conversation::prepare_to_join(conversation_name);
+    let mut group: Conversation = Conversation::new(conversation_name);
 
     let other = setup_joiner(
         conversation_name,
@@ -259,7 +259,7 @@ fn test_process_inbound_leave_group() {
     let packets = build_commit_candidate(
         &mut steward_handle.group,
         &steward_handle.mls,
-        &steward_handle.steward,
+        &steward_handle.steward_list,
         false,
         &steward_handle.identity,
         b"test-app-id",
@@ -293,7 +293,7 @@ fn test_process_inbound_leave_group() {
     let finalize = finalize_freeze_round(
         &mut joiner.group,
         joiner.mls.as_ref().unwrap(),
-        &joiner.steward,
+        &joiner.steward_list,
         false,
         false,
         b"test-app-id",
@@ -348,7 +348,7 @@ fn test_rejoin_after_eviction() {
     let packets = build_commit_candidate(
         &mut steward_handle.group,
         &steward_handle.mls,
-        &steward_handle.steward,
+        &steward_handle.steward_list,
         false,
         &steward_handle.identity,
         b"test-app-id",
@@ -373,7 +373,7 @@ fn test_rejoin_after_eviction() {
     let finalize_joiner = finalize_freeze_round(
         &mut joiner.group,
         joiner.mls.as_ref().unwrap(),
-        &joiner.steward,
+        &joiner.steward_list,
         false,
         false,
         b"test-app-id",
@@ -391,7 +391,7 @@ fn test_rejoin_after_eviction() {
     let finalize_steward = finalize_freeze_round(
         &mut steward_handle.group,
         &steward_handle.mls,
-        &steward_handle.steward,
+        &steward_handle.steward_list,
         false,
         false,
         b"test-app-id",
@@ -417,7 +417,7 @@ fn test_rejoin_after_eviction() {
     // storage); the steward re-adds them. With MLS now on the entry/handle
     // rather than `Conversation`, no separate joiner-side `Conversation` allocation is
     // needed for the rejoin — the test only needs the resulting MLS service.
-    let _ = default_steward_config();
+    let _ = default_steward_list_config();
     let key_package = OpenMlsService::<Arc<MemoryDeMlsStorage>>::generate_key_package(
         &joiner.storage,
         &joiner.credentials,
@@ -486,7 +486,7 @@ fn test_process_inbound_raw_commit_payload_is_ignored() {
     let packets = build_commit_candidate(
         &mut steward_handle.group,
         &steward_handle.mls,
-        &steward_handle.steward,
+        &steward_handle.steward_list,
         false,
         &steward_handle.identity,
         b"test-app-id",
@@ -545,13 +545,13 @@ fn test_auto_fill_steward_list_triggers_below_sn_min() {
     let sn = members_2.len().min(config.sn_max);
     assert!(
         steward_handle
-            .steward
+            .steward_list
             .install_list(epoch, &members_2, sn, 0)
             .is_ok()
     );
 
     let list = steward_handle
-        .steward
+        .steward_list
         .current_list()
         .expect("steward list should exist after auto-fill");
     assert_eq!(list.len(), 2);
@@ -585,7 +585,7 @@ fn test_auto_fill_never_triggers_with_default_config() {
     let members = steward_handle.mls.members().unwrap();
     assert_eq!(members.len(), 1);
     assert!(
-        members.len() >= steward_handle.steward.config().sn_min,
+        members.len() >= steward_handle.steward_list.config().sn_min,
         "default config (sn_min=1) should never trigger auto-fill"
     );
 }
@@ -607,12 +607,12 @@ fn test_group_sync_roundtrip() {
     joiner.accept_welcome_packet(&welcome_packet);
 
     assert!(
-        joiner.steward.current_list().is_none(),
+        joiner.steward_list.current_list().is_none(),
         "Joiner should not have a steward list before sync"
     );
 
     let steward_list = steward_handle
-        .steward
+        .steward_list
         .current_list()
         .expect("steward should have a list");
     let sync = ConversationSync {
@@ -682,7 +682,7 @@ fn test_group_sync_roundtrip() {
         let sn = sync.steward_members.len();
         assert!(
             joiner
-                .steward
+                .steward_list
                 .install_list(
                     sync.election_epoch,
                     &sync.steward_members,
@@ -694,11 +694,11 @@ fn test_group_sync_roundtrip() {
     }
 
     let joiner_list = joiner
-        .steward
+        .steward_list
         .current_list()
         .expect("Joiner should have a steward list after sync");
     let steward_list = steward_handle
-        .steward
+        .steward_list
         .current_list()
         .expect("steward should have a list");
     assert_eq!(joiner_list.members(), steward_list.members());
@@ -726,28 +726,28 @@ fn test_group_sync_propagates_divergent_per_group_config() {
     let mut steward_handle =
         setup_steward_with_config(conversation_name, steward_hex, steward_protocol);
     let mut joiner =
-        setup_joiner_with_config(conversation_name, joiner_hex, default_steward_config());
+        setup_joiner_with_config(conversation_name, joiner_hex, default_steward_list_config());
 
     steward_handle.liveness_criteria_yes = STEWARD_LIVENESS_YES;
     steward_handle.pending_update_max_epochs = STEWARD_PENDING_MAX_EPOCHS;
 
     assert_ne!(joiner.liveness_criteria_yes, STEWARD_LIVENESS_YES);
     assert_ne!(joiner.pending_update_max_epochs, STEWARD_PENDING_MAX_EPOCHS);
-    assert_ne!(joiner.steward.config().sn_min, STEWARD_SN_MIN);
-    assert_ne!(joiner.steward.config().sn_max, STEWARD_SN_MAX);
+    assert_ne!(joiner.steward_list.config().sn_min, STEWARD_SN_MIN);
+    assert_ne!(joiner.steward_list.config().sn_max, STEWARD_SN_MAX);
 
     let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
     joiner.accept_welcome_packet(&welcome_packet);
 
     let alice = b"alice".to_vec();
     let bob = b"bob".to_vec();
-    let steward_list = steward_handle.steward.current_list().unwrap();
+    let steward_list = steward_handle.steward_list.current_list().unwrap();
     let sync = ConversationSync {
         steward_members: steward_list.members().to_vec(),
         election_epoch: steward_list.election_epoch(),
         sn_min: steward_list.config().sn_min as u32,
         sn_max: steward_list.config().sn_max as u32,
-        allow_subset_candidates: steward_handle.steward.config().allow_subset_candidates,
+        allow_subset_candidates: steward_handle.steward_list.config().allow_subset_candidates,
         peer_scores: vec![
             PeerScore {
                 member_id: alice.clone(),
@@ -760,7 +760,7 @@ fn test_group_sync_propagates_divergent_per_group_config() {
         ],
         timing: None,
         retry_round: steward_list.retry_round(),
-        max_reelection_attempts: steward_handle.steward.max_retries(),
+        max_reelection_attempts: steward_handle.steward_list.max_retries(),
         liveness_criteria_yes: steward_handle.liveness_criteria_yes,
         threshold_peer_score: STEWARD_THRESHOLD,
         pending_update_max_epochs: steward_handle.pending_update_max_epochs,
@@ -795,14 +795,14 @@ fn test_group_sync_propagates_divergent_per_group_config() {
     let mut applied_protocol =
         StewardListConfig::new(received.sn_min as usize, received.sn_max as usize).unwrap();
     applied_protocol.allow_subset_candidates = received.allow_subset_candidates;
-    joiner.steward.set_config(applied_protocol);
+    joiner.steward_list.set_config(applied_protocol);
     joiner.liveness_criteria_yes = received.liveness_criteria_yes;
     joiner.pending_update_max_epochs = received.pending_update_max_epochs;
 
     assert_eq!(joiner.liveness_criteria_yes, STEWARD_LIVENESS_YES);
     assert_eq!(joiner.pending_update_max_epochs, STEWARD_PENDING_MAX_EPOCHS);
-    assert_eq!(joiner.steward.config().sn_min, STEWARD_SN_MIN);
-    assert_eq!(joiner.steward.config().sn_max, STEWARD_SN_MAX);
+    assert_eq!(joiner.steward_list.config().sn_min, STEWARD_SN_MIN);
+    assert_eq!(joiner.steward_list.config().sn_max, STEWARD_SN_MAX);
 
     let mut scoring = PeerScoringService::new(
         InMemoryPeerScoreStorage::new(),
@@ -853,10 +853,10 @@ fn test_group_sync_idempotent_for_existing_members() {
 
     // Manually give the joiner a steward list (simulating a previous sync)
     let members = joiner.mls.as_ref().unwrap().members().unwrap();
-    assert!(joiner.steward.install_list(0, &members, 1, 0).is_ok());
-    assert!(joiner.steward.current_list().is_some());
+    assert!(joiner.steward_list.install_list(0, &members, 1, 0).is_ok());
+    assert!(joiner.steward_list.current_list().is_some());
 
-    let steward_list = steward_handle.steward.current_list().unwrap();
+    let steward_list = steward_handle.steward_list.current_list().unwrap();
     let sync = ConversationSync {
         steward_members: steward_list.members().to_vec(),
         election_epoch: steward_list.election_epoch(),
@@ -893,7 +893,7 @@ fn test_group_sync_idempotent_for_existing_members() {
     // App layer would skip applying because the list is already set; verify
     // the existing list wasn't overwritten.
     assert_eq!(
-        joiner.steward.current_list().unwrap().len(),
+        joiner.steward_list.current_list().unwrap().len(),
         1,
         "Existing list should be preserved (1 member), not overwritten by sync"
     );
@@ -921,18 +921,18 @@ fn test_group_sync_carries_list_retry_round_not_group_counter() {
     let epoch = steward_handle.mls.current_epoch().unwrap();
     let accepted_round: u32 = 2;
     steward_handle
-        .steward
+        .steward_list
         .install_list(epoch, &members, 4, accepted_round)
         .unwrap();
-    steward_handle.steward.reset_retry();
+    steward_handle.steward_list.reset_retry();
 
     let list = steward_handle
-        .steward
+        .steward_list
         .current_list()
         .expect("list set above");
     assert_eq!(list.retry_round(), accepted_round, "list keeps its seed");
     assert_eq!(
-        steward_handle.steward.retry_round(),
+        steward_handle.steward_list.retry_round(),
         0,
         "counter was reset on accept — distinct from the list tag"
     );
@@ -962,7 +962,7 @@ fn test_group_sync_carries_list_retry_round_not_group_counter() {
         peer_scores: vec![],
         timing: None,
         retry_round: list.retry_round(),
-        max_reelection_attempts: steward_handle.steward.max_retries(),
+        max_reelection_attempts: steward_handle.steward_list.max_retries(),
         liveness_criteria_yes: true,
         threshold_peer_score: 0,
         pending_update_max_epochs: 3,
@@ -988,7 +988,7 @@ fn test_group_sync_carries_list_retry_round_not_group_counter() {
             conversation_name.as_bytes(),
             &sync.steward_members,
             &config,
-            steward_handle.steward.retry_round(),
+            steward_handle.steward_list.retry_round(),
         )
         .unwrap(),
         "the post-accept counter value (0) regenerates a different ordering"

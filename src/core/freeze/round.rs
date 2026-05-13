@@ -223,20 +223,13 @@ impl RoundContext {
         current_epoch: u64,
         self_identity: &[u8],
     ) -> Result<Self, CoreError> {
-        let mut mls_actions: Vec<MlsProposalOutput> = Vec::new();
-        let mut self_remove_pending = false;
-        for req in conversation.approved_proposals().values() {
-            if let Some(action) = expected_action_for_request(req) {
-                mls_actions.push(action);
-            }
-            if matches!(
-                &req.payload,
-                Some(Payload::RemoveMember(rm)) if rm.identity == self_identity
-            ) {
-                self_remove_pending = true;
-            }
-        }
+        let mls_actions: Vec<MlsProposalOutput> = conversation
+            .approved_proposals()
+            .values()
+            .filter_map(expected_action_for_request)
+            .collect();
         let mls_count = mls_actions.len();
+        let self_remove_pending = conversation.is_pending_removal(self_identity);
 
         let members = mls.members()?;
         let eligible = conversation.steward_eligibility(&members);

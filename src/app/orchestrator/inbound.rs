@@ -212,7 +212,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         let working_event = match self.lookup_entry(conversation_name).await {
             Some(entry_arc) => {
                 let mut entry = entry_arc.write().await;
-                entry.handle.steward.reset_retry();
+                entry.handle.steward_list.reset_retry();
                 let state = entry.handle.current_state();
                 if matches!(
                     state,
@@ -295,7 +295,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             entry.handle.conversation.ensure_freeze_round(epoch);
 
             let self_identity = self.self_identity().to_vec();
-            let outbound = if entry.handle.steward.is_steward(&self_identity) {
+            let outbound = if entry.handle.steward_list.is_steward(&self_identity) {
                 match entry
                     .handle
                     .create_commit_candidate(&self_identity, &self.app_id)
@@ -338,7 +338,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 None => return Ok(()),
             };
             let entry = entry_arc.read().await;
-            if entry.handle.steward.current_list().is_some() {
+            if entry.handle.steward_list.current_list().is_some() {
                 return Ok(());
             }
             let mls = entry.handle.expect_mls()?;
@@ -385,8 +385,8 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         };
         let mut entry = entry_arc.write().await;
         let sn = sync.steward_members.len();
-        entry.handle.steward.set_config(protocol_config);
-        let _events = entry.handle.steward.install_list(
+        entry.handle.steward_list.set_config(protocol_config);
+        let _events = entry.handle.steward_list.install_list(
             sync.election_epoch,
             &sync.steward_members,
             sn,
@@ -394,7 +394,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         )?;
         entry
             .handle
-            .steward
+            .steward_list
             .set_max_retries(sync.max_reelection_attempts);
         entry
             .handle
@@ -528,7 +528,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 let self_id = self.self_identity();
                 let already_in = {
                     let entry = entry_arc.read().await;
-                    entry.handle.steward.is_steward(self_id) || entry.handle.mls().is_some()
+                    entry.handle.steward_list.is_steward(self_id) || entry.handle.mls().is_some()
                 };
                 if already_in {
                     return Ok(());

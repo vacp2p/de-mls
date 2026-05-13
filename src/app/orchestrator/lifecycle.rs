@@ -51,11 +51,11 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         let self_identity_bytes = self.self_identity().to_vec();
         let (conversation, mls_opt, state_machine, phase_timer) = if is_creation {
             let mls = self.plugins.create_mls(conversation_name.to_string())?;
-            let conversation = Conversation::create(conversation_name);
+            let conversation = Conversation::new(conversation_name);
             let state_machine = ConversationStateMachine::new_as_member();
             (conversation, Some(mls), state_machine, PhaseTimer::new())
         } else {
-            let conversation = Conversation::prepare_to_join(conversation_name);
+            let conversation = Conversation::new(conversation_name);
             let state_machine = ConversationStateMachine::new_as_pending_join();
             // Anchor the timer at "now" so `is_pending_join_expired` can
             // detect the 3× commit-inactivity timeout.
@@ -64,16 +64,19 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             (conversation, None, state_machine, phase_timer)
         };
 
-        let mut steward = self.make_steward_plugin(conversation_name);
-        steward.set_max_retries(config.max_reelection_attempts);
+        let mut steward_list = self.plugins.make_steward_list(
+            conversation_name.as_bytes(),
+            self.default_steward_list_config.clone(),
+        );
+        steward_list.set_max_retries(config.max_reelection_attempts);
         // Creator path: bootstrap the list with self as sole steward at
         // epoch 0. Joiner path leaves the plug-in empty until `ConversationSync`.
         if is_creation {
             let _events =
-                steward.install_list(0, std::slice::from_ref(&self_identity_bytes), 1, 0)?;
+                steward_list.install_list(0, std::slice::from_ref(&self_identity_bytes), 1, 0)?;
         }
 
-        let mut scoring = self.make_scoring_service();
+        let mut scoring = self.plugins.make_scoring(&self.default_scoring_config);
         // Joiners get tracked at `JoinedConversation` time, once members are known.
         if is_creation {
             // Creator is self at `default_score`; under standard config
@@ -99,7 +102,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 phase_timer,
                 config,
                 scoring,
-                steward,
+                steward_list,
             ))),
         );
         drop(conversations);

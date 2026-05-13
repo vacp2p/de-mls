@@ -37,7 +37,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             Some(mls) => mls.current_epoch()?,
             None => 0,
         };
-        Ok((epoch, entry.handle.steward.retry_round()))
+        Ok((epoch, entry.handle.steward_list.retry_round()))
     }
 
     pub async fn list_conversations(&self) -> Vec<String> {
@@ -68,7 +68,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             let received = e.handle.conversation.freeze_candidate_count();
             let expected = e
                 .handle
-                .steward
+                .steward_list
                 .current_list()
                 .map(|l| l.len())
                 .unwrap_or(0);
@@ -83,9 +83,11 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         conversation_name: &str,
     ) -> Result<bool, UserError> {
         let self_id = self.self_identity().to_vec();
-        self.with_entry(conversation_name, |e| e.handle.steward.is_steward(&self_id))
-            .await
-            .ok_or(UserError::ConversationNotFound)
+        self.with_entry(conversation_name, |e| {
+            e.handle.steward_list.is_steward(&self_id)
+        })
+        .await
+        .ok_or(UserError::ConversationNotFound)
     }
 
     pub async fn get_conversation_members(
@@ -160,11 +162,12 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
         let members = entry.handle.conversation_members()?;
 
         let eligible = entry.handle.conversation.steward_eligibility(&members);
-        let (live_epoch, live_backup) = entry.handle.steward.epoch_and_backup(epoch, &eligible);
+        let (live_epoch, live_backup) =
+            entry.handle.steward_list.epoch_and_backup(epoch, &eligible);
         let live_epoch = live_epoch.map(|s| s.to_vec());
         let live_backup = live_backup.map(|s| s.to_vec());
-        let exhausted = entry.handle.steward.is_exhausted(epoch);
-        let has_list = entry.handle.steward.current_list().is_some();
+        let exhausted = entry.handle.steward_list.is_exhausted(epoch);
+        let has_list = entry.handle.steward_list.current_list().is_some();
         let roles = members
             .iter()
             .cloned()
@@ -174,12 +177,12 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                         MemberRole::EpochSteward
                     } else if live_backup.as_deref().is_some_and(|bs| bs == id) {
                         MemberRole::BackupSteward
-                    } else if entry.handle.steward.is_steward(&id) {
+                    } else if entry.handle.steward_list.is_steward(&id) {
                         MemberRole::Steward
                     } else {
                         MemberRole::Member
                     }
-                } else if has_list && entry.handle.steward.is_steward(&id) {
+                } else if has_list && entry.handle.steward_list.is_steward(&id) {
                     MemberRole::Steward
                 } else {
                     MemberRole::Member

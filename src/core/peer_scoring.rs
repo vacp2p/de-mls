@@ -223,7 +223,6 @@ pub trait PeerScoringPlugin: Send + Sync + 'static {
     /// Emits [`PeerScoringEvent::ThresholdCrossedDown`] iff the default
     /// score lands at-or-below threshold (unusual config); otherwise no
     /// event.
-    #[must_use]
     fn add_member(&mut self, member_id: &[u8]) -> Vec<PeerScoringEvent>;
 
     /// Stop tracking a member. Emits no events — removal is a membership
@@ -236,27 +235,24 @@ pub trait PeerScoringPlugin: Send + Sync + 'static {
     /// before applying ops). Returns events only when the op causes a
     /// threshold cross; repeated ops on a member already at-or-below
     /// threshold do not re-emit.
-    #[must_use]
     fn apply_op(&mut self, op: &ScoreOp) -> Vec<PeerScoringEvent>;
 
     /// Apply a batch of [`ScoreOp`]s. Returns the concatenated events
     /// for every op in input order. A member crossing threshold twice
     /// in one batch (down then up, say) yields two events in that order.
-    #[must_use]
-    fn apply_ops(&mut self, ops: &[ScoreOp]) -> Vec<PeerScoringEvent>;
+    /// Default impl chains [`Self::apply_op`]; override for batched-write
+    /// storage where the round-trip cost dominates.
+    fn apply_ops(&mut self, ops: &[ScoreOp]) -> Vec<PeerScoringEvent> {
+        ops.iter().flat_map(|op| self.apply_op(op)).collect()
+    }
 
-    /// Apply a [`ScoreSnapshot`] (ConversationSync receive). Each entry is an
-    /// absolute-score replacement that auto-tracks members not already
-    /// known to the plug-in (treating "untracked → tracked" as crossing
-    /// from above for cross-detection — see [`PeerScoringEvent`]). This
-    /// is the one mutator that diverges from [`Self::apply_op`]'s
-    /// no-track-on-unknown behaviour: snapshots are bootstrap payloads
-    /// and arrive before membership sync in some edge cases.
+    /// Apply a snapshot of absolute scores (ConversationSync bootstrap).
+    /// Unknown members are auto-tracked at the snapshot value — unlike
+    /// [`Self::apply_op`], which ignores them — because a snapshot may
+    /// arrive before the MLS membership view catches up.
     ///
-    /// Events fire only when the entry's prior state was on the
-    /// opposite side of threshold from the new score; re-applying an
-    /// unchanged snapshot emits nothing.
-    #[must_use]
+    /// Emits a [`PeerScoringEvent`] per entry that crosses threshold;
+    /// re-applying an unchanged snapshot emits nothing.
     fn apply_snapshot(&mut self, snapshot: &ScoreSnapshot) -> Vec<PeerScoringEvent>;
 
     /// Sparse snapshot of non-default scores for ConversationSync send.
@@ -379,14 +375,6 @@ impl<S: PeerScoreStorage + Send + Sync + 'static, P: ScoringProvider + Send + Sy
         )
         .into_iter()
         .collect()
-    }
-
-    fn apply_ops(&mut self, ops: &[ScoreOp]) -> Vec<PeerScoringEvent> {
-        let mut events = Vec::new();
-        for op in ops {
-            events.extend(self.apply_op(op));
-        }
-        events
     }
 
     fn apply_snapshot(&mut self, snapshot: &ScoreSnapshot) -> Vec<PeerScoringEvent> {
