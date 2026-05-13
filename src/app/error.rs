@@ -5,6 +5,7 @@ use hashgraph_like_consensus::error::ConsensusError;
 
 use crate::{
     core::{CallbackError, CoreError},
+    identity::IdentityError,
     mls_crypto::MlsError,
 };
 
@@ -49,6 +50,9 @@ pub enum UserError {
 
     #[error("MLS error: {0}")]
     Mls(#[from] MlsError),
+
+    #[error("Identity error: {0}")]
+    Identity(#[from] IdentityError),
 }
 
 impl UserError {

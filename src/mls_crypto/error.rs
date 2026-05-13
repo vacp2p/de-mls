@@ -40,9 +40,6 @@ pub enum MlsError {
     #[error("JSON encoding error: {0}")]
     InvalidJson(serde_json::Error),
 
-    #[error("Invalid wallet address: {0}")]
-    InvalidWalletAddress(String),
-
     // ── MLS wire format (not parameterised over storage) ──
     #[error(transparent)]
     MlsMessageDeserialize(#[from] openmls::prelude::Error),

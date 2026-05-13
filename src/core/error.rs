@@ -1,12 +1,16 @@
 //! Core library errors.
 
-use crate::mls_crypto;
+use crate::{identity::IdentityError, mls_crypto};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
-    /// MLS error (covers identity, service, and storage variants).
+    /// MLS error (covers service, wire-format, and storage variants).
     #[error("MLS error: {0}")]
     Mls(#[from] mls_crypto::MlsError),
+
+    /// Identity-domain error (wallet-address parsing, etc.).
+    #[error("Identity error: {0}")]
+    Identity(#[from] IdentityError),
 
     #[error("Consensus error: {0}")]
     ConsensusError(#[from] hashgraph_like_consensus::error::ConsensusError),

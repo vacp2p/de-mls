@@ -13,7 +13,14 @@
 use alloy::{hex, primitives::Address};
 use std::str::FromStr;
 
-use crate::mls_crypto::MlsError;
+/// Errors from identity-domain helpers (currently wallet-address parsing).
+/// Kept separate from `MlsError` so identity code doesn't return an MLS
+/// error for non-MLS failures.
+#[derive(Debug, thiserror::Error)]
+pub enum IdentityError {
+    #[error("Invalid wallet address: {0}")]
+    InvalidWalletAddress(String),
+}
 
 /// Pluggable user identity.
 ///
@@ -73,10 +80,10 @@ impl Identity for WalletIdentity {
 /// let addr = parse_wallet_address("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")?;
 /// let addr = parse_wallet_address("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266")?;
 /// ```
-pub fn parse_wallet_address(address: &str) -> Result<Address, MlsError> {
+pub fn parse_wallet_address(address: &str) -> Result<Address, IdentityError> {
     let trimmed = address.trim();
     if trimmed.is_empty() {
-        return Err(MlsError::InvalidWalletAddress(address.to_string()));
+        return Err(IdentityError::InvalidWalletAddress(address.to_string()));
     }
 
     let hex_part = trimmed
@@ -85,11 +92,12 @@ pub fn parse_wallet_address(address: &str) -> Result<Address, MlsError> {
         .unwrap_or(trimmed);
 
     if hex_part.len() != 40 || !hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(MlsError::InvalidWalletAddress(trimmed.to_string()));
+        return Err(IdentityError::InvalidWalletAddress(trimmed.to_string()));
     }
 
     let normalized = format!("0x{}", hex_part.to_ascii_lowercase());
-    Address::from_str(&normalized).map_err(|_| MlsError::InvalidWalletAddress(trimmed.to_string()))
+    Address::from_str(&normalized)
+        .map_err(|_| IdentityError::InvalidWalletAddress(trimmed.to_string()))
 }
 
 /// Format raw wallet bytes (20 bytes) as a hex string.
@@ -109,7 +117,7 @@ pub fn format_wallet_address(raw: &[u8]) -> String {
 ///
 /// Combines `parse_wallet_address` with byte extraction.
 /// Useful for creating removal requests from user input.
-pub fn parse_wallet_to_bytes(address: &str) -> Result<Vec<u8>, MlsError> {
+pub fn parse_wallet_to_bytes(address: &str) -> Result<Vec<u8>, IdentityError> {
     let addr = parse_wallet_address(address)?;
     Ok(addr.as_slice().to_vec())
 }
