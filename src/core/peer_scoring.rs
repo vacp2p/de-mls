@@ -1,11 +1,13 @@
 //! Peer-scoring vocabulary, traits, reference [`PeerScoringService`],
-//! and pure score-derivation helpers. The service is storage- and
-//! policy-agnostic; concrete backends (e.g.
-//! [`crate::app::InMemoryPeerScoreStorage`]) and delta-table providers
-//! (e.g. [`crate::app::FixedScoringProvider`]) live in the app layer.
+//! and score-derivation helpers. Storage is abstracted via
+//! [`PeerScoreStorage`]; concrete backends (e.g.
+//! [`crate::app::InMemoryPeerScoreStorage`]) live in the app layer.
+//! Per-event deltas are supplied as a `HashMap<ScoreEvent, i64>` at
+//! service construction; [`default_score_deltas`] returns the RFC
+//! reference table.
 
 use prost::Message;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, ViolationEvidence, conversation_update_request::Payload,
@@ -55,10 +57,24 @@ pub struct ScoreOp {
 
 // ── Scoring configuration ───────────────────────────────────────────
 
-/// Maps each [`ScoreEvent`] to a signed score delta (positive = reward).
-/// The app layer ships a fixed-table default impl.
-pub trait ScoringProvider {
-    fn score_delta(&self, event: ScoreEvent) -> i64;
+/// RFC §Peer Scoring default delta for each [`ScoreEvent`]. Values are
+/// placeholders pending an empirical tuning pass (see `docs/ROADMAP.md`).
+/// Integrators that want different deltas pass their own map to
+/// [`PeerScoringService::new`].
+pub fn default_score_deltas() -> HashMap<ScoreEvent, i64> {
+    HashMap::from([
+        // ECP target penalties (violation-type-specific)
+        (ScoreEvent::BrokenCommit, -50),
+        (ScoreEvent::BrokenMlsProposal, -30),
+        (ScoreEvent::CensorshipInactivity, -40),
+        // ECP creator outcomes
+        (ScoreEvent::EmergencyYesCreator, 20),
+        (ScoreEvent::EmergencyNoCreator, -50),
+        // Commit selection
+        (ScoreEvent::SuccessfulCommit, 10),
+        (ScoreEvent::HonestCommitAttempt, 5),
+        (ScoreEvent::MisbehavingCommit, -30),
+    ])
 }
 
 #[derive(Debug, Clone)]
@@ -318,25 +334,28 @@ fn cross_event(
 /// [`ScoringConfig`]. Storage is abstracted via [`PeerScoreStorage`] so
 /// app-layer backends (in-memory, on-disk, …) plug in without touching
 /// this protocol logic.
-pub struct PeerScoringService<S: PeerScoreStorage, P: ScoringProvider> {
+pub struct PeerScoringService<S: PeerScoreStorage> {
     storage: S,
-    provider: P,
+    score_deltas: HashMap<ScoreEvent, i64>,
     config: ScoringConfig,
 }
 
-impl<S: PeerScoreStorage, P: ScoringProvider> PeerScoringService<S, P> {
-    pub fn new(storage: S, provider: P, config: ScoringConfig) -> Self {
+impl<S: PeerScoreStorage> PeerScoringService<S> {
+    pub fn new(storage: S, score_deltas: HashMap<ScoreEvent, i64>, config: ScoringConfig) -> Self {
         Self {
             storage,
-            provider,
+            score_deltas,
             config,
         }
     }
+
+    /// Signed score delta for `event`. Events not in the table contribute 0.
+    fn score_delta(&self, event: ScoreEvent) -> i64 {
+        self.score_deltas.get(&event).copied().unwrap_or(0)
+    }
 }
 
-impl<S: PeerScoreStorage + Send + Sync + 'static, P: ScoringProvider + Send + Sync + 'static>
-    PeerScoringPlugin for PeerScoringService<S, P>
-{
+impl<S: PeerScoreStorage + Send + Sync + 'static> PeerScoringPlugin for PeerScoringService<S> {
     fn add_member(&mut self, member_id: &[u8]) -> Vec<PeerScoringEvent> {
         let default = self.config.default_score;
         self.storage.set(member_id, default);
@@ -363,7 +382,7 @@ impl<S: PeerScoreStorage + Send + Sync + 'static, P: ScoringProvider + Send + Sy
         let Some(current) = self.storage.get(&op.member_id) else {
             return Vec::new();
         };
-        let delta = self.provider.score_delta(op.event);
+        let delta = self.score_delta(op.event);
         let new_score = current.saturating_add(delta);
         self.storage.set(&op.member_id, new_score);
         cross_event(
@@ -464,17 +483,7 @@ mod tests {
         }
     }
 
-    /// HashMap-backed [`ScoringProvider`] with caller-supplied deltas.
-    /// Production deltas live in [`crate::app::FixedScoringProvider`].
-    struct TestProvider(HashMap<ScoreEvent, i64>);
-
-    impl ScoringProvider for TestProvider {
-        fn score_delta(&self, event: ScoreEvent) -> i64 {
-            self.0.get(&event).copied().unwrap_or(0)
-        }
-    }
-
-    fn make_service() -> PeerScoringService<TestStorage, TestProvider> {
+    fn make_service() -> PeerScoringService<TestStorage> {
         let deltas = HashMap::from([
             (ScoreEvent::EmergencyNoCreator, -50),
             (ScoreEvent::EmergencyYesCreator, 20),
@@ -484,7 +493,7 @@ mod tests {
         ]);
         PeerScoringService::new(
             TestStorage::default(),
-            TestProvider(deltas),
+            deltas,
             ScoringConfig {
                 default_score: 100,
                 threshold: 0,
@@ -506,7 +515,7 @@ mod tests {
     fn add_member_with_default_below_threshold_emits_down_event() {
         let mut svc = PeerScoringService::new(
             TestStorage::default(),
-            TestProvider(HashMap::new()),
+            HashMap::new(),
             ScoringConfig {
                 default_score: -10,
                 threshold: 0,
@@ -788,7 +797,7 @@ mod tests {
         let mut svc = make_service();
         let _ = svc.add_member(b"alice");
         // Apply via snapshot to set an absolute score without going
-        // through the delta provider.
+        // through the delta table.
         let _ = svc.apply_snapshot(&ScoreSnapshot {
             diverged: vec![(b"alice".to_vec(), -10)],
         });
@@ -804,7 +813,7 @@ mod tests {
     fn score_saturates_no_overflow() {
         let mut svc = PeerScoringService::new(
             TestStorage::default(),
-            TestProvider(HashMap::from([(ScoreEvent::SuccessfulCommit, i64::MAX)])),
+            HashMap::from([(ScoreEvent::SuccessfulCommit, i64::MAX)]),
             ScoringConfig {
                 default_score: i64::MAX,
                 threshold: 0,
@@ -822,7 +831,7 @@ mod tests {
     fn unknown_event_yields_zero_delta() {
         let mut svc = PeerScoringService::new(
             TestStorage::default(),
-            TestProvider(HashMap::from([(ScoreEvent::EmergencyNoCreator, -50)])),
+            HashMap::from([(ScoreEvent::EmergencyNoCreator, -50)]),
             ScoringConfig {
                 default_score: 100,
                 threshold: 0,

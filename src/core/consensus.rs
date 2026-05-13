@@ -198,7 +198,7 @@ pub fn apply_consensus_result(
         }
         info!(
             proposal_id,
-            target = %ShortId(target),
+            target = %ShortId::new(target),
             "removal proposal deduped — target already queued for removal"
         );
         return Ok(ConsensusApplyResult::default());
@@ -249,14 +249,14 @@ pub fn apply_consensus_result(
         if approved {
             info!(
                 proposal_id,
-                target = %ShortId(&ev.target_member_id),
-                creator = %ShortId(&ev.creator_member_id),
+                target = %ShortId::new(&ev.target_member_id),
+                creator = %ShortId::new(&ev.creator_member_id),
                 "emergency criteria proposal accepted"
             );
         } else {
             info!(
                 proposal_id,
-                creator = %ShortId(&ev.creator_member_id),
+                creator = %ShortId::new(&ev.creator_member_id),
                 "emergency criteria proposal rejected"
             );
         }

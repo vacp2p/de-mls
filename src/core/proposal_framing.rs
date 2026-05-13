@@ -63,7 +63,7 @@ pub(crate) fn build_invitation_packet(
 
 /// Build the consensus-library `CreateProposalRequest` for a
 /// `ConversationUpdateRequest`. The caller (app layer) submits the
-/// resulting request via `ProviderConsensus::create_proposal_with_config`.
+/// resulting request via `PluginConsensus::create_proposal_with_config`.
 pub fn build_create_proposal_request(
     request: &ConversationUpdateRequest,
     creator_id: &[u8],

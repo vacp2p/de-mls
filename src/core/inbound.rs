@@ -71,8 +71,8 @@ pub fn process_inbound<M: MlsService>(
                 warn!(
                     conversation = conversation.name(),
                     proposal_id = proposal.proposal_id,
-                    sender = %ShortId(&sender),
-                    owner = %ShortId(&proposal.proposal_owner),
+                    sender = %ShortId::new(&sender),
+                    owner = %ShortId::new(&proposal.proposal_owner),
                     "fast-path proposal rejected: sender is not the self-removal target"
                 );
                 return Ok(ProcessResult::Noop);
@@ -84,7 +84,7 @@ pub fn process_inbound<M: MlsService>(
                 if !mls.is_member(&target) {
                     info!(
                         conversation = conversation.name(),
-                        target = %ShortId(&target),
+                        target = %ShortId::new(&target),
                         "ban request skipped: target not a member"
                     );
                     return Ok(ProcessResult::Noop);

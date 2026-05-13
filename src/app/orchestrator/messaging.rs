@@ -1,8 +1,8 @@
 //! Send operations (key packages, app messages, ban requests).
 
 use crate::{
-    app::{ConversationPlugins, ConversationState, User, UserError},
-    core::{ConversationEventHandler, DeMlsProvider, build_key_package_message},
+    app::{ConversationState, User, UserError},
+    core::{ConsensusPlugin, ConversationPluginsFactory, build_key_package_message},
     identity::parse_wallet_to_bytes,
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
@@ -11,9 +11,7 @@ use crate::{
     },
 };
 
-impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 'static>
-    User<P, GP, H>
-{
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Broadcast our key-package on the welcome subtopic so the steward
     /// can invite us.
     pub async fn send_kp_message(&self, conversation_name: &str) -> Result<(), UserError> {

@@ -15,10 +15,9 @@ use tracing::info;
 use crate::{
     app::PhaseTimer,
     core::{
-        Conversation, ConversationConfig, ConversationHandle, ConversationState,
-        ConversationStateMachine, PeerScoringPlugin, StewardListPlugin,
+        Conversation, ConversationConfig, ConversationHandle, ConversationPluginsFactory,
+        ConversationState, ConversationStateMachine,
     },
-    mls_crypto::MlsService,
 };
 
 /// Per-conversation auto-vote timer registry. Spawned when a proposal first
@@ -26,8 +25,8 @@ use crate::{
 /// manual vote, consensus resolution, or conversation leave.
 pub(crate) type AutoVoteTimers = Arc<Mutex<HashMap<u32, JoinHandle<()>>>>;
 
-pub struct SessionRunner<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> {
-    pub(crate) handle: ConversationHandle<M, Sc, St>,
+pub struct SessionRunner<CP: ConversationPluginsFactory> {
+    pub(crate) handle: ConversationHandle<CP>,
     /// Wall-clock anchor combined with `handle.state_machine` by
     /// coordinator methods.
     pub(crate) phase_timer: PhaseTimer,
@@ -37,18 +36,18 @@ pub struct SessionRunner<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPl
     pub(crate) auto_vote_timers: AutoVoteTimers,
 }
 
-impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> SessionRunner<M, Sc, St> {
+impl<CP: ConversationPluginsFactory> SessionRunner<CP> {
     /// Build a fresh runner. Creator path passes `Some(mls)`; joiner
     /// path passes `None` and attaches the MLS service later via
     /// `handle.attach_mls`.
     pub(crate) fn new(
         conversation: Conversation,
-        mls: Option<M>,
+        mls: Option<CP::Mls>,
         state_machine: ConversationStateMachine,
         phase_timer: PhaseTimer,
         config: ConversationConfig,
-        scoring: Sc,
-        steward_list: St,
+        scoring: CP::Scoring,
+        steward_list: CP::StewardList,
     ) -> Self {
         Self {
             handle: ConversationHandle::new(
@@ -188,12 +187,10 @@ impl<M: MlsService, Sc: PeerScoringPlugin, St: StewardListPlugin> SessionRunner<
 mod tests {
     use super::*;
     use crate::core::Conversation;
-    use crate::test_fixtures::{StubScoring, StubStewardList, UnusedMls};
+    use crate::test_fixtures::{StubPluginsFactory, StubScoring, StubStewardList, UnusedMls};
     use std::time::Instant;
 
-    fn make_runner_pending_join(
-        commit_inactivity: Duration,
-    ) -> SessionRunner<UnusedMls, StubScoring, StubStewardList> {
+    fn make_runner_pending_join(commit_inactivity: Duration) -> SessionRunner<StubPluginsFactory> {
         let config = ConversationConfig {
             commit_inactivity_duration: commit_inactivity,
             ..ConversationConfig::default()
@@ -211,7 +208,7 @@ mod tests {
         runner
     }
 
-    fn make_runner_working() -> SessionRunner<UnusedMls, StubScoring, StubStewardList> {
+    fn make_runner_working() -> SessionRunner<StubPluginsFactory> {
         SessionRunner::new(
             Conversation::new("g"),
             Some(UnusedMls),

@@ -116,8 +116,14 @@ pub fn parse_wallet_to_bytes(address: &str) -> Result<Vec<u8>, MlsError> {
 
 /// Short identity prefix for log output. Renders the first 4 bytes as hex
 /// (8 chars) — long enough to be unique across the conversation, short enough not
-/// to dominate a log line. Use as `%ShortId(&identity)` in `tracing` macros.
-pub struct ShortId<'a>(pub &'a [u8]);
+/// to dominate a log line. Use as `%ShortId::new(&identity)` in `tracing` macros.
+pub struct ShortId<'a>(&'a [u8]);
+
+impl<'a> ShortId<'a> {
+    pub fn new(bytes: &'a [u8]) -> Self {
+        Self(bytes)
+    }
+}
 
 impl std::fmt::Display for ShortId<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -12,7 +12,9 @@ use async_trait::async_trait;
 use hashgraph_like_consensus::service::DefaultConsensusService;
 
 use de_mls::app::{ConversationConfig, User};
-use de_mls::core::{CallbackError, ConversationEventHandler, DefaultProvider, StewardListConfig};
+use de_mls::core::{
+    CallbackError, ConversationEventHandler, DefaultConsensusPlugin, StewardListConfig,
+};
 use de_mls::ds::{InboundPacket, OutboundPacket};
 use de_mls::protos::de_mls::messages::v1::AppMessage;
 
@@ -55,7 +57,7 @@ const BOB_KEY: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6
 const CHARLIE_KEY: &str = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
 const DAVE_KEY: &str = "7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6";
 
-type TU = User<DefaultProvider, de_mls::app::DefaultConversationPlugins, H>;
+type TU = User<DefaultConsensusPlugin, de_mls::app::DefaultConversationPluginsFactory>;
 
 fn make(
     key: &str,

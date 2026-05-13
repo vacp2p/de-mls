@@ -1,7 +1,7 @@
 use std::{env::VarError, num::ParseIntError, sync::Arc, time::Duration};
 
 use de_mls::{
-    core::{DefaultProvider, ProviderConsensus},
+    core::{DefaultConsensusPlugin, PluginConsensus},
     ds::{
         DeliveryService, DeliveryServiceError, InboundPacket, TopicFilter, WakuConfig,
         WakuDeliveryService, WakuStartResult,
@@ -20,7 +20,7 @@ pub struct AppState<DS: DeliveryService> {
 pub struct CoreCtx<DS: DeliveryService> {
     pub app_state: Arc<AppState<DS>>,
     pub topics: Arc<TopicFilter>,
-    pub consensus: ProviderConsensus<DefaultProvider>,
+    pub consensus: PluginConsensus<DefaultConsensusPlugin>,
 }
 
 impl<DS: DeliveryService> CoreCtx<DS> {
@@ -28,7 +28,7 @@ impl<DS: DeliveryService> CoreCtx<DS> {
         Self {
             app_state,
             topics: Arc::new(TopicFilter::new()),
-            consensus: ProviderConsensus::<DefaultProvider>::new_with_max_sessions(10),
+            consensus: PluginConsensus::<DefaultConsensusPlugin>::new_with_max_sessions(10),
         }
     }
 }

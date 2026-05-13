@@ -4,9 +4,9 @@
 use tracing::{error, info};
 
 use crate::{
-    app::{ConversationPlugins, User, UserError},
+    app::{User, UserError},
     core::{
-        ConversationEventHandler, DeMlsProvider, ElectionDecision, PeerScoringPlugin,
+        ConsensusPlugin, ConversationPluginsFactory, ElectionDecision, PeerScoringPlugin,
         StewardListPlugin, member_set, scoring_member_diff, target_identity_of,
     },
     identity::ShortId,
@@ -18,9 +18,7 @@ use crate::{
 
 use crate::mls_crypto::MlsService;
 
-impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 'static>
-    User<P, GP, H>
-{
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Add any MLS members not yet tracked in scoring, and drop scored
     /// entries for identities no longer in MLS. Diffing is delegated to
     /// [`scoring_member_diff`]; this method only applies the diff.
@@ -547,7 +545,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
 
             info!(
                 conversation = conversation_name,
-                target = %ShortId(&target_id),
+                target = %ShortId::new(&target_id),
                 score = current_score,
                 "initiating SCORE_BELOW_THRESHOLD removal"
             );
@@ -567,7 +565,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 }
                 error!(
                     conversation = conversation_name,
-                    target = %ShortId(&target_id),
+                    target = %ShortId::new(&target_id),
                     error = %e,
                     "SCORE_BELOW_THRESHOLD vote failed to start"
                 );

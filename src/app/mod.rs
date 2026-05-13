@@ -44,9 +44,9 @@ pub use display::{
 };
 pub use error::UserError;
 pub use orchestrator::{
-    ConversationPlugins, DefaultConversationPlugins, DefaultMlsService, DefaultPeerScoring,
-    DefaultStewardList, User,
+    DefaultConversationPluginsFactory, DefaultMlsService, DefaultPeerScoring, DefaultStewardList,
+    User,
 };
-pub use peer_scoring_backends::{FixedScoringProvider, InMemoryPeerScoreStorage};
+pub use peer_scoring_backends::InMemoryPeerScoreStorage;
 pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer};
 pub use session_runner::SessionRunner;

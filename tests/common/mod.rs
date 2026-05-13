@@ -13,8 +13,9 @@ use std::sync::{
 
 use async_trait::async_trait;
 
-use de_mls::app::{FixedScoringProvider, InMemoryPeerScoreStorage};
+use de_mls::app::InMemoryPeerScoreStorage;
 use de_mls::core::PeerScoringService;
+use de_mls::core::default_score_deltas;
 use de_mls::core::{
     BufferedCommitCandidate, CallbackError, Conversation, ConversationEventHandler, CoreError,
     DeterministicStewardList, FreezeOutcome, OperatingMode, ProcessResult, ProposalKind,
@@ -603,10 +604,10 @@ pub fn steward_add_joiner(
 
 // ─────────────────────────── Scoring ───────────────────────────
 
-pub fn make_scoring() -> PeerScoringService<InMemoryPeerScoreStorage, FixedScoringProvider> {
+pub fn make_scoring() -> PeerScoringService<InMemoryPeerScoreStorage> {
     PeerScoringService::new(
         InMemoryPeerScoreStorage::new(),
-        FixedScoringProvider::with_default_deltas(),
+        default_score_deltas(),
         ScoringConfig {
             default_score: DEFAULT_SCORE,
             threshold: 0,

@@ -9,13 +9,14 @@
 
 use crate::{
     core::{
-        ElectionDecision, PeerScoringEvent, PeerScoringPlugin, ScoreOp, ScoreSnapshot, StewardList,
-        StewardListConfig, StewardListEvent, StewardListPlugin,
+        ConversationPluginsFactory, ElectionDecision, PeerScoringEvent, PeerScoringPlugin, ScoreOp,
+        ScoreSnapshot, ScoringConfig, StewardList, StewardListConfig, StewardListEvent,
+        StewardListPlugin,
     },
     ds::OutboundPacket,
     mls_crypto::{
-        CommitCandidate, DecryptResult, MlsCommitInput, MlsError, MlsMessageKind, MlsService,
-        StagedCandidateResult,
+        CommitCandidate, DecryptResult, KeyPackageBytes, MlsCommitInput, MlsError, MlsMessageKind,
+        MlsService, StagedCandidateResult,
     },
     protos::de_mls::messages::v1::AppMessage,
 };
@@ -79,7 +80,7 @@ impl MlsService for UnusedMls {
     }
 }
 
-/// Steward plug-in with controllable `is_steward`. Other methods panic.
+/// Steward-list plug-in with controllable `is_steward`. Other methods panic.
 pub(crate) struct StubStewardList {
     is_steward: bool,
     config: StewardListConfig,
@@ -186,7 +187,8 @@ impl StewardListPlugin for StubStewardList {
 }
 
 /// Scoring plug-in that panics on every call. Tests that don't read
-/// scores at all use this to satisfy the `Sc: PeerScoringPlugin` bound.
+/// scores use this as `StubPluginsFactory::Scoring` so the bundle still
+/// satisfies [`crate::core::ConversationPluginsFactory`].
 pub(crate) struct StubScoring;
 
 impl PeerScoringPlugin for StubScoring {
@@ -224,6 +226,35 @@ impl PeerScoringPlugin for StubScoring {
         unreachable!()
     }
     fn set_default_score(&mut self, _: i64) {
+        unreachable!()
+    }
+}
+
+/// Test plug-in bundle wiring the three stubs into the [`ConversationPluginsFactory`]
+/// trait so tests can construct [`crate::core::ConversationHandle`] and
+/// [`crate::app::SessionRunner`] under their single `<CP>` parameter. The
+/// factory methods are `unreachable!()` — tests build plug-in instances
+/// directly and hand them to the handle/runner constructors.
+pub(crate) struct StubPluginsFactory;
+
+impl ConversationPluginsFactory for StubPluginsFactory {
+    type Mls = UnusedMls;
+    type Scoring = StubScoring;
+    type StewardList = StubStewardList;
+
+    fn create_mls(&self, _: String) -> Result<Self::Mls, MlsError> {
+        unreachable!()
+    }
+    fn welcome_mls(&self, _: &[u8]) -> Result<Option<Self::Mls>, MlsError> {
+        unreachable!()
+    }
+    fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
+        unreachable!()
+    }
+    fn make_scoring(&self, _: &ScoringConfig) -> Self::Scoring {
+        unreachable!()
+    }
+    fn make_steward_list(&self, _: &[u8], _: StewardListConfig) -> Self::StewardList {
         unreachable!()
     }
 }

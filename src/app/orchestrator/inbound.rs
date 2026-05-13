@@ -5,12 +5,9 @@ use prost::Message;
 use tracing::{error, info};
 
 use crate::{
-    app::{
-        ConversationPlugins, ConversationState, User, UserError, forward_incoming_vote,
-        relay_incoming_proposal,
-    },
+    app::{ConversationState, User, UserError, forward_incoming_vote, relay_incoming_proposal},
     core::{
-        ConversationEventHandler, CoreError, DeMlsProvider, PeerScoringPlugin, ProcessResult,
+        ConsensusPlugin, ConversationPluginsFactory, CoreError, PeerScoringPlugin, ProcessResult,
         ProposalKind, ScoreSnapshot, StewardList, StewardListConfig, StewardListPlugin, member_set,
     },
     ds::{APP_MSG_SUBTOPIC, InboundPacket, WELCOME_SUBTOPIC},
@@ -22,9 +19,7 @@ use crate::{
     },
 };
 
-impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 'static>
-    User<P, GP, H>
-{
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Dispatches a single ProcessResult to the appropriate handler/consensus/state-machine action.
     pub async fn dispatch_inbound_result(
         &self,
@@ -497,7 +492,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 if already_member {
                     info!(
                         conversation = conversation_name,
-                        identity = %ShortId(&identity),
+                        identity = %ShortId::new(&identity),
                         "key package skipped: already a member"
                     );
                     return Ok(());
@@ -505,7 +500,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
 
                 info!(
                     conversation = conversation_name,
-                    identity = %ShortId(&identity),
+                    identity = %ShortId::new(&identity),
                     "key package received"
                 );
 
@@ -535,7 +530,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
                 }
 
                 let svc = self
-                    .plugins
+                    .plugin_factory
                     .welcome_mls(&invitation.mls_message_out_bytes)?;
                 let Some(svc) = svc else {
                     // Welcome wasn't for us.

@@ -18,7 +18,7 @@ use tracing::info;
 use crate::{
     app::error::UserError,
     core::{
-        Conversation, ConversationEventHandler, CoreError, DeMlsProvider, ProviderConsensus,
+        ConsensusPlugin, Conversation, ConversationEventHandler, CoreError, PluginConsensus,
         build_create_proposal_request, self_leave_proposal_id,
     },
     protos::de_mls::messages::v1::{
@@ -48,11 +48,11 @@ pub struct ProposalParams {
 /// In both cases the caller must record ownership *before*
 /// casting, so a single-voter consensus transition can't fire before
 /// `Conversation::is_owner_of_proposal` is true.
-pub async fn submit_proposal<P: DeMlsProvider>(
+pub async fn submit_proposal<P: ConsensusPlugin>(
     conversation_name: &str,
     request: &ConversationUpdateRequest,
     creator_id: &[u8],
-    consensus: &ProviderConsensus<P>,
+    consensus: &PluginConsensus<P>,
     params: ProposalParams,
 ) -> Result<(u32, AppMessage), CoreError> {
     let create_request = build_create_proposal_request(
@@ -99,11 +99,11 @@ pub async fn cast_vote<P, SN>(
     conversation_name: &str,
     proposal_id: u32,
     vote: bool,
-    consensus: &ProviderConsensus<P>,
+    consensus: &PluginConsensus<P>,
     signer: SN,
 ) -> Result<AppMessage, UserError>
 where
-    P: DeMlsProvider,
+    P: ConsensusPlugin,
     SN: Signer + Send + Sync,
 {
     let scope = P::Scope::from(conversation_name.to_string());
@@ -124,10 +124,10 @@ where
 /// regular proposals, emit a `VotePayload` so the UI can surface the
 /// pending vote. Fast-path proposals (`expected_voters_count == 1`)
 /// self-resolve on arrival and skip the banner.
-pub async fn relay_incoming_proposal<P: DeMlsProvider>(
+pub async fn relay_incoming_proposal<P: ConsensusPlugin>(
     conversation_name: &str,
     proposal: Proposal,
-    consensus: &ProviderConsensus<P>,
+    consensus: &PluginConsensus<P>,
     handler: &dyn ConversationEventHandler,
 ) -> Result<(), UserError> {
     let scope = P::Scope::from(conversation_name.to_string());
@@ -168,10 +168,10 @@ pub async fn relay_incoming_proposal<P: DeMlsProvider>(
 ///   swallow the error so inbound dispatch keeps draining.
 ///
 /// Other consensus errors propagate.
-pub async fn forward_incoming_vote<P: DeMlsProvider>(
+pub async fn forward_incoming_vote<P: ConsensusPlugin>(
     conversation: &Conversation,
     vote: Vote,
-    consensus: &ProviderConsensus<P>,
+    consensus: &PluginConsensus<P>,
 ) -> Result<(), CoreError> {
     let proposal_id = vote.proposal_id;
     let conversation_name = conversation.name();
@@ -227,12 +227,12 @@ pub async fn forward_incoming_vote<P: DeMlsProvider>(
 pub async fn submit_self_leave_proposal<P, SN>(
     conversation_name: &str,
     self_identity: &[u8],
-    consensus: &ProviderConsensus<P>,
+    consensus: &PluginConsensus<P>,
     signer: SN,
     params: ProposalParams,
 ) -> Result<Option<(u32, AppMessage)>, UserError>
 where
-    P: DeMlsProvider,
+    P: ConsensusPlugin,
     SN: Signer + Send + Sync,
 {
     let request = ConversationUpdateRequest {

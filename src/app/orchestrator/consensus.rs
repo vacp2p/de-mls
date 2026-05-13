@@ -12,12 +12,9 @@ use prost::Message;
 use tracing::{error, info};
 
 use crate::{
-    app::{
-        ConversationPlugins, ConversationState, ProposalParams, User, UserError, cast_vote,
-        submit_proposal,
-    },
+    app::{ConversationState, ProposalParams, User, UserError, cast_vote, submit_proposal},
     core::{
-        ConversationEventHandler, DeMlsProvider, ProposalKind, StewardListPlugin,
+        ConsensusPlugin, ConversationPluginsFactory, ProposalKind, StewardListPlugin,
         target_identity_of,
     },
     protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest, VotePayload},
@@ -42,9 +39,7 @@ struct NewProposal {
 
 use crate::mls_crypto::MlsService;
 
-impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 'static>
-    User<P, GP, H>
-{
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Check that the conversation state allows creating a proposal of this
     /// kind and return the expected voter count.
     async fn check_proposal_allowed(

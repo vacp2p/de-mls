@@ -45,12 +45,13 @@
 //! ## Quick Example
 //!
 //! ```ignore
-//! use de_mls::core::{DefaultProvider, ConversationEventHandler, ProcessResult};
+//! use de_mls::core::{DefaultConsensusPlugin, ConversationEventHandler, ProcessResult};
 //! use de_mls::app::User;
 //!
 //! // Build a user from an Ethereum private key. The convenience
-//! // constructor pins every `User` generic to the default provider
-//! // and plug-in bundle, so type inference works without annotation.
+//! // constructor pins both `User` generics to `DefaultConsensusPlugin`
+//! // and `DefaultConversationPluginsFactory`, so type inference works
+//! // without annotation.
 //! let mut user = User::with_private_key(
 //!     "0xac0974...",   // Private key
 //!     consensus,       // Consensus service
