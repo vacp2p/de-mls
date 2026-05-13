@@ -2,12 +2,10 @@
 //! Per-candidate apply paths (local merge / remote stage-validate-merge),
 //! MLS staging, validation, and post-commit bookkeeping live here.
 
-use std::collections::HashMap;
-
 use super::round::{FreezeFinalizeResult, FreezeOutcome, RoundContext};
 use crate::{
     core::{
-        Conversation, CoreError, ProcessResult, ProposalId, ScoreEvent, ScoreOp, StewardListPlugin,
+        Conversation, CoreError, ProcessResult, ScoreEvent, ScoreOp, StewardListPlugin,
         conversation::BufferedCommitCandidate, proposal_framing::build_invitation_packet,
     },
     mls_crypto::{MlsProposalOutput, MlsService, StagedCandidateResult},
@@ -24,7 +22,7 @@ enum CandidateOutcome {
     Terminal {
         outcome: FreezeOutcome,
         committer: Vec<u8>,
-        committed_batch: HashMap<ProposalId, ConversationUpdateRequest>,
+        committed_batch: Vec<ConversationUpdateRequest>,
     },
     Drop(ScoreOp),
 }
@@ -147,7 +145,7 @@ pub(super) fn apply_in_priority_order<M: MlsService>(
     Ok(FreezeFinalizeResult {
         outcome: FreezeOutcome::NoCandidate,
         score_ops,
-        committed_batch: HashMap::new(),
+        committed_batch: Vec::new(),
     })
 }
 
@@ -306,8 +304,8 @@ enum StagingOutcome {
 
 /// Stage proposals and commit, cross-checking sender consistency along the way.
 ///
-/// Leaves MLS in the staged state on `Staged`; the caller must clean up via
-/// `discard_and_*` for `Abort` / `Violation`.
+/// Leaves MLS in the staged state on `Staged`; the caller must clean up
+/// via `discard_staged_commit` for `Abort` / `Violation`.
 fn stage_candidate<M>(
     mls: &M,
     conversation_name: &str,
@@ -450,12 +448,12 @@ fn check_commit_sender_authorized(
 fn record_applied_commit(
     conversation: &mut Conversation,
     commit_hash: Vec<u8>,
-) -> HashMap<ProposalId, ConversationUpdateRequest> {
+) -> Vec<ConversationUpdateRequest> {
     conversation.record_committed_batch(commit_hash);
     let snapshot = if let Some(target) = conversation.take_urgent_commit_target() {
         // Urgent commit: leave the rest of the queue for the next cycle.
         conversation.drop_approved_removals_for(&target);
-        HashMap::new()
+        Vec::new()
     } else {
         conversation.clear_approved_proposals()
     };

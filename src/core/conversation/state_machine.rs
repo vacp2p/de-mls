@@ -52,8 +52,6 @@ impl Display for ConversationState {
     }
 }
 
-/// State enum + named transitions. The app layer wraps this with
-/// timer-driven behaviour through [`crate::app::PhaseTimer`].
 #[derive(Debug, Clone)]
 pub struct ConversationStateMachine {
     state: ConversationState,

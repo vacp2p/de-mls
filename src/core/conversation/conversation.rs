@@ -18,11 +18,9 @@ use crate::{
 pub type ProposalId = u32;
 
 /// Deterministic proposal ID for a self-leave, derived from the leaver's
-/// identity. Pinning the ID is what makes a leaver's crash-retry dedupe
-/// against an in-flight session (`ProposalAlreadyExist`) instead of opening
-/// a second session that would land a duplicate `RemoveMember` in the next
-/// commit batch. It also doubles as the self-leave signature used by
-/// `is_auto_approved_entry` and `reject_all_approved_proposals`.
+/// identity. Pinning the ID dedupes a crash-retry against any in-flight
+/// session via `ProposalAlreadyExist` and lets every node key the approved
+/// entry under the same id.
 pub fn self_leave_proposal_id(identity: &[u8]) -> u32 {
     let hash = Sha256::digest(identity);
     u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
@@ -66,7 +64,6 @@ pub fn target_identity_of(request: &ConversationUpdateRequest) -> Option<&[u8]> 
 /// `max_age_epochs` epochs have elapsed since the entry was first seen.
 #[derive(Clone, Debug)]
 pub struct PendingUpdate {
-    /// The `ConversationUpdateRequest` carrying either `InviteMember` or `RemoveMember`.
     pub request: ConversationUpdateRequest,
     /// MLS epoch at which this update was first observed locally.
     pub first_seen_epoch: u64,
@@ -111,10 +108,7 @@ pub enum FreezeBufferOutcome {
 
 /// Per-conversation protocol state. Stewards batch commits; members vote.
 /// Construct with [`Conversation::new`].
-///
-/// Proposal-queue and freeze-round bookkeeping.
 pub struct Conversation {
-    /// The name of the conversation.
     conversation_name: String,
     /// Proposals that passed consensus, waiting for steward to commit.
     approved_proposals: HashMap<ProposalId, ConversationUpdateRequest>,
@@ -193,13 +187,10 @@ impl Conversation {
         move |candidate: &[u8]| !self.is_pending_removal(candidate) && mls_set.contains(candidate)
     }
 
-    /// True iff `approved_proposals` carries any `RemoveMember(identity)` —
-    /// regardless of source (self-leave, ban, ECP-derived). Used by the
-    /// steward-eligibility predicate to skip a member whose removal is queued
-    /// for the next commit: MLS forbids them from committing it themselves,
-    /// so the rotation walk would have to fall back anyway. Broader than
-    /// [`Self::is_pending_self_leave`] (which only matches the deterministic
-    /// self-leave id).
+    /// True iff `approved_proposals` carries any `RemoveMember(identity)`,
+    /// regardless of source. Used by `steward_eligibility` to skip a member
+    /// whose removal is queued — MLS forbids them from committing it
+    /// themselves. Broader than [`Self::is_pending_self_leave`].
     pub fn is_pending_removal(&self, identity: &[u8]) -> bool {
         self.approved_proposals.values().any(|req| {
             matches!(
@@ -277,16 +268,14 @@ impl Conversation {
         }
     }
 
-    /// Clear the approved-proposal queue and return the cleared batch so
-    /// callers can archive it for UI / diagnostic history. Returns an
-    /// empty `HashMap` when the queue was already empty.
-    ///
-    /// MLS advances the epoch itself on commit merge, so no counter bump
-    /// here. Per-node epoch history is an app-layer concern; this method
-    /// surfaces the snapshot but does not retain it.
-    pub fn clear_approved_proposals(&mut self) -> HashMap<ProposalId, ConversationUpdateRequest> {
-        self.approved_order.clear();
-        std::mem::take(&mut self.approved_proposals)
+    /// Clear the approved-proposal queue and return the cleared batch in
+    /// FIFO insertion order so callers can archive it for UI / diagnostic
+    /// history. Returns an empty `Vec` when the queue was already empty.
+    pub fn clear_approved_proposals(&mut self) -> Vec<ConversationUpdateRequest> {
+        self.approved_order
+            .drain(..)
+            .filter_map(|pid| self.approved_proposals.remove(&pid))
+            .collect()
     }
 
     /// Discard the approved queue on freeze failure. `RemoveMember`

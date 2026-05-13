@@ -2,16 +2,14 @@
 //!
 //! Per-candidate apply lives in the sibling [`super::apply`] module.
 
-use std::collections::HashMap;
-
 use sha2::{Digest, Sha256};
 use tracing::info;
 
 use super::apply::apply_in_priority_order;
 use crate::{
     core::{
-        Conversation, CoreError, FreezeBufferOutcome, ProcessResult, ProposalId, ScoreOp,
-        StewardListPlugin, conversation::BufferedCommitCandidate,
+        Conversation, CoreError, FreezeBufferOutcome, ProcessResult, ScoreOp, StewardListPlugin,
+        conversation::BufferedCommitCandidate,
     },
     mls_crypto::{MlsMessageKind, MlsProposalOutput, MlsService},
     protos::de_mls::messages::v1::{
@@ -24,35 +22,22 @@ use crate::{
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// What [`finalize_freeze_round`] hands back to the caller.
-///
-/// `score_ops` accumulates during the phase-3 loop — each time a candidate
-/// is dropped for MLS-staging failure the caller records a
-/// [`crate::core::ScoreEvent::MisbehavingCommit`] against its author. The
-/// app layer feeds these directly into the peer-scoring service without
-/// an ECP round-trip (RFC §Peer Scoring: locally-observed violations may
-/// be scored immediately).
 #[derive(Debug, Clone, Default)]
 pub struct FreezeFinalizeResult {
     pub outcome: FreezeOutcome,
     pub score_ops: Vec<ScoreOp>,
-    /// The approved-proposal batch that was just committed and cleared
-    /// from `Conversation::approved_proposals`. Empty when no commit applied or
-    /// when an urgent-target commit drops only the targeted entry. App
-    /// layer typically archives this for UI history.
-    pub committed_batch: HashMap<ProposalId, ConversationUpdateRequest>,
+    /// Just-committed approvals in FIFO order. Empty on no-op or when
+    /// an urgent-target commit drops only its entry.
+    pub committed_batch: Vec<ConversationUpdateRequest>,
 }
 
-/// Terminal outcome of a freeze round: either a dispatchable result or no
-/// candidate was applyable.
-///
 /// `result` is boxed because [`ProcessResult`] is a large enum (~240 bytes)
 /// and `NoCandidate` is the common case.
 #[derive(Debug, Clone, Default)]
 pub enum FreezeOutcome {
-    /// A dispatchable result — successful apply or self-leave.
-    /// `outbound` carries deferred welcomes when our own candidate won.
     Applied {
         result: Box<ProcessResult>,
+        /// Deferred welcomes when our own candidate won.
         outbound: Option<crate::ds::OutboundPacket>,
     },
     #[default]
@@ -66,11 +51,9 @@ pub fn compute_commit_hash(commit_message: &[u8]) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-/// Buffer a remote commit candidate for the active freeze round.
-///
-/// Enforces the invariants [`finalize_freeze_round`] assumes: non-empty
-/// proposals/commit, valid MLS wire kinds, non-empty `steward_identity`,
-/// not already committed. No MLS state is mutated here.
+/// Buffer a remote commit candidate. Enforces non-empty proposals/commit,
+/// valid MLS wire kinds, non-empty `steward_identity`, and non-duplicate
+/// hash. No MLS state is mutated.
 pub fn process_commit_candidate<M: MlsService>(
     conversation: &mut Conversation,
     mls: &M,
@@ -138,9 +121,7 @@ pub fn process_commit_candidate<M: MlsService>(
             );
             Ok(ProcessResult::CommitCandidateReceived)
         }
-        // All other outcomes are legitimate runtime states, not errors.
-        // Drop the candidate quietly; the round proceeds with whatever
-        // is already buffered.
+        // Legitimate runtime states, not errors — drop quietly.
         FreezeBufferOutcome::SelectionLocked
         | FreezeBufferOutcome::StaleEpoch
         | FreezeBufferOutcome::DuplicateHash => Ok(ProcessResult::Noop),
@@ -202,21 +183,18 @@ pub fn finalize_freeze_round<M: MlsService>(
 // ROUND SETUP
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Precomputed round-level data: the approved-queue snapshot every
-/// candidate must match, the epoch the round targets, and the identities
-/// used for self-accusation skips and committer-vs-expected checks.
-///
-/// `mls_actions` is the expected MLS action set (non-MLS payloads
-/// filtered out). `self_remove_pending` flips the local apply's terminal
-/// result to `LeaveConversation` when our removal is in the batch.
-/// `live_epoch_steward_id` is the pre-merge eligibility-filtered steward
-/// expected to have committed at `current_epoch`; used to penalise an
-/// absent steward when a backup commits in their place.
+/// Precomputed round-level data used during candidate apply.
 pub(super) struct RoundContext {
+    /// Expected MLS action set; non-MLS payloads filtered out.
     pub(super) mls_actions: Vec<MlsProposalOutput>,
     pub(super) mls_count: usize,
+    /// Flips the local apply's terminal result to `LeaveConversation`
+    /// when our removal is in the batch.
     pub(super) self_remove_pending: bool,
     pub(super) current_epoch: u64,
+    /// Pre-merge eligibility-filtered steward expected at
+    /// `current_epoch`. Used to penalise an absent steward when a
+    /// backup commits in their place.
     pub(super) live_epoch_steward_id: Option<Vec<u8>>,
     pub(super) self_identity: Vec<u8>,
 }
@@ -345,8 +323,6 @@ fn compare_candidate_priority(
 mod tests {
     use super::*;
 
-    /// Test-only: sort candidates by the RFC priority comparator so tests can
-    /// assert the full ranked order. Production uses `min_by` instead.
     fn sort_by_priority(
         candidates: &mut [BufferedCommitCandidate],
         epoch_steward_id: Option<&[u8]>,

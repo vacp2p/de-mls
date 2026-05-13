@@ -90,7 +90,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .on_phase_change(conversation_name, selection_event)
             .await;
 
-        let (finalize_result, downward_cross) = {
+        let (mut finalize_result, downward_cross) = {
             let mut entry = entry_arc.write().await;
             let allow_subset = entry.handle.steward_list.config().allow_subset_candidates;
             let result = if entry.handle.mls().is_some() {
@@ -122,14 +122,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             (result, cross)
         };
 
-        // Notify the integrator of the just-committed batch (UI history,
-        // audit logs, etc.). Fired outside the runner lock so the handler
-        // can take its own locks without deadlock risk.
         if !finalize_result.committed_batch.is_empty() {
-            let batch: Vec<_> = finalize_result.committed_batch.values().cloned().collect();
             if let Err(e) = self
                 .handler
-                .on_commit_applied(conversation_name, batch)
+                .on_commit_applied(
+                    conversation_name,
+                    std::mem::take(&mut finalize_result.committed_batch),
+                )
                 .await
             {
                 error!(conversation = conversation_name, error = %e, "on_commit_applied callback failed");

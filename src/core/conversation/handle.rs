@@ -22,12 +22,9 @@ use crate::{
     },
 };
 
-/// Per-conversation aggregate. Generic over a single [`ConversationPluginsFactory`]
-/// bundle so callsites name one type parameter instead of three. Fields
-/// with simple direct semantics (`conversation`, `state_machine`, `config`,
-/// `scoring`, `steward_list`) are exposed as fields; fields with
-/// attach/detach lifecycle (`mls`) or RFC-defined invariants
-/// (`operating_mode`) go through controlled accessors.
+/// Per-conversation aggregate owned by the orchestrator. Bundles protocol
+/// state, the MLS service, plug-ins, state machine, durable config, and
+/// operating mode behind one type parameter.
 pub struct ConversationHandle<CP: ConversationPluginsFactory> {
     pub(crate) conversation: Conversation,
     /// Per-conversation MLS service. `None` for joiners in `PendingJoin` who
@@ -41,19 +38,15 @@ pub struct ConversationHandle<CP: ConversationPluginsFactory> {
     /// `liveness_criteria_yes`, `pending_update_max_epochs`. Read by
     /// orchestrators; joiner-sync writes through this directly.
     pub(crate) config: ConversationConfig,
-    /// Per-conversation peer-score plug-in. Read by protocol decisions under
-    /// the orchestrator's per-handle lock; no separate `Mutex` needed.
+    /// Per-conversation peer-score plug-in.
     pub(crate) scoring: CP::Scoring,
     /// Per-conversation steward-list plug-in. Holds the active list, retry
     /// counter, and election retry policy. Orchestrator composes
-    /// eligibility from MLS members + `Conversation::is_pending_removal` and
-    /// passes it on every position query.
+    /// eligibility from MLS members + `Conversation::is_pending_removal`.
     pub(crate) steward_list: CP::StewardList,
     /// Authorization mode (RFC §Layer 3 Anti-Deadlock ECP). `Recovery` is
     /// set when an accepted Deadlock ECP relaxes the steward gate so any
     /// member may produce the next commit; cleared on accepted election.
-    /// Read by the freeze coordinator, the create-commit path, and
-    /// `core::finalize_freeze_round` (via `in_recovery` parameter).
     operating_mode: OperatingMode,
 }
 
@@ -108,9 +101,7 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
     }
 
     /// Borrow the MLS service, erroring with
-    /// [`CoreError::MlsGroupNotInitialized`] when not attached. Use this
-    /// in code paths where the service must be present so the `?` chain
-    /// stays linear.
+    /// [`CoreError::MlsGroupNotInitialized`] when not attached.
     pub(crate) fn expect_mls(&self) -> Result<&CP::Mls, CoreError> {
         self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)
     }
@@ -267,11 +258,8 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
             },
             epoch,
         );
-        // We still return the outbound packet so the steward broadcasts;
-        // finalize will ignore the unbuffered local candidate. The
-        // non-Buffered outcomes are legitimate runtime states (see
-        // `FreezeBufferOutcome` doc), not errors — log at debug so they
-        // surface for operators without alerting.
+        // Non-Buffered outcomes are legitimate runtime states (see
+        // `FreezeBufferOutcome`), not errors — log at debug.
         if !matches!(outcome, FreezeBufferOutcome::Buffered) {
             tracing::debug!(
                 conversation = self.conversation.name(),
@@ -297,9 +285,7 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
         )))
     }
 
-    /// Finalize the active freeze round. Errors with
-    /// [`CoreError::MlsGroupNotInitialized`] when no MLS service is
-    /// attached.
+    /// Finalize the active freeze round.
     pub(crate) fn finalize_freeze_round(
         &mut self,
         allow_subset_candidates: bool,
