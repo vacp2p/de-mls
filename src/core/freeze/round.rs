@@ -11,7 +11,7 @@ use crate::{
         Conversation, CoreError, FreezeBufferOutcome, ProcessResult, ScoreOp, StewardListPlugin,
         conversation::BufferedCommitCandidate,
     },
-    mls_crypto::{MlsMessageKind, MlsProposalOutput, MlsService},
+    mls_crypto::{MlsMessageKind, MlsService},
     protos::de_mls::messages::v1::{
         CommitCandidate, ConversationUpdateRequest, conversation_update_request::Payload,
     },
@@ -160,7 +160,14 @@ pub fn finalize_freeze_round<M: MlsService>(
         return Ok(FreezeFinalizeResult::default());
     }
 
-    let ctx = RoundContext::snapshot(conversation, mls, steward, current_epoch, self_identity)?;
+    let ctx = RoundContext::snapshot(
+        conversation,
+        mls,
+        steward,
+        current_epoch,
+        in_recovery,
+        self_identity,
+    )?;
     let sorted = rank_applicable_candidates(candidates, &ctx, allow_subset_candidates);
 
     if sorted.is_empty() {
@@ -172,9 +179,9 @@ pub fn finalize_freeze_round<M: MlsService>(
         conversation,
         mls,
         steward,
-        in_recovery,
         sorted,
         &ctx,
+        self_identity,
         app_id,
     )
 }
@@ -183,20 +190,22 @@ pub fn finalize_freeze_round<M: MlsService>(
 // ROUND SETUP
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Precomputed round-level data used during candidate apply.
+/// Pre-merge round state used during candidate apply.
 pub(super) struct RoundContext {
-    /// Expected MLS action set; non-MLS payloads filtered out.
-    pub(super) mls_actions: Vec<MlsProposalOutput>,
+    /// Number of MLS-producing approvals (Add/Remove). Used to filter
+    /// candidates whose proposal count doesn't match the voted set.
     pub(super) mls_count: usize,
     /// Flips the local apply's terminal result to `LeaveConversation`
     /// when our removal is in the batch.
     pub(super) self_remove_pending: bool,
     pub(super) current_epoch: u64,
+    /// RFC §Layer 3 Anti-Deadlock: any member MAY commit when set;
+    /// otherwise the commit sender must be on the steward list.
+    pub(super) in_recovery: bool,
     /// Pre-merge eligibility-filtered steward expected at
     /// `current_epoch`. Used to penalise an absent steward when a
     /// backup commits in their place.
     pub(super) live_epoch_steward_id: Option<Vec<u8>>,
-    pub(super) self_identity: Vec<u8>,
 }
 
 impl RoundContext {
@@ -205,14 +214,14 @@ impl RoundContext {
         mls: &M,
         steward: &dyn StewardListPlugin,
         current_epoch: u64,
+        in_recovery: bool,
         self_identity: &[u8],
     ) -> Result<Self, CoreError> {
-        let mls_actions: Vec<MlsProposalOutput> = conversation
+        let mls_count = conversation
             .approved_proposals()
             .values()
-            .filter_map(expected_action_for_request)
-            .collect();
-        let mls_count = mls_actions.len();
+            .filter(|req| produces_mls_action(req))
+            .count();
         let self_remove_pending = conversation.is_pending_removal(self_identity);
 
         let members = mls.members()?;
@@ -222,24 +231,23 @@ impl RoundContext {
             .map(|s| s.to_vec());
 
         Ok(Self {
-            mls_actions,
             mls_count,
             self_remove_pending,
             current_epoch,
+            in_recovery,
             live_epoch_steward_id,
-            self_identity: self_identity.to_vec(),
         })
     }
 }
 
-/// The MLS action a voted request should map to, or `None` for non-MLS
-/// payloads (emergency/election) — doubles as the "MLS-producing" filter.
-fn expected_action_for_request(req: &ConversationUpdateRequest) -> Option<MlsProposalOutput> {
-    match &req.payload {
-        Some(Payload::InviteMember(im)) => Some(MlsProposalOutput::Add(im.identity.clone())),
-        Some(Payload::RemoveMember(rm)) => Some(MlsProposalOutput::Remove(rm.identity.clone())),
-        Some(Payload::EmergencyCriteria(_)) | Some(Payload::StewardElection(_)) | None => None,
-    }
+/// True iff `req` is a membership change that produces an MLS proposal
+/// (vs governance kinds like emergency criteria or steward election,
+/// which are consensus-only).
+pub(super) fn produces_mls_action(req: &ConversationUpdateRequest) -> bool {
+    matches!(
+        req.payload.as_ref(),
+        Some(Payload::InviteMember(_) | Payload::RemoveMember(_))
+    )
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

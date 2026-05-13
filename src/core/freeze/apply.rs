@@ -9,7 +9,10 @@ use crate::{
         conversation::BufferedCommitCandidate, proposal_framing::build_invitation_packet,
     },
     mls_crypto::{MlsProposalOutput, MlsService, StagedCandidateResult},
-    protos::de_mls::messages::v1::{CommitCandidate, ConversationUpdateRequest, ViolationEvidence},
+    protos::de_mls::messages::v1::{
+        CommitCandidate, ConversationUpdateRequest, ViolationEvidence,
+        conversation_update_request::Payload,
+    },
 };
 
 /// Result of trying to apply one candidate. `Terminal` ends the round;
@@ -39,9 +42,9 @@ pub(super) fn apply_in_priority_order<M: MlsService>(
     conversation: &mut Conversation,
     mls: &M,
     steward: &dyn StewardListPlugin,
-    in_recovery: bool,
     sorted: Vec<BufferedCommitCandidate>,
     ctx: &RoundContext,
+    self_identity: &[u8],
     app_id: &[u8],
 ) -> Result<FreezeFinalizeResult, CoreError> {
     let mut score_ops: Vec<ScoreOp> = Vec::new();
@@ -58,24 +61,16 @@ pub(super) fn apply_in_priority_order<M: MlsService>(
                 );
                 continue;
             }
-            apply_local_candidate(conversation, mls, chosen, ctx.self_remove_pending, app_id)?
+            apply_local_candidate(conversation, mls, chosen, ctx, app_id)?
         } else {
-            if !own_commit_discarded && steward.is_steward(&ctx.self_identity) {
+            if !own_commit_discarded && steward.is_steward(self_identity) {
                 // A failure here leaves an old pending commit in MLS and
                 // would sabotage every subsequent staging attempt — bubble
                 // the error out of the round instead of pressing on.
                 mls.discard_own_commit()?;
                 own_commit_discarded = true;
             }
-            apply_incoming_candidate(
-                conversation,
-                mls,
-                steward,
-                in_recovery,
-                chosen,
-                &ctx.mls_actions,
-                ctx.current_epoch,
-            )?
+            apply_incoming_candidate(conversation, mls, steward, chosen, ctx)?
         };
 
         match apply_result {
@@ -84,47 +79,15 @@ pub(super) fn apply_in_priority_order<M: MlsService>(
                 committer,
                 committed_batch,
             } => {
-                score_ops.push(ScoreOp {
-                    member_id: committer.clone(),
-                    event: ScoreEvent::SuccessfulCommit,
-                });
-                // If a backup committed in place of the epoch steward,
-                // penalise the absent steward (RFC §Steward violation
-                // list: censorship/inactivity). Skip self-accusation —
-                // we know our own liveness directly. The walk in
-                // `live_epoch_steward_id` already filters out
-                // queued-removal targets, so a draining named steward
-                // never appears here as `expected`.
-                if let Some(expected) = ctx.live_epoch_steward_id.as_deref() {
-                    if expected != committer.as_slice() && expected != ctx.self_identity.as_slice()
-                    {
-                        score_ops.push(ScoreOp {
-                            member_id: expected.to_vec(),
-                            event: ScoreEvent::CensorshipInactivity,
-                        });
-                    }
-                }
-                // Unpicked candidates that passed the count filter are
-                // honest competitors under Δ-synchrony (same approved set,
-                // different MLS entropy). RFC §Commit Validation: "MUST
-                // NOT be classified as misbehaviour." Score only when the
-                // wire-claimed identity sits on the steward list — a forged
-                // claim from a non-steward earns no credit.
-                for loser in remaining {
-                    let claimed = loser.candidate_msg.steward_identity;
-                    let on_list = steward.is_steward(&claimed);
-                    if on_list {
-                        score_ops.push(ScoreOp {
-                            member_id: claimed,
-                            event: ScoreEvent::HonestCommitAttempt,
-                        });
-                    } else {
-                        tracing::debug!(
-                            conversation = %conversation_name,
-                            "dropping HonestCommitAttempt: claimed identity not on steward list"
-                        );
-                    }
-                }
+                record_winner_scores(
+                    &mut score_ops,
+                    &committer,
+                    self_identity,
+                    ctx,
+                    remaining,
+                    steward,
+                    &conversation_name,
+                );
                 return Ok(FreezeFinalizeResult {
                     outcome,
                     score_ops,
@@ -149,6 +112,59 @@ pub(super) fn apply_in_priority_order<M: MlsService>(
     })
 }
 
+/// Append the scoring side-effects of a winning commit:
+/// `SuccessfulCommit` on the committer, `CensorshipInactivity` on the
+/// absent named steward (if a backup won and we aren't that steward),
+/// and `HonestCommitAttempt` on each unpicked competitor whose
+/// wire-claimed identity sits on the steward list.
+///
+/// RFC §Commit Validation: unpicked competitors are honest under
+/// Δ-synchrony (same approved set, different MLS entropy) and MUST NOT
+/// be classified as misbehaviour. The steward-list check rejects forged
+/// credit claims from non-stewards.
+fn record_winner_scores(
+    score_ops: &mut Vec<ScoreOp>,
+    committer: &[u8],
+    self_identity: &[u8],
+    ctx: &RoundContext,
+    losers: impl Iterator<Item = BufferedCommitCandidate>,
+    steward: &dyn StewardListPlugin,
+    conversation_name: &str,
+) {
+    score_ops.push(ScoreOp {
+        member_id: committer.to_vec(),
+        event: ScoreEvent::SuccessfulCommit,
+    });
+
+    // The walk in `live_epoch_steward_id` already filters out
+    // queued-removal targets, so a draining named steward never appears
+    // here as `expected`.
+    if let Some(expected) = ctx.live_epoch_steward_id.as_deref()
+        && expected != committer
+        && expected != self_identity
+    {
+        score_ops.push(ScoreOp {
+            member_id: expected.to_vec(),
+            event: ScoreEvent::CensorshipInactivity,
+        });
+    }
+
+    for loser in losers {
+        let claimed = loser.candidate_msg.steward_identity;
+        if steward.is_steward(&claimed) {
+            score_ops.push(ScoreOp {
+                member_id: claimed,
+                event: ScoreEvent::HonestCommitAttempt,
+            });
+        } else {
+            tracing::debug!(
+                conversation = %conversation_name,
+                "dropping HonestCommitAttempt: claimed identity not on steward list"
+            );
+        }
+    }
+}
+
 // ─────────────────────────── Application Paths ───────────────────────────
 
 /// Merge our own commit and send the deferred welcomes we held back.
@@ -158,7 +174,7 @@ fn apply_local_candidate<M: MlsService>(
     conversation: &mut Conversation,
     mls: &M,
     chosen: BufferedCommitCandidate,
-    self_removed: bool,
+    ctx: &RoundContext,
     app_id: &[u8],
 ) -> Result<CandidateOutcome, CoreError> {
     // Local candidate: we wrote the message, so the wire-claimed identity
@@ -174,7 +190,7 @@ fn apply_local_candidate<M: MlsService>(
 
     let committed_batch = record_applied_commit(conversation, chosen.commit_hash);
 
-    let result = if self_removed {
+    let result = if ctx.self_remove_pending {
         ProcessResult::LeaveConversation
     } else {
         ProcessResult::ConversationUpdated
@@ -200,10 +216,8 @@ fn apply_incoming_candidate<M: MlsService>(
     conversation: &mut Conversation,
     mls: &M,
     steward: &dyn StewardListPlugin,
-    in_recovery: bool,
     chosen: BufferedCommitCandidate,
-    expected_actions: &[MlsProposalOutput],
-    current_epoch: u64,
+    ctx: &RoundContext,
 ) -> Result<CandidateOutcome, CoreError> {
     let conversation_name = conversation.name().to_owned();
 
@@ -211,7 +225,7 @@ fn apply_incoming_candidate<M: MlsService>(
         mls,
         &conversation_name,
         &chosen.candidate_msg,
-        current_epoch,
+        ctx,
     )? {
         StagingOutcome::Staged {
             commit_sender,
@@ -240,9 +254,8 @@ fn apply_incoming_candidate<M: MlsService>(
     if let Some(violation) = check_commit_sender_authorized(
         conversation,
         steward,
-        in_recovery,
         &commit_sender,
-        current_epoch,
+        ctx,
     ) {
         mls.discard_staged_commit()?;
         return Ok(CandidateOutcome::Drop(
@@ -255,10 +268,9 @@ fn apply_incoming_candidate<M: MlsService>(
     // MLS actions must match the set we voted to approve.
     if let Some(violation) = validate_commit_candidate(
         conversation,
-        expected_actions,
         &commit_sender,
         &commit_actions,
-        current_epoch,
+        ctx,
     )? {
         mls.discard_staged_commit()?;
         return Ok(CandidateOutcome::Drop(
@@ -310,7 +322,7 @@ fn stage_candidate<M>(
     mls: &M,
     conversation_name: &str,
     candidate: &CommitCandidate,
-    current_epoch: u64,
+    ctx: &RoundContext,
 ) -> Result<StagingOutcome, CoreError>
 where
     M: MlsService,
@@ -339,7 +351,7 @@ where
         );
         return Ok(StagingOutcome::Violation(ViolationEvidence::broken_commit(
             commit_sender,
-            current_epoch,
+            ctx.current_epoch,
             "commit candidate's steward_identity doesn't match MLS commit sender",
         )));
     }
@@ -356,7 +368,7 @@ where
         );
         return Ok(StagingOutcome::Violation(ViolationEvidence::broken_commit(
             commit_sender,
-            current_epoch,
+            ctx.current_epoch,
             "commit bundles proposals not signed by the committer",
         )));
     }
@@ -372,36 +384,62 @@ where
 
 /// Check that a commit's MLS actions match the voted-approved set.
 /// `Some(evidence)` on mismatch.
+///
+/// Compares both sides as sorted `(kind_tag, &identity)` projections —
+/// no `MlsProposalOutput` allocation, no per-element clone.
 fn validate_commit_candidate(
     conversation: &Conversation,
-    expected_actions: &[MlsProposalOutput],
     sender_id: &[u8],
     mls_actions: &[MlsProposalOutput],
-    epoch: u64,
+    ctx: &RoundContext,
 ) -> Result<Option<ViolationEvidence>, CoreError> {
-    let conversation_name = conversation.name();
+    let mut expected: Vec<(u8, &[u8])> = conversation
+        .approved_proposals()
+        .values()
+        .filter_map(action_projection_from_request)
+        .collect();
+    let mut actual: Vec<(u8, &[u8])> =
+        mls_actions.iter().map(action_projection_from_mls).collect();
+    expected.sort();
+    actual.sort();
 
-    let mut expected_actions = expected_actions.to_vec();
-    let mut actual_actions = mls_actions.to_vec();
-
-    expected_actions.sort();
-    actual_actions.sort();
-
-    if actual_actions != expected_actions {
-        tracing::warn!(
-            conversation = conversation_name,
-            actual = ?actual_actions,
-            expected = ?expected_actions,
-            "violation: MLS actions don't match voted proposals"
-        );
-        return Ok(Some(ViolationEvidence::broken_mls_proposal(
-            sender_id.to_vec(),
-            epoch,
-            format!("MLS actions {actual_actions:?} != voted {expected_actions:?}"),
-        )));
+    if expected == actual {
+        return Ok(None);
     }
 
-    Ok(None)
+    tracing::warn!(
+        conversation = conversation.name(),
+        actual = ?mls_actions,
+        expected = ?expected,
+        "violation: MLS actions don't match voted proposals"
+    );
+    Ok(Some(ViolationEvidence::broken_mls_proposal(
+        sender_id.to_vec(),
+        ctx.current_epoch,
+        format!("MLS actions {mls_actions:?} != voted {expected:?}"),
+    )))
+}
+
+/// `(kind_tag, identity)` projection of an approved voting request.
+/// Returns `None` for non-MLS payloads (emergency/election).
+fn action_projection_from_request(
+    req: &ConversationUpdateRequest,
+) -> Option<(u8, &[u8])> {
+    match req.payload.as_ref()? {
+        Payload::InviteMember(im) => Some((0, &im.identity)),
+        Payload::RemoveMember(rm) => Some((1, &rm.identity)),
+        _ => None,
+    }
+}
+
+/// `(kind_tag, identity)` projection of an MLS-staged action. `Other`
+/// gets a distinct tag so it never matches voted Add/Remove.
+fn action_projection_from_mls(action: &MlsProposalOutput) -> (u8, &[u8]) {
+    match action {
+        MlsProposalOutput::Add(id) => (0, id),
+        MlsProposalOutput::Remove(id) => (1, id),
+        MlsProposalOutput::Other(_) => (2, b""),
+    }
 }
 
 /// RFC §"de-MLS Objects": any steward-list member may commit to preserve
@@ -414,15 +452,14 @@ fn validate_commit_candidate(
 fn check_commit_sender_authorized(
     conversation: &Conversation,
     steward: &dyn StewardListPlugin,
-    in_recovery: bool,
     commit_sender: &[u8],
-    epoch: u64,
+    ctx: &RoundContext,
 ) -> Option<ViolationEvidence> {
-    if in_recovery {
+    if ctx.in_recovery {
         return None;
     }
     steward.current_list()?;
-    if steward.is_exhausted(epoch) {
+    if steward.is_exhausted(ctx.current_epoch) {
         return None;
     }
     if steward.is_steward(commit_sender) {
@@ -434,7 +471,7 @@ fn check_commit_sender_authorized(
     );
     Some(ViolationEvidence::broken_commit(
         commit_sender.to_vec(),
-        epoch,
+        ctx.current_epoch,
         "commit from unauthorized sender (not on the steward list)",
     ))
 }
