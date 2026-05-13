@@ -27,7 +27,7 @@ pub type BoxedError = Box<dyn StdError + Send + Sync>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MlsError {
-    // ── Identity ──
+    // ── Crypto + key-package serialization ──
     #[error(transparent)]
     UnableToCreateKeyPackage(#[from] KeyPackageNewError),
 

@@ -22,10 +22,6 @@ pub enum CoreError {
     #[error("Message error: {0}")]
     MessageError(#[from] prost::DecodeError),
 
-    /// JSON error.
-    #[error("JSON error: {0}")]
-    JsonError(#[from] serde_json::Error),
-
     /// MLS group is not initialized for this conversation.
     #[error("MLS group not initialized")]
     MlsGroupNotInitialized,

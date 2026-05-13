@@ -55,11 +55,3 @@ pub enum UserError {
     Identity(#[from] IdentityError),
 }
 
-impl UserError {
-    pub fn is_fatal(&self) -> bool {
-        matches!(
-            self,
-            UserError::ConversationNotFound | UserError::AlreadyLeaving
-        )
-    }
-}

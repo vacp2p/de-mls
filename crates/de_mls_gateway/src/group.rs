@@ -1,5 +1,7 @@
 use de_mls::{
-    app::FreezeTimeoutStatus, ds::WakuDeliveryService, protos::de_mls::messages::v1::BanRequest,
+    app::{FreezeTimeoutStatus, UserError},
+    ds::WakuDeliveryService,
+    protos::de_mls::messages::v1::BanRequest,
 };
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
 
@@ -7,6 +9,28 @@ use crate::{
     Gateway, UserRef,
     forwarder::{display_batch, load_member_info},
 };
+
+/// True when a [`UserError`] surfaced during the polling loop should end
+/// the loop. Exhaustive match per variant so a newly-added [`UserError`]
+/// variant forces an explicit decision at compile time. Fatal variants
+/// mean "the conversation is gone, stop polling"; non-fatal variants are
+/// transient and the loop continues.
+fn is_polling_fatal(err: &UserError) -> bool {
+    match err {
+        UserError::ConversationNotFound | UserError::AlreadyLeaving => true,
+        UserError::ConversationAlreadyExists
+        | UserError::ConversationBlocked(_)
+        | UserError::PartialFreeze
+        | UserError::Callback(_)
+        | UserError::Core(_)
+        | UserError::Consensus(_)
+        | UserError::Message(_)
+        | UserError::SystemTime(_)
+        | UserError::Signer(_)
+        | UserError::Mls(_)
+        | UserError::Identity(_) => false,
+    }
+}
 
 impl Gateway<WakuDeliveryService> {
     pub async fn create_conversation(&self, conversation_name: String) -> anyhow::Result<()> {
@@ -117,7 +141,7 @@ impl Gateway<WakuDeliveryService> {
             {
                 Ok(status) => status,
                 Err(e) => {
-                    if e.is_fatal() {
+                    if is_polling_fatal(&e) {
                         tracing::warn!(group = %conversation_name, error = %e, "polling loop exiting");
                         break;
                     }
@@ -135,7 +159,7 @@ impl Gateway<WakuDeliveryService> {
                         Ok(true) => { /* entered Freezing (+ created candidate if steward) */ }
                         Ok(false) => {}
                         Err(e) => {
-                            if e.is_fatal() {
+                            if is_polling_fatal(&e) {
                                 tracing::warn!(group = %conversation_name, error = %e, "polling loop exiting");
                                 break;
                             }
