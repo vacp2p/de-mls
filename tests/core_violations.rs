@@ -271,7 +271,7 @@ fn test_duplicate_batch_returns_noop() {
     )
     .unwrap();
     assert!(
-        matches!(r1, ProcessResult::CommitCandidateReceived),
+        matches!(r1, ProcessResult::CommitCandidateReceived { .. }),
         "Expected CommitCandidateReceived, got {:?}",
         r1
     );
@@ -285,7 +285,7 @@ fn test_duplicate_batch_returns_noop() {
     )
     .unwrap();
     assert!(
-        matches!(r2, ProcessResult::Noop),
+        matches!(r2, ProcessResult::Noop(_)),
         "Expected Noop (duplicate), got {:?}",
         r2
     );
@@ -376,7 +376,7 @@ fn test_candidate_ignored_without_freeze_round() {
     )
     .unwrap();
     assert!(
-        matches!(result, ProcessResult::Noop),
+        matches!(result, ProcessResult::Noop(_)),
         "Expected Noop (no freeze round), got {:?}",
         result
     );
@@ -448,7 +448,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     )
     .unwrap();
     assert!(
-        matches!(result, ProcessResult::CommitCandidateReceived),
+        matches!(result, ProcessResult::CommitCandidateReceived { .. }),
         "Expected CommitCandidateReceived, got {:?}",
         result
     );
@@ -710,7 +710,7 @@ fn test_forged_steward_identity_scores_mls_sender() {
     )
     .unwrap();
     assert!(
-        matches!(result, ProcessResult::CommitCandidateReceived),
+        matches!(result, ProcessResult::CommitCandidateReceived { .. }),
         "Expected CommitCandidateReceived after wire forgery, got {:?}",
         result
     );

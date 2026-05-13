@@ -43,14 +43,52 @@ pub enum ProcessResult {
     ConversationUpdated,
 
     /// Remote commit candidate was buffered in the active freeze round.
-    CommitCandidateReceived,
+    /// `steward` is the wire-claimed identity from the candidate; the app
+    /// layer uses it for dispatch context (logging, scoring attribution).
+    CommitCandidateReceived { steward: Vec<u8> },
 
     /// Conversation-sync message from the steward (steward list, scores, timing,
     /// protocol flags). Meaningful only for joiners with no steward list yet.
     ConversationSyncReceived(ConversationSync),
 
-    /// Nothing to do (not for us, duplicate, or already handled).
-    Noop,
+    /// Nothing to do. The reason variant names the specific case so the
+    /// app layer can match precisely instead of relying on producer-side
+    /// log lines for context.
+    Noop(NoopReason),
+}
+
+/// Why a [`ProcessResult::Noop`] was returned. One variant per producer
+/// site so the dispatch layer can match on the specific case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoopReason {
+    /// Decrypted application message had no recognized payload variant.
+    UnknownAppMessage,
+    /// Fast-path proposal rejected: MLS sender doesn't match the
+    /// self-removal target.
+    FastPathRejected,
+    /// Ban request dropped: target is not a conversation member.
+    BanTargetNotMember,
+    /// Decrypt returned `Ignored` (wrong epoch or wrong conversation).
+    DecryptIgnored,
+    /// Decrypt returned a non-Application MLS payload on the app subtopic.
+    UnexpectedMlsType,
+    /// `process_commit_candidate` found no approved proposals to commit.
+    NoApprovedProposals,
+    /// Commit hash matches a recent committed batch — duplicate broadcast.
+    AlreadyCommitted,
+    /// Candidate carried an empty proposals or commit payload.
+    EmptyCandidatePayload,
+    /// Candidate carried an empty `steward_identity` field.
+    EmptyStewardIdentity,
+    /// Candidate's wire kind doesn't match Proposal/Commit.
+    WireKindMismatch,
+    /// Freeze round selection is locked — the buffer no longer accepts
+    /// candidates.
+    SelectionLocked,
+    /// Caller's epoch doesn't match the buffered round's epoch.
+    StaleEpoch,
+    /// Identical commit hash is already buffered for this round.
+    DuplicateBufferedHash,
 }
 
 // ── ViolationEvidence constructors ────────────────────────────────
@@ -229,7 +267,13 @@ impl TryFrom<AppMessage> for ProcessResult {
             Some(app_message::Payload::ConversationSync(sync)) => {
                 Ok(ProcessResult::ConversationSyncReceived(sync.clone()))
             }
-            _ => Ok(ProcessResult::Noop),
+            other => {
+                tracing::debug!(
+                    payload_kind = ?other.as_ref().map(std::mem::discriminant),
+                    "app message ignored: payload variant not consumed by core dispatch"
+                );
+                Ok(ProcessResult::Noop(NoopReason::UnknownAppMessage))
+            }
         }
     }
 }

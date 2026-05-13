@@ -50,7 +50,7 @@ fn test_process_inbound_app_msg_before_mls_init() {
 
     let result =
         process_inbound_compat(&mut group, None, b"some payload", APP_MSG_SUBTOPIC).unwrap();
-    assert!(matches!(result, ProcessResult::Noop));
+    assert!(matches!(result, ProcessResult::Noop(_)));
 }
 
 #[test]
@@ -284,7 +284,7 @@ fn test_process_inbound_leave_group() {
     .unwrap();
 
     assert!(
-        matches!(remove_result, ProcessResult::CommitCandidateReceived),
+        matches!(remove_result, ProcessResult::CommitCandidateReceived { .. }),
         "Expected CommitCandidateReceived, got {:?}",
         remove_result
     );
@@ -511,7 +511,7 @@ fn test_process_inbound_raw_commit_payload_is_ignored() {
         APP_MSG_SUBTOPIC,
     )
     .unwrap();
-    assert!(matches!(result, ProcessResult::Noop));
+    assert!(matches!(result, ProcessResult::Noop(_)));
 }
 
 // ─────────────────────────── Auto-fill steward list tests ───────────────────────────

@@ -57,13 +57,21 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 self.on_conversation_updated(conversation_name).await
             }
             ProcessResult::LeaveConversation => self.on_leave_conversation(conversation_name).await,
-            ProcessResult::CommitCandidateReceived => {
-                self.on_commit_candidate_received(conversation_name).await
+            ProcessResult::CommitCandidateReceived { steward } => {
+                self.on_commit_candidate_received(conversation_name, &steward)
+                    .await
             }
             ProcessResult::ConversationSyncReceived(sync) => {
                 self.on_conversation_sync(conversation_name, sync).await
             }
-            ProcessResult::Noop => Ok(()),
+            ProcessResult::Noop(reason) => {
+                tracing::debug!(
+                    conversation = conversation_name,
+                    ?reason,
+                    "inbound dispatched as noop"
+                );
+                Ok(())
+            }
         }
     }
 
@@ -274,7 +282,16 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
     /// Peer broadcast a commit candidate. If we were in Working, enter
     /// Freezing and — if we're a steward — build our own candidate too.
-    async fn on_commit_candidate_received(&self, conversation_name: &str) -> Result<(), UserError> {
+    async fn on_commit_candidate_received(
+        &self,
+        conversation_name: &str,
+        steward: &[u8],
+    ) -> Result<(), UserError> {
+        tracing::debug!(
+            conversation = conversation_name,
+            steward = %ShortId::new(steward),
+            "candidate received from peer steward"
+        );
         let entry_arc = match self.lookup_entry(conversation_name).await {
             Some(e) => e,
             None => return Ok(()),

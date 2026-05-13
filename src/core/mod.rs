@@ -81,4 +81,4 @@ pub use consensus_plugin::{ConsensusPlugin, DefaultConsensusPlugin, PluginConsen
 pub use plugins::ConversationPluginsFactory;
 
 // ── Process results ──
-pub use process_result::ProcessResult;
+pub use process_result::{NoopReason, ProcessResult};
