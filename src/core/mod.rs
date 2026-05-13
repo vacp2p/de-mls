@@ -43,7 +43,7 @@ pub use conversation::{
     BufferedCommitCandidate, Conversation, ConversationConfig, ConversationHandle,
     ConversationState, ConversationStateMachine, DEFAULT_COMMIT_INACTIVITY_DURATION,
     DEFAULT_CONSENSUS_TIMEOUT, DEFAULT_ELECTION_VOTING_DELAY, DEFAULT_LIVENESS_CRITERIA_YES,
-    DEFAULT_PEER_SCORE, DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION,
+    DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION,
     DEFAULT_RECOVERY_INACTIVITY_DURATION, DEFAULT_VOTING_DELAY, OperatingMode, PendingUpdate,
     ProposalId, member_set, self_leave_proposal_id, target_identity_of,
 };
@@ -51,9 +51,9 @@ pub use conversation::{
 // ── Consensus result application (pure, synchronous) ──
 pub use consensus::{ConsensusApplyResult, apply_consensus_result};
 pub use peer_scoring::{
-    DEFAULT_THRESHOLD_PEER_SCORE, PeerScoreStorage, PeerScoringEvent, PeerScoringPlugin,
-    PeerScoringService, ScoreEvent, ScoreOp, ScoreSnapshot, ScoringConfig, ScoringMemberDiff,
-    ScoringProvider, emergency_score_ops, scoring_member_diff,
+    DEFAULT_PEER_SCORE, DEFAULT_THRESHOLD_PEER_SCORE, PeerScoreStorage, PeerScoringEvent,
+    PeerScoringPlugin, PeerScoringService, ScoreEvent, ScoreOp, ScoreSnapshot, ScoringConfig,
+    ScoringMemberDiff, ScoringProvider, emergency_score_ops, scoring_member_diff,
 };
 
 // ── Error type ──

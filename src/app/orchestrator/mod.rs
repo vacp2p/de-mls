@@ -76,6 +76,14 @@ pub struct User<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventH
     eth_signer: PrivateKeySigner,
     handler: Arc<H>,
     default_conversation_config: ConversationConfig,
+    /// Seed config for the per-conversation peer-scoring plug-in. Owned at
+    /// the User level so every conversation starts from the same defaults;
+    /// once a conversation exists, its plug-in owns the live values
+    /// (joiner-side overwritten by `ConversationSync`).
+    default_scoring_config: ScoringConfig,
+    /// Seed config for the per-conversation steward-list plug-in. Same
+    /// ownership story as `default_scoring_config`.
+    default_steward_config: StewardListConfig,
     /// Per-instance UUID embedded in every outbound packet. Inbound packets
     /// carrying our `app_id` are self-echoes and silently dropped.
     app_id: Vec<u8>,
@@ -93,6 +101,8 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler> Clo
             eth_signer: self.eth_signer.clone(),
             handler: Arc::clone(&self.handler),
             default_conversation_config: self.default_conversation_config.clone(),
+            default_scoring_config: self.default_scoring_config.clone(),
+            default_steward_config: self.default_steward_config.clone(),
             app_id: self.app_id.clone(),
         }
     }
@@ -117,31 +127,41 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             eth_signer,
             handler,
             default_conversation_config,
+            default_scoring_config: ScoringConfig::default(),
+            default_steward_config: StewardListConfig::default(),
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
         }
+    }
+
+    /// Override the seed [`ScoringConfig`] used for newly-created per-conversation
+    /// scoring plug-ins. Existing conversations are untouched; their plug-ins
+    /// already own their live config (joiner-side overwritten by ConversationSync).
+    pub fn set_default_scoring_config(&mut self, config: ScoringConfig) {
+        self.default_scoring_config = config;
+    }
+
+    /// Override the seed [`StewardListConfig`] used for newly-created
+    /// per-conversation steward-list plug-ins. Same lifecycle as
+    /// [`Self::set_default_scoring_config`].
+    pub fn set_default_steward_config(&mut self, config: StewardListConfig) {
+        self.default_steward_config = config;
     }
 
     /// Build a fresh per-conversation scoring plug-in from the user's default
     /// scoring config. Used by runner construction in lifecycle / welcome
     /// paths.
     pub(crate) fn make_scoring_service(&self) -> GP::Scoring {
-        let scoring_config = ScoringConfig {
-            default_score: self.default_conversation_config.default_peer_score,
-            threshold: self.default_conversation_config.threshold_peer_score,
-        };
-        self.plugins.make_scoring(&scoring_config)
+        self.plugins.make_scoring(&self.default_scoring_config)
     }
 
     /// Build a fresh per-conversation steward-list plug-in. Returns an empty
     /// plug-in; the lifecycle creator path bootstraps it via `install_list`,
     /// the joiner path leaves it empty until `ConversationSync` arrives.
-    pub(crate) fn make_steward_plugin(
-        &self,
-        conversation_name: &str,
-        config: &StewardListConfig,
-    ) -> GP::Steward {
-        self.plugins
-            .make_steward(conversation_name.as_bytes(), config.clone())
+    pub(crate) fn make_steward_plugin(&self, conversation_name: &str) -> GP::Steward {
+        self.plugins.make_steward(
+            conversation_name.as_bytes(),
+            self.default_steward_config.clone(),
+        )
     }
 
     /// Look up a conversation runner. Returns `None` when no runner is

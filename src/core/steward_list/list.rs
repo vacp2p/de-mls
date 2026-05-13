@@ -25,6 +25,14 @@ pub struct StewardListConfig {
     pub allow_subset_candidates: bool,
 }
 
+impl Default for StewardListConfig {
+    /// Tiny-conversation defaults — `sn ∈ [1, 2]`, subset candidates disallowed.
+    /// Adjust at `User` init via [`crate::app::User::set_default_steward_config`].
+    fn default() -> Self {
+        Self::new(1, 2).expect("1..=2 is always a valid StewardListConfig range")
+    }
+}
+
 impl StewardListConfig {
     /// Create a new config with the given bounds.
     ///

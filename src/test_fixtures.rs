@@ -226,4 +226,10 @@ impl PeerScoringPlugin for StubScoring {
     fn set_threshold(&mut self, _: i64) {
         unreachable!()
     }
+    fn default_score(&self) -> i64 {
+        unreachable!()
+    }
+    fn set_default_score(&mut self, _: i64) {
+        unreachable!()
+    }
 }

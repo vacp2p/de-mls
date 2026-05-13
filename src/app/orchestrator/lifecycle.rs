@@ -65,7 +65,7 @@ impl<P: DeMlsProvider, GP: ConversationPlugins, H: ConversationEventHandler + 's
             (conversation, None, state_machine, phase_timer)
         };
 
-        let mut steward = self.make_steward_plugin(conversation_name, &config.protocol);
+        let mut steward = self.make_steward_plugin(conversation_name);
         steward.set_max_retries(config.max_reelection_attempts);
         // Creator path: bootstrap the list with self as sole steward at
         // epoch 0. Joiner path leaves the plug-in empty until `ConversationSync`.
