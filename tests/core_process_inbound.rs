@@ -50,7 +50,7 @@ fn test_process_inbound_app_msg_before_mls_init() {
 
     let result =
         process_inbound_compat(&mut group, None, b"some payload", APP_MSG_SUBTOPIC).unwrap();
-    assert!(matches!(result, ProcessResult::Noop));
+    assert!(matches!(result, ProcessResult::Noop(_)));
 }
 
 #[test]
@@ -284,7 +284,7 @@ fn test_process_inbound_leave_group() {
     .unwrap();
 
     assert!(
-        matches!(remove_result, ProcessResult::CommitCandidateReceived),
+        matches!(remove_result, ProcessResult::CommitCandidateReceived { .. }),
         "Expected CommitCandidateReceived, got {:?}",
         remove_result
     );
@@ -302,7 +302,7 @@ fn test_process_inbound_leave_group() {
     .unwrap();
     let matched = matches!(
         &finalize.outcome,
-        FreezeOutcome::Applied { result, .. } if matches!(**result, ProcessResult::LeaveConversation)
+        FreezeOutcome::Applied { result, .. } if matches!(*result, ProcessResult::LeaveConversation)
     );
     assert!(
         matched,
@@ -383,7 +383,7 @@ fn test_rejoin_after_eviction() {
     assert!(
         matches!(
             &finalize_joiner.outcome,
-            FreezeOutcome::Applied { result, .. } if matches!(**result, ProcessResult::LeaveConversation)
+            FreezeOutcome::Applied { result, .. } if matches!(*result, ProcessResult::LeaveConversation)
         ),
         "Expected LeaveConversation on joiner finalize, got {finalize_joiner:?}"
     );
@@ -400,7 +400,7 @@ fn test_rejoin_after_eviction() {
     .unwrap();
     assert!(matches!(
         &finalize_steward.outcome,
-        FreezeOutcome::Applied { result, .. } if matches!(**result, ProcessResult::ConversationUpdated)
+        FreezeOutcome::Applied { result, .. } if matches!(*result, ProcessResult::ConversationUpdated)
     ));
     assert!(!steward_handle.mls.is_member(&joiner_id),);
 
@@ -511,7 +511,7 @@ fn test_process_inbound_raw_commit_payload_is_ignored() {
         APP_MSG_SUBTOPIC,
     )
     .unwrap();
-    assert!(matches!(result, ProcessResult::Noop));
+    assert!(matches!(result, ProcessResult::Noop(_)));
 }
 
 // ─────────────────────────── Auto-fill steward list tests ───────────────────────────

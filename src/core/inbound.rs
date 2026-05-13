@@ -10,8 +10,10 @@ use tracing::{info, warn};
 
 use crate::{
     core::{
-        conversation::Conversation, error::CoreError, freeze::process_commit_candidate,
-        process_result::ProcessResult,
+        conversation::Conversation,
+        error::CoreError,
+        freeze::process_commit_candidate,
+        process_result::{NoopReason, ProcessResult},
     },
     identity::{ShortId, parse_wallet_to_bytes},
     mls_crypto::{DecryptResult, MlsService},
@@ -75,7 +77,7 @@ pub fn process_inbound<M: MlsService>(
                     owner = %ShortId::new(&proposal.proposal_owner),
                     "fast-path proposal rejected: sender is not the self-removal target"
                 );
-                return Ok(ProcessResult::Noop);
+                return Ok(ProcessResult::Noop(NoopReason::FastPathRejected));
             }
             // Drop BanRequests whose target isn't in the conversation — saves a
             // useless consensus round.
@@ -87,7 +89,7 @@ pub fn process_inbound<M: MlsService>(
                         target = %ShortId::new(&target),
                         "ban request skipped: target not a member"
                     );
-                    return Ok(ProcessResult::Noop);
+                    return Ok(ProcessResult::Noop(NoopReason::BanTargetNotMember));
                 }
             }
             app_msg.try_into()
@@ -98,14 +100,14 @@ pub fn process_inbound<M: MlsService>(
                 conversation = conversation.name(),
                 "app message ignored (wrong epoch/conversation)"
             );
-            Ok(ProcessResult::Noop)
+            Ok(ProcessResult::Noop(NoopReason::DecryptIgnored))
         }
         _ => {
             warn!(
                 conversation = conversation.name(),
                 "unexpected MLS message type on app subtopic"
             );
-            Ok(ProcessResult::Noop)
+            Ok(ProcessResult::Noop(NoopReason::UnexpectedMlsType))
         }
     }
 }

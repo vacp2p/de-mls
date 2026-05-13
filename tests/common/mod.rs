@@ -18,8 +18,8 @@ use de_mls::core::PeerScoringService;
 use de_mls::core::default_score_deltas;
 use de_mls::core::{
     BufferedCommitCandidate, CallbackError, Conversation, ConversationEventHandler, CoreError,
-    DeterministicStewardList, FreezeOutcome, OperatingMode, ProcessResult, ProposalKind,
-    ScoringConfig, StewardListConfig, StewardListPlugin, build_key_package_message,
+    DeterministicStewardList, FreezeOutcome, NoopReason, OperatingMode, ProcessResult,
+    ProposalKind, ScoringConfig, StewardListConfig, StewardListPlugin, build_key_package_message,
     compute_commit_hash, finalize_freeze_round, member_set, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
@@ -320,9 +320,9 @@ pub fn process_inbound_compat(
                 if let Some(mls) = mls
                     && mls.is_member(&identity)
                 {
-                    return Ok(ProcessResult::Noop);
+                    return Ok(ProcessResult::Noop(NoopReason::UnknownAppMessage));
                 }
-                Ok(ProcessResult::MembershipChangeReceived(
+                Ok(ProcessResult::MembershipChangeReceived(Box::new(
                     ConversationUpdateRequest {
                         payload: Some(conversation_update_request::Payload::InviteMember(
                             InviteMember {
@@ -331,7 +331,7 @@ pub fn process_inbound_compat(
                             },
                         )),
                     },
-                ))
+                )))
             }
             Some(welcome_message::Payload::InvitationToJoin(_)) => {
                 panic!(
@@ -339,13 +339,13 @@ pub fn process_inbound_compat(
                      use JoinerHandle::accept_welcome_packet"
                 );
             }
-            None => Ok(ProcessResult::Noop),
+            None => Ok(ProcessResult::Noop(NoopReason::UnknownAppMessage)),
         }
     } else if subtopic == APP_MSG_SUBTOPIC {
         let Some(mls) = mls else {
             // Pre-refactor behaviour: app messages on a group with no MLS
             // state are silently ignored. Mirrors the User-layer dispatch.
-            return Ok(ProcessResult::Noop);
+            return Ok(ProcessResult::Noop(NoopReason::UnknownAppMessage));
         };
         process_inbound(group, mls, payload)
     } else {
@@ -581,7 +581,7 @@ pub fn steward_add_joiner(
     let welcome_packet = match finalize.outcome {
         FreezeOutcome::Applied { result, outbound } => {
             assert!(
-                matches!(*result, ProcessResult::ConversationUpdated),
+                matches!(result, ProcessResult::ConversationUpdated),
                 "Expected ConversationUpdated, got {:?}",
                 result
             );

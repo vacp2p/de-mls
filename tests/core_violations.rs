@@ -173,7 +173,7 @@ fn test_emergency_mixed_with_regular_returns_error() {
     )
     .unwrap();
     let gur = match result {
-        ProcessResult::MembershipChangeReceived(gur) => gur,
+        ProcessResult::MembershipChangeReceived(gur) => *gur,
         other => panic!("Expected MembershipChangeReceived, got {:?}", other),
     };
 
@@ -237,7 +237,7 @@ fn test_duplicate_batch_returns_noop() {
     )
     .unwrap();
     let gur = match result {
-        ProcessResult::MembershipChangeReceived(gur) => gur,
+        ProcessResult::MembershipChangeReceived(gur) => *gur,
         other => panic!("Expected MembershipChangeReceived, got {:?}", other),
     };
 
@@ -271,7 +271,7 @@ fn test_duplicate_batch_returns_noop() {
     )
     .unwrap();
     assert!(
-        matches!(r1, ProcessResult::CommitCandidateReceived),
+        matches!(r1, ProcessResult::CommitCandidateReceived { .. }),
         "Expected CommitCandidateReceived, got {:?}",
         r1
     );
@@ -285,7 +285,7 @@ fn test_duplicate_batch_returns_noop() {
     )
     .unwrap();
     assert!(
-        matches!(r2, ProcessResult::Noop),
+        matches!(r2, ProcessResult::Noop(_)),
         "Expected Noop (duplicate), got {:?}",
         r2
     );
@@ -347,7 +347,7 @@ fn test_candidate_ignored_without_freeze_round() {
     )
     .unwrap();
     let gur = match result {
-        ProcessResult::MembershipChangeReceived(gur) => gur,
+        ProcessResult::MembershipChangeReceived(gur) => *gur,
         other => panic!("Expected MembershipChangeReceived, got {:?}", other),
     };
 
@@ -376,7 +376,7 @@ fn test_candidate_ignored_without_freeze_round() {
     )
     .unwrap();
     assert!(
-        matches!(result, ProcessResult::Noop),
+        matches!(result, ProcessResult::Noop(_)),
         "Expected Noop (no freeze round), got {:?}",
         result
     );
@@ -413,7 +413,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     )
     .unwrap();
     let gur = match result {
-        ProcessResult::MembershipChangeReceived(gur) => gur,
+        ProcessResult::MembershipChangeReceived(gur) => *gur,
         other => panic!("Expected MembershipChangeReceived, got {:?}", other),
     };
 
@@ -448,7 +448,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     )
     .unwrap();
     assert!(
-        matches!(result, ProcessResult::CommitCandidateReceived),
+        matches!(result, ProcessResult::CommitCandidateReceived { .. }),
         "Expected CommitCandidateReceived, got {:?}",
         result
     );
@@ -467,7 +467,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     .unwrap();
     let matched = matches!(
         &finalize.outcome,
-        FreezeOutcome::Applied { result, .. } if matches!(**result, ProcessResult::ConversationUpdated)
+        FreezeOutcome::Applied { result, .. } if matches!(*result, ProcessResult::ConversationUpdated)
     );
     assert!(
         matched,
@@ -531,7 +531,7 @@ fn test_backup_commit_scores_absent_steward() {
     )
     .unwrap()
     {
-        ProcessResult::MembershipChangeReceived(g) => g,
+        ProcessResult::MembershipChangeReceived(g) => *g,
         other => panic!("Expected MembershipChangeReceived, got {:?}", other),
     };
     let proposal_id: ProposalId = 90;
@@ -571,7 +571,7 @@ fn test_backup_commit_scores_absent_steward() {
 
     let matched = matches!(
         &result.outcome,
-        FreezeOutcome::Applied { result: r, .. } if matches!(**r, ProcessResult::ConversationUpdated)
+        FreezeOutcome::Applied { result: r, .. } if matches!(*r, ProcessResult::ConversationUpdated)
     );
     assert!(
         matched,
@@ -661,7 +661,7 @@ fn test_forged_steward_identity_scores_mls_sender() {
     )
     .unwrap();
     let gur = match result {
-        ProcessResult::MembershipChangeReceived(gur) => gur,
+        ProcessResult::MembershipChangeReceived(gur) => *gur,
         other => panic!("Expected MembershipChangeReceived, got {:?}", other),
     };
 
@@ -710,7 +710,7 @@ fn test_forged_steward_identity_scores_mls_sender() {
     )
     .unwrap();
     assert!(
-        matches!(result, ProcessResult::CommitCandidateReceived),
+        matches!(result, ProcessResult::CommitCandidateReceived { .. }),
         "Expected CommitCandidateReceived after wire forgery, got {:?}",
         result
     );

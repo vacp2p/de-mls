@@ -8,9 +8,10 @@ use tracing::info;
 use super::apply::apply_in_priority_order;
 use crate::{
     core::{
-        Conversation, CoreError, FreezeBufferOutcome, ProcessResult, ScoreOp, StewardListPlugin,
-        conversation::BufferedCommitCandidate,
+        Conversation, CoreError, FreezeBufferOutcome, NoopReason, ProcessResult, ScoreOp,
+        StewardListPlugin, conversation::BufferedCommitCandidate,
     },
+    ds::OutboundPacket,
     mls_crypto::{MlsMessageKind, MlsService},
     protos::de_mls::messages::v1::{
         CommitCandidate, ConversationUpdateRequest, conversation_update_request::Payload,
@@ -31,14 +32,12 @@ pub struct FreezeFinalizeResult {
     pub committed_batch: Vec<ConversationUpdateRequest>,
 }
 
-/// `result` is boxed because [`ProcessResult`] is a large enum (~240 bytes)
-/// and `NoCandidate` is the common case.
 #[derive(Debug, Clone, Default)]
 pub enum FreezeOutcome {
     Applied {
-        result: Box<ProcessResult>,
+        result: ProcessResult,
         /// Deferred welcomes when our own candidate won.
-        outbound: Option<crate::ds::OutboundPacket>,
+        outbound: Option<OutboundPacket>,
     },
     #[default]
     NoCandidate,
@@ -66,7 +65,7 @@ pub fn process_commit_candidate<M: MlsService>(
     if conversation.freeze_round().is_none() {
         if conversation.approved_proposals_count() == 0 {
             tracing::debug!(conversation = %conversation_name, "candidate ignored: no approved proposals");
-            return Ok(ProcessResult::Noop);
+            return Ok(ProcessResult::Noop(NoopReason::NoApprovedProposals));
         }
         let epoch = mls.current_epoch()?;
         conversation.ensure_freeze_round(epoch);
@@ -75,17 +74,17 @@ pub fn process_commit_candidate<M: MlsService>(
     let commit_hash = compute_commit_hash(&candidate_msg.commit_message);
     if conversation.is_duplicate_commit_candidate(&commit_hash) {
         tracing::debug!(conversation = %conversation_name, "candidate ignored: already committed");
-        return Ok(ProcessResult::Noop);
+        return Ok(ProcessResult::Noop(NoopReason::AlreadyCommitted));
     }
 
     if candidate_msg.mls_proposals.is_empty() || candidate_msg.commit_message.is_empty() {
         tracing::debug!(conversation = %conversation_name, "candidate ignored: empty proposals or commit");
-        return Ok(ProcessResult::Noop);
+        return Ok(ProcessResult::Noop(NoopReason::EmptyCandidatePayload));
     }
 
     if candidate_msg.steward_identity.is_empty() {
         tracing::debug!(conversation = %conversation_name, "candidate ignored: empty steward_identity");
-        return Ok(ProcessResult::Noop);
+        return Ok(ProcessResult::Noop(NoopReason::EmptyStewardIdentity));
     }
 
     // Wire-level kind check — no MLS staging.
@@ -98,9 +97,16 @@ pub fn process_commit_candidate<M: MlsService>(
         Ok(MlsMessageKind::Commit)
     );
     if !proposals_ok || !commit_ok {
-        return Ok(ProcessResult::Noop);
+        tracing::debug!(
+            conversation = %conversation_name,
+            proposals_ok,
+            commit_ok,
+            "candidate ignored: wire kind mismatch (not Proposal/Commit)"
+        );
+        return Ok(ProcessResult::Noop(NoopReason::WireKindMismatch));
     }
 
+    let steward = candidate_msg.steward_identity.clone();
     let epoch = mls.current_epoch()?;
     let outcome = conversation.add_freeze_candidate(
         BufferedCommitCandidate {
@@ -119,12 +125,16 @@ pub fn process_commit_candidate<M: MlsService>(
                 total_candidates = conversation.freeze_candidate_count(),
                 "remote candidate buffered"
             );
-            Ok(ProcessResult::CommitCandidateReceived)
+            Ok(ProcessResult::CommitCandidateReceived { steward })
         }
         // Legitimate runtime states, not errors — drop quietly.
-        FreezeBufferOutcome::SelectionLocked
-        | FreezeBufferOutcome::StaleEpoch
-        | FreezeBufferOutcome::DuplicateHash => Ok(ProcessResult::Noop),
+        FreezeBufferOutcome::SelectionLocked => {
+            Ok(ProcessResult::Noop(NoopReason::SelectionLocked))
+        }
+        FreezeBufferOutcome::StaleEpoch => Ok(ProcessResult::Noop(NoopReason::StaleEpoch)),
+        FreezeBufferOutcome::DuplicateHash => {
+            Ok(ProcessResult::Noop(NoopReason::DuplicateBufferedHash))
+        }
     }
 }
 

@@ -171,7 +171,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 }
 
                 if let Err(e) = self
-                    .dispatch_inbound_result(conversation_name, *result)
+                    .dispatch_inbound_result(conversation_name, result)
                     .await
                 {
                     error!(conversation = conversation_name, error = %e, "finalize result dispatch failed");
