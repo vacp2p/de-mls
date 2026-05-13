@@ -9,9 +9,9 @@ use tracing::info;
 use crate::{
     core::{
         BufferedCommitCandidate, Conversation, ConversationConfig, ConversationPluginsFactory,
-        ConversationState, ConversationStateMachine, CoreError, FreezeFinalizeResult,
-        OperatingMode, ProcessResult, ProposalKind, StewardListPlugin, compute_commit_hash,
-        finalize_freeze_round, member_set, process_inbound,
+        ConversationState, ConversationStateMachine, CoreError, FreezeBufferOutcome,
+        FreezeFinalizeResult, OperatingMode, ProcessResult, ProposalKind, StewardListPlugin,
+        compute_commit_hash, finalize_freeze_round, member_set, process_inbound,
     },
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     mls_crypto::{
@@ -258,7 +258,7 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
         // commit merges, so joiners can't advance epoch ahead of the steward.
         let commit_hash = compute_commit_hash(&candidate.commit_message);
         let epoch = mls.current_epoch()?;
-        let _ = self.conversation.add_freeze_candidate(
+        let outcome = self.conversation.add_freeze_candidate(
             BufferedCommitCandidate {
                 candidate_msg: candidate.clone(),
                 commit_hash,
@@ -267,6 +267,19 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
             },
             epoch,
         );
+        // We still return the outbound packet so the steward broadcasts;
+        // finalize will ignore the unbuffered local candidate. The
+        // non-Buffered outcomes are legitimate runtime states (see
+        // `FreezeBufferOutcome` doc), not errors — log at debug so they
+        // surface for operators without alerting.
+        if !matches!(outcome, FreezeBufferOutcome::Buffered) {
+            tracing::debug!(
+                conversation = self.conversation.name(),
+                epoch,
+                ?outcome,
+                "local commit candidate not buffered",
+            );
+        }
 
         info!(
             conversation = self.conversation.name(),

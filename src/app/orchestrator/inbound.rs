@@ -262,7 +262,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self.conversations.write().await.remove(conversation_name);
         if let Some(entry) = entry {
             if let Some(mls) = entry.write().await.handle.take_mls() {
-                let _ = mls.delete();
+                mls.delete()?;
             }
         }
         self.cleanup_consensus_scope(conversation_name).await?;

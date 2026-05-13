@@ -59,7 +59,7 @@ impl<S> OpenMlsService<S>
 where
     S: DeMlsStorage,
 {
-    fn make_provider(&self) -> MlsProvider<'_, S::MlsStorage> {
+    fn provider(&self) -> MlsProvider<'_, S::MlsStorage> {
         MlsProvider {
             crypto: &self.crypto,
             storage: self.storage.mls_storage(),
@@ -106,12 +106,12 @@ where
     // ══════════════════════════════════════════════════════════
 
     fn delete(&self) -> Result<(), MlsError> {
-        let provider = self.make_provider();
-        let mut group = self.mls_group.write()?;
-        group
+        let provider = self.provider();
+        self.state
+            .write()?
+            .group
             .delete(provider.storage())
-            .map_err(MlsError::storage)?;
-        Ok(())
+            .map_err(MlsError::storage)
     }
 
     // ══════════════════════════════════════════════════════════
@@ -119,8 +119,10 @@ where
     // ══════════════════════════════════════════════════════════
 
     fn members(&self) -> Result<Vec<Vec<u8>>, MlsError> {
-        let group = self.mls_group.read()?;
-        Ok(group
+        Ok(self
+            .state
+            .read()?
+            .group
             .members()
             .map(|m| m.credential.serialized_content().to_vec())
             .collect())
@@ -133,8 +135,7 @@ where
     }
 
     fn current_epoch(&self) -> Result<u64, MlsError> {
-        let group = self.mls_group.read()?;
-        Ok(group.epoch().as_u64())
+        Ok(self.state.read()?.group.epoch().as_u64())
     }
 
     // ══════════════════════════════════════════════════════════
@@ -145,10 +146,11 @@ where
         &self,
         updates: &[MlsCommitInput],
     ) -> Result<CommitCandidate, MlsError> {
-        let provider = self.make_provider();
+        let provider = self.provider();
         let signer = self.credentials.signer();
 
-        let mut group = self.mls_group.write()?;
+        let mut state = self.state.write()?;
+        let group = &mut state.group;
         let mut mls_proposals = Vec::new();
 
         for update in updates {
@@ -194,17 +196,22 @@ where
     }
 
     fn merge_own_commit(&self) -> Result<(), MlsError> {
-        let provider = self.make_provider();
-        let mut group = self.mls_group.write()?;
-        group.merge_pending_commit(&provider)?;
+        let provider = self.provider();
+        self.state.write()?.group.merge_pending_commit(&provider)?;
         Ok(())
     }
 
     fn discard_own_commit(&self) -> Result<(), MlsError> {
-        let provider = self.make_provider();
-        let mut group = self.mls_group.write()?;
-        let _ = group.clear_pending_commit(provider.storage());
-        let _ = group.clear_pending_proposals(provider.storage());
+        let provider = self.provider();
+        let mut state = self.state.write()?;
+        state
+            .group
+            .clear_pending_commit(provider.storage())
+            .map_err(MlsError::storage)?;
+        state
+            .group
+            .clear_pending_proposals(provider.storage())
+            .map_err(MlsError::storage)?;
         Ok(())
     }
 
@@ -217,13 +224,16 @@ where
         proposals: &[Vec<u8>],
         commit_bytes: &[u8],
     ) -> Result<StagedCandidateResult, MlsError> {
-        let provider = self.make_provider();
+        let provider = self.provider();
 
-        // Hold the group lock for the whole atomic stage. Anything we put
+        // Hold the state lock for the whole atomic stage. Anything we put
         // into MLS pending state stays there for the caller to roll back
-        // via `discard_staged_commit` on Aborted.
+        // via `discard_staged_commit` on Aborted; the pending-staged-commit
+        // slot is written before the lock drops so observers never see the
+        // group at the post-stage epoch with `pending_staged_commit = None`.
+        let mut state = self.state.write()?;
         let outcome = {
-            let mut group = self.mls_group.write()?;
+            let group = &mut state.group;
 
             // ── Stage every proposal, collecting senders ──
             let mut proposal_senders: Vec<Vec<u8>> = Vec::with_capacity(proposals.len());
@@ -315,7 +325,7 @@ where
 
         match outcome {
             Some((commit_sender, proposal_senders, self_removed, actions, staged)) => {
-                *self.pending_staged_commit.write()? = Some(staged);
+                state.pending_staged_commit = Some(staged);
                 Ok(StagedCandidateResult::Staged {
                     commit_sender,
                     proposal_senders,
@@ -328,25 +338,24 @@ where
     }
 
     fn merge_staged_commit(&self) -> Result<(), MlsError> {
-        let provider = self.make_provider();
-
-        let staged = self
+        let provider = self.provider();
+        let mut state = self.state.write()?;
+        let staged = state
             .pending_staged_commit
-            .write()?
             .take()
             .ok_or_else(|| MlsError::NoPendingStagedCommit(self.conversation_id.clone()))?;
-
-        let mut group = self.mls_group.write()?;
-        group.merge_staged_commit(&provider, staged)?;
+        state.group.merge_staged_commit(&provider, staged)?;
         Ok(())
     }
 
     fn discard_staged_commit(&self) -> Result<(), MlsError> {
-        *self.pending_staged_commit.write()? = None;
-
-        let provider = self.make_provider();
-        let mut group = self.mls_group.write()?;
-        let _ = group.clear_pending_proposals(provider.storage());
+        let provider = self.provider();
+        let mut state = self.state.write()?;
+        state.pending_staged_commit = None;
+        state
+            .group
+            .clear_pending_proposals(provider.storage())
+            .map_err(MlsError::storage)?;
         Ok(())
     }
 
@@ -355,11 +364,13 @@ where
     // ══════════════════════════════════════════════════════════
 
     fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, MlsError> {
-        let provider = self.make_provider();
+        let provider = self.provider();
         let signer = self.credentials.signer();
-
-        let mut group = self.mls_group.write()?;
-        let message = group.create_message(&provider, signer, plaintext)?;
+        let message = self
+            .state
+            .write()?
+            .group
+            .create_message(&provider, signer, plaintext)?;
         Ok(message.to_bytes()?)
     }
 
@@ -378,9 +389,10 @@ where
     }
 
     fn decrypt_application_only(&self, ciphertext: &[u8]) -> Result<DecryptResult, MlsError> {
-        let provider = self.make_provider();
+        let provider = self.provider();
 
-        let mut group = self.mls_group.write()?;
+        let mut state = self.state.write()?;
+        let group = &mut state.group;
 
         let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(ciphertext)?;
         let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
@@ -417,9 +429,10 @@ where
     }
 
     fn decrypt(&self, ciphertext: &[u8]) -> Result<DecryptResult, MlsError> {
-        let provider = self.make_provider();
+        let provider = self.provider();
 
-        let mut group = self.mls_group.write()?;
+        let mut state = self.state.write()?;
+        let group = &mut state.group;
 
         let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(ciphertext)?;
         let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
@@ -457,7 +470,7 @@ where
             )),
             ProcessedMessageContent::ProposalMessage(proposal) => {
                 let action =
-                    OpenMlsService::<S>::extract_proposal_action(&group, proposal.proposal())?;
+                    OpenMlsService::<S>::extract_proposal_action(group, proposal.proposal())?;
 
                 group
                     .store_pending_proposal(provider.storage(), proposal.as_ref().clone())
