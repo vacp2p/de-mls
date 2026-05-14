@@ -1,33 +1,43 @@
-//! Post-epoch-advance steward housekeeping: list generation/election,
-//! pending-update drain, scoring sync, conversation-sync broadcast.
+//! Post-epoch-advance steward housekeeping on `SessionRunner`: list
+//! generation/election, pending-update drain, scoring sync, conversation-sync
+//! broadcast.
+//!
+//! Methods that file new proposals (`try_initiate_steward_election`,
+//! `try_initiate_deadlock_ecp`, `process_buffered_updates`,
+//! `check_and_initiate_score_removals`) are associated functions taking
+//! `Arc<RwLock<SessionRunner>>` so they can call
+//! [`SessionRunner::initiate_proposal`] which itself spawns a background
+//! task. The rest are `&self` / `&mut self` methods on the runner.
+//!
+//! Transient `User` wrappers at the bottom forward to the session methods
+//! so existing User-level callers (consensus_events, freeze, inbound) keep
+//! compiling during the wave-by-wave migration. Wave 8 drops them.
 
+use std::sync::Arc;
+
+use tokio::sync::RwLock;
 use tracing::{error, info};
 
 use crate::{
-    app::{User, UserError},
+    app::{SessionRunner, User, UserError},
     core::{
         ConsensusPlugin, ConversationPluginsFactory, ElectionDecision, PeerScoringPlugin,
         StewardListPlugin, member_set, scoring_member_diff, target_identity_of,
     },
     identity::ShortId,
+    mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationSync, ConversationUpdateRequest, PeerScore,
         StewardElectionProposal, TimingConfig, ViolationEvidence, conversation_update_request,
     },
 };
 
-use crate::mls_crypto::MlsService;
-
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Add any MLS members not yet tracked in scoring, and drop scored
     /// entries for identities no longer in MLS. Diffing is delegated to
     /// [`scoring_member_diff`]; this method only applies the diff.
-    pub async fn sync_scoring_members(&self, conversation_name: &str, mls_members: &[Vec<u8>]) {
-        let Some(entry_arc) = self.lookup_entry(conversation_name).await else {
-            return;
-        };
-        let mut entry = entry_arc.write().await;
-        let scored: Vec<Vec<u8>> = entry
+    pub async fn sync_scoring_members(&mut self, mls_members: &[Vec<u8>]) {
+        let scored: Vec<Vec<u8>> = self
             .handle
             .scoring
             .all_members_with_scores()
@@ -40,10 +50,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             // returns no events; an exotic config could surface a fresh
             // member as below-threshold, but the score-removal chain
             // doesn't fire on membership-sync ticks today.
-            let _events = entry.handle.scoring.add_member(member_id);
+            let _events = self.handle.scoring.add_member(member_id);
         }
         for member_id in &diff.to_remove {
-            entry.handle.scoring.remove_member(member_id);
+            self.handle.scoring.remove_member(member_id);
         }
     }
 
@@ -51,16 +61,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// policy (the deterministic impl re-installs when membership drops
     /// below `sn_min`). Coordinator just supplies `epoch` + `members`
     /// and drains events.
-    async fn try_auto_fill_steward_list(&self, conversation_name: &str) -> Result<(), UserError> {
-        let entry_arc = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        let mut entry = entry_arc.write().await;
-        let mls = entry.handle.expect_mls()?;
-        let epoch = mls.current_epoch()?;
-        let members = entry.handle.conversation_members()?;
-        let _events = entry.handle.steward_list.maybe_auto_fill(epoch, &members)?;
+    async fn try_auto_fill_steward_list(&mut self) -> Result<(), UserError> {
+        let epoch = self.handle.expect_mls()?.current_epoch()?;
+        let members = self.handle.conversation_members()?;
+        let _events = self.handle.steward_list.maybe_auto_fill(epoch, &members)?;
         Ok(())
     }
 
@@ -71,26 +75,20 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// `recovery = true` bypasses the list-exhaustion gate and filters
     /// queued-removal targets out of the candidate pool. `extra_exclude`
     /// drops one more identity not yet in `approved_proposals`.
-    pub(super) async fn try_initiate_steward_election(
-        &self,
-        conversation_name: &str,
+    pub(crate) async fn try_initiate_steward_election(
+        arc: &Arc<RwLock<Self>>,
         recovery: bool,
         extra_exclude: Option<&[u8]>,
     ) -> Result<(), UserError> {
-        let entry_arc = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        let (proposed_stewards, election_epoch, retry_round) = {
-            let entry = entry_arc.read().await;
-            let mls = entry.handle.expect_mls()?;
-            let epoch = mls.current_epoch()?;
-            let mls_members = entry.handle.conversation_members()?;
-            let self_identity = self.self_identity();
+        let (proposed_stewards, election_epoch, retry_round, conversation_name) = {
+            let s = arc.read().await;
+            let epoch = s.handle.expect_mls()?.current_epoch()?;
+            let mls_members = s.handle.conversation_members()?;
+            let self_identity: &[u8] = &s.self_identity;
 
             // `has_election_in_flight` is a proposal-queue check, not a
             // steward-list one — gated here, before the plug-in call.
-            if entry.handle.conversation.has_election_in_flight() {
+            if s.handle.conversation.has_election_in_flight() {
                 return Ok(());
             }
 
@@ -102,7 +100,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                     if extra_exclude.is_some_and(|x| x == m.as_slice()) {
                         return false;
                     }
-                    if recovery && entry.handle.conversation.is_pending_removal(m) {
+                    if recovery && s.handle.conversation.is_pending_removal(m) {
                         return false;
                     }
                     true
@@ -113,7 +111,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 candidate_pool.iter().map(Vec::as_slice).collect();
             let eligible = |c: &[u8]| pool_set.contains(c);
 
-            match entry.handle.steward_list.propose_election(
+            match s.handle.steward_list.propose_election(
                 epoch,
                 &candidate_pool,
                 self_identity,
@@ -123,7 +121,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 ElectionDecision::Skip(reason) => {
                     if matches!(reason, "no eligible candidates after filter") {
                         info!(
-                            conversation = conversation_name,
+                            conversation = %s.conversation_name,
                             "skipping election: {reason}"
                         );
                     }
@@ -133,7 +131,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                     proposed_stewards,
                     election_epoch,
                     retry_round,
-                } => (proposed_stewards, election_epoch, retry_round),
+                } => (
+                    proposed_stewards,
+                    election_epoch,
+                    retry_round,
+                    s.conversation_name.clone(),
+                ),
             }
         };
 
@@ -149,7 +152,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         };
 
         info!(
-            conversation = conversation_name,
+            conversation = %conversation_name,
             epoch = election_epoch,
             retry_round,
             stewards = stewards_len,
@@ -159,8 +162,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
         // Elections are conversation-wide decisions — broadcast unbundled
         // so the responsible proposer still votes via the banner.
-        self.initiate_proposal(conversation_name.to_string(), request, None)
-            .await?;
+        Self::initiate_proposal(arc, request, None).await?;
 
         Ok(())
     }
@@ -168,33 +170,32 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Layer 3 escalation: file a `Deadlock` ECP after re-election retries
     /// exhaust. Only the deterministic responsible proposer submits;
     /// others no-op. On YES the ECP opens `recovery_mode`.
-    pub(super) async fn try_initiate_deadlock_ecp(
-        &self,
-        conversation_name: &str,
+    pub(crate) async fn try_initiate_deadlock_ecp(
+        arc: &Arc<RwLock<Self>>,
     ) -> Result<(), UserError> {
-        let entry_arc = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        let (is_authorized, self_id, epoch) = {
-            let entry = entry_arc.read().await;
-            let mls = entry.handle.expect_mls()?;
-            let mls_members = entry.handle.conversation_members()?;
-            let self_id = self.self_identity();
+        let (is_authorized, self_id, epoch, conversation_name) = {
+            let s = arc.read().await;
+            let mls_members = s.handle.conversation_members()?;
+            let self_id: &[u8] = &s.self_identity;
             // Deadlock proposer = election proposer with the stricter
             // predicate (MLS-present and not queued for removal).
             let mls_set: std::collections::HashSet<&[u8]> =
                 mls_members.iter().map(Vec::as_slice).collect();
-            let conversation_ref = &entry.handle.conversation;
-            let authorized = entry
+            let conversation_ref = &s.handle.conversation;
+            let authorized = s
                 .handle
                 .steward_list
                 .election_proposer(&|c: &[u8]| {
                     mls_set.contains(c) && !conversation_ref.is_pending_removal(c)
                 })
                 .is_some_and(|proposer| proposer == self_id);
-            let epoch = mls.current_epoch()?;
-            (authorized, self_id, epoch)
+            let epoch = s.handle.expect_mls()?.current_epoch()?;
+            (
+                authorized,
+                Arc::clone(&s.self_identity),
+                epoch,
+                s.conversation_name.clone(),
+            )
         };
 
         if !is_authorized {
@@ -206,14 +207,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .into_update_request()?;
 
         info!(
-            conversation = conversation_name,
+            conversation = %conversation_name,
             epoch, "initiating Deadlock ECP"
         );
 
         // Bundle YES — the proposer's observation that the deadlock is
         // real is their vote.
-        self.initiate_proposal(conversation_name.to_string(), request, Some(true))
-            .await?;
+        Self::initiate_proposal(arc, request, Some(true)).await?;
         Ok(())
     }
 
@@ -221,16 +221,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// below `sn_min`, (2) kick off an election if the list is exhausted.
     /// Election-initiate failures are logged, not surfaced — conversation
     /// state may legitimately reject a new proposal right now.
-    pub async fn steward_list_housekeeping(
-        &self,
-        conversation_name: &str,
-    ) -> Result<(), UserError> {
-        self.try_auto_fill_steward_list(conversation_name).await?;
-        if let Err(e) = self
-            .try_initiate_steward_election(conversation_name, false, None)
-            .await
-        {
-            info!(conversation = conversation_name, error = %e, "election initiation deferred");
+    pub async fn steward_list_housekeeping(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
+        arc.write().await.try_auto_fill_steward_list().await?;
+        if let Err(e) = Self::try_initiate_steward_election(arc, false, None).await {
+            let conv_name = arc.read().await.conversation_name.clone();
+            info!(conversation = %conv_name, error = %e, "election initiation deferred");
         }
         Ok(())
     }
@@ -238,27 +233,16 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Regenerate the steward list at the current epoch against the current
     /// MLS member set — same effect as a successful election. Intended for
     /// tests and administrative tooling.
-    pub async fn regenerate_steward_list(&self, conversation_name: &str) -> Result<(), UserError> {
-        let entry_arc = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        let (current_epoch, members) = {
-            let entry = entry_arc.read().await;
-            let mls = entry.handle.expect_mls()?;
-            let current_epoch = mls.current_epoch()?;
-            let members = entry.handle.conversation_members()?;
-            (current_epoch, members)
-        };
-
-        let mut entry = entry_arc.write().await;
-        let sn = entry
+    pub async fn regenerate_steward_list(&mut self) -> Result<(), UserError> {
+        let current_epoch = self.handle.expect_mls()?.current_epoch()?;
+        let members = self.handle.conversation_members()?;
+        let sn = self
             .handle
             .steward_list
             .config()
             .compute_list_size(members.len());
         // Test/admin regenerate — no election, no retry seed.
-        let _events = entry
+        let _events = self
             .handle
             .steward_list
             .install_list(current_epoch, &members, sn, 0)?;
@@ -268,40 +252,30 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Drop Add entries whose target is now a member and Remove entries
     /// whose target is now gone, then expire entries older than
     /// `pending_update_max_epochs`.
-    pub async fn prune_pending_updates_after_commit(
-        &self,
-        conversation_name: &str,
-    ) -> Result<(), UserError> {
-        let entry_arc = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
+    pub async fn prune_pending_updates_after_commit(&mut self) -> Result<(), UserError> {
         let (current_epoch, members, max_age) = {
-            let entry = entry_arc.read().await;
-            let Some(mls) = entry.handle.mls() else {
+            let Some(mls) = self.handle.mls() else {
                 return Ok(());
             };
             (
                 mls.current_epoch()?,
-                entry.handle.conversation_members()?,
-                entry.handle.config.pending_update_max_epochs,
+                self.handle.conversation_members()?,
+                self.handle.config.pending_update_max_epochs,
             )
         };
 
-        let mut entry = entry_arc.write().await;
-        let before = entry.handle.conversation.pending_update_count();
-        entry
-            .handle
+        let before = self.handle.conversation.pending_update_count();
+        self.handle
             .conversation
             .prune_pending_updates_for_members(&members);
-        let expired = entry
+        let expired = self
             .handle
             .conversation
             .expire_pending_updates(current_epoch, max_age);
-        let after = entry.handle.conversation.pending_update_count();
+        let after = self.handle.conversation.pending_update_count();
         if before != after {
             info!(
-                conversation = conversation_name,
+                conversation = %self.conversation_name,
                 before,
                 after,
                 expired = expired.len(),
@@ -314,21 +288,21 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// On epoch advance, the new live epoch steward drains the pending-update
     /// buffer into voting proposals. Skips entries already covered by the
     /// current voting/approved queues so we don't double-propose.
-    pub async fn process_buffered_updates(&self, conversation_name: &str) -> Result<(), UserError> {
-        let entry_arc = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        let (current_epoch, to_propose): (u64, Vec<ConversationUpdateRequest>) = {
-            let entry = entry_arc.read().await;
+    pub async fn process_buffered_updates(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
+        let (current_epoch, to_propose, conversation_name): (
+            u64,
+            Vec<ConversationUpdateRequest>,
+            String,
+        ) = {
+            let s = arc.read().await;
 
-            let (current_epoch, members) = match entry.handle.mls() {
-                Some(mls) => (mls.current_epoch()?, entry.handle.conversation_members()?),
+            let (current_epoch, members) = match s.handle.mls() {
+                Some(mls) => (mls.current_epoch()?, s.handle.conversation_members()?),
                 None => (0, Vec::new()),
             };
-            let self_identity = self.self_identity();
-            let eligible = entry.handle.conversation.steward_eligibility(&members);
-            let is_live = entry
+            let self_identity: &[u8] = &s.self_identity;
+            let eligible = s.handle.conversation.steward_eligibility(&members);
+            let is_live = s
                 .handle
                 .steward_list
                 .epoch_steward(current_epoch, &eligible)
@@ -340,12 +314,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             // Collect buffered updates whose target isn't already in an
             // active proposal queue. Both the voting and approved queues
             // live on `Conversation`.
-            let approved = entry.handle.conversation.approved_proposals();
+            let approved = s.handle.conversation.approved_proposals();
             let approved_targets: std::collections::HashSet<&[u8]> =
                 approved.values().filter_map(target_identity_of).collect();
             let members_set = member_set(&members);
 
-            let to_propose: Vec<ConversationUpdateRequest> = entry
+            let to_propose: Vec<ConversationUpdateRequest> = s
                 .handle
                 .conversation
                 .pending_updates()
@@ -362,7 +336,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 })
                 .map(|(_, p)| p.request.clone())
                 .collect();
-            (current_epoch, to_propose)
+            (current_epoch, to_propose, s.conversation_name.clone())
         };
 
         if to_propose.is_empty() {
@@ -370,7 +344,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         }
 
         info!(
-            conversation = conversation_name,
+            conversation = %conversation_name,
             epoch = current_epoch,
             count = to_propose.len(),
             "promoting buffered updates to proposals"
@@ -379,11 +353,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         // Buffered updates inherit the same banner path as fresh
         // steward-auto-propose — the steward still decides per proposal.
         for request in to_propose {
-            if let Err(e) = self
-                .initiate_proposal(conversation_name.to_string(), request, None)
-                .await
-            {
-                info!(conversation = conversation_name, error = %e, "buffered proposal deferred");
+            if let Err(e) = Self::initiate_proposal(arc, request, None).await {
+                info!(
+                    conversation = %conversation_name,
+                    error = %e,
+                    "buffered proposal deferred"
+                );
             }
         }
         Ok(())
@@ -393,19 +368,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// an encrypted `ConversationSync`. Steward calls this after an Add-bearing
     /// commit so new joiners can fully participate. Idempotent for members
     /// who already have a steward list.
-    pub async fn send_conversation_sync(&self, conversation_name: &str) -> Result<(), UserError> {
-        let entry_arc = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
+    pub async fn send_conversation_sync(&self) -> Result<(), UserError> {
         let packet = {
-            let entry = entry_arc.read().await;
             // Sparse snapshot — only members whose score has diverged
             // from `default_score`. Joiners init every member at default
             // via membership sync before applying the snapshot, so
             // missing entries imply default. Saves wire size at scale
             // (Waku message budget concern past ~1k members).
-            let scores: Vec<PeerScore> = entry
+            let scores: Vec<PeerScore> = self
                 .handle
                 .scoring
                 .snapshot()
@@ -417,20 +387,20 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 })
                 .collect();
 
-            let list = match entry.handle.steward_list.current_list() {
+            let list = match self.handle.steward_list.current_list() {
                 Some(l) => l,
                 None => return Ok(()),
             };
 
-            let timing = TimingConfig::from(&entry.handle.config);
+            let timing = TimingConfig::from(&self.handle.config);
 
             // Filter ghosts and queued-removal targets so joiners don't
             // inherit stewards they would have to walk past on the very
             // first epoch.
-            let mls = entry.handle.expect_mls()?;
-            let mls_members = entry.handle.conversation_members()?;
-            let eligible = entry.handle.conversation.steward_eligibility(&mls_members);
-            let steward_members = entry.handle.steward_list.steward_members(&eligible);
+            let mls = self.handle.expect_mls()?;
+            let mls_members = self.handle.conversation_members()?;
+            let eligible = self.handle.conversation.steward_eligibility(&mls_members);
+            let steward_members = self.handle.steward_list.steward_members(&eligible);
 
             // `retry_round` is the seed that produced the *stored* list —
             // a frozen tag on `StewardList`, not the plug-in's dynamic
@@ -441,14 +411,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 election_epoch: list.election_epoch(),
                 sn_min: list.config().sn_min as u32,
                 sn_max: list.config().sn_max as u32,
-                allow_subset_candidates: entry.handle.steward_list.config().allow_subset_candidates,
+                allow_subset_candidates: self.handle.steward_list.config().allow_subset_candidates,
                 peer_scores: scores,
                 timing: Some(timing),
                 retry_round: list.retry_round(),
-                max_reelection_attempts: entry.handle.steward_list.max_retries(),
-                liveness_criteria_yes: entry.handle.config.liveness_criteria_yes,
-                threshold_peer_score: entry.handle.scoring.threshold(),
-                pending_update_max_epochs: entry.handle.config.pending_update_max_epochs,
+                max_reelection_attempts: self.handle.steward_list.max_retries(),
+                liveness_criteria_yes: self.handle.config.liveness_criteria_yes,
+                threshold_peer_score: self.handle.scoring.threshold(),
+                pending_update_max_epochs: self.handle.config.pending_update_max_epochs,
             };
 
             let app_msg: AppMessage = sync.into();
@@ -456,7 +426,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         };
 
         self.send_outbound(packet).await?;
-        info!(conversation = conversation_name, "conversation sync sent");
+        info!(conversation = %self.conversation_name, "conversation sync sent");
         Ok(())
     }
 
@@ -464,24 +434,17 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// score fell at or below the removal threshold. Skips self and any
     /// target already covered by a pending removal.
     pub async fn check_and_initiate_score_removals(
-        &self,
-        conversation_name: &str,
+        arc: &Arc<RwLock<Self>>,
     ) -> Result<(), UserError> {
-        let entry_arc = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        let self_id = self.self_identity();
-
         // Reactive entry: callers chain into this after a scoring apply
         // emitted a downward cross, so we expect at least one tracked
         // member to be at-or-below threshold. The scan is the source of
         // truth — events just trigger the look.
-        let (is_steward, epoch, to_remove): (bool, u64, Vec<(Vec<u8>, i64)>) = {
-            let mut entry = entry_arc.write().await;
-            let mls = entry.handle.expect_mls()?;
-            let is_steward = entry.handle.steward_list.is_steward(self_id);
-            let epoch = mls.current_epoch()?;
+        let (epoch, to_remove, self_id_arc, conversation_name) = {
+            let mut s = arc.write().await;
+            let epoch = s.handle.expect_mls()?.current_epoch()?;
+            let self_id_arc = Arc::clone(&s.self_identity);
+            let is_steward = s.handle.steward_list.is_steward(&self_id_arc);
             if !is_steward {
                 return Ok(());
             }
@@ -496,41 +459,35 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             //     target in `approved_proposals` with their score still
             //     ≤ threshold) would re-fire a duplicate ECP for the
             //     same target before the RemoveMember commits.
-            let to_remove = entry
+            let self_id: &[u8] = &self_id_arc;
+            let to_remove: Vec<(Vec<u8>, i64)> = s
                 .handle
                 .scoring
                 .members_below_threshold()
                 .into_iter()
-                .filter(|id| *id != self_id)
-                .filter(|id| !entry.handle.conversation.has_pending_removal(id))
-                .filter(|id| !entry.handle.conversation.is_pending_removal(id))
+                .filter(|id| id.as_slice() != self_id)
+                .filter(|id| !s.handle.conversation.has_pending_removal(id))
+                .filter(|id| !s.handle.conversation.is_pending_removal(id))
                 .filter_map(|id| {
-                    let score = entry.handle.scoring.score_for(&id)?;
+                    let score = s.handle.scoring.score_for(&id)?;
                     Some((id, score))
                 })
-                .collect::<Vec<_>>();
+                .collect();
             for (id, _) in &to_remove {
-                entry
-                    .handle
-                    .conversation
-                    .observe_pending_removal(id.clone());
+                s.handle.conversation.observe_pending_removal(id.clone());
             }
-            (is_steward, epoch, to_remove)
+            (epoch, to_remove, self_id_arc, s.conversation_name.clone())
         };
-
-        if !is_steward {
-            return Ok(());
-        }
 
         // Submit proposals without holding the lock.
         for (target_id, current_score) in to_remove {
             let evidence =
                 ViolationEvidence::score_below_threshold(target_id.clone(), epoch, current_score)
-                    .with_creator(self_id.to_vec());
+                    .with_creator(self_id_arc.to_vec());
             let request = evidence.into_update_request()?;
 
             info!(
-                conversation = conversation_name,
+                conversation = %conversation_name,
                 target = %ShortId::new(&target_id),
                 score = current_score,
                 "initiating SCORE_BELOW_THRESHOLD removal"
@@ -538,19 +495,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             // SCORE_BELOW_THRESHOLD is self-executing: threshold crossed ⇒
             // member must be removed. The steward's vote is YES by
             // protocol, so we bundle it at submit and skip the banner.
-            if let Err(e) = self
-                .initiate_proposal(conversation_name.to_string(), request, Some(true))
-                .await
-            {
-                if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
-                    let mut entry = entry_arc.write().await;
-                    entry
-                        .handle
-                        .conversation
-                        .resolve_pending_removal(&target_id);
-                }
+            if let Err(e) = Self::initiate_proposal(arc, request, Some(true)).await {
+                arc.write()
+                    .await
+                    .handle
+                    .conversation
+                    .resolve_pending_removal(&target_id);
                 error!(
-                    conversation = conversation_name,
+                    conversation = %conversation_name,
                     target = %ShortId::new(&target_id),
                     error = %e,
                     "SCORE_BELOW_THRESHOLD vote failed to start"
@@ -559,5 +511,109 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         }
 
         Ok(())
+    }
+}
+
+// ── Transient User wrappers ─────────────────────────────────────────────
+//
+// Each wrapper looks up the session and forwards. Existing callers in
+// consensus_events, freeze, and inbound use these until those files move
+// to SessionRunner too (Waves 4-6). Wave 8 drops the wrappers.
+
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
+    pub async fn sync_scoring_members(&self, conversation_name: &str, mls_members: &[Vec<u8>]) {
+        let Some(session) = self.lookup_entry(conversation_name).await else {
+            return;
+        };
+        session
+            .write()
+            .await
+            .sync_scoring_members(mls_members)
+            .await;
+    }
+
+    pub(super) async fn try_initiate_steward_election(
+        &self,
+        conversation_name: &str,
+        recovery: bool,
+        extra_exclude: Option<&[u8]>,
+    ) -> Result<(), UserError> {
+        let session = self
+            .lookup_entry(conversation_name)
+            .await
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::try_initiate_steward_election(&session, recovery, extra_exclude).await
+    }
+
+    pub(super) async fn try_initiate_deadlock_ecp(
+        &self,
+        conversation_name: &str,
+    ) -> Result<(), UserError> {
+        let session = self
+            .lookup_entry(conversation_name)
+            .await
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::try_initiate_deadlock_ecp(&session).await
+    }
+
+    pub async fn steward_list_housekeeping(
+        &self,
+        conversation_name: &str,
+    ) -> Result<(), UserError> {
+        let session = self
+            .lookup_entry(conversation_name)
+            .await
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::steward_list_housekeeping(&session).await
+    }
+
+    pub async fn regenerate_steward_list(&self, conversation_name: &str) -> Result<(), UserError> {
+        let session = self
+            .lookup_entry(conversation_name)
+            .await
+            .ok_or(UserError::ConversationNotFound)?;
+        session.write().await.regenerate_steward_list().await
+    }
+
+    pub async fn prune_pending_updates_after_commit(
+        &self,
+        conversation_name: &str,
+    ) -> Result<(), UserError> {
+        let session = self
+            .lookup_entry(conversation_name)
+            .await
+            .ok_or(UserError::ConversationNotFound)?;
+        session
+            .write()
+            .await
+            .prune_pending_updates_after_commit()
+            .await
+    }
+
+    pub async fn process_buffered_updates(&self, conversation_name: &str) -> Result<(), UserError> {
+        let session = self
+            .lookup_entry(conversation_name)
+            .await
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::process_buffered_updates(&session).await
+    }
+
+    pub async fn send_conversation_sync(&self, conversation_name: &str) -> Result<(), UserError> {
+        let session = self
+            .lookup_entry(conversation_name)
+            .await
+            .ok_or(UserError::ConversationNotFound)?;
+        session.read().await.send_conversation_sync().await
+    }
+
+    pub async fn check_and_initiate_score_removals(
+        &self,
+        conversation_name: &str,
+    ) -> Result<(), UserError> {
+        let session = self
+            .lookup_entry(conversation_name)
+            .await
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::check_and_initiate_score_removals(&session).await
     }
 }
