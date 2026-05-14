@@ -111,6 +111,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 scoring,
                 steward_list,
                 consensus,
+                Arc::clone(&self.transport),
                 Arc::clone(&self.self_identity),
                 Arc::clone(&self.app_id),
             ))),

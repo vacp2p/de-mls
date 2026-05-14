@@ -51,14 +51,19 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// this `Arc` so it can self-clean on completion; coordinators use
     /// `cancel_auto_vote` / `cancel_all_auto_votes` to abort early.
     pub(crate) auto_vote_timers: AutoVoteTimers,
+    /// Synchronous outbound transport (cloned from `User`). Per-session
+    /// methods use `send_outbound` to wrap `DeliveryService::send` in
+    /// `spawn_blocking`.
+    #[allow(dead_code)] // wired in chunk-C phase 2; users land in subsequent waves
+    pub(crate) transport: Arc<dyn crate::ds::DeliveryService>,
     /// Cached identity bytes (cloned from `User`). Used by per-session
     /// methods that need the local identity without re-walking the
     /// `Identity` trait.
-    #[allow(dead_code)] // populated; per-session methods land in a follow-up
+    #[allow(dead_code)] // wired in chunk-C phase 2; users land in subsequent waves
     pub(crate) self_identity: Arc<[u8]>,
     /// Per-User instance UUID (cloned from `User`). Tagged on every
     /// outbound packet for self-message filtering.
-    #[allow(dead_code)] // populated; per-session methods land in a follow-up
+    #[allow(dead_code)] // wired in chunk-C phase 2; users land in subsequent waves
     pub(crate) app_id: Arc<[u8]>,
     /// Per-session notification channel. Integrators subscribe via
     /// [`Self::subscribe`] and consume [`SessionEvent`]s for UI / audit.
@@ -81,6 +86,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         scoring: CP::Scoring,
         steward_list: CP::StewardList,
         consensus: PluginConsensus<P>,
+        transport: Arc<dyn crate::ds::DeliveryService>,
         self_identity: Arc<[u8]>,
         app_id: Arc<[u8]>,
     ) -> Self {
@@ -98,6 +104,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             consensus,
             phase_timer,
             auto_vote_timers: Arc::new(Mutex::new(HashMap::new())),
+            transport,
             self_identity,
             app_id,
             events,
@@ -120,9 +127,24 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Emit a [`SessionEvent`] on the session's broadcast channel. Silently
     /// drops the event when there are no live subscribers — events are
     /// fire-and-forget.
-    #[allow(dead_code)]
     pub(crate) fn emit_event(&self, event: SessionEvent) {
         let _ = self.events.send(event);
+    }
+
+    /// Send an outbound packet via the session's transport. Wraps the
+    /// synchronous [`crate::ds::DeliveryService::send`] in `spawn_blocking`
+    /// so the async context isn't blocked. Mirrors `User::send_outbound`
+    /// so session methods can send without going back through `User`.
+    #[allow(dead_code)] // wired in chunk-C phase 2; callers land in subsequent waves
+    pub(crate) async fn send_outbound(
+        &self,
+        packet: crate::ds::OutboundPacket,
+    ) -> Result<String, crate::app::UserError> {
+        let transport = std::sync::Arc::clone(&self.transport);
+        let send_result = tokio::task::spawn_blocking(move || transport.send(packet))
+            .await
+            .expect("transport send task panicked");
+        Ok(send_result?)
     }
 
     // ── Auto-vote timers ────────────────────────────────────────────
@@ -272,6 +294,7 @@ mod tests {
             StubScoring,
             StubStewardList::member(),
             make_test_consensus_service(),
+            Arc::new(crate::test_fixtures::UnusedTransport),
             Arc::from(&b"test-identity"[..]),
             Arc::from(&[0u8; 16][..]),
         );
@@ -290,6 +313,7 @@ mod tests {
             StubScoring,
             StubStewardList::member(),
             make_test_consensus_service(),
+            Arc::new(crate::test_fixtures::UnusedTransport),
             Arc::from(&b"test-identity"[..]),
             Arc::from(&[0u8; 16][..]),
         )

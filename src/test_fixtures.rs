@@ -35,6 +35,23 @@ pub(crate) fn make_test_consensus_service() -> PluginConsensus<DefaultConsensusP
     )
 }
 
+/// Transport stub for tests. `send` is unreachable (tests should never push
+/// outbound), and `subscribe` returns a disconnected receiver.
+pub(crate) struct UnusedTransport;
+
+impl crate::ds::DeliveryService for UnusedTransport {
+    fn send(
+        &self,
+        _: crate::ds::OutboundPacket,
+    ) -> Result<String, crate::ds::DeliveryServiceError> {
+        unreachable!("UnusedTransport::send called")
+    }
+    fn subscribe(&self) -> std::sync::mpsc::Receiver<crate::ds::InboundPacket> {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        rx
+    }
+}
+
 /// MLS service that errors on every operation. Lets tests construct a
 /// `ConversationHandle` whose early-return paths never invoke MLS.
 pub(crate) struct UnusedMls;
