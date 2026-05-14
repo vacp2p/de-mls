@@ -366,7 +366,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             let mls = entry.handle.expect_mls()?;
             (entry.handle.conversation_members()?, mls.current_epoch()?)
         };
-        let local_default_peer_score = self.default_scoring_config.default_score;
+        let local_default_peer_score = self.plugins.default_scoring_config.default_score;
         if !validate_conversation_sync(
             conversation_name,
             &sync,
@@ -549,7 +549,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 }
 
                 let svc = self
-                    .plugin_factory
+                    .plugins
+                    .conversation_plugins
                     .welcome_mls(&invitation.mls_message_out_bytes)?;
                 let Some(svc) = svc else {
                     // Welcome wasn't for us.

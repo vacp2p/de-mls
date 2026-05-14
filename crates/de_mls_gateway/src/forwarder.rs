@@ -140,17 +140,17 @@ impl Gateway<WakuDeliveryService> {
         let cname_owned = conversation_name.clone();
 
         tokio::spawn(async move {
-            let Some(bus) = ({
+            let Some(session_arc) = ({
                 let u = user_for_sub.read().await;
-                u.consensus_event_bus(&cname_owned).await
+                u.lookup_entry(&cname_owned).await
             }) else {
                 tracing::warn!(
                     conversation = %cname_owned,
-                    "consensus forwarder: no event bus (conversation already gone)"
+                    "consensus forwarder: no session (conversation already gone)"
                 );
                 return;
             };
-            let mut rx = bus.subscribe();
+            let mut rx = session_arc.read().await.consensus.event_bus().subscribe();
             tracing::info!("consensus forwarder started");
             while let Ok((conversation_name, event)) = rx.recv().await {
                 // Forward to UI

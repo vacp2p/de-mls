@@ -30,7 +30,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         self.create_conversation_with_config(
             conversation_name,
             is_creation,
-            self.default_conversation_config.clone(),
+            self.plugins.default_conversation_config.clone(),
         )
         .await
     }
@@ -50,7 +50,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let self_identity_bytes = self.self_identity().to_vec();
         let (conversation, mls_opt, state_machine, phase_timer) = if is_creation {
             let mls = self
-                .plugin_factory
+                .plugins
+                .conversation_plugins
                 .create_mls(conversation_name.to_string())?;
             let conversation = Conversation::new(conversation_name);
             let state_machine = ConversationStateMachine::new_as_member();
@@ -65,9 +66,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             (conversation, None, state_machine, phase_timer)
         };
 
-        let mut steward_list = self.plugin_factory.make_steward_list(
+        let mut steward_list = self.plugins.conversation_plugins.make_steward_list(
             conversation_name.as_bytes(),
-            self.default_steward_list_config.clone(),
+            self.plugins.default_steward_list_config.clone(),
         );
         steward_list.set_max_retries(config.max_reelection_attempts);
         // Creator path: bootstrap the list with self as sole steward at
@@ -78,8 +79,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         }
 
         let mut scoring = self
-            .plugin_factory
-            .make_scoring(&self.default_scoring_config);
+            .plugins
+            .conversation_plugins
+            .make_scoring(&self.plugins.default_scoring_config);
         // Joiners get tracked at `JoinedConversation` time, once members are known.
         if is_creation {
             // Creator is self at `default_score`; under standard config

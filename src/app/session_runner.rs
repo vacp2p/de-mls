@@ -40,8 +40,10 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// in the shared storage and a private event bus. Constructed at
     /// conversation creation by `User::build_consensus_service` and held
     /// here so consensus calls hit the local service directly without
-    /// User-level lookup.
-    pub(crate) consensus: PluginConsensus<P>,
+    /// User-level lookup. `pub` so integrators can reach
+    /// `session.consensus.event_bus().subscribe()` for per-conv consensus
+    /// event forwarding.
+    pub consensus: PluginConsensus<P>,
     /// Wall-clock anchor combined with `handle.state_machine` by
     /// coordinator methods.
     pub(crate) phase_timer: PhaseTimer,

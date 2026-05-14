@@ -23,6 +23,7 @@
 mod consensus_bridge;
 mod display;
 mod error;
+mod key_package;
 mod orchestrator;
 mod peer_scoring_backends;
 mod phase_timer;
@@ -43,6 +44,7 @@ pub use display::{
     message_types,
 };
 pub use error::UserError;
+pub use key_package::DefaultKeyPackageProvider;
 pub use orchestrator::{
     DefaultConversationPluginsFactory, DefaultMlsService, DefaultPeerScoring, DefaultStewardList,
     User,

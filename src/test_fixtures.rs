@@ -18,8 +18,8 @@ use crate::{
     },
     ds::OutboundPacket,
     mls_crypto::{
-        CommitCandidate, DecryptResult, KeyPackageBytes, MlsCommitInput, MlsError, MlsMessageKind,
-        MlsService, StagedCandidateResult,
+        CommitCandidate, DecryptResult, MlsCommitInput, MlsError, MlsMessageKind, MlsService,
+        StagedCandidateResult,
     },
     protos::de_mls::messages::v1::AppMessage,
 };
@@ -260,9 +260,6 @@ impl ConversationPluginsFactory for StubPluginsFactory {
         unreachable!()
     }
     fn welcome_mls(&self, _: &[u8]) -> Result<Option<Self::Mls>, MlsError> {
-        unreachable!()
-    }
-    fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
         unreachable!()
     }
     fn make_scoring(&self, _: &ScoringConfig) -> Self::Scoring {

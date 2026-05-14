@@ -29,6 +29,7 @@ mod error;
 mod events;
 mod freeze;
 mod inbound;
+mod key_package;
 mod peer_scoring;
 mod plugins;
 mod process_result;
@@ -64,6 +65,9 @@ pub use error::CoreError;
 
 // ── Session-event types ──
 pub use events::{ConversationLifecycle, SessionEvent};
+
+// ── Key package generation trait (identity-bound, no conversation) ──
+pub use key_package::KeyPackageProvider;
 
 // ── Proposal classification ──
 pub use proposal_kind::ProposalKind;

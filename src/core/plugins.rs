@@ -6,10 +6,14 @@
 //! per-conversation plug-ins. The convenience
 //! [`crate::app::DefaultConversationPluginsFactory`] supplies an in-memory
 //! build used by [`crate::app::User::with_private_key`].
+//!
+//! Key package generation lives on its own trait —
+//! [`crate::core::KeyPackageProvider`] — because it is identity-bound,
+//! not conversation-bound.
 
 use crate::{
     core::{PeerScoringPlugin, ScoringConfig, StewardListConfig, StewardListPlugin},
-    mls_crypto::{KeyPackageBytes, MlsError, MlsService},
+    mls_crypto::{MlsError, MlsService},
 };
 
 /// Per-conversation plug-in bundle. One trait carries the three plug-in
@@ -28,11 +32,6 @@ pub trait ConversationPluginsFactory: Send + Sync + 'static {
     /// Try to build an MLS service from a serialized MLS welcome.
     /// Returns `Ok(None)` when the welcome isn't for us.
     fn welcome_mls(&self, welcome_bytes: &[u8]) -> Result<Option<Self::Mls>, MlsError>;
-
-    /// Generate a single-use key package. Independent of any
-    /// conversation's MLS service so a joiner can publish a key package
-    /// before joining.
-    fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError>;
 
     /// Build a fresh peer-scoring plug-in for a new conversation runner.
     fn make_scoring(&self, config: &ScoringConfig) -> Self::Scoring;
