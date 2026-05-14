@@ -61,9 +61,14 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// `Identity` trait.
     #[allow(dead_code)] // wired in chunk-C phase 2; users land in subsequent waves
     pub(crate) self_identity: Arc<[u8]>,
+    /// Cached display form of the local identity (e.g. checksummed `0x…`
+    /// hex). Stable for the lifetime of the runner; populated at
+    /// construction from `User.identity.identity_display()`. Used by
+    /// session methods (`send_app_message`) that need the `sender` field
+    /// without re-walking the `Identity` trait + allocating each call.
+    pub(crate) identity_display: Arc<str>,
     /// Per-User instance UUID (cloned from `User`). Tagged on every
     /// outbound packet for self-message filtering.
-    #[allow(dead_code)] // wired in chunk-C phase 2; users land in subsequent waves
     pub(crate) app_id: Arc<[u8]>,
     /// Per-session notification channel. Integrators subscribe via
     /// [`Self::subscribe`] and consume [`SessionEvent`]s for UI / audit.
@@ -88,6 +93,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         consensus: PluginConsensus<P>,
         transport: Arc<dyn crate::ds::DeliveryService>,
         self_identity: Arc<[u8]>,
+        identity_display: Arc<str>,
         app_id: Arc<[u8]>,
     ) -> Self {
         let (events, _initial_rx) = broadcast::channel(SESSION_EVENT_CAPACITY);
@@ -106,6 +112,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             auto_vote_timers: Arc::new(Mutex::new(HashMap::new())),
             transport,
             self_identity,
+            identity_display,
             app_id,
             events,
         }
@@ -135,7 +142,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// synchronous [`crate::ds::DeliveryService::send`] in `spawn_blocking`
     /// so the async context isn't blocked. Mirrors `User::send_outbound`
     /// so session methods can send without going back through `User`.
-    #[allow(dead_code)] // wired in chunk-C phase 2; callers land in subsequent waves
     pub(crate) async fn send_outbound(
         &self,
         packet: crate::ds::OutboundPacket,
@@ -296,6 +302,7 @@ mod tests {
             make_test_consensus_service(),
             Arc::new(crate::test_fixtures::UnusedTransport),
             Arc::from(&b"test-identity"[..]),
+            Arc::from("0xtest-display"),
             Arc::from(&[0u8; 16][..]),
         );
         runner.phase_timer.start();
@@ -315,6 +322,7 @@ mod tests {
             make_test_consensus_service(),
             Arc::new(crate::test_fixtures::UnusedTransport),
             Arc::from(&b"test-identity"[..]),
+            Arc::from("0xtest-display"),
             Arc::from(&[0u8; 16][..]),
         )
     }

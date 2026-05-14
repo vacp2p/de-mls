@@ -70,6 +70,11 @@ pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// orchestrator method that needs the local identity bytes reads them
     /// without re-walking the `Identity` trait + allocating a fresh `Vec`.
     self_identity: Arc<[u8]>,
+    /// Cached display form of the local identity (e.g. checksummed `0x…`
+    /// hex). Cloned into each `SessionRunner` so per-session methods
+    /// (`send_app_message`) can tag the `sender` field without re-walking
+    /// the `Identity` trait + allocating each call.
+    identity_display: Arc<str>,
     /// Per-instance UUID embedded in every outbound packet. Inbound packets
     /// carrying our `app_id` are self-echoes and silently dropped. Cached
     /// as `Arc<[u8]>` so each `SessionRunner` cheaply shares it.
@@ -97,6 +102,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Clone for User<P, CP> {
         Self {
             identity: Arc::clone(&self.identity),
             self_identity: Arc::clone(&self.self_identity),
+            identity_display: Arc::clone(&self.identity_display),
             app_id: Arc::clone(&self.app_id),
             transport: Arc::clone(&self.transport),
             plugins: self.plugins.clone(),
@@ -113,10 +119,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         transport: Arc<dyn DeliveryService>,
     ) -> Self {
         let self_identity: Arc<[u8]> = Arc::from(identity.identity_bytes());
+        let identity_display: Arc<str> = Arc::from(identity.identity_display());
         let (lifecycle, _initial_rx) = broadcast::channel(CONVERSATION_LIFECYCLE_CAPACITY);
         Self {
             identity,
             self_identity,
+            identity_display,
             app_id: Arc::from(uuid::Uuid::new_v4().as_bytes().as_slice()),
             transport,
             plugins,
@@ -179,7 +187,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
     /// Wallet address as checksummed hex.
     pub fn identity_string(&self) -> String {
-        self.identity.identity_display().to_string()
+        self.identity_display.to_string()
     }
 
     /// Generate a single-use key package for our identity. Conversation-free —

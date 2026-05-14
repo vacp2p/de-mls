@@ -106,9 +106,11 @@ async fn concurrent_joins_leave_joiners_with_empty_buffer() {
     // Step 2: All three joiners send KPs nearly simultaneously. Before the
     // buffer-hygiene fix, each joiner would buffer the others' KPs observed
     // on the broadcast welcome subtopic.
-    bob.send_kp_message(group).await.unwrap();
-    charlie.send_kp_message(group).await.unwrap();
-    dave.send_kp_message(group).await.unwrap();
+    for u in [&bob, &charlie, &dave] {
+        let kp = u.generate_key_package().unwrap();
+        let session = u.lookup_entry(group).await.unwrap();
+        session.read().await.send_kp_message(kp).await.unwrap();
+    }
 
     // Step 3: Broadcast every KP packet to every participant (mocks pubsub).
     // Each joiner receives its own KP + the others'. Alice receives all three.

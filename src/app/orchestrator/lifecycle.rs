@@ -113,6 +113,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 consensus,
                 Arc::clone(&self.transport),
                 Arc::clone(&self.self_identity),
+                Arc::clone(&self.identity_display),
                 Arc::clone(&self.app_id),
             ))),
         );
