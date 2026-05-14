@@ -174,12 +174,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         Some(f(&entry))
     }
 
-    /// Borrow the local identity. Source of truth for "who am I" at the
-    /// User level.
-    pub(crate) fn identity(&self) -> &dyn Identity {
-        self.identity.as_ref()
-    }
-
     /// Borrow the local identity bytes. Cached at construction; cheap to call.
     pub(crate) fn self_identity(&self) -> &[u8] {
         &self.self_identity
@@ -195,19 +189,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`crate::core::KeyPackageProvider`].
     pub fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
         self.plugins.key_package_provider.generate()
-    }
-
-    /// Clone the conversation's consensus service handle. Cheap (the service
-    /// is `Arc`-backed internally) and avoids holding the runner lock across
-    /// `.await` points in consensus calls. Returns `None` when no runner is
-    /// registered for `conversation_name`.
-    pub(crate) async fn lookup_consensus(
-        &self,
-        conversation_name: &str,
-    ) -> Option<PluginConsensus<P>> {
-        let entry_arc = self.lookup_entry(conversation_name).await?;
-        let entry = entry_arc.read().await;
-        Some(entry.consensus.clone())
     }
 
     /// Subscribe to User-level conversation lifecycle events. Integrators

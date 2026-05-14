@@ -1,11 +1,35 @@
-//! Inbound packet dispatch and consensus event handling.
+//! Inbound packet dispatch and consensus-event handling.
+//!
+//! Layout:
+//!
+//! - `process_inbound_packet` and `process_welcome_packet` stay on `User`.
+//!   The packet entry point does echo-dedup + name routing; the welcome
+//!   handler reaches the per-conv plugin factory (`welcome_mls`), which
+//!   isn't on the session.
+//! - `dispatch_inbound_result` and every `ProcessResult` branch handler
+//!   live on `SessionRunner`. They're associated functions taking
+//!   `Arc<RwLock<Self>>` so they can release the runner lock across
+//!   `.await` points without holding it during proposal lifecycles.
+//! - `LeaveConversation` is split: the session-side helper
+//!   `prepare_self_leave` does the protocol work (emit `Leaving`, take and
+//!   delete the MLS service); the User-side wrapper drops the entry from
+//!   the registry, cleans up the consensus scope, and broadcasts
+//!   `ConversationLifecycle::Removed`. The session method returns
+//!   [`DispatchOutcome::LeaveRequested`] so the caller knows to finish
+//!   the lifecycle on the User side.
+
+use std::sync::Arc;
 
 use hashgraph_like_consensus::protos::consensus::v1::Proposal;
 use prost::Message;
+use tokio::sync::RwLock;
 use tracing::{error, info};
 
 use crate::{
-    app::{ConversationState, User, UserError, forward_incoming_vote, relay_incoming_proposal},
+    app::{
+        ConversationState, SessionRunner, User, UserError, forward_incoming_vote,
+        relay_incoming_proposal,
+    },
     core::{
         ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, CoreError,
         PeerScoringPlugin, ProcessResult, ProposalKind, ScoreSnapshot, SessionEvent, StewardList,
@@ -20,56 +44,79 @@ use crate::{
     },
 };
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
-    /// Dispatches a single ProcessResult to the appropriate handler/consensus/state-machine action.
+/// What [`SessionRunner::dispatch_inbound_result`] hands back to the
+/// caller. `LeaveRequested` signals that the session has done its
+/// protocol-side teardown (emitted `Leaving`, deleted MLS state) and the
+/// caller — which holds the User-side handles — must drop the entry
+/// from the registry and broadcast the lifecycle removal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchOutcome {
+    /// No further User-side action required.
+    Done,
+    /// The session has prepared itself for removal; the caller should
+    /// remove the registry entry and clean up the consensus scope.
+    LeaveRequested,
+}
+
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
+    /// Dispatch a single [`ProcessResult`] to its branch handler. Called
+    /// by `User::process_inbound_packet` after the MLS-side
+    /// `process_inbound` returns a result, and by other call sites that
+    /// produce a `ProcessResult` (e.g. the welcome-side
+    /// `JoinedConversation`).
     pub async fn dispatch_inbound_result(
-        &self,
-        conversation_name: &str,
+        arc: &Arc<RwLock<Self>>,
         result: ProcessResult,
-    ) -> Result<(), UserError> {
+    ) -> Result<DispatchOutcome, UserError> {
         match result {
             ProcessResult::AppMessage(msg) => {
-                self.emit(conversation_name, SessionEvent::AppMessage(*msg))
-                    .await;
-                Ok(())
+                arc.read().await.emit_event(SessionEvent::AppMessage(*msg));
+                Ok(DispatchOutcome::Done)
             }
             ProcessResult::Proposal(proposal) => {
-                self.on_incoming_proposal(conversation_name, *proposal)
-                    .await
+                Self::on_incoming_proposal(arc, *proposal).await?;
+                Ok(DispatchOutcome::Done)
             }
             ProcessResult::Vote(vote) => {
-                let entry_arc = self
-                    .lookup_entry(conversation_name)
-                    .await
-                    .ok_or(UserError::ConversationNotFound)?;
-                let entry = entry_arc.read().await;
-                forward_incoming_vote::<P>(&entry.handle.conversation, *vote, &entry.consensus)
-                    .await?;
-                Ok(())
+                let s = arc.read().await;
+                forward_incoming_vote::<P>(&s.handle.conversation, *vote, &s.consensus).await?;
+                Ok(DispatchOutcome::Done)
             }
             ProcessResult::MembershipChangeReceived(request) => {
-                self.handle_incoming_update_request(conversation_name, *request)
-                    .await
+                Self::handle_incoming_update_request(arc, *request).await?;
+                Ok(DispatchOutcome::Done)
             }
-            ProcessResult::JoinedConversation(name) => self.on_joined_conversation(&name).await,
+            ProcessResult::JoinedConversation(_name) => {
+                // `name` is always this conversation's name — `process_inbound`
+                // emits it via the local MLS service. Use the session's own
+                // `conversation_name` rather than the parameter.
+                Self::on_joined_conversation(arc).await?;
+                Ok(DispatchOutcome::Done)
+            }
             ProcessResult::ConversationUpdated => {
-                self.on_conversation_updated(conversation_name).await
+                Self::on_conversation_updated(arc).await?;
+                Ok(DispatchOutcome::Done)
             }
-            ProcessResult::LeaveConversation => self.on_leave_conversation(conversation_name).await,
+            ProcessResult::LeaveConversation => {
+                Self::prepare_self_leave(arc).await?;
+                Ok(DispatchOutcome::LeaveRequested)
+            }
             ProcessResult::CommitCandidateReceived { steward } => {
-                self.on_commit_candidate_received(conversation_name, &steward)
-                    .await
+                Self::on_commit_candidate_received(arc, &steward).await?;
+                Ok(DispatchOutcome::Done)
             }
             ProcessResult::ConversationSyncReceived(sync) => {
-                self.on_conversation_sync(conversation_name, *sync).await
+                Self::on_conversation_sync(arc, *sync).await?;
+                Ok(DispatchOutcome::Done)
             }
             ProcessResult::Noop(reason) => {
+                let conv_name = arc.read().await.conversation_name.clone();
                 tracing::debug!(
-                    conversation = conversation_name,
+                    conversation = %conv_name,
                     ?reason,
                     "inbound dispatched as noop"
                 );
-                Ok(())
+                Ok(DispatchOutcome::Done)
             }
         }
     }
@@ -86,30 +133,25 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// divergence windows small. Consensus-service-level priority gating is
     /// tracked as a backlog item in `docs/ROADMAP.md`.
     async fn on_incoming_proposal(
-        &self,
-        conversation_name: &str,
+        arc: &Arc<RwLock<Self>>,
         proposal: Proposal,
     ) -> Result<(), UserError> {
         let decoded = ConversationUpdateRequest::decode(proposal.payload.as_slice()).ok();
-        if let Some(req) = decoded.as_ref()
-            && let Some(entry_arc) = self.lookup_entry(conversation_name).await
-        {
-            let mut entry = entry_arc.write().await;
-            let current_epoch = match entry.handle.mls() {
+        if let Some(req) = decoded.as_ref() {
+            let mut s = arc.write().await;
+            let current_epoch = match s.handle.mls() {
                 Some(mls) => mls.current_epoch()?,
                 None => 0,
             };
             match &req.payload {
                 Some(conversation_update_request::Payload::EmergencyCriteria(_)) => {
-                    entry
-                        .handle
+                    s.handle
                         .conversation
                         .observe_emergency(proposal.proposal_id);
                 }
                 Some(conversation_update_request::Payload::InviteMember(_))
                 | Some(conversation_update_request::Payload::RemoveMember(_)) => {
-                    entry
-                        .handle
+                    s.handle
                         .conversation
                         .buffer_pending_update(req.clone(), current_epoch);
                 }
@@ -122,36 +164,29 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .as_ref()
             .map(ProposalKind::of)
             .unwrap_or(ProposalKind::Commit);
-        let consensus = self
-            .lookup_consensus(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
+        let (consensus, conversation_name) = {
+            let s = arc.read().await;
+            (s.consensus.clone(), s.conversation_name.clone())
+        };
         if let Some(vote_notification) =
-            relay_incoming_proposal::<P>(conversation_name, proposal, &consensus).await?
+            relay_incoming_proposal::<P>(&conversation_name, proposal, &consensus).await?
         {
-            self.emit(
-                conversation_name,
-                SessionEvent::AppMessage(vote_notification),
-            )
-            .await;
+            arc.read()
+                .await
+                .emit_event(SessionEvent::AppMessage(vote_notification));
         }
         // Skip auto-vote for fast-path proposals: the creator's bundled
         // YES already resolved the session, so the timer would hit a
         // closed session.
         if expected_voters > 1 {
-            let Some((delay, vote)) = self
-                .with_entry(conversation_name, |e| {
-                    (
-                        e.handle.config.voting_delay_for(kind),
-                        e.handle.config.liveness_criteria_yes,
-                    )
-                })
-                .await
-            else {
-                return Ok(());
+            let (delay, vote) = {
+                let s = arc.read().await;
+                (
+                    s.handle.config.voting_delay_for(kind),
+                    s.handle.config.liveness_criteria_yes,
+                )
             };
-            self.spawn_auto_vote(conversation_name, proposal_id, delay, vote)
-                .await;
+            Self::spawn_auto_vote(arc, proposal_id, delay, vote).await;
         }
         Ok(())
     }
@@ -159,38 +194,35 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// We just joined via welcome. Broadcast a system "joined" chat message,
     /// sync scoring, and transition to Working. Pending-update pruning is
     /// defensive — PendingJoin doesn't buffer, but paths may change.
-    async fn on_joined_conversation(&self, name: &str) -> Result<(), UserError> {
-        self.prune_pending_updates_after_commit(name).await?;
+    async fn on_joined_conversation(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
+        arc.write()
+            .await
+            .prune_pending_updates_after_commit()
+            .await?;
 
-        let msg: AppMessage = ConversationMessage {
-            message: format!(
-                "User {} joined the conversation",
-                self.identity().identity_display()
-            )
-            .into_bytes(),
-            sender: "SYSTEM".to_string(),
-            conversation_name: name.to_string(),
-        }
-        .into();
-        let Some(entry_arc) = self.lookup_entry(name).await else {
-            return Ok(());
+        let (packet, mls_members, conversation_name) = {
+            let s = arc.read().await;
+            let msg: AppMessage = ConversationMessage {
+                message: format!("User {} joined the conversation", s.identity_display)
+                    .into_bytes(),
+                sender: "SYSTEM".to_string(),
+                conversation_name: s.conversation_name.clone(),
+            }
+            .into();
+            let mls = s.handle.expect_mls()?;
+            let packet = mls.build_message(&msg, &s.app_id)?;
+            let members = s.handle.conversation_members().unwrap_or_default();
+            (packet, members, s.conversation_name.clone())
         };
-        let (packet, mls_members) = {
-            let entry = entry_arc.read().await;
-            let mls = entry.handle.expect_mls()?;
-            let packet = mls.build_message(&msg, &self.app_id)?;
-            let members = entry.handle.conversation_members().unwrap_or_default();
-            (packet, members)
-        };
-        self.send_outbound(packet).await?;
-        self.emit(name, SessionEvent::Joined).await;
-        self.sync_scoring_members(name, &mls_members).await;
+        arc.read().await.send_outbound(packet).await?;
+        arc.read().await.emit_event(SessionEvent::Joined);
+        arc.write().await.sync_scoring_members(&mls_members).await;
 
-        let event = {
-            let mut entry = entry_arc.write().await;
-            entry.start_working()
-        };
-        self.emit(name, SessionEvent::PhaseChange(event)).await;
+        let event = arc.write().await.start_working();
+        arc.read()
+            .await
+            .emit_event(SessionEvent::PhaseChange(event));
+        info!(conversation = %conversation_name, "joined conversation");
         Ok(())
     }
 
@@ -198,133 +230,114 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Working, and run steward housekeeping (auto-fill, election kick-off,
     /// buffered-update drain). The commit author's `SuccessfulCommit`
     /// reward is emitted by `finalize_freeze_round`, not here.
-    async fn on_conversation_updated(&self, conversation_name: &str) -> Result<(), UserError> {
-        if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
-            let mls_members = {
-                let entry = entry_arc.read().await;
-                if entry.handle.mls().is_some() {
-                    entry.handle.conversation_members().unwrap_or_default()
-                } else {
-                    Vec::new()
-                }
-            };
-            self.sync_scoring_members(conversation_name, &mls_members)
-                .await;
-        }
-        self.prune_pending_updates_after_commit(conversation_name)
+    async fn on_conversation_updated(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
+        let mls_members = {
+            let s = arc.read().await;
+            if s.handle.mls().is_some() {
+                s.handle.conversation_members().unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        };
+        arc.write().await.sync_scoring_members(&mls_members).await;
+        arc.write()
+            .await
+            .prune_pending_updates_after_commit()
             .await?;
 
         // Transition to Working BEFORE steward checks (election needs Working
         // state). Reset reelection_round: this commit advanced the epoch,
         // so whatever retry cycle we were in belongs to the previous epoch.
-        let working_event = match self.lookup_entry(conversation_name).await {
-            Some(entry_arc) => {
-                let mut entry = entry_arc.write().await;
-                entry.handle.steward_list.reset_retry();
-                let state = entry.handle.current_state();
-                if matches!(
-                    state,
-                    ConversationState::Working
-                        | ConversationState::Freezing
-                        | ConversationState::Selection
-                        | ConversationState::Reelection
-                ) {
-                    Some(entry.start_working())
-                } else {
-                    None
-                }
+        let working_event = {
+            let mut s = arc.write().await;
+            s.handle.steward_list.reset_retry();
+            let state = s.handle.current_state();
+            if matches!(
+                state,
+                ConversationState::Working
+                    | ConversationState::Freezing
+                    | ConversationState::Selection
+                    | ConversationState::Reelection
+            ) {
+                Some(s.start_working())
+            } else {
+                None
             }
-            None => None,
         };
 
-        self.steward_list_housekeeping(conversation_name).await?;
-        self.process_buffered_updates(conversation_name).await?;
-        self.maybe_close_recovery_window(conversation_name).await;
+        Self::steward_list_housekeeping(arc).await?;
+        Self::process_buffered_updates(arc).await?;
+        Self::maybe_close_recovery_window(arc).await;
 
         if let Some(event) = working_event {
-            self.emit(conversation_name, SessionEvent::PhaseChange(event))
-                .await;
+            arc.read()
+                .await
+                .emit_event(SessionEvent::PhaseChange(event));
         }
         Ok(())
     }
 
     /// Fire a steward election while `recovery_mode` is set so the next
     /// list installs and closes the window.
-    async fn maybe_close_recovery_window(&self, conversation_name: &str) {
-        let in_recovery_mode = self
-            .with_entry(conversation_name, |entry| {
-                entry.handle.is_in_recovery_mode()
-            })
-            .await
-            .unwrap_or(false);
+    async fn maybe_close_recovery_window(arc: &Arc<RwLock<Self>>) {
+        let in_recovery_mode = arc.read().await.handle.is_in_recovery_mode();
         if !in_recovery_mode {
             return;
         }
-        if let Err(e) = self
-            .try_initiate_steward_election(conversation_name, true, None)
-            .await
-        {
+        if let Err(e) = Self::try_initiate_steward_election(arc, true, None).await {
+            let conv_name = arc.read().await.conversation_name.clone();
             info!(
-                conversation = conversation_name,
+                conversation = %conv_name,
                 error = %e,
                 "post-recovery election deferred"
             );
         }
     }
 
-    async fn on_leave_conversation(&self, conversation_name: &str) -> Result<(), UserError> {
-        // Emit Leaving on the session's channel before we remove the entry,
-        // while the session is still subscribable.
-        self.emit(conversation_name, SessionEvent::Leaving).await;
-        let entry = self.conversations.write().await.remove(conversation_name);
-        if let Some(entry) = entry {
-            if let Some(mls) = entry.write().await.handle.take_mls() {
-                mls.delete()?;
-            }
+    /// Protocol-side teardown for `LeaveConversation`: emit `Leaving` on
+    /// the session's bus and delete the local MLS state. The User-side
+    /// caller drops the entry from the registry and broadcasts
+    /// `ConversationLifecycle::Removed`.
+    async fn prepare_self_leave(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
+        arc.read().await.emit_event(SessionEvent::Leaving);
+        if let Some(mls) = arc.write().await.handle.take_mls() {
+            mls.delete()?;
         }
-        self.cleanup_consensus_scope(conversation_name).await?;
-        let _ = self.lifecycle.send(ConversationLifecycle::Removed(
-            conversation_name.to_string(),
-        ));
         Ok(())
     }
 
     /// Peer broadcast a commit candidate. If we were in Working, enter
     /// Freezing and — if we're a steward — build our own candidate too.
     async fn on_commit_candidate_received(
-        &self,
-        conversation_name: &str,
+        arc: &Arc<RwLock<Self>>,
         steward: &[u8],
     ) -> Result<(), UserError> {
-        tracing::debug!(
-            conversation = conversation_name,
-            steward = %ShortId::new(steward),
-            "candidate received from peer steward"
-        );
-        let entry_arc = match self.lookup_entry(conversation_name).await {
-            Some(e) => e,
-            None => return Ok(()),
-        };
+        {
+            let conv_name = arc.read().await.conversation_name.clone();
+            tracing::debug!(
+                conversation = %conv_name,
+                steward = %ShortId::new(steward),
+                "candidate received from peer steward"
+            );
+        }
         let (event, outbound) = {
-            let mut entry = entry_arc.write().await;
-            if entry.handle.current_state() != ConversationState::Working {
+            let mut s = arc.write().await;
+            if s.handle.current_state() != ConversationState::Working {
                 return Ok(());
             }
 
-            let event = entry.start_freezing();
-            let epoch = entry.handle.expect_mls()?.current_epoch()?;
-            entry.handle.conversation.ensure_freeze_round(epoch);
+            let event = s.start_freezing();
+            let epoch = s.handle.expect_mls()?.current_epoch()?;
+            s.handle.conversation.ensure_freeze_round(epoch);
 
-            let self_identity = self.self_identity().to_vec();
-            let outbound = if entry.handle.steward_list.is_steward(&self_identity) {
-                match entry
-                    .handle
-                    .create_commit_candidate(&self_identity, &self.app_id)
-                {
+            let self_identity = Arc::clone(&s.self_identity);
+            let app_id = Arc::clone(&s.app_id);
+            let outbound = if s.handle.steward_list.is_steward(&self_identity) {
+                match s.handle.create_commit_candidate(&self_identity, &app_id) {
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(
-                            conversation = conversation_name,
+                            conversation = %s.conversation_name,
                             error = %e,
                             "own commit candidate build failed"
                         );
@@ -337,10 +350,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             (event, outbound)
         };
 
-        self.emit(conversation_name, SessionEvent::PhaseChange(event))
-            .await;
+        arc.read()
+            .await
+            .emit_event(SessionEvent::PhaseChange(event));
         if let Some(message) = outbound {
-            self.send_outbound(message).await?;
+            arc.read().await.send_outbound(message).await?;
         }
         Ok(())
     }
@@ -350,25 +364,24 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// (not the full MLS set — the list may have been generated before we
     /// existed), then applies list + protocol flags + timing + peer scores.
     async fn on_conversation_sync(
-        &self,
-        conversation_name: &str,
+        arc: &Arc<RwLock<Self>>,
         sync: ConversationSync,
     ) -> Result<(), UserError> {
-        let (members, current_epoch) = {
-            let entry_arc = match self.lookup_entry(conversation_name).await {
-                Some(e) => e,
-                None => return Ok(()),
-            };
-            let entry = entry_arc.read().await;
-            if entry.handle.steward_list.current_list().is_some() {
+        let (members, current_epoch, local_default_peer_score, conversation_name) = {
+            let s = arc.read().await;
+            if s.handle.steward_list.current_list().is_some() {
                 return Ok(());
             }
-            let mls = entry.handle.expect_mls()?;
-            (entry.handle.conversation_members()?, mls.current_epoch()?)
+            let mls = s.handle.expect_mls()?;
+            (
+                s.handle.conversation_members()?,
+                mls.current_epoch()?,
+                s.handle.scoring.default_score(),
+                s.conversation_name.clone(),
+            )
         };
-        let local_default_peer_score = self.plugins.default_scoring_config.default_score;
         if !validate_conversation_sync(
-            conversation_name,
+            &conversation_name,
             &sync,
             current_epoch,
             &members,
@@ -378,11 +391,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         }
 
         let sn = sync.steward_members.len();
-        self.apply_conversation_sync_to_entry(conversation_name, &sync)
-            .await?;
+        arc.write().await.apply_conversation_sync_to_entry(&sync)?;
 
         info!(
-            conversation = conversation_name,
+            conversation = %conversation_name,
             election_epoch = sync.election_epoch,
             stewards = sn,
             scores = sync.peer_scores.len(),
@@ -392,36 +404,26 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         Ok(())
     }
 
-    async fn apply_conversation_sync_to_entry(
-        &self,
-        conversation_name: &str,
+    fn apply_conversation_sync_to_entry(
+        &mut self,
         sync: &ConversationSync,
     ) -> Result<(), UserError> {
         let mut protocol_config =
             StewardListConfig::new(sync.sn_min as usize, sync.sn_max as usize)?;
         protocol_config.allow_subset_candidates = sync.allow_subset_candidates;
 
-        let entry_arc = match self.lookup_entry(conversation_name).await {
-            Some(e) => e,
-            None => return Ok(()),
-        };
-        let mut entry = entry_arc.write().await;
         let sn = sync.steward_members.len();
-        entry.handle.steward_list.set_config(protocol_config);
-        let _events = entry.handle.steward_list.install_list(
+        self.handle.steward_list.set_config(protocol_config);
+        let _events = self.handle.steward_list.install_list(
             sync.election_epoch,
             &sync.steward_members,
             sn,
             sync.retry_round,
         )?;
-        entry
-            .handle
+        self.handle
             .steward_list
             .set_max_retries(sync.max_reelection_attempts);
-        entry
-            .handle
-            .scoring
-            .set_threshold(sync.threshold_peer_score);
+        self.handle.scoring.set_threshold(sync.threshold_peer_score);
         let snapshot = ScoreSnapshot {
             diverged: sync
                 .peer_scores
@@ -434,20 +436,25 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         // member in this snapshot — they'll submit
         // `SCORE_BELOW_THRESHOLD` from their own event chain. Drop our
         // events to avoid duplicate proposals from joiners.
-        let _events = entry.handle.scoring.apply_snapshot(&snapshot);
-        entry.handle.config.liveness_criteria_yes = sync.liveness_criteria_yes;
-        entry.handle.config.pending_update_max_epochs = sync.pending_update_max_epochs;
+        let _events = self.handle.scoring.apply_snapshot(&snapshot);
+        self.handle.config.liveness_criteria_yes = sync.liveness_criteria_yes;
+        self.handle.config.pending_update_max_epochs = sync.pending_update_max_epochs;
         if let Some(timing) = &sync.timing {
-            entry.handle.config.apply_timing(timing);
+            self.handle.config.apply_timing(timing);
         }
         Ok(())
     }
+}
 
-    /// Process an inbound packet.
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
+    /// Process an inbound packet. The User-level entry point owns echo
+    /// dedup, name-based routing, and the welcome subtopic's plug-in-
+    /// factory access. App-message packets are handed off to the session
+    /// for MLS processing and dispatch.
     pub async fn process_inbound_packet(&self, packet: InboundPacket) -> Result<(), UserError> {
         let conversation_name = packet.conversation_id.clone();
 
-        // Echo dedup: drop our own messages received back from pub/sub
+        // Echo dedup: drop our own messages received back from pub/sub.
         if packet.app_id.as_slice() == &*self.app_id {
             return Ok(());
         }
@@ -459,7 +466,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
         match packet.subtopic.as_str() {
             WELCOME_SUBTOPIC => {
-                self.process_welcome_packet(&conversation_name, &packet.payload)
+                self.process_welcome_packet(&conversation_name, &packet.payload, &entry_arc)
                     .await
             }
             APP_MSG_SUBTOPIC => {
@@ -470,7 +477,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                     }
                     entry.handle.process_inbound(&packet.payload)?
                 };
-                self.dispatch_inbound_result(&conversation_name, result)
+                self.finish_dispatch(&conversation_name, &entry_arc, result)
                     .await
             }
             other => Err(UserError::Core(CoreError::InvalidSubtopic(
@@ -489,6 +496,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         &self,
         conversation_name: &str,
         payload: &[u8],
+        entry_arc: &Arc<RwLock<SessionRunner<P, CP>>>,
     ) -> Result<(), UserError> {
         let welcome_msg = WelcomeMessage::decode(payload)?;
         match welcome_msg.payload {
@@ -496,10 +504,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 let (key_package_bytes, identity) =
                     key_package_bytes_from_json(user_kp.key_package_bytes)?;
 
-                let entry_arc = self
-                    .lookup_entry(conversation_name)
-                    .await
-                    .ok_or(UserError::ConversationNotFound)?;
                 let already_member = {
                     let entry = entry_arc.read().await;
                     entry
@@ -531,14 +535,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                         },
                     )),
                 };
-                self.handle_incoming_update_request(conversation_name, gur)
-                    .await
+                SessionRunner::handle_incoming_update_request(entry_arc, gur).await
             }
             Some(welcome_message::Payload::InvitationToJoin(invitation)) => {
-                let entry_arc = self
-                    .lookup_entry(conversation_name)
-                    .await
-                    .ok_or(UserError::ConversationNotFound)?;
                 let self_id = self.self_identity();
                 let already_in = {
                     let entry = entry_arc.read().await;
@@ -565,14 +564,60 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                     conversation = conversation_name,
                     "joined conversation via welcome"
                 );
-                self.dispatch_inbound_result(
+                self.finish_dispatch(
                     conversation_name,
+                    entry_arc,
                     ProcessResult::JoinedConversation(joined_name),
                 )
                 .await
             }
             None => Ok(()),
         }
+    }
+
+    /// Drive the session-side dispatcher and finish lifecycle work on the
+    /// User side when the session signals `LeaveRequested`.
+    async fn finish_dispatch(
+        &self,
+        conversation_name: &str,
+        entry_arc: &Arc<RwLock<SessionRunner<P, CP>>>,
+        result: ProcessResult,
+    ) -> Result<(), UserError> {
+        let outcome = SessionRunner::dispatch_inbound_result(entry_arc, result).await?;
+        if matches!(outcome, DispatchOutcome::LeaveRequested) {
+            self.finalize_self_leave(conversation_name).await?;
+        }
+        Ok(())
+    }
+
+    /// User-side completion of `LeaveConversation`: drop the entry from
+    /// the registry, clean up the consensus scope, and broadcast removal.
+    /// The session-side teardown (emit `Leaving`, delete MLS state) has
+    /// already run inside `SessionRunner::dispatch_inbound_result`.
+    async fn finalize_self_leave(&self, conversation_name: &str) -> Result<(), UserError> {
+        self.conversations.write().await.remove(conversation_name);
+        self.cleanup_consensus_scope(conversation_name).await?;
+        let _ = self.lifecycle.send(ConversationLifecycle::Removed(
+            conversation_name.to_string(),
+        ));
+        Ok(())
+    }
+
+    /// Transient wrapper used by `freeze.rs::poll_freeze_status`. Looks
+    /// up the session, drives the session-side dispatcher, and handles
+    /// User-side lifecycle on `LeaveRequested`. Dropped in the final
+    /// cleanup wave once `poll_freeze_status` moves to `SessionRunner`.
+    pub async fn dispatch_inbound_result(
+        &self,
+        conversation_name: &str,
+        result: ProcessResult,
+    ) -> Result<(), UserError> {
+        let entry_arc = self
+            .lookup_entry(conversation_name)
+            .await
+            .ok_or(UserError::ConversationNotFound)?;
+        self.finish_dispatch(conversation_name, &entry_arc, result)
+            .await
     }
 }
 
