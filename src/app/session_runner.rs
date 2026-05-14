@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use tokio::task::JoinHandle;
+use tokio::{sync::broadcast, task::JoinHandle};
 use tracing::info;
 
 use crate::{
@@ -17,8 +17,14 @@ use crate::{
     core::{
         ConsensusPlugin, Conversation, ConversationConfig, ConversationHandle,
         ConversationPluginsFactory, ConversationState, ConversationStateMachine, PluginConsensus,
+        SessionEvent,
     },
 };
+
+/// Default capacity for a session's [`SessionEvent`] broadcast channel.
+/// Sized for bursty proposal sessions (proposals + votes + UI pushes in
+/// flight); subscribers that fall behind by more than this lose events.
+const SESSION_EVENT_CAPACITY: usize = 256;
 
 /// Per-conversation auto-vote timer registry. Spawned when a proposal first
 /// becomes visible locally (own submit or peer inbound); cancelled on
@@ -26,6 +32,9 @@ use crate::{
 pub(crate) type AutoVoteTimers = Arc<Mutex<HashMap<u32, JoinHandle<()>>>>;
 
 pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
+    /// Conversation name. Identifies this session in the User registry and
+    /// is used to construct scope keys for consensus operations.
+    pub(crate) conversation_name: String,
     pub(crate) handle: ConversationHandle<CP>,
     /// Per-conversation consensus service. Owns this conversation's scope
     /// in the shared storage and a private event bus. Constructed at
@@ -40,6 +49,19 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// this `Arc` so it can self-clean on completion; coordinators use
     /// `cancel_auto_vote` / `cancel_all_auto_votes` to abort early.
     pub(crate) auto_vote_timers: AutoVoteTimers,
+    /// Cached identity bytes (cloned from `User`). Used by per-session
+    /// methods that need the local identity without re-walking the
+    /// `Identity` trait.
+    #[allow(dead_code)] // populated; per-session methods land in a follow-up
+    pub(crate) self_identity: Arc<[u8]>,
+    /// Per-User instance UUID (cloned from `User`). Tagged on every
+    /// outbound packet for self-message filtering.
+    #[allow(dead_code)] // populated; per-session methods land in a follow-up
+    pub(crate) app_id: Arc<[u8]>,
+    /// Per-session notification channel. Integrators subscribe via
+    /// [`Self::subscribe`] and consume [`SessionEvent`]s for UI / audit.
+    /// Fire-and-forget; no failure path back into the session.
+    pub(crate) events: broadcast::Sender<SessionEvent>,
 }
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
@@ -48,6 +70,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// `handle.attach_mls`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        conversation_name: String,
         conversation: Conversation,
         mls: Option<CP::Mls>,
         state_machine: ConversationStateMachine,
@@ -56,8 +79,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         scoring: CP::Scoring,
         steward_list: CP::StewardList,
         consensus: PluginConsensus<P>,
+        self_identity: Arc<[u8]>,
+        app_id: Arc<[u8]>,
     ) -> Self {
+        let (events, _initial_rx) = broadcast::channel(SESSION_EVENT_CAPACITY);
         Self {
+            conversation_name,
             handle: ConversationHandle::new(
                 conversation,
                 mls,
@@ -69,7 +96,31 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             consensus,
             phase_timer,
             auto_vote_timers: Arc::new(Mutex::new(HashMap::new())),
+            self_identity,
+            app_id,
+            events,
         }
+    }
+
+    /// Borrow the conversation name. Used by per-session methods to build
+    /// scope keys without threading the name through every signature.
+    #[allow(dead_code)]
+    pub(crate) fn conversation_name(&self) -> &str {
+        &self.conversation_name
+    }
+
+    /// Subscribe to per-session [`SessionEvent`] notifications. Each call
+    /// returns a fresh receiver; late subscribers miss earlier events.
+    pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
+        self.events.subscribe()
+    }
+
+    /// Emit a [`SessionEvent`] on the session's broadcast channel. Silently
+    /// drops the event when there are no live subscribers — events are
+    /// fire-and-forget.
+    #[allow(dead_code)]
+    pub(crate) fn emit_event(&self, event: SessionEvent) {
+        let _ = self.events.send(event);
     }
 
     // ── Auto-vote timers ────────────────────────────────────────────
@@ -210,6 +261,7 @@ mod tests {
             ..ConversationConfig::default()
         };
         let mut runner = SessionRunner::new(
+            "g".to_string(),
             Conversation::new("g"),
             Some(UnusedMls),
             ConversationStateMachine::new_as_pending_join(),
@@ -218,6 +270,8 @@ mod tests {
             StubScoring,
             StubStewardList::member(),
             make_test_consensus_service(),
+            Arc::from(&b"test-identity"[..]),
+            Arc::from(&[0u8; 16][..]),
         );
         runner.phase_timer.start();
         runner
@@ -225,6 +279,7 @@ mod tests {
 
     fn make_runner_working() -> SessionRunner<DefaultConsensusPlugin, StubPluginsFactory> {
         SessionRunner::new(
+            "g".to_string(),
             Conversation::new("g"),
             Some(UnusedMls),
             ConversationStateMachine::new_as_member(),
@@ -233,6 +288,8 @@ mod tests {
             StubScoring,
             StubStewardList::member(),
             make_test_consensus_service(),
+            Arc::from(&b"test-identity"[..]),
+            Arc::from(&[0u8; 16][..]),
         )
     }
 

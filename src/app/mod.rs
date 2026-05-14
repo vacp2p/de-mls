@@ -2,7 +2,7 @@
 //! app with consensus, state machine, peer scoring, and freeze/commit timing.
 //!
 //! Integrate by constructing a [`crate::app::User`] with your
-//! [`crate::core::ConversationEventHandler`], then drive it from a transport
+//! `SessionEvent` / `ConversationLifecycle`, then drive it from a transport
 //! receive loop ([`crate::app::User::process_inbound_packet`]) and a
 //! periodic poll ([`crate::app::User::check_member_freeze`],
 //! [`crate::app::User::poll_freeze_status`]).
@@ -14,7 +14,7 @@
 //! with that timer through coordinator methods that update both atomically.
 //! State transitions return the new [`crate::core::ConversationState`]; the
 //! orchestrator dispatches it via
-//! [`crate::core::ConversationEventHandler::on_phase_change`].
+//! `SessionEvent::PhaseChange`.
 //!
 //! Use this layer directly for epoch-based steward chat; write a custom app
 //! layer if you need a different consensus model, state machine, or epoch

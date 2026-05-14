@@ -21,7 +21,7 @@ fn is_polling_fatal(err: &UserError) -> bool {
         UserError::ConversationAlreadyExists
         | UserError::ConversationBlocked(_)
         | UserError::PartialFreeze
-        | UserError::Callback(_)
+        | UserError::Transport(_)
         | UserError::Core(_)
         | UserError::Consensus(_)
         | UserError::Message(_)

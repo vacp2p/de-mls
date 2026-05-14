@@ -35,7 +35,7 @@
 //! ## Getting Started
 //!
 //! Most developers should start with the [`core`] module documentation, which explains:
-//! - What traits you need to implement ([`core::ConversationEventHandler`])
+//! - What traits you need to implement (`core::SessionEvent`)
 //! - Core operations (start conversation, join, send messages)
 //! - The `ProcessResult` matching flow
 //!
@@ -45,7 +45,6 @@
 //! ## Quick Example
 //!
 //! ```ignore
-//! use de_mls::core::{DefaultConsensusPlugin, ConversationEventHandler, ProcessResult};
 //! use de_mls::app::User;
 //!
 //! // Build a user from an Ethereum private key. The convenience
@@ -54,9 +53,11 @@
 //! // without annotation.
 //! let mut user = User::with_private_key(
 //!     "0xac0974...",   // Private key
-//!     consensus,       // Consensus service
-//!     event_handler,   // Your ConversationEventHandler implementation
+//!     transport,       // Your `ds::DeliveryService` implementation
 //! )?;
+//!
+//! // Subscribe to user-level lifecycle events to discover new sessions.
+//! let mut lifecycle = user.subscribe_conversations();
 //!
 //! // Start a conversation (as steward).
 //! user.start_conversation("de-mls-test", true).await?;

@@ -4,9 +4,7 @@ use alloy::signers::local::LocalSignerError;
 use hashgraph_like_consensus::error::ConsensusError;
 
 use crate::{
-    core::{CallbackError, CoreError},
-    identity::IdentityError,
-    mls_crypto::MlsError,
+    core::CoreError, ds::DeliveryServiceError, identity::IdentityError, mls_crypto::MlsError,
 };
 
 /// Errors from User operations.
@@ -29,9 +27,10 @@ pub enum UserError {
     )]
     PartialFreeze,
 
-    /// Returned when a [`crate::core::ConversationEventHandler`] callback fails.
-    #[error("Handler callback error: {0}")]
-    Callback(#[from] CallbackError),
+    /// Returned when the synchronous transport [`crate::ds::DeliveryService::send`]
+    /// reports failure (e.g. network unavailable, payload too large).
+    #[error("Transport error: {0}")]
+    Transport(#[from] DeliveryServiceError),
 
     #[error("Core error: {0}")]
     Core(#[from] CoreError),

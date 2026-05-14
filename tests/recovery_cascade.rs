@@ -7,15 +7,14 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
-
 use de_mls::app::{ConversationConfig, User};
-use de_mls::core::{
-    CallbackError, ConversationEventHandler, DefaultConsensusPlugin, StewardListConfig,
-};
-use de_mls::ds::{InboundPacket, OutboundPacket};
-use de_mls::protos::de_mls::messages::v1::AppMessage;
+use de_mls::core::{DefaultConsensusPlugin, StewardListConfig};
+use de_mls::ds::{DeliveryService, DeliveryServiceError, InboundPacket, OutboundPacket};
 
+/// Test-only transport: captures every outbound packet for later inspection
+/// instead of sending it. `subscribe()` returns a dangling receiver so the
+/// blocking-channel half goes nowhere (tests deliver inbound by calling
+/// `process_inbound_packet` directly).
 #[derive(Clone)]
 struct H {
     packets: Arc<Mutex<Vec<OutboundPacket>>>,
@@ -32,22 +31,17 @@ impl H {
     }
 }
 
-#[async_trait]
-impl ConversationEventHandler for H {
-    async fn on_outbound(&self, _: &str, p: OutboundPacket) -> Result<String, CallbackError> {
-        self.packets.lock().unwrap().push(p);
+impl DeliveryService for H {
+    fn send(&self, pkt: OutboundPacket) -> Result<String, DeliveryServiceError> {
+        self.packets.lock().unwrap().push(pkt);
         Ok("ok".into())
     }
-    async fn on_app_message(&self, _: &str, _m: AppMessage) -> Result<(), CallbackError> {
-        Ok(())
+    fn subscribe(&self) -> std::sync::mpsc::Receiver<InboundPacket> {
+        // Inbound is delivered explicitly via `process_inbound_packet` in
+        // these tests; the receiver is never polled.
+        let (_tx, rx) = std::sync::mpsc::channel();
+        rx
     }
-    async fn on_leave_conversation(&self, _: &str) -> Result<(), CallbackError> {
-        Ok(())
-    }
-    async fn on_joined_conversation(&self, _: &str) -> Result<(), CallbackError> {
-        Ok(())
-    }
-    async fn on_error(&self, _: &str, _: &str, _: &str) {}
 }
 
 const ALICE_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";

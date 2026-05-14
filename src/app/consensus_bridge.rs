@@ -17,8 +17,8 @@ use tracing::info;
 use crate::{
     app::error::UserError,
     core::{
-        ConsensusPlugin, Conversation, ConversationEventHandler, CoreError, PluginConsensus,
-        build_create_proposal_request, self_leave_proposal_id,
+        ConsensusPlugin, Conversation, CoreError, PluginConsensus, build_create_proposal_request,
+        self_leave_proposal_id,
     },
     protos::de_mls::messages::v1::{
         AppMessage, ConversationUpdateRequest, RemoveMember, VotePayload,
@@ -123,8 +123,7 @@ pub async fn relay_incoming_proposal<P: ConsensusPlugin>(
     conversation_name: &str,
     proposal: Proposal,
     consensus: &PluginConsensus<P>,
-    handler: &dyn ConversationEventHandler,
-) -> Result<(), UserError> {
+) -> Result<Option<AppMessage>, UserError> {
     let scope = P::Scope::from(conversation_name.to_string());
     let expected_voters = proposal.expected_voters_count;
     consensus
@@ -132,7 +131,7 @@ pub async fn relay_incoming_proposal<P: ConsensusPlugin>(
         .await?;
 
     if expected_voters <= 1 {
-        return Ok(());
+        return Ok(None);
     }
 
     let vote_notification: AppMessage = VotePayload {
@@ -145,10 +144,7 @@ pub async fn relay_incoming_proposal<P: ConsensusPlugin>(
     }
     .into();
 
-    handler
-        .on_app_message(conversation_name, vote_notification)
-        .await?;
-    Ok(())
+    Ok(Some(vote_notification))
 }
 
 /// Forward a peer's vote into the local consensus service.

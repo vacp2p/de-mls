@@ -7,20 +7,18 @@
 #![allow(dead_code)]
 
 use std::sync::{
-    Arc, Mutex,
+    Arc,
     atomic::{AtomicU32, Ordering},
 };
-
-use async_trait::async_trait;
 
 use de_mls::app::InMemoryPeerScoreStorage;
 use de_mls::core::PeerScoringService;
 use de_mls::core::default_score_deltas;
 use de_mls::core::{
-    BufferedCommitCandidate, CallbackError, Conversation, ConversationEventHandler, CoreError,
-    DeterministicStewardList, FreezeOutcome, NoopReason, OperatingMode, ProcessResult,
-    ProposalKind, ScoringConfig, StewardListConfig, StewardListPlugin, build_key_package_message,
-    compute_commit_hash, finalize_freeze_round, member_set, process_inbound,
+    BufferedCommitCandidate, Conversation, CoreError, DeterministicStewardList, FreezeOutcome,
+    NoopReason, OperatingMode, ProcessResult, ProposalKind, ScoringConfig, StewardListConfig,
+    StewardListPlugin, build_key_package_message, compute_commit_hash, finalize_freeze_round,
+    member_set, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
 use de_mls::identity::{Identity, WalletIdentity, parse_wallet_address};
@@ -41,95 +39,6 @@ use prost::Message as _;
 pub type TestMls = OpenMlsService<Arc<MemoryDeMlsStorage>>;
 
 pub const DEFAULT_SCORE: i64 = 100;
-
-// ─────────────────────────── Mock handler ───────────────────────────
-
-#[derive(Debug, Clone)]
-pub enum Event {
-    Outbound {
-        group: String,
-        packet: OutboundPacket,
-    },
-    AppMessage {
-        group: String,
-        msg: AppMessage,
-    },
-    LeaveConversation {
-        group: String,
-    },
-    JoinedConversation {
-        group: String,
-    },
-    Error {
-        group: String,
-        op: String,
-        err: String,
-    },
-}
-
-#[derive(Clone, Default)]
-pub struct MockHandler {
-    pub events: Arc<Mutex<Vec<Event>>>,
-}
-
-impl MockHandler {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn events(&self) -> Vec<Event> {
-        self.events.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl ConversationEventHandler for MockHandler {
-    async fn on_outbound(
-        &self,
-        conversation_name: &str,
-        packet: OutboundPacket,
-    ) -> Result<String, CallbackError> {
-        self.events.lock().unwrap().push(Event::Outbound {
-            group: conversation_name.to_string(),
-            packet,
-        });
-        Ok("mock-id".to_string())
-    }
-
-    async fn on_app_message(
-        &self,
-        conversation_name: &str,
-        message: AppMessage,
-    ) -> Result<(), CallbackError> {
-        self.events.lock().unwrap().push(Event::AppMessage {
-            group: conversation_name.to_string(),
-            msg: message,
-        });
-        Ok(())
-    }
-
-    async fn on_leave_conversation(&self, conversation_name: &str) -> Result<(), CallbackError> {
-        self.events.lock().unwrap().push(Event::LeaveConversation {
-            group: conversation_name.to_string(),
-        });
-        Ok(())
-    }
-
-    async fn on_joined_conversation(&self, conversation_name: &str) -> Result<(), CallbackError> {
-        self.events.lock().unwrap().push(Event::JoinedConversation {
-            group: conversation_name.to_string(),
-        });
-        Ok(())
-    }
-
-    async fn on_error(&self, conversation_name: &str, operation: &str, error: &str) {
-        self.events.lock().unwrap().push(Event::Error {
-            group: conversation_name.to_string(),
-            op: operation.to_string(),
-            err: error.to_string(),
-        });
-    }
-}
 
 // ─────────────────────────── Test-only protocol helper ───────────────────────────
 

@@ -11,8 +11,9 @@ use crate::{
         submit_self_leave_proposal,
     },
     core::{
-        ConsensusPlugin, Conversation, ConversationConfig, ConversationPluginsFactory,
-        ConversationStateMachine, PeerScoringPlugin, StewardListPlugin, self_leave_proposal_id,
+        ConsensusPlugin, Conversation, ConversationConfig, ConversationLifecycle,
+        ConversationPluginsFactory, ConversationStateMachine, PeerScoringPlugin, SessionEvent,
+        StewardListPlugin, self_leave_proposal_id,
     },
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
@@ -99,6 +100,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         conversations.insert(
             conversation_name.to_string(),
             Arc::new(RwLock::new(SessionRunner::new(
+                conversation_name.to_string(),
                 conversation,
                 mls_opt,
                 state_machine,
@@ -107,15 +109,19 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 scoring,
                 steward_list,
                 consensus,
+                Arc::clone(&self.self_identity),
+                Arc::clone(&self.app_id),
             ))),
         );
         drop(conversations);
 
-        self.handler
-            .on_conversation_created(conversation_name)
-            .await;
-        self.handler
-            .on_phase_change(conversation_name, initial_state)
+        // Emit on the lifecycle channel first so integrators can subscribe
+        // to the new session's `SessionEvent` stream before any session
+        // events are fired.
+        let _ = self.lifecycle.send(ConversationLifecycle::Created(
+            conversation_name.to_string(),
+        ));
+        self.emit(conversation_name, SessionEvent::PhaseChange(initial_state))
             .await;
 
         Ok(())
@@ -137,11 +143,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .await
             .ok_or(UserError::ConversationNotFound)?;
         if is_pending_join {
+            self.emit(conversation_name, SessionEvent::Leaving).await;
             self.conversations.write().await.remove(conversation_name);
             self.cleanup_consensus_scope(conversation_name).await?;
-            self.handler
-                .on_leave_conversation(conversation_name)
-                .await?;
+            let _ = self.lifecycle.send(ConversationLifecycle::Removed(
+                conversation_name.to_string(),
+            ));
             return Ok(());
         }
 
@@ -221,7 +228,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 .expect_mls()?
                 .build_message(&app_msg, &self.app_id)?
         };
-        self.handler.on_outbound(conversation_name, packet).await?;
+        self.send_outbound(packet).await?;
 
         Ok(())
     }

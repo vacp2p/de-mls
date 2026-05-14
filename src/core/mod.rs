@@ -3,7 +3,7 @@
 //! Wraps MLS cryptography, consensus voting, and message routing. Transport,
 //! UI, and state management live in the app layer.
 //!
-//! Integrators implement [`crate::core::ConversationEventHandler`] (transport
+//! Integrators implement `SessionEvent` / `ConversationLifecycle` (transport
 //! + UI delivery) and feed inbound packets to [`crate::core::process_inbound`],
 //! then dispatch the returned [`crate::core::ProcessResult`].
 //! [`crate::core::DefaultConsensusPlugin`] bundles in-memory backends for tests
@@ -13,7 +13,7 @@
 //! config), `consensus` (pure consensus result application),
 //! `consensus_plugin` ([`crate::core::ConsensusPlugin`] +
 //! [`crate::core::DefaultConsensusPlugin`]), `events`
-//! ([`crate::core::ConversationEventHandler`]), `freeze` (round selection
+//! (`SessionEvent` / `ConversationLifecycle`), `freeze` (round selection
 //! + apply), `inbound` (app-subtopic packet routing), `peer_scoring`
 //! (scoring plug-in contract), `plugins`
 //! ([`crate::core::ConversationPluginsFactory`] bundle), `process_result`
@@ -62,8 +62,8 @@ pub use peer_scoring::{
 // ── Error type ──
 pub use error::CoreError;
 
-// ── Event handler trait and callback error ──
-pub use events::{CallbackError, ConversationEventHandler};
+// ── Session-event types ──
+pub use events::{ConversationLifecycle, SessionEvent};
 
 // ── Proposal classification ──
 pub use proposal_kind::ProposalKind;

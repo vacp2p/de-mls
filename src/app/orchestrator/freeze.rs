@@ -6,7 +6,7 @@ use crate::{
     app::{ConversationState, FreezeTimeoutStatus, User, UserError},
     core::{
         ConsensusPlugin, ConversationPluginsFactory, FreezeFinalizeResult, FreezeOutcome,
-        PeerScoringPlugin, ScoreEvent, ScoreOp, StewardListPlugin,
+        PeerScoringPlugin, ScoreEvent, ScoreOp, SessionEvent, StewardListPlugin,
     },
     ds::WELCOME_SUBTOPIC,
     mls_crypto::MlsService,
@@ -37,9 +37,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             info!(conversation = conversation_name, "pending join timed out");
             self.conversations.write().await.remove(conversation_name);
             self.cleanup_consensus_scope(conversation_name).await?;
-            self.handler
-                .on_leave_conversation(conversation_name)
-                .await?;
+            self.emit(conversation_name, SessionEvent::Leaving).await;
+            let _ = self
+                .lifecycle
+                .send(crate::core::ConversationLifecycle::Removed(
+                    conversation_name.to_string(),
+                ));
             return Ok(false);
         }
 
@@ -86,9 +89,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             )
         };
 
-        self.handler
-            .on_phase_change(conversation_name, selection_event)
-            .await;
+        self.emit(
+            conversation_name,
+            SessionEvent::PhaseChange(selection_event),
+        )
+        .await;
 
         let (mut finalize_result, downward_cross) = {
             let mut entry = entry_arc.write().await;
@@ -123,16 +128,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         };
 
         if !finalize_result.committed_batch.is_empty() {
-            if let Err(e) = self
-                .handler
-                .on_commit_applied(
-                    conversation_name,
-                    std::mem::take(&mut finalize_result.committed_batch),
-                )
-                .await
-            {
-                error!(conversation = conversation_name, error = %e, "on_commit_applied callback failed");
-            }
+            self.emit(
+                conversation_name,
+                SessionEvent::CommitApplied(std::mem::take(&mut finalize_result.committed_batch)),
+            )
+            .await;
         }
 
         // Lock split is intentional: `check_and_initiate_score_removals`
@@ -156,7 +156,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                     .as_ref()
                     .is_some_and(|p| p.subtopic == WELCOME_SUBTOPIC);
                 if let Some(packet) = outbound {
-                    if let Err(e) = self.handler.on_outbound(conversation_name, packet).await {
+                    if let Err(e) = self.send_outbound(packet).await {
                         error!(conversation = conversation_name, error = %e, "deferred welcome send failed");
                     }
                 }
@@ -241,9 +241,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 }
 
                 let entered_reelection = transition_event == ConversationState::Reelection;
-                self.handler
-                    .on_phase_change(conversation_name, transition_event)
-                    .await;
+                self.emit(
+                    conversation_name,
+                    SessionEvent::PhaseChange(transition_event),
+                )
+                .await;
 
                 // Layer 2 recovery: regenerate the steward list. Only the
                 // responsible proposer's call actually submits.
@@ -323,9 +325,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
             // Drop lock before any async calls.
             drop(entry);
-            self.handler.on_phase_change(conversation_name, event).await;
+            self.emit(conversation_name, SessionEvent::PhaseChange(event))
+                .await;
             if let Some(message) = outbound {
-                self.handler.on_outbound(conversation_name, message).await?;
+                self.send_outbound(message).await?;
             }
         }
 

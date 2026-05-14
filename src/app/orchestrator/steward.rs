@@ -455,7 +455,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             mls.build_message(&app_msg, &self.app_id)?
         };
 
-        self.handler.on_outbound(conversation_name, packet).await?;
+        self.send_outbound(packet).await?;
         info!(conversation = conversation_name, "conversation sync sent");
         Ok(())
     }

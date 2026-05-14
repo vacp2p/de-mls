@@ -25,7 +25,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         }
         let key_package = self.generate_key_package()?;
         let packet = build_key_package_message(conversation_name, key_package, &self.app_id);
-        self.handler.on_outbound(conversation_name, packet).await?;
+        self.send_outbound(packet).await?;
         Ok(())
     }
 
@@ -66,7 +66,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 .expect_mls()?
                 .build_message(&app_msg, &self.app_id)?
         };
-        self.handler.on_outbound(conversation_name, packet).await?;
+        self.send_outbound(packet).await?;
         Ok(())
     }
 

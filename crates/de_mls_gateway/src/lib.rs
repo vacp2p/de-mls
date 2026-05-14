@@ -31,7 +31,7 @@ use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use tokio::sync::Mutex;
 
-use crate::handler::GatewayEventHandler;
+use crate::handler::GatewaySessionFanout;
 
 pub use crate::bootstrap::{
     AppState, Bootstrap, BootstrapConfig, BootstrapError, CoreCtx, bootstrap_core,
@@ -160,31 +160,82 @@ impl Gateway<WakuDeliveryService> {
     pub async fn login_with_private_key(&self, private_key: String) -> anyhow::Result<String> {
         let core = self.core();
 
-        let handler = Arc::new(GatewayEventHandler {
-            delivery: Arc::new(core.app_state.delivery.clone()),
-            evt_tx: self.evt_tx.clone(),
-            topics: core.topics.clone(),
-            epoch_history: self.epoch_history.clone(),
-            spawn_forwarder: Arc::new(|name: String| {
-                let Ok(user_ref) = GATEWAY.user() else {
-                    tracing::warn!(
-                        conversation = %name,
-                        "spawn_forwarder fired but user is not logged in"
-                    );
-                    return;
-                };
-                GATEWAY.spawn_consensus_forwarder(user_ref, name);
-            }),
-        });
+        // Hand the Waku delivery service directly to `User` as its transport.
+        // `WakuDeliveryService` implements `de_mls::ds::DeliveryService`.
+        let transport: Arc<dyn de_mls::ds::DeliveryService> =
+            Arc::new(core.app_state.delivery.clone());
 
-        let user = User::with_private_key(private_key.as_str(), handler)?;
+        let user = User::with_private_key(private_key.as_str(), transport)?;
 
         let user_address = user.identity_string();
         let user_ref: UserRef = Arc::new(tokio::sync::RwLock::new(user));
 
         *self.user.write() = Some(user_ref.clone());
 
+        // Per-conversation subscribers: one task watches the User's
+        // lifecycle channel; on each `Created(name)`, spawn a task that
+        // subscribes to the new session's `SessionEvent` stream and
+        // forwards to the UI pipe; the consensus event forwarder is
+        // spawned on the same trigger.
+        self.spawn_session_subscribers(user_ref.clone());
+
         self.spawn_delivery_service_forwarder(core.clone(), user_ref.clone());
         Ok(user_address)
+    }
+
+    /// Spawn the user-level subscriber that watches
+    /// [`User::subscribe_conversations`] and, on each `Created(name)`,
+    /// spawns:
+    /// - a per-session `SessionEvent` subscriber (UI fan-out), and
+    /// - the existing per-conv consensus event forwarder.
+    fn spawn_session_subscribers(&self, user: UserRef) {
+        let evt_tx = self.evt_tx.clone();
+        let topics = self.core().topics.clone();
+        let epoch_history = self.epoch_history.clone();
+        let user_for_loop = user.clone();
+        let gateway_for_consensus_spawn = user.clone();
+
+        tokio::spawn(async move {
+            let mut lifecycle_rx = {
+                let u = user_for_loop.read().await;
+                u.subscribe_conversations()
+            };
+            while let Ok(event) = lifecycle_rx.recv().await {
+                match event {
+                    de_mls::core::ConversationLifecycle::Created(name) => {
+                        let fanout = Arc::new(GatewaySessionFanout {
+                            evt_tx: evt_tx.clone(),
+                            topics: topics.clone(),
+                            epoch_history: epoch_history.clone(),
+                        });
+                        let Some(session_rx) = ({
+                            let u = user_for_loop.read().await;
+                            u.lookup_entry(&name).await
+                        }) else {
+                            tracing::warn!(
+                                conversation = %name,
+                                "lifecycle::Created fired but session missing in registry"
+                            );
+                            continue;
+                        };
+                        let name_for_sub = name.clone();
+                        let mut session_rx_inner = session_rx.read().await.subscribe();
+                        tokio::spawn(async move {
+                            while let Ok(event) = session_rx_inner.recv().await {
+                                fanout.handle(&name_for_sub, event).await;
+                            }
+                        });
+                        // Spawn the per-conv consensus event forwarder
+                        // (handles `AppEvent::ProposalDecided` + state pushes).
+                        GATEWAY
+                            .spawn_consensus_forwarder(gateway_for_consensus_spawn.clone(), name);
+                    }
+                    de_mls::core::ConversationLifecycle::Removed(_) => {
+                        // Per-session subscribers exit naturally when the
+                        // session's broadcast sender drops on entry removal.
+                    }
+                }
+            }
+        });
     }
 }

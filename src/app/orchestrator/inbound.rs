@@ -7,8 +7,9 @@ use tracing::{error, info};
 use crate::{
     app::{ConversationState, User, UserError, forward_incoming_vote, relay_incoming_proposal},
     core::{
-        ConsensusPlugin, ConversationPluginsFactory, CoreError, PeerScoringPlugin, ProcessResult,
-        ProposalKind, ScoreSnapshot, StewardList, StewardListConfig, StewardListPlugin, member_set,
+        ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, CoreError,
+        PeerScoringPlugin, ProcessResult, ProposalKind, ScoreSnapshot, SessionEvent, StewardList,
+        StewardListConfig, StewardListPlugin, member_set,
     },
     ds::{APP_MSG_SUBTOPIC, InboundPacket, WELCOME_SUBTOPIC},
     identity::ShortId,
@@ -28,7 +29,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     ) -> Result<(), UserError> {
         match result {
             ProcessResult::AppMessage(msg) => {
-                self.handler.on_app_message(conversation_name, *msg).await?;
+                self.emit(conversation_name, SessionEvent::AppMessage(*msg))
+                    .await;
                 Ok(())
             }
             ProcessResult::Proposal(proposal) => {
@@ -124,8 +126,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .lookup_consensus(conversation_name)
             .await
             .ok_or(UserError::ConversationNotFound)?;
-        relay_incoming_proposal::<P>(conversation_name, proposal, &consensus, &*self.handler)
-            .await?;
+        if let Some(vote_notification) =
+            relay_incoming_proposal::<P>(conversation_name, proposal, &consensus).await?
+        {
+            self.emit(
+                conversation_name,
+                SessionEvent::AppMessage(vote_notification),
+            )
+            .await;
+        }
         // Skip auto-vote for fast-path proposals: the creator's bundled
         // YES already resolved the session, so the timer would hit a
         // closed session.
@@ -173,15 +182,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             let members = entry.handle.conversation_members().unwrap_or_default();
             (packet, members)
         };
-        self.handler.on_outbound(name, packet).await?;
-        self.handler.on_joined_conversation(name).await?;
+        self.send_outbound(packet).await?;
+        self.emit(name, SessionEvent::Joined).await;
         self.sync_scoring_members(name, &mls_members).await;
 
         let event = {
             let mut entry = entry_arc.write().await;
             entry.start_working()
         };
-        self.handler.on_phase_change(name, event).await;
+        self.emit(name, SessionEvent::PhaseChange(event)).await;
         Ok(())
     }
 
@@ -233,7 +242,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         self.maybe_close_recovery_window(conversation_name).await;
 
         if let Some(event) = working_event {
-            self.handler.on_phase_change(conversation_name, event).await;
+            self.emit(conversation_name, SessionEvent::PhaseChange(event))
+                .await;
         }
         Ok(())
     }
@@ -263,6 +273,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     }
 
     async fn on_leave_conversation(&self, conversation_name: &str) -> Result<(), UserError> {
+        // Emit Leaving on the session's channel before we remove the entry,
+        // while the session is still subscribable.
+        self.emit(conversation_name, SessionEvent::Leaving).await;
         let entry = self.conversations.write().await.remove(conversation_name);
         if let Some(entry) = entry {
             if let Some(mls) = entry.write().await.handle.take_mls() {
@@ -270,9 +283,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             }
         }
         self.cleanup_consensus_scope(conversation_name).await?;
-        self.handler
-            .on_leave_conversation(conversation_name)
-            .await?;
+        let _ = self.lifecycle.send(ConversationLifecycle::Removed(
+            conversation_name.to_string(),
+        ));
         Ok(())
     }
 
@@ -324,9 +337,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             (event, outbound)
         };
 
-        self.handler.on_phase_change(conversation_name, event).await;
+        self.emit(conversation_name, SessionEvent::PhaseChange(event))
+            .await;
         if let Some(message) = outbound {
-            self.handler.on_outbound(conversation_name, message).await?;
+            self.send_outbound(message).await?;
         }
         Ok(())
     }
@@ -434,7 +448,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let conversation_name = packet.conversation_id.clone();
 
         // Echo dedup: drop our own messages received back from pub/sub
-        if packet.app_id == self.app_id {
+        if packet.app_id.as_slice() == &*self.app_id {
             return Ok(());
         }
 

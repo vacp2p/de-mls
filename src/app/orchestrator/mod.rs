@@ -15,18 +15,24 @@ use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::{signing::EthereumConsensusSigner, storage::ConsensusStorage};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 
 use crate::{
     app::{SessionRunner, UserError},
     core::{
-        ConsensusPlugin, ConversationConfig, ConversationEventHandler, ConversationPluginsFactory,
-        DefaultConsensusPlugin, PeerScoringEvent, PluginConsensus, ScoringConfig,
+        ConsensusPlugin, ConversationConfig, ConversationLifecycle, ConversationPluginsFactory,
+        DefaultConsensusPlugin, PeerScoringEvent, PluginConsensus, ScoringConfig, SessionEvent,
         StewardListConfig,
     },
+    ds::{DeliveryService, OutboundPacket},
     identity::{Identity, WalletIdentity},
     mls_crypto::{KeyPackageBytes, MemoryDeMlsStorage, MlsCredentials, MlsError},
 };
+
+/// Default capacity for the User's [`ConversationLifecycle`] broadcast
+/// channel. Sized for batch login flows; subscribers that fall behind by
+/// more than this lose events.
+const CONVERSATION_LIFECYCLE_CAPACITY: usize = 128;
 
 mod consensus;
 mod consensus_events;
@@ -86,7 +92,10 @@ pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// `ConsensusService` at construction. The signer's identity bytes are
     /// the user's wallet/account identity on the wire.
     consensus_signer: P::Signer,
-    handler: Arc<dyn ConversationEventHandler>,
+    /// Synchronous outbound transport. Cloned into each `SessionRunner` at
+    /// construction; the User-level helper wraps [`DeliveryService::send`]
+    /// in `spawn_blocking` for use in async contexts.
+    transport: Arc<dyn DeliveryService>,
     default_conversation_config: ConversationConfig,
     /// Seed config for the per-conversation peer-scoring plug-in. Owned at
     /// the User level so every conversation starts from the same defaults;
@@ -97,8 +106,15 @@ pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// ownership story as `default_scoring_config`.
     default_steward_list_config: StewardListConfig,
     /// Per-instance UUID embedded in every outbound packet. Inbound packets
-    /// carrying our `app_id` are self-echoes and silently dropped.
-    app_id: Vec<u8>,
+    /// carrying our `app_id` are self-echoes and silently dropped. Cached
+    /// as `Arc<[u8]>` so each `SessionRunner` cheaply shares it.
+    app_id: Arc<[u8]>,
+    /// User-level conversation lifecycle channel. Emits `Created(name)`
+    /// when a new conversation enters the registry and `Removed(name)`
+    /// when one leaves. Integrators subscribe via
+    /// [`Self::subscribe_conversations`] to discover new sessions and
+    /// subscribe to their [`SessionEvent`] streams.
+    lifecycle: broadcast::Sender<ConversationLifecycle>,
 }
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Clone for User<P, CP> {
@@ -110,11 +126,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Clone for User<P, CP> {
             conversations: Arc::clone(&self.conversations),
             consensus_storage: self.consensus_storage.clone(),
             consensus_signer: self.consensus_signer.clone(),
-            handler: Arc::clone(&self.handler),
+            transport: Arc::clone(&self.transport),
             default_conversation_config: self.default_conversation_config.clone(),
             default_scoring_config: self.default_scoring_config.clone(),
             default_steward_list_config: self.default_steward_list_config.clone(),
-            app_id: self.app_id.clone(),
+            app_id: Arc::clone(&self.app_id),
+            lifecycle: self.lifecycle.clone(),
         }
     }
 }
@@ -125,10 +142,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         plugin_factory: Arc<CP>,
         consensus_storage: P::ConsensusStorage,
         consensus_signer: P::Signer,
-        handler: Arc<dyn ConversationEventHandler>,
+        transport: Arc<dyn DeliveryService>,
         default_conversation_config: ConversationConfig,
     ) -> Self {
         let self_identity: Arc<[u8]> = Arc::from(identity.identity_bytes());
+        let (lifecycle, _initial_rx) = broadcast::channel(CONVERSATION_LIFECYCLE_CAPACITY);
         Self {
             identity,
             self_identity,
@@ -136,11 +154,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             conversations: Arc::new(RwLock::new(HashMap::new())),
             consensus_storage,
             consensus_signer,
-            handler,
+            transport,
             default_conversation_config,
             default_scoring_config: ScoringConfig::default(),
             default_steward_list_config: StewardListConfig::default(),
-            app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
+            app_id: Arc::from(uuid::Uuid::new_v4().as_bytes().as_slice()),
+            lifecycle,
         }
     }
 
@@ -162,7 +181,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// registered for `conversation_name`. Takes the outer read lock briefly
     /// to clone the inner `Arc`, then releases it before the caller
     /// acquires the runner's own lock.
-    pub(crate) async fn lookup_entry(
+    pub async fn lookup_entry(
         &self,
         conversation_name: &str,
     ) -> Option<Arc<RwLock<SessionRunner<P, CP>>>> {
@@ -220,13 +239,42 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     }
 
     /// Clone the conversation's consensus event bus. Used by integrators to
-    /// subscribe their per-conversation consensus-event forwarder (see
-    /// [`ConversationEventHandler::on_conversation_created`]). Returns `None`
-    /// when no runner is registered for `conversation_name`.
+    /// subscribe their per-conversation consensus-event forwarder (typically
+    /// driven off [`Self::subscribe_conversations`]). Returns `None` when no
+    /// runner is registered for `conversation_name`.
     pub async fn consensus_event_bus(&self, conversation_name: &str) -> Option<P::EventBus> {
         let entry_arc = self.lookup_entry(conversation_name).await?;
         let entry = entry_arc.read().await;
         Some(entry.consensus.event_bus().clone())
+    }
+
+    /// Subscribe to User-level conversation lifecycle events. Integrators
+    /// use this to discover new sessions and subscribe to their per-session
+    /// [`SessionEvent`] streams. Each call returns a fresh receiver.
+    pub fn subscribe_conversations(&self) -> broadcast::Receiver<ConversationLifecycle> {
+        self.lifecycle.subscribe()
+    }
+
+    /// Send an outbound packet via the User-level transport. Wraps the
+    /// synchronous [`DeliveryService::send`] in `spawn_blocking` so the
+    /// async context isn't blocked. Returns a transport message id (if
+    /// any) on success.
+    pub(crate) async fn send_outbound(&self, packet: OutboundPacket) -> Result<String, UserError> {
+        let transport = Arc::clone(&self.transport);
+        let send_result = tokio::task::spawn_blocking(move || transport.send(packet))
+            .await
+            .expect("transport send task panicked");
+        Ok(send_result?)
+    }
+
+    /// Emit a [`SessionEvent`] on the named session's broadcast channel.
+    /// No-op when no session is registered for `conversation_name`. The
+    /// emit itself is fire-and-forget — subscribers that have fallen
+    /// behind silently miss events.
+    pub(crate) async fn emit(&self, conversation_name: &str, event: SessionEvent) {
+        if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
+            entry_arc.read().await.emit_event(event);
+        }
     }
 
     /// Build a fresh per-conversation `ConsensusService`. Clones the shared
@@ -260,9 +308,9 @@ impl User<DefaultConsensusPlugin, DefaultConversationPluginsFactory> {
     /// Construct a `User` on [`DefaultConsensusPlugin`] with the default config.
     pub fn with_private_key(
         private_key: &str,
-        handler: Arc<dyn ConversationEventHandler>,
+        transport: Arc<dyn DeliveryService>,
     ) -> Result<Self, UserError> {
-        Self::with_private_key_and_config(private_key, handler, ConversationConfig::default())
+        Self::with_private_key_and_config(private_key, transport, ConversationConfig::default())
     }
 
     /// Construct a `User` on [`DefaultConsensusPlugin`] with a custom config.
@@ -272,7 +320,7 @@ impl User<DefaultConsensusPlugin, DefaultConversationPluginsFactory> {
     /// the signer.
     pub fn with_private_key_and_config(
         private_key: &str,
-        handler: Arc<dyn ConversationEventHandler>,
+        transport: Arc<dyn DeliveryService>,
         default_conversation_config: ConversationConfig,
     ) -> Result<Self, UserError> {
         let private_key_signer = PrivateKeySigner::from_str(private_key)?;
@@ -292,7 +340,7 @@ impl User<DefaultConsensusPlugin, DefaultConversationPluginsFactory> {
             plugin_factory,
             consensus_storage,
             consensus_signer,
-            handler,
+            transport,
             default_conversation_config,
         ))
     }

@@ -14,7 +14,7 @@ use tracing::{error, info};
 use crate::{
     app::{ConversationState, ProposalParams, User, UserError, cast_vote, submit_proposal},
     core::{
-        ConsensusPlugin, ConversationPluginsFactory, ProposalKind, StewardListPlugin,
+        ConsensusPlugin, ConversationPluginsFactory, ProposalKind, SessionEvent, StewardListPlugin,
         target_identity_of,
     },
     protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest, VotePayload},
@@ -119,7 +119,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Proposal background task: register (which broadcasts proposal +
     /// creator's vote in one bundle) → sleep `consensus_timeout` → resolve.
     /// Never returns an error — submission failures are surfaced through
-    /// `ConversationEventHandler::on_error` and everything after that is best-effort.
+    /// `SessionEvent::Error` and everything after that is best-effort.
     async fn run_proposal_lifecycle(self, np: NewProposal) {
         let NewProposal {
             conversation_name,
@@ -142,9 +142,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             Ok(pid) => pid,
             Err(err) => {
                 error!(conversation = %conversation_name, error = %err, "proposal submission failed");
-                self.handler
-                    .on_error(&conversation_name, "Start voting", &err.to_string())
-                    .await;
+                self.emit(
+                    &conversation_name,
+                    SessionEvent::Error {
+                        operation: "Start voting".to_string(),
+                        message: err.to_string(),
+                    },
+                )
+                .await;
                 return;
             }
         };
@@ -257,14 +262,19 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 .expect_mls()?
                 .build_message(&outbound, &self.app_id)?
         };
-        self.handler.on_outbound(conversation_name, packet).await?;
+        self.send_outbound(packet).await?;
 
         match creator_vote {
             Some(_) => {
                 // Creator already voted — populate history cache, no banner.
-                self.handler
-                    .on_own_proposal_submitted(conversation_name, proposal_id, &request)
-                    .await?;
+                self.emit(
+                    conversation_name,
+                    SessionEvent::OwnProposalSubmitted {
+                        proposal_id,
+                        request: request.clone(),
+                    },
+                )
+                .await;
             }
             None => {
                 // Creator hasn't voted — show them the banner like peers
@@ -281,9 +291,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                         .unwrap_or(0),
                 }
                 .into();
-                self.handler
-                    .on_app_message(conversation_name, vote_notification)
-                    .await?;
+                self.emit(
+                    conversation_name,
+                    SessionEvent::AppMessage(vote_notification),
+                )
+                .await;
                 self.spawn_auto_vote(
                     conversation_name,
                     proposal_id,
@@ -475,7 +487,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 .expect_mls()?
                 .build_message(&app_message, &app_id)?
         };
-        self.handler.on_outbound(conversation_name, packet).await?;
+        self.send_outbound(packet).await?;
         Ok(())
     }
 
@@ -574,7 +586,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 .expect_mls()?
                 .build_message(&app_message, &self.app_id)?
         };
-        self.handler.on_outbound(conversation_name, packet).await?;
+        self.send_outbound(packet).await?;
         Ok(())
     }
 }

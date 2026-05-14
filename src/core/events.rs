@@ -1,102 +1,77 @@
-//! I/O contract between the protocol layer and an integrator. The app layer
-//! ([`crate::app::User`]) calls these methods while dispatching
-//! [`crate::core::ProcessResult`] variants — core itself never calls them.
+//! I/O contract between the protocol layer and an integrator.
+//!
+//! Two channels:
+//!
+//! - [`SessionEvent`] — fire-and-forget notifications about a single
+//!   conversation. Each [`crate::app::SessionRunner`] owns a broadcast sender;
+//!   integrators subscribe per session.
+//! - [`ConversationLifecycle`] — User-level create/remove notifications.
+//!   Integrators use this to discover new sessions and subscribe to them.
+//!
+//! Synchronous outbound transport is supplied by
+//! [`crate::ds::DeliveryService`], passed to `User` at construction and
+//! cloned into each session.
 
-use async_trait::async_trait;
 use hashgraph_like_consensus::types::ConsensusEvent;
 
 use crate::{
     core::ConversationState,
-    ds::OutboundPacket,
     protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest},
 };
 
-/// Error wrapper returned by [`ConversationEventHandler`] callbacks. Integrators
-/// convert their transport/UI errors into this via `CallbackError(e.to_string())`.
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct CallbackError(pub String);
+/// Per-conversation notification. Sessions broadcast these; integrators
+/// subscribe via [`crate::app::SessionRunner::subscribe`]. All variants are
+/// fire-and-forget — no failure path back to the session.
+#[derive(Debug, Clone)]
+pub enum SessionEvent {
+    /// Decrypted application message (chat, vote request, proposal
+    /// notification, ban request, …).
+    AppMessage(AppMessage),
 
-/// Integrator-supplied bridge between DE-MLS and the transport / UI.
-///
-/// Called from async contexts while managing multiple conversations, hence `Send + Sync`.
-#[async_trait]
-pub trait ConversationEventHandler: Send + Sync {
-    /// Send an encrypted packet to the network. The packet's `subtopic`
-    /// distinguishes welcome vs application traffic. Returns a transport
-    /// message id if meaningful, else an empty string.
-    async fn on_outbound(
-        &self,
-        conversation_name: &str,
-        packet: OutboundPacket,
-    ) -> Result<String, CallbackError>;
-
-    /// Deliver a decrypted application message (chat, vote request, proposal
-    /// notification, ban request, …) to the UI.
-    async fn on_app_message(
-        &self,
-        conversation_name: &str,
-        message: AppMessage,
-    ) -> Result<(), CallbackError>;
+    /// Welcome processed and MLS state initialised. Epoch timers + state
+    /// transitions are already wired — surface to UI only.
+    Joined,
 
     /// The user is out of this conversation (self-leave commit merged, or
-    /// someone else removed us). When using [`crate::app::User`] the
-    /// registry is already pruned — use this only for UI/transport cleanup.
-    async fn on_leave_conversation(&self, conversation_name: &str) -> Result<(), CallbackError>;
+    /// someone else removed us). The session entry is about to be removed
+    /// from `User`'s registry.
+    Leaving,
 
-    /// Welcome processed and MLS state initialised. When using
-    /// [`crate::app::User`] epoch timers + state transitions are already
-    /// wired — use this only for UI notification.
-    async fn on_joined_conversation(&self, conversation_name: &str) -> Result<(), CallbackError>;
+    /// A background operation (e.g., vote submission) failed. UI may surface;
+    /// state has already been reconciled.
+    Error { operation: String, message: String },
 
-    /// A background operation (e.g., vote submission) failed. Log and
-    /// optionally surface to the UI.
-    async fn on_error(&self, conversation_name: &str, operation: &str, error: &str);
+    /// The local user just submitted `request` as a new proposal with the
+    /// creator's vote bundled. UI should record for history; no "please vote"
+    /// affordance.
+    OwnProposalSubmitted {
+        proposal_id: u32,
+        request: ConversationUpdateRequest,
+    },
 
-    /// The local user just submitted `request` as a new proposal. The
-    /// creator's vote is bundled with the outbound proposal and has already
-    /// reached peers — the local UI should record the proposal for history
-    /// rendering but must **not** surface a "please vote" affordance.
-    /// Default impl is a no-op for integrators without a voting UI.
-    async fn on_own_proposal_submitted(
-        &self,
-        _conversation_name: &str,
-        _proposal_id: u32,
-        _request: &ConversationUpdateRequest,
-    ) -> Result<(), CallbackError> {
-        Ok(())
-    }
+    /// A freeze round merged a commit; `batch` is the set of approved
+    /// proposals that landed in this commit (in insertion order).
+    CommitApplied(Vec<ConversationUpdateRequest>),
 
-    /// A freeze round just merged a commit; `batch` is the set of approved
-    /// proposals that landed in that commit. Fired once per accepted commit
-    /// (whether the local node was the steward or not), in insertion order
-    /// of the approved queue. Integrators that maintain a UI history view
-    /// or audit log consume this; the default impl is a no-op.
-    async fn on_commit_applied(
-        &self,
-        _conversation_name: &str,
-        _batch: Vec<ConversationUpdateRequest>,
-    ) -> Result<(), CallbackError> {
-        Ok(())
-    }
+    /// Conversation transitioned into `state`.
+    PhaseChange(ConversationState),
 
-    /// A conversation transitioned into `state`. Caller fires this after a
-    /// coordinator method returns the new state. Integrators surface
-    /// state changes to the UI or audit log; this is a fire-and-forget
-    /// notification (returns `()` like `on_error`). Default impl is a no-op.
-    async fn on_phase_change(&self, _conversation_name: &str, _state: ConversationState) {}
+    /// A consensus session reached an outcome. Fired after the runner has
+    /// applied the result to local state.
+    ProposalDecided(ConsensusEvent),
+}
 
-    /// A consensus session for `conversation_name` reached an outcome
-    /// (`ConsensusReached` or `ConsensusFailed`). Fired by the per-conversation
-    /// consensus event forwarder *after* [`crate::app::User::apply_consensus_outcome`]
-    /// has applied the result to local state. Integrators surface the
-    /// outcome to the UI or audit log; the default impl is a no-op.
-    async fn on_proposal_decided(&self, _conversation_name: &str, _event: ConsensusEvent) {}
+/// User-level conversation lifecycle event. Sent on [`crate::app::User`]'s
+/// lifecycle channel; integrators subscribe via
+/// [`crate::app::User::subscribe_conversations`] and use `Created` as the
+/// trigger to subscribe to the new session's [`SessionEvent`] stream.
+#[derive(Debug, Clone)]
+pub enum ConversationLifecycle {
+    /// A new conversation entry has been registered. The session is in the
+    /// registry; the integrator can look it up and `subscribe()` to its
+    /// per-session events.
+    Created(String),
 
-    /// A new conversation entry has been registered on `User` (creator or
-    /// joiner). Fires once per conversation. Integrators use this to spawn
-    /// per-conversation infrastructure that ties to the conversation
-    /// lifetime — most notably the consensus event forwarder. Default impl
-    /// is a no-op.
-    async fn on_conversation_created(&self, _conversation_name: &str) {}
+    /// A conversation entry has been removed from the registry.
+    Removed(String),
 }

@@ -11,7 +11,8 @@ use crate::{
     app::{ConversationState, User, UserError},
     core::{
         ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin, ProposalKind, ScoreOp,
-        StewardListPlugin, apply_consensus_result, emergency_score_ops, target_identity_of,
+        SessionEvent, StewardListPlugin, apply_consensus_result, emergency_score_ops,
+        target_identity_of,
     },
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, conversation_update_request,
@@ -110,7 +111,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 None => None,
             };
             if let Some(event) = event {
-                self.handler.on_phase_change(conversation_name, event).await;
+                self.emit(conversation_name, SessionEvent::PhaseChange(event))
+                    .await;
             }
         }
 
@@ -217,7 +219,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             }
         };
         if let Some(event) = resumed_from_reelection {
-            self.handler.on_phase_change(conversation_name, event).await;
+            self.emit(conversation_name, SessionEvent::PhaseChange(event))
+                .await;
         }
         info!(
             conversation = conversation_name,
@@ -251,9 +254,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             );
             if let Err(e) = self.try_initiate_deadlock_ecp(conversation_name).await {
                 error!(conversation = conversation_name, error = %e, "Deadlock ECP filing failed");
-                self.handler
-                    .on_error(conversation_name, "Reelection stuck", &e.to_string())
-                    .await;
+                self.emit(
+                    conversation_name,
+                    SessionEvent::Error {
+                        operation: "Reelection stuck".to_string(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
             }
             return;
         }
@@ -312,7 +320,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             None => None,
         };
         if let Some(event) = resumed_event {
-            self.handler.on_phase_change(conversation_name, event).await;
+            self.emit(conversation_name, SessionEvent::PhaseChange(event))
+                .await;
         }
 
         if let Err(e) = self
