@@ -1,9 +1,18 @@
 //! Timer polls for pending-join expiry, freeze timeout, and steward inactivity.
+//!
+//! Wave-5 split: `check_member_freeze` is the only fully session-side method —
+//! it's self-contained. `check_pending_join` (drives leave-by-timeout) and
+//! `poll_freeze_status` (calls `dispatch_inbound_result` on commit-applied)
+//! stay on User as coordinators because they also do registry CRUD and
+//! cross-session dispatch. They'll fold into [`SessionRunner`] in the final
+//! cleanup wave once inbound moves too.
+
+use std::sync::Arc;
 
 use tracing::{error, info};
 
 use crate::{
-    app::{ConversationState, FreezeTimeoutStatus, User, UserError},
+    app::{ConversationState, FreezeTimeoutStatus, SessionRunner, User, UserError},
     core::{
         ConsensusPlugin, ConversationPluginsFactory, FreezeFinalizeResult, FreezeOutcome,
         PeerScoringPlugin, ScoreEvent, ScoreOp, SessionEvent, StewardListPlugin,
@@ -262,51 +271,59 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         Ok(FreezeTimeoutStatus::TimedOut { has_proposals })
     }
 
+    /// Transient wrapper: looks up the session and forwards. Wave 8 drops it
+    /// once external callers switch to driving the session directly.
     pub async fn check_member_freeze(&self, conversation_name: &str) -> Result<bool, UserError> {
-        let entry_arc = self
+        let session = self
             .lookup_entry(conversation_name)
             .await
             .ok_or(UserError::ConversationNotFound)?;
-        let mut entry = entry_arc.write().await;
+        let mut runner = session.write().await;
+        runner.check_member_freeze().await
+    }
+}
 
-        let state = entry.handle.current_state();
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
+    /// Drive the steward-inactivity check. Returns `true` exactly on the
+    /// tick that transitions into Freezing; `false` while still waiting,
+    /// outside Working, or when there's no approved work. Stewards build
+    /// their own commit candidate under the same lock; candidate-build
+    /// failure is logged and the freeze transition proceeds (peers'
+    /// candidates still get processed).
+    pub async fn check_member_freeze(&mut self) -> Result<bool, UserError> {
+        let state = self.handle.current_state();
         if state == ConversationState::PendingJoin {
             return Ok(false);
         }
 
-        let proposal_count = entry.handle.conversation.approved_proposals_count();
+        let proposal_count = self.handle.conversation.approved_proposals_count();
         // Hold the freeze while an election is in flight — committing on
         // the known-stale list would just produce a NoCandidate.
-        if entry.handle.conversation.has_election_in_flight() {
+        if self.handle.conversation.has_election_in_flight() {
             return Ok(false);
         }
         // Recovery uses the shorter retry inactivity window so we don't
         // burn another full epoch waiting for a steward to commit.
         let in_recovery =
-            entry.handle.is_in_recovery_mode() || entry.handle.steward_list.retry_round() > 0;
+            self.handle.is_in_recovery_mode() || self.handle.steward_list.retry_round() > 0;
         let inactivity = if in_recovery {
-            entry.handle.config.recovery_inactivity_duration
+            self.handle.config.recovery_inactivity_duration
         } else {
-            entry.handle.config.commit_inactivity_duration
+            self.handle.config.commit_inactivity_duration
         };
-        let freeze_event = entry.check_steward_inactivity(proposal_count, inactivity);
+        let freeze_event = self.check_steward_inactivity(proposal_count, inactivity);
         if let Some(event) = freeze_event {
-            let epoch = entry.handle.expect_mls()?.current_epoch()?;
-            entry.handle.conversation.ensure_freeze_round(epoch);
+            let epoch = self.handle.expect_mls()?.current_epoch()?;
+            self.handle.conversation.ensure_freeze_round(epoch);
 
-            // Stewards build their own candidate under the same lock.
-            // Candidate-build failure must not block the freeze transition —
-            // peers' candidates still get processed.
-            let self_identity = self.self_identity();
-            let outbound = if entry.handle.steward_list.is_steward(self_identity) {
-                match entry
-                    .handle
-                    .create_commit_candidate(self_identity, &self.app_id)
-                {
+            let self_identity = Arc::clone(&self.self_identity);
+            let app_id = Arc::clone(&self.app_id);
+            let outbound = if self.handle.steward_list.is_steward(&self_identity) {
+                match self.handle.create_commit_candidate(&self_identity, &app_id) {
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(
-                            conversation = conversation_name,
+                            conversation = %self.conversation_name,
                             error = %e,
                             "commit candidate build failed"
                         );
@@ -318,15 +335,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             };
 
             info!(
-                conversation = conversation_name,
+                conversation = %self.conversation_name,
                 approved = proposal_count,
                 "steward inactivity transition"
             );
 
-            // Drop lock before any async calls.
-            drop(entry);
-            self.emit(conversation_name, SessionEvent::PhaseChange(event))
-                .await;
+            self.emit_event(SessionEvent::PhaseChange(event));
             if let Some(message) = outbound {
                 self.send_outbound(message).await?;
             }
