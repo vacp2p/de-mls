@@ -132,14 +132,6 @@ impl<P: ConsensusPlugin> ConsensusContext<P> {
     ) -> Result<(), hashgraph_like_consensus::error::ConsensusError> {
         self.storage.delete_scope(scope).await
     }
-
-    /// Borrow the underlying consensus storage handle. Used by the User
-    /// to fetch a proposal payload after a `ConsensusReached` event
-    /// (`apply_consensus_outcome`), which is the only call site that
-    /// reaches into storage outside the per-conv service.
-    pub(crate) fn storage(&self) -> &P::ConsensusStorage {
-        &self.storage
-    }
 }
 
 impl<P: ConsensusPlugin> Clone for ConsensusContext<P> {

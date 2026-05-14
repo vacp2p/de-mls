@@ -1,14 +1,25 @@
-//! Consensus-event dispatch — the other side of the User's inbound edge,
-//! triggered when the hashgraph-like-consensus service reaches or fails
-//! consensus on a proposal. Compare with `inbound.rs` which handles
-//! transport-delivered packets.
+//! Consensus-event dispatch on `SessionRunner`. Triggered when the
+//! hashgraph-like-consensus service reaches or fails consensus on a
+//! proposal; compare with `inbound.rs` (transport-delivered packets).
+//!
+//! All five handlers are associated functions taking
+//! `Arc<RwLock<SessionRunner>>` because they fan out into steward
+//! initiations (election, deadlock ECP, score removals, buffered-update
+//! drains), each of which spawns a background proposal lifecycle.
+//!
+//! A transient `User::apply_consensus_outcome` wrapper at the bottom
+//! preserves the existing entry signature so the gateway forwarder keeps
+//! compiling; Wave 8 drops the wrapper.
+
+use std::sync::Arc;
 
 use hashgraph_like_consensus::{storage::ConsensusStorage, types::ConsensusEvent};
 use prost::Message;
+use tokio::sync::RwLock;
 use tracing::{error, info};
 
 use crate::{
-    app::{ConversationState, User, UserError},
+    app::{ConversationState, SessionRunner, User, UserError},
     core::{
         ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin, ProposalKind, ScoreOp,
         SessionEvent, StewardListPlugin, apply_consensus_result, emergency_score_ops,
@@ -19,13 +30,13 @@ use crate::{
     },
 };
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
-    /// Entry point from the consensus service: decode the proposal, apply the
-    /// result to the conversation, and dispatch to the correct follow-up handler
-    /// (election-accepted / election-rejected / emergency-scored).
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
+    /// Entry point from the consensus event bus: decode the proposal,
+    /// apply the result to the conversation, and dispatch to the correct
+    /// follow-up handler (election-accepted / election-rejected /
+    /// emergency-scored).
     pub async fn apply_consensus_outcome(
-        &mut self,
-        conversation_name: &str,
+        arc: &Arc<RwLock<Self>>,
         event: ConsensusEvent,
     ) -> Result<(), UserError> {
         let (proposal_id, approved) = match &event {
@@ -38,33 +49,33 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         };
 
         // Proposal resolved — any pending auto-vote timer for it is moot.
-        self.cancel_auto_vote(conversation_name, proposal_id).await;
+        arc.read().await.cancel_auto_vote(proposal_id);
 
         // Drop re-emissions from the consensus library (timeout-path race)
         // so we don't re-apply state or double-fire UI events.
-        let already_applied = self
-            .with_entry(conversation_name, |entry| {
-                entry
-                    .handle
-                    .conversation
-                    .is_consensus_outcome_applied(proposal_id)
-            })
+        let already_applied = arc
+            .read()
             .await
-            .unwrap_or(false);
+            .handle
+            .conversation
+            .is_consensus_outcome_applied(proposal_id);
         if already_applied {
+            let conv_name = arc.read().await.conversation_name.clone();
             tracing::debug!(
-                conversation = conversation_name,
+                conversation = %conv_name,
                 proposal_id,
                 "duplicate consensus outcome dropped"
             );
             return Ok(());
         }
 
-        // Fetch payload from the shared consensus storage.
-        let scope = P::Scope::from(conversation_name.to_string());
-        let proposal = self
-            .plugins
-            .consensus
+        // Fetch payload from the per-conversation consensus storage.
+        let (consensus, conversation_name) = {
+            let s = arc.read().await;
+            (s.consensus.clone(), s.conversation_name.clone())
+        };
+        let scope = P::Scope::from(conversation_name.clone());
+        let proposal = consensus
             .storage()
             .get_proposal(&scope, proposal_id)
             .await?;
@@ -72,73 +83,56 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
         // The inactivity timer is self-started by `check_steward_inactivity`
         // on the next poll — no explicit notification needed here.
-        let entry_arc = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
         let consensus_apply = {
-            let mut entry = entry_arc.write().await;
+            let mut s = arc.write().await;
             info!(
-                conversation = conversation_name,
+                conversation = %s.conversation_name,
                 proposal_id, approved, "consensus reached"
             );
-            entry
-                .handle
+            s.handle
                 .conversation
                 .mark_consensus_outcome_applied(proposal_id);
-            apply_consensus_result(
-                &mut entry.handle.conversation,
-                proposal_id,
-                approved,
-                &payload,
-            )?
+            apply_consensus_result(&mut s.handle.conversation, proposal_id, approved, &payload)?
         };
 
         if let Some(election) = consensus_apply.election {
-            return self
-                .handle_election_accepted(conversation_name, election)
-                .await;
+            return Self::handle_election_accepted(arc, election).await;
         }
 
         if consensus_apply.enter_recovery_mode {
-            if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
-                entry_arc.write().await.handle.enter_recovery_mode();
-            }
+            arc.write().await.handle.enter_recovery_mode();
         }
 
         if consensus_apply.force_freezing {
             // Bypass the inactivity timer so the urgent commit fires now.
-            let event = match self.lookup_entry(conversation_name).await {
-                Some(entry_arc) => entry_arc.write().await.force_freezing(),
-                None => None,
-            };
+            let event = arc.write().await.force_freezing();
             if let Some(event) = event {
-                self.emit(conversation_name, SessionEvent::PhaseChange(event))
-                    .await;
+                arc.read()
+                    .await
+                    .emit_event(SessionEvent::PhaseChange(event));
             }
         }
 
         if let Some(target) = &consensus_apply.queued_remove_target {
-            self.refresh_stewards_after_removal(conversation_name, target)
-                .await;
+            Self::refresh_stewards_after_removal(arc, target).await;
         }
 
         if !approved && let Ok(req) = ConversationUpdateRequest::decode(payload.as_slice()) {
             if ProposalKind::of(&req).is_steward_election() {
-                self.handle_election_rejected(conversation_name).await;
+                Self::handle_election_rejected(arc).await;
             } else if let Some(target) = target_identity_of(&req) {
                 let target = target.to_vec();
-                if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
-                    let mut entry = entry_arc.write().await;
-                    entry.handle.conversation.remove_pending_update(&target);
-                }
+                arc.write()
+                    .await
+                    .handle
+                    .conversation
+                    .remove_pending_update(&target);
             }
         }
 
         let score_ops = emergency_score_ops(&payload, approved);
         if !score_ops.is_empty() {
-            self.handle_emergency_scored(conversation_name, proposal_id, &payload, &score_ops)
-                .await?;
+            Self::handle_emergency_scored(arc, proposal_id, &payload, &score_ops).await?;
         }
 
         Ok(())
@@ -146,22 +140,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
     /// When the removal target is a current steward, fire a fresh election
     /// in parallel so the next epoch keeps a healthy ES + BS.
-    async fn refresh_stewards_after_removal(&self, conversation_name: &str, target: &[u8]) {
-        let target_was_steward = self
-            .with_entry(conversation_name, |entry| {
-                entry.handle.steward_list.is_steward(target)
-            })
-            .await
-            .unwrap_or(false);
+    async fn refresh_stewards_after_removal(arc: &Arc<RwLock<Self>>, target: &[u8]) {
+        let target_was_steward = arc.read().await.handle.steward_list.is_steward(target);
         if !target_was_steward {
             return;
         }
-        if let Err(e) = self
-            .try_initiate_steward_election(conversation_name, true, Some(target))
-            .await
-        {
+        if let Err(e) = Self::try_initiate_steward_election(arc, true, Some(target)).await {
+            let conv_name = arc.read().await.conversation_name.clone();
             info!(
-                conversation = conversation_name,
+                conversation = %conv_name,
                 error = %e,
                 "post-removal steward-list refresh deferred"
             );
@@ -172,22 +159,16 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// if we were in it, close any open recovery window, and drain
     /// buffered updates so the fresh epoch steward picks them up.
     async fn handle_election_accepted(
-        &self,
-        conversation_name: &str,
+        arc: &Arc<RwLock<Self>>,
         election: StewardElectionProposal,
     ) -> Result<(), UserError> {
-        let entry_arc = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-
         let is_valid = {
-            let entry = entry_arc.read().await;
-            entry.handle.expect_mls()?;
+            let s = arc.read().await;
+            s.handle.expect_mls()?;
             // Election proposals carry the candidate pool implicitly:
             // `proposed_stewards` is the full set the proposer sorted, so
             // `candidate_pool == proposed_stewards` for validation.
-            entry.handle.steward_list.validate_proposed(
+            s.handle.steward_list.validate_proposed(
                 &election.proposed_stewards,
                 election.election_epoch,
                 &election.proposed_stewards,
@@ -195,16 +176,17 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             )?
         };
         if !is_valid {
+            let conv_name = arc.read().await.conversation_name.clone();
             info!(
-                conversation = conversation_name,
+                conversation = %conv_name,
                 "steward election rejected: invalid list"
             );
             return Ok(());
         }
 
         let resumed_from_reelection = {
-            let mut entry = entry_arc.write().await;
-            let _events = entry.handle.steward_list.install_list(
+            let mut s = arc.write().await;
+            let _events = s.handle.steward_list.install_list(
                 election.election_epoch,
                 &election.proposed_stewards,
                 election.proposed_stewards.len(),
@@ -213,69 +195,64 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             // `retry_round` stays > 0 until the next successful commit so
             // the immediate post-election inactivity check uses the
             // short retry window.
-            entry.handle.exit_recovery_mode();
-            if entry.handle.current_state() == ConversationState::Reelection {
-                Some(entry.start_working())
+            s.handle.exit_recovery_mode();
+            if s.handle.current_state() == ConversationState::Reelection {
+                Some(s.start_working())
             } else {
                 None
             }
         };
         if let Some(event) = resumed_from_reelection {
-            self.emit(conversation_name, SessionEvent::PhaseChange(event))
-                .await;
+            arc.read()
+                .await
+                .emit_event(SessionEvent::PhaseChange(event));
         }
-        info!(
-            conversation = conversation_name,
-            epoch = election.election_epoch,
-            stewards = election.proposed_stewards.len(),
-            retry_round = election.retry_round,
-            "steward election applied"
-        );
+        {
+            let s = arc.read().await;
+            info!(
+                conversation = %s.conversation_name,
+                epoch = election.election_epoch,
+                stewards = election.proposed_stewards.len(),
+                retry_round = election.retry_round,
+                "steward election applied"
+            );
+        }
 
-        self.process_buffered_updates(conversation_name).await
+        Self::process_buffered_updates(arc).await
     }
 
     /// Rejected election: bump the retry round and retry under the max
     /// (idempotent), or escalate to a `Deadlock` ECP once exhausted.
-    async fn handle_election_rejected(&self, conversation_name: &str) {
-        let (round, max) = match self.lookup_entry(conversation_name).await {
-            Some(entry_arc) => {
-                let mut entry = entry_arc.write().await;
-                let _events = entry.handle.steward_list.bump_retry();
-                (
-                    entry.handle.steward_list.retry_round(),
-                    entry.handle.steward_list.max_retries(),
-                )
-            }
-            None => return,
+    async fn handle_election_rejected(arc: &Arc<RwLock<Self>>) {
+        let (round, max) = {
+            let mut s = arc.write().await;
+            let _events = s.handle.steward_list.bump_retry();
+            (
+                s.handle.steward_list.retry_round(),
+                s.handle.steward_list.max_retries(),
+            )
         };
+        let conversation_name = arc.read().await.conversation_name.clone();
         if round > max {
             info!(
-                conversation = conversation_name,
+                conversation = %conversation_name,
                 round, max, "election retries exhausted; escalating to Layer 3"
             );
-            if let Err(e) = self.try_initiate_deadlock_ecp(conversation_name).await {
-                error!(conversation = conversation_name, error = %e, "Deadlock ECP filing failed");
-                self.emit(
-                    conversation_name,
-                    SessionEvent::Error {
-                        operation: "Reelection stuck".to_string(),
-                        message: e.to_string(),
-                    },
-                )
-                .await;
+            if let Err(e) = Self::try_initiate_deadlock_ecp(arc).await {
+                error!(conversation = %conversation_name, error = %e, "Deadlock ECP filing failed");
+                arc.read().await.emit_event(SessionEvent::Error {
+                    operation: "Reelection stuck".to_string(),
+                    message: e.to_string(),
+                });
             }
             return;
         }
         info!(
-            conversation = conversation_name,
+            conversation = %conversation_name,
             round, max, "steward election rejected, retrying"
         );
-        if let Err(e) = self
-            .try_initiate_steward_election(conversation_name, true, None)
-            .await
-        {
-            info!(conversation = conversation_name, error = %e, "election retry deferred");
+        if let Err(e) = Self::try_initiate_steward_election(arc, true, None).await {
+            info!(conversation = %conversation_name, error = %e, "election retry deferred");
         }
     }
 
@@ -284,54 +261,68 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// exit Reelection if we landed there), then check for new
     /// below-threshold removals.
     async fn handle_emergency_scored(
-        &self,
-        conversation_name: &str,
+        arc: &Arc<RwLock<Self>>,
         proposal_id: u32,
         payload: &[u8],
         score_ops: &[ScoreOp],
     ) -> Result<(), UserError> {
-        if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
-            let mut entry = entry_arc.write().await;
+        {
+            let mut s = arc.write().await;
             // Events from this apply chain into the score-removal pass
             // below (after `handle_emergency_scored` returns into its
             // caller). The terminal `check_and_initiate_score_removals`
             // call covers it, so we only need to drop the events here.
-            let _events = entry.handle.scoring.apply_ops(score_ops);
+            let _events = s.handle.scoring.apply_ops(score_ops);
             if let Ok(req) = ConversationUpdateRequest::decode(payload)
                 && let Some(conversation_update_request::Payload::EmergencyCriteria(ec)) =
                     &req.payload
                 && let Some(ev) = &ec.evidence
             {
-                entry
-                    .handle
+                s.handle
                     .conversation
                     .resolve_pending_removal(&ev.target_member_id);
             }
         }
 
-        let resumed_event = match self.lookup_entry(conversation_name).await {
-            Some(entry_arc) => {
-                let mut entry = entry_arc.write().await;
-                entry.handle.conversation.resolve_emergency(proposal_id);
-                if entry.handle.current_state() == ConversationState::Reelection {
-                    Some(entry.start_working())
-                } else {
-                    None
-                }
+        let resumed_event = {
+            let mut s = arc.write().await;
+            s.handle.conversation.resolve_emergency(proposal_id);
+            if s.handle.current_state() == ConversationState::Reelection {
+                Some(s.start_working())
+            } else {
+                None
             }
-            None => None,
         };
         if let Some(event) = resumed_event {
-            self.emit(conversation_name, SessionEvent::PhaseChange(event))
-                .await;
+            arc.read()
+                .await
+                .emit_event(SessionEvent::PhaseChange(event));
         }
 
-        if let Err(e) = self
-            .check_and_initiate_score_removals(conversation_name)
-            .await
-        {
-            error!(conversation = conversation_name, error = %e, "score-removal check failed");
+        if let Err(e) = Self::check_and_initiate_score_removals(arc).await {
+            let conv_name = arc.read().await.conversation_name.clone();
+            error!(conversation = %conv_name, error = %e, "score-removal check failed");
         }
         Ok(())
+    }
+}
+
+// ── Transient User wrapper ──────────────────────────────────────────────
+//
+// Preserves `User::apply_consensus_outcome(name, event)` so the gateway
+// forwarder keeps compiling. Wave 8 drops it once the forwarder switches
+// to driving the session arc directly.
+
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
+    pub async fn apply_consensus_outcome(
+        &mut self,
+        conversation_name: &str,
+        event: ConsensusEvent,
+    ) -> Result<(), UserError> {
+        let session = self
+            .lookup_entry(conversation_name)
+            .await
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::apply_consensus_outcome(&session, event).await
     }
 }

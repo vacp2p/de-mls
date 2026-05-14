@@ -545,17 +545,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         SessionRunner::try_initiate_steward_election(&session, recovery, extra_exclude).await
     }
 
-    pub(super) async fn try_initiate_deadlock_ecp(
-        &self,
-        conversation_name: &str,
-    ) -> Result<(), UserError> {
-        let session = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::try_initiate_deadlock_ecp(&session).await
-    }
-
     pub async fn steward_list_housekeeping(
         &self,
         conversation_name: &str,

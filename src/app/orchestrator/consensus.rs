@@ -571,14 +571,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         SessionRunner::spawn_auto_vote(&session, proposal_id, delay, vote).await;
     }
 
-    /// Abort the auto-vote timer for `(conversation_name, proposal_id)` if one
-    /// is registered. No-op otherwise.
-    pub(crate) async fn cancel_auto_vote(&self, conversation_name: &str, proposal_id: u32) {
-        if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
-            entry_arc.read().await.cancel_auto_vote(proposal_id);
-        }
-    }
-
     /// Abort every auto-vote timer belonging to `conversation_name`. Called
     /// on conversation leave so no stale timers fire against a conversation
     /// we've left.
