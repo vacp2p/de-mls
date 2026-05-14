@@ -7,11 +7,14 @@
 //! into an `unreachable!()` branch, that's a sign the test is touching
 //! state it shouldn't be (and the panic location pinpoints the leak).
 
+use alloy::signers::local::PrivateKeySigner;
+use hashgraph_like_consensus::signing::EthereumConsensusSigner;
+
 use crate::{
     core::{
-        ConversationPluginsFactory, ElectionDecision, PeerScoringEvent, PeerScoringPlugin, ScoreOp,
-        ScoreSnapshot, ScoringConfig, StewardList, StewardListConfig, StewardListEvent,
-        StewardListPlugin,
+        ConsensusPlugin, ConversationPluginsFactory, DefaultConsensusPlugin, ElectionDecision,
+        PeerScoringEvent, PeerScoringPlugin, PluginConsensus, ScoreOp, ScoreSnapshot,
+        ScoringConfig, StewardList, StewardListConfig, StewardListEvent, StewardListPlugin,
     },
     ds::OutboundPacket,
     mls_crypto::{
@@ -20,6 +23,17 @@ use crate::{
     },
     protos::de_mls::messages::v1::AppMessage,
 };
+
+/// Build a `PluginConsensus<DefaultConsensusPlugin>` with a random signer for
+/// tests that need a `SessionRunner` but never exercise consensus operations.
+pub(crate) fn make_test_consensus_service() -> PluginConsensus<DefaultConsensusPlugin> {
+    PluginConsensus::<DefaultConsensusPlugin>::new_with_components(
+        DefaultConsensusPlugin::new_storage(),
+        DefaultConsensusPlugin::new_event_bus(),
+        EthereumConsensusSigner::new(PrivateKeySigner::random()),
+        10,
+    )
+}
 
 /// MLS service that errors on every operation. Lets tests construct a
 /// `ConversationHandle` whose early-return paths never invoke MLS.

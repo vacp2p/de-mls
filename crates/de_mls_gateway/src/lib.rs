@@ -165,6 +165,16 @@ impl Gateway<WakuDeliveryService> {
             evt_tx: self.evt_tx.clone(),
             topics: core.topics.clone(),
             epoch_history: self.epoch_history.clone(),
+            spawn_forwarder: Arc::new(|name: String| {
+                let Ok(user_ref) = GATEWAY.user() else {
+                    tracing::warn!(
+                        conversation = %name,
+                        "spawn_forwarder fired but user is not logged in"
+                    );
+                    return;
+                };
+                GATEWAY.spawn_consensus_forwarder(user_ref, name);
+            }),
         });
 
         let user = User::with_private_key(private_key.as_str(), handler)?;
@@ -175,7 +185,6 @@ impl Gateway<WakuDeliveryService> {
         *self.user.write() = Some(user_ref.clone());
 
         self.spawn_delivery_service_forwarder(core.clone(), user_ref.clone());
-        self.spawn_consensus_forwarder(user_ref.clone());
         Ok(user_address)
     }
 }

@@ -131,15 +131,26 @@ impl Gateway<WakuDeliveryService> {
     ///
     /// This handles both UI notification (AppEvent::ProposalDecided) and
     /// user-side processing (apply_consensus_outcome internally calls handler).
-    pub(crate) fn spawn_consensus_forwarder(&self, user: UserRef) {
+    /// Spawn a per-conversation consensus event forwarder. One task per
+    /// conversation; it subscribes to that conversation's private event bus
+    /// and exits naturally when the bus is dropped (conversation removed).
+    pub(crate) fn spawn_consensus_forwarder(&self, user: UserRef, conversation_name: String) {
         let evt_tx = self.evt_tx.clone();
         let user_for_sub = user.clone();
+        let cname_owned = conversation_name.clone();
 
         tokio::spawn(async move {
-            let mut rx = {
+            let Some(bus) = ({
                 let u = user_for_sub.read().await;
-                u.consensus_event_bus().subscribe()
+                u.consensus_event_bus(&cname_owned).await
+            }) else {
+                tracing::warn!(
+                    conversation = %cname_owned,
+                    "consensus forwarder: no event bus (conversation already gone)"
+                );
+                return;
             };
+            let mut rx = bus.subscribe();
             tracing::info!("consensus forwarder started");
             while let Ok((conversation_name, event)) = rx.recv().await {
                 // Forward to UI

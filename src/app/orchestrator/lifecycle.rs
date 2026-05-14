@@ -95,6 +95,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 "pending join, awaiting welcome"
             );
         }
+        let consensus = self.build_consensus_service();
         conversations.insert(
             conversation_name.to_string(),
             Arc::new(RwLock::new(SessionRunner::new(
@@ -105,10 +106,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 config,
                 scoring,
                 steward_list,
+                consensus,
             ))),
         );
         drop(conversations);
 
+        self.handler
+            .on_conversation_created(conversation_name)
+            .await;
         self.handler
             .on_phase_change(conversation_name, initial_state)
             .await;
@@ -173,34 +178,31 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         // fires `ConsensusReached` on submit, and `apply_consensus_result`
         // needs `is_owner_of_proposal` to be true by then.
         let proposal_id = self_leave_proposal_id(&self_identity);
-        let (proposal_expiration, consensus_timeout) = {
-            let entry_arc = self
-                .lookup_entry(conversation_name)
-                .await
-                .ok_or(UserError::ConversationNotFound)?;
+        let entry_arc = self
+            .lookup_entry(conversation_name)
+            .await
+            .ok_or(UserError::ConversationNotFound)?;
+        let submitted = {
             let mut entry = entry_arc.write().await;
             entry
                 .handle
                 .conversation
                 .store_voting_proposal(proposal_id, request);
-            (
-                entry.handle.config.proposal_expiration,
-                entry.handle.config.consensus_timeout,
+            let proposal_expiration = entry.handle.config.proposal_expiration;
+            let consensus_timeout = entry.handle.config.consensus_timeout;
+            submit_self_leave_proposal::<P>(
+                conversation_name,
+                &self_identity,
+                &entry.consensus,
+                ProposalParams {
+                    expected_voters: 1,
+                    proposal_expiration,
+                    consensus_timeout,
+                    liveness_criteria_yes: true,
+                },
             )
+            .await?
         };
-
-        let submitted = submit_self_leave_proposal::<P>(
-            conversation_name,
-            &self_identity,
-            &self.consensus_service,
-            ProposalParams {
-                expected_voters: 1,
-                proposal_expiration,
-                consensus_timeout,
-                liveness_criteria_yes: true,
-            },
-        )
-        .await?;
 
         // Dedup (`ProposalAlreadyExist`) — another submit is already driving
         // this proposal_id. Our voting entry resolves on that session.

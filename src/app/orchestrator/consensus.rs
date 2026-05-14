@@ -190,11 +190,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .await
             .ok_or(UserError::ConversationNotFound)?;
 
+        let consensus = self
+            .lookup_consensus(conversation_name)
+            .await
+            .ok_or(UserError::ConversationNotFound)?;
         let (proposal_id, unbundled) = submit_proposal::<P>(
             conversation_name,
             &request,
             self.self_identity(),
-            &self.consensus_service,
+            &consensus,
             ProposalParams {
                 expected_voters,
                 proposal_expiration,
@@ -227,8 +231,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 // `cast_vote` helper sends Vote-only messages, which would
                 // leave peers without the proposal.
                 let scope = P::Scope::from(conversation_name.to_string());
-                let proposal = self
-                    .consensus_service
+                let proposal = consensus
                     .cast_vote_and_get_proposal(&scope, proposal_id, vote)
                     .await?;
                 info!(
@@ -306,8 +309,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// bug, not a race).
     async fn resolve_on_timeout(&self, conversation_name: &str, proposal_id: u32) {
         let scope = P::Scope::from(conversation_name.to_string());
-        let still_active = self
-            .consensus_service
+        let Some(consensus) = self.lookup_consensus(conversation_name).await else {
+            return;
+        };
+        let still_active = consensus
             .storage()
             .get_active_proposals(&scope)
             .await
@@ -316,8 +321,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         if !still_active {
             return;
         }
-        match self
-            .consensus_service
+        match consensus
             .handle_consensus_timeout(&scope, proposal_id)
             .await
         {
@@ -450,25 +454,20 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .lookup_entry(conversation_name)
             .await
             .ok_or(UserError::ConversationNotFound)?;
-        {
+        let consensus = {
             let entry = entry_arc.read().await;
             let state = entry.handle.current_state();
             if state == ConversationState::Freezing || state == ConversationState::Selection {
                 return Err(UserError::ConversationBlocked(state.to_string()));
             }
-        }
+            entry.consensus.clone()
+        };
         let app_id = self.app_id.clone();
 
         // Manual vote takes precedence over the pending auto-vote timer.
         self.cancel_auto_vote(conversation_name, proposal_id).await;
 
-        let app_message = cast_vote::<P>(
-            conversation_name,
-            proposal_id,
-            vote,
-            &self.consensus_service,
-        )
-        .await?;
+        let app_message = cast_vote::<P>(conversation_name, proposal_id, vote, &consensus).await?;
         let packet = {
             let entry = entry_arc.read().await;
             entry
@@ -563,13 +562,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .lookup_entry(conversation_name)
             .await
             .ok_or(UserError::ConversationNotFound)?;
-        let app_message = cast_vote::<P>(
-            conversation_name,
-            proposal_id,
-            vote,
-            &self.consensus_service,
-        )
-        .await?;
+        let consensus = {
+            let entry = entry_arc.read().await;
+            entry.consensus.clone()
+        };
+        let app_message = cast_vote::<P>(conversation_name, proposal_id, vote, &consensus).await?;
         let packet = {
             let entry = entry_arc.read().await;
             entry

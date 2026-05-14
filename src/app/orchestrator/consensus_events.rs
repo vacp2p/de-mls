@@ -59,11 +59,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             return Ok(());
         }
 
-        // Fetch payload from consensus service.
+        // Fetch payload from the shared consensus storage.
         let scope = P::Scope::from(conversation_name.to_string());
         let proposal = self
-            .consensus_service
-            .storage()
+            .consensus_storage
             .get_proposal(&scope, proposal_id)
             .await?;
         let payload = proposal.payload;

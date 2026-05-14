@@ -41,12 +41,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                     .await
                     .ok_or(UserError::ConversationNotFound)?;
                 let entry = entry_arc.read().await;
-                forward_incoming_vote::<P>(
-                    &entry.handle.conversation,
-                    *vote,
-                    &*self.consensus_service,
-                )
-                .await?;
+                forward_incoming_vote::<P>(&entry.handle.conversation, *vote, &entry.consensus)
+                    .await?;
                 Ok(())
             }
             ProcessResult::MembershipChangeReceived(request) => {
@@ -124,13 +120,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .as_ref()
             .map(ProposalKind::of)
             .unwrap_or(ProposalKind::Commit);
-        relay_incoming_proposal::<P>(
-            conversation_name,
-            proposal,
-            &*self.consensus_service,
-            &*self.handler,
-        )
-        .await?;
+        let consensus = self
+            .lookup_consensus(conversation_name)
+            .await
+            .ok_or(UserError::ConversationNotFound)?;
+        relay_incoming_proposal::<P>(conversation_name, proposal, &consensus, &*self.handler)
+            .await?;
         // Skip auto-vote for fast-path proposals: the creator's bundled
         // YES already resolved the session, so the timer would hit a
         // closed session.

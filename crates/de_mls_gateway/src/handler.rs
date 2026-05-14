@@ -30,6 +30,11 @@ pub struct GatewayEventHandler<DS: DeliveryService> {
     pub evt_tx: UnboundedSender<AppEvent>,
     pub topics: Arc<TopicFilter>,
     pub epoch_history: EpochHistoryStore,
+    /// Closure that spawns a per-conversation consensus event forwarder when
+    /// a new conversation is registered on `User`. Captured at login so this
+    /// trait impl stays delivery-service-generic — the closure carries the
+    /// `Waku`-specific gateway reference internally.
+    pub spawn_forwarder: Arc<dyn Fn(String) + Send + Sync>,
 }
 
 #[async_trait]
@@ -131,6 +136,10 @@ impl<DS: DeliveryService> ConversationEventHandler for GatewayEventHandler<DS> {
             epochs: formatted,
         });
         Ok(())
+    }
+
+    async fn on_conversation_created(&self, conversation_name: &str) {
+        (self.spawn_forwarder)(conversation_name.to_string());
     }
 }
 

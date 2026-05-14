@@ -15,8 +15,8 @@ use tracing::info;
 use crate::{
     app::PhaseTimer,
     core::{
-        Conversation, ConversationConfig, ConversationHandle, ConversationPluginsFactory,
-        ConversationState, ConversationStateMachine,
+        ConsensusPlugin, Conversation, ConversationConfig, ConversationHandle,
+        ConversationPluginsFactory, ConversationState, ConversationStateMachine, PluginConsensus,
     },
 };
 
@@ -25,8 +25,14 @@ use crate::{
 /// manual vote, consensus resolution, or conversation leave.
 pub(crate) type AutoVoteTimers = Arc<Mutex<HashMap<u32, JoinHandle<()>>>>;
 
-pub struct SessionRunner<CP: ConversationPluginsFactory> {
+pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     pub(crate) handle: ConversationHandle<CP>,
+    /// Per-conversation consensus service. Owns this conversation's scope
+    /// in the shared storage and a private event bus. Constructed at
+    /// conversation creation by `User::build_consensus_service` and held
+    /// here so consensus calls hit the local service directly without
+    /// User-level lookup.
+    pub(crate) consensus: PluginConsensus<P>,
     /// Wall-clock anchor combined with `handle.state_machine` by
     /// coordinator methods.
     pub(crate) phase_timer: PhaseTimer,
@@ -36,10 +42,11 @@ pub struct SessionRunner<CP: ConversationPluginsFactory> {
     pub(crate) auto_vote_timers: AutoVoteTimers,
 }
 
-impl<CP: ConversationPluginsFactory> SessionRunner<CP> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Build a fresh runner. Creator path passes `Some(mls)`; joiner
     /// path passes `None` and attaches the MLS service later via
     /// `handle.attach_mls`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         conversation: Conversation,
         mls: Option<CP::Mls>,
@@ -48,6 +55,7 @@ impl<CP: ConversationPluginsFactory> SessionRunner<CP> {
         config: ConversationConfig,
         scoring: CP::Scoring,
         steward_list: CP::StewardList,
+        consensus: PluginConsensus<P>,
     ) -> Self {
         Self {
             handle: ConversationHandle::new(
@@ -58,6 +66,7 @@ impl<CP: ConversationPluginsFactory> SessionRunner<CP> {
                 scoring,
                 steward_list,
             ),
+            consensus,
             phase_timer,
             auto_vote_timers: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -190,7 +199,12 @@ mod tests {
     use crate::test_fixtures::{StubPluginsFactory, StubScoring, StubStewardList, UnusedMls};
     use std::time::Instant;
 
-    fn make_runner_pending_join(commit_inactivity: Duration) -> SessionRunner<StubPluginsFactory> {
+    use crate::core::DefaultConsensusPlugin;
+    use crate::test_fixtures::make_test_consensus_service;
+
+    fn make_runner_pending_join(
+        commit_inactivity: Duration,
+    ) -> SessionRunner<DefaultConsensusPlugin, StubPluginsFactory> {
         let config = ConversationConfig {
             commit_inactivity_duration: commit_inactivity,
             ..ConversationConfig::default()
@@ -203,12 +217,13 @@ mod tests {
             config,
             StubScoring,
             StubStewardList::member(),
+            make_test_consensus_service(),
         );
         runner.phase_timer.start();
         runner
     }
 
-    fn make_runner_working() -> SessionRunner<StubPluginsFactory> {
+    fn make_runner_working() -> SessionRunner<DefaultConsensusPlugin, StubPluginsFactory> {
         SessionRunner::new(
             Conversation::new("g"),
             Some(UnusedMls),
@@ -217,6 +232,7 @@ mod tests {
             ConversationConfig::default(),
             StubScoring,
             StubStewardList::member(),
+            make_test_consensus_service(),
         )
     }
 

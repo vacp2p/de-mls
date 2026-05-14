@@ -3,6 +3,7 @@
 //! [`crate::core::ProcessResult`] variants — core itself never calls them.
 
 use async_trait::async_trait;
+use hashgraph_like_consensus::types::ConsensusEvent;
 
 use crate::{
     core::ConversationState,
@@ -84,4 +85,18 @@ pub trait ConversationEventHandler: Send + Sync {
     /// state changes to the UI or audit log; this is a fire-and-forget
     /// notification (returns `()` like `on_error`). Default impl is a no-op.
     async fn on_phase_change(&self, _conversation_name: &str, _state: ConversationState) {}
+
+    /// A consensus session for `conversation_name` reached an outcome
+    /// (`ConsensusReached` or `ConsensusFailed`). Fired by the per-conversation
+    /// consensus event forwarder *after* [`crate::app::User::apply_consensus_outcome`]
+    /// has applied the result to local state. Integrators surface the
+    /// outcome to the UI or audit log; the default impl is a no-op.
+    async fn on_proposal_decided(&self, _conversation_name: &str, _event: ConsensusEvent) {}
+
+    /// A new conversation entry has been registered on `User` (creator or
+    /// joiner). Fires once per conversation. Integrators use this to spawn
+    /// per-conversation infrastructure that ties to the conversation
+    /// lifetime — most notably the consensus event forwarder. Default impl
+    /// is a no-op.
+    async fn on_conversation_created(&self, _conversation_name: &str) {}
 }

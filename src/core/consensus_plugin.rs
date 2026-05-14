@@ -32,6 +32,17 @@ pub trait ConsensusPlugin: 'static {
     /// Signature scheme for authenticating votes (default:
     /// [`EthereumConsensusSigner`]). All peers on a network must agree.
     type Signer: ConsensusSignatureScheme + Clone + Send + Sync + 'static;
+
+    /// Build a fresh storage handle. Called once at `User` init; the handle
+    /// is cloned per conversation so all per-conv `ConsensusService` instances
+    /// share one underlying persistence (see upstream "per-scope service
+    /// composition" pattern).
+    fn new_storage() -> Self::ConsensusStorage;
+
+    /// Build a fresh event bus for one conversation. Each per-conv
+    /// `ConsensusService` owns its own bus; subscribers automatically see
+    /// only that conversation's events.
+    fn new_event_bus() -> Self::EventBus;
 }
 
 /// Concrete consensus service derived from a [`ConsensusPlugin`]'s
@@ -51,4 +62,12 @@ impl ConsensusPlugin for DefaultConsensusPlugin {
     type ConsensusStorage = InMemoryConsensusStorage<String>;
     type EventBus = BroadcastEventBus<String>;
     type Signer = EthereumConsensusSigner;
+
+    fn new_storage() -> Self::ConsensusStorage {
+        InMemoryConsensusStorage::new()
+    }
+
+    fn new_event_bus() -> Self::EventBus {
+        BroadcastEventBus::default()
+    }
 }

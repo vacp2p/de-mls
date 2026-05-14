@@ -54,7 +54,7 @@ pub(crate) fn has_downward_cross(events: &[PeerScoringEvent]) -> bool {
 /// Per-user registry of conversation runners, with one outer lock for map
 /// CRUD and one inner lock per runner so writes on one conversation don't
 /// block reads on another.
-type ConversationRegistry<CP> = Arc<RwLock<HashMap<String, Arc<RwLock<SessionRunner<CP>>>>>>;
+type ConversationRegistry<P, CP> = Arc<RwLock<HashMap<String, Arc<RwLock<SessionRunner<P, CP>>>>>>;
 
 pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// User-level identity, shared across every conversation this user is in.
@@ -76,8 +76,16 @@ pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// map CRUD (insert / remove / iterate names); inner per-runner lock
     /// guards per-conversation reads and mutations, so a write on
     /// conversation A doesn't block reads on conversation B.
-    conversations: ConversationRegistry<CP>,
-    consensus_service: Arc<PluginConsensus<P>>,
+    conversations: ConversationRegistry<P, CP>,
+    /// Shared consensus storage. Built once at User init; cloned per
+    /// conversation when constructing that conversation's `ConsensusService`.
+    /// All per-conv services share the same underlying persistence — the
+    /// `Scope` parameter on every operation discriminates them.
+    consensus_storage: P::ConsensusStorage,
+    /// User-level consensus signer. Cloned into each per-conversation
+    /// `ConsensusService` at construction. The signer's identity bytes are
+    /// the user's wallet/account identity on the wire.
+    consensus_signer: P::Signer,
     handler: Arc<dyn ConversationEventHandler>,
     default_conversation_config: ConversationConfig,
     /// Seed config for the per-conversation peer-scoring plug-in. Owned at
@@ -100,7 +108,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Clone for User<P, CP> {
             self_identity: Arc::clone(&self.self_identity),
             plugin_factory: Arc::clone(&self.plugin_factory),
             conversations: Arc::clone(&self.conversations),
-            consensus_service: Arc::clone(&self.consensus_service),
+            consensus_storage: self.consensus_storage.clone(),
+            consensus_signer: self.consensus_signer.clone(),
             handler: Arc::clone(&self.handler),
             default_conversation_config: self.default_conversation_config.clone(),
             default_scoring_config: self.default_scoring_config.clone(),
@@ -114,7 +123,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     fn new_with_config(
         identity: Arc<dyn Identity>,
         plugin_factory: Arc<CP>,
-        consensus_service: Arc<PluginConsensus<P>>,
+        consensus_storage: P::ConsensusStorage,
+        consensus_signer: P::Signer,
         handler: Arc<dyn ConversationEventHandler>,
         default_conversation_config: ConversationConfig,
     ) -> Self {
@@ -124,7 +134,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             self_identity,
             plugin_factory,
             conversations: Arc::new(RwLock::new(HashMap::new())),
-            consensus_service,
+            consensus_storage,
+            consensus_signer,
             handler,
             default_conversation_config,
             default_scoring_config: ScoringConfig::default(),
@@ -154,7 +165,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     pub(crate) async fn lookup_entry(
         &self,
         conversation_name: &str,
-    ) -> Option<Arc<RwLock<SessionRunner<CP>>>> {
+    ) -> Option<Arc<RwLock<SessionRunner<P, CP>>>> {
         self.conversations
             .read()
             .await
@@ -167,7 +178,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     pub(crate) async fn with_entry<R>(
         &self,
         conversation_name: &str,
-        f: impl FnOnce(&SessionRunner<CP>) -> R,
+        f: impl FnOnce(&SessionRunner<P, CP>) -> R,
     ) -> Option<R> {
         let entry_arc = self.lookup_entry(conversation_name).await?;
         let entry = entry_arc.read().await;
@@ -195,23 +206,50 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         self.plugin_factory.generate_key_package()
     }
 
-    /// Borrow the consensus event bus. Used by the gateway forwarder to
-    /// subscribe for `ProposalDecided` notifications. Per-conversation
-    /// consensus (Track A) will move this onto `ConversationHandle`.
-    pub fn consensus_event_bus(&self) -> &P::EventBus {
-        self.consensus_service.event_bus()
+    /// Clone the conversation's consensus service handle. Cheap (the service
+    /// is `Arc`-backed internally) and avoids holding the runner lock across
+    /// `.await` points in consensus calls. Returns `None` when no runner is
+    /// registered for `conversation_name`.
+    pub(crate) async fn lookup_consensus(
+        &self,
+        conversation_name: &str,
+    ) -> Option<PluginConsensus<P>> {
+        let entry_arc = self.lookup_entry(conversation_name).await?;
+        let entry = entry_arc.read().await;
+        Some(entry.consensus.clone())
     }
 
-    /// Drop all proposals / votes / sessions for this conversation from the
-    /// consensus service and abort every auto-vote timer belonging to it.
-    /// Called on leave, pending-join timeout, and re-creation.
+    /// Clone the conversation's consensus event bus. Used by integrators to
+    /// subscribe their per-conversation consensus-event forwarder (see
+    /// [`ConversationEventHandler::on_conversation_created`]). Returns `None`
+    /// when no runner is registered for `conversation_name`.
+    pub async fn consensus_event_bus(&self, conversation_name: &str) -> Option<P::EventBus> {
+        let entry_arc = self.lookup_entry(conversation_name).await?;
+        let entry = entry_arc.read().await;
+        Some(entry.consensus.event_bus().clone())
+    }
+
+    /// Build a fresh per-conversation `ConsensusService`. Clones the shared
+    /// storage handle so all per-conv services share one underlying
+    /// persistence (scope-keyed), and clones the user-level signer. Each
+    /// service gets a private event bus — subscribers on that bus see only
+    /// this conversation's events.
+    fn build_consensus_service(&self) -> PluginConsensus<P> {
+        PluginConsensus::<P>::new_with_components(
+            self.consensus_storage.clone(),
+            P::new_event_bus(),
+            self.consensus_signer.clone(),
+            10,
+        )
+    }
+
+    /// Drop this conversation's consensus scope from the shared storage and
+    /// abort every auto-vote timer belonging to it. Called on leave and
+    /// pending-join timeout.
     async fn cleanup_consensus_scope(&self, conversation_name: &str) -> Result<(), UserError> {
         self.cancel_conversation_auto_votes(conversation_name).await;
         let scope = P::Scope::from(conversation_name.to_string());
-        self.consensus_service
-            .storage()
-            .delete_scope(&scope)
-            .await?;
+        self.consensus_storage.delete_scope(&scope).await?;
         Ok(())
     }
 }
@@ -228,9 +266,10 @@ impl User<DefaultConsensusPlugin, DefaultConversationPluginsFactory> {
     }
 
     /// Construct a `User` on [`DefaultConsensusPlugin`] with a custom config.
-    /// The user-level consensus service is built internally from the private
-    /// key — `hashgraph_like_consensus 0.4.0` holds the signer inside the
-    /// service, so the signer and the service are constructed together.
+    /// The user-level consensus storage + signer are derived from the private
+    /// key; per-conversation `ConsensusService` instances are minted at
+    /// conversation creation time, sharing the storage handle and cloning
+    /// the signer.
     pub fn with_private_key_and_config(
         private_key: &str,
         handler: Arc<dyn ConversationEventHandler>,
@@ -246,14 +285,13 @@ impl User<DefaultConsensusPlugin, DefaultConversationPluginsFactory> {
             credentials,
         });
         let consensus_signer = EthereumConsensusSigner::new(private_key_signer);
-        let consensus_service = Arc::new(PluginConsensus::<DefaultConsensusPlugin>::new(
-            consensus_signer,
-        ));
+        let consensus_storage = DefaultConsensusPlugin::new_storage();
 
         Ok(Self::new_with_config(
             identity,
             plugin_factory,
-            consensus_service,
+            consensus_storage,
+            consensus_signer,
             handler,
             default_conversation_config,
         ))
