@@ -229,7 +229,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 let scope = P::Scope::from(conversation_name.to_string());
                 let proposal = self
                     .consensus_service
-                    .cast_vote_and_get_proposal(&scope, proposal_id, vote, self.eth_signer.clone())
+                    .cast_vote_and_get_proposal(&scope, proposal_id, vote)
                     .await?;
                 info!(
                     conversation = conversation_name,
@@ -462,12 +462,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         // Manual vote takes precedence over the pending auto-vote timer.
         self.cancel_auto_vote(conversation_name, proposal_id).await;
 
-        let app_message = cast_vote::<P, _>(
+        let app_message = cast_vote::<P>(
             conversation_name,
             proposal_id,
             vote,
             &self.consensus_service,
-            self.eth_signer.clone(),
         )
         .await?;
         let packet = {
@@ -564,12 +563,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .lookup_entry(conversation_name)
             .await
             .ok_or(UserError::ConversationNotFound)?;
-        let app_message = cast_vote::<P, _>(
+        let app_message = cast_vote::<P>(
             conversation_name,
             proposal_id,
             vote,
             &self.consensus_service,
-            self.eth_signer.clone(),
         )
         .await?;
         let packet = {

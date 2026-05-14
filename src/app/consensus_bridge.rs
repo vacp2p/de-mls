@@ -5,7 +5,6 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use alloy::signers::Signer;
 use hashgraph_like_consensus::{
     error::ConsensusError,
     protos::consensus::v1::{Proposal, Vote},
@@ -95,16 +94,14 @@ pub async fn submit_proposal<P: ConsensusPlugin>(
 /// `consensus.cast_vote_and_get_proposal` directly rather than this
 /// helper, because that is the only legitimate case for broadcasting
 /// proposal + vote atomically in a single wire message.
-pub async fn cast_vote<P, SN>(
+pub async fn cast_vote<P>(
     conversation_name: &str,
     proposal_id: u32,
     vote: bool,
     consensus: &PluginConsensus<P>,
-    signer: SN,
 ) -> Result<AppMessage, UserError>
 where
     P: ConsensusPlugin,
-    SN: Signer + Send + Sync,
 {
     let scope = P::Scope::from(conversation_name.to_string());
 
@@ -114,9 +111,7 @@ where
         proposal_id, choice, "vote cast"
     );
 
-    let vote_msg = consensus
-        .cast_vote(&scope, proposal_id, vote, signer)
-        .await?;
+    let vote_msg = consensus.cast_vote(&scope, proposal_id, vote).await?;
     Ok(vote_msg.into())
 }
 
@@ -224,16 +219,14 @@ pub async fn forward_incoming_vote<P: ConsensusPlugin>(
 /// broadcast the `AppMessage`). Returns `Ok(None)` if the session already
 /// exists (e.g. the user double-clicked Leave and the dedup fired) — no
 /// broadcast needed. Other consensus errors propagate.
-pub async fn submit_self_leave_proposal<P, SN>(
+pub async fn submit_self_leave_proposal<P>(
     conversation_name: &str,
     self_identity: &[u8],
     consensus: &PluginConsensus<P>,
-    signer: SN,
     params: ProposalParams,
 ) -> Result<Option<(u32, AppMessage)>, UserError>
 where
     P: ConsensusPlugin,
-    SN: Signer + Send + Sync,
 {
     let request = ConversationUpdateRequest {
         payload: Some(conversation_update_request::Payload::RemoveMember(
@@ -264,7 +257,7 @@ where
         liveness_criteria_yes: params.liveness_criteria_yes,
     };
 
-    let yes_vote = build_vote(&proposal, true, signer)
+    let yes_vote = build_vote(&proposal, true, consensus.signer())
         .await
         .map_err(CoreError::from)?;
     proposal.votes.push(yes_vote);

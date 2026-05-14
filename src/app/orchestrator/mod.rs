@@ -14,7 +14,7 @@
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use alloy::signers::local::PrivateKeySigner;
-use hashgraph_like_consensus::storage::ConsensusStorage;
+use hashgraph_like_consensus::{signing::EthereumConsensusSigner, storage::ConsensusStorage};
 use tokio::sync::RwLock;
 
 use crate::{
@@ -78,7 +78,6 @@ pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// conversation A doesn't block reads on conversation B.
     conversations: ConversationRegistry<CP>,
     consensus_service: Arc<PluginConsensus<P>>,
-    eth_signer: PrivateKeySigner,
     handler: Arc<dyn ConversationEventHandler>,
     default_conversation_config: ConversationConfig,
     /// Seed config for the per-conversation peer-scoring plug-in. Owned at
@@ -102,7 +101,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Clone for User<P, CP> {
             plugin_factory: Arc::clone(&self.plugin_factory),
             conversations: Arc::clone(&self.conversations),
             consensus_service: Arc::clone(&self.consensus_service),
-            eth_signer: self.eth_signer.clone(),
             handler: Arc::clone(&self.handler),
             default_conversation_config: self.default_conversation_config.clone(),
             default_scoring_config: self.default_scoring_config.clone(),
@@ -117,7 +115,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         identity: Arc<dyn Identity>,
         plugin_factory: Arc<CP>,
         consensus_service: Arc<PluginConsensus<P>>,
-        eth_signer: PrivateKeySigner,
         handler: Arc<dyn ConversationEventHandler>,
         default_conversation_config: ConversationConfig,
     ) -> Self {
@@ -128,7 +125,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             plugin_factory,
             conversations: Arc::new(RwLock::new(HashMap::new())),
             consensus_service,
-            eth_signer,
             handler,
             default_conversation_config,
             default_scoring_config: ScoringConfig::default(),
@@ -199,6 +195,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         self.plugin_factory.generate_key_package()
     }
 
+    /// Borrow the consensus event bus. Used by the gateway forwarder to
+    /// subscribe for `ProposalDecided` notifications. Per-conversation
+    /// consensus (Track A) will move this onto `ConversationHandle`.
+    pub fn consensus_event_bus(&self) -> &P::EventBus {
+        self.consensus_service.event_bus()
+    }
+
     /// Drop all proposals / votes / sessions for this conversation from the
     /// consensus service and abort every auto-vote timer belonging to it.
     /// Called on leave, pending-join timeout, and re-creation.
@@ -219,26 +222,22 @@ impl User<DefaultConsensusPlugin, DefaultConversationPluginsFactory> {
     /// Construct a `User` on [`DefaultConsensusPlugin`] with the default config.
     pub fn with_private_key(
         private_key: &str,
-        consensus_service: Arc<PluginConsensus<DefaultConsensusPlugin>>,
         handler: Arc<dyn ConversationEventHandler>,
     ) -> Result<Self, UserError> {
-        Self::with_private_key_and_config(
-            private_key,
-            consensus_service,
-            handler,
-            ConversationConfig::default(),
-        )
+        Self::with_private_key_and_config(private_key, handler, ConversationConfig::default())
     }
 
     /// Construct a `User` on [`DefaultConsensusPlugin`] with a custom config.
+    /// The user-level consensus service is built internally from the private
+    /// key — `hashgraph_like_consensus 0.4.0` holds the signer inside the
+    /// service, so the signer and the service are constructed together.
     pub fn with_private_key_and_config(
         private_key: &str,
-        consensus_service: Arc<PluginConsensus<DefaultConsensusPlugin>>,
         handler: Arc<dyn ConversationEventHandler>,
         default_conversation_config: ConversationConfig,
     ) -> Result<Self, UserError> {
-        let signer = PrivateKeySigner::from_str(private_key)?;
-        let user_address = signer.address();
+        let private_key_signer = PrivateKeySigner::from_str(private_key)?;
+        let user_address = private_key_signer.address();
 
         let identity: Arc<dyn Identity> = Arc::new(WalletIdentity::from_wallet(user_address));
         let credentials = Arc::new(MlsCredentials::from_identity(identity.as_ref())?);
@@ -246,12 +245,15 @@ impl User<DefaultConsensusPlugin, DefaultConversationPluginsFactory> {
             storage: Arc::new(MemoryDeMlsStorage::new()),
             credentials,
         });
+        let consensus_signer = EthereumConsensusSigner::new(private_key_signer);
+        let consensus_service = Arc::new(PluginConsensus::<DefaultConsensusPlugin>::new(
+            consensus_signer,
+        ));
 
         Ok(Self::new_with_config(
             identity,
             plugin_factory,
             consensus_service,
-            signer,
             handler,
             default_conversation_config,
         ))

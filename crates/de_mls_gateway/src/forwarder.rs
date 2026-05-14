@@ -131,15 +131,15 @@ impl Gateway<WakuDeliveryService> {
     ///
     /// This handles both UI notification (AppEvent::ProposalDecided) and
     /// user-side processing (apply_consensus_outcome internally calls handler).
-    pub(crate) fn spawn_consensus_forwarder(
-        &self,
-        core: Arc<CoreCtx<WakuDeliveryService>>,
-        user: UserRef,
-    ) {
+    pub(crate) fn spawn_consensus_forwarder(&self, user: UserRef) {
         let evt_tx = self.evt_tx.clone();
-        let mut rx = core.consensus.event_bus().subscribe();
+        let user_for_sub = user.clone();
 
         tokio::spawn(async move {
+            let mut rx = {
+                let u = user_for_sub.read().await;
+                u.consensus_event_bus().subscribe()
+            };
             tracing::info!("consensus forwarder started");
             while let Ok((conversation_name, event)) = rx.recv().await {
                 // Forward to UI

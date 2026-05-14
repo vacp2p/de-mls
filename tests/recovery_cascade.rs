@@ -9,8 +9,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use hashgraph_like_consensus::service::DefaultConsensusService;
-
 use de_mls::app::{ConversationConfig, User};
 use de_mls::core::{
     CallbackError, ConversationEventHandler, DefaultConsensusPlugin, StewardListConfig,
@@ -59,14 +57,9 @@ const DAVE_KEY: &str = "7c852118294e51e653712a81e05800f419141751be58f605c371e151
 
 type TU = User<DefaultConsensusPlugin, de_mls::app::DefaultConversationPluginsFactory>;
 
-fn make(
-    key: &str,
-    cs: Arc<DefaultConsensusService>,
-    cfg: ConversationConfig,
-    steward_cfg: StewardListConfig,
-) -> (TU, H) {
+fn make(key: &str, cfg: ConversationConfig, steward_cfg: StewardListConfig) -> (TU, H) {
     let h = H::new();
-    let mut u = User::with_private_key_and_config(key, cs, Arc::new(h.clone()), cfg).unwrap();
+    let mut u = User::with_private_key_and_config(key, Arc::new(h.clone()), cfg).unwrap();
     u.set_default_steward_list_config(steward_cfg);
     (u, h)
 }
@@ -103,13 +96,12 @@ async fn concurrent_joins_leave_joiners_with_empty_buffer() {
         freeze_duration: Duration::from_millis(10),
         ..ConversationConfig::default()
     };
-    let cs = Arc::new(DefaultConsensusService::new_with_max_sessions(100));
     let steward_cfg = StewardListConfig::new(1, 5).unwrap();
 
-    let (mut alice, _ah) = make(ALICE_KEY, cs.clone(), cfg.clone(), steward_cfg.clone());
-    let (mut bob, bh) = make(BOB_KEY, cs.clone(), cfg.clone(), steward_cfg.clone());
-    let (mut charlie, ch) = make(CHARLIE_KEY, cs.clone(), cfg.clone(), steward_cfg.clone());
-    let (mut dave, dh) = make(DAVE_KEY, cs.clone(), cfg.clone(), steward_cfg.clone());
+    let (mut alice, _ah) = make(ALICE_KEY, cfg.clone(), steward_cfg.clone());
+    let (mut bob, bh) = make(BOB_KEY, cfg.clone(), steward_cfg.clone());
+    let (mut charlie, ch) = make(CHARLIE_KEY, cfg.clone(), steward_cfg.clone());
+    let (mut dave, dh) = make(DAVE_KEY, cfg.clone(), steward_cfg.clone());
 
     // Step 1: alice creates the group. Bob/Charlie/Dave register as joiners.
     alice.start_conversation(group, true).await.unwrap();

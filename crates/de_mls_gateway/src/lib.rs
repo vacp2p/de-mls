@@ -159,7 +159,6 @@ impl Gateway<WakuDeliveryService> {
     /// Returns a derived display name (e.g., address string).
     pub async fn login_with_private_key(&self, private_key: String) -> anyhow::Result<String> {
         let core = self.core();
-        let consensus_service = core.consensus.clone();
 
         let handler = Arc::new(GatewayEventHandler {
             delivery: Arc::new(core.app_state.delivery.clone()),
@@ -168,8 +167,7 @@ impl Gateway<WakuDeliveryService> {
             epoch_history: self.epoch_history.clone(),
         });
 
-        let user =
-            User::with_private_key(private_key.as_str(), Arc::new(consensus_service), handler)?;
+        let user = User::with_private_key(private_key.as_str(), handler)?;
 
         let user_address = user.identity_string();
         let user_ref: UserRef = Arc::new(tokio::sync::RwLock::new(user));
@@ -177,7 +175,7 @@ impl Gateway<WakuDeliveryService> {
         *self.user.write() = Some(user_ref.clone());
 
         self.spawn_delivery_service_forwarder(core.clone(), user_ref.clone());
-        self.spawn_consensus_forwarder(core.clone(), user_ref.clone());
+        self.spawn_consensus_forwarder(user_ref.clone());
         Ok(user_address)
     }
 }

@@ -189,11 +189,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             )
         };
 
-        let submitted = submit_self_leave_proposal::<P, _>(
+        let submitted = submit_self_leave_proposal::<P>(
             conversation_name,
             &self_identity,
             &self.consensus_service,
-            self.eth_signer.clone(),
             ProposalParams {
                 expected_voters: 1,
                 proposal_expiration,
