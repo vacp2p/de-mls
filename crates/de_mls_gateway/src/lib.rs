@@ -50,6 +50,17 @@ type UserRef = Arc<
     >,
 >;
 
+/// Type alias for a per-conversation session reference obtained via
+/// `User::lookup_entry`. Mirrors [`UserRef`] but at the session granularity.
+pub(crate) type SessionRef = Arc<
+    tokio::sync::RwLock<
+        de_mls::app::SessionRunner<
+            DefaultConsensusPlugin,
+            de_mls::app::DefaultConversationPluginsFactory,
+        >,
+    >,
+>;
+
 // Global, process-wide gateway instance
 pub static GATEWAY: Lazy<Gateway<WakuDeliveryService>> = Lazy::new(Gateway::new);
 

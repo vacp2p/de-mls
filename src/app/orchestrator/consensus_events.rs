@@ -6,10 +6,6 @@
 //! `Arc<RwLock<SessionRunner>>` because they fan out into steward
 //! initiations (election, deadlock ECP, score removals, buffered-update
 //! drains), each of which spawns a background proposal lifecycle.
-//!
-//! A transient `User::apply_consensus_outcome` wrapper at the bottom
-//! preserves the existing entry signature so the gateway forwarder keeps
-//! compiling; Wave 8 drops the wrapper.
 
 use std::sync::Arc;
 
@@ -19,7 +15,7 @@ use tokio::sync::RwLock;
 use tracing::{error, info};
 
 use crate::{
-    app::{ConversationState, SessionRunner, User, UserError},
+    app::{ConversationState, SessionRunner, UserError},
     core::{
         ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin, ProposalKind, ScoreOp,
         SessionEvent, StewardListPlugin, apply_consensus_result, emergency_score_ops,
@@ -304,25 +300,5 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             error!(conversation = %conv_name, error = %e, "score-removal check failed");
         }
         Ok(())
-    }
-}
-
-// ── Transient User wrapper ──────────────────────────────────────────────
-//
-// Preserves `User::apply_consensus_outcome(name, event)` so the gateway
-// forwarder keeps compiling. Wave 8 drops it once the forwarder switches
-// to driving the session arc directly.
-
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
-    pub async fn apply_consensus_outcome(
-        &mut self,
-        conversation_name: &str,
-        event: ConsensusEvent,
-    ) -> Result<(), UserError> {
-        let session = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::apply_consensus_outcome(&session, event).await
     }
 }

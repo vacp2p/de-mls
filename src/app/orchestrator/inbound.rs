@@ -592,32 +592,19 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
     /// User-side completion of `LeaveConversation`: drop the entry from
     /// the registry, clean up the consensus scope, and broadcast removal.
-    /// The session-side teardown (emit `Leaving`, delete MLS state) has
-    /// already run inside `SessionRunner::dispatch_inbound_result`.
-    async fn finalize_self_leave(&self, conversation_name: &str) -> Result<(), UserError> {
+    /// The session-side teardown (emit `Leaving`, delete MLS state) runs
+    /// inside [`SessionRunner::dispatch_inbound_result`] /
+    /// [`SessionRunner::poll_freeze_status`] /
+    /// [`SessionRunner::check_pending_join`]; this method is the cleanup
+    /// callers run when those signal "registry should be removed"
+    /// (`DispatchOutcome::LeaveRequested` or `PendingJoinTick::Expired`).
+    pub async fn finalize_self_leave(&self, conversation_name: &str) -> Result<(), UserError> {
         self.conversations.write().await.remove(conversation_name);
         self.cleanup_consensus_scope(conversation_name).await?;
         let _ = self.lifecycle.send(ConversationLifecycle::Removed(
             conversation_name.to_string(),
         ));
         Ok(())
-    }
-
-    /// Transient wrapper used by `freeze.rs::poll_freeze_status`. Looks
-    /// up the session, drives the session-side dispatcher, and handles
-    /// User-side lifecycle on `LeaveRequested`. Dropped in the final
-    /// cleanup wave once `poll_freeze_status` moves to `SessionRunner`.
-    pub async fn dispatch_inbound_result(
-        &self,
-        conversation_name: &str,
-        result: ProcessResult,
-    ) -> Result<(), UserError> {
-        let entry_arc = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        self.finish_dispatch(conversation_name, &entry_arc, result)
-            .await
     }
 }
 

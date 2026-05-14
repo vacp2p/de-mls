@@ -1,18 +1,22 @@
 //! Timer polls for pending-join expiry, freeze timeout, and steward inactivity.
 //!
-//! Wave-5 split: `check_member_freeze` is the only fully session-side method —
-//! it's self-contained. `check_pending_join` (drives leave-by-timeout) and
-//! `poll_freeze_status` (calls `dispatch_inbound_result` on commit-applied)
-//! stay on User as coordinators because they also do registry CRUD and
-//! cross-session dispatch. They'll fold into [`SessionRunner`] in the final
-//! cleanup wave once inbound moves too.
+//! `check_pending_join` returns a [`PendingJoinTick`] so a polling caller can
+//! distinguish "still pending" / "now joined" / "timed out". On `Expired`
+//! the session has already emitted `Leaving`; the caller drives the
+//! User-side cleanup via [`crate::app::User::finalize_self_leave`].
+//!
+//! `poll_freeze_status` returns the freeze-tick status alongside a
+//! [`DispatchOutcome`] for the rare case where a commit applied during
+//! the freeze fires `LeaveConversation`. Same handshake as
+//! [`SessionRunner::dispatch_inbound_result`].
 
 use std::sync::Arc;
 
+use tokio::sync::RwLock;
 use tracing::{error, info};
 
 use crate::{
-    app::{ConversationState, FreezeTimeoutStatus, SessionRunner, User, UserError},
+    app::{ConversationState, FreezeTimeoutStatus, SessionRunner, UserError},
     core::{
         ConsensusPlugin, ConversationPluginsFactory, FreezeFinalizeResult, FreezeOutcome,
         PeerScoringPlugin, ScoreEvent, ScoreOp, SessionEvent, StewardListPlugin,
@@ -21,101 +25,96 @@ use crate::{
     mls_crypto::MlsService,
 };
 
-use crate::app::orchestrator::has_downward_cross;
+use crate::app::orchestrator::{has_downward_cross, inbound::DispatchOutcome};
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
-    pub async fn check_pending_join(&self, conversation_name: &str) -> Result<bool, UserError> {
-        let (state, expired) = match self
-            .with_entry(conversation_name, |entry| {
-                (
-                    entry.handle.current_state(),
-                    entry.is_pending_join_expired(),
-                )
-            })
-            .await
-        {
-            Some(v) => v,
-            None => return Ok(false),
+/// What [`SessionRunner::check_pending_join`] hands back to its polling
+/// caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingJoinTick {
+    /// Still in `PendingJoin`; caller should keep polling.
+    StillPending,
+    /// No longer in `PendingJoin` (joined or otherwise transitioned).
+    NotPending,
+    /// Pending-join window elapsed without a welcome. The session has
+    /// emitted `Leaving`; the caller must follow up with
+    /// [`crate::app::User::finalize_self_leave`] to drop the entry from
+    /// the registry and broadcast removal.
+    Expired,
+}
+
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
+    /// Polling check for `PendingJoin`. Returns [`PendingJoinTick::Expired`]
+    /// after emitting `SessionEvent::Leaving` once the pending-join window
+    /// elapses; the caller handles registry-side cleanup.
+    pub async fn check_pending_join(arc: &Arc<RwLock<Self>>) -> PendingJoinTick {
+        let (state, expired, conversation_name) = {
+            let s = arc.read().await;
+            (
+                s.handle.current_state(),
+                s.is_pending_join_expired(),
+                s.conversation_name.clone(),
+            )
         };
-
         if state != ConversationState::PendingJoin {
-            return Ok(false);
+            return PendingJoinTick::NotPending;
         }
-
-        if expired {
-            info!(conversation = conversation_name, "pending join timed out");
-            self.conversations.write().await.remove(conversation_name);
-            self.cleanup_consensus_scope(conversation_name).await?;
-            self.emit(conversation_name, SessionEvent::Leaving).await;
-            let _ = self
-                .lifecycle
-                .send(crate::core::ConversationLifecycle::Removed(
-                    conversation_name.to_string(),
-                ));
-            return Ok(false);
+        if !expired {
+            return PendingJoinTick::StillPending;
         }
-
-        Ok(true)
+        info!(conversation = %conversation_name, "pending join timed out");
+        arc.read().await.emit_event(SessionEvent::Leaving);
+        PendingJoinTick::Expired
     }
 
     /// Poll tick for `Freezing`: drives Freezing → Selection once candidates
-    /// are all in or the freeze window elapses, then finalises and dispatches.
+    /// are all in or the freeze window elapses, then finalises, dispatches
+    /// the resulting [`crate::core::ProcessResult`], and returns the
+    /// freeze status. The [`DispatchOutcome`] is `LeaveRequested` if the
+    /// applied commit ejected the local member — the caller drives the
+    /// User-side registry teardown.
     pub async fn poll_freeze_status(
-        &self,
-        conversation_name: &str,
-    ) -> Result<FreezeTimeoutStatus, UserError> {
-        let entry_arc = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-
+        arc: &Arc<RwLock<Self>>,
+    ) -> Result<(FreezeTimeoutStatus, DispatchOutcome), UserError> {
         let (has_proposals, selection_event) = {
-            let mut entry = entry_arc.write().await;
+            let mut s = arc.write().await;
 
-            let state = entry.handle.current_state();
+            let state = s.handle.current_state();
             if state != ConversationState::Freezing {
-                return Ok(FreezeTimeoutStatus::NotFreezing);
+                return Ok((FreezeTimeoutStatus::NotFreezing, DispatchOutcome::Done));
             }
 
             // Early selection: skip remaining freeze time if all expected
             // stewards have submitted candidates.
-            let all_candidates_in = entry
-                .handle
-                .steward_list
-                .current_list()
-                .is_some_and(|list| {
-                    entry.handle.conversation.freeze_candidate_count() >= list.len()
+            let all_candidates_in =
+                s.handle.steward_list.current_list().is_some_and(|list| {
+                    s.handle.conversation.freeze_candidate_count() >= list.len()
                 });
 
-            if !all_candidates_in && !entry.is_freeze_timed_out() {
-                return Ok(FreezeTimeoutStatus::StillFreezing);
+            if !all_candidates_in && !s.is_freeze_timed_out() {
+                return Ok((FreezeTimeoutStatus::StillFreezing, DispatchOutcome::Done));
             }
 
-            let event = entry.start_selection();
-            (
-                entry.handle.conversation.approved_proposals_count() > 0,
-                event,
-            )
+            let event = s.start_selection();
+            (s.handle.conversation.approved_proposals_count() > 0, event)
         };
 
-        self.emit(
-            conversation_name,
-            SessionEvent::PhaseChange(selection_event),
-        )
-        .await;
+        arc.read()
+            .await
+            .emit_event(SessionEvent::PhaseChange(selection_event));
 
-        let (mut finalize_result, downward_cross) = {
-            let mut entry = entry_arc.write().await;
-            let allow_subset = entry.handle.steward_list.config().allow_subset_candidates;
-            let result = if entry.handle.mls().is_some() {
-                match entry.handle.finalize_freeze_round(
-                    allow_subset,
-                    &self.app_id,
-                    self.self_identity(),
-                ) {
+        let (mut finalize_result, downward_cross, conversation_name) = {
+            let mut s = arc.write().await;
+            let allow_subset = s.handle.steward_list.config().allow_subset_candidates;
+            let self_identity = Arc::clone(&s.self_identity);
+            let app_id = Arc::clone(&s.app_id);
+            let result = if s.handle.mls().is_some() {
+                match s
+                    .handle
+                    .finalize_freeze_round(allow_subset, &app_id, &self_identity)
+                {
                     Ok(result) => result,
                     Err(e) => {
-                        error!(conversation = conversation_name, error = %e, "freeze finalize failed");
+                        error!(conversation = %s.conversation_name, error = %e, "freeze finalize failed");
                         FreezeFinalizeResult::default()
                     }
                 }
@@ -128,20 +127,20 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             // no ECP needed). A downward threshold cross schedules a
             // removal-init pass below, after the lock drops.
             let cross = if !result.score_ops.is_empty() {
-                let events = entry.handle.scoring.apply_ops(&result.score_ops);
+                let events = s.handle.scoring.apply_ops(&result.score_ops);
                 has_downward_cross(&events)
             } else {
                 false
             };
-            (result, cross)
+            (result, cross, s.conversation_name.clone())
         };
 
         if !finalize_result.committed_batch.is_empty() {
-            self.emit(
-                conversation_name,
-                SessionEvent::CommitApplied(std::mem::take(&mut finalize_result.committed_batch)),
-            )
-            .await;
+            arc.read()
+                .await
+                .emit_event(SessionEvent::CommitApplied(std::mem::take(
+                    &mut finalize_result.committed_batch,
+                )));
         }
 
         // Lock split is intentional: `check_and_initiate_score_removals`
@@ -149,12 +148,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         // which `.await`s on the consensus service. Holding the runner
         // lock across that await would block other operations on this
         // conversation, so we drop the lock above before chaining.
-        if downward_cross
-            && let Err(e) = self
-                .check_and_initiate_score_removals(conversation_name)
-                .await
-        {
-            error!(conversation = conversation_name, error = %e, "score-removal check failed (freeze finalize)");
+        if downward_cross && let Err(e) = Self::check_and_initiate_score_removals(arc).await {
+            error!(conversation = %conversation_name, error = %e, "score-removal check failed (freeze finalize)");
         }
 
         match finalize_result.outcome {
@@ -164,28 +159,27 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 let has_welcome = outbound
                     .as_ref()
                     .is_some_and(|p| p.subtopic == WELCOME_SUBTOPIC);
-                if let Some(packet) = outbound {
-                    if let Err(e) = self.send_outbound(packet).await {
-                        error!(conversation = conversation_name, error = %e, "deferred welcome send failed");
-                    }
+                if let Some(packet) = outbound
+                    && let Err(e) = arc.read().await.send_outbound(packet).await
+                {
+                    error!(conversation = %conversation_name, error = %e, "deferred welcome send failed");
                 }
 
                 // ConversationSync carries the steward list + timing + scores
                 // to new joiners; send it only after the welcome they'll use
                 // to catch up.
-                if has_welcome {
-                    if let Err(e) = self.send_conversation_sync(conversation_name).await {
-                        error!(conversation = conversation_name, error = %e, "conversation sync send failed");
-                    }
+                if has_welcome && let Err(e) = arc.read().await.send_conversation_sync().await {
+                    error!(conversation = %conversation_name, error = %e, "conversation sync send failed");
                 }
 
-                if let Err(e) = self
-                    .dispatch_inbound_result(conversation_name, result)
-                    .await
-                {
-                    error!(conversation = conversation_name, error = %e, "finalize result dispatch failed");
-                }
-                return Ok(FreezeTimeoutStatus::Applied);
+                let outcome = match Self::dispatch_inbound_result(arc, result).await {
+                    Ok(o) => o,
+                    Err(e) => {
+                        error!(conversation = %conversation_name, error = %e, "finalize result dispatch failed");
+                        DispatchOutcome::Done
+                    }
+                };
+                return Ok((FreezeTimeoutStatus::Applied, outcome));
             }
             FreezeOutcome::NoCandidate => {
                 // `accuse_target` is `Some` only when we had approved proposals
@@ -194,28 +188,26 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 // node that failed to commit observes its own state directly
                 // and doesn't need to record a ScoreOp against itself.
                 let (transition_event, downward_cross) = {
-                    let mut entry = entry_arc.write().await;
+                    let mut s = arc.write().await;
 
                     if has_proposals {
                         // Approved batch (and in-flight votes) survive so
                         // the recovered steward commits the same proposals
                         // once the next election lands.
-                        let event = entry.start_reelection();
+                        let event = s.start_reelection();
 
                         // Local observation → direct peer-score penalty,
                         // no ECP round-trip. Each honest member records
                         // the same event independently; threshold-crossing
                         // removal still goes through SCORE_BELOW_THRESHOLD
                         // consensus in steward.rs.
-                        let accuse_target = match entry.handle.mls() {
+                        let accuse_target = match s.handle.mls() {
                             Some(mls) => {
                                 let violation_epoch = mls.current_epoch()?;
-                                let self_identity = self.self_identity();
-                                let members = entry.handle.conversation_members()?;
-                                let eligible =
-                                    entry.handle.conversation.steward_eligibility(&members);
-                                entry
-                                    .handle
+                                let self_identity: &[u8] = &s.self_identity;
+                                let members = s.handle.conversation_members()?;
+                                let eligible = s.handle.conversation.steward_eligibility(&members);
+                                s.handle
                                     .steward_list
                                     .epoch_steward(violation_epoch, &eligible)
                                     .filter(|id| !id.is_empty() && *id != self_identity)
@@ -224,7 +216,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                             None => None,
                         };
                         let cross = if let Some(steward_id) = accuse_target {
-                            let events = entry.handle.scoring.apply_op(&ScoreOp {
+                            let events = s.handle.scoring.apply_op(&ScoreOp {
                                 member_id: steward_id,
                                 event: ScoreEvent::CensorshipInactivity,
                             });
@@ -235,55 +227,38 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
                         (event, cross)
                     } else {
-                        entry.handle.conversation.clear_freeze_round();
-                        let event = entry.start_working();
+                        s.handle.conversation.clear_freeze_round();
+                        let event = s.start_working();
                         (event, false)
                     }
                 };
 
-                if downward_cross
-                    && let Err(e) = self
-                        .check_and_initiate_score_removals(conversation_name)
-                        .await
+                if downward_cross && let Err(e) = Self::check_and_initiate_score_removals(arc).await
                 {
-                    error!(conversation = conversation_name, error = %e, "score-removal check failed (freeze timeout)");
+                    error!(conversation = %conversation_name, error = %e, "score-removal check failed (freeze timeout)");
                 }
 
                 let entered_reelection = transition_event == ConversationState::Reelection;
-                self.emit(
-                    conversation_name,
-                    SessionEvent::PhaseChange(transition_event),
-                )
-                .await;
+                arc.read()
+                    .await
+                    .emit_event(SessionEvent::PhaseChange(transition_event));
 
                 // Layer 2 recovery: regenerate the steward list. Only the
                 // responsible proposer's call actually submits.
                 if entered_reelection
-                    && let Err(e) = self
-                        .try_initiate_steward_election(conversation_name, true, None)
-                        .await
+                    && let Err(e) = Self::try_initiate_steward_election(arc, true, None).await
                 {
-                    info!(conversation = conversation_name, error = %e, "recovery election deferred");
+                    info!(conversation = %conversation_name, error = %e, "recovery election deferred");
                 }
             }
         }
 
-        Ok(FreezeTimeoutStatus::TimedOut { has_proposals })
+        Ok((
+            FreezeTimeoutStatus::TimedOut { has_proposals },
+            DispatchOutcome::Done,
+        ))
     }
 
-    /// Transient wrapper: looks up the session and forwards. Wave 8 drops it
-    /// once external callers switch to driving the session directly.
-    pub async fn check_member_freeze(&self, conversation_name: &str) -> Result<bool, UserError> {
-        let session = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        let mut runner = session.write().await;
-        runner.check_member_freeze().await
-    }
-}
-
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Drive the steward-inactivity check. Returns `true` exactly on the
     /// tick that transitions into Freezing; `false` while still waiting,
     /// outside Working, or when there's no approved work. Stewards build

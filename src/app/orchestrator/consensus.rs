@@ -5,10 +5,6 @@
 //! timeout. The spawn helpers take `Arc<RwLock<SessionRunner>>` so the task
 //! body can release the runner lock across `.await` points without holding
 //! it during the consensus timeout sleep.
-//!
-//! Public entries are also exposed as transient `User` wrappers that look up
-//! the session and delegate. Wave 8 drops the wrappers once external callers
-//! switch to using sessions directly.
 
 use std::{sync::Arc, time::Duration};
 
@@ -19,8 +15,7 @@ use tracing::{error, info};
 
 use crate::{
     app::{
-        ConversationState, ProposalParams, SessionRunner, User, UserError, cast_vote,
-        submit_proposal,
+        ConversationState, ProposalParams, SessionRunner, UserError, cast_vote, submit_proposal,
     },
     core::{
         ConsensusPlugin, ConversationPluginsFactory, ProposalKind, SessionEvent, StewardListPlugin,
@@ -508,62 +503,5 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         };
         arc.read().await.send_outbound(packet).await?;
         Ok(())
-    }
-}
-
-// ── Transient User wrappers ─────────────────────────────────────────────
-//
-// Each wrapper looks up the session and forwards to the session method.
-// They exist so existing User-level callers (steward.rs, inbound.rs,
-// messaging.rs::process_ban_request, gateway, ui_bridge) keep compiling
-// during the wave-by-wave migration. Wave 8 drops the wrappers and
-// updates external callers to use sessions directly.
-
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
-    pub async fn initiate_proposal(
-        &self,
-        conversation_name: String,
-        request: ConversationUpdateRequest,
-        creator_vote: Option<bool>,
-    ) -> Result<(), UserError> {
-        let session = self
-            .lookup_entry(&conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::initiate_proposal(&session, request, creator_vote).await
-    }
-
-    pub async fn handle_incoming_update_request(
-        &self,
-        conversation_name: &str,
-        request: ConversationUpdateRequest,
-    ) -> Result<(), UserError> {
-        let session = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::handle_incoming_update_request(&session, request).await
-    }
-
-    pub async fn process_user_vote(
-        &mut self,
-        conversation_name: &str,
-        proposal_id: u32,
-        vote: bool,
-    ) -> Result<(), UserError> {
-        let session = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::process_user_vote(&session, proposal_id, vote).await
-    }
-
-    /// Abort every auto-vote timer belonging to `conversation_name`. Called
-    /// on conversation leave so no stale timers fire against a conversation
-    /// we've left.
-    pub(crate) async fn cancel_conversation_auto_votes(&self, conversation_name: &str) {
-        if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
-            entry_arc.read().await.cancel_all_auto_votes();
-        }
     }
 }

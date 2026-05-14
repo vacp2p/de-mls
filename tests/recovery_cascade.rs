@@ -128,19 +128,12 @@ async fn concurrent_joins_leave_joiners_with_empty_buffer() {
 
     // Regression guard: PendingJoin members must have empty pending_updates
     // buffers. Alice (steward) has the KPs in her buffer until she commits.
-    assert_eq!(
-        bob.get_pending_update_count(group).await.unwrap(),
-        0,
-        "bob in PendingJoin must not buffer broadcast KPs"
-    );
-    assert_eq!(
-        charlie.get_pending_update_count(group).await.unwrap(),
-        0,
-        "charlie in PendingJoin must not buffer broadcast KPs"
-    );
-    assert_eq!(
-        dave.get_pending_update_count(group).await.unwrap(),
-        0,
-        "dave in PendingJoin must not buffer broadcast KPs"
-    );
+    for (name, user) in [("bob", &bob), ("charlie", &charlie), ("dave", &dave)] {
+        let session = user.lookup_entry(group).await.unwrap();
+        let count = session.read().await.get_pending_update_count();
+        assert_eq!(
+            count, 0,
+            "{name} in PendingJoin must not buffer broadcast KPs"
+        );
+    }
 }

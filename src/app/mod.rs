@@ -4,8 +4,9 @@
 //! Integrate by constructing a [`crate::app::User`] with your
 //! `SessionEvent` / `ConversationLifecycle`, then drive it from a transport
 //! receive loop ([`crate::app::User::process_inbound_packet`]) and a
-//! periodic poll ([`crate::app::User::check_member_freeze`],
-//! [`crate::app::User::poll_freeze_status`]).
+//! periodic poll on each conversation's
+//! [`crate::app::SessionRunner::check_member_freeze`] and
+//! [`crate::app::SessionRunner::poll_freeze_status`].
 //!
 //! [`crate::core::ConversationStateMachine`] owns the per-conversation state
 //! enum (`PendingJoin → Working → Freezing → Selection → Reelection`);
@@ -47,7 +48,7 @@ pub use error::UserError;
 pub use key_package::DefaultKeyPackageProvider;
 pub use orchestrator::{
     DefaultConversationPluginsFactory, DefaultMlsService, DefaultPeerScoring, DefaultStewardList,
-    User,
+    DispatchOutcome, PendingJoinTick, User,
 };
 pub use peer_scoring_backends::InMemoryPeerScoreStorage;
 pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer};

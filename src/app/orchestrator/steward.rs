@@ -8,10 +8,6 @@
 //! `Arc<RwLock<SessionRunner>>` so they can call
 //! [`SessionRunner::initiate_proposal`] which itself spawns a background
 //! task. The rest are `&self` / `&mut self` methods on the runner.
-//!
-//! Transient `User` wrappers at the bottom forward to the session methods
-//! so existing User-level callers (consensus_events, freeze, inbound) keep
-//! compiling during the wave-by-wave migration. Wave 8 drops them.
 
 use std::sync::Arc;
 
@@ -19,7 +15,7 @@ use tokio::sync::RwLock;
 use tracing::{error, info};
 
 use crate::{
-    app::{SessionRunner, User, UserError},
+    app::{SessionRunner, UserError},
     core::{
         ConsensusPlugin, ConversationPluginsFactory, ElectionDecision, PeerScoringPlugin,
         StewardListPlugin, member_set, scoring_member_diff, target_identity_of,
@@ -511,98 +507,5 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         }
 
         Ok(())
-    }
-}
-
-// ── Transient User wrappers ─────────────────────────────────────────────
-//
-// Each wrapper looks up the session and forwards. Existing callers in
-// consensus_events, freeze, and inbound use these until those files move
-// to SessionRunner too (Waves 4-6). Wave 8 drops the wrappers.
-
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
-    pub async fn sync_scoring_members(&self, conversation_name: &str, mls_members: &[Vec<u8>]) {
-        let Some(session) = self.lookup_entry(conversation_name).await else {
-            return;
-        };
-        session
-            .write()
-            .await
-            .sync_scoring_members(mls_members)
-            .await;
-    }
-
-    pub(super) async fn try_initiate_steward_election(
-        &self,
-        conversation_name: &str,
-        recovery: bool,
-        extra_exclude: Option<&[u8]>,
-    ) -> Result<(), UserError> {
-        let session = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::try_initiate_steward_election(&session, recovery, extra_exclude).await
-    }
-
-    pub async fn steward_list_housekeeping(
-        &self,
-        conversation_name: &str,
-    ) -> Result<(), UserError> {
-        let session = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::steward_list_housekeeping(&session).await
-    }
-
-    pub async fn regenerate_steward_list(&self, conversation_name: &str) -> Result<(), UserError> {
-        let session = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        session.write().await.regenerate_steward_list().await
-    }
-
-    pub async fn prune_pending_updates_after_commit(
-        &self,
-        conversation_name: &str,
-    ) -> Result<(), UserError> {
-        let session = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        session
-            .write()
-            .await
-            .prune_pending_updates_after_commit()
-            .await
-    }
-
-    pub async fn process_buffered_updates(&self, conversation_name: &str) -> Result<(), UserError> {
-        let session = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::process_buffered_updates(&session).await
-    }
-
-    pub async fn send_conversation_sync(&self, conversation_name: &str) -> Result<(), UserError> {
-        let session = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        session.read().await.send_conversation_sync().await
-    }
-
-    pub async fn check_and_initiate_score_removals(
-        &self,
-        conversation_name: &str,
-    ) -> Result<(), UserError> {
-        let session = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::check_and_initiate_score_removals(&session).await
     }
 }

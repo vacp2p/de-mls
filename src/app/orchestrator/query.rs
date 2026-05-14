@@ -1,9 +1,8 @@
 //! Read-only queries over a conversation's state (UI and diagnostics).
 //!
-//! Per-conversation getters live on `SessionRunner`. `User` retains
-//! transient wrappers so existing callers (gateway, UI bridge) keep
-//! compiling; Wave 8 drops the wrappers in favour of direct session
-//! access. `list_conversations` is registry-wide and stays on `User`.
+//! Per-conversation getters live on `SessionRunner`; callers reach them via
+//! `User::lookup_entry`. The registry-wide `list_conversations` getter
+//! stays on `User`.
 
 use crate::{
     app::{ConversationState, MemberRole, SessionRunner, User, UserError},
@@ -131,118 +130,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     }
 }
 
-// ── Transient User wrappers ─────────────────────────────────────────────
-//
-// Forward to the session-level getter. Existing callers (gateway, UI
-// bridge, tests) keep working without per-call lookup ceremony. Wave 8
-// drops the wrappers once callers switch to session-direct access.
+// `User::list_conversations` is registry-wide; keep it on User. Per-conv
+// getters above are session methods — callers use `lookup_entry` to reach
+// them.
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
-    pub async fn get_conversation_state(
-        &self,
-        conversation_name: &str,
-    ) -> Result<ConversationState, UserError> {
-        self.with_entry(conversation_name, SessionRunner::get_conversation_state)
-            .await
-            .ok_or(UserError::ConversationNotFound)
-    }
-
-    pub async fn get_epoch_and_retry(
-        &self,
-        conversation_name: &str,
-    ) -> Result<(u64, u32), UserError> {
-        let entry_arc = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        entry_arc.read().await.get_epoch_and_retry()
-    }
-
     pub async fn list_conversations(&self) -> Vec<String> {
         self.conversations.read().await.keys().cloned().collect()
-    }
-
-    pub async fn get_pending_update_count(
-        &self,
-        conversation_name: &str,
-    ) -> Result<usize, UserError> {
-        self.with_entry(conversation_name, SessionRunner::get_pending_update_count)
-            .await
-            .ok_or(UserError::ConversationNotFound)
-    }
-
-    pub async fn get_freeze_candidate_count(
-        &self,
-        conversation_name: &str,
-    ) -> Result<(usize, usize), UserError> {
-        self.with_entry(conversation_name, SessionRunner::get_freeze_candidate_count)
-            .await
-            .ok_or(UserError::ConversationNotFound)
-    }
-
-    pub async fn is_steward_for_conversation(
-        &self,
-        conversation_name: &str,
-    ) -> Result<bool, UserError> {
-        self.with_entry(conversation_name, SessionRunner::is_steward_for_self)
-            .await
-            .ok_or(UserError::ConversationNotFound)
-    }
-
-    pub async fn get_conversation_members(
-        &self,
-        conversation_name: &str,
-    ) -> Result<Vec<String>, UserError> {
-        let entry_arc = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        entry_arc.read().await.get_conversation_members()
-    }
-
-    pub async fn get_member_scores(&self, conversation_name: &str) -> Vec<(Vec<u8>, i64)> {
-        match self.lookup_entry(conversation_name).await {
-            Some(entry_arc) => entry_arc.read().await.get_member_scores(),
-            None => Vec::new(),
-        }
-    }
-
-    pub async fn get_member_score(&self, conversation_name: &str, member_id: &[u8]) -> Option<i64> {
-        let entry_arc = self.lookup_entry(conversation_name).await?;
-        entry_arc.read().await.get_member_score(member_id)
-    }
-
-    pub async fn get_pending_leave_identities(
-        &self,
-        conversation_name: &str,
-    ) -> Result<Vec<Vec<u8>>, UserError> {
-        let entry_arc = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        entry_arc.read().await.get_pending_leave_identities()
-    }
-
-    pub async fn get_member_roles(
-        &self,
-        conversation_name: &str,
-    ) -> Result<Vec<(Vec<u8>, MemberRole)>, UserError> {
-        let entry_arc = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        entry_arc.read().await.get_member_roles()
-    }
-
-    pub async fn get_approved_proposal_for_current_epoch(
-        &self,
-        conversation_name: &str,
-    ) -> Result<Vec<ConversationUpdateRequest>, UserError> {
-        self.with_entry(
-            conversation_name,
-            SessionRunner::get_approved_proposal_for_current_epoch,
-        )
-        .await
-        .ok_or(UserError::ConversationNotFound)
     }
 }

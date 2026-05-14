@@ -36,13 +36,15 @@ const CONVERSATION_LIFECYCLE_CAPACITY: usize = 128;
 mod consensus;
 mod consensus_events;
 mod freeze;
-mod inbound;
+pub(crate) mod inbound;
 mod lifecycle;
 mod messaging;
 mod plugins;
 mod query;
 mod steward;
 
+pub use freeze::PendingJoinTick;
+pub use inbound::DispatchOutcome;
 use plugins::UserPlugins;
 pub use plugins::{
     DefaultConversationPluginsFactory, DefaultMlsService, DefaultPeerScoring, DefaultStewardList,
@@ -230,7 +232,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// abort every auto-vote timer belonging to it. Called on leave and
     /// pending-join timeout.
     async fn cleanup_consensus_scope(&self, conversation_name: &str) -> Result<(), UserError> {
-        self.cancel_conversation_auto_votes(conversation_name).await;
+        if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
+            entry_arc.read().await.cancel_all_auto_votes();
+        }
         let scope = P::Scope::from(conversation_name.to_string());
         self.plugins.consensus.delete_scope(&scope).await?;
         Ok(())
