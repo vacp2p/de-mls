@@ -15,17 +15,25 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info};
 
+use super::DispatchOutcome;
+
 use crate::{
     app::{ConversationState, FreezeTimeoutStatus, SessionRunner, UserError},
     core::{
         ConsensusPlugin, ConversationPluginsFactory, FreezeFinalizeResult, FreezeOutcome,
-        PeerScoringPlugin, ScoreEvent, ScoreOp, SessionEvent, StewardListPlugin,
+        PeerScoringEvent, PeerScoringPlugin, ScoreEvent, ScoreOp, SessionEvent, StewardListPlugin,
     },
     ds::WELCOME_SUBTOPIC,
     mls_crypto::MlsService,
 };
 
-use super::{DispatchOutcome, has_downward_cross};
+/// `true` iff `events` contains at least one downward threshold cross.
+/// Used to chain into a score-removal pass after applying score ops.
+fn has_downward_cross(events: &[PeerScoringEvent]) -> bool {
+    events
+        .iter()
+        .any(|e| matches!(e, PeerScoringEvent::ThresholdCrossedDown { .. }))
+}
 
 /// What [`SessionRunner::check_pending_join`] hands back to its polling
 /// caller.

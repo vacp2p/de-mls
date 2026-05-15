@@ -13,35 +13,345 @@ use prost::Message;
 use tokio::sync::RwLock;
 use tracing::{error, info};
 
-use crate::{
-    app::{
-        ConversationState, ProposalParams, SessionRunner, UserError, cast_vote, submit_proposal,
-    },
-    core::{
-        ConsensusPlugin, ConversationPluginsFactory, ProposalKind, SessionEvent, StewardListPlugin,
-        target_identity_of,
-    },
-    mls_crypto::MlsService,
-    protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest, VotePayload},
+use super::consensus_bridge::{
+    ProposalParams, cast_vote, submit_proposal, submit_self_leave_proposal,
 };
 
-/// Per-call arguments for a new outgoing proposal. Bundled so the spawned
-/// task has one typed payload instead of four captures.
-///
-/// `creator_vote` is `Some(v)` when the creator's vote is known up front
-/// (user-initiated path where the user picked, or self-executing protocol
-/// action) and should be bundled into the outbound proposal. `None` means
-/// "broadcast the unbundled proposal and let the creator vote via the
-/// normal banner like any other member" — used for steward auto-propose
-/// paths where the steward still holds a judgement call.
+use crate::{
+    app::{ConversationState, SessionRunner, UserError},
+    core::{
+        ConsensusPlugin, ConversationPluginsFactory, ProposalKind, SessionEvent, StewardListPlugin,
+        self_leave_proposal_id, target_identity_of,
+    },
+    mls_crypto::MlsService,
+    protos::de_mls::messages::v1::{
+        AppMessage, ConversationUpdateRequest, RemoveMember, VotePayload,
+        conversation_update_request,
+    },
+};
+
+/// The creator's intent at proposal submit time. Controls both the wire
+/// shape and the local UI flow — see [`SessionRunner::initiate_proposal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreatorVote {
+    /// Creator commits YES at submit. Vote is bundled with the proposal
+    /// in one atomic wire message; local UI gets `OwnProposalSubmitted`
+    /// (no banner). Used for unambiguous actions: ban-button click,
+    /// self-executing protocol moves (`SCORE_BELOW_THRESHOLD`, `Deadlock`).
+    Yes,
+    /// Creator hasn't decided. Broadcast unbundled; local UI banners
+    /// alongside the auto-vote timer (`liveness_criteria_yes` after
+    /// `voting_delay_for`). Used for steward auto-propose paths where
+    /// the steward still exercises judgement.
+    Deferred,
+}
+
+/// Typed payload for the spawned proposal lifecycle.
 struct NewProposal {
     request: ConversationUpdateRequest,
     expected_voters: u32,
     kind: ProposalKind,
-    creator_vote: Option<bool>,
+    creator_vote: CreatorVote,
+}
+
+/// Build the `AppMessage` carrying a `VotePayload` for banner display in
+/// the local UI. Used both by the creator's `Deferred` submit path
+/// (own proposal) and by peers receiving an unbundled `Proposal` over the
+/// wire — both render the same banner.
+pub(crate) fn build_vote_banner_event(
+    conversation_name: &str,
+    proposal_id: u32,
+    payload: Vec<u8>,
+) -> AppMessage {
+    VotePayload {
+        conversation_id: conversation_name.to_string(),
+        proposal_id,
+        payload,
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    }
+    .into()
 }
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
+    // ── Public API ───────────────────────────────────────────────────
+
+    /// Start a consensus vote for `request`.
+    ///
+    /// Gates against the session's state machine (no proposals during
+    /// `Freezing`/`Selection`, partial-freeze rules during `Reelection`,
+    /// MLS must be attached), then spawns the proposal lifecycle.
+    /// `Ok(())` means "spawned"; later submission/timeout failures surface
+    /// as [`SessionEvent::Error`].
+    ///
+    /// `creator_vote` — see [`CreatorVote`] for wire shape and local UI behavior.
+    pub async fn initiate_proposal(
+        arc: &Arc<RwLock<Self>>,
+        request: ConversationUpdateRequest,
+        creator_vote: CreatorVote,
+    ) -> Result<(), UserError> {
+        let kind = ProposalKind::of(&request);
+        let expected_voters = arc.read().await.check_proposal_allowed(kind).await?;
+        Self::spawn_proposal_submission(
+            arc,
+            NewProposal {
+                request,
+                expected_voters,
+                kind,
+                creator_vote,
+            },
+        );
+        Ok(())
+    }
+
+    /// Handle an incoming membership update (KP-derived `InviteMember` or
+    /// `RemoveMember`): buffer it so every member has a durable record, then
+    /// promote it to a voting proposal if this node is the current epoch
+    /// steward and the conversation accepts new proposals.
+    pub async fn handle_incoming_update_request(
+        arc: &Arc<RwLock<Self>>,
+        request: ConversationUpdateRequest,
+    ) -> Result<(), UserError> {
+        let (pending_join, members_for_rotation, current_epoch) = {
+            let s = arc.read().await;
+            let pending = s.handle.current_state() == ConversationState::PendingJoin;
+            match (pending, s.handle.mls()) {
+                (true, _) | (false, None) => (pending, Vec::new(), 0u64),
+                (false, Some(mls)) => (
+                    false,
+                    s.handle.conversation_members()?,
+                    mls.current_epoch()?,
+                ),
+            }
+        };
+        if pending_join {
+            return Ok(());
+        }
+
+        let (inserted, is_epoch_steward, state, buffer_total, should_propose, conversation_name) = {
+            let mut s = arc.write().await;
+
+            // Defensive — core only emits membership changes here.
+            if target_identity_of(&request).is_none() {
+                return Ok(());
+            }
+
+            let inserted = s
+                .handle
+                .conversation
+                .buffer_pending_update(request.clone(), current_epoch);
+
+            // Only the epoch steward proposes immediately. The buffer
+            // survives freeze rounds so a later steward can retry.
+            let self_identity = Arc::clone(&s.self_identity);
+            let eligible = s
+                .handle
+                .conversation
+                .steward_eligibility(&members_for_rotation);
+            let is_es = s
+                .handle
+                .steward_list
+                .epoch_steward(current_epoch, &eligible)
+                .is_some_and(|es| es == &*self_identity);
+            let state = s.handle.current_state();
+            let total = s.handle.conversation.pending_update_count();
+            let should = is_es && state == ConversationState::Working;
+            let name = s.conversation_name.clone();
+            (inserted, is_es, state, total, should, name)
+        };
+
+        info!(
+            conversation = %conversation_name,
+            epoch = current_epoch,
+            inserted,
+            buffer_total,
+            is_epoch_steward,
+            state = %state,
+            propose = should_propose,
+            "update request buffered"
+        );
+
+        if should_propose {
+            // Steward auto-propose: the steward forwards peer intent and
+            // still holds a judgement call, so we broadcast unbundled and
+            // let the banner drive the steward's vote like any other member.
+            // `check_proposal_allowed` may still reject (active emergency
+            // etc.) — leave the entry in the buffer for next rotation.
+            if let Err(e) = Self::initiate_proposal(arc, request, CreatorVote::Deferred).await {
+                info!(conversation = %conversation_name, error = %e, "proposal deferred");
+            }
+        }
+        Ok(())
+    }
+
+    /// Cast a manual vote on behalf of the local member. Blocked in
+    /// `Freezing` and `Selection`; cancels any pending auto-vote so the
+    /// manual choice wins.
+    pub async fn process_user_vote(
+        arc: &Arc<RwLock<Self>>,
+        proposal_id: u32,
+        vote: bool,
+    ) -> Result<(), UserError> {
+        let (consensus, conversation_name) = {
+            let s = arc.read().await;
+            let state = s.handle.current_state();
+            if state == ConversationState::Freezing || state == ConversationState::Selection {
+                return Err(UserError::ConversationBlocked(state.to_string()));
+            }
+            (s.consensus.clone(), s.conversation_name.clone())
+        };
+
+        // Manual vote takes precedence over the pending auto-vote timer.
+        arc.read().await.cancel_auto_vote(proposal_id);
+
+        let app_message = cast_vote::<P>(&conversation_name, proposal_id, vote, &consensus).await?;
+        let packet = {
+            let s = arc.read().await;
+            s.handle
+                .expect_mls()?
+                .build_message(&app_message, &s.app_id)?
+        };
+        arc.read().await.send_outbound(packet).await?;
+        Ok(())
+    }
+
+    // ── Crate-internal ───────────────────────────────────────────────
+
+    /// Open a self-leave consensus session: `RemoveMember(self)` with
+    /// `expected_voters = 1` and the leaver's YES bundled. Resolves
+    /// synchronously, so the normal `apply_consensus_outcome` path commits
+    /// the removal on the next steward commit. Idempotent — a second call
+    /// after a successful submit short-circuits on the local pending-leave
+    /// check, and a retransmit dedupes inside the consensus library via
+    /// the deterministic [`self_leave_proposal_id`].
+    pub(crate) async fn initiate_self_leave(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
+        let self_identity = Arc::clone(&arc.read().await.self_identity);
+
+        let (already_pending, conversation_name) = {
+            let s = arc.read().await;
+            (
+                s.handle.conversation.is_pending_self_leave(&self_identity),
+                s.conversation_name.clone(),
+            )
+        };
+        if already_pending {
+            info!(
+                conversation = %conversation_name,
+                "self-leave already in flight, ignoring duplicate"
+            );
+            return Ok(());
+        }
+
+        let request = ConversationUpdateRequest {
+            payload: Some(conversation_update_request::Payload::RemoveMember(
+                RemoveMember {
+                    identity: self_identity.to_vec(),
+                },
+            )),
+        };
+        let proposal_id = self_leave_proposal_id(&self_identity);
+
+        // Register ownership BEFORE the session opens — the bundled YES
+        // fires `ConsensusReached` synchronously, and
+        // `apply_consensus_outcome` needs `is_owner_of_proposal` to be true
+        // by then.
+        let (consensus, proposal_expiration, consensus_timeout) = {
+            let mut s = arc.write().await;
+            s.handle
+                .conversation
+                .store_voting_proposal(proposal_id, request);
+            (
+                s.consensus.clone(),
+                s.handle.config.proposal_expiration,
+                s.handle.config.consensus_timeout,
+            )
+        };
+
+        let submitted = submit_self_leave_proposal::<P>(
+            &conversation_name,
+            &self_identity,
+            &consensus,
+            ProposalParams {
+                expected_voters: 1,
+                proposal_expiration,
+                consensus_timeout,
+                liveness_criteria_yes: true,
+            },
+        )
+        .await?;
+
+        // Dedup (`ProposalAlreadyExist`) — another submit is already driving
+        // this proposal_id. Our voting entry resolves on that session.
+        let Some((_proposal_id, app_msg)) = submitted else {
+            return Ok(());
+        };
+
+        let packet = {
+            let s = arc.read().await;
+            s.handle.expect_mls()?.build_message(&app_msg, &s.app_id)?
+        };
+        arc.read().await.send_outbound(packet).await?;
+        Ok(())
+    }
+
+    /// Spawn an auto-vote timer for `proposal_id`. Idempotent — an existing
+    /// handle for the same key is aborted and replaced. `vote` is captured
+    /// before the sleep so a `ConversationSync` during the delay can't
+    /// change it.
+    pub(crate) async fn spawn_auto_vote(
+        arc: &Arc<RwLock<Self>>,
+        proposal_id: u32,
+        delay: Duration,
+        vote: bool,
+    ) {
+        let (timers, conversation_name) = {
+            let s = arc.read().await;
+            (s.auto_vote_timers.clone(), s.conversation_name.clone())
+        };
+
+        // Idempotent: abort any existing handle for this proposal.
+        if let Ok(mut t) = timers.lock()
+            && let Some(old) = t.remove(&proposal_id)
+        {
+            old.abort();
+        }
+
+        let arc_for_task = Arc::clone(arc);
+        let conv_name_for_log = conversation_name.clone();
+        let timers_for_task = Arc::clone(&timers);
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            if let Err(e) = Self::cast_auto_vote(&arc_for_task, proposal_id, vote).await {
+                tracing::debug!(
+                    conversation = %conv_name_for_log,
+                    proposal_id,
+                    error = %e,
+                    "auto-vote skipped (already voted or session resolved)"
+                );
+            } else {
+                info!(
+                    conversation = %conv_name_for_log,
+                    proposal_id,
+                    vote,
+                    "auto-vote cast on timer"
+                );
+            }
+            // Self-clean so repeated manual votes after the timer fires
+            // don't try to abort a dead handle.
+            if let Ok(mut t) = timers_for_task.lock() {
+                t.remove(&proposal_id);
+            }
+        });
+
+        if let Ok(mut t) = timers.lock() {
+            t.insert(proposal_id, handle);
+        }
+    }
+
+    // ── Private ──────────────────────────────────────────────────────
+
     /// Check that the conversation state allows creating a proposal of this
     /// kind and return the expected voter count.
     async fn check_proposal_allowed(&self, kind: ProposalKind) -> Result<u32, UserError> {
@@ -69,38 +379,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         self.handle.expect_mls()?;
         let members = self.handle.conversation_members()?;
         Ok(members.len() as u32)
-    }
-
-    /// Start a consensus vote for a conversation update request.
-    ///
-    /// `creator_vote` captures the creator's intent:
-    /// - `Some(v)` — bundle `v` into the outbound proposal at submit time.
-    ///   Used when the intent is unambiguous: user clicked a button that
-    ///   means YES (ban request), or the action is self-executing
-    ///   (`SCORE_BELOW_THRESHOLD` removal).
-    /// - `None` — broadcast the proposal unbundled; the creator's UI
-    ///   shows the usual vote banner and the creator votes like any
-    ///   other member. Silence is tallied per `liveness_criteria_yes`
-    ///   at consensus timeout, same as for peer silence. Used for
-    ///   steward auto-propose paths (election, incoming KP, buffered
-    ///   update) where the creator still exercises judgement.
-    pub async fn initiate_proposal(
-        arc: &Arc<RwLock<Self>>,
-        request: ConversationUpdateRequest,
-        creator_vote: Option<bool>,
-    ) -> Result<(), UserError> {
-        let kind = ProposalKind::of(&request);
-        let expected_voters = arc.read().await.check_proposal_allowed(kind).await?;
-        Self::spawn_proposal_submission(
-            arc,
-            NewProposal {
-                request,
-                expected_voters,
-                kind,
-                creator_vote,
-            },
-        );
-        Ok(())
     }
 
     fn spawn_proposal_submission(arc: &Arc<RwLock<Self>>, np: NewProposal) {
@@ -197,8 +475,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             }
         }
 
-        let outbound = match creator_vote {
-            Some(vote) => {
+        match creator_vote {
+            CreatorVote::Yes => {
                 // Bundled path: the creator's vote goes on the wire with the
                 // proposal as one atomic broadcast. Use the consensus
                 // library's owner-bundling API directly — the normal
@@ -206,54 +484,47 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 // leave peers without the proposal.
                 let scope = P::Scope::from(conversation_name.clone());
                 let proposal = consensus
-                    .cast_vote_and_get_proposal(&scope, proposal_id, vote)
+                    .cast_vote_and_get_proposal(&scope, proposal_id, true)
                     .await?;
                 info!(
                     conversation = %conversation_name,
                     proposal_id,
-                    choice = if vote { "YES" } else { "NO" },
                     actor = "owner",
-                    "vote cast (bundled at submit)"
+                    "YES vote cast (bundled at submit)"
                 );
-                proposal.into()
-            }
-            None => unbundled,
-        };
-
-        let packet = {
-            let s = arc.read().await;
-            s.handle.expect_mls()?.build_message(&outbound, &s.app_id)?
-        };
-        arc.read().await.send_outbound(packet).await?;
-
-        match creator_vote {
-            Some(_) => {
+                let outbound: AppMessage = proposal.into();
+                let packet = {
+                    let s = arc.read().await;
+                    s.handle.expect_mls()?.build_message(&outbound, &s.app_id)?
+                };
+                arc.read().await.send_outbound(packet).await?;
                 // Creator already voted — populate history cache, no banner.
                 arc.read()
                     .await
                     .emit_event(SessionEvent::OwnProposalSubmitted {
                         proposal_id,
-                        request: request.clone(),
+                        request,
                     });
             }
-            None => {
-                // Creator hasn't voted — show them the banner like peers
-                // and start their own auto-vote timer. Peers receive the
-                // proposal via wire and run their own timers locally.
-                let payload = request.encode_to_vec();
-                let vote_notification: AppMessage = VotePayload {
-                    conversation_id: conversation_name.clone(),
+            CreatorVote::Deferred => {
+                // Unbundled path: broadcast the proposal alone. Show the
+                // creator the banner like peers and start their own
+                // auto-vote timer; peers run their own timers locally.
+                let packet = {
+                    let s = arc.read().await;
+                    s.handle
+                        .expect_mls()?
+                        .build_message(&unbundled, &s.app_id)?
+                };
+                arc.read().await.send_outbound(packet).await?;
+                let banner = build_vote_banner_event(
+                    &conversation_name,
                     proposal_id,
-                    payload,
-                    timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0),
-                }
-                .into();
+                    request.encode_to_vec(),
+                );
                 arc.read()
                     .await
-                    .emit_event(SessionEvent::AppMessage(vote_notification));
+                    .emit_event(SessionEvent::AppMessage(banner));
                 Self::spawn_auto_vote(arc, proposal_id, voting_delay, liveness_criteria_yes).await;
             }
         }
@@ -315,171 +586,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             Err(e) => {
                 info!(proposal_id, error = %e, "timeout resolution skipped");
             }
-        }
-    }
-
-    /// Handle an incoming membership update (KP-derived `InviteMember` or
-    /// `RemoveMember`): buffer it so every member has a durable record, then
-    /// promote it to a voting proposal if this node is the current epoch
-    /// steward and the conversation accepts new proposals.
-    pub async fn handle_incoming_update_request(
-        arc: &Arc<RwLock<Self>>,
-        request: ConversationUpdateRequest,
-    ) -> Result<(), UserError> {
-        let (pending_join, members_for_rotation, current_epoch) = {
-            let s = arc.read().await;
-            let pending = s.handle.current_state() == ConversationState::PendingJoin;
-            match (pending, s.handle.mls()) {
-                (true, _) | (false, None) => (pending, Vec::new(), 0u64),
-                (false, Some(mls)) => (
-                    false,
-                    s.handle.conversation_members()?,
-                    mls.current_epoch()?,
-                ),
-            }
-        };
-        if pending_join {
-            return Ok(());
-        }
-
-        let (inserted, is_epoch_steward, state, buffer_total, should_propose, conversation_name) = {
-            let mut s = arc.write().await;
-
-            // Defensive — core only emits membership changes here.
-            if target_identity_of(&request).is_none() {
-                return Ok(());
-            }
-
-            let inserted = s
-                .handle
-                .conversation
-                .buffer_pending_update(request.clone(), current_epoch);
-
-            // Only the epoch steward proposes immediately. The buffer
-            // survives freeze rounds so a later steward can retry.
-            let self_identity = Arc::clone(&s.self_identity);
-            let eligible = s
-                .handle
-                .conversation
-                .steward_eligibility(&members_for_rotation);
-            let is_es = s
-                .handle
-                .steward_list
-                .epoch_steward(current_epoch, &eligible)
-                .is_some_and(|es| es == &*self_identity);
-            let state = s.handle.current_state();
-            let total = s.handle.conversation.pending_update_count();
-            let should = is_es && state == ConversationState::Working;
-            let name = s.conversation_name.clone();
-            (inserted, is_es, state, total, should, name)
-        };
-
-        info!(
-            conversation = %conversation_name,
-            epoch = current_epoch,
-            inserted,
-            buffer_total,
-            is_epoch_steward,
-            state = %state,
-            propose = should_propose,
-            "update request buffered"
-        );
-
-        if should_propose {
-            // Steward auto-propose: the steward forwards peer intent and
-            // still holds a judgement call, so we broadcast unbundled and
-            // let the banner drive the steward's vote like any other member.
-            // `check_proposal_allowed` may still reject (active emergency
-            // etc.) — leave the entry in the buffer for next rotation.
-            if let Err(e) = Self::initiate_proposal(arc, request, None).await {
-                info!(conversation = %conversation_name, error = %e, "proposal deferred");
-            }
-        }
-        Ok(())
-    }
-
-    /// Cast a manual vote on behalf of the local member. Blocked in
-    /// `Freezing` and `Selection`; cancels any pending auto-vote so the
-    /// manual choice wins.
-    pub async fn process_user_vote(
-        arc: &Arc<RwLock<Self>>,
-        proposal_id: u32,
-        vote: bool,
-    ) -> Result<(), UserError> {
-        let (consensus, conversation_name) = {
-            let s = arc.read().await;
-            let state = s.handle.current_state();
-            if state == ConversationState::Freezing || state == ConversationState::Selection {
-                return Err(UserError::ConversationBlocked(state.to_string()));
-            }
-            (s.consensus.clone(), s.conversation_name.clone())
-        };
-
-        // Manual vote takes precedence over the pending auto-vote timer.
-        arc.read().await.cancel_auto_vote(proposal_id);
-
-        let app_message = cast_vote::<P>(&conversation_name, proposal_id, vote, &consensus).await?;
-        let packet = {
-            let s = arc.read().await;
-            s.handle
-                .expect_mls()?
-                .build_message(&app_message, &s.app_id)?
-        };
-        arc.read().await.send_outbound(packet).await?;
-        Ok(())
-    }
-
-    /// Spawn an auto-vote timer for `proposal_id`. Idempotent — an existing
-    /// handle for the same key is aborted and replaced. `vote` is captured
-    /// before the sleep so a `ConversationSync` during the delay can't
-    /// change it.
-    pub(crate) async fn spawn_auto_vote(
-        arc: &Arc<RwLock<Self>>,
-        proposal_id: u32,
-        delay: Duration,
-        vote: bool,
-    ) {
-        let (timers, conversation_name) = {
-            let s = arc.read().await;
-            (s.auto_vote_timers.clone(), s.conversation_name.clone())
-        };
-
-        // Idempotent: abort any existing handle for this proposal.
-        if let Ok(mut t) = timers.lock()
-            && let Some(old) = t.remove(&proposal_id)
-        {
-            old.abort();
-        }
-
-        let arc_for_task = Arc::clone(arc);
-        let conv_name_for_log = conversation_name.clone();
-        let timers_for_task = Arc::clone(&timers);
-        let handle = tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
-            if let Err(e) = Self::cast_auto_vote(&arc_for_task, proposal_id, vote).await {
-                tracing::debug!(
-                    conversation = %conv_name_for_log,
-                    proposal_id,
-                    error = %e,
-                    "auto-vote skipped (already voted or session resolved)"
-                );
-            } else {
-                info!(
-                    conversation = %conv_name_for_log,
-                    proposal_id,
-                    vote,
-                    "auto-vote cast on timer"
-                );
-            }
-            // Self-clean so repeated manual votes after the timer fires
-            // don't try to abort a dead handle.
-            if let Ok(mut t) = timers_for_task.lock() {
-                t.remove(&proposal_id);
-            }
-        });
-
-        if let Ok(mut t) = timers.lock() {
-            t.insert(proposal_id, handle);
         }
     }
 

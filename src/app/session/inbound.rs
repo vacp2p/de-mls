@@ -19,10 +19,11 @@ use prost::Message;
 use tokio::sync::RwLock;
 use tracing::{error, info};
 
+use super::consensus::build_vote_banner_event;
+use super::consensus_bridge::{forward_incoming_proposal, forward_incoming_vote};
+
 use crate::{
-    app::{
-        ConversationState, SessionRunner, UserError, forward_incoming_vote, relay_incoming_proposal,
-    },
+    app::{ConversationState, SessionRunner, UserError},
     core::{
         ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin, ProcessResult,
         ProposalKind, ScoreSnapshot, SessionEvent, StewardList, StewardListConfig,
@@ -36,7 +37,7 @@ use crate::{
     },
 };
 
-/// What [`SessionRunner::dispatch_inbound_result`] hands back to the
+/// What `SessionRunner::dispatch_inbound_result` hands back to the
 /// caller. `LeaveRequested` signals that the session has done its
 /// protocol-side teardown (emitted `Leaving`, deleted MLS state) and the
 /// caller — which holds the User-side handles — must drop the entry
@@ -56,7 +57,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// `process_inbound` returns a result, and by other call sites that
     /// produce a `ProcessResult` (e.g. the welcome-side
     /// `JoinedConversation`).
-    pub async fn dispatch_inbound_result(
+    pub(crate) async fn dispatch_inbound_result(
         arc: &Arc<RwLock<Self>>,
         result: ProcessResult,
     ) -> Result<DispatchOutcome, UserError> {
@@ -152,6 +153,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         }
         let proposal_id = proposal.proposal_id;
         let expected_voters = proposal.expected_voters_count;
+        let payload = proposal.payload.clone();
         let kind = decoded
             .as_ref()
             .map(ProposalKind::of)
@@ -160,17 +162,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let s = arc.read().await;
             (s.consensus.clone(), s.conversation_name.clone())
         };
-        if let Some(vote_notification) =
-            relay_incoming_proposal::<P>(&conversation_name, proposal, &consensus).await?
-        {
+        forward_incoming_proposal::<P>(&conversation_name, proposal, &consensus).await?;
+        // Skip the banner + auto-vote for fast-path proposals: the
+        // creator's bundled YES already resolved the session, so peers have
+        // nothing to vote on.
+        if expected_voters > 1 {
+            let banner = build_vote_banner_event(&conversation_name, proposal_id, payload);
             arc.read()
                 .await
-                .emit_event(SessionEvent::AppMessage(vote_notification));
-        }
-        // Skip auto-vote for fast-path proposals: the creator's bundled
-        // YES already resolved the session, so the timer would hit a
-        // closed session.
-        if expected_voters > 1 {
+                .emit_event(SessionEvent::AppMessage(banner));
             let (delay, vote) = {
                 let s = arc.read().await;
                 (

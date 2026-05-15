@@ -28,6 +28,8 @@ use crate::{
 };
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
+    // ── Public API ───────────────────────────────────────────────────
+
     /// Process an inbound packet. The User-level entry point owns echo
     /// dedup, name-based routing, and the welcome subtopic's plug-in-
     /// factory access. App-message packets are handed off to the session
@@ -66,6 +68,25 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             ))),
         }
     }
+
+    /// User-side completion of `LeaveConversation`: drop the entry from
+    /// the registry, clean up the consensus scope, and broadcast removal.
+    /// The session-side teardown (emit `Leaving`, delete MLS state) runs
+    /// inside `SessionRunner::dispatch_inbound_result` /
+    /// [`SessionRunner::poll_freeze_status`] /
+    /// [`SessionRunner::check_pending_join`]; this method is the cleanup
+    /// callers run when those signal "registry should be removed"
+    /// (`DispatchOutcome::LeaveRequested` or `PendingJoinTick::Expired`).
+    pub async fn finalize_self_leave(&self, conversation_name: &str) -> Result<(), UserError> {
+        self.conversations.write().await.remove(conversation_name);
+        self.cleanup_consensus_scope(conversation_name).await?;
+        let _ = self.lifecycle.send(ConversationLifecycle::Removed(
+            conversation_name.to_string(),
+        ));
+        Ok(())
+    }
+
+    // ── Private ──────────────────────────────────────────────────────
 
     /// Welcome-subtopic dispatch. Two payload kinds:
     /// - `UserKeyPackage` — a peer wants to join. If we already have an MLS
@@ -168,23 +189,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         if matches!(outcome, DispatchOutcome::LeaveRequested) {
             self.finalize_self_leave(conversation_name).await?;
         }
-        Ok(())
-    }
-
-    /// User-side completion of `LeaveConversation`: drop the entry from
-    /// the registry, clean up the consensus scope, and broadcast removal.
-    /// The session-side teardown (emit `Leaving`, delete MLS state) runs
-    /// inside [`SessionRunner::dispatch_inbound_result`] /
-    /// [`SessionRunner::poll_freeze_status`] /
-    /// [`SessionRunner::check_pending_join`]; this method is the cleanup
-    /// callers run when those signal "registry should be removed"
-    /// (`DispatchOutcome::LeaveRequested` or `PendingJoinTick::Expired`).
-    pub async fn finalize_self_leave(&self, conversation_name: &str) -> Result<(), UserError> {
-        self.conversations.write().await.remove(conversation_name);
-        self.cleanup_consensus_scope(conversation_name).await?;
-        let _ = self.lifecycle.send(ConversationLifecycle::Removed(
-            conversation_name.to_string(),
-        ));
         Ok(())
     }
 }

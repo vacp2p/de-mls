@@ -1,7 +1,6 @@
 //! App-layer adapters over the consensus service: proposal submission,
 //! vote casting, and inbound forwarding for peer messages. These helpers
 //! shape how consensus events surface in the UI and on the transport;
-//! they are not protocol invariants.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -9,6 +8,7 @@ use hashgraph_like_consensus::{
     error::ConsensusError,
     protos::consensus::v1::{Proposal, Vote},
     session::ConsensusConfig,
+    types::CreateProposalRequest,
     utils::build_vote,
 };
 use prost::Message;
@@ -16,19 +16,15 @@ use tracing::info;
 
 use crate::{
     app::error::UserError,
-    core::{
-        ConsensusPlugin, Conversation, CoreError, PluginConsensus, build_create_proposal_request,
-        self_leave_proposal_id,
-    },
+    core::{ConsensusPlugin, Conversation, CoreError, PluginConsensus, self_leave_proposal_id},
     protos::de_mls::messages::v1::{
-        AppMessage, ConversationUpdateRequest, RemoveMember, VotePayload,
-        conversation_update_request,
+        AppMessage, ConversationUpdateRequest, RemoveMember, conversation_update_request,
     },
 };
 
 /// Consensus-session parameters that come from `ConversationConfig`. Grouped so
 /// [`submit_proposal`]'s argument list stays readable.
-pub struct ProposalParams {
+pub(crate) struct ProposalParams {
     pub expected_voters: u32,
     pub proposal_expiration: Duration,
     pub consensus_timeout: Duration,
@@ -46,17 +42,18 @@ pub struct ProposalParams {
 ///
 /// In both cases the caller must record ownership *before*
 /// casting, so a single-voter consensus transition can't fire before
-/// `Conversation::is_owner_of_proposal` is true.
-pub async fn submit_proposal<P: ConsensusPlugin>(
+/// [`Conversation::is_owner_of_proposal`] is true.
+pub(crate) async fn submit_proposal<P: ConsensusPlugin>(
     conversation_name: &str,
     request: &ConversationUpdateRequest,
     creator_id: &[u8],
     consensus: &PluginConsensus<P>,
     params: ProposalParams,
 ) -> Result<(u32, AppMessage), CoreError> {
-    let create_request = build_create_proposal_request(
-        request,
-        creator_id,
+    let create_request = CreateProposalRequest::new(
+        uuid::Uuid::new_v4().to_string(),
+        request.encode_to_vec(),
+        creator_id.to_vec(),
         params.expected_voters,
         params.proposal_expiration.as_secs(),
         params.liveness_criteria_yes,
@@ -88,13 +85,13 @@ pub async fn submit_proposal<P: ConsensusPlugin>(
 /// peer already has the proposal registered in their session (either from
 /// the unbundled broadcast or from a bundled-at-submit proposal — both
 /// land before anyone votes). Re-broadcasting the full proposal would be
-/// rejected peer-side as `ProposalAlreadyExist`, dropping the vote.
+/// rejected peer-side as [`ConsensusError::ProposalAlreadyExist`], dropping the vote.
 ///
 /// The bundled-at-submit path in `register_new_proposal` calls
 /// `consensus.cast_vote_and_get_proposal` directly rather than this
 /// helper, because that is the only legitimate case for broadcasting
 /// proposal + vote atomically in a single wire message.
-pub async fn cast_vote<P>(
+pub(crate) async fn cast_vote<P>(
     conversation_name: &str,
     proposal_id: u32,
     vote: bool,
@@ -115,42 +112,26 @@ where
     Ok(vote_msg.into())
 }
 
-/// Forward a peer's proposal into the local consensus service and, for
-/// regular proposals, emit a `VotePayload` so the UI can surface the
-/// pending vote. Fast-path proposals (`expected_voters_count == 1`)
-/// self-resolve on arrival and skip the banner.
-pub async fn relay_incoming_proposal<P: ConsensusPlugin>(
+/// Forward a peer's proposal into the local consensus service. The caller
+/// decides whether to emit a banner event — for fast-path proposals
+/// (`expected_voters_count == 1`) the session resolves on arrival, so
+/// there's nothing to vote on.
+pub(crate) async fn forward_incoming_proposal<P: ConsensusPlugin>(
     conversation_name: &str,
     proposal: Proposal,
     consensus: &PluginConsensus<P>,
-) -> Result<Option<AppMessage>, UserError> {
+) -> Result<(), UserError> {
     let scope = P::Scope::from(conversation_name.to_string());
-    let expected_voters = proposal.expected_voters_count;
     consensus
-        .process_incoming_proposal(&scope, proposal.clone())
+        .process_incoming_proposal(&scope, proposal)
         .await?;
-
-    if expected_voters <= 1 {
-        return Ok(None);
-    }
-
-    let vote_notification: AppMessage = VotePayload {
-        conversation_id: conversation_name.to_string(),
-        proposal_id: proposal.proposal_id,
-        payload: proposal.payload.clone(),
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs(),
-    }
-    .into();
-
-    Ok(Some(vote_notification))
+    Ok(())
 }
 
 /// Forward a peer's vote into the local consensus service.
 ///
-/// Late-arrival classification uses the `Conversation::is_consensus_outcome_applied`
-/// cache to tell benign late packets from suspicious unknowns:
+/// Late-arrival classification uses the resolved-proposals cache on
+/// [`Conversation`] to tell benign late packets from suspicious unknowns:
 /// - `SessionNotActive` — session exists but already resolved. Benign, debug.
 /// - `SessionNotFound` with id in the resolved-proposals cache — session
 ///   was trimmed after local resolution. Benign, debug.
@@ -159,7 +140,7 @@ pub async fn relay_incoming_proposal<P: ConsensusPlugin>(
 ///   swallow the error so inbound dispatch keeps draining.
 ///
 /// Other consensus errors propagate.
-pub async fn forward_incoming_vote<P: ConsensusPlugin>(
+pub(crate) async fn forward_incoming_vote<P: ConsensusPlugin>(
     conversation: &Conversation,
     vote: Vote,
     consensus: &PluginConsensus<P>,
@@ -197,25 +178,18 @@ pub async fn forward_incoming_vote<P: ConsensusPlugin>(
     }
 }
 
-/// Open a self-leave consensus session with the leaver's YES vote bundled
-/// and `expected_voters_count = 1`.
+/// Open a self-leave consensus session: `expected_voters_count = 1` with
+/// the leaver's YES bundled, so it resolves synchronously and the normal
+/// `apply_consensus_outcome` path commits `RemoveMember(self)`.
 ///
-/// Unlike [`submit_proposal`], this hand-crafts the `Proposal` so it carries
-/// the deterministic `self_leave_proposal_id(identity)`. Every node
-/// derives the same id from the MLS-authenticated sender, so a
-/// retransmitted self-leave dedupes natively via `ProposalAlreadyExist` and
-/// every node's `approved_proposals` entry ends up under the same key.
+/// Unlike [`submit_proposal`], the `Proposal` is hand-crafted to carry
+/// `self_leave_proposal_id(identity)`. Every node derives the same id, so a
+/// retransmitted self-leave dedupes via `ProposalAlreadyExist` and lands in
+/// every `approved_proposals` under the same key.
 ///
-/// On the leaver's side the bundled YES vote (+ `expected_voters=1`) makes
-/// `from_proposal` fire `ConsensusReached(true)` synchronously, so the
-/// normal `apply_consensus_outcome` path can place `RemoveMember(self)` in
-/// `approved_proposals` with the deterministic id.
-///
-/// Returns `Ok(Some(...))` if the proposal was newly opened (caller must
-/// broadcast the `AppMessage`). Returns `Ok(None)` if the session already
-/// exists (e.g. the user double-clicked Leave and the dedup fired) — no
-/// broadcast needed. Other consensus errors propagate.
-pub async fn submit_self_leave_proposal<P>(
+/// `Ok(Some(_))` — newly opened; caller broadcasts the `AppMessage`.
+/// `Ok(None)` — already in flight (e.g. double-click); no broadcast.
+pub(crate) async fn submit_self_leave_proposal<P>(
     conversation_name: &str,
     self_identity: &[u8],
     consensus: &PluginConsensus<P>,
@@ -253,9 +227,7 @@ where
         liveness_criteria_yes: params.liveness_criteria_yes,
     };
 
-    let yes_vote = build_vote(&proposal, true, consensus.signer())
-        .await
-        .map_err(CoreError::from)?;
+    let yes_vote = build_vote(&proposal, true, consensus.signer()).await?;
     proposal.votes.push(yes_vote);
 
     let scope = P::Scope::from(conversation_name.to_string());
@@ -277,6 +249,6 @@ where
             );
             Ok(None)
         }
-        Err(e) => Err(CoreError::from(e).into()),
+        Err(e) => Err(e.into()),
     }
 }

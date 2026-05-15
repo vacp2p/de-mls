@@ -40,10 +40,7 @@ pub use display::{
 pub use error::UserError;
 pub use peer_scoring_backends::InMemoryPeerScoreStorage;
 pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer};
-pub use session::{
-    DispatchOutcome, PendingJoinTick, ProposalParams, SessionRunner, cast_vote,
-    forward_incoming_vote, relay_incoming_proposal, submit_proposal, submit_self_leave_proposal,
-};
+pub use session::{CreatorVote, DispatchOutcome, PendingJoinTick, SessionRunner};
 pub use user::{
     DefaultConversationPluginsFactory, DefaultKeyPackageProvider, DefaultMlsService,
     DefaultPeerScoring, DefaultStewardList, User,

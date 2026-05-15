@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 use tracing::{error, info};
 
 use crate::{
-    app::{SessionRunner, UserError},
+    app::{CreatorVote, SessionRunner, UserError},
     core::{
         ConsensusPlugin, ConversationPluginsFactory, ElectionDecision, PeerScoringPlugin,
         StewardListPlugin, member_set, scoring_member_diff, target_identity_of,
@@ -29,6 +29,8 @@ use crate::{
 };
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
+    // ── Public API ───────────────────────────────────────────────────
+
     /// Add any MLS members not yet tracked in scoring, and drop scored
     /// entries for identities no longer in MLS. Diffing is delegated to
     /// [`scoring_member_diff`]; this method only applies the diff.
@@ -51,166 +53,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         for member_id in &diff.to_remove {
             self.handle.scoring.remove_member(member_id);
         }
-    }
-
-    /// Plug-in decides whether the current list still satisfies its
-    /// policy (the deterministic impl re-installs when membership drops
-    /// below `sn_min`). Coordinator just supplies `epoch` + `members`
-    /// and drains events.
-    async fn try_auto_fill_steward_list(&mut self) -> Result<(), UserError> {
-        let epoch = self.handle.expect_mls()?.current_epoch()?;
-        let members = self.handle.conversation_members()?;
-        let _events = self.handle.steward_list.maybe_auto_fill(epoch, &members)?;
-        Ok(())
-    }
-
-    /// Submit a steward-election proposal. Only the deterministic responsible
-    /// proposer actually submits; others no-op, so this is safe to call from
-    /// every poll tick without double-proposing.
-    ///
-    /// `recovery = true` bypasses the list-exhaustion gate and filters
-    /// queued-removal targets out of the candidate pool. `extra_exclude`
-    /// drops one more identity not yet in `approved_proposals`.
-    pub(crate) async fn try_initiate_steward_election(
-        arc: &Arc<RwLock<Self>>,
-        recovery: bool,
-        extra_exclude: Option<&[u8]>,
-    ) -> Result<(), UserError> {
-        let (proposed_stewards, election_epoch, retry_round, conversation_name) = {
-            let s = arc.read().await;
-            let epoch = s.handle.expect_mls()?.current_epoch()?;
-            let mls_members = s.handle.conversation_members()?;
-            let self_identity: &[u8] = &s.self_identity;
-
-            // `has_election_in_flight` is a proposal-queue check, not a
-            // steward-list one — gated here, before the plug-in call.
-            if s.handle.conversation.has_election_in_flight() {
-                return Ok(());
-            }
-
-            // Build the candidate pool: MLS members minus pending
-            // removals (recovery only) minus any explicit exclude.
-            let candidate_pool: Vec<Vec<u8>> = mls_members
-                .iter()
-                .filter(|m| {
-                    if extra_exclude.is_some_and(|x| x == m.as_slice()) {
-                        return false;
-                    }
-                    if recovery && s.handle.conversation.is_pending_removal(m) {
-                        return false;
-                    }
-                    true
-                })
-                .cloned()
-                .collect();
-            let pool_set: std::collections::HashSet<&[u8]> =
-                candidate_pool.iter().map(Vec::as_slice).collect();
-            let eligible = |c: &[u8]| pool_set.contains(c);
-
-            match s.handle.steward_list.propose_election(
-                epoch,
-                &candidate_pool,
-                self_identity,
-                &eligible,
-                recovery,
-            )? {
-                ElectionDecision::Skip(reason) => {
-                    if matches!(reason, "no eligible candidates after filter") {
-                        info!(
-                            conversation = %s.conversation_name,
-                            "skipping election: {reason}"
-                        );
-                    }
-                    return Ok(());
-                }
-                ElectionDecision::Proposed {
-                    proposed_stewards,
-                    election_epoch,
-                    retry_round,
-                } => (
-                    proposed_stewards,
-                    election_epoch,
-                    retry_round,
-                    s.conversation_name.clone(),
-                ),
-            }
-        };
-
-        let stewards_len = proposed_stewards.len();
-        let request = ConversationUpdateRequest {
-            payload: Some(conversation_update_request::Payload::StewardElection(
-                StewardElectionProposal {
-                    proposed_stewards,
-                    election_epoch,
-                    retry_round,
-                },
-            )),
-        };
-
-        info!(
-            conversation = %conversation_name,
-            epoch = election_epoch,
-            retry_round,
-            stewards = stewards_len,
-            recovery,
-            "initiating steward election"
-        );
-
-        // Elections are conversation-wide decisions — broadcast unbundled
-        // so the responsible proposer still votes via the banner.
-        Self::initiate_proposal(arc, request, None).await?;
-
-        Ok(())
-    }
-
-    /// Layer 3 escalation: file a `Deadlock` ECP after re-election retries
-    /// exhaust. Only the deterministic responsible proposer submits;
-    /// others no-op. On YES the ECP opens `recovery_mode`.
-    pub(crate) async fn try_initiate_deadlock_ecp(
-        arc: &Arc<RwLock<Self>>,
-    ) -> Result<(), UserError> {
-        let (is_authorized, self_id, epoch, conversation_name) = {
-            let s = arc.read().await;
-            let mls_members = s.handle.conversation_members()?;
-            let self_id: &[u8] = &s.self_identity;
-            // Deadlock proposer = election proposer with the stricter
-            // predicate (MLS-present and not queued for removal).
-            let mls_set: std::collections::HashSet<&[u8]> =
-                mls_members.iter().map(Vec::as_slice).collect();
-            let conversation_ref = &s.handle.conversation;
-            let authorized = s
-                .handle
-                .steward_list
-                .election_proposer(&|c: &[u8]| {
-                    mls_set.contains(c) && !conversation_ref.is_pending_removal(c)
-                })
-                .is_some_and(|proposer| proposer == self_id);
-            let epoch = s.handle.expect_mls()?.current_epoch()?;
-            (
-                authorized,
-                Arc::clone(&s.self_identity),
-                epoch,
-                s.conversation_name.clone(),
-            )
-        };
-
-        if !is_authorized {
-            return Ok(());
-        }
-
-        let request = ViolationEvidence::deadlock(epoch)
-            .with_creator(self_id.to_vec())
-            .into_update_request()?;
-
-        info!(
-            conversation = %conversation_name,
-            epoch, "initiating Deadlock ECP"
-        );
-
-        // Bundle YES — the proposer's observation that the deadlock is
-        // real is their vote.
-        Self::initiate_proposal(arc, request, Some(true)).await?;
-        Ok(())
     }
 
     /// Post-epoch-advance sequence: (1) auto-fill if membership dropped
@@ -349,7 +191,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // Buffered updates inherit the same banner path as fresh
         // steward-auto-propose — the steward still decides per proposal.
         for request in to_propose {
-            if let Err(e) = Self::initiate_proposal(arc, request, None).await {
+            if let Err(e) = Self::initiate_proposal(arc, request, CreatorVote::Deferred).await {
                 info!(
                     conversation = %conversation_name,
                     error = %e,
@@ -491,7 +333,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             // SCORE_BELOW_THRESHOLD is self-executing: threshold crossed ⇒
             // member must be removed. The steward's vote is YES by
             // protocol, so we bundle it at submit and skip the banner.
-            if let Err(e) = Self::initiate_proposal(arc, request, Some(true)).await {
+            if let Err(e) = Self::initiate_proposal(arc, request, CreatorVote::Yes).await {
                 arc.write()
                     .await
                     .handle
@@ -506,6 +348,170 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             }
         }
 
+        Ok(())
+    }
+
+    // ── Crate-internal ───────────────────────────────────────────────
+
+    /// Submit a steward-election proposal. Only the deterministic responsible
+    /// proposer actually submits; others no-op, so this is safe to call from
+    /// every poll tick without double-proposing.
+    ///
+    /// `recovery = true` bypasses the list-exhaustion gate and filters
+    /// queued-removal targets out of the candidate pool. `extra_exclude`
+    /// drops one more identity not yet in `approved_proposals`.
+    pub(crate) async fn try_initiate_steward_election(
+        arc: &Arc<RwLock<Self>>,
+        recovery: bool,
+        extra_exclude: Option<&[u8]>,
+    ) -> Result<(), UserError> {
+        let (proposed_stewards, election_epoch, retry_round, conversation_name) = {
+            let s = arc.read().await;
+            let epoch = s.handle.expect_mls()?.current_epoch()?;
+            let mls_members = s.handle.conversation_members()?;
+            let self_identity: &[u8] = &s.self_identity;
+
+            // `has_election_in_flight` is a proposal-queue check, not a
+            // steward-list one — gated here, before the plug-in call.
+            if s.handle.conversation.has_election_in_flight() {
+                return Ok(());
+            }
+
+            // Build the candidate pool: MLS members minus pending
+            // removals (recovery only) minus any explicit exclude.
+            let candidate_pool: Vec<Vec<u8>> = mls_members
+                .iter()
+                .filter(|m| {
+                    if extra_exclude.is_some_and(|x| x == m.as_slice()) {
+                        return false;
+                    }
+                    if recovery && s.handle.conversation.is_pending_removal(m) {
+                        return false;
+                    }
+                    true
+                })
+                .cloned()
+                .collect();
+            let pool_set: std::collections::HashSet<&[u8]> =
+                candidate_pool.iter().map(Vec::as_slice).collect();
+            let eligible = |c: &[u8]| pool_set.contains(c);
+
+            match s.handle.steward_list.propose_election(
+                epoch,
+                &candidate_pool,
+                self_identity,
+                &eligible,
+                recovery,
+            )? {
+                ElectionDecision::Skip(reason) => {
+                    if matches!(reason, "no eligible candidates after filter") {
+                        info!(
+                            conversation = %s.conversation_name,
+                            "skipping election: {reason}"
+                        );
+                    }
+                    return Ok(());
+                }
+                ElectionDecision::Proposed {
+                    proposed_stewards,
+                    election_epoch,
+                    retry_round,
+                } => (
+                    proposed_stewards,
+                    election_epoch,
+                    retry_round,
+                    s.conversation_name.clone(),
+                ),
+            }
+        };
+
+        let stewards_len = proposed_stewards.len();
+        let request = ConversationUpdateRequest {
+            payload: Some(conversation_update_request::Payload::StewardElection(
+                StewardElectionProposal {
+                    proposed_stewards,
+                    election_epoch,
+                    retry_round,
+                },
+            )),
+        };
+
+        info!(
+            conversation = %conversation_name,
+            epoch = election_epoch,
+            retry_round,
+            stewards = stewards_len,
+            recovery,
+            "initiating steward election"
+        );
+
+        // Elections are conversation-wide decisions — broadcast unbundled
+        // so the responsible proposer still votes via the banner.
+        Self::initiate_proposal(arc, request, CreatorVote::Deferred).await?;
+
+        Ok(())
+    }
+
+    /// Layer 3 escalation: file a `Deadlock` ECP after re-election retries
+    /// exhaust. Only the deterministic responsible proposer submits;
+    /// others no-op. On YES the ECP opens `recovery_mode`.
+    pub(crate) async fn try_initiate_deadlock_ecp(
+        arc: &Arc<RwLock<Self>>,
+    ) -> Result<(), UserError> {
+        let (is_authorized, self_id, epoch, conversation_name) = {
+            let s = arc.read().await;
+            let mls_members = s.handle.conversation_members()?;
+            let self_id: &[u8] = &s.self_identity;
+            // Deadlock proposer = election proposer with the stricter
+            // predicate (MLS-present and not queued for removal).
+            let mls_set: std::collections::HashSet<&[u8]> =
+                mls_members.iter().map(Vec::as_slice).collect();
+            let conversation_ref = &s.handle.conversation;
+            let authorized = s
+                .handle
+                .steward_list
+                .election_proposer(&|c: &[u8]| {
+                    mls_set.contains(c) && !conversation_ref.is_pending_removal(c)
+                })
+                .is_some_and(|proposer| proposer == self_id);
+            let epoch = s.handle.expect_mls()?.current_epoch()?;
+            (
+                authorized,
+                Arc::clone(&s.self_identity),
+                epoch,
+                s.conversation_name.clone(),
+            )
+        };
+
+        if !is_authorized {
+            return Ok(());
+        }
+
+        let request = ViolationEvidence::deadlock(epoch)
+            .with_creator(self_id.to_vec())
+            .into_update_request()?;
+
+        info!(
+            conversation = %conversation_name,
+            epoch, "initiating Deadlock ECP"
+        );
+
+        // Bundle YES — the proposer's observation that the deadlock is
+        // real is their vote.
+        Self::initiate_proposal(arc, request, CreatorVote::Yes).await?;
+        Ok(())
+    }
+
+    // ── Private ──────────────────────────────────────────────────────
+
+    /// Plug-in decides whether the current list still satisfies its
+    /// policy (the deterministic impl re-installs when membership drops
+    /// below `sn_min`). Coordinator just supplies `epoch` + `members`
+    /// and drains events.
+    async fn try_auto_fill_steward_list(&mut self) -> Result<(), UserError> {
+        let epoch = self.handle.expect_mls()?.current_epoch()?;
+        let members = self.handle.conversation_members()?;
+        let _events = self.handle.steward_list.maybe_auto_fill(epoch, &members)?;
         Ok(())
     }
 }

@@ -40,7 +40,7 @@ mod steward_list;
 // ── Core conversation operations ──
 pub use freeze::{FreezeFinalizeResult, FreezeOutcome, compute_commit_hash, finalize_freeze_round};
 pub use inbound::process_inbound;
-pub use proposal_framing::{build_create_proposal_request, build_key_package_message};
+pub use proposal_framing::build_key_package_message;
 
 // ── Per-conversation types: state, handle, state machine, config ──
 pub use conversation::{

@@ -26,18 +26,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .cloned()
     }
 
-    /// Run `f` under the runner's own read lock. Returns `None` if the
-    /// runner isn't present.
-    pub(crate) async fn with_entry<R>(
-        &self,
-        conversation_name: &str,
-        f: impl FnOnce(&SessionRunner<P, CP>) -> R,
-    ) -> Option<R> {
-        let entry_arc = self.lookup_entry(conversation_name).await?;
-        let entry = entry_arc.read().await;
-        Some(f(&entry))
-    }
-
     /// Names of every conversation registered on this `User`.
     pub async fn list_conversations(&self) -> Vec<String> {
         self.conversations.read().await.keys().cloned().collect()

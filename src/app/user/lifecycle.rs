@@ -6,18 +6,11 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::{
-    app::{
-        ConversationState, PhaseTimer, ProposalParams, SessionRunner, User, UserError,
-        submit_self_leave_proposal,
-    },
+    app::{ConversationState, PhaseTimer, SessionRunner, User, UserError},
     core::{
         ConsensusPlugin, Conversation, ConversationConfig, ConversationLifecycle,
         ConversationPluginsFactory, ConversationStateMachine, PeerScoringPlugin, SessionEvent,
-        StewardListPlugin, self_leave_proposal_id,
-    },
-    mls_crypto::MlsService,
-    protos::de_mls::messages::v1::{
-        ConversationUpdateRequest, RemoveMember, conversation_update_request,
+        StewardListPlugin,
     },
 };
 
@@ -99,24 +92,22 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             );
         }
         let consensus = self.build_consensus_service();
-        conversations.insert(
+        let session = Arc::new(RwLock::new(SessionRunner::new(
             conversation_name.to_string(),
-            Arc::new(RwLock::new(SessionRunner::new(
-                conversation_name.to_string(),
-                conversation,
-                mls_opt,
-                state_machine,
-                phase_timer,
-                config,
-                scoring,
-                steward_list,
-                consensus,
-                Arc::clone(&self.transport),
-                Arc::clone(&self.self_identity),
-                Arc::clone(&self.identity_display),
-                Arc::clone(&self.app_id),
-            ))),
-        );
+            conversation,
+            mls_opt,
+            state_machine,
+            phase_timer,
+            config,
+            scoring,
+            steward_list,
+            consensus,
+            Arc::clone(&self.transport),
+            Arc::clone(&self.self_identity),
+            Arc::clone(&self.identity_display),
+            Arc::clone(&self.app_id),
+        )));
+        conversations.insert(conversation_name.to_string(), Arc::clone(&session));
         drop(conversations);
 
         // Emit on the lifecycle channel first so integrators can subscribe
@@ -125,29 +116,32 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let _ = self.lifecycle.send(ConversationLifecycle::Created(
             conversation_name.to_string(),
         ));
-        self.emit(conversation_name, SessionEvent::PhaseChange(initial_state))
-            .await;
+        session
+            .read()
+            .await
+            .emit_event(SessionEvent::PhaseChange(initial_state));
 
         Ok(())
     }
 
-    /// Submit `RemoveMember(self)` as an `expected_voters = 1` proposal with
-    /// the leaver's YES bundled, so the session resolves on submit. We stay
+    /// Leave the conversation. `PendingJoin` short-circuits to local
+    /// teardown (no MLS state yet). Otherwise delegates the protocol work
+    /// to the session-side `initiate_self_leave` — opens a self-leave
+    /// consensus session with the leaver's YES bundled at submit. We stay
     /// active until the next steward commit merges the removal; on that
-    /// commit `ProcessResult::LeaveConversation` fires. A failed commit leaves us
-    /// a member and a later one picks the leave up.
-    /// `PendingJoin` short-circuits to local teardown.
+    /// commit `ProcessResult::LeaveConversation` fires.
     pub async fn leave_conversation(&mut self, conversation_name: &str) -> Result<(), UserError> {
         info!(conversation = conversation_name, "leaving conversation");
 
-        let is_pending_join = self
-            .with_entry(conversation_name, |entry| {
-                entry.handle.current_state() == ConversationState::PendingJoin
-            })
+        let entry_arc = self
+            .lookup_entry(conversation_name)
             .await
             .ok_or(UserError::ConversationNotFound)?;
+
+        let is_pending_join =
+            entry_arc.read().await.handle.current_state() == ConversationState::PendingJoin;
         if is_pending_join {
-            self.emit(conversation_name, SessionEvent::Leaving).await;
+            entry_arc.read().await.emit_event(SessionEvent::Leaving);
             self.conversations.write().await.remove(conversation_name);
             self.cleanup_consensus_scope(conversation_name).await?;
             let _ = self.lifecycle.send(ConversationLifecycle::Removed(
@@ -156,84 +150,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             return Ok(());
         }
 
-        let self_identity = self.self_identity().to_vec();
-
-        // Idempotent: a second click after a successful submit finds the
-        // approved entry and short-circuits.
-        let already_pending = self
-            .with_entry(conversation_name, |entry| {
-                entry
-                    .handle
-                    .conversation
-                    .is_pending_self_leave(&self_identity)
-            })
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        if already_pending {
-            info!(
-                conversation = conversation_name,
-                "self-leave already in flight, ignoring duplicate"
-            );
-            return Ok(());
-        }
-
-        let request = ConversationUpdateRequest {
-            payload: Some(conversation_update_request::Payload::RemoveMember(
-                RemoveMember {
-                    identity: self_identity.clone(),
-                },
-            )),
-        };
-
-        // Register ownership BEFORE the session opens — the bundled YES
-        // fires `ConsensusReached` on submit, and `apply_consensus_result`
-        // needs `is_owner_of_proposal` to be true by then.
-        let proposal_id = self_leave_proposal_id(&self_identity);
-        let entry_arc = self
-            .lookup_entry(conversation_name)
-            .await
-            .ok_or(UserError::ConversationNotFound)?;
-        let submitted = {
-            let mut entry = entry_arc.write().await;
-            entry
-                .handle
-                .conversation
-                .store_voting_proposal(proposal_id, request);
-            let proposal_expiration = entry.handle.config.proposal_expiration;
-            let consensus_timeout = entry.handle.config.consensus_timeout;
-            submit_self_leave_proposal::<P>(
-                conversation_name,
-                &self_identity,
-                &entry.consensus,
-                ProposalParams {
-                    expected_voters: 1,
-                    proposal_expiration,
-                    consensus_timeout,
-                    liveness_criteria_yes: true,
-                },
-            )
-            .await?
-        };
-
-        // Dedup (`ProposalAlreadyExist`) — another submit is already driving
-        // this proposal_id. Our voting entry resolves on that session.
-        let Some((_proposal_id, app_msg)) = submitted else {
-            return Ok(());
-        };
-
-        let packet = {
-            let entry_arc = self
-                .lookup_entry(conversation_name)
-                .await
-                .ok_or(UserError::ConversationNotFound)?;
-            let entry = entry_arc.read().await;
-            entry
-                .handle
-                .expect_mls()?
-                .build_message(&app_msg, &self.app_id)?
-        };
-        self.send_outbound(packet).await?;
-
-        Ok(())
+        SessionRunner::initiate_self_leave(&entry_arc).await
     }
 }

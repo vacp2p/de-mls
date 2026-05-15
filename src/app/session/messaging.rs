@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::{
-    app::{ConversationState, SessionRunner, UserError},
+    app::{ConversationState, CreatorVote, SessionRunner, UserError},
     core::{ConsensusPlugin, ConversationPluginsFactory, build_key_package_message},
     identity::parse_wallet_to_bytes,
     mls_crypto::{KeyPackageBytes, MlsService},
@@ -83,7 +83,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     },
                 )),
             },
-            Some(true),
+            CreatorVote::Yes,
         )
         .await?;
 
