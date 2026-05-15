@@ -224,19 +224,10 @@ pub fn spawn_consensus_forwarder(session: SessionArc) -> JoinHandle<()> {
 /// and consensus deadlines are sub-second so a polling loop converges in a
 /// handful of rounds. Override individual fields where the test needs
 /// different timing.
-///
-/// `recovery_inactivity_duration` is overridden alongside the regular
-/// `commit_inactivity_duration` because [`bootstrap_joined_conversation`]
-/// finishes with `retry_round = 1` on the steward list (see the doc on
-/// that function). With `retry_round > 0`, `check_member_freeze` uses the
-/// recovery inactivity window, not the commit one — leaving the default
-/// 5-second recovery duration in place would make every test wait that
-/// long for the first inactivity tick.
 pub fn fast_test_config() -> ConversationConfig {
     use std::time::Duration;
     ConversationConfig {
         commit_inactivity_duration: Duration::from_millis(50),
-        recovery_inactivity_duration: Duration::from_millis(100),
         freeze_duration: Duration::from_millis(20),
         voting_delay: Duration::from_millis(30),
         election_voting_delay: Duration::from_millis(30),
@@ -258,23 +249,23 @@ pub async fn poll_once(session: &SessionArc) {
 /// Bring up a conversation with `keys[0]` as the creator and the rest as
 /// joiners. Drives the full join cycle: each joiner sends a KP, the
 /// creator promotes them to InviteMember proposals, consensus resolves,
-/// commits are made and welcomes broadcast. Returns once every joiner has
-/// reached [`ConversationState::Working`].
+/// commits are made and welcomes broadcast. Returns once every joiner is
+/// in [`ConversationState::Working`] AND no packets have flowed for
+/// `QUIET_THRESHOLD` consecutive polling rounds.
+///
+/// The quiet-period exit matters: the InviteMember commit's
+/// `on_conversation_updated` handler fires
+/// `steward_list_housekeeping` → `try_initiate_steward_election` right as
+/// joiners reach Working. If bootstrap exits the instant joiners are
+/// Working, that election gets orphaned — its `consensus_timeout` fires
+/// without enough votes, `handle_election_rejected` bumps the creator's
+/// `retry_round` to 1, and every subsequent `check_member_freeze` call
+/// flips to the recovery-inactivity window instead of the commit one.
 ///
 /// One consensus forwarder is spawned per session — its `JoinHandle` is
 /// detached and the task lives for the duration of the test process.
 ///
-/// **Post-bootstrap state.** Members have `retry_round = 1` on their
-/// steward-list plug-in, not 0. After the InviteMember commit lands, the
-/// creator runs `steward_list_housekeeping` which fires a steward
-/// election; in the tight test environment this election is rejected,
-/// bumping `retry_round`. This is currently a live characteristic of the
-/// post-commit housekeeping pass, not a fixture quirk — but it means
-/// tests that poll `check_member_freeze` see the recovery inactivity
-/// window, not the commit one. [`fast_test_config`] sets both to short
-/// durations to accommodate.
-///
-/// Panics if any joiner has not joined after `MAX_ROUNDS` polling rounds.
+/// Panics if convergence does not happen within `MAX_ROUNDS` rounds.
 pub async fn bootstrap_joined_conversation(
     keys: &[&str],
     conversation: &str,
@@ -325,41 +316,47 @@ pub async fn bootstrap_joined_conversation(
         let _ = users[0].0.process_inbound_packet(to_inbound(p)).await;
     }
 
-    // Drive every session's polling and shuttle outbound packets to all
-    // other users until every joiner reaches Working.
+    // Drive every session's polling and shuttle outbound packets until
+    // every joiner is Working AND no packets have flowed for several
+    // consecutive rounds. The quiet-period check is important: the
+    // post-commit `steward_list_housekeeping` fires an election right
+    // as joiners reach Working; if we exit immediately the election
+    // gets orphaned (its consensus_timeout fires with no votes counted,
+    // and the next session-poll observes `retry_round = 1`).
+    const QUIET_THRESHOLD: usize = 3;
+    let mut quiet_rounds = 0;
     for round in 0..MAX_ROUNDS {
         tokio::time::sleep(Duration::from_millis(60)).await;
         for s in &sessions {
             poll_once(s).await;
         }
-        // Collect every outbound packet from every transport.
         let mut packets = Vec::new();
         for (_, h) in &users {
             packets.extend(h.drain_packets());
         }
-        // Deliver each packet to every user except its origin. We don't
-        // know origin from the packet, so deliver to all — `process_inbound_packet`
-        // dedups our own echo via `app_id`.
+        // Deliver each packet to every user. `process_inbound_packet`
+        // dedups echoes of our own messages via `app_id`.
         for p in &packets {
             for (u, _) in &users {
                 let _ = u.process_inbound_packet(to_inbound(p)).await;
             }
         }
 
-        let mut all_done = true;
+        let mut all_working = true;
         for s in sessions.iter().skip(1) {
             if s.read().await.get_conversation_state() != ConversationState::Working {
-                all_done = false;
+                all_working = false;
                 break;
             }
         }
-        if all_done {
-            // Drain residual packets so the caller starts from a clean slate.
-            for (_, h) in &users {
-                let _ = h.drain_packets();
+        if all_working && packets.is_empty() {
+            quiet_rounds += 1;
+            if quiet_rounds >= QUIET_THRESHOLD {
+                tracing::debug!(rounds = round + 1, "bootstrap converged");
+                return users;
             }
-            tracing::debug!(rounds = round + 1, "bootstrap converged");
-            return users;
+        } else {
+            quiet_rounds = 0;
         }
     }
 
