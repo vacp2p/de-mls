@@ -75,18 +75,23 @@ impl DeliveryService for CapturingTransport {
 
 /// Predicates for matching packets on the wire.
 ///
-/// **Encryption asymmetry on `APP_MSG_SUBTOPIC`.** Most app messages
-/// (chat, votes, proposals, `ConversationSync`) are MLS-encrypted via
-/// `mls.build_message` — prost-decoding `payload` yields garbage, so
-/// these predicates can't peek inside. `CommitCandidate` is the
-/// exception: it's sent as plain prost (peers must validate it pre-merge,
-/// before they can decrypt anything), which is why
-/// [`is_commit_candidate`] genuinely matches. `WELCOME_SUBTOPIC` is
-/// always plaintext.
+/// **Outer-envelope asymmetry on `APP_MSG_SUBTOPIC`.** Most app messages
+/// (chat, votes, proposals, `ConversationSync`) get a fresh MLS encryption
+/// pass in `mls.build_message`, so the outer prost payload is opaque to a
+/// non-member observer. `CommitCandidate` skips that pass: the inner
+/// `commit_message` field is already MLS-encrypted output of
+/// `mls.create_commit_candidate`, and the outer prost wrapper carries the
+/// staging metadata peers must read *before* they can apply the commit
+/// (steward identity for sender cross-validation, the staged
+/// `mls_proposals`). Wrapping it again would force peers to be members of
+/// the new epoch before they could even tell whose commit it is.
+/// `WELCOME_SUBTOPIC` is similarly plaintext on its outer prost layer.
 ///
-/// For encrypted app-msg packets, identify them by ordering / sender
-/// state (e.g. "the single packet emitted right after we called
-/// `send_conversation_sync`") rather than payload inspection.
+/// In practice: [`is_commit_candidate`], [`is_kp`], and [`is_invitation`]
+/// can prost-decode the wire payload. For everything else on the app-msg
+/// subtopic, identify packets by ordering / sender state (e.g. "the
+/// single packet emitted right after `send_conversation_sync`") rather
+/// than by payload inspection.
 pub mod predicate {
     use super::*;
     use de_mls::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
@@ -102,8 +107,9 @@ pub mod predicate {
         p.subtopic == WELCOME_SUBTOPIC
     }
 
-    /// Matches `CommitCandidate` on app-msg subtopic. Works because commit
-    /// candidates are sent unencrypted — see the module doc.
+    /// Matches `CommitCandidate` on app-msg subtopic. Works because the
+    /// outer prost wrapper carries pre-merge staging metadata and isn't
+    /// re-encrypted by `build_message` — see the module doc.
     pub fn is_commit_candidate(p: &OutboundPacket) -> bool {
         if p.subtopic != APP_MSG_SUBTOPIC {
             return false;
