@@ -142,8 +142,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             entry_arc.read().await.handle.current_state() == ConversationState::PendingJoin;
         if is_pending_join {
             entry_arc.read().await.emit_event(SessionEvent::Leaving);
-            self.conversations.write().await.remove(conversation_name);
+            // Cancel auto-vote timers before removing the registry entry —
+            // see `finalize_self_leave` for the rationale.
             self.cleanup_consensus_scope(conversation_name).await?;
+            self.conversations.write().await.remove(conversation_name);
             let _ = self.lifecycle.send(ConversationLifecycle::Removed(
                 conversation_name.to_string(),
             ));

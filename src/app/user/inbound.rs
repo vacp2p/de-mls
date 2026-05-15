@@ -78,8 +78,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// callers run when those signal "registry should be removed"
     /// (`DispatchOutcome::LeaveRequested` or `PendingJoinTick::Expired`).
     pub async fn finalize_self_leave(&self, conversation_name: &str) -> Result<(), UserError> {
-        self.conversations.write().await.remove(conversation_name);
+        // Cancel auto-vote timers before removing the registry entry —
+        // `cleanup_consensus_scope` finds the runner via `lookup_entry` and
+        // aborts its timers. If the entry is gone first, the lookup returns
+        // `None` and the timers leak (still scheduled, will fire against a
+        // conversation we've left).
         self.cleanup_consensus_scope(conversation_name).await?;
+        self.conversations.write().await.remove(conversation_name);
         let _ = self.lifecycle.send(ConversationLifecycle::Removed(
             conversation_name.to_string(),
         ));
