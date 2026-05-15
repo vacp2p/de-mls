@@ -291,9 +291,15 @@ pub async fn bootstrap_joined_conversation(
         .map(|k| make_user(k, cfg.clone(), steward_cfg.clone()))
         .collect();
 
-    users[0].0.start_conversation(conversation, true).await.expect("creator start");
+    users[0]
+        .0
+        .start_conversation(conversation, true)
+        .await
+        .expect("creator start");
     for (u, _) in users.iter_mut().skip(1) {
-        u.start_conversation(conversation, false).await.expect("joiner start");
+        u.start_conversation(conversation, false)
+            .await
+            .expect("joiner start");
     }
 
     let mut sessions: Vec<SessionArc> = Vec::with_capacity(users.len());
@@ -315,7 +321,12 @@ pub async fn bootstrap_joined_conversation(
     // Joiners send KPs. Drain joiner transports, deliver to creator.
     for i in 1..users.len() {
         let kp = users[i].0.generate_key_package().expect("kp");
-        sessions[i].read().await.send_kp_message(kp).await.expect("send kp");
+        sessions[i]
+            .read()
+            .await
+            .send_kp_message(kp)
+            .await
+            .expect("send kp");
     }
     let mut kp_packets = Vec::new();
     for (_, h) in users.iter().skip(1) {

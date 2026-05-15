@@ -36,12 +36,10 @@ async fn second_conversation_sync_is_a_no_op() {
     // first sync delivery applied — without a sync, joiners have no list.)
     let roles_before = bob_session.read().await.get_member_roles().unwrap();
     assert!(
-        roles_before
-            .iter()
-            .any(|(_, r)| matches!(
-                r,
-                MemberRole::EpochSteward | MemberRole::BackupSteward | MemberRole::Steward
-            )),
+        roles_before.iter().any(|(_, r)| matches!(
+            r,
+            MemberRole::EpochSteward | MemberRole::BackupSteward | MemberRole::Steward
+        )),
         "bob must see at least one steward after bootstrap, got {roles_before:?}"
     );
     let scores_before = bob_session.read().await.get_member_scores();

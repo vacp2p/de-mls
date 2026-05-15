@@ -54,8 +54,7 @@ async fn silent_steward_drives_observer_to_reelection() {
     // Observer files a proposal. With `CreatorVote::Yes` and `expected_voters=2`,
     // the steward's auto-vote completes consensus. The exact proposal payload
     // doesn't matter — we just need approved work in the queue.
-    let steward_identity =
-        parse_wallet_to_bytes(&users[steward_idx].0.identity_string()).unwrap();
+    let steward_identity = parse_wallet_to_bytes(&users[steward_idx].0.identity_string()).unwrap();
     let request = ConversationUpdateRequest {
         payload: Some(conversation_update_request::Payload::RemoveMember(
             RemoveMember {
@@ -105,7 +104,10 @@ async fn silent_steward_drives_observer_to_reelection() {
         // Discard everything the steward emits, deliver everything else.
         let _ = steward_tx.drain_packets();
         for p in observer_tx.drain_packets() {
-            let _ = users[steward_idx].0.process_inbound_packet(to_inbound(&p)).await;
+            let _ = users[steward_idx]
+                .0
+                .process_inbound_packet(to_inbound(&p))
+                .await;
         }
 
         let observer_state = observer_session.read().await.get_conversation_state();

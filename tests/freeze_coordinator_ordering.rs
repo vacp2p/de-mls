@@ -76,8 +76,7 @@ async fn freeze_cycle_emits_phase_events_in_order() {
 
         alice_phases.extend(drain_phase_log(&mut alice_events));
         let alice_state = alice_session.read().await.get_conversation_state();
-        if alice_state == ConversationState::Freezing
-            || alice_state == ConversationState::Selection
+        if alice_state == ConversationState::Freezing || alice_state == ConversationState::Selection
         {
             saw_freezing = true;
         }
@@ -115,7 +114,10 @@ async fn freeze_cycle_emits_phase_events_in_order() {
             Some(conversation_update_request::Payload::RemoveMember(rm)) if rm.identity == bob_id
         )
     });
-    assert!(removes_bob, "CommitApplied batch must contain RemoveMember(bob)");
+    assert!(
+        removes_bob,
+        "CommitApplied batch must contain RemoveMember(bob)"
+    );
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,6 +189,9 @@ fn assert_subsequence_matches(phases: &[PhaseEntry], expected: &[PhaseTag], msg:
     let mut iter = actual.iter();
     for want in expected {
         let found = iter.any(|got| got == want);
-        assert!(found, "{msg}\n  expected subsequence: {expected:?}\n  actual events: {actual:?}");
+        assert!(
+            found,
+            "{msg}\n  expected subsequence: {expected:?}\n  actual events: {actual:?}"
+        );
     }
 }
