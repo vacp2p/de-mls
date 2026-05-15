@@ -16,6 +16,7 @@ use de_mls::core::{DefaultConsensusPlugin, StewardListConfig};
 use de_mls::ds::{DeliveryService, DeliveryServiceError, InboundPacket, OutboundPacket};
 use prost::Message;
 use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
 
 pub type TestUser = User<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
 pub type TestSession = SessionRunner<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
@@ -193,4 +194,147 @@ pub async fn broadcast(packets: &[OutboundPacket], receivers: &[&TestUser]) {
             let _ = r.process_inbound_packet(to_inbound(p)).await;
         }
     }
+}
+
+/// Mirror of `de_mls_gateway::Gateway::spawn_consensus_forwarder` — one
+/// task per session that subscribes to the session's private consensus
+/// event bus and drives `apply_consensus_outcome` on each event. Without
+/// this, consensus sessions in tests never resolve into approved
+/// proposals. Exits naturally when the bus is dropped (conversation
+/// removed from the registry).
+pub fn spawn_consensus_forwarder(session: SessionArc) -> JoinHandle<()> {
+    use hashgraph_like_consensus::events::ConsensusEventBus;
+    tokio::spawn(async move {
+        let mut rx = session.read().await.consensus.event_bus().subscribe();
+        while let Ok((_conversation_name, event)) = rx.recv().await {
+            let _ = SessionRunner::apply_consensus_outcome(&session, event).await;
+        }
+    })
+}
+
+/// Default fast-timing config for SessionRunner-driven tests. All inactivity
+/// and consensus deadlines are sub-second so a polling loop converges in a
+/// handful of rounds. Override individual fields where the test needs
+/// different timing.
+pub fn fast_test_config() -> ConversationConfig {
+    use std::time::Duration;
+    ConversationConfig {
+        commit_inactivity_duration: Duration::from_millis(50),
+        freeze_duration: Duration::from_millis(20),
+        voting_delay: Duration::from_millis(30),
+        election_voting_delay: Duration::from_millis(30),
+        consensus_timeout: Duration::from_millis(150),
+        proposal_expiration: Duration::from_millis(2000),
+        ..ConversationConfig::default()
+    }
+}
+
+/// One polling cycle on a session: drive freeze status, member-freeze
+/// check, and (for joiners) the pending-join tick. Mirrors the production
+/// `group_polling_loop` body in `de_mls_gateway::group`.
+pub async fn poll_once(session: &SessionArc) {
+    let _ = SessionRunner::poll_freeze_status(session).await;
+    let _ = session.write().await.check_member_freeze().await;
+    let _ = SessionRunner::check_pending_join(session).await;
+}
+
+/// Bring up a conversation with `keys[0]` as the creator and the rest as
+/// joiners. Drives the full join cycle: each joiner sends a KP, the
+/// creator promotes them to InviteMember proposals, consensus resolves,
+/// commits are made and welcomes broadcast. Returns once every joiner has
+/// reached [`ConversationState::Working`].
+///
+/// One consensus forwarder is spawned per session — its `JoinHandle` is
+/// detached and the task lives for the duration of the test process.
+///
+/// Panics if any joiner has not joined after `MAX_ROUNDS` polling rounds.
+pub async fn bootstrap_joined_conversation(
+    keys: &[&str],
+    conversation: &str,
+    cfg: ConversationConfig,
+    steward_cfg: StewardListConfig,
+) -> Vec<(TestUser, Arc<CapturingTransport>)> {
+    use de_mls::core::ConversationState;
+    use std::time::Duration;
+    const MAX_ROUNDS: usize = 30;
+    assert!(!keys.is_empty(), "bootstrap needs at least one key");
+
+    let mut users: Vec<(TestUser, Arc<CapturingTransport>)> = keys
+        .iter()
+        .map(|k| make_user(k, cfg.clone(), steward_cfg.clone()))
+        .collect();
+
+    users[0].0.start_conversation(conversation, true).await.expect("creator start");
+    for (u, _) in users.iter_mut().skip(1) {
+        u.start_conversation(conversation, false).await.expect("joiner start");
+    }
+
+    let mut sessions: Vec<SessionArc> = Vec::with_capacity(users.len());
+    for (u, _) in &users {
+        sessions.push(
+            u.lookup_entry(conversation)
+                .await
+                .expect("session registered"),
+        );
+    }
+
+    // One forwarder per session — without this, consensus events fire
+    // but `approved_proposals` never populates. JoinHandles are detached;
+    // tasks live for the duration of the test process.
+    for s in &sessions {
+        std::mem::drop(spawn_consensus_forwarder(s.clone()));
+    }
+
+    // Joiners send KPs. Drain joiner transports, deliver to creator.
+    for i in 1..users.len() {
+        let kp = users[i].0.generate_key_package().expect("kp");
+        sessions[i].read().await.send_kp_message(kp).await.expect("send kp");
+    }
+    let mut kp_packets = Vec::new();
+    for (_, h) in users.iter().skip(1) {
+        kp_packets.extend(h.drain_packets());
+    }
+    for p in &kp_packets {
+        let _ = users[0].0.process_inbound_packet(to_inbound(p)).await;
+    }
+
+    // Drive every session's polling and shuttle outbound packets to all
+    // other users until every joiner reaches Working.
+    for round in 0..MAX_ROUNDS {
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        for s in &sessions {
+            poll_once(s).await;
+        }
+        // Collect every outbound packet from every transport.
+        let mut packets = Vec::new();
+        for (_, h) in &users {
+            packets.extend(h.drain_packets());
+        }
+        // Deliver each packet to every user except its origin. We don't
+        // know origin from the packet, so deliver to all — `process_inbound_packet`
+        // dedups our own echo via `app_id`.
+        for p in &packets {
+            for (u, _) in &users {
+                let _ = u.process_inbound_packet(to_inbound(p)).await;
+            }
+        }
+
+        let mut all_done = true;
+        for s in sessions.iter().skip(1) {
+            if s.read().await.get_conversation_state() != ConversationState::Working {
+                all_done = false;
+                break;
+            }
+        }
+        if all_done {
+            // Drain residual packets so the caller starts from a clean slate.
+            for (_, h) in &users {
+                let _ = h.drain_packets();
+            }
+            tracing::debug!(rounds = round + 1, "bootstrap converged");
+            return users;
+        }
+    }
+
+    panic!("bootstrap_joined_conversation did not converge after {MAX_ROUNDS} rounds");
 }
