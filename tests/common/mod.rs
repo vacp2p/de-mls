@@ -4,23 +4,29 @@
 //! `tests/common/` is *not* a test binary, so this module can be reused by
 //! adding `mod common;` to any test file. Helpers carry `#[allow(dead_code)]`
 //! at the module level because not every binary exercises every helper.
+//!
+//! New SessionRunner-driven tests should import from [`session_fixtures`]
+//! (User-level helpers, packet capture). The lower-level `StewardHandle` /
+//! `JoinerHandle` / `process_inbound_compat` / `build_commit_candidate`
+//! shims here predate the per-conv-consensus refactor and are kept for the
+//! forgery-focused violation tests; new tests should not use them.
 #![allow(dead_code)]
 
+pub mod session_fixtures;
+
 use std::sync::{
-    Arc, Mutex,
+    Arc,
     atomic::{AtomicU32, Ordering},
 };
-
-use async_trait::async_trait;
 
 use de_mls::app::InMemoryPeerScoreStorage;
 use de_mls::core::PeerScoringService;
 use de_mls::core::default_score_deltas;
 use de_mls::core::{
-    BufferedCommitCandidate, CallbackError, Conversation, ConversationEventHandler, CoreError,
-    DeterministicStewardList, FreezeOutcome, NoopReason, OperatingMode, ProcessResult,
-    ProposalKind, ScoringConfig, StewardListConfig, StewardListPlugin, build_key_package_message,
-    compute_commit_hash, finalize_freeze_round, member_set, process_inbound,
+    BufferedCommitCandidate, Conversation, CoreError, DeterministicStewardList, FreezeOutcome,
+    NoopReason, OperatingMode, ProcessResult, ProposalKind, ScoringConfig, StewardListConfig,
+    StewardListPlugin, build_key_package_message, compute_commit_hash, finalize_freeze_round,
+    member_set, process_inbound,
 };
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
 use de_mls::identity::{Identity, WalletIdentity, parse_wallet_address};
@@ -41,95 +47,6 @@ use prost::Message as _;
 pub type TestMls = OpenMlsService<Arc<MemoryDeMlsStorage>>;
 
 pub const DEFAULT_SCORE: i64 = 100;
-
-// ─────────────────────────── Mock handler ───────────────────────────
-
-#[derive(Debug, Clone)]
-pub enum Event {
-    Outbound {
-        group: String,
-        packet: OutboundPacket,
-    },
-    AppMessage {
-        group: String,
-        msg: AppMessage,
-    },
-    LeaveConversation {
-        group: String,
-    },
-    JoinedConversation {
-        group: String,
-    },
-    Error {
-        group: String,
-        op: String,
-        err: String,
-    },
-}
-
-#[derive(Clone, Default)]
-pub struct MockHandler {
-    pub events: Arc<Mutex<Vec<Event>>>,
-}
-
-impl MockHandler {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn events(&self) -> Vec<Event> {
-        self.events.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl ConversationEventHandler for MockHandler {
-    async fn on_outbound(
-        &self,
-        conversation_name: &str,
-        packet: OutboundPacket,
-    ) -> Result<String, CallbackError> {
-        self.events.lock().unwrap().push(Event::Outbound {
-            group: conversation_name.to_string(),
-            packet,
-        });
-        Ok("mock-id".to_string())
-    }
-
-    async fn on_app_message(
-        &self,
-        conversation_name: &str,
-        message: AppMessage,
-    ) -> Result<(), CallbackError> {
-        self.events.lock().unwrap().push(Event::AppMessage {
-            group: conversation_name.to_string(),
-            msg: message,
-        });
-        Ok(())
-    }
-
-    async fn on_leave_conversation(&self, conversation_name: &str) -> Result<(), CallbackError> {
-        self.events.lock().unwrap().push(Event::LeaveConversation {
-            group: conversation_name.to_string(),
-        });
-        Ok(())
-    }
-
-    async fn on_joined_conversation(&self, conversation_name: &str) -> Result<(), CallbackError> {
-        self.events.lock().unwrap().push(Event::JoinedConversation {
-            group: conversation_name.to_string(),
-        });
-        Ok(())
-    }
-
-    async fn on_error(&self, conversation_name: &str, operation: &str, error: &str) {
-        self.events.lock().unwrap().push(Event::Error {
-            group: conversation_name.to_string(),
-            op: operation.to_string(),
-            err: error.to_string(),
-        });
-    }
-}
 
 // ─────────────────────────── Test-only protocol helper ───────────────────────────
 
@@ -282,22 +199,6 @@ pub fn setup_identity_storage(
     (identity, credentials, storage)
 }
 
-/// Build an [`OpenMlsService`] for a fresh group with a default test id.
-/// Convenience for tests that don't care about a specific group id at the
-/// MLS layer (most pure-state tests). For tests that need a specific id,
-/// prefer [`setup_steward`] or [`setup_mls_for_group`].
-pub fn setup_mls(wallet_hex: &str) -> TestMls {
-    setup_mls_for_group("test-group", wallet_hex)
-}
-
-/// Like [`setup_mls`] but with an explicit group id. Use this when the
-/// test asserts something about the MLS-tracked group id or when two
-/// services share a group.
-pub fn setup_mls_for_group(conversation_name: &str, wallet_hex: &str) -> TestMls {
-    let (_, credentials, storage) = setup_identity_storage(wallet_hex);
-    OpenMlsService::new_as_creator(conversation_name.to_string(), storage, credentials).unwrap()
-}
-
 /// Compat shim that mirrors the pre-refactor `core::process_inbound`
 /// 4-arg surface for tests that drive packet relay manually. Routes
 /// app-subtopic packets to the new `core::process_inbound`, and synthesises
@@ -343,8 +244,9 @@ pub fn process_inbound_compat(
         }
     } else if subtopic == APP_MSG_SUBTOPIC {
         let Some(mls) = mls else {
-            // Pre-refactor behaviour: app messages on a group with no MLS
-            // state are silently ignored. Mirrors the User-layer dispatch.
+            // App messages on a conversation with no MLS state are
+            // silently ignored. Mirrors `SessionRunner::process_inbound_packet`,
+            // which gates app payloads on `handle.mls().is_some()`.
             return Ok(ProcessResult::Noop(NoopReason::UnknownAppMessage));
         };
         process_inbound(group, mls, payload)
@@ -376,7 +278,7 @@ impl StewardHandle {
     }
 
     /// Test convenience: identity bytes stored on the handle; matches the
-    /// value the orchestrator caches at the User level.
+    /// value the User layer caches on `User::self_identity`.
     pub fn self_identity(&self) -> &[u8] {
         &self.identity
     }
@@ -448,7 +350,7 @@ pub struct JoinerHandle {
 
 impl JoinerHandle {
     /// Test convenience: identity bytes stored on the handle; matches the
-    /// value the orchestrator caches at the User level.
+    /// value the User layer caches on `User::self_identity`.
     pub fn self_identity(&self) -> Vec<u8> {
         self.identity.identity_bytes().to_vec()
     }

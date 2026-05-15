@@ -1,14 +1,30 @@
 use std::sync::{Arc, atomic::Ordering};
 
 use de_mls::{
-    app::format_conversation_request, ds::WakuDeliveryService, identity::format_wallet_address,
+    app::{SessionRunner, UserError, format_conversation_request},
+    ds::WakuDeliveryService,
+    identity::format_wallet_address,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
 use futures::channel::mpsc::UnboundedSender;
 use hashgraph_like_consensus::events::ConsensusEventBus;
 
-use crate::{CoreCtx, Gateway, UserRef};
+use crate::{CoreCtx, Gateway, SessionRef, UserRef};
+
+/// Look up a per-conversation session from the `User` registry. Returns
+/// `Err(ConversationNotFound)` when the conversation has been removed.
+/// Centralized so every call site uses the same lookup + error shape.
+pub(crate) async fn lookup_session(
+    user: &UserRef,
+    conversation_name: &str,
+) -> Result<SessionRef, UserError> {
+    user.read()
+        .await
+        .lookup_entry(conversation_name)
+        .await
+        .ok_or(UserError::ConversationNotFound)
+}
 
 /// Render a batch of approved proposals as `(action, identity)` pairs,
 /// dropping any entry with an empty payload.
@@ -26,16 +42,13 @@ pub(crate) async fn load_member_info(
     user: &UserRef,
     conversation_name: &str,
 ) -> anyhow::Result<Vec<MemberInfo>> {
-    let user = user.read().await;
-    let addresses = user.get_conversation_members(conversation_name).await?;
-    let scores = user.get_member_scores(conversation_name).await;
-    let roles = user
-        .get_member_roles(conversation_name)
-        .await
-        .unwrap_or_default();
-    let pending_leavers: Vec<String> = user
-        .get_pending_leave_identities(conversation_name)
-        .await
+    let session = lookup_session(user, conversation_name).await?;
+    let runner = session.read().await;
+    let addresses = runner.get_conversation_members()?;
+    let scores = runner.get_member_scores();
+    let roles = runner.get_member_roles().unwrap_or_default();
+    let pending_leavers: Vec<String> = runner
+        .get_pending_leave_identities()
         .unwrap_or_default()
         .into_iter()
         .map(|id| format_wallet_address(id.as_slice()).to_string())
@@ -71,24 +84,17 @@ pub(crate) async fn push_consensus_state(
     evt_tx: &UnboundedSender<AppEvent>,
     conversation_name: &str,
 ) {
-    if let Ok(proposals) = user
-        .read()
-        .await
-        .get_approved_proposal_for_current_epoch(conversation_name)
-        .await
-    {
-        let _ = evt_tx.unbounded_send(AppEvent::CurrentEpochProposals {
-            conversation_id: conversation_name.to_string(),
-            proposals: display_batch(&proposals),
-        });
-    }
+    let Ok(session) = lookup_session(user, conversation_name).await else {
+        return;
+    };
+    let runner = session.read().await;
+    let proposals = runner.get_approved_proposal_for_current_epoch();
+    let _ = evt_tx.unbounded_send(AppEvent::CurrentEpochProposals {
+        conversation_id: conversation_name.to_string(),
+        proposals: display_batch(&proposals),
+    });
 
-    if let Ok((epoch, retry_round)) = user
-        .read()
-        .await
-        .get_epoch_and_retry(conversation_name)
-        .await
-    {
+    if let Ok((epoch, retry_round)) = runner.get_epoch_and_retry() {
         let _ = evt_tx.unbounded_send(AppEvent::GroupEpoch {
             conversation_id: conversation_name.to_string(),
             epoch,
@@ -114,12 +120,10 @@ pub(crate) async fn push_member_scores(
         members,
     });
 
-    let is_steward = user
-        .read()
-        .await
-        .is_steward_for_conversation(conversation_name)
-        .await
-        .unwrap_or(false);
+    let Ok(session) = lookup_session(user, conversation_name).await else {
+        return;
+    };
+    let is_steward = session.read().await.is_steward_for_self();
     let _ = evt_tx.unbounded_send(AppEvent::StewardStatus {
         conversation_id: conversation_name.to_string(),
         is_steward,
@@ -127,19 +131,23 @@ pub(crate) async fn push_member_scores(
 }
 
 impl Gateway<WakuDeliveryService> {
-    /// Spawn the consensus event forwarder.
-    ///
-    /// This handles both UI notification (AppEvent::ProposalDecided) and
-    /// user-side processing (apply_consensus_outcome internally calls handler).
-    pub(crate) fn spawn_consensus_forwarder(
-        &self,
-        core: Arc<CoreCtx<WakuDeliveryService>>,
-        user: UserRef,
-    ) {
+    /// Spawn a per-conversation consensus event forwarder. One task per
+    /// conversation; it subscribes to that conversation's private event bus
+    /// and exits naturally when the bus is dropped (conversation removed).
+    pub(crate) fn spawn_consensus_forwarder(&self, user: UserRef, conversation_name: String) {
         let evt_tx = self.evt_tx.clone();
-        let mut rx = core.consensus.event_bus().subscribe();
+        let user_for_sub = user.clone();
+        let cname_owned = conversation_name.clone();
 
         tokio::spawn(async move {
+            let Ok(session_arc) = lookup_session(&user_for_sub, &cname_owned).await else {
+                tracing::warn!(
+                    conversation = %cname_owned,
+                    "consensus forwarder: no session (conversation already gone)"
+                );
+                return;
+            };
+            let mut rx = session_arc.read().await.consensus.event_bus().subscribe();
             tracing::info!("consensus forwarder started");
             while let Ok((conversation_name, event)) = rx.recv().await {
                 // Forward to UI
@@ -148,12 +156,7 @@ impl Gateway<WakuDeliveryService> {
                     event.clone(),
                 ));
 
-                if let Err(e) = user
-                    .write()
-                    .await
-                    .apply_consensus_outcome(&conversation_name, event)
-                    .await
-                {
+                if let Err(e) = SessionRunner::apply_consensus_outcome(&session_arc, event).await {
                     tracing::warn!(group = %conversation_name, error = %e, "apply_consensus_outcome failed");
                 }
 
@@ -203,7 +206,7 @@ impl Gateway<WakuDeliveryService> {
 
                 let conversation_id = pkt.conversation_id.clone();
 
-                if let Err(e) = user.write().await.process_inbound_packet(pkt).await {
+                if let Err(e) = user.read().await.process_inbound_packet(pkt).await {
                     tracing::error!(group = %conversation_id, error = %e, "process_inbound_packet failed");
                 }
 

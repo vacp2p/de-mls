@@ -20,20 +20,194 @@ use crate::{
     },
 };
 
-/// Result of applying a consensus outcome. `force_freezing` signals
-/// the app to skip the inactivity timer; `queued_remove_target` lets
-/// the app refresh the steward list when the target is on it. Score
-/// ops for emergency outcomes are derived by
-/// [`emergency_score_ops`](crate::core::emergency_score_ops).
-#[derive(Debug, Clone, Default)]
-pub struct ConsensusApplyResult {
-    pub election: Option<StewardElectionProposal>,
-    pub force_freezing: bool,
-    pub queued_remove_target: Option<Vec<u8>>,
-    /// `true` when an accepted Layer-3 Deadlock ECP signals "open recovery
-    /// mode." Caller switches the handle's [`crate::core::OperatingMode`]
-    /// to `Recovery`; cleared on the next accepted election.
-    pub enter_recovery_mode: bool,
+/// Outcome of applying a consensus result to a conversation. Each variant
+/// encodes exactly the follow-up the app caller must perform — no
+/// independent boolean flags.
+///
+/// Score deltas for emergency outcomes are derived separately by
+/// [`crate::core::emergency_score_ops`].
+#[derive(Debug, Clone)]
+pub enum ConsensusApplyResult {
+    /// Nothing to fire. Election rejected, non-removal emergency, regular
+    /// non-removal approval, removal deduped, or any rejection.
+    NoAction,
+    /// Election accepted. Caller validates the proposed list against the
+    /// candidate pool, installs it, and exits Reelection.
+    ElectionAccepted(StewardElectionProposal),
+    /// Layer-3 `Deadlock` ECP accepted. Caller switches the handle's
+    /// [`crate::core::OperatingMode`] to `Recovery` (any-member commit) and
+    /// bypasses the inactivity timer. Cleared on the next accepted election.
+    RecoveryModeOpened,
+    /// `SCORE_BELOW_THRESHOLD` ECP accepted. The urgent-commit target is
+    /// already set on the conversation; caller bypasses the inactivity
+    /// timer so the urgent commit fires now and refreshes the steward
+    /// list if `target` was on it.
+    UrgentRemoval { target: Vec<u8> },
+    /// Regular `RemoveMember` accepted and queued for the next commit.
+    /// Caller refreshes the steward list if `target` was on it.
+    QueuedRemoval { target: Vec<u8> },
+}
+
+/// Apply a consensus result to the conversation's proposal queues.
+///
+/// Routes by proposal kind:
+/// - **Election (accepted)** — returns [`ConsensusApplyResult::ElectionAccepted`].
+/// - **`ScoreBelowThreshold` ECP (accepted)** — queues `RemoveMember(target)`
+///   in the approved queue, sets the urgent-commit target, and returns
+///   [`ConsensusApplyResult::UrgentRemoval`].
+/// - **`Deadlock` ECP (accepted)** — returns
+///   [`ConsensusApplyResult::RecoveryModeOpened`]. No approved-queue entry
+///   (no MLS op to commit).
+/// - **Other emergency (accepted)** — transient: briefly marked approved
+///   then removed. Returns [`ConsensusApplyResult::NoAction`].
+/// - **Regular `RemoveMember` (accepted)** — moved to the approved queue;
+///   returns [`ConsensusApplyResult::QueuedRemoval`]. Duplicate-target
+///   removals are deduped at insertion and return `NoAction`.
+/// - **Other regular proposal (accepted)** — moved to the approved queue;
+///   returns [`ConsensusApplyResult::NoAction`].
+/// - **Rejected (any kind)** — dropped from the voting queue if we owned
+///   it; returns [`ConsensusApplyResult::NoAction`].
+pub fn apply_consensus_result(
+    conversation: &mut Conversation,
+    proposal_id: u32,
+    approved: bool,
+    payload: &[u8],
+) -> Result<ConsensusApplyResult, CoreError> {
+    let is_owner = conversation.is_owner_of_proposal(proposal_id);
+    let request = ConversationUpdateRequest::decode(payload)?;
+    let evidence = extract_emergency_evidence(&request).cloned();
+    let is_emergency = evidence.is_some();
+
+    if let Some(election) = extract_election_proposal(&request).cloned() {
+        return Ok(apply_election_outcome(
+            conversation,
+            proposal_id,
+            approved,
+            election,
+            is_owner,
+        ));
+    }
+
+    // ── Emergency and regular proposals ──
+
+    // Should the approved ECP transform into a RemoveMember?
+    let transforms_to_removal =
+        approved && is_emergency && evidence.as_ref().is_some_and(is_score_below_threshold);
+
+    // Target for `approved_proposals` dedup and downstream steward-list refresh.
+    let removal_target = pending_removal_target(
+        &request,
+        evidence.as_ref(),
+        approved,
+        is_emergency,
+        transforms_to_removal,
+    );
+
+    // Two approvals from independent paths (self-leave + ban, ECP + ban, …)
+    // can each carry `RemoveMember(target)` under different proposal ids.
+    // MLS rejects a duplicate removal at commit time, so keep the first
+    // entry and drop the second.
+    if let Some(target) = &removal_target
+        && conversation.is_pending_removal(target)
+    {
+        if is_owner {
+            conversation.mark_proposal_as_rejected(proposal_id);
+        }
+        info!(
+            proposal_id,
+            target = %ShortId::new(target),
+            "removal proposal deduped — target already queued for removal"
+        );
+        return Ok(ConsensusApplyResult::NoAction);
+    }
+
+    if approved {
+        if is_owner {
+            conversation.mark_proposal_as_approved(proposal_id);
+            if transforms_to_removal {
+                // Replace ECP with RemoveMember in approved queue (reuse proposal_id).
+                let removal = removal_request_for(evidence.as_ref().unwrap());
+                conversation.remove_approved_proposal(proposal_id);
+                conversation.insert_approved_proposal(proposal_id, removal);
+            } else if is_emergency {
+                // Other emergencies don't produce MLS operations.
+                conversation.remove_approved_proposal(proposal_id);
+            }
+        } else if transforms_to_removal {
+            // Non-owner: insert RemoveMember directly (the ECP was never stored).
+            let removal = removal_request_for(evidence.as_ref().unwrap());
+            conversation.insert_approved_proposal(proposal_id, removal);
+        } else if !is_emergency {
+            // Regular proposal: add to approved queue for the next commit.
+            conversation.insert_approved_proposal(proposal_id, request);
+        }
+    } else if is_owner {
+        conversation.mark_proposal_as_rejected(proposal_id);
+    }
+
+    if let Some(ev) = evidence.as_ref() {
+        if approved {
+            info!(
+                proposal_id,
+                target = %ShortId::new(&ev.target_member_id),
+                creator = %ShortId::new(&ev.creator_member_id),
+                "emergency criteria proposal accepted"
+            );
+        } else {
+            info!(
+                proposal_id,
+                creator = %ShortId::new(&ev.creator_member_id),
+                "emergency criteria proposal rejected"
+            );
+        }
+    }
+
+    if transforms_to_removal {
+        // Fast removal: restrict the next commit to this target so it
+        // doesn't drag along unrelated approved work.
+        let target = evidence.as_ref().unwrap().target_member_id.clone();
+        conversation.set_urgent_commit_target(target.clone());
+        return Ok(ConsensusApplyResult::UrgentRemoval { target });
+    }
+    if evidence.as_ref().is_some_and(is_deadlock) && approved {
+        // Layer 3: any member can produce the next commit.
+        return Ok(ConsensusApplyResult::RecoveryModeOpened);
+    }
+    if let Some(target) = removal_target {
+        return Ok(ConsensusApplyResult::QueuedRemoval { target });
+    }
+    Ok(ConsensusApplyResult::NoAction)
+}
+
+/// Election outcome — no MLS operation. YES hands the proposed list
+/// back to the app for validation and install; NO drops the owner's
+/// voting-queue entry.
+fn apply_election_outcome(
+    conversation: &mut Conversation,
+    proposal_id: u32,
+    approved: bool,
+    election: StewardElectionProposal,
+    is_owner: bool,
+) -> ConsensusApplyResult {
+    if approved {
+        if is_owner {
+            conversation.mark_proposal_as_approved(proposal_id);
+            conversation.remove_approved_proposal(proposal_id);
+        }
+        info!(
+            proposal_id,
+            epoch = election.election_epoch,
+            stewards = election.proposed_stewards.len(),
+            "steward election proposal accepted"
+        );
+        ConsensusApplyResult::ElectionAccepted(election)
+    } else {
+        if is_owner {
+            conversation.mark_proposal_as_rejected(proposal_id);
+        }
+        info!(proposal_id, "steward election proposal rejected");
+        ConsensusApplyResult::NoAction
+    }
 }
 
 /// Extract emergency evidence from a `ConversationUpdateRequest`, if present.
@@ -99,177 +273,6 @@ fn pending_removal_target(
     }
 }
 
-/// Election outcome — no MLS operation. YES hands the proposed list
-/// back to the app for validation and install; NO drops the owner's
-/// voting-queue entry.
-fn apply_election_outcome(
-    conversation: &mut Conversation,
-    proposal_id: u32,
-    approved: bool,
-    election: StewardElectionProposal,
-    is_owner: bool,
-) -> ConsensusApplyResult {
-    if approved {
-        if is_owner {
-            conversation.mark_proposal_as_approved(proposal_id);
-            conversation.remove_approved_proposal(proposal_id);
-        }
-        info!(
-            proposal_id,
-            epoch = election.election_epoch,
-            stewards = election.proposed_stewards.len(),
-            "steward election proposal accepted"
-        );
-        ConsensusApplyResult {
-            election: Some(election),
-            ..Default::default()
-        }
-    } else {
-        if is_owner {
-            conversation.mark_proposal_as_rejected(proposal_id);
-        }
-        info!(proposal_id, "steward election proposal rejected");
-        ConsensusApplyResult::default()
-    }
-}
-
-/// Apply a consensus result to the conversation's proposal queues.
-///
-/// Routes by proposal kind:
-/// - **Election (accepted)** — returned via `election` for the app to
-///   validate and install.
-/// - **`ScoreBelowThreshold` ECP (accepted)** — queues `RemoveMember(target)`
-///   in the approved queue, sets the urgent-commit target, and signals
-///   `force_freezing` so the urgent commit fires now.
-/// - **`Deadlock` ECP (accepted)** — opens `recovery_mode` (any-member
-///   commit) and signals `force_freezing`.
-/// - **Other emergency (accepted)** — transient in the approved queue:
-///   briefly marked approved then removed. No MLS op to commit.
-/// - **Regular proposal (accepted)** — moved to the approved queue.
-///   `RemoveMember` for an already-queued target is deduped at insertion.
-/// - **Rejected (any kind)** — dropped from the voting queue if we
-///   owned it.
-pub fn apply_consensus_result(
-    conversation: &mut Conversation,
-    proposal_id: u32,
-    approved: bool,
-    payload: &[u8],
-) -> Result<ConsensusApplyResult, CoreError> {
-    let is_owner = conversation.is_owner_of_proposal(proposal_id);
-    let request = ConversationUpdateRequest::decode(payload)?;
-    let evidence = extract_emergency_evidence(&request).cloned();
-    let is_emergency = evidence.is_some();
-
-    if let Some(election) = extract_election_proposal(&request).cloned() {
-        return Ok(apply_election_outcome(
-            conversation,
-            proposal_id,
-            approved,
-            election,
-            is_owner,
-        ));
-    }
-
-    // ── Emergency and regular proposals ──
-
-    // Should the approved ECP transform into a RemoveMember?
-    let transforms_to_removal =
-        approved && is_emergency && evidence.as_ref().is_some_and(is_score_below_threshold);
-
-    // Used for target-keyed dedup below and reported back so the app
-    // layer can fire a steward-list refresh.
-    let removal_target = pending_removal_target(
-        &request,
-        evidence.as_ref(),
-        approved,
-        is_emergency,
-        transforms_to_removal,
-    );
-
-    // Two approvals from independent paths (self-leave + ban, ECP + ban, …)
-    // can each carry `RemoveMember(target)` under different proposal ids.
-    // MLS rejects a duplicate removal at commit time, so keep the first
-    // entry and drop the second.
-    if let Some(target) = &removal_target
-        && conversation.is_pending_removal(target)
-    {
-        if is_owner {
-            conversation.mark_proposal_as_rejected(proposal_id);
-        }
-        info!(
-            proposal_id,
-            target = %ShortId::new(target),
-            "removal proposal deduped — target already queued for removal"
-        );
-        return Ok(ConsensusApplyResult::default());
-    }
-
-    let mut force_freezing = false;
-    let mut enter_recovery_mode = false;
-
-    if approved {
-        if is_owner {
-            conversation.mark_proposal_as_approved(proposal_id);
-            if transforms_to_removal {
-                // Replace ECP with RemoveMember in approved queue (reuse proposal_id).
-                let removal = removal_request_for(evidence.as_ref().unwrap());
-                conversation.remove_approved_proposal(proposal_id);
-                conversation.insert_approved_proposal(proposal_id, removal);
-            } else if is_emergency {
-                // Other emergencies don't produce MLS operations.
-                conversation.remove_approved_proposal(proposal_id);
-            }
-        } else if transforms_to_removal {
-            // Non-owner: insert RemoveMember directly (the ECP was never stored).
-            let removal = removal_request_for(evidence.as_ref().unwrap());
-            conversation.insert_approved_proposal(proposal_id, removal);
-        } else if !is_emergency {
-            // Regular proposal: add to approved queue for the next commit.
-            conversation.insert_approved_proposal(proposal_id, request);
-        }
-
-        if transforms_to_removal {
-            // Fast removal: restrict the next commit to this target so it
-            // doesn't drag along unrelated approved work.
-            let target = evidence.as_ref().unwrap().target_member_id.clone();
-            conversation.set_urgent_commit_target(target);
-            force_freezing = true;
-        } else if evidence.as_ref().is_some_and(is_deadlock) {
-            // Layer 3: relax the steward gate so any member can produce
-            // the next commit. App caller calls `ConversationHandle::enter_recovery_mode()`
-            // when it sees this flag; cleared when a fresh election lands.
-            enter_recovery_mode = true;
-            force_freezing = true;
-        }
-    } else if is_owner {
-        conversation.mark_proposal_as_rejected(proposal_id);
-    }
-
-    if let Some(ev) = evidence.as_ref() {
-        if approved {
-            info!(
-                proposal_id,
-                target = %ShortId::new(&ev.target_member_id),
-                creator = %ShortId::new(&ev.creator_member_id),
-                "emergency criteria proposal accepted"
-            );
-        } else {
-            info!(
-                proposal_id,
-                creator = %ShortId::new(&ev.creator_member_id),
-                "emergency criteria proposal rejected"
-            );
-        }
-    }
-
-    Ok(ConsensusApplyResult {
-        election: None,
-        force_freezing,
-        queued_remove_target: removal_target,
-        enter_recovery_mode,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,15 +324,17 @@ mod tests {
         )
         .unwrap();
 
-        let outcome = result.election.expect("election outcome expected");
+        let ConsensusApplyResult::ElectionAccepted(outcome) = result else {
+            panic!("expected ElectionAccepted, got {result:?}");
+        };
         assert_eq!(outcome.election_epoch, 10);
         assert_eq!(outcome.proposed_stewards.len(), 5);
         assert_eq!(conversation.approved_proposals_count(), 0);
     }
 
-    /// NO on an election returns no outcome and leaves the approved queue empty.
+    /// NO on an election returns NoAction and leaves the approved queue empty.
     #[test]
-    fn election_no_returns_empty() {
+    fn election_no_returns_no_action() {
         let mut conversation = Conversation::new("test-conversation");
         let request = election_request(vec![member(1), member(2)], 10);
 
@@ -344,7 +349,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(result.election.is_none());
+        assert!(matches!(result, ConsensusApplyResult::NoAction));
         assert_eq!(conversation.approved_proposals_count(), 0);
     }
 
@@ -364,7 +369,9 @@ mod tests {
         )
         .unwrap();
 
-        let outcome = result.election.expect("election outcome expected");
+        let ConsensusApplyResult::ElectionAccepted(outcome) = result else {
+            panic!("expected ElectionAccepted, got {result:?}");
+        };
         assert_eq!(outcome.election_epoch, 5);
         assert_eq!(outcome.proposed_stewards.len(), 3);
         assert_eq!(conversation.approved_proposals_count(), 0);
@@ -388,8 +395,13 @@ mod tests {
         // First removal — non-owner path inserts straight into approved.
         let first_id = 10;
         let request = remove_request(target.clone());
-        apply_consensus_result(&mut conversation, first_id, true, &request.encode_to_vec())
-            .unwrap();
+        let first_result =
+            apply_consensus_result(&mut conversation, first_id, true, &request.encode_to_vec())
+                .unwrap();
+        assert!(matches!(
+            first_result,
+            ConsensusApplyResult::QueuedRemoval { .. }
+        ));
         assert_eq!(conversation.approved_proposals_count(), 1);
 
         // Second removal for the same target arrives under a different id.
@@ -399,7 +411,7 @@ mod tests {
             apply_consensus_result(&mut conversation, second_id, true, &request.encode_to_vec())
                 .unwrap();
 
-        assert!(result.election.is_none());
+        assert!(matches!(result, ConsensusApplyResult::NoAction));
         assert_eq!(
             conversation.approved_proposals_count(),
             1,
@@ -434,7 +446,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(result.election.is_none());
+        assert!(matches!(result, ConsensusApplyResult::NoAction));
         assert_eq!(conversation.approved_proposals_count(), 1);
         assert!(conversation.approved_proposals().contains_key(&pending_id));
         assert!(
@@ -454,7 +466,7 @@ mod tests {
     }
 
     #[test]
-    fn ecp_score_below_threshold_yes_marks_urgent_and_force_freezes() {
+    fn ecp_score_below_threshold_yes_returns_urgent_removal() {
         let mut conversation = Conversation::new("urgent-yes");
         let target = member(7);
 
@@ -463,8 +475,10 @@ mod tests {
 
         let result = apply_consensus_result(&mut conversation, 100, true, &payload).unwrap();
 
-        assert!(result.force_freezing, "ECP YES must signal force-Freezing");
-        assert!(result.election.is_none());
+        let ConsensusApplyResult::UrgentRemoval { target: out_target } = result else {
+            panic!("expected UrgentRemoval, got {result:?}");
+        };
+        assert_eq!(out_target, target);
         assert_eq!(
             conversation.urgent_commit_target(),
             Some(target.as_slice()),
@@ -485,7 +499,7 @@ mod tests {
 
         let result = apply_consensus_result(&mut conversation, 101, false, &payload).unwrap();
 
-        assert!(!result.force_freezing);
+        assert!(matches!(result, ConsensusApplyResult::NoAction));
         assert!(conversation.urgent_commit_target().is_none());
         assert_eq!(conversation.approved_proposals_count(), 0);
     }
@@ -498,21 +512,14 @@ mod tests {
     }
 
     #[test]
-    fn ecp_deadlock_yes_signals_recovery_mode_and_force_freezes() {
+    fn ecp_deadlock_yes_returns_recovery_mode_opened() {
         let mut conversation = Conversation::new("deadlock-yes");
 
         let request = deadlock_request(member(1));
         let payload = request.encode_to_vec();
         let result = apply_consensus_result(&mut conversation, 200, true, &payload).unwrap();
 
-        assert!(
-            result.force_freezing,
-            "Deadlock YES must signal force-Freezing"
-        );
-        assert!(
-            result.enter_recovery_mode,
-            "Deadlock YES must signal recovery-mode open"
-        );
+        assert!(matches!(result, ConsensusApplyResult::RecoveryModeOpened));
         assert_eq!(
             conversation.approved_proposals_count(),
             0,
@@ -522,14 +529,68 @@ mod tests {
     }
 
     #[test]
-    fn ecp_deadlock_no_does_not_signal_recovery_mode() {
+    fn ecp_deadlock_no_returns_no_action() {
         let mut conversation = Conversation::new("deadlock-no");
 
         let request = deadlock_request(member(1));
         let payload = request.encode_to_vec();
         let result = apply_consensus_result(&mut conversation, 201, false, &payload).unwrap();
 
-        assert!(!result.force_freezing);
-        assert!(!result.enter_recovery_mode);
+        assert!(matches!(result, ConsensusApplyResult::NoAction));
+    }
+
+    /// A regular (non-emergency) `RemoveMember` reached via consensus YES
+    /// enqueues into `approved_proposals` and produces no score ops.
+    #[test]
+    fn regular_remove_member_enqueues_without_score_ops() {
+        let mut conversation = Conversation::new("regular-yes");
+        let target = member(7);
+
+        let request = remove_request(target.clone());
+        let payload = request.encode_to_vec();
+
+        let proposal_id = 70;
+        conversation.store_voting_proposal(proposal_id, request);
+
+        apply_consensus_result(&mut conversation, proposal_id, true, &payload).unwrap();
+
+        assert!(crate::core::emergency_score_ops(&payload, true).is_empty());
+        assert_eq!(conversation.approved_proposals_count(), 1);
+    }
+
+    /// `apply_consensus_result` returns an error when the payload bytes
+    /// do not decode as a `ConversationUpdateRequest`.
+    #[test]
+    fn invalid_payload_returns_error() {
+        let mut conversation = Conversation::new("invalid-payload");
+        let result = apply_consensus_result(&mut conversation, 999, true, &[0xFF, 0xFF]);
+        assert!(result.is_err());
+    }
+
+    /// A non-score emergency (e.g. `BrokenCommit`) approved by consensus
+    /// is consumed without queuing a `RemoveMember` — only score-below-
+    /// threshold ECPs transform into a removal.
+    #[test]
+    fn regular_emergency_yes_does_not_queue_remove_member() {
+        let mut conversation = Conversation::new("no-transform");
+        let creator = member(1);
+        let target = member(7);
+
+        let request = ViolationEvidence::broken_commit(target, 0, Vec::<u8>::new())
+            .with_creator(creator)
+            .into_update_request()
+            .unwrap();
+        let payload = request.encode_to_vec();
+
+        let proposal_id = 300;
+        conversation.store_voting_proposal(proposal_id, request);
+
+        apply_consensus_result(&mut conversation, proposal_id, true, &payload).unwrap();
+
+        assert_eq!(
+            conversation.approved_proposals_count(),
+            0,
+            "regular emergencies are consumed, not transformed to RemoveMember"
+        );
     }
 }

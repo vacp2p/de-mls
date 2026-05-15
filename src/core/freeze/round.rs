@@ -53,7 +53,7 @@ pub fn compute_commit_hash(commit_message: &[u8]) -> Vec<u8> {
 /// Buffer a remote commit candidate. Enforces non-empty proposals/commit,
 /// valid MLS wire kinds, non-empty `steward_identity`, and non-duplicate
 /// hash. No MLS state is mutated.
-pub fn process_commit_candidate<M: MlsService>(
+pub fn buffer_commit_candidate<M: MlsService>(
     conversation: &mut Conversation,
     mls: &M,
     candidate_msg: CommitCandidate,

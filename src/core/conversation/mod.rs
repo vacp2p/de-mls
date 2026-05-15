@@ -14,6 +14,7 @@ mod config;
 mod conversation;
 mod handle;
 mod state_machine;
+mod util;
 
 pub use config::{
     ConversationConfig, DEFAULT_COMMIT_INACTIVITY_DURATION, DEFAULT_CONSENSUS_TIMEOUT,
@@ -23,7 +24,7 @@ pub use config::{
 };
 pub use conversation::{
     BufferedCommitCandidate, Conversation, FreezeBufferOutcome, PendingUpdate, ProposalId,
-    member_set, self_leave_proposal_id, target_identity_of,
 };
 pub use handle::ConversationHandle;
 pub use state_machine::{ConversationState, ConversationStateMachine, OperatingMode};
+pub use util::{member_set, self_leave_proposal_id, target_identity_of};

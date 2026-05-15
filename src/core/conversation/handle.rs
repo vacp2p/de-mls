@@ -347,4 +347,28 @@ mod tests {
             .expect_err("empty approved queue should be rejected");
         assert!(matches!(err, CoreError::NoProposals));
     }
+
+    /// An emergency-criteria proposal in the approved queue must surface as
+    /// `UnexpectedNonMlsProposals` — only MLS-producing payloads belong in a
+    /// commit. The error carries the offending proposal ids so the
+    /// orchestrator can drop them.
+    #[test]
+    fn create_commit_candidate_errors_on_emergency_in_approved_queue() {
+        use crate::protos::de_mls::messages::v1::ViolationEvidence;
+
+        let mut handle = make_handle(StubStewardList::steward());
+        let emergency = ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new())
+            .with_creator(vec![0x01])
+            .into_update_request()
+            .unwrap();
+        handle.conversation.insert_approved_proposal(50, emergency);
+
+        let err = handle
+            .create_commit_candidate(b"me", b"app")
+            .expect_err("emergency in approved queue should be rejected");
+        let CoreError::UnexpectedNonMlsProposals { proposal_ids } = err else {
+            panic!("expected UnexpectedNonMlsProposals, got {err:?}");
+        };
+        assert_eq!(proposal_ids, vec![50]);
+    }
 }

@@ -1,7 +1,8 @@
-//! App-side per-conversation runner: wraps a [`crate::core::ConversationHandle`]
-//! together with a [`crate::app::PhaseTimer`] and the per-proposal
-//! auto-vote timer registry. Coordinator methods compose state-machine
-//! transitions with phase-timer anchors so callers update both in one call.
+//! [`SessionRunner`] struct, constructor, and the state-machine + phase-timer
+//! coordinators that compose [`crate::core::ConversationHandle`] with
+//! [`crate::app::PhaseTimer`] under one lock. Per-conversation method
+//! bodies (proposal submission, voting, inbound dispatch, etc.) live in
+//! sibling modules and extend `SessionRunner` via additional `impl` blocks.
 
 use std::{
     collections::HashMap,
@@ -9,38 +10,81 @@ use std::{
     time::Duration,
 };
 
-use tokio::task::JoinHandle;
+use tokio::{
+    sync::broadcast,
+    task::{JoinHandle, spawn_blocking},
+};
 use tracing::info;
 
 use crate::{
     app::PhaseTimer,
     core::{
-        Conversation, ConversationConfig, ConversationHandle, ConversationPluginsFactory,
-        ConversationState, ConversationStateMachine,
+        ConsensusPlugin, Conversation, ConversationConfig, ConversationHandle,
+        ConversationPluginsFactory, ConversationState, ConversationStateMachine, PluginConsensus,
+        SessionEvent,
     },
 };
+
+/// Default capacity for a session's [`SessionEvent`] broadcast channel.
+/// Sized for bursty proposal sessions (proposals + votes + UI pushes in
+/// flight); subscribers that fall behind by more than this lose events.
+const SESSION_EVENT_CAPACITY: usize = 256;
 
 /// Per-conversation auto-vote timer registry. Spawned when a proposal first
 /// becomes visible locally (own submit or peer inbound); cancelled on
 /// manual vote, consensus resolution, or conversation leave.
 pub(crate) type AutoVoteTimers = Arc<Mutex<HashMap<u32, JoinHandle<()>>>>;
 
-pub struct SessionRunner<CP: ConversationPluginsFactory> {
+pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
+    /// Conversation name. Identifies this session in the User registry and
+    /// is used to construct scope keys for consensus operations.
+    pub(crate) conversation_name: String,
     pub(crate) handle: ConversationHandle<CP>,
+    /// Per-conversation consensus service. Owns this conversation's scope
+    /// in the shared storage and a private event bus. Constructed at
+    /// conversation creation by `User::build_consensus_service` and held
+    /// here so consensus calls hit the local service directly without
+    /// User-level lookup. `pub` so integrators can reach
+    /// `session.consensus.event_bus().subscribe()` for per-conv consensus
+    /// event forwarding.
+    pub consensus: PluginConsensus<P>,
     /// Wall-clock anchor combined with `handle.state_machine` by
     /// coordinator methods.
-    pub(crate) phase_timer: PhaseTimer,
+    phase_timer: PhaseTimer,
     /// Per-proposal auto-vote timers. The spawned task holds a clone of
     /// this `Arc` so it can self-clean on completion; coordinators use
     /// `cancel_auto_vote` / `cancel_all_auto_votes` to abort early.
     pub(crate) auto_vote_timers: AutoVoteTimers,
+    /// Synchronous outbound transport (cloned from `User`). Per-session
+    /// methods reach this via [`Self::send_outbound`] which wraps
+    /// [`crate::ds::DeliveryService::send`] in `spawn_blocking`.
+    transport: Arc<dyn crate::ds::DeliveryService>,
+    /// Cached identity bytes (cloned from `User`). Used by per-session
+    /// methods that need the local identity without re-walking the
+    /// `Identity` trait.
+    pub(crate) self_identity: Arc<[u8]>,
+    /// Cached display form of the local identity (e.g. checksummed `0x…`
+    /// hex). Stable for the lifetime of the runner; populated at
+    /// construction from `User.identity.identity_display()`. Used by
+    /// session methods (`send_app_message`) that need the `sender` field
+    /// without re-walking the `Identity` trait + allocating each call.
+    pub(crate) identity_display: Arc<str>,
+    /// Per-User instance UUID (cloned from `User`). Tagged on every
+    /// outbound packet for self-message filtering.
+    pub(crate) app_id: Arc<[u8]>,
+    /// Per-session notification channel. Integrators subscribe via
+    /// [`Self::subscribe`] and consume [`SessionEvent`]s for UI / audit.
+    /// Fire-and-forget; no failure path back into the session.
+    events: broadcast::Sender<SessionEvent>,
 }
 
-impl<CP: ConversationPluginsFactory> SessionRunner<CP> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Build a fresh runner. Creator path passes `Some(mls)`; joiner
     /// path passes `None` and attaches the MLS service later via
     /// `handle.attach_mls`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        conversation_name: String,
         conversation: Conversation,
         mls: Option<CP::Mls>,
         state_machine: ConversationStateMachine,
@@ -48,8 +92,15 @@ impl<CP: ConversationPluginsFactory> SessionRunner<CP> {
         config: ConversationConfig,
         scoring: CP::Scoring,
         steward_list: CP::StewardList,
+        consensus: PluginConsensus<P>,
+        transport: Arc<dyn crate::ds::DeliveryService>,
+        self_identity: Arc<[u8]>,
+        identity_display: Arc<str>,
+        app_id: Arc<[u8]>,
     ) -> Self {
+        let (events, _initial_rx) = broadcast::channel(SESSION_EVENT_CAPACITY);
         Self {
+            conversation_name,
             handle: ConversationHandle::new(
                 conversation,
                 mls,
@@ -58,9 +109,42 @@ impl<CP: ConversationPluginsFactory> SessionRunner<CP> {
                 scoring,
                 steward_list,
             ),
+            consensus,
             phase_timer,
             auto_vote_timers: Arc::new(Mutex::new(HashMap::new())),
+            transport,
+            self_identity,
+            identity_display,
+            app_id,
+            events,
         }
+    }
+
+    /// Subscribe to per-session [`SessionEvent`] notifications. Each call
+    /// returns a fresh receiver; late subscribers miss earlier events.
+    pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
+        self.events.subscribe()
+    }
+
+    /// Emit a [`SessionEvent`] on the session's broadcast channel. Silently
+    /// drops the event when there are no live subscribers — events are
+    /// fire-and-forget.
+    pub(crate) fn emit_event(&self, event: SessionEvent) {
+        let _ = self.events.send(event);
+    }
+
+    /// Send an outbound packet via the session's transport. Wraps the
+    /// synchronous [`crate::ds::DeliveryService::send`] in `spawn_blocking`
+    /// so the async context isn't blocked.
+    pub(crate) async fn send_outbound(
+        &self,
+        packet: crate::ds::OutboundPacket,
+    ) -> Result<String, crate::app::UserError> {
+        let transport = Arc::clone(&self.transport);
+        let send_result = spawn_blocking(move || transport.send(packet))
+            .await
+            .expect("transport send task panicked");
+        Ok(send_result?)
     }
 
     // ── Auto-vote timers ────────────────────────────────────────────
@@ -129,9 +213,6 @@ impl<CP: ConversationPluginsFactory> SessionRunner<CP> {
 
     /// `true` once 3× `commit_inactivity_duration` has passed in
     /// `PendingJoin` without a welcome.
-    ///
-    /// Pipeline: consensus (~15s) + commit_inactivity + freeze (≈ commit/2)
-    /// = ~1.5× commit-inactivity + consensus overhead. Use 3× for safety margin.
     pub(crate) fn is_pending_join_expired(&self) -> bool {
         self.handle.current_state() == ConversationState::PendingJoin
             && self
@@ -187,15 +268,21 @@ impl<CP: ConversationPluginsFactory> SessionRunner<CP> {
 mod tests {
     use super::*;
     use crate::core::Conversation;
-    use crate::test_fixtures::{StubPluginsFactory, StubScoring, StubStewardList, UnusedMls};
+    use crate::core::DefaultConsensusPlugin;
+    use crate::test_fixtures::{
+        StubPluginsFactory, StubScoring, StubStewardList, UnusedMls, make_test_consensus_service,
+    };
     use std::time::Instant;
 
-    fn make_runner_pending_join(commit_inactivity: Duration) -> SessionRunner<StubPluginsFactory> {
+    fn make_runner_pending_join(
+        commit_inactivity: Duration,
+    ) -> SessionRunner<DefaultConsensusPlugin, StubPluginsFactory> {
         let config = ConversationConfig {
             commit_inactivity_duration: commit_inactivity,
             ..ConversationConfig::default()
         };
         let mut runner = SessionRunner::new(
+            "g".to_string(),
             Conversation::new("g"),
             Some(UnusedMls),
             ConversationStateMachine::new_as_pending_join(),
@@ -203,13 +290,19 @@ mod tests {
             config,
             StubScoring,
             StubStewardList::member(),
+            make_test_consensus_service(),
+            Arc::new(crate::test_fixtures::UnusedTransport),
+            Arc::from(&b"test-identity"[..]),
+            Arc::from("0xtest-display"),
+            Arc::from(&[0u8; 16][..]),
         );
         runner.phase_timer.start();
         runner
     }
 
-    fn make_runner_working() -> SessionRunner<StubPluginsFactory> {
+    fn make_runner_working() -> SessionRunner<DefaultConsensusPlugin, StubPluginsFactory> {
         SessionRunner::new(
+            "g".to_string(),
             Conversation::new("g"),
             Some(UnusedMls),
             ConversationStateMachine::new_as_member(),
@@ -217,6 +310,11 @@ mod tests {
             ConversationConfig::default(),
             StubScoring,
             StubStewardList::member(),
+            make_test_consensus_service(),
+            Arc::new(crate::test_fixtures::UnusedTransport),
+            Arc::from(&b"test-identity"[..]),
+            Arc::from("0xtest-display"),
+            Arc::from(&[0u8; 16][..]),
         )
     }
 

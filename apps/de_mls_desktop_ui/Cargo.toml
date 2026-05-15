@@ -27,5 +27,5 @@ parking_lot = "0.12.5"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2.3"
-hashgraph-like-consensus = "0.2.0"
+hashgraph-like-consensus = "0.4.0"
 prost = "0.13.5"

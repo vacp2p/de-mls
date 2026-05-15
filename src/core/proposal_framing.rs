@@ -1,19 +1,17 @@
-//! Wire framing helpers: welcome-subtopic packets and consensus
-//! `CreateProposalRequest` construction. Conversation construction lives on
-//! [`Conversation::new`](crate::core::Conversation::new);
-//! application-message framing lives on
-//! [`MlsService::build_message`](crate::mls_crypto::MlsService::build_message).
+//! Wire framing helpers for welcome-subtopic packets. Conversation
+//! construction lives on
+//! [`Conversation::new`](crate::core::Conversation::new); application-message
+//! framing lives on
+//! [`MlsService::build_message`](crate::mls_crypto::MlsService::build_message);
+//! consensus `CreateProposalRequest` construction lives in the
+//! `crate::app::session` consensus-bridge helpers.
 
-use hashgraph_like_consensus::types::CreateProposalRequest;
 use prost::Message;
 
 use crate::{
-    core::error::CoreError,
     ds::{OutboundPacket, WELCOME_SUBTOPIC},
     mls_crypto::KeyPackageBytes,
-    protos::de_mls::messages::v1::{
-        ConversationUpdateRequest, InvitationToJoin, UserKeyPackage, WelcomeMessage,
-    },
+    protos::de_mls::messages::v1::{InvitationToJoin, UserKeyPackage, WelcomeMessage},
 };
 
 // ─────────────────────────── Welcome-subtopic framing ───────────────────────────
@@ -57,27 +55,4 @@ pub(crate) fn build_invitation_packet(
         conversation_name,
         app_id,
     )
-}
-
-// ─────────────────────────── Consensus Proposal Building ───────────────────────────
-
-/// Build the consensus-library `CreateProposalRequest` for a
-/// `ConversationUpdateRequest`. The caller (app layer) submits the
-/// resulting request via `PluginConsensus::create_proposal_with_config`.
-pub fn build_create_proposal_request(
-    request: &ConversationUpdateRequest,
-    creator_id: &[u8],
-    expected_voters: u32,
-    proposal_expiration_secs: u64,
-    liveness_criteria_yes: bool,
-) -> Result<CreateProposalRequest, CoreError> {
-    let payload = request.encode_to_vec();
-    Ok(CreateProposalRequest::new(
-        uuid::Uuid::new_v4().to_string(),
-        payload,
-        creator_id.to_vec(),
-        expected_voters,
-        proposal_expiration_secs,
-        liveness_criteria_yes,
-    )?)
 }

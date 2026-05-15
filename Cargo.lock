@@ -3674,9 +3674,9 @@ checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
 
 [[package]]
 name = "hashgraph-like-consensus"
-version = "0.2.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "758bbc016729bebda4b7d82f4be896c3c456e2ec82c6a8b425fe6b972db3c9f4"
+checksum = "5d846ed9b2da5aa98872bbc7a0c143ccb7a4b2145d41bb4d5f9ad298030b38d5"
 dependencies = [
  "alloy",
  "alloy-signer",

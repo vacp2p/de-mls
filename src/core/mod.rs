@@ -3,7 +3,7 @@
 //! Wraps MLS cryptography, consensus voting, and message routing. Transport,
 //! UI, and state management live in the app layer.
 //!
-//! Integrators implement [`crate::core::ConversationEventHandler`] (transport
+//! Integrators implement `SessionEvent` / `ConversationLifecycle` (transport
 //! + UI delivery) and feed inbound packets to [`crate::core::process_inbound`],
 //! then dispatch the returned [`crate::core::ProcessResult`].
 //! [`crate::core::DefaultConsensusPlugin`] bundles in-memory backends for tests
@@ -12,11 +12,12 @@
 //! Submodules: `conversation` (per-conversation state, handle, state machine,
 //! config), `consensus` (pure consensus result application),
 //! `consensus_plugin` ([`crate::core::ConsensusPlugin`] +
-//! [`crate::core::DefaultConsensusPlugin`]), `events`
-//! ([`crate::core::ConversationEventHandler`]), `freeze` (round selection
-//! + apply), `inbound` (app-subtopic packet routing), `peer_scoring`
-//! (scoring plug-in contract), `plugins`
-//! ([`crate::core::ConversationPluginsFactory`] bundle), `process_result`
+//! [`crate::core::DefaultConsensusPlugin`]), `conversation_plugins`
+//! ([`crate::core::ConversationPluginsFactory`] — the per-conversation
+//! plug-in factory bundle), `events` (`SessionEvent` /
+//! `ConversationLifecycle`), `freeze` (round selection + apply),
+//! `inbound` (app-subtopic packet routing), `peer_scoring`
+//! (scoring plug-in contract), `process_result`
 //! ([`crate::core::ProcessResult`]), `proposal_framing` (welcome-subtopic
 //! + consensus-library framing helpers), `proposal_kind`
 //! ([`crate::core::ProposalKind`] classifier), `steward_list`
@@ -25,12 +26,13 @@
 mod consensus;
 mod consensus_plugin;
 mod conversation;
+mod conversation_plugins;
 mod error;
 mod events;
 mod freeze;
 mod inbound;
+mod key_package;
 mod peer_scoring;
-mod plugins;
 mod process_result;
 mod proposal_framing;
 mod proposal_kind;
@@ -39,7 +41,7 @@ mod steward_list;
 // ── Core conversation operations ──
 pub use freeze::{FreezeFinalizeResult, FreezeOutcome, compute_commit_hash, finalize_freeze_round};
 pub use inbound::process_inbound;
-pub use proposal_framing::{build_create_proposal_request, build_key_package_message};
+pub use proposal_framing::build_key_package_message;
 
 // ── Per-conversation types: state, handle, state machine, config ──
 pub use conversation::{
@@ -62,8 +64,11 @@ pub use peer_scoring::{
 // ── Error type ──
 pub use error::CoreError;
 
-// ── Event handler trait and callback error ──
-pub use events::{CallbackError, ConversationEventHandler};
+// ── Session-event types ──
+pub use events::{ConversationLifecycle, SessionEvent};
+
+// ── Key package generation trait (identity-bound, no conversation) ──
+pub use key_package::KeyPackageProvider;
 
 // ── Proposal classification ──
 pub use proposal_kind::ProposalKind;
@@ -78,7 +83,7 @@ pub use steward_list::{
 pub use consensus_plugin::{ConsensusPlugin, DefaultConsensusPlugin, PluginConsensus};
 
 // ── Per-conversation plug-in bundle ──
-pub use plugins::ConversationPluginsFactory;
+pub use conversation_plugins::ConversationPluginsFactory;
 
 // ── Process results ──
 pub use process_result::{NoopReason, ProcessResult};

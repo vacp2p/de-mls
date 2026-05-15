@@ -7,19 +7,50 @@
 //! into an `unreachable!()` branch, that's a sign the test is touching
 //! state it shouldn't be (and the panic location pinpoints the leak).
 
+use alloy::signers::local::PrivateKeySigner;
+use hashgraph_like_consensus::signing::EthereumConsensusSigner;
+
 use crate::{
     core::{
-        ConversationPluginsFactory, ElectionDecision, PeerScoringEvent, PeerScoringPlugin, ScoreOp,
-        ScoreSnapshot, ScoringConfig, StewardList, StewardListConfig, StewardListEvent,
-        StewardListPlugin,
+        ConsensusPlugin, ConversationPluginsFactory, DefaultConsensusPlugin, ElectionDecision,
+        PeerScoringEvent, PeerScoringPlugin, PluginConsensus, ScoreOp, ScoreSnapshot,
+        ScoringConfig, StewardList, StewardListConfig, StewardListEvent, StewardListPlugin,
     },
     ds::OutboundPacket,
     mls_crypto::{
-        CommitCandidate, DecryptResult, KeyPackageBytes, MlsCommitInput, MlsError, MlsMessageKind,
-        MlsService, StagedCandidateResult,
+        CommitCandidate, DecryptResult, MlsCommitInput, MlsError, MlsMessageKind, MlsService,
+        StagedCandidateResult,
     },
     protos::de_mls::messages::v1::AppMessage,
 };
+
+/// Build a `PluginConsensus<DefaultConsensusPlugin>` with a random signer for
+/// tests that need a `SessionRunner` but never exercise consensus operations.
+pub(crate) fn make_test_consensus_service() -> PluginConsensus<DefaultConsensusPlugin> {
+    PluginConsensus::<DefaultConsensusPlugin>::new_with_components(
+        DefaultConsensusPlugin::new_storage(),
+        DefaultConsensusPlugin::new_event_bus(),
+        EthereumConsensusSigner::new(PrivateKeySigner::random()),
+        10,
+    )
+}
+
+/// Transport stub for tests. `send` is unreachable (tests should never push
+/// outbound), and `subscribe` returns a disconnected receiver.
+pub(crate) struct UnusedTransport;
+
+impl crate::ds::DeliveryService for UnusedTransport {
+    fn send(
+        &self,
+        _: crate::ds::OutboundPacket,
+    ) -> Result<String, crate::ds::DeliveryServiceError> {
+        unreachable!("UnusedTransport::send called")
+    }
+    fn subscribe(&self) -> std::sync::mpsc::Receiver<crate::ds::InboundPacket> {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        rx
+    }
+}
 
 /// MLS service that errors on every operation. Lets tests construct a
 /// `ConversationHandle` whose early-return paths never invoke MLS.
@@ -246,9 +277,6 @@ impl ConversationPluginsFactory for StubPluginsFactory {
         unreachable!()
     }
     fn welcome_mls(&self, _: &[u8]) -> Result<Option<Self::Mls>, MlsError> {
-        unreachable!()
-    }
-    fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
         unreachable!()
     }
     fn make_scoring(&self, _: &ScoringConfig) -> Self::Scoring {

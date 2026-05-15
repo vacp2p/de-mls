@@ -1,8 +1,8 @@
-//! [`DefaultConversationPluginsFactory`] — reference implementation of the
-//! [`crate::core::ConversationPluginsFactory`] trait, used by the convenience
-//! [`super::User::with_private_key`] constructor. In-memory MLS storage
-//! shared across per-conversation services; reference scoring + steward
-//! implementations.
+//! [`DefaultConversationPluginsFactory`] — reference impl of
+//! [`crate::core::ConversationPluginsFactory`] used by
+//! [`super::super::User::with_private_key`]. Builds per-conversation MLS,
+//! scoring, and steward-list plug-ins; shares MLS storage + credentials
+//! across every per-conversation service via `Arc`.
 
 use std::sync::Arc;
 
@@ -12,7 +12,7 @@ use crate::{
         ConversationPluginsFactory, DeterministicStewardList, PeerScoringService, ScoringConfig,
         StewardListConfig, default_score_deltas,
     },
-    mls_crypto::{KeyPackageBytes, MemoryDeMlsStorage, MlsCredentials, MlsError, OpenMlsService},
+    mls_crypto::{MemoryDeMlsStorage, MlsCredentials, MlsError, OpenMlsService},
 };
 
 /// MLS service type for the default `DefaultConsensusPlugin`-backed `User`. Uses
@@ -31,9 +31,9 @@ pub type DefaultPeerScoring = PeerScoringService<InMemoryPeerScoreStorage>;
 pub type DefaultStewardList = DeterministicStewardList;
 
 /// Default plug-in bundle used by the convenience
-/// [`super::User::with_private_key`] constructor. In-memory MLS storage
-/// shared across per-conversation services; reference scoring + steward
-/// implementations.
+/// [`super::super::User::with_private_key`] constructor. In-memory MLS
+/// storage shared across per-conversation services; reference scoring +
+/// steward implementations.
 pub struct DefaultConversationPluginsFactory {
     pub(crate) storage: Arc<MemoryDeMlsStorage>,
     pub(crate) credentials: Arc<MlsCredentials>,
@@ -57,13 +57,6 @@ impl ConversationPluginsFactory for DefaultConversationPluginsFactory {
             welcome_bytes,
             Arc::clone(&self.storage),
             Arc::clone(&self.credentials),
-        )
-    }
-
-    fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
-        OpenMlsService::<Arc<MemoryDeMlsStorage>>::generate_key_package(
-            &self.storage,
-            &self.credentials,
         )
     }
 

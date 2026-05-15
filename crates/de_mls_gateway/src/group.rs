@@ -1,5 +1,5 @@
 use de_mls::{
-    app::{FreezeTimeoutStatus, UserError},
+    app::{DispatchOutcome, FreezeTimeoutStatus, PendingJoinTick, SessionRunner, UserError},
     ds::WakuDeliveryService,
     protos::de_mls::messages::v1::BanRequest,
 };
@@ -7,7 +7,7 @@ use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
 
 use crate::{
     Gateway, UserRef,
-    forwarder::{display_batch, load_member_info},
+    forwarder::{display_batch, load_member_info, lookup_session},
 };
 
 /// True when a [`UserError`] surfaced during the polling loop should end
@@ -21,7 +21,7 @@ fn is_polling_fatal(err: &UserError) -> bool {
         UserError::ConversationAlreadyExists
         | UserError::ConversationBlocked(_)
         | UserError::PartialFreeze
-        | UserError::Callback(_)
+        | UserError::Transport(_)
         | UserError::Core(_)
         | UserError::Consensus(_)
         | UserError::Message(_)
@@ -67,11 +67,9 @@ impl Gateway<WakuDeliveryService> {
             .start_conversation(&conversation_name, false)
             .await?;
         core.topics.add_many(&conversation_name).await;
-        user_ref
-            .write()
-            .await
-            .send_kp_message(&conversation_name)
-            .await?;
+        let key_package = user_ref.read().await.generate_key_package()?;
+        let session = lookup_session(&user_ref, &conversation_name).await?;
+        session.read().await.send_kp_message(key_package).await?;
         tracing::info!(group = %conversation_name, "key package sent");
 
         // Phase 1 (PendingJoin): Poll every 5s until joined or timed out
@@ -81,31 +79,32 @@ impl Gateway<WakuDeliveryService> {
         let evt_tx_clone = self.evt_tx.clone();
         tokio::spawn(async move {
             // Phase 1: Wait for join
-            loop {
+            let joined = loop {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                match user_clone
-                    .read()
-                    .await
-                    .check_pending_join(&group_name_clone)
-                    .await
-                {
-                    Ok(true) => continue, // still waiting
-                    Ok(false) => break,   // joined or timed out
-                    Err(e) => {
-                        tracing::error!(group = %group_name_clone, error = %e, "check_pending_join failed");
-                        break;
+                let Ok(session) = lookup_session(&user_clone, &group_name_clone).await else {
+                    break false;
+                };
+                match SessionRunner::check_pending_join(&session).await {
+                    PendingJoinTick::StillPending => continue,
+                    PendingJoinTick::NotPending => {
+                        // Transitioned out of PendingJoin (typically Working
+                        // after welcome merge). Confirm via state read.
+                        let state = session.read().await.get_conversation_state();
+                        break state == de_mls::app::ConversationState::Working;
+                    }
+                    PendingJoinTick::Expired => {
+                        if let Err(e) = user_clone
+                            .read()
+                            .await
+                            .finalize_self_leave(&group_name_clone)
+                            .await
+                        {
+                            tracing::error!(group = %group_name_clone, error = %e, "pending-join cleanup failed");
+                        }
+                        break false;
                     }
                 }
-            }
-
-            // Check if we actually joined
-            let joined = user_clone
-                .read()
-                .await
-                .get_conversation_state(&group_name_clone)
-                .await
-                .map(|s| s == de_mls::app::ConversationState::Working)
-                .unwrap_or(false);
+            };
 
             if !joined {
                 tracing::debug!(group = %group_name_clone, "join failed");
@@ -133,13 +132,12 @@ impl Gateway<WakuDeliveryService> {
     ) {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            let freeze_status = match user
-                .read()
-                .await
-                .poll_freeze_status(&conversation_name)
-                .await
-            {
-                Ok(status) => status,
+            let Ok(session) = lookup_session(&user, &conversation_name).await else {
+                tracing::warn!(group = %conversation_name, "polling loop: session gone");
+                break;
+            };
+            let freeze_outcome = match SessionRunner::poll_freeze_status(&session).await {
+                Ok(o) => o,
                 Err(e) => {
                     if is_polling_fatal(&e) {
                         tracing::warn!(group = %conversation_name, error = %e, "polling loop exiting");
@@ -148,14 +146,22 @@ impl Gateway<WakuDeliveryService> {
                     continue;
                 }
             };
+            let (freeze_status, dispatch) = freeze_outcome;
+            if matches!(dispatch, DispatchOutcome::LeaveRequested) {
+                if let Err(e) = user
+                    .read()
+                    .await
+                    .finalize_self_leave(&conversation_name)
+                    .await
+                {
+                    tracing::error!(group = %conversation_name, error = %e, "self-leave cleanup failed");
+                }
+                break;
+            }
             match freeze_status {
                 FreezeTimeoutStatus::NotFreezing => {
-                    match user
-                        .read()
-                        .await
-                        .check_member_freeze(&conversation_name)
-                        .await
-                    {
+                    let mut runner = session.write().await;
+                    match runner.check_member_freeze().await {
                         Ok(true) => { /* entered Freezing (+ created candidate if steward) */ }
                         Ok(false) => {}
                         Err(e) => {
@@ -168,18 +174,12 @@ impl Gateway<WakuDeliveryService> {
                     }
                 }
                 FreezeTimeoutStatus::StillFreezing => {
-                    if let Ok((received, expected)) = user
-                        .read()
-                        .await
-                        .get_freeze_candidate_count(&conversation_name)
-                        .await
-                    {
-                        let _ = evt_tx.unbounded_send(AppEvent::FreezeCandidates {
-                            conversation_id: conversation_name.clone(),
-                            received,
-                            expected,
-                        });
-                    }
+                    let (received, expected) = session.read().await.get_freeze_candidate_count();
+                    let _ = evt_tx.unbounded_send(AppEvent::FreezeCandidates {
+                        conversation_id: conversation_name.clone(),
+                        received,
+                        expected,
+                    });
                     continue;
                 }
                 FreezeTimeoutStatus::Applied => {}
@@ -201,10 +201,11 @@ impl Gateway<WakuDeliveryService> {
         message: String,
     ) -> anyhow::Result<()> {
         let user_ref = self.user()?;
-        user_ref
+        let session = lookup_session(&user_ref, &conversation_name).await?;
+        session
             .read()
             .await
-            .send_app_message(&conversation_name, message.into_bytes())
+            .send_app_message(message.into_bytes())
             .await?;
         tracing::debug!(group = %conversation_name, "app message sent");
         Ok(())
@@ -216,17 +217,14 @@ impl Gateway<WakuDeliveryService> {
         user_to_ban: String,
     ) -> anyhow::Result<()> {
         let user_ref = self.user()?;
+        let session = lookup_session(&user_ref, &conversation_name).await?;
 
         let ban_request = BanRequest {
             user_to_ban: user_to_ban.clone(),
             conversation_name: conversation_name.clone(),
         };
 
-        user_ref
-            .write()
-            .await
-            .process_ban_request(ban_request, &conversation_name)
-            .await?;
+        SessionRunner::process_ban_request(&session, ban_request).await?;
 
         Ok(())
     }
@@ -238,14 +236,8 @@ impl Gateway<WakuDeliveryService> {
         vote: bool,
     ) -> anyhow::Result<()> {
         let user_ref = self.user()?;
-
-        // process_user_vote now sends via handler internally
-        user_ref
-            .write()
-            .await
-            .process_user_vote(&conversation_name, proposal_id, vote)
-            .await?;
-
+        let session = lookup_session(&user_ref, &conversation_name).await?;
+        SessionRunner::process_user_vote(&session, proposal_id, vote).await?;
         Ok(())
     }
 
@@ -268,21 +260,15 @@ impl Gateway<WakuDeliveryService> {
 
     pub async fn get_steward_status(&self, conversation_name: String) -> anyhow::Result<bool> {
         let user_ref = self.user()?;
-        let is_steward = user_ref
-            .read()
-            .await
-            .is_steward_for_conversation(&conversation_name)
-            .await?;
+        let session = lookup_session(&user_ref, &conversation_name).await?;
+        let is_steward = session.read().await.is_steward_for_self();
         Ok(is_steward)
     }
 
     pub async fn get_group_state(&self, conversation_name: String) -> anyhow::Result<String> {
         let user_ref = self.user()?;
-        let state = user_ref
-            .read()
-            .await
-            .get_conversation_state(&conversation_name)
-            .await?;
+        let session = lookup_session(&user_ref, &conversation_name).await?;
+        let state = session.read().await.get_conversation_state();
         Ok(state.to_string())
     }
 
@@ -292,11 +278,11 @@ impl Gateway<WakuDeliveryService> {
         conversation_name: String,
     ) -> anyhow::Result<Vec<(String, String)>> {
         let user_ref = self.user()?;
-        let proposals = user_ref
+        let session = lookup_session(&user_ref, &conversation_name).await?;
+        let proposals = session
             .read()
             .await
-            .get_approved_proposal_for_current_epoch(&conversation_name)
-            .await?;
+            .get_approved_proposal_for_current_epoch();
         Ok(display_batch(&proposals))
     }
 
