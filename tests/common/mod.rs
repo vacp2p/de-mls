@@ -5,11 +5,16 @@
 //! adding `mod common;` to any test file. Helpers carry `#[allow(dead_code)]`
 //! at the module level because not every binary exercises every helper.
 //!
-//! New SessionRunner-driven tests should import from [`session_fixtures`]
-//! (User-level helpers, packet capture). The lower-level `StewardHandle` /
-//! `JoinerHandle` / `process_inbound_compat` / `build_commit_candidate`
-//! shims here predate the per-conv-consensus refactor and are kept for the
-//! forgery-focused violation tests; new tests should not use them.
+//! Two distinct fixture surfaces live here:
+//!
+//! - [`session_fixtures`] is the public-surface fixture set: `User` +
+//!   `SessionRunner` driven through `process_inbound_packet`, transport
+//!   capture, polling helpers. Default for new tests.
+//! - The low-level helpers in this file (`StewardHandle`, `JoinerHandle`,
+//!   `process_inbound_compat`, `build_commit_candidate`) let a test reach
+//!   into `core::process_inbound` and the MLS layer directly, which is
+//!   what the forgery / adversarial-input tests in `core_violations.rs`
+//!   need. New tests should prefer [`session_fixtures`].
 #![allow(dead_code)]
 
 pub mod session_fixtures;
@@ -236,8 +241,8 @@ pub fn process_inbound_compat(
             }
             Some(welcome_message::Payload::InvitationToJoin(_)) => {
                 panic!(
-                    "InvitationToJoin no longer flows through core::process_inbound; \
-                     use JoinerHandle::accept_welcome_packet"
+                    "InvitationToJoin is handled by the User layer; \
+                     tests using this shim should call JoinerHandle::accept_welcome_packet"
                 );
             }
             None => Ok(ProcessResult::Noop(NoopReason::UnknownAppMessage)),
@@ -431,10 +436,10 @@ pub fn steward_add_joiner(
 ) -> (OutboundPacket, OutboundPacket) {
     static PROPOSAL_COUNTER: AtomicU32 = AtomicU32::new(100);
 
-    // The welcome subtopic dispatch moved to the User layer (constructing a
-    // service from a welcome needs the app-supplied factory). Tests still
-    // drive packet relay manually, so decode the KP envelope here and
-    // surface the same membership-change request that core used to emit.
+    // The User-layer welcome handler constructs a service from a welcome
+    // via the app-supplied factory. Tests that drive packet relay
+    // manually still need the inviter side: decode the KP envelope here
+    // and synthesise the matching membership-change request directly.
     let welcome_msg = WelcomeMessage::decode(joiner_kp_packet.payload.as_slice()).unwrap();
     let user_kp = match welcome_msg.payload {
         Some(welcome_message::Payload::UserKeyPackage(kp)) => kp,
