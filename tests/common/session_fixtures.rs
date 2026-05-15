@@ -198,10 +198,18 @@ pub async fn broadcast(packets: &[OutboundPacket], receivers: &[&TestUser]) {
 
 /// Mirror of `de_mls_gateway::Gateway::spawn_consensus_forwarder` — one
 /// task per session that subscribes to the session's private consensus
-/// event bus and drives `apply_consensus_outcome` on each event. Without
-/// this, consensus sessions in tests never resolve into approved
-/// proposals. Exits naturally when the bus is dropped (conversation
-/// removed from the registry).
+/// event bus and drives `apply_consensus_outcome` on each event.
+///
+/// **Required for any test that exercises consensus.** Per the per-conv-
+/// consensus refactor, each `SessionRunner.consensus` owns a fresh private
+/// event bus (see `ConsensusContext::build_service`). The library emits
+/// `ConsensusReached` to that bus, but no code in `de-mls` itself consumes
+/// it — production has the gateway run this forwarder, tests must too.
+/// Without it, proposals reach consensus but never populate
+/// `approved_proposals`.
+///
+/// Task exits naturally when the bus is dropped (conversation removed
+/// from the registry).
 pub fn spawn_consensus_forwarder(session: SessionArc) -> JoinHandle<()> {
     use hashgraph_like_consensus::events::ConsensusEventBus;
     tokio::spawn(async move {
@@ -216,6 +224,14 @@ pub fn spawn_consensus_forwarder(session: SessionArc) -> JoinHandle<()> {
 /// and consensus deadlines are sub-second so a polling loop converges in a
 /// handful of rounds. Override individual fields where the test needs
 /// different timing.
+///
+/// `recovery_inactivity_duration` is overridden alongside the regular
+/// `commit_inactivity_duration` because [`bootstrap_joined_conversation`]
+/// finishes with `retry_round = 1` on the steward list (see the doc on
+/// that function). With `retry_round > 0`, `check_member_freeze` uses the
+/// recovery inactivity window, not the commit one — leaving the default
+/// 5-second recovery duration in place would make every test wait that
+/// long for the first inactivity tick.
 pub fn fast_test_config() -> ConversationConfig {
     use std::time::Duration;
     ConversationConfig {
@@ -247,6 +263,16 @@ pub async fn poll_once(session: &SessionArc) {
 ///
 /// One consensus forwarder is spawned per session — its `JoinHandle` is
 /// detached and the task lives for the duration of the test process.
+///
+/// **Post-bootstrap state.** Members have `retry_round = 1` on their
+/// steward-list plug-in, not 0. After the InviteMember commit lands, the
+/// creator runs `steward_list_housekeeping` which fires a steward
+/// election; in the tight test environment this election is rejected,
+/// bumping `retry_round`. This is currently a live characteristic of the
+/// post-commit housekeeping pass, not a fixture quirk — but it means
+/// tests that poll `check_member_freeze` see the recovery inactivity
+/// window, not the commit one. [`fast_test_config`] sets both to short
+/// durations to accommodate.
 ///
 /// Panics if any joiner has not joined after `MAX_ROUNDS` polling rounds.
 pub async fn bootstrap_joined_conversation(
