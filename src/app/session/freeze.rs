@@ -25,7 +25,7 @@ use crate::{
     mls_crypto::MlsService,
 };
 
-use crate::app::orchestrator::{has_downward_cross, inbound::DispatchOutcome};
+use super::{DispatchOutcome, has_downward_cross};
 
 /// What [`SessionRunner::check_pending_join`] hands back to its polling
 /// caller.

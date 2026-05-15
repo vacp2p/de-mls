@@ -1,11 +1,9 @@
 //! Read-only queries over a conversation's state (UI and diagnostics).
-//!
-//! Per-conversation getters live on `SessionRunner`; callers reach them via
-//! `User::lookup_entry`. The registry-wide `list_conversations` getter
-//! stays on `User`.
+//! Callers reach these via `User::lookup_entry`; the registry-wide
+//! `list_conversations` getter lives on `User`.
 
 use crate::{
-    app::{ConversationState, MemberRole, SessionRunner, User, UserError},
+    app::{ConversationState, MemberRole, SessionRunner, UserError},
     core::{ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin, StewardListPlugin},
     identity::format_wallet_address,
     mls_crypto::MlsService,
@@ -127,15 +125,5 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             .values()
             .cloned()
             .collect()
-    }
-}
-
-// `User::list_conversations` is registry-wide; keep it on User. Per-conv
-// getters above are session methods — callers use `lookup_entry` to reach
-// them.
-
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
-    pub async fn list_conversations(&self) -> Vec<String> {
-        self.conversations.read().await.keys().cloned().collect()
     }
 }

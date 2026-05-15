@@ -1,6 +1,6 @@
 //! User-level plugin types and bundle.
 //!
-//! Two pieces:
+//! Pieces:
 //!
 //! - [`UserPlugins`] — the bundle of all User-level plugin state: the
 //!   per-conversation factory, the consensus context, the key package
@@ -8,17 +8,23 @@
 //! - [`ConsensusContext`] — the consensus-plugin-side state (storage +
 //!   signer) plus methods that build per-conv services and clean up
 //!   scopes on leave.
-//!
-//! Also: [`DefaultConversationPluginsFactory`] — reference impl of
-//! [`crate::core::ConversationPluginsFactory`] used by
-//! [`super::User::with_private_key`].
+//! - [`DefaultConversationPluginsFactory`] — reference impl of
+//!   [`crate::core::ConversationPluginsFactory`] used by
+//!   [`super::User::with_private_key`].
+//! - [`DefaultKeyPackageProvider`] — reference impl of
+//!   [`crate::core::KeyPackageProvider`]; lives in the [`key_package`]
+//!   submodule.
+
+mod key_package;
+
+pub use key_package::DefaultKeyPackageProvider;
 
 use std::sync::Arc;
 
 use hashgraph_like_consensus::storage::ConsensusStorage;
 
 use crate::{
-    app::{DefaultKeyPackageProvider, InMemoryPeerScoreStorage},
+    app::InMemoryPeerScoreStorage,
     core::{
         ConsensusPlugin, ConversationConfig, ConversationPluginsFactory, DeterministicStewardList,
         KeyPackageProvider, PeerScoringService, PluginConsensus, ScoringConfig, StewardListConfig,

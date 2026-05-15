@@ -14,21 +14,18 @@
 //! [`crate::app::SessionRunner`] composes a [`crate::core::ConversationHandle`]
 //! with that timer through coordinator methods that update both atomically.
 //! State transitions return the new [`crate::core::ConversationState`]; the
-//! orchestrator dispatches it via
-//! `SessionEvent::PhaseChange`.
+//! session-side dispatcher emits a `SessionEvent::PhaseChange` on each one.
 //!
 //! Use this layer directly for epoch-based steward chat; write a custom app
 //! layer if you need a different consensus model, state machine, or epoch
 //! timing.
 
-mod consensus_bridge;
 mod display;
 mod error;
-mod key_package;
-mod orchestrator;
 mod peer_scoring_backends;
 mod phase_timer;
-mod session_runner;
+mod session;
+mod user;
 
 pub use crate::core::{
     ConversationConfig, ConversationState, DEFAULT_COMMIT_INACTIVITY_DURATION,
@@ -36,20 +33,18 @@ pub use crate::core::{
     DEFAULT_PEER_SCORE, DEFAULT_PROPOSAL_EXPIRATION, DEFAULT_RECOVERY_INACTIVITY_DURATION,
     DEFAULT_THRESHOLD_PEER_SCORE, DEFAULT_VOTING_DELAY,
 };
-pub use consensus_bridge::{
-    ProposalParams, cast_vote, forward_incoming_vote, relay_incoming_proposal, submit_proposal,
-    submit_self_leave_proposal,
-};
 pub use display::{
     MemberRole, MessageType, format_conversation_request, format_conversation_request_target,
     message_types,
 };
 pub use error::UserError;
-pub use key_package::DefaultKeyPackageProvider;
-pub use orchestrator::{
-    DefaultConversationPluginsFactory, DefaultMlsService, DefaultPeerScoring, DefaultStewardList,
-    DispatchOutcome, PendingJoinTick, User,
-};
 pub use peer_scoring_backends::InMemoryPeerScoreStorage;
 pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer};
-pub use session_runner::SessionRunner;
+pub use session::{
+    DispatchOutcome, PendingJoinTick, ProposalParams, SessionRunner, cast_vote,
+    forward_incoming_vote, relay_incoming_proposal, submit_proposal, submit_self_leave_proposal,
+};
+pub use user::{
+    DefaultConversationPluginsFactory, DefaultKeyPackageProvider, DefaultMlsService,
+    DefaultPeerScoring, DefaultStewardList, User,
+};

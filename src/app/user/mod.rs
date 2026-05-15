@@ -1,12 +1,17 @@
-//! [`User`] — multi-conversation facade over core. One node owns one `User`, which
-//! holds the consensus service, event handler, and per-conversation registry.
-//! Each conversation's MLS service, peer-scoring plug-in, and steward-list
-//! plug-in live on the [`SessionRunner`] (one instance per conversation),
-//! which owns a [`crate::core::ConversationHandle`]. Methods split across
-//! the submodules: `lifecycle` (create/leave), `query` (read-only getters),
-//! `messaging` (send/ban), `consensus` (voting), `consensus_events`
-//! (outcome dispatch), `inbound` (packet dispatch), `freeze` (timers),
-//! `steward` (steward-side housekeeping).
+//! [`User`] — multi-conversation facade over core. One node owns one `User`,
+//! which holds the per-conversation registry, the identity-bound key-package
+//! provider, the consensus context, and the outbound transport. Per-conv
+//! protocol work lives on each [`SessionRunner`]; callers reach a session
+//! via [`User::lookup_entry`].
+//!
+//! Submodules:
+//! - [`lifecycle`] — `start_conversation`, `leave_conversation` (registry CUD).
+//! - [`registry`] — `lookup_entry`, `with_entry`, `list_conversations`,
+//!   `subscribe_conversations`.
+//! - [`inbound`] — `process_inbound_packet`, welcome-subtopic handler,
+//!   `finalize_self_leave` (registry-side completion of `LeaveConversation`).
+//! - [`plugins`] — `UserPlugins<P, CP>` bundle + `ConsensusContext<P>` +
+//!   reference impls.
 //!
 //! `User` is `Clone` — all fields are `Arc` or cheap `Clone` — so background
 //! tasks just take their own handle via `self.clone()`.
@@ -20,12 +25,22 @@ use crate::{
     app::{SessionRunner, UserError},
     core::{
         ConsensusPlugin, ConversationConfig, ConversationLifecycle, ConversationPluginsFactory,
-        DefaultConsensusPlugin, PeerScoringEvent, PluginConsensus, ScoringConfig, SessionEvent,
-        StewardListConfig,
+        DefaultConsensusPlugin, PluginConsensus, ScoringConfig, SessionEvent, StewardListConfig,
     },
     ds::{DeliveryService, OutboundPacket},
     identity::{Identity, WalletIdentity},
     mls_crypto::{KeyPackageBytes, MlsError},
+};
+
+mod inbound;
+mod lifecycle;
+mod plugins;
+mod registry;
+
+use plugins::UserPlugins;
+pub use plugins::{
+    DefaultConversationPluginsFactory, DefaultKeyPackageProvider, DefaultMlsService,
+    DefaultPeerScoring, DefaultStewardList,
 };
 
 /// Default capacity for the User's [`ConversationLifecycle`] broadcast
@@ -33,70 +48,45 @@ use crate::{
 /// more than this lose events.
 const CONVERSATION_LIFECYCLE_CAPACITY: usize = 128;
 
-mod consensus;
-mod consensus_events;
-mod freeze;
-pub(crate) mod inbound;
-mod lifecycle;
-mod messaging;
-mod plugins;
-mod query;
-mod steward;
-
-pub use freeze::PendingJoinTick;
-pub use inbound::DispatchOutcome;
-use plugins::UserPlugins;
-pub use plugins::{
-    DefaultConversationPluginsFactory, DefaultMlsService, DefaultPeerScoring, DefaultStewardList,
-};
-
-/// `true` iff `events` contains at least one downward threshold cross —
-/// the signal coordinators react to by chaining into score-removal
-/// initiation. One helper so every callsite uses the same triggering rule.
-pub(crate) fn has_downward_cross(events: &[PeerScoringEvent]) -> bool {
-    events
-        .iter()
-        .any(|e| matches!(e, PeerScoringEvent::ThresholdCrossedDown { .. }))
-}
-
 /// Per-user registry of conversation runners, with one outer lock for map
 /// CRUD and one inner lock per runner so writes on one conversation don't
 /// block reads on another.
-type ConversationRegistry<P, CP> = Arc<RwLock<HashMap<String, Arc<RwLock<SessionRunner<P, CP>>>>>>;
+pub(crate) type ConversationRegistry<P, CP> =
+    Arc<RwLock<HashMap<String, Arc<RwLock<SessionRunner<P, CP>>>>>>;
 
 pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// User-level identity. Source of truth for "who am I"; per-conv MLS
     /// state lives on each `SessionRunner`.
-    identity: Arc<dyn Identity>,
+    pub(crate) identity: Arc<dyn Identity>,
     /// `identity.identity_bytes()` materialised once at construction so every
-    /// orchestrator method that needs the local identity bytes reads them
-    /// without re-walking the `Identity` trait + allocating a fresh `Vec`.
-    self_identity: Arc<[u8]>,
+    /// method that needs the local identity bytes reads them without
+    /// re-walking the `Identity` trait + allocating a fresh `Vec`.
+    pub(crate) self_identity: Arc<[u8]>,
     /// Cached display form of the local identity (e.g. checksummed `0x…`
     /// hex). Cloned into each `SessionRunner` so per-session methods
     /// (`send_app_message`) can tag the `sender` field without re-walking
     /// the `Identity` trait + allocating each call.
-    identity_display: Arc<str>,
+    pub(crate) identity_display: Arc<str>,
     /// Per-instance UUID embedded in every outbound packet. Inbound packets
     /// carrying our `app_id` are self-echoes and silently dropped. Cached
     /// as `Arc<[u8]>` so each `SessionRunner` cheaply shares it.
-    app_id: Arc<[u8]>,
+    pub(crate) app_id: Arc<[u8]>,
     /// Synchronous outbound transport. Cloned into each `SessionRunner` at
     /// construction; the User-level helper wraps [`DeliveryService::send`]
     /// in `spawn_blocking` for use in async contexts.
-    transport: Arc<dyn DeliveryService>,
+    pub(crate) transport: Arc<dyn DeliveryService>,
     /// All User-level plugin state: the per-conversation factory, the
     /// consensus context, the key-package provider, and the three default
     /// configs cloned into newly-created sessions.
-    plugins: UserPlugins<P, CP>,
+    pub(crate) plugins: UserPlugins<P, CP>,
     /// Per-conversation `SessionRunner`s. Outer lock guards map CRUD;
     /// inner per-runner lock guards per-conversation reads/mutations so a
     /// write on conversation A doesn't block reads on conversation B.
-    conversations: ConversationRegistry<P, CP>,
+    pub(crate) conversations: ConversationRegistry<P, CP>,
     /// User-level conversation lifecycle channel. Emits `Created(name)` /
     /// `Removed(name)` so integrators can subscribe to per-session
     /// [`SessionEvent`] streams as conversations come and go.
-    lifecycle: broadcast::Sender<ConversationLifecycle>,
+    pub(crate) lifecycle: broadcast::Sender<ConversationLifecycle>,
 }
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Clone for User<P, CP> {
@@ -149,33 +139,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         self.plugins.default_steward_list_config = config;
     }
 
-    /// Look up a conversation runner. Returns `None` when no runner is
-    /// registered for `conversation_name`. Takes the outer read lock briefly
-    /// to clone the inner `Arc`, then releases it before the caller
-    /// acquires the runner's own lock.
-    pub async fn lookup_entry(
-        &self,
-        conversation_name: &str,
-    ) -> Option<Arc<RwLock<SessionRunner<P, CP>>>> {
-        self.conversations
-            .read()
-            .await
-            .get(conversation_name)
-            .cloned()
-    }
-
-    /// Run `f` under the runner's own read lock. Returns `None` if the
-    /// runner isn't present.
-    pub(crate) async fn with_entry<R>(
-        &self,
-        conversation_name: &str,
-        f: impl FnOnce(&SessionRunner<P, CP>) -> R,
-    ) -> Option<R> {
-        let entry_arc = self.lookup_entry(conversation_name).await?;
-        let entry = entry_arc.read().await;
-        Some(f(&entry))
-    }
-
     /// Borrow the local identity bytes. Cached at construction; cheap to call.
     pub(crate) fn self_identity(&self) -> &[u8] {
         &self.self_identity
@@ -191,13 +154,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`crate::core::KeyPackageProvider`].
     pub fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
         self.plugins.key_package_provider.generate()
-    }
-
-    /// Subscribe to User-level conversation lifecycle events. Integrators
-    /// use this to discover new sessions and subscribe to their per-session
-    /// [`SessionEvent`] streams. Each call returns a fresh receiver.
-    pub fn subscribe_conversations(&self) -> broadcast::Receiver<ConversationLifecycle> {
-        self.lifecycle.subscribe()
     }
 
     /// Send an outbound packet via the User-level transport. Wraps the
@@ -224,14 +180,17 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
     /// Build a fresh per-conversation `ConsensusService` via the User's
     /// `ConsensusContext`.
-    fn build_consensus_service(&self) -> PluginConsensus<P> {
+    pub(crate) fn build_consensus_service(&self) -> PluginConsensus<P> {
         self.plugins.consensus.build_service()
     }
 
     /// Drop this conversation's consensus scope from the shared storage and
     /// abort every auto-vote timer belonging to it. Called on leave and
     /// pending-join timeout.
-    async fn cleanup_consensus_scope(&self, conversation_name: &str) -> Result<(), UserError> {
+    pub(crate) async fn cleanup_consensus_scope(
+        &self,
+        conversation_name: &str,
+    ) -> Result<(), UserError> {
         if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
             entry_arc.read().await.cancel_all_auto_votes();
         }

@@ -2,6 +2,10 @@
 //! together with a [`crate::app::PhaseTimer`] and the per-proposal
 //! auto-vote timer registry. Coordinator methods compose state-machine
 //! transitions with phase-timer anchors so callers update both in one call.
+//!
+//! Submodules contain per-conversation method bodies. All per-conv protocol
+//! work lives here; the `User` side keeps only registry CRUD, lifecycle
+//! entry points, and the inbound packet entry.
 
 use std::{
     collections::HashMap,
@@ -16,10 +20,35 @@ use crate::{
     app::PhaseTimer,
     core::{
         ConsensusPlugin, Conversation, ConversationConfig, ConversationHandle,
-        ConversationPluginsFactory, ConversationState, ConversationStateMachine, PluginConsensus,
-        SessionEvent,
+        ConversationPluginsFactory, ConversationState, ConversationStateMachine, PeerScoringEvent,
+        PluginConsensus, SessionEvent,
     },
 };
+
+mod consensus;
+mod consensus_bridge;
+mod consensus_events;
+mod freeze;
+mod inbound;
+mod messaging;
+mod query;
+mod steward;
+
+pub use consensus_bridge::{
+    ProposalParams, cast_vote, forward_incoming_vote, relay_incoming_proposal, submit_proposal,
+    submit_self_leave_proposal,
+};
+pub use freeze::PendingJoinTick;
+pub use inbound::DispatchOutcome;
+
+/// `true` iff `events` contains at least one downward threshold cross —
+/// the signal coordinators react to by chaining into score-removal
+/// initiation. One helper so every callsite uses the same triggering rule.
+pub(crate) fn has_downward_cross(events: &[PeerScoringEvent]) -> bool {
+    events
+        .iter()
+        .any(|e| matches!(e, PeerScoringEvent::ThresholdCrossedDown { .. }))
+}
 
 /// Default capacity for a session's [`SessionEvent`] broadcast channel.
 /// Sized for bursty proposal sessions (proposals + votes + UI pushes in
@@ -54,12 +83,10 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Synchronous outbound transport (cloned from `User`). Per-session
     /// methods use `send_outbound` to wrap `DeliveryService::send` in
     /// `spawn_blocking`.
-    #[allow(dead_code)] // wired in chunk-C phase 2; users land in subsequent waves
     pub(crate) transport: Arc<dyn crate::ds::DeliveryService>,
     /// Cached identity bytes (cloned from `User`). Used by per-session
     /// methods that need the local identity without re-walking the
     /// `Identity` trait.
-    #[allow(dead_code)] // wired in chunk-C phase 2; users land in subsequent waves
     pub(crate) self_identity: Arc<[u8]>,
     /// Cached display form of the local identity (e.g. checksummed `0x…`
     /// hex). Stable for the lifetime of the runner; populated at
