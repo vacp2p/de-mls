@@ -191,22 +191,6 @@ pub fn setup_identity_storage(
     (identity, credentials, storage)
 }
 
-/// Build an [`OpenMlsService`] for a fresh group with a default test id.
-/// Convenience for tests that don't care about a specific group id at the
-/// MLS layer (most pure-state tests). For tests that need a specific id,
-/// prefer [`setup_steward`] or [`setup_mls_for_group`].
-pub fn setup_mls(wallet_hex: &str) -> TestMls {
-    setup_mls_for_group("test-group", wallet_hex)
-}
-
-/// Like [`setup_mls`] but with an explicit group id. Use this when the
-/// test asserts something about the MLS-tracked group id or when two
-/// services share a group.
-pub fn setup_mls_for_group(conversation_name: &str, wallet_hex: &str) -> TestMls {
-    let (_, credentials, storage) = setup_identity_storage(wallet_hex);
-    OpenMlsService::new_as_creator(conversation_name.to_string(), storage, credentials).unwrap()
-}
-
 /// Compat shim that mirrors the pre-refactor `core::process_inbound`
 /// 4-arg surface for tests that drive packet relay manually. Routes
 /// app-subtopic packets to the new `core::process_inbound`, and synthesises
@@ -252,8 +236,9 @@ pub fn process_inbound_compat(
         }
     } else if subtopic == APP_MSG_SUBTOPIC {
         let Some(mls) = mls else {
-            // Pre-refactor behaviour: app messages on a group with no MLS
-            // state are silently ignored. Mirrors the User-layer dispatch.
+            // App messages on a conversation with no MLS state are
+            // silently ignored. Mirrors `SessionRunner::process_inbound_packet`,
+            // which gates app payloads on `handle.mls().is_some()`.
             return Ok(ProcessResult::Noop(NoopReason::UnknownAppMessage));
         };
         process_inbound(group, mls, payload)
@@ -285,7 +270,7 @@ impl StewardHandle {
     }
 
     /// Test convenience: identity bytes stored on the handle; matches the
-    /// value the orchestrator caches at the User level.
+    /// value the User layer caches on `User::self_identity`.
     pub fn self_identity(&self) -> &[u8] {
         &self.identity
     }
@@ -357,7 +342,7 @@ pub struct JoinerHandle {
 
 impl JoinerHandle {
     /// Test convenience: identity bytes stored on the handle; matches the
-    /// value the orchestrator caches at the User level.
+    /// value the User layer caches on `User::self_identity`.
     pub fn self_identity(&self) -> Vec<u8> {
         self.identity.identity_bytes().to_vec()
     }

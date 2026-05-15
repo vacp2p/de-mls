@@ -670,4 +670,47 @@ mod tests {
             "retries should produce at least one different list"
         );
     }
+
+    /// A list generated at `retry_round = N` carries that seed forward —
+    /// `list.retry_round()` reads back `N` even after callers have reset
+    /// their plug-in counter back to 0 (the counter and the list seed are
+    /// distinct quantities). On the wire, peers must validate the list
+    /// using the seed embedded in it, not the current counter.
+    #[test]
+    fn retry_round_seed_persists_independently_of_caller_counter() {
+        let config = StewardListConfig::new(2, 4).unwrap();
+        let mems: Vec<Vec<u8>> = (1..=4u8).map(member).collect();
+        let epoch = 7;
+        let accepted_round: u32 = 2;
+
+        let list = StewardList::generate(epoch, b"conv", &mems, 4, config.clone(), accepted_round)
+            .unwrap();
+        assert_eq!(list.retry_round(), accepted_round, "list keeps its seed");
+
+        let round0 = StewardList::generate(epoch, b"conv", &mems, 4, config.clone(), 0).unwrap();
+        assert_ne!(
+            list.members(),
+            round0.members(),
+            "retry_round must shuffle the ordering for this test to be meaningful"
+        );
+
+        assert!(
+            StewardList::validate(
+                list.members(),
+                epoch,
+                b"conv",
+                list.members(),
+                &config,
+                accepted_round,
+            )
+            .unwrap(),
+            "validate succeeds when the seed matches the list's recorded retry_round"
+        );
+
+        assert!(
+            !StewardList::validate(list.members(), epoch, b"conv", list.members(), &config, 0,)
+                .unwrap(),
+            "validate fails when the seed differs — caller's counter is not the source of truth"
+        );
+    }
 }

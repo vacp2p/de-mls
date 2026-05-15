@@ -285,3 +285,39 @@ impl TryFrom<AppMessage> for ProcessResult {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ViolationEvidence::broken_commit` plus `with_creator` plus
+    /// `into_update_request` produce an `EmergencyCriteria` payload that
+    /// preserves target, epoch, and violation type on the wire.
+    #[test]
+    fn broken_commit_evidence_roundtrips_into_update_request() {
+        let evidence = ViolationEvidence::broken_commit(vec![0xAA, 0xBB], 5, vec![0xDE, 0xAD])
+            .with_creator(vec![0x01]);
+        let request = evidence.into_update_request().unwrap();
+
+        let Some(conversation_update_request::Payload::EmergencyCriteria(ec)) = request.payload
+        else {
+            panic!("Expected EmergencyCriteria payload");
+        };
+        let ev = ec.evidence.expect("evidence present");
+        assert_eq!(ev.violation_type, ViolationType::BrokenCommit as i32);
+        assert_eq!(ev.target_member_id, vec![0xAA, 0xBB]);
+        assert_eq!(ev.epoch, 5);
+        assert_eq!(ev.evidence_payload, vec![0xDE, 0xAD]);
+        assert_eq!(ev.creator_member_id, vec![0x01]);
+    }
+
+    /// `into_update_request` rejects evidence with no creator identity.
+    #[test]
+    fn into_update_request_errors_without_creator() {
+        let evidence = ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new());
+        let err = evidence
+            .into_update_request()
+            .expect_err("creator required");
+        assert!(matches!(err, CoreError::InvalidConversationUpdateRequest));
+    }
+}

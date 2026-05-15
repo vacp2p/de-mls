@@ -538,4 +538,59 @@ mod tests {
 
         assert!(matches!(result, ConsensusApplyResult::NoAction));
     }
+
+    /// A regular (non-emergency) `RemoveMember` reached via consensus YES
+    /// enqueues into `approved_proposals` and produces no score ops.
+    #[test]
+    fn regular_remove_member_enqueues_without_score_ops() {
+        let mut conversation = Conversation::new("regular-yes");
+        let target = member(7);
+
+        let request = remove_request(target.clone());
+        let payload = request.encode_to_vec();
+
+        let proposal_id = 70;
+        conversation.store_voting_proposal(proposal_id, request);
+
+        apply_consensus_result(&mut conversation, proposal_id, true, &payload).unwrap();
+
+        assert!(crate::core::emergency_score_ops(&payload, true).is_empty());
+        assert_eq!(conversation.approved_proposals_count(), 1);
+    }
+
+    /// `apply_consensus_result` returns an error when the payload bytes
+    /// do not decode as a `ConversationUpdateRequest`.
+    #[test]
+    fn invalid_payload_returns_error() {
+        let mut conversation = Conversation::new("invalid-payload");
+        let result = apply_consensus_result(&mut conversation, 999, true, &[0xFF, 0xFF]);
+        assert!(result.is_err());
+    }
+
+    /// A non-score emergency (e.g. `BrokenCommit`) approved by consensus
+    /// is consumed without queuing a `RemoveMember` — only score-below-
+    /// threshold ECPs transform into a removal.
+    #[test]
+    fn regular_emergency_yes_does_not_queue_remove_member() {
+        let mut conversation = Conversation::new("no-transform");
+        let creator = member(1);
+        let target = member(7);
+
+        let request = ViolationEvidence::broken_commit(target, 0, Vec::<u8>::new())
+            .with_creator(creator)
+            .into_update_request()
+            .unwrap();
+        let payload = request.encode_to_vec();
+
+        let proposal_id = 300;
+        conversation.store_voting_proposal(proposal_id, request);
+
+        apply_consensus_result(&mut conversation, proposal_id, true, &payload).unwrap();
+
+        assert_eq!(
+            conversation.approved_proposals_count(),
+            0,
+            "regular emergencies are consumed, not transformed to RemoveMember"
+        );
+    }
 }

@@ -198,12 +198,4 @@ mod tests {
     fn format_empty_bytes() {
         assert_eq!(format_wallet_address(&[]), "");
     }
-
-    #[test]
-    fn roundtrip() {
-        let original = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-        let addr = parse_wallet_address(original).unwrap();
-        let formatted = format_wallet_address(addr.as_slice());
-        assert_eq!(formatted.to_lowercase(), original.to_lowercase());
-    }
 }

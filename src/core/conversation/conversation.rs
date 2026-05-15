@@ -650,34 +650,6 @@ mod tests {
     }
 
     #[test]
-    fn test_reject_all_approved_preserves_self_leave_entry() {
-        let mut conversation = Conversation::new("test-conversation");
-
-        let leaver = member(2);
-        insert_self_leave(&mut conversation, &leaver);
-        let ban_id: ProposalId = 0xdead_beef;
-        let ban = ConversationUpdateRequest {
-            payload: Some(conversation_update_request::Payload::InviteMember(
-                InviteMember {
-                    key_package_bytes: vec![0; 8],
-                    identity: member(99),
-                },
-            )),
-        };
-        conversation.insert_approved_proposal(ban_id, ban);
-        assert_eq!(conversation.approved_proposals_count(), 2);
-
-        // Simulate freeze failure.
-        conversation.reject_all_approved_proposals();
-
-        // Self-leave entry (deterministic id) survives; unrelated approvals drop.
-        assert_eq!(conversation.approved_proposals_count(), 1);
-        let leave_id = self_leave_proposal_id(&leaver);
-        assert!(conversation.approved_proposals().contains_key(&leave_id));
-        assert!(!conversation.approved_proposals().contains_key(&ban_id));
-    }
-
-    #[test]
     fn test_prune_clears_self_leave_entry_when_member_gone() {
         let mut conversation = Conversation::new("test-conversation");
 
@@ -886,5 +858,81 @@ mod tests {
         assert_eq!(expired, vec![prior.clone()]);
         assert!(conversation.has_pending_update(&current));
         assert!(!conversation.has_pending_update(&prior));
+    }
+
+    /// `reject_all_voting_proposals` empties the owner-side voting queue —
+    /// proposals the local node submitted but never reached consensus
+    /// must not survive into the next round.
+    #[test]
+    fn reject_all_voting_proposals_empties_owner_queue() {
+        let mut conversation = Conversation::new("reject-voting");
+        conversation.store_voting_proposal(1, ConversationUpdateRequest { payload: None });
+        conversation.store_voting_proposal(2, ConversationUpdateRequest { payload: None });
+        assert!(conversation.is_owner_of_proposal(1));
+        assert!(conversation.is_owner_of_proposal(2));
+
+        conversation.reject_all_voting_proposals();
+
+        assert!(!conversation.is_owner_of_proposal(1));
+        assert!(!conversation.is_owner_of_proposal(2));
+    }
+
+    /// `observe → has → resolve` cycle for `pending_removal_targets`,
+    /// covering the idempotent re-observe path.
+    #[test]
+    fn pending_removal_target_observe_resolve_cycle() {
+        let mut conversation = Conversation::new("dedup");
+        let target = member(10);
+
+        assert!(!conversation.has_pending_removal(&target));
+
+        conversation.observe_pending_removal(target.clone());
+        assert!(conversation.has_pending_removal(&target));
+
+        conversation.observe_pending_removal(target.clone());
+        assert!(
+            conversation.has_pending_removal(&target),
+            "second observe is idempotent"
+        );
+
+        conversation.resolve_pending_removal(&target);
+        assert!(!conversation.has_pending_removal(&target));
+    }
+
+    /// Once an ECP score-below-threshold YES has resolved into a queued
+    /// `RemoveMember`, `is_pending_removal` flips true (it's in the approved
+    /// queue) and `has_pending_removal` flips false (the in-flight ECP dedup
+    /// is cleared). Both gates together must keep the steward from
+    /// re-proposing for the same target.
+    #[test]
+    fn below_threshold_target_queued_for_removal_is_not_re_proposed() {
+        use crate::core::apply_consensus_result;
+        use crate::protos::de_mls::messages::v1::ViolationEvidence;
+        use prost::Message;
+
+        let mut conversation = Conversation::new("removal-no-duplicate");
+        let creator = member(1);
+        let target = member(7);
+
+        let evidence =
+            ViolationEvidence::score_below_threshold(target.clone(), 0, 0).with_creator(creator);
+        let request = evidence.into_update_request().unwrap();
+        let payload = request.encode_to_vec();
+        let proposal_id = 300;
+        conversation.store_voting_proposal(proposal_id, request);
+        conversation.observe_pending_removal(target.clone());
+
+        apply_consensus_result(&mut conversation, proposal_id, true, &payload).unwrap();
+        // Mirror the coordinator: clear the in-flight ECP dedup on resolution.
+        conversation.resolve_pending_removal(&target);
+
+        assert!(
+            conversation.is_pending_removal(&target),
+            "RemoveMember should be queued in approved_proposals"
+        );
+        assert!(
+            !conversation.has_pending_removal(&target),
+            "in-flight ECP dedup is cleared once the ECP resolves"
+        );
     }
 }

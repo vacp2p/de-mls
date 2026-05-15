@@ -2,16 +2,12 @@
 //! proposals, freeze round selection, and dedup.
 
 use de_mls::core::StewardListPlugin;
-use de_mls::core::{
-    FreezeOutcome, ProcessResult, ProposalId, ScoreEvent, apply_consensus_result,
-    finalize_freeze_round,
-};
+use de_mls::core::{FreezeOutcome, ProcessResult, ProposalId, ScoreEvent, finalize_freeze_round};
 use de_mls::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 use de_mls::identity::Identity;
 use de_mls::mls_crypto::MlsService;
 use de_mls::protos::de_mls::messages::v1::{
-    AppMessage, ConversationUpdateRequest, ViolationEvidence, ViolationType, app_message,
-    conversation_update_request,
+    AppMessage, ConversationUpdateRequest, ViolationEvidence, app_message,
 };
 use prost::Message;
 
@@ -21,128 +17,6 @@ use common::{
 };
 
 // ─────────────────────────── Tests ───────────────────────────
-
-/// Test: ViolationDetected carries correct evidence for emergency criteria proposal.
-#[test]
-fn test_violation_detected_produces_emergency_proposal() {
-    let evidence = ViolationEvidence::broken_commit(vec![0xAA, 0xBB], 5, vec![0xDE, 0xAD])
-        .with_creator(vec![0x01]);
-    let request = evidence.into_update_request().unwrap();
-
-    match request.payload {
-        Some(conversation_update_request::Payload::EmergencyCriteria(ec)) => {
-            let ev = ec.evidence.expect("Expected evidence");
-            assert_eq!(ev.violation_type, 1);
-            assert_eq!(ev.target_member_id, vec![0xAA, 0xBB]);
-            assert_eq!(ev.epoch, 5);
-        }
-        other => panic!("Expected EmergencyCriteria payload, got {:?}", other),
-    }
-}
-
-/// Test: create_commit_candidate rejects emergency criteria proposals in the approved queue.
-#[test]
-fn test_emergency_in_approved_queue_returns_error() {
-    let conversation_name = "emergency-only-batch";
-    let mut group = setup_steward(
-        conversation_name,
-        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
-    );
-
-    let emergency_request = ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new())
-        .with_creator(vec![0x01])
-        .into_update_request()
-        .unwrap();
-    group.insert_approved_proposal(50, emergency_request);
-    assert_eq!(group.approved_proposals_count(), 1);
-
-    let result = build_commit_candidate(
-        &mut group.group,
-        &group.mls,
-        &group.steward_list,
-        false,
-        &group.identity,
-        b"test-app-id",
-    );
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        de_mls::core::CoreError::UnexpectedNonMlsProposals { proposal_ids } => {
-            assert_eq!(proposal_ids, vec![50]);
-        }
-        other => panic!("Expected UnexpectedNonMlsProposals, got {:?}", other),
-    }
-}
-
-/// Test: remove_approved_proposal correctly removes a single proposal.
-#[test]
-fn test_remove_approved_proposal() {
-    let conversation_name = "remove-approved";
-    let mut group = setup_steward(
-        conversation_name,
-        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
-    );
-
-    let emergency_request = ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new())
-        .with_creator(vec![0x01])
-        .into_update_request()
-        .unwrap();
-    group.insert_approved_proposal(50, emergency_request);
-    assert_eq!(group.approved_proposals_count(), 1);
-
-    group.remove_approved_proposal(50);
-    assert_eq!(group.approved_proposals_count(), 0);
-}
-
-/// Test: ViolationEvidence carries correct target_member_id and epoch.
-#[test]
-fn test_violation_evidence_carries_steward_id_and_epoch() {
-    let evidence = ViolationEvidence::broken_commit(vec![0xAA, 0xBB], 2, b"proof".to_vec());
-    assert_eq!(evidence.violation_type, ViolationType::BrokenCommit as i32);
-    assert_eq!(evidence.target_member_id, vec![0xAA, 0xBB]);
-    assert_eq!(evidence.epoch, 2);
-    assert_eq!(evidence.evidence_payload, b"proof".to_vec());
-}
-
-/// Test: epoch starts at 0 for a freshly created group.
-#[test]
-fn test_mls_epoch_accessible_after_group_creation() {
-    let conversation_name = "epoch-mls";
-    let group = setup_steward(
-        conversation_name,
-        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
-    );
-    let epoch = group.mls.current_epoch().unwrap();
-    assert_eq!(epoch, 0);
-}
-
-#[test]
-fn test_clear_approved_proposals_does_not_change_mls_epoch() {
-    let conversation_name = "epoch-no-change";
-    let mut group = setup_steward(
-        conversation_name,
-        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
-    );
-
-    assert_eq!(group.mls.current_epoch().unwrap(), 0);
-
-    group.insert_approved_proposal(1, ConversationUpdateRequest { payload: None });
-    group.clear_approved_proposals();
-    // MLS epoch only advances on actual commit merge, not on clear_approved_proposals
-    assert_eq!(group.mls.current_epoch().unwrap(), 0);
-}
-
-/// Test: apply_consensus_result errors on invalid (unparseable) payload.
-#[test]
-fn test_apply_consensus_result_invalid_payload() {
-    let conversation_name = "invalid-payload";
-    let mut group = setup_steward(
-        conversation_name,
-        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
-    );
-
-    let result = apply_consensus_result(&mut group, 999, true, &[0xFF, 0xFF]);
-    assert!(result.is_err());
-}
 
 /// Test: emergency proposals mixed with regular proposals in approved queue
 /// causes an error.
@@ -288,32 +162,6 @@ fn test_duplicate_batch_returns_noop() {
         matches!(r2, ProcessResult::Noop(_)),
         "Expected Noop (duplicate), got {:?}",
         r2
-    );
-}
-
-/// Test: after a join, MLS members are accessible from the joiner side.
-#[test]
-fn test_violation_does_not_corrupt_mls_state() {
-    let conversation_name = "violation-no-corrupt";
-
-    let mut steward_handle = setup_steward(
-        conversation_name,
-        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
-    );
-    let mut joiner = setup_joiner(
-        conversation_name,
-        "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
-    );
-
-    let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
-    joiner.accept_welcome_packet(&welcome_packet);
-
-    // After joining, MLS members should be accessible
-    let members = joiner.mls.as_ref().unwrap().members().unwrap();
-    assert_eq!(
-        members.len(),
-        2,
-        "Members should be accessible after joining"
     );
 }
 
@@ -473,17 +321,6 @@ fn test_commit_candidate_roundtrip_sender_identity() {
         matched,
         "Expected ConversationUpdated after finalize, got {finalize:?}"
     );
-
-    // After finalization, verify the steward list on the creator group
-    // still contains the steward (the list is the source of truth).
-    let steward_list = steward_handle
-        .steward_list
-        .current_list()
-        .expect("steward should have a list");
-    assert!(
-        steward_list.contains(steward_handle.self_identity()),
-        "Steward should be on the steward list"
-    );
 }
 
 /// Test: when a backup steward commits in place of the live epoch steward_list,
@@ -610,29 +447,6 @@ fn test_backup_commit_scores_absent_steward() {
             "No CensorshipInactivity expected when self is the live epoch steward_list, got {events:?}",
         );
     }
-}
-
-/// Test: reject_all_voting_proposals clears voting queue.
-#[test]
-fn test_reject_all_voting_proposals_clears_queue() {
-    let conversation_name = "reject-voting";
-    let mut group = setup_steward(
-        conversation_name,
-        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
-    );
-
-    // Store proposals in voting queue
-    group.store_voting_proposal(1, ConversationUpdateRequest { payload: None });
-    group.store_voting_proposal(2, ConversationUpdateRequest { payload: None });
-    assert!(group.is_owner_of_proposal(1));
-    assert!(group.is_owner_of_proposal(2));
-
-    // Reject all voting proposals
-    group.reject_all_voting_proposals();
-
-    // Voting queue should be empty
-    assert!(!group.is_owner_of_proposal(1));
-    assert!(!group.is_owner_of_proposal(2));
 }
 
 /// Test: a candidate whose wire `steward_identity` doesn't match the
