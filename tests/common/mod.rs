@@ -4,7 +4,15 @@
 //! `tests/common/` is *not* a test binary, so this module can be reused by
 //! adding `mod common;` to any test file. Helpers carry `#[allow(dead_code)]`
 //! at the module level because not every binary exercises every helper.
+//!
+//! New SessionRunner-driven tests should import from [`session_fixtures`]
+//! (User-level helpers, packet capture). The lower-level `StewardHandle` /
+//! `JoinerHandle` / `process_inbound_compat` / `build_commit_candidate`
+//! shims here predate the per-conv-consensus refactor and are kept for the
+//! forgery-focused violation tests; new tests should not use them.
 #![allow(dead_code)]
+
+pub mod session_fixtures;
 
 use std::sync::{
     Arc,
