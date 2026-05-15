@@ -1,10 +1,9 @@
 //! Per-conversation lock isolation.
 //!
-//! The per-conv-consensus refactor moved per-conversation state from
-//! `User`-level locks onto one `RwLock` per `SessionRunner`. Headline
-//! invariant: holding the write lock on one conversation's session must
-//! not block reads or writes on any other conversation, and must not
-//! block the outer-registry read path either.
+//! Each `SessionRunner` lives behind its own `RwLock` inside the User's
+//! conversation registry. Holding one session's write lock must not
+//! block reads or writes on any other session, nor block the outer
+//! registry read path that `lookup_entry` walks.
 
 use std::time::Duration;
 

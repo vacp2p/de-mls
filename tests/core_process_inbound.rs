@@ -1,8 +1,7 @@
-//! Integration tests for the core inbound pipeline.
-//!
-//! Surviving coverage: a second welcome for a different KP is ignored,
-//! and ConversationSync propagates divergent per-conversation config to
-//! a joiner. Everything else moved to SessionRunner-driven tests.
+//! Two narrow checks on `core::process_inbound`: a second welcome for a
+//! different KP is ignored, and a `ConversationSync` packet propagates
+//! divergent per-conversation config (timing, threshold, scoring) to a
+//! joiner that hasn't yet installed a steward list.
 
 use de_mls::core::{ProcessResult, StewardListConfig, StewardListPlugin};
 use de_mls::ds::APP_MSG_SUBTOPIC;
