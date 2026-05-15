@@ -220,6 +220,7 @@ pub fn fast_test_config() -> ConversationConfig {
     use std::time::Duration;
     ConversationConfig {
         commit_inactivity_duration: Duration::from_millis(50),
+        recovery_inactivity_duration: Duration::from_millis(100),
         freeze_duration: Duration::from_millis(20),
         voting_delay: Duration::from_millis(30),
         election_voting_delay: Duration::from_millis(30),
