@@ -418,4 +418,45 @@ mod tests {
         let next = p.election_proposer(&|c| c != proposer.as_slice()).unwrap();
         assert_ne!(next, proposer.as_slice());
     }
+
+    /// When membership drops below `sn_min`, `maybe_auto_fill` regenerates
+    /// the steward list over the full member set with `retry_round = 0`.
+    /// RFC §"Steward list creation": every member must be a steward once
+    /// the conversation is below `sn_min`.
+    #[test]
+    fn maybe_auto_fill_installs_full_member_set_when_below_sn_min() {
+        let cfg = StewardListConfig::new(3, 5).unwrap();
+        let mut p = DeterministicStewardList::empty(b"g".to_vec(), cfg);
+        let mems = members(&[1, 2]); // below sn_min = 3
+
+        let events = p.maybe_auto_fill(5, &mems).unwrap();
+        assert_eq!(
+            events,
+            vec![StewardListEvent::ListInstalled {
+                epoch: 5,
+                retry_round: 0,
+                len: 2,
+            }]
+        );
+
+        let list = p.current_list().expect("auto-fill installed a list");
+        assert_eq!(list.len(), 2);
+        assert_eq!(list.retry_round(), 0);
+        for m in &mems {
+            assert!(list.contains(m), "auto-filled list must cover every member");
+        }
+    }
+
+    /// When membership is at or above `sn_min`, `maybe_auto_fill` is a
+    /// no-op: no events emitted and any existing list is left untouched.
+    #[test]
+    fn maybe_auto_fill_no_op_when_at_or_above_sn_min() {
+        let cfg = StewardListConfig::new(2, 5).unwrap();
+        let mut p = DeterministicStewardList::empty(b"g".to_vec(), cfg);
+        let mems = members(&[1, 2, 3]); // ≥ sn_min = 2
+
+        let events = p.maybe_auto_fill(0, &mems).unwrap();
+        assert!(events.is_empty(), "no-op above sn_min");
+        assert!(p.current_list().is_none(), "no list installed");
+    }
 }
