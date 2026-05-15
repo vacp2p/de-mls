@@ -197,3 +197,64 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ds::{DeliveryService, DeliveryServiceError, InboundPacket, OutboundPacket};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    /// Transport stub: `send` is a no-op so an outbound never reaches a
+    /// real network; `subscribe` returns a dangling receiver.
+    struct NullTransport;
+    impl DeliveryService for NullTransport {
+        fn send(&self, _: OutboundPacket) -> Result<String, DeliveryServiceError> {
+            Ok("noop".into())
+        }
+        fn subscribe(&self) -> std::sync::mpsc::Receiver<InboundPacket> {
+            let (_tx, rx) = std::sync::mpsc::channel();
+            rx
+        }
+    }
+
+    const ALICE_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+
+    /// Self-leave must abort auto-vote timers — otherwise they fire
+    /// against a conversation we've left.
+    #[tokio::test]
+    async fn finalize_self_leave_cancels_registered_auto_votes() {
+        let transport: Arc<dyn DeliveryService> = Arc::new(NullTransport);
+        let mut user = User::with_private_key(ALICE_KEY, transport).unwrap();
+        user.start_conversation("test-conv", true).await.unwrap();
+
+        let session = user
+            .lookup_entry("test-conv")
+            .await
+            .expect("creator session registered");
+
+        let executed = Arc::new(AtomicBool::new(false));
+        let canary = {
+            let executed = Arc::clone(&executed);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                executed.store(true, Ordering::SeqCst);
+            })
+        };
+        session
+            .read()
+            .await
+            .auto_vote_timers
+            .lock()
+            .unwrap()
+            .insert(42, canary);
+
+        user.finalize_self_leave("test-conv").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        assert!(
+            !executed.load(Ordering::SeqCst),
+            "auto-vote timer must be aborted on self-leave"
+        );
+    }
+}
