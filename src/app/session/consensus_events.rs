@@ -17,9 +17,9 @@ use tracing::{error, info};
 use crate::{
     app::{ConversationState, SessionRunner, UserError},
     core::{
-        ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin, ProposalKind, ScoreOp,
-        SessionEvent, StewardListPlugin, apply_consensus_result, emergency_score_ops,
-        target_identity_of,
+        ConsensusApplyResult, ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin,
+        ProposalKind, ScoreOp, SessionEvent, StewardListPlugin, apply_consensus_result,
+        emergency_score_ops, target_identity_of,
     },
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, conversation_update_request,
@@ -91,26 +91,22 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             apply_consensus_result(&mut s.handle.conversation, proposal_id, approved, &payload)?
         };
 
-        if let Some(election) = consensus_apply.election {
-            return Self::handle_election_accepted(arc, election).await;
-        }
-
-        if consensus_apply.enter_recovery_mode {
-            arc.write().await.handle.enter_recovery_mode();
-        }
-
-        if consensus_apply.force_freezing {
-            // Bypass the inactivity timer so the urgent commit fires now.
-            let event = arc.write().await.force_freezing();
-            if let Some(event) = event {
-                arc.read()
-                    .await
-                    .emit_event(SessionEvent::PhaseChange(event));
+        match consensus_apply {
+            ConsensusApplyResult::NoAction => {}
+            ConsensusApplyResult::ElectionAccepted(election) => {
+                return Self::handle_election_accepted(arc, election).await;
             }
-        }
-
-        if let Some(target) = &consensus_apply.queued_remove_target {
-            Self::refresh_stewards_after_removal(arc, target).await;
+            ConsensusApplyResult::RecoveryModeOpened => {
+                arc.write().await.handle.enter_recovery_mode();
+                Self::force_freezing_and_emit(arc).await;
+            }
+            ConsensusApplyResult::UrgentRemoval { target } => {
+                Self::force_freezing_and_emit(arc).await;
+                Self::refresh_stewards_after_removal(arc, &target).await;
+            }
+            ConsensusApplyResult::QueuedRemoval { target } => {
+                Self::refresh_stewards_after_removal(arc, &target).await;
+            }
         }
 
         if !approved && let Ok(req) = ConversationUpdateRequest::decode(payload.as_slice()) {
@@ -132,6 +128,18 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         }
 
         Ok(())
+    }
+
+    /// Bypass the inactivity timer and emit the resulting phase change.
+    /// Called by [`Self::apply_consensus_outcome`] for `UrgentRemoval` and
+    /// `RecoveryModeOpened` outcomes that need an immediate commit.
+    async fn force_freezing_and_emit(arc: &Arc<RwLock<Self>>) {
+        let event = arc.write().await.force_freezing();
+        if let Some(event) = event {
+            arc.read()
+                .await
+                .emit_event(SessionEvent::PhaseChange(event));
+        }
     }
 
     /// When the removal target is a current steward, fire a fresh election

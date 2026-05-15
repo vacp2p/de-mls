@@ -12,7 +12,7 @@ use crate::{
     core::{
         conversation::Conversation,
         error::CoreError,
-        freeze::process_commit_candidate,
+        freeze::buffer_commit_candidate,
         process_result::{NoopReason, ProcessResult},
     },
     identity::{ShortId, parse_wallet_to_bytes},
@@ -55,7 +55,7 @@ pub fn process_inbound<M: MlsService>(
     // 1. Try plaintext CommitCandidate (sent as plaintext AppMessage)
     if let Ok(app_message) = AppMessage::decode(payload) {
         if let Some(app_message::Payload::CommitCandidate(candidate)) = app_message.payload {
-            return process_commit_candidate(conversation, mls, candidate);
+            return buffer_commit_candidate(conversation, mls, candidate);
         }
     }
 

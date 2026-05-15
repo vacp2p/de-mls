@@ -5,10 +5,13 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use sha2::{Digest, Sha256};
-
 use crate::{
-    core::proposal_kind::ProposalKind,
+    core::{
+        conversation::util::{
+            is_auto_approved_entry, member_set, self_leave_proposal_id, target_identity_of,
+        },
+        proposal_kind::ProposalKind,
+    },
     protos::de_mls::messages::v1::{
         CommitCandidate, ConversationUpdateRequest, conversation_update_request,
     },
@@ -16,45 +19,6 @@ use crate::{
 
 /// Consensus proposal identifier (assigned by the consensus service).
 pub type ProposalId = u32;
-
-/// Deterministic proposal ID for a self-leave, derived from the leaver's
-/// identity. Pinning the ID dedupes a crash-retry against any in-flight
-/// session via `ProposalAlreadyExist` and lets every node key the approved
-/// entry under the same id.
-pub fn self_leave_proposal_id(identity: &[u8]) -> u32 {
-    let hash = Sha256::digest(identity);
-    u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
-}
-
-/// True iff the `(proposal_id, request)` pair is an auto-approved self-leave
-/// (identified by the deterministic ID signature).
-pub fn is_auto_approved_entry(proposal_id: u32, request: &ConversationUpdateRequest) -> bool {
-    match request.payload.as_ref() {
-        Some(conversation_update_request::Payload::RemoveMember(r)) => {
-            proposal_id == self_leave_proposal_id(&r.identity)
-        }
-        _ => false,
-    }
-}
-
-/// Borrow-only `HashSet` view over a slice of identity blobs, for O(1)
-/// membership lookups against `Vec<Vec<u8>>`.
-pub fn member_set(members: &[Vec<u8>]) -> HashSet<&[u8]> {
-    members.iter().map(|m| m.as_slice()).collect()
-}
-
-/// Return the target identity of a membership-changing `ConversationUpdateRequest`.
-///
-/// Used as the stable key for buffering pending updates so duplicates don't
-/// stack when the same KP is re-broadcast. Returns `None` for non-membership
-/// requests (emergency criteria, steward election).
-pub fn target_identity_of(request: &ConversationUpdateRequest) -> Option<&[u8]> {
-    match request.payload.as_ref()? {
-        conversation_update_request::Payload::InviteMember(m) => Some(&m.identity),
-        conversation_update_request::Payload::RemoveMember(m) => Some(&m.identity),
-        _ => None,
-    }
-}
 
 /// A membership update that has been observed but may not yet have been committed.
 ///
@@ -158,14 +122,6 @@ impl Conversation {
         }
     }
 
-    pub(crate) fn is_consensus_outcome_applied(&self, proposal_id: ProposalId) -> bool {
-        self.resolved_proposals.contains(proposal_id)
-    }
-
-    pub(crate) fn mark_consensus_outcome_applied(&mut self, proposal_id: ProposalId) {
-        self.resolved_proposals.record(proposal_id);
-    }
-
     pub fn name(&self) -> &str {
         &self.conversation_name
     }
@@ -218,17 +174,6 @@ impl Conversation {
     /// Insertion order of `approved_proposals` (oldest first).
     pub fn approved_order(&self) -> &[ProposalId] {
         &self.approved_order
-    }
-
-    /// Re-inserting an existing id preserves the original position.
-    fn push_approved(&mut self, proposal_id: ProposalId, proposal: ConversationUpdateRequest) {
-        if self
-            .approved_proposals
-            .insert(proposal_id, proposal)
-            .is_none()
-        {
-            self.approved_order.push(proposal_id);
-        }
     }
 
     /// Move a proposal from the voting queue into the approved queue.
@@ -340,17 +285,8 @@ impl Conversation {
 
     // ─────────────────────────── Urgent (ECP-driven) Commit ───────────────────────────
 
-    /// Mark the next freeze cycle as urgent and committed-only-for `target`.
-    pub(crate) fn set_urgent_commit_target(&mut self, target: Vec<u8>) {
-        self.urgent_commit_target = Some(target);
-    }
-
     pub fn urgent_commit_target(&self) -> Option<&[u8]> {
         self.urgent_commit_target.as_deref()
-    }
-
-    pub(crate) fn take_urgent_commit_target(&mut self) -> Option<Vec<u8>> {
-        self.urgent_commit_target.take()
     }
 
     /// Drop every `RemoveMember(target)` entry; other approvals stay
@@ -376,23 +312,6 @@ impl Conversation {
     }
 
     // ─────────────────────────── Freeze Round Operations ───────────────────────────
-
-    fn build_freeze_round(&self, epoch: u64) -> FreezeRound {
-        FreezeRound {
-            epoch,
-            selection_locked: false,
-            candidates: Vec::new(),
-        }
-    }
-
-    /// Initialise a freeze round for `epoch` if none exists or the buffered
-    /// one is for a stale epoch.
-    pub(crate) fn ensure_freeze_round(&mut self, epoch: u64) {
-        if matches!(self.freeze_round, Some(ref round) if round.epoch == epoch) {
-            return;
-        }
-        self.freeze_round = Some(self.build_freeze_round(epoch));
-    }
 
     /// Replace the active freeze round with a fresh one for `epoch`.
     pub fn start_freeze_round(&mut self, epoch: u64) {
@@ -429,64 +348,12 @@ impl Conversation {
         FreezeBufferOutcome::Buffered
     }
 
-    /// Mark the active freeze round as selection-locked.
-    pub(crate) fn lock_freeze_round_selection(&mut self, epoch: u64) {
-        if let Some(round) = self.freeze_round.as_mut() {
-            if round.epoch == epoch {
-                round.selection_locked = true;
-            }
-        }
-    }
-
-    /// Read-only access to the active freeze round.
-    pub(crate) fn freeze_round(&self) -> Option<&FreezeRound> {
-        self.freeze_round.as_ref()
-    }
-
     /// Get the number of buffered commit candidates in the active freeze round.
     pub fn freeze_candidate_count(&self) -> usize {
         self.freeze_round
             .as_ref()
             .map(|r| r.candidates.len())
             .unwrap_or(0)
-    }
-
-    /// Clear freeze-round state.
-    pub(crate) fn clear_freeze_round(&mut self) {
-        self.freeze_round = None;
-    }
-
-    /// Move the active round's candidates out and clear the round.
-    /// Returns `None` when no round is active or its epoch doesn't match.
-    pub(crate) fn take_round_candidates(
-        &mut self,
-        epoch: u64,
-    ) -> Option<Vec<BufferedCommitCandidate>> {
-        let round = self.freeze_round.take()?;
-        if round.epoch != epoch {
-            self.freeze_round = Some(round);
-            return None;
-        }
-        Some(round.candidates)
-    }
-
-    // ─────────────────────────── Dedup Operations ───────────────────────────
-
-    /// Check if a commit hash has already been committed (in committed history).
-    ///
-    /// Note: freeze round buffer dedup is handled separately by `add_freeze_candidate`.
-    pub(crate) fn is_duplicate_commit_candidate(&self, commit_hash: &[u8]) -> bool {
-        self.committed_batch_hashes
-            .iter()
-            .any(|ch| ch == commit_hash)
-    }
-
-    /// Record a committed batch's hash for future dedup.
-    pub(crate) fn record_committed_batch(&mut self, commit_hash: Vec<u8>) {
-        if self.committed_batch_hashes.len() >= MAX_COMMITTED_HASHES {
-            self.committed_batch_hashes.pop_front();
-        }
-        self.committed_batch_hashes.push_back(commit_hash);
     }
 
     // ─────────────────────────── Pending Update Buffer ───────────────────────────
@@ -607,6 +474,105 @@ impl Conversation {
         });
         self.approved_order
             .retain(|pid| self.approved_proposals.contains_key(pid));
+    }
+
+    // ─────────────────────────── Crate-internal ───────────────────────────
+
+    pub(crate) fn is_consensus_outcome_applied(&self, proposal_id: ProposalId) -> bool {
+        self.resolved_proposals.contains(proposal_id)
+    }
+
+    pub(crate) fn mark_consensus_outcome_applied(&mut self, proposal_id: ProposalId) {
+        self.resolved_proposals.record(proposal_id);
+    }
+
+    /// Mark the next freeze cycle as urgent and committed-only-for `target`.
+    pub(crate) fn set_urgent_commit_target(&mut self, target: Vec<u8>) {
+        self.urgent_commit_target = Some(target);
+    }
+
+    pub(crate) fn take_urgent_commit_target(&mut self) -> Option<Vec<u8>> {
+        self.urgent_commit_target.take()
+    }
+
+    /// Initialise a freeze round for `epoch` if none exists or the buffered
+    /// one is for a stale epoch.
+    pub(crate) fn ensure_freeze_round(&mut self, epoch: u64) {
+        if matches!(self.freeze_round, Some(ref round) if round.epoch == epoch) {
+            return;
+        }
+        self.freeze_round = Some(self.build_freeze_round(epoch));
+    }
+
+    /// Mark the active freeze round as selection-locked.
+    pub(crate) fn lock_freeze_round_selection(&mut self, epoch: u64) {
+        if let Some(round) = self.freeze_round.as_mut()
+            && round.epoch == epoch
+        {
+            round.selection_locked = true;
+        }
+    }
+
+    /// Read-only access to the active freeze round.
+    pub(crate) fn freeze_round(&self) -> Option<&FreezeRound> {
+        self.freeze_round.as_ref()
+    }
+
+    /// Clear freeze-round state.
+    pub(crate) fn clear_freeze_round(&mut self) {
+        self.freeze_round = None;
+    }
+
+    /// Move the active round's candidates out and clear the round.
+    /// Returns `None` when no round is active or its epoch doesn't match.
+    pub(crate) fn take_round_candidates(
+        &mut self,
+        epoch: u64,
+    ) -> Option<Vec<BufferedCommitCandidate>> {
+        let round = self.freeze_round.take()?;
+        if round.epoch != epoch {
+            self.freeze_round = Some(round);
+            return None;
+        }
+        Some(round.candidates)
+    }
+
+    /// Check if a commit hash has already been committed (in committed history).
+    ///
+    /// Note: freeze round buffer dedup is handled separately by `add_freeze_candidate`.
+    pub(crate) fn is_duplicate_commit_candidate(&self, commit_hash: &[u8]) -> bool {
+        self.committed_batch_hashes
+            .iter()
+            .any(|ch| ch == commit_hash)
+    }
+
+    /// Record a committed batch's hash for future dedup.
+    pub(crate) fn record_committed_batch(&mut self, commit_hash: Vec<u8>) {
+        if self.committed_batch_hashes.len() >= MAX_COMMITTED_HASHES {
+            self.committed_batch_hashes.pop_front();
+        }
+        self.committed_batch_hashes.push_back(commit_hash);
+    }
+
+    // ─────────────────────────── Private ───────────────────────────
+
+    /// Re-inserting an existing id preserves the original position.
+    fn push_approved(&mut self, proposal_id: ProposalId, proposal: ConversationUpdateRequest) {
+        if self
+            .approved_proposals
+            .insert(proposal_id, proposal)
+            .is_none()
+        {
+            self.approved_order.push(proposal_id);
+        }
+    }
+
+    fn build_freeze_round(&self, epoch: u64) -> FreezeRound {
+        FreezeRound {
+            epoch,
+            selection_locked: false,
+            candidates: Vec::new(),
+        }
     }
 }
 

@@ -78,7 +78,7 @@ pub enum NoopReason {
     DecryptIgnored,
     /// Decrypt returned a non-Application MLS payload on the app subtopic.
     UnexpectedMlsType,
-    /// `process_commit_candidate` found no approved proposals to commit.
+    /// `buffer_commit_candidate` found no approved proposals to commit.
     NoApprovedProposals,
     /// Commit hash matches a recent committed batch — duplicate broadcast.
     AlreadyCommitted,

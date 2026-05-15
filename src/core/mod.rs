@@ -12,11 +12,12 @@
 //! Submodules: `conversation` (per-conversation state, handle, state machine,
 //! config), `consensus` (pure consensus result application),
 //! `consensus_plugin` ([`crate::core::ConsensusPlugin`] +
-//! [`crate::core::DefaultConsensusPlugin`]), `events`
-//! (`SessionEvent` / `ConversationLifecycle`), `freeze` (round selection
-//! + apply), `inbound` (app-subtopic packet routing), `peer_scoring`
-//! (scoring plug-in contract), `plugins`
-//! ([`crate::core::ConversationPluginsFactory`] bundle), `process_result`
+//! [`crate::core::DefaultConsensusPlugin`]), `conversation_plugins`
+//! ([`crate::core::ConversationPluginsFactory`] — the per-conversation
+//! plug-in factory bundle), `events` (`SessionEvent` /
+//! `ConversationLifecycle`), `freeze` (round selection + apply),
+//! `inbound` (app-subtopic packet routing), `peer_scoring`
+//! (scoring plug-in contract), `process_result`
 //! ([`crate::core::ProcessResult`]), `proposal_framing` (welcome-subtopic
 //! + consensus-library framing helpers), `proposal_kind`
 //! ([`crate::core::ProposalKind`] classifier), `steward_list`
@@ -25,13 +26,13 @@
 mod consensus;
 mod consensus_plugin;
 mod conversation;
+mod conversation_plugins;
 mod error;
 mod events;
 mod freeze;
 mod inbound;
 mod key_package;
 mod peer_scoring;
-mod plugins;
 mod process_result;
 mod proposal_framing;
 mod proposal_kind;
@@ -82,7 +83,7 @@ pub use steward_list::{
 pub use consensus_plugin::{ConsensusPlugin, DefaultConsensusPlugin, PluginConsensus};
 
 // ── Per-conversation plug-in bundle ──
-pub use plugins::ConversationPluginsFactory;
+pub use conversation_plugins::ConversationPluginsFactory;
 
 // ── Process results ──
 pub use process_result::{NoopReason, ProcessResult};
