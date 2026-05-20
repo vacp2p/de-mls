@@ -340,7 +340,7 @@ impl WakuDeliveryService {
 impl WakuDeliveryService {
     /// Open a pull-style inbound channel. Internal Waku consumers (the
     /// gateway's pubsub forwarder, integration tests) call this to receive
-    /// every packet the node delivers; libchat-style integrators that
+    /// every packet the node delivers; alternative integrators that
     /// route packets via [`DeliveryService::subscribe`] don't use this.
     ///
     /// Each call creates a new channel and registers its sender
@@ -372,9 +372,9 @@ impl DeliveryService for WakuDeliveryService {
             })
             .map_err(|e| DeliveryServiceError::Other(anyhow::anyhow!(e)))?;
 
-        // Discard the transport-assigned message id — the libchat-shaped
-        // trait returns `Result<(), _>` and de-mls's callers don't use the
-        // id for anything load-bearing.
+        // Discard the transport-assigned message id — the trait returns
+        // `Result<(), _>` and no caller uses the id for anything
+        // load-bearing.
         reply_rx
             .recv()
             .map_err(|e| DeliveryServiceError::Other(anyhow::anyhow!(e)))??;
@@ -385,8 +385,7 @@ impl DeliveryService for WakuDeliveryService {
         // The Waku node already accepts every packet on the configured
         // pubsub topic; per-address routing is done downstream by the
         // gateway's TopicFilter. Recording the address here would be
-        // structural — kept as a no-op so the trait still matches
-        // libchat's signature one-for-one.
+        // structural — kept as a no-op.
         Ok(())
     }
 }

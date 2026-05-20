@@ -169,7 +169,7 @@ impl Gateway<WakuDeliveryService> {
 
         // Hand the Waku delivery service directly to `User` as its transport.
         // `WakuDeliveryService` implements `DeliveryService`. Wrap in a std
-        // `Mutex` because the libchat-shape trait takes `&mut self`.
+        // `Mutex` because the trait takes `&mut self`.
         let transport: SharedDeliveryService =
             Arc::new(StdMutex::new(core.app_state.delivery.clone()));
 

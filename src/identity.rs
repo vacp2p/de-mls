@@ -6,9 +6,9 @@
 //! *from* an `Identity` at User init and held shared.
 //!
 //! The default impl is [`crate::identity::WalletIdentity`], which derives
-//! the canonical identity bytes from a 20-byte Ethereum address. Future
-//! impls (libchat-style `AccountId`, etc.) plug in by implementing the
-//! trait; they do not need to know anything about MLS.
+//! the canonical identity bytes from a 20-byte Ethereum address. Other
+//! impls plug in by implementing the trait; they do not need to know
+//! anything about MLS.
 
 use alloy::{hex, primitives::Address};
 use std::str::FromStr;

@@ -1,25 +1,24 @@
 //! Transport-agnostic envelopes + delivery service interface.
 //!
-//! The [`DeliveryService`] trait shape mirrors libchat's
-//! `core/conversations/src/service_traits.rs` so an integrator that
-//! implements one can satisfy the other with a single impl block.
-//! Concretely:
+//! [`DeliveryService`] shape:
 //! - `Debug` supertrait.
-//! - Associated `type Error: Display` lets each transport define its own
-//!   error shape. de-mls's `WakuDeliveryService` pins `type Error =
-//!   DeliveryServiceError`; integrators (libchat) bring their own.
+//! - Associated `type Error: Display + Debug` lets each transport define
+//!   its own error shape. `WakuDeliveryService` pins
+//!   `type Error = DeliveryServiceError`; other transports bring their own.
 //! - `publish(&mut self, ...)` and `subscribe(&mut self, &str)` take a
-//!   mutable receiver so impls can mutate internal state without
-//!   interior mutability. de-mls stores the trait object behind an
-//!   `Arc<Mutex<dyn ...>>` so concurrent callers serialize on the
-//!   mutex; single-thread integrators can wrap in `Rc<RefCell<dyn ...>>`
-//!   instead.
+//!   mutable receiver so impls can mutate internal state without interior
+//!   mutability. The trait object is stored behind `Arc<Mutex<dyn ...>>`
+//!   so concurrent callers serialize on the mutex; single-thread
+//!   integrators can wrap in `Rc<RefCell<dyn ...>>` instead.
 //! - `subscribe(addr)` registers interest in a delivery address and
-//!   returns `Result<(), Error>` — push-style. The `subscribe() ->
-//!   Receiver` pull-style API the de-mls Waku impl previously offered
-//!   has moved off the trait to a Waku-specific concrete method.
+//!   returns `Result<(), Error>`. The pull-style `Receiver`-returning API
+//!   the Waku impl previously offered now lives as a Waku-specific
+//!   concrete method.
 
-use std::fmt::{Debug, Display};
+use std::{
+    fmt::{Debug, Display},
+    sync::{Arc, Mutex},
+};
 
 use crate::ds::DeliveryServiceError;
 
@@ -82,16 +81,19 @@ impl InboundPacket {
     }
 }
 
-/// Trait implemented by every transport. The shape is intentionally identical
-/// to libchat's `DeliveryService` so an impl can satisfy both crates'
-/// requirements with a single set of method bodies.
-pub trait DeliveryService: Debug + Send + Sync + 'static {
+/// Trait implemented by every transport. `Debug` supertrait and
+/// `Error: Display + Debug` only — no `Send`/`Sync` on the trait itself or
+/// on the associated `Error`, so single-thread hosts can implement
+/// without thread-safety bounds. The `'static` bound is preserved so
+/// trait objects (`dyn DeliveryService<Error = …>`) are storable behind
+/// `Arc`.
+pub trait DeliveryService: Debug + 'static {
     /// Per-impl error type. Pinned to [`DeliveryServiceError`] at storage
     /// sites inside de-mls (`Arc<Mutex<dyn DeliveryService<Error =
     /// DeliveryServiceError>>>`) so existing consumers route everything
     /// through one error enum; integrators that need a richer error type
     /// can wrap in an adapter that maps to [`DeliveryServiceError::Other`].
-    type Error: Display + Send + Sync + 'static;
+    type Error: Display + Debug + 'static;
 
     /// Publish a packet to the network.
     fn publish(&mut self, packet: OutboundPacket) -> Result<(), Self::Error>;
@@ -104,9 +106,11 @@ pub trait DeliveryService: Debug + Send + Sync + 'static {
     fn subscribe(&mut self, delivery_address: &str) -> Result<(), Self::Error>;
 }
 
-/// Type alias for the trait object shape de-mls stores internally. Pins the
-/// associated `Error` so dyn-dispatch is object-safe and existing
+/// Type alias for the trait object shape de-mls stores internally. Pins
+/// the associated `Error` so dyn-dispatch is object-safe and existing
 /// `UserError::Transport(#[from] DeliveryServiceError)` conversion works
-/// without changes.
+/// without changes. The `Send` is on the trait-object wrapper (not the
+/// trait) so a `User` clone-handle can move between tasks even though the
+/// trait itself doesn't require `Send`.
 pub type SharedDeliveryService =
-    std::sync::Arc<std::sync::Mutex<dyn DeliveryService<Error = DeliveryServiceError>>>;
+    Arc<Mutex<dyn DeliveryService<Error = DeliveryServiceError> + Send>>;

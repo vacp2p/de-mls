@@ -1,5 +1,7 @@
 //! Display helpers for rendering protobuf types in the UI.
 
+use std::fmt;
+
 use crate::{
     identity::format_wallet_address,
     protos::de_mls::messages::v1::{
@@ -23,8 +25,8 @@ pub enum MemberRole {
     Member,
 }
 
-impl std::fmt::Display for MemberRole {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for MemberRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MemberRole::EpochSteward => write!(f, "epoch_steward"),
             MemberRole::BackupSteward => write!(f, "backup_steward"),

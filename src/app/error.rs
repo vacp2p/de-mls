@@ -1,7 +1,10 @@
 //! Error type for the app layer.
 
+use std::time::SystemTimeError;
+
 use alloy::signers::local::LocalSignerError;
 use hashgraph_like_consensus::error::ConsensusError;
+use tokio::task::JoinError;
 
 use crate::{
     core::CoreError, ds::DeliveryServiceError, identity::IdentityError, mls_crypto::MlsError,
@@ -42,7 +45,7 @@ pub enum UserError {
     Message(#[from] prost::DecodeError),
 
     #[error("System time error: {0}")]
-    SystemTime(#[from] std::time::SystemTimeError),
+    SystemTime(#[from] SystemTimeError),
 
     #[error("Signer error: {0}")]
     Signer(#[from] LocalSignerError),
@@ -57,5 +60,5 @@ pub enum UserError {
     LockPoisoned(&'static str),
 
     #[error("Background task join failed: {0}")]
-    TaskJoin(#[from] tokio::task::JoinError),
+    TaskJoin(#[from] JoinError),
 }

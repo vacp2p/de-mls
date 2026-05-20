@@ -17,12 +17,13 @@ use tokio::{
 use tracing::info;
 
 use crate::{
-    app::PhaseTimer,
+    app::{PhaseTimer, UserError},
     core::{
         ConsensusPlugin, Conversation, ConversationConfig, ConversationHandle,
         ConversationPluginsFactory, ConversationState, ConversationStateMachine, PluginConsensus,
         SessionEvent,
     },
+    ds::{OutboundPacket, SharedDeliveryService},
 };
 
 /// Free helper that wraps the synchronous
@@ -30,14 +31,14 @@ use crate::{
 /// so callers can hold the runner lock just long enough to clone the
 /// transport, then `await` the send without the guard alive.
 pub(crate) async fn send_packet(
-    transport: &crate::ds::SharedDeliveryService,
-    packet: crate::ds::OutboundPacket,
-) -> Result<(), crate::app::UserError> {
+    transport: &SharedDeliveryService,
+    packet: OutboundPacket,
+) -> Result<(), UserError> {
     let transport = Arc::clone(transport);
-    spawn_blocking(move || -> Result<(), crate::app::UserError> {
+    spawn_blocking(move || -> Result<(), UserError> {
         transport
             .lock()
-            .map_err(|_| crate::app::UserError::LockPoisoned("transport"))?
+            .map_err(|_| UserError::LockPoisoned("transport"))?
             .publish(packet)?;
         Ok(())
     })
@@ -78,7 +79,7 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// methods reach this via [`Self::transport`] and route through
     /// [`send_packet`], which wraps [`crate::ds::DeliveryService::publish`]
     /// in `spawn_blocking`.
-    transport: crate::ds::SharedDeliveryService,
+    transport: SharedDeliveryService,
     /// Cached identity bytes (cloned from `User`). Used by per-session
     /// methods that need the local identity without re-walking the
     /// `Identity` trait.
@@ -113,7 +114,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         scoring: CP::Scoring,
         steward_list: CP::StewardList,
         consensus: PluginConsensus<P>,
-        transport: crate::ds::SharedDeliveryService,
+        transport: SharedDeliveryService,
         self_identity: Arc<[u8]>,
         identity_display: Arc<str>,
         app_id: Arc<[u8]>,
@@ -156,7 +157,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Borrow the session's transport without taking the runner lock —
     /// callers that need to send while holding the runner lock briefly can
     /// clone this and pass it to [`send_packet`] after dropping the guard.
-    pub(crate) fn transport(&self) -> &crate::ds::SharedDeliveryService {
+    pub(crate) fn transport(&self) -> &SharedDeliveryService {
         &self.transport
     }
 

@@ -59,7 +59,7 @@ pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Synchronous outbound transport. Cloned into each `SessionRunner` at
     /// construction; sessions wrap [`crate::ds::DeliveryService::publish`]
     /// in `spawn_blocking` for use in async contexts. Stored behind a
-    /// `Mutex` because the libchat-shape trait takes `&mut self`.
+    /// `Mutex` because the trait takes `&mut self`.
     pub(crate) transport: SharedDeliveryService,
     /// All User-level plugin state: the per-conversation factory, the
     /// consensus context, the key-package provider, and the three default
