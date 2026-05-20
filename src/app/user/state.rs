@@ -142,7 +142,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     ) -> Result<(), UserError> {
         if let Some(entry_arc) = self.lookup_entry(conversation_name)? {
             entry_arc
-                .read()
+                .write()
                 .map_err(|_| UserError::LockPoisoned("session"))?
                 .cancel_all_auto_votes();
         }

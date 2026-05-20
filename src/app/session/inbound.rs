@@ -89,7 +89,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::MembershipChangeReceived(request) => {
-                Self::handle_incoming_update_request(arc, *request)?;
+                Self::handle_incoming_update_request(arc, *request).await?;
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::JoinedConversation(_name) => {
@@ -190,7 +190,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     s.handle.config.liveness_criteria_yes,
                 )
             };
-            Self::spawn_auto_vote(arc, proposal_id, delay, vote)?;
+            arc.write_or_err("session")?
+                .register_auto_vote(proposal_id, delay, vote);
         }
         Ok(())
     }
@@ -217,7 +218,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             (packet, members, s.conversation_name.clone())
         };
         let transport = Arc::clone(arc.read_or_err("session")?.transport());
-        send_packet(&transport, packet).await?;
+        send_packet(&transport, packet)?;
         arc.read_or_err("session")?.emit_event(SessionEvent::Joined);
         arc.write_or_err("session")?
             .sync_scoring_members(&mls_members);
@@ -267,9 +268,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             }
         };
 
-        Self::steward_list_housekeeping(arc)?;
-        Self::process_buffered_updates(arc)?;
-        Self::maybe_close_recovery_window(arc);
+        Self::steward_list_housekeeping(arc).await?;
+        Self::process_buffered_updates(arc).await?;
+        Self::maybe_close_recovery_window(arc).await;
 
         if let Some(event) = working_event {
             arc.read_or_err("session")?
@@ -280,7 +281,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
     /// Fire a steward election while `recovery_mode` is set so the next
     /// list installs and closes the window.
-    fn maybe_close_recovery_window(arc: &Arc<RwLock<Self>>) {
+    async fn maybe_close_recovery_window(arc: &Arc<RwLock<Self>>) {
         let in_recovery_mode = match arc.read_or_err("session") {
             Ok(s) => s.handle.is_in_recovery_mode(),
             Err(e) => {
@@ -291,7 +292,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         if !in_recovery_mode {
             return;
         }
-        if let Err(e) = Self::try_initiate_steward_election(arc, true, None) {
+        if let Err(e) = Self::try_initiate_steward_election(arc, true, None).await {
             let conv_name = arc
                 .read_or_err("session")
                 .map(|s| s.conversation_name.clone())
@@ -370,7 +371,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             .emit_event(SessionEvent::PhaseChange(event));
         if let Some(message) = outbound {
             let transport = Arc::clone(arc.read_or_err("session")?.transport());
-            send_packet(&transport, message).await?;
+            send_packet(&transport, message)?;
         }
         Ok(())
     }

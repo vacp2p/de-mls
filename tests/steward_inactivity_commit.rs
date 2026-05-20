@@ -52,7 +52,9 @@ async fn steward_inactivity_fires_commit_candidate() {
             RemoveMember { identity: bob_id },
         )),
     };
-    SessionRunner::initiate_proposal(&alice_session, request, CreatorVote::Yes).unwrap();
+    SessionRunner::initiate_proposal(&alice_session, request, CreatorVote::Yes)
+        .await
+        .unwrap();
 
     // Drive polling + packet relay. Accumulate alice's outbound so we can
     // verify a `CommitCandidate` packet appears — without any explicit

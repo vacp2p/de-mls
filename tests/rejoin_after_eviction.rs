@@ -67,7 +67,9 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
             },
         )),
     };
-    SessionRunner::initiate_proposal(&steward_session, request, CreatorVote::Yes).unwrap();
+    SessionRunner::initiate_proposal(&steward_session, request, CreatorVote::Yes)
+        .await
+        .unwrap();
 
     let mut target_evicted = false;
     for _ in 0..30 {
@@ -150,6 +152,7 @@ async fn drive_one_round(
     settle_for(Duration::from_millis(40)).await;
     for (i, (u, _)) in users.iter().enumerate() {
         if let Some(s) = u.lookup_entry("rejoin").unwrap() {
+            let _ = SessionRunner::tick_deadlines(&s).await;
             let pfs = SessionRunner::poll_freeze_status(&s).await;
             if i == target_idx && matches!(pfs, Ok((_, DispatchOutcome::LeaveRequested))) {
                 u.finalize_self_leave("rejoin").await.unwrap();

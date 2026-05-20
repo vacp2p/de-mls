@@ -254,6 +254,7 @@ pub fn fast_test_config() -> ConversationConfig {
 /// check, and (for joiners) the pending-join tick. Mirrors the production
 /// `group_polling_loop` body in `de_mls_gateway::group`.
 pub async fn poll_once(session: &SessionArc) {
+    let _ = SessionRunner::tick_deadlines(session).await;
     let _ = SessionRunner::poll_freeze_status(session).await;
     let _ = SessionRunner::check_member_freeze(session).await;
     let _ = SessionRunner::check_pending_join(session);

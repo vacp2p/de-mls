@@ -156,7 +156,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // which `.await`s on the consensus service. Holding the runner
         // lock across that await would block other operations on this
         // conversation, so we drop the lock above before chaining.
-        if downward_cross && let Err(e) = Self::check_and_initiate_score_removals(arc) {
+        if downward_cross && let Err(e) = Self::check_and_initiate_score_removals(arc).await {
             error!(conversation = %conversation_name, error = %e, "score-removal check failed (freeze finalize)");
         }
 
@@ -169,7 +169,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     .is_some_and(|p| p.subtopic == WELCOME_SUBTOPIC);
                 if let Some(packet) = outbound {
                     let transport = Arc::clone(arc.read_or_err("session")?.transport());
-                    if let Err(e) = send_packet(&transport, packet).await {
+                    if let Err(e) = send_packet(&transport, packet) {
                         error!(conversation = %conversation_name, error = %e, "deferred welcome send failed");
                     }
                 }
@@ -185,7 +185,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     };
                     match sync_packet_result {
                         Ok(Some((transport, packet))) => {
-                            if let Err(e) = send_packet(&transport, packet).await {
+                            if let Err(e) = send_packet(&transport, packet) {
                                 error!(conversation = %conversation_name, error = %e, "conversation sync send failed");
                             } else {
                                 info!(conversation = %conversation_name, "conversation sync sent");
@@ -259,7 +259,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     }
                 };
 
-                if downward_cross && let Err(e) = Self::check_and_initiate_score_removals(arc) {
+                if downward_cross && let Err(e) = Self::check_and_initiate_score_removals(arc).await
+                {
                     error!(conversation = %conversation_name, error = %e, "score-removal check failed (freeze timeout)");
                 }
 
@@ -270,7 +271,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 // Layer 2 recovery: regenerate the steward list. Only the
                 // responsible proposer's call actually submits.
                 if entered_reelection
-                    && let Err(e) = Self::try_initiate_steward_election(arc, true, None)
+                    && let Err(e) = Self::try_initiate_steward_election(arc, true, None).await
                 {
                     info!(conversation = %conversation_name, error = %e, "recovery election deferred");
                 }
@@ -354,7 +355,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
         // Async phase: release the lock before awaiting the transport.
         if let Some(message) = outbound {
-            send_packet(&transport, message).await?;
+            send_packet(&transport, message)?;
         }
 
         Ok(transitioned)

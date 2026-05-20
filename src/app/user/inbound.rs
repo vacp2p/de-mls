@@ -143,7 +143,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                         },
                     )),
                 };
-                SessionRunner::handle_incoming_update_request(entry_arc, gur)
+                SessionRunner::handle_incoming_update_request(entry_arc, gur).await
             }
             Some(welcome_message::Payload::InvitationToJoin(invitation)) => {
                 let self_id = self.self_identity();
@@ -202,10 +202,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ds::{DeliveryService, DeliveryServiceError, OutboundPacket, SharedDeliveryService};
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
+
+    use crate::ds::{DeliveryService, DeliveryServiceError, OutboundPacket, SharedDeliveryService};
 
     /// Transport stub: `publish` is a no-op so an outbound never reaches a
     /// real network; `subscribe` is a no-op too.
@@ -227,8 +227,11 @@ mod tests {
 
     /// Self-leave must abort auto-vote timers — otherwise they fire
     /// against a conversation we've left.
+    /// Self-leave must drop the pending auto-vote registry — otherwise
+    /// the next `tick_deadlines` would fire against a conversation
+    /// we've left.
     #[tokio::test]
-    async fn finalize_self_leave_cancels_registered_auto_votes() {
+    async fn finalize_self_leave_clears_pending_auto_votes() {
         let transport: SharedDeliveryService = Arc::new(Mutex::new(NullTransport));
         let mut user = User::with_private_key(ALICE_KEY, transport).unwrap();
         user.start_conversation("test-conv", true).await.unwrap();
@@ -238,28 +241,25 @@ mod tests {
             .unwrap()
             .expect("creator session registered");
 
-        let executed = Arc::new(AtomicBool::new(false));
-        let canary = {
-            let executed = Arc::clone(&executed);
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                executed.store(true, Ordering::SeqCst);
-            })
-        };
+        // Seed a pending auto-vote with a far-future fire-at so the
+        // assertion isn't sensitive to wall-clock drift.
         session
-            .read()
+            .write()
             .unwrap()
-            .auto_vote_timers
-            .lock()
-            .unwrap()
-            .insert(42, canary);
+            .register_auto_vote(42, Duration::from_secs(600), true);
+        assert!(
+            session.read().unwrap().pending_auto_votes.contains_key(&42),
+            "auto-vote must be registered before self-leave"
+        );
 
         user.finalize_self_leave("test-conv").await.unwrap();
-        tokio::time::sleep(Duration::from_millis(500)).await;
 
+        // Session entry is gone from the registry, so the conversation's
+        // pending auto-votes can no longer fire from a poll cycle on this
+        // user.
         assert!(
-            !executed.load(Ordering::SeqCst),
-            "auto-vote timer must be aborted on self-leave"
+            user.lookup_entry("test-conv").unwrap().is_none(),
+            "registry entry must be evicted on self-leave"
         );
     }
 }

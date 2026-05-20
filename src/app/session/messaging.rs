@@ -35,7 +35,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let packet = build_key_package_message(&s.conversation_name, key_package, &s.app_id);
             (Arc::clone(s.transport()), packet)
         };
-        send_packet(&transport, packet).await?;
+        send_packet(&transport, packet)?;
         Ok(())
     }
 
@@ -72,7 +72,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let packet = s.handle.expect_mls()?.build_message(&app_msg, &s.app_id)?;
             (Arc::clone(s.transport()), packet)
         };
-        send_packet(&transport, packet).await?;
+        send_packet(&transport, packet)?;
         Ok(())
     }
 
@@ -80,7 +80,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// The requester's click means "I want this person removed" → the
     /// creator's vote is bundled as YES at submit; no banner is shown to
     /// the requester.
-    pub fn process_ban_request(
+    pub async fn process_ban_request(
         arc: &Arc<RwLock<Self>>,
         ban_request: BanRequest,
     ) -> Result<(), UserError> {
@@ -102,7 +102,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 )),
             },
             CreatorVote::Yes,
-        )?;
+        )
+        .await?;
 
         Ok(())
     }

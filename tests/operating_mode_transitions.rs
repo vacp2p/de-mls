@@ -54,7 +54,9 @@ async fn deadlock_ecp_opens_recovery_and_force_freezes() {
         .with_creator(b"alice-creator".to_vec())
         .into_update_request()
         .unwrap();
-    SessionRunner::initiate_proposal(&alice_session, request, CreatorVote::Yes).unwrap();
+    SessionRunner::initiate_proposal(&alice_session, request, CreatorVote::Yes)
+        .await
+        .unwrap();
 
     let mut alice_saw_freezing = false;
     let mut bob_saw_freezing = false;

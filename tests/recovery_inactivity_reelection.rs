@@ -62,7 +62,9 @@ async fn silent_steward_drives_observer_to_reelection() {
             },
         )),
     };
-    SessionRunner::initiate_proposal(&observer_session, request, CreatorVote::Yes).unwrap();
+    SessionRunner::initiate_proposal(&observer_session, request, CreatorVote::Yes)
+        .await
+        .unwrap();
 
     // Phase 1: pump packets normally until both sides have approved=1.
     let mut consensus_reached = false;

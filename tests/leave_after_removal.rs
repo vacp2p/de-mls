@@ -63,7 +63,9 @@ async fn removed_member_emits_leaving_and_is_evicted() {
             },
         )),
     };
-    SessionRunner::initiate_proposal(&steward_session, request, CreatorVote::Yes).unwrap();
+    SessionRunner::initiate_proposal(&steward_session, request, CreatorVote::Yes)
+        .await
+        .unwrap();
 
     // Drive packet relay + polling until the target is evicted from its
     // User registry. Mirrors the gateway's polling loop: when
@@ -74,6 +76,7 @@ async fn removed_member_emits_leaving_and_is_evicted() {
         settle_for(Duration::from_millis(40)).await;
         for (i, (u, _)) in users.iter().enumerate() {
             if let Some(s) = u.lookup_entry("leave").unwrap() {
+                let _ = SessionRunner::tick_deadlines(&s).await;
                 if i == target_idx
                     && matches!(
                         SessionRunner::poll_freeze_status(&s).await,

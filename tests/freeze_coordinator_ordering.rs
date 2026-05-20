@@ -52,7 +52,9 @@ async fn freeze_cycle_emits_phase_events_in_order() {
             },
         )),
     };
-    SessionRunner::initiate_proposal(&alice_session, remove_request, CreatorVote::Yes).unwrap();
+    SessionRunner::initiate_proposal(&alice_session, remove_request, CreatorVote::Yes)
+        .await
+        .unwrap();
 
     // Drive polling + packet relay until both sessions are back in
     // Working (bob will actually exit the conversation, so we check

@@ -157,6 +157,13 @@ impl Gateway<WakuDeliveryService> {
                 tracing::warn!(group = %conversation_name, "polling loop: session gone");
                 break;
             };
+            if let Err(e) = SessionRunner::tick_deadlines(&session).await {
+                if is_polling_fatal(&e) {
+                    tracing::warn!(group = %conversation_name, error = %e, "polling loop exiting (tick_deadlines)");
+                    break;
+                }
+                tracing::warn!(group = %conversation_name, error = %e, "tick_deadlines failed");
+            }
             let freeze_outcome = match SessionRunner::poll_freeze_status(&session).await {
                 Ok(o) => o,
                 Err(e) => {
@@ -251,7 +258,7 @@ impl Gateway<WakuDeliveryService> {
             conversation_name: conversation_name.clone(),
         };
 
-        SessionRunner::process_ban_request(&session, ban_request)?;
+        SessionRunner::process_ban_request(&session, ban_request).await?;
 
         Ok(())
     }
