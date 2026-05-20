@@ -35,7 +35,7 @@ impl<S: PeerScoreStorage> PeerScoringService<S> {
     }
 }
 
-impl<S: PeerScoreStorage + Send + Sync + 'static> PeerScoringPlugin for PeerScoringService<S> {
+impl<S: PeerScoreStorage> PeerScoringPlugin for PeerScoringService<S> {
     fn add_member(&mut self, member_id: &[u8]) -> Vec<PeerScoringEvent> {
         let default = self.config.default_score;
         self.storage.set(member_id, default);

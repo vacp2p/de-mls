@@ -22,7 +22,7 @@ use crate::{
 /// for each. Identity is intentionally **not** part of this bundle — it
 /// lives parallel to the conversation registry as `Arc<dyn Identity>` on
 /// `User`.
-pub trait ConversationPluginsFactory: Send + Sync + 'static {
+pub trait ConversationPluginsFactory {
     type Mls: MlsService;
     type Scoring: PeerScoringPlugin;
     type StewardList: StewardListPlugin;

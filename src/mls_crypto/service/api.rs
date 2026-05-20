@@ -40,7 +40,7 @@ pub const DEFAULT_COMMIT_BATCH_MAX: usize = 50;
 ///
 /// Read-only methods take `&self`; methods that advance MLS state take
 /// `&mut self`. Callers serialize via the outer per-session lock.
-pub trait MlsService{
+pub trait MlsService {
     /// The conversation id this service is scoped to.
     fn conversation_id(&self) -> &str;
 

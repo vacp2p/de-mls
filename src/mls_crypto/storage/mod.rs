@@ -1,6 +1,8 @@
 //! Storage abstraction for DE-MLS persistence.
 //!
 
+use openmls_traits::storage::StorageProvider;
+use std::error::Error;
 use std::sync::Arc;
 
 use crate::mls_crypto::MlsError;
@@ -10,18 +12,13 @@ use crate::mls_crypto::MlsError;
 /// Implementations must provide:
 /// - Key package reference tracking (to detect welcomes for us)
 /// - OpenMLS storage delegation (groups, key packages, etc.)
-///
-/// # Thread Safety
-///
-/// Implementations must be `Send + Sync`. Internal synchronization
-/// (locks, channels) is the implementation's responsibility.
-pub trait DeMlsStorage: Send + Sync + 'static {
+pub trait DeMlsStorage {
     /// The OpenMLS storage provider type.
     /// VERSION is the OpenMLS storage version (currently 1).
-    type MlsStorage: openmls_traits::storage::StorageProvider<1, Error = Self::StorageError>;
+    type MlsStorage: StorageProvider<1, Error = Self::StorageError>;
 
     /// Storage error type (must be compatible with OpenMLS).
-    type StorageError: std::error::Error + Send + Sync + 'static;
+    type StorageError: Error + Send + Sync + 'static;
 
     // ─────────────────────────────────────────────────────────
     // Key Package Tracking

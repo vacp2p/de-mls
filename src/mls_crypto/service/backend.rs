@@ -88,7 +88,7 @@ where
 
 impl<S> MlsService for OpenMlsService<S>
 where
-    S: DeMlsStorage + Send + Sync + 'static,
+    S: DeMlsStorage,
 {
     fn conversation_id(&self) -> &str {
         &self.conversation_id
