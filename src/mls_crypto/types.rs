@@ -4,9 +4,9 @@ use openmls::key_packages::KeyPackage as MlsKeyPackage;
 
 use crate::mls_crypto::MlsError;
 
-/// Serialized key package for joining conversation.
+/// Serialized key package for joining a conversation.
 ///
-/// Contains the TLS-serialized key package bytes and the owner's wallet identity.
+/// Carries the TLS-serialized key package and the owner's identity bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyPackageBytes {
     bytes: Vec<u8>,
@@ -32,13 +32,13 @@ impl KeyPackageBytes {
 /// | Shape | Where | Carries |
 /// |-------|-------|---------|
 /// | [`crate::protos::de_mls::messages::v1::ConversationUpdateRequest`] | consensus wire | wire payload, also covers governance kinds (emergency / election) |
-/// | [`MlsCommitInput`] | input to [`super::MlsService::create_commit_candidate`] | Add carries the full key package; Remove carries the wallet bytes |
+/// | [`MlsCommitInput`] | input to [`super::MlsService::create_commit_candidate`] | Add carries the full key package; Remove carries the target identity bytes |
 /// | [`MlsProposalOutput`] | output of MLS staging / decryption | identity-only, plus `Other` for proposal kinds we don't construct |
 #[derive(Clone, Debug)]
 pub enum MlsCommitInput {
     /// Add a new member using their key package.
     Add(KeyPackageBytes),
-    /// Remove a member by their wallet address (20 bytes).
+    /// Remove a member by their identity bytes.
     Remove(Vec<u8>),
 }
 
@@ -99,7 +99,7 @@ pub enum DecryptResult {
 pub enum StagedCandidateResult {
     /// Candidate staged successfully. All identities are MLS-authenticated.
     Staged {
-        /// Identity (wallet bytes) of the commit sender.
+        /// Identity bytes of the commit sender (MLS-authenticated).
         commit_sender: Vec<u8>,
         /// Per-proposal sender identity, in input order. Caller cross-checks
         /// these against the commit sender to detect bundles signed by
@@ -129,7 +129,7 @@ pub struct CommitCandidate {
 ///
 /// Returns `(key_package_bytes, identity)` where:
 /// - `key_package_bytes` is the original JSON bytes (passed through)
-/// - `identity` is the wallet address extracted from the credential
+/// - `identity` is the identity bytes from the leaf credential
 pub fn key_package_bytes_from_json(json_bytes: Vec<u8>) -> Result<(Vec<u8>, Vec<u8>), MlsError> {
     let kp: MlsKeyPackage =
         serde_json::from_slice(&json_bytes).map_err(MlsError::KeyPackageJson)?;
