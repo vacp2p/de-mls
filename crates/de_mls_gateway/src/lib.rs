@@ -51,14 +51,10 @@ type UserRef = Arc<
 >;
 
 /// Type alias for a per-conversation session reference obtained via
-/// `User::lookup_entry`. Mirrors [`UserRef`] but at the session granularity.
-pub(crate) type SessionRef = Arc<
-    tokio::sync::RwLock<
-        de_mls::app::SessionRunner<
-            DefaultConsensusPlugin,
-            de_mls::app::DefaultConversationPluginsFactory,
-        >,
-    >,
+/// `User::lookup_entry`. Re-exports the sync-locked entry from `de_mls::app`.
+pub(crate) type SessionRef = de_mls::app::SessionEntry<
+    DefaultConsensusPlugin,
+    de_mls::app::DefaultConversationPluginsFactory,
 >;
 
 // Global, process-wide gateway instance
@@ -240,7 +236,17 @@ impl Gateway<WakuDeliveryService> {
                             continue;
                         };
                         let name_for_sub = name.clone();
-                        let mut session_rx_inner = session_rx.read().await.subscribe();
+                        let session_rx_clone = session_rx.clone();
+                        let mut session_rx_inner = match session_rx_clone.read() {
+                            Ok(s) => s.subscribe(),
+                            Err(_) => {
+                                tracing::warn!(
+                                    conversation = %name,
+                                    "session event subscribe skipped: session lock poisoned"
+                                );
+                                continue;
+                            }
+                        };
                         tokio::spawn(async move {
                             while let Ok(event) = session_rx_inner.recv().await {
                                 fanout.handle(&name_for_sub, event).await;

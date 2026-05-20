@@ -1,11 +1,11 @@
 //! Gateway-side fan-out from per-session [`SessionEvent`]s to the UI event pipe.
 //!
 //! [`crate::Gateway`] spawns one subscriber per logged-in user that consumes
-//! [`ConversationLifecycle::Created`] / `Removed` from
-//! [`User::subscribe_conversations`]. For each `Created`, it spawns a
-//! per-session subscriber that consumes [`SessionEvent`]s and dispatches
-//! them to `AppEvent` variants on the UI pipe — also maintaining the
-//! per-group `epoch_history` cache used by the History tab.
+//! [`de_mls::core::ConversationLifecycle::Created`] / `Removed` from
+//! [`de_mls::app::User::subscribe_conversations`]. For each `Created`, it
+//! spawns a per-session subscriber that consumes [`SessionEvent`]s and
+//! dispatches them to `AppEvent` variants on the UI pipe — also
+//! maintaining the per-group `epoch_history` cache used by the History tab.
 
 use std::sync::Arc;
 

@@ -17,7 +17,12 @@ use crate::{
 /// transient and the loop continues.
 fn is_polling_fatal(err: &UserError) -> bool {
     match err {
+        // Conversation-level terminal states.
         UserError::ConversationNotFound | UserError::AlreadyLeaving => true,
+        // Lock poisoning means the session is corrupted — no recovery.
+        // Background task join failure means a spawned task panicked or
+        // was cancelled; conservative response is to exit the loop.
+        UserError::LockPoisoned(_) | UserError::TaskJoin(_) => true,
         UserError::ConversationAlreadyExists
         | UserError::ConversationBlocked(_)
         | UserError::PartialFreeze
@@ -42,7 +47,7 @@ impl Gateway<WakuDeliveryService> {
             .await
             .start_conversation(&conversation_name, true)
             .await?;
-        core.topics.add_many(&conversation_name).await;
+        core.topics.add_many(&conversation_name)?;
         tracing::info!(group = %conversation_name, "group ready, subtopics subscribed");
 
         // Unified polling loop — stewards create commit candidates
@@ -66,10 +71,10 @@ impl Gateway<WakuDeliveryService> {
             .await
             .start_conversation(&conversation_name, false)
             .await?;
-        core.topics.add_many(&conversation_name).await;
+        core.topics.add_many(&conversation_name)?;
         let key_package = user_ref.read().await.generate_key_package()?;
         let session = lookup_session(&user_ref, &conversation_name).await?;
-        session.read().await.send_kp_message(key_package).await?;
+        SessionRunner::send_kp_message(&session, key_package).await?;
         tracing::info!(group = %conversation_name, "key package sent");
 
         // Phase 1 (PendingJoin): Poll every 5s until joined or timed out
@@ -84,12 +89,28 @@ impl Gateway<WakuDeliveryService> {
                 let Ok(session) = lookup_session(&user_clone, &group_name_clone).await else {
                     break false;
                 };
-                match SessionRunner::check_pending_join(&session).await {
+                let tick = match SessionRunner::check_pending_join(&session) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::warn!(group = %group_name_clone, error = %e, "check_pending_join failed");
+                        break false;
+                    }
+                };
+                match tick {
                     PendingJoinTick::StillPending => continue,
                     PendingJoinTick::NotPending => {
                         // Transitioned out of PendingJoin (typically Working
                         // after welcome merge). Confirm via state read.
-                        let state = session.read().await.get_conversation_state();
+                        let state = match session.read() {
+                            Ok(s) => s.get_conversation_state(),
+                            Err(_) => {
+                                tracing::warn!(
+                                    group = %group_name_clone,
+                                    "state read skipped: session lock poisoned"
+                                );
+                                break false;
+                            }
+                        };
                         break state == de_mls::app::ConversationState::Working;
                     }
                     PendingJoinTick::Expired => {
@@ -160,8 +181,7 @@ impl Gateway<WakuDeliveryService> {
             }
             match freeze_status {
                 FreezeTimeoutStatus::NotFreezing => {
-                    let mut runner = session.write().await;
-                    match runner.check_member_freeze().await {
+                    match SessionRunner::check_member_freeze(&session).await {
                         Ok(true) => { /* entered Freezing (+ created candidate if steward) */ }
                         Ok(false) => {}
                         Err(e) => {
@@ -174,12 +194,23 @@ impl Gateway<WakuDeliveryService> {
                     }
                 }
                 FreezeTimeoutStatus::StillFreezing => {
-                    let (received, expected) = session.read().await.get_freeze_candidate_count();
-                    let _ = evt_tx.unbounded_send(AppEvent::FreezeCandidates {
-                        conversation_id: conversation_name.clone(),
-                        received,
-                        expected,
-                    });
+                    let candidate_count = match session.read() {
+                        Ok(s) => Some(s.get_freeze_candidate_count()),
+                        Err(_) => {
+                            tracing::warn!(
+                                group = %conversation_name,
+                                "freeze candidate count skipped: session lock poisoned"
+                            );
+                            None
+                        }
+                    };
+                    if let Some((received, expected)) = candidate_count {
+                        let _ = evt_tx.unbounded_send(AppEvent::FreezeCandidates {
+                            conversation_id: conversation_name.clone(),
+                            received,
+                            expected,
+                        });
+                    }
                     continue;
                 }
                 FreezeTimeoutStatus::Applied => {}
@@ -202,11 +233,7 @@ impl Gateway<WakuDeliveryService> {
     ) -> anyhow::Result<()> {
         let user_ref = self.user()?;
         let session = lookup_session(&user_ref, &conversation_name).await?;
-        session
-            .read()
-            .await
-            .send_app_message(message.into_bytes())
-            .await?;
+        SessionRunner::send_app_message(&session, message.into_bytes()).await?;
         tracing::debug!(group = %conversation_name, "app message sent");
         Ok(())
     }
@@ -224,7 +251,7 @@ impl Gateway<WakuDeliveryService> {
             conversation_name: conversation_name.clone(),
         };
 
-        SessionRunner::process_ban_request(&session, ban_request).await?;
+        SessionRunner::process_ban_request(&session, ban_request)?;
 
         Ok(())
     }
@@ -265,14 +292,20 @@ impl Gateway<WakuDeliveryService> {
     pub async fn get_steward_status(&self, conversation_name: String) -> anyhow::Result<bool> {
         let user_ref = self.user()?;
         let session = lookup_session(&user_ref, &conversation_name).await?;
-        let is_steward = session.read().await.is_steward_for_self();
+        let is_steward = session
+            .read()
+            .map_err(|_| UserError::LockPoisoned("session"))?
+            .is_steward_for_self();
         Ok(is_steward)
     }
 
     pub async fn get_group_state(&self, conversation_name: String) -> anyhow::Result<String> {
         let user_ref = self.user()?;
         let session = lookup_session(&user_ref, &conversation_name).await?;
-        let state = session.read().await.get_conversation_state();
+        let state = session
+            .read()
+            .map_err(|_| UserError::LockPoisoned("session"))?
+            .get_conversation_state();
         Ok(state.to_string())
     }
 
@@ -285,7 +318,7 @@ impl Gateway<WakuDeliveryService> {
         let session = lookup_session(&user_ref, &conversation_name).await?;
         let proposals = session
             .read()
-            .await
+            .map_err(|_| UserError::LockPoisoned("session"))?
             .get_approved_proposal_for_current_epoch();
         Ok(display_batch(&proposals))
     }

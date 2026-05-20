@@ -21,8 +21,7 @@ pub(crate) async fn lookup_session(
 ) -> Result<SessionRef, UserError> {
     user.read()
         .await
-        .lookup_entry(conversation_name)
-        .await
+        .lookup_entry(conversation_name)?
         .ok_or(UserError::ConversationNotFound)
 }
 
@@ -43,7 +42,9 @@ pub(crate) async fn load_member_info(
     conversation_name: &str,
 ) -> anyhow::Result<Vec<MemberInfo>> {
     let session = lookup_session(user, conversation_name).await?;
-    let runner = session.read().await;
+    let runner = session
+        .read()
+        .map_err(|_| UserError::LockPoisoned("session"))?;
     let addresses = runner.get_conversation_members()?;
     let scores = runner.get_member_scores();
     let roles = runner.get_member_roles().unwrap_or_default();
@@ -87,7 +88,16 @@ pub(crate) async fn push_consensus_state(
     let Ok(session) = lookup_session(user, conversation_name).await else {
         return;
     };
-    let runner = session.read().await;
+    let runner = match session.read() {
+        Ok(s) => s,
+        Err(_) => {
+            tracing::warn!(
+                conversation = %conversation_name,
+                "push_consensus_state skipped: session lock poisoned"
+            );
+            return;
+        }
+    };
     let proposals = runner.get_approved_proposal_for_current_epoch();
     let _ = evt_tx.unbounded_send(AppEvent::CurrentEpochProposals {
         conversation_id: conversation_name.to_string(),
@@ -123,7 +133,16 @@ pub(crate) async fn push_member_scores(
     let Ok(session) = lookup_session(user, conversation_name).await else {
         return;
     };
-    let is_steward = session.read().await.is_steward_for_self();
+    let is_steward = match session.read() {
+        Ok(s) => s.is_steward_for_self(),
+        Err(_) => {
+            tracing::warn!(
+                conversation = %conversation_name,
+                "is_steward read skipped: session lock poisoned"
+            );
+            return;
+        }
+    };
     let _ = evt_tx.unbounded_send(AppEvent::StewardStatus {
         conversation_id: conversation_name.to_string(),
         is_steward,
@@ -147,7 +166,16 @@ impl Gateway<WakuDeliveryService> {
                 );
                 return;
             };
-            let mut rx = session_arc.read().await.consensus.event_bus().subscribe();
+            let mut rx = match session_arc.read() {
+                Ok(s) => s.consensus.event_bus().subscribe(),
+                Err(_) => {
+                    tracing::warn!(
+                        conversation = %cname_owned,
+                        "consensus forwarder: session lock poisoned at subscribe"
+                    );
+                    return;
+                }
+            };
             tracing::info!("consensus forwarder started");
             while let Ok((conversation_name, event)) = rx.recv().await {
                 // Forward to UI
@@ -196,12 +224,13 @@ impl Gateway<WakuDeliveryService> {
                     }
                     Err(_) => break,
                 };
-                if !core
-                    .topics
-                    .contains(&pkt.conversation_id, &pkt.subtopic)
-                    .await
-                {
-                    continue;
+                match core.topics.contains(&pkt.conversation_id, &pkt.subtopic) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "topic filter contains check failed");
+                        continue;
+                    }
                 }
 
                 let conversation_id = pkt.conversation_id.clone();

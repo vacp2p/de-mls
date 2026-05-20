@@ -311,7 +311,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     fn prepare_self_leave(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
         arc.read_or_err("session")?
             .emit_event(SessionEvent::Leaving);
-        if let Some(mls) = arc.write_or_err("session")?.handle.take_mls() {
+        // Bind to a let so the write guard is dropped before `mls.delete()`
+        // runs the storage I/O — otherwise the guard's `if let` scrutinee
+        // lifetime would keep every other task on this session blocked
+        // throughout the delete.
+        let taken_mls = arc.write_or_err("session")?.handle.take_mls();
+        if let Some(mls) = taken_mls {
             mls.delete()?;
         }
         Ok(())
