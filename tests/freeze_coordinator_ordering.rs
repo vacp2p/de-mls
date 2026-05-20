@@ -9,11 +9,10 @@ use std::time::Duration;
 
 use de_mls::app::{CreatorVote, SessionRunner};
 use de_mls::core::{ConversationState, SessionEvent, StewardListConfig};
-use de_mls::identity::parse_wallet_to_bytes;
+use de_mls::identity::Identity;
 use de_mls::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, RemoveMember, conversation_update_request,
 };
-use tokio::sync::broadcast;
 
 mod common;
 use common::session_fixtures::{
@@ -33,18 +32,23 @@ async fn freeze_cycle_emits_phase_events_in_order() {
     )
     .await;
 
-    let alice_session = users[0].0.lookup_entry("c3").await.unwrap();
-    let bob_session = users[1].0.lookup_entry("c3").await.unwrap();
+    let alice_session = users[0].0.lookup_entry("c3").unwrap().unwrap();
+    let bob_session = users[1].0.lookup_entry("c3").unwrap().unwrap();
     let alice_tx = users[0].1.clone();
     let bob_tx = users[1].1.clone();
 
-    // Subscribe BEFORE filing the proposal so we don't miss the early
-    // Freezing event. We only assert on the steward (alice); the target's
-    // (bob's) event stream is complicated by the LeaveConversation path
-    // and is covered separately in the self-leave tests.
-    let mut alice_events = alice_session.read().await.subscribe();
+    // We only assert on the steward (alice); the target's (bob's) event
+    // stream is complicated by the LeaveConversation path and is covered
+    // separately in the self-leave tests.
+    //
+    // Drain whatever bootstrap emitted (e.g. the join-cycle's
+    // `CommitApplied(InviteMember(bob))`) so the loop below only collects
+    // events fired by the RemoveMember proposal we're about to file.
+    let _ = alice_session.read().unwrap().drain_events();
 
-    let bob_id = parse_wallet_to_bytes(&users[1].0.identity_string()).unwrap();
+    let bob_id = common::WalletIdentity::from_hex(&users[1].0.identity_string())
+        .identity_bytes()
+        .to_vec();
     let remove_request = ConversationUpdateRequest {
         payload: Some(conversation_update_request::Payload::RemoveMember(
             RemoveMember {
@@ -67,15 +71,15 @@ async fn freeze_cycle_emits_phase_events_in_order() {
         poll_once(&bob_session).await;
 
         let mut packets = Vec::new();
-        packets.extend(alice_tx.drain_packets());
-        packets.extend(bob_tx.drain_packets());
+        packets.extend(alice_tx.lock().unwrap().drain_packets());
+        packets.extend(bob_tx.lock().unwrap().drain_packets());
         for p in &packets {
             let _ = users[0].0.process_inbound_packet(to_inbound(p)).await;
             let _ = users[1].0.process_inbound_packet(to_inbound(p)).await;
         }
 
-        alice_phases.extend(drain_phase_log(&mut alice_events));
-        let alice_state = alice_session.read().await.get_conversation_state();
+        alice_phases.extend(drain_phase_log(&alice_session));
+        let alice_state = alice_session.read().unwrap().get_conversation_state();
         if alice_state == ConversationState::Freezing || alice_state == ConversationState::Selection
         {
             saw_freezing = true;
@@ -84,7 +88,7 @@ async fn freeze_cycle_emits_phase_events_in_order() {
             // Pump one more round to catch trailing events.
             settle_for(Duration::from_millis(40)).await;
             poll_once(&alice_session).await;
-            alice_phases.extend(drain_phase_log(&mut alice_events));
+            alice_phases.extend(drain_phase_log(&alice_session));
             break;
         }
     }
@@ -147,39 +151,21 @@ impl PhaseEntry {
     }
 }
 
-/// Drain pending events from a broadcast receiver and project to the
-/// phase-relevant subset. Tolerates `Lagged` (which means events have
-/// overflowed the channel buffer between polls) but stops on `Empty` /
-/// `Closed`.
-fn drain_phase_log(rx: &mut broadcast::Receiver<SessionEvent>) -> Vec<PhaseEntry> {
-    use tokio::sync::broadcast::error::TryRecvError;
-    let mut out = Vec::new();
-    let mut lagged = 0u64;
-    loop {
-        match rx.try_recv() {
-            Ok(SessionEvent::PhaseChange(ConversationState::Freezing)) => {
-                out.push(PhaseEntry::Freezing)
-            }
-            Ok(SessionEvent::PhaseChange(ConversationState::Selection)) => {
-                out.push(PhaseEntry::Selection)
-            }
-            Ok(SessionEvent::PhaseChange(ConversationState::Working)) => {
-                out.push(PhaseEntry::Working)
-            }
-            Ok(SessionEvent::PhaseChange(_)) => {}
-            Ok(SessionEvent::CommitApplied(batch)) => out.push(PhaseEntry::CommitApplied(batch)),
-            Ok(_) => {}
-            Err(TryRecvError::Lagged(n)) => {
-                lagged += n;
-                continue;
-            }
-            Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
-        }
-    }
-    if lagged > 0 {
-        eprintln!("[drain_phase_log] lagged: dropped {lagged} events");
-    }
-    out
+/// Drain pending session events and project to the phase-relevant subset.
+fn drain_phase_log(session: &common::session_fixtures::SessionArc) -> Vec<PhaseEntry> {
+    session
+        .read()
+        .unwrap()
+        .drain_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            SessionEvent::PhaseChange(ConversationState::Freezing) => Some(PhaseEntry::Freezing),
+            SessionEvent::PhaseChange(ConversationState::Selection) => Some(PhaseEntry::Selection),
+            SessionEvent::PhaseChange(ConversationState::Working) => Some(PhaseEntry::Working),
+            SessionEvent::CommitApplied(batch) => Some(PhaseEntry::CommitApplied(batch)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Assert that `phases` contains every element of `expected` in order

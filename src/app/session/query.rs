@@ -5,7 +5,6 @@
 use crate::{
     app::{ConversationState, MemberRole, SessionRunner, UserError},
     core::{ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin, StewardListPlugin},
-    identity::format_wallet_address,
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
@@ -50,15 +49,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         self.handle.steward_list.is_steward(&self.self_identity)
     }
 
-    pub fn get_conversation_members(&self) -> Result<Vec<String>, UserError> {
+    /// Identity bytes of every current member of this conversation, as
+    /// reported by MLS. Returns an empty vec when the local user has no
+    /// MLS state yet (pending join).
+    pub fn get_conversation_members(&self) -> Result<Vec<Vec<u8>>, UserError> {
         if self.handle.mls().is_none() {
             return Ok(Vec::new());
         }
-        let members = self.handle.conversation_members()?;
-        Ok(members
-            .into_iter()
-            .map(|raw| format_wallet_address(raw.as_slice()).to_string())
-            .collect())
+        Ok(self.handle.conversation_members()?)
     }
 
     pub fn get_member_scores(&self) -> Vec<(Vec<u8>, i64)> {

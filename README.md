@@ -4,19 +4,20 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-Decentralized MLS proof-of-concept that coordinates secure group membership through
-off-chain consensus and a Waku relay.  
-This repository now ships a native desktop client built with Dioxus that drives the MLS core directly.
+Decentralized MLS proof-of-concept that coordinates secure conversation
+membership through off-chain consensus and a Waku relay. A native
+desktop client built with Dioxus drives the MLS core directly.
 
 ## What's Included
 
-| Crate / Path               | Description                                                                     |
-| -------------------------- | ------------------------------------------------------------------------------- |
-| **de-mls** (`src/`)        | Core library — MLS groups, consensus, and the delivery service layer            |
-| **crates/de_mls_gateway**  | Bridges UI commands (`AppCmd`) to the core runtime and streams `AppEvent`s back |
-| **crates/ui_bridge**       | Bootstrap glue that hosts the async command loop for desktop clients            |
-| **apps/de_mls_desktop_ui** | Dioxus desktop UI with login, chat, stewardship, and voting flows               |
-| **tests/**                 | Integration tests for the MLS state machine and consensus paths                 |
+| Crate / Path                  | Description                                                                          |
+| ----------------------------- | ------------------------------------------------------------------------------------ |
+| **de-mls** (`src/`)           | Core library — MLS conversations, consensus, identity trait, and the delivery layer  |
+| **crates/de_mls_ui_protocol** | Shared UI ↔ gateway message types (`AppCmd`, `AppEvent`, `MemberInfo`) + hex display |
+| **crates/de_mls_gateway**     | Bridges UI commands to the core runtime and streams events back                      |
+| **crates/ui_bridge**          | Bootstrap glue that hosts the async command loop for desktop clients                 |
+| **apps/de_mls_desktop_ui**    | Dioxus desktop UI with login, chat, stewardship, and voting flows                    |
+| **tests/**                    | Integration tests for the MLS state machine and consensus paths                      |
 
 ## Prerequisites
 
@@ -52,10 +53,10 @@ implementation — the gateway and desktop crates enable it automatically.
 
 ```toml
 # Use the transport-agnostic types only (no libwaku needed):
-de_mls = { path = "..." }
+de-mls = { path = "..." }
 
 # Enable the Waku transport (requires libwaku):
-de_mls = { path = "...", features = ["waku"] }
+de-mls = { path = "...", features = ["waku"] }
 ```
 
 ## Delivery Service (`src/ds/`)
@@ -71,7 +72,7 @@ src/ds/
 ├── mod.rs              Public API re-exports
 ├── transport.rs        DeliveryService trait, OutboundPacket, InboundPacket
 ├── error.rs            DeliveryServiceError
-├── topic_filter.rs     TopicFilter — async HashSet-based allowlist for inbound routing
+├── topic_filter.rs     TopicFilter — HashSet-based allowlist for inbound routing
 └── waku/               Waku relay implementation (libwaku FFI)
     ├── mod.rs          WakuDeliveryService, WakuConfig, content-topic helpers
     ├── sys.rs          Raw C FFI bindings (trampoline pattern)
@@ -80,15 +81,15 @@ src/ds/
 
 ### Key types
 
-| Type                  | Feature | Description                                                              |
-| --------------------- | ------- | ------------------------------------------------------------------------ |
-| `DeliveryService`     | —       | Trait — `send()` and `subscribe()`, both synchronous                     |
-| `OutboundPacket`      | —       | Payload + group id + subtopic + app id (self-message filter)             |
-| `InboundPacket`       | —       | Payload + group id + subtopic + app id + timestamp                       |
-| `TopicFilter`         | —       | Async allowlist used by the gateway to filter inbound packets by group   |
-| `WakuDeliveryService` | `waku`  | Concrete impl — runs an embedded Waku node on a background `std::thread` |
-| `WakuConfig`          | `waku`  | Node port, discv5 settings                                               |
-| `WakuStartResult`     | `waku`  | Returned by `start()` — contains the service + optional local ENR        |
+| Type                  | Feature | Description                                                                          |
+| --------------------- | ------- | ------------------------------------------------------------------------------------ |
+| `DeliveryService`     | —       | Trait — `publish()` and `subscribe()`, both synchronous                              |
+| `OutboundPacket`      | —       | Payload + conversation id + subtopic + app id (self-message filter)                  |
+| `InboundPacket`       | —       | Payload + conversation id + subtopic + app id + timestamp                            |
+| `TopicFilter`         | —       | Allowlist used by the gateway to filter inbound packets by conversation              |
+| `WakuDeliveryService` | `waku`  | Concrete impl — runs an embedded Waku node on a background `std::thread`             |
+| `WakuConfig`          | `waku`  | Node port, discv5 settings                                                           |
+| `WakuStartResult`     | `waku`  | Returned by `start()` — contains the service + optional local ENR                    |
 
 ### Basic usage
 
@@ -102,19 +103,19 @@ let result = WakuDeliveryService::start(WakuConfig {
     ..Default::default()
 })?;
 
-let ds = result.service;
+let mut ds = result.service;
 
-// Subscribe (can be called multiple times for fan-out).
-let rx = ds.subscribe();
+// Open a pull-style inbound channel (multiple receivers allowed).
+let rx = ds.inbound_receiver();
 std::thread::spawn(move || {
     while let Ok(pkt) = rx.recv() {
-        println!("{} bytes from group {}", pkt.payload.len(), pkt.group_id);
+        println!("{} bytes from {}", pkt.payload.len(), pkt.conversation_id);
     }
 });
 
-// Send a message.
-ds.send(OutboundPacket::new(
-    b"hello".to_vec(), "app_msg", "my-group", b"instance-id",
+// Publish a message.
+ds.publish(OutboundPacket::new(
+    b"hello".to_vec(), "app_msg", "my-conversation", b"instance-id",
 ))?;
 
 // Shut down explicitly, or just drop all clones.
@@ -128,27 +129,24 @@ libwaku context. Outbound messages are queued via `std::sync::mpsc`; inbound
 events are fanned out to all subscribers. The background thread is wrapped in
 `catch_unwind` so a panic in the FFI layer won't crash the process.
 
-In async code (e.g. the gateway), wrap `ds.send()` in
-`tokio::task::spawn_blocking` to avoid blocking the tokio runtime.
-
 ### Content topics
 
 Messages are routed by Waku content topics with the format:
 
 ``` bash
-/{group_name}/{version}/{subtopic}/proto
+/{conversation_name}/{version}/{subtopic}/proto
 ```
 
 Two subtopics are used: `app_msg` (application messages) and `welcome`
-(MLS Welcome messages for group joins). The pubsub topic is fixed to
-`/waku/2/rs/15/1` (cluster 15, shard 1).
+(MLS Welcome messages for conversation joins). The pubsub topic is
+fixed to `/waku/2/rs/15/1` (cluster 15, shard 1).
 
 ### Self-message filtering
 
-Each group entry in the app layer generates a random UUID (`app_id`) stored in
-the Waku message `meta` field. On receive, the application compares
-`packet.app_id` against the local entry's id and drops self-originated messages.
-Waku relay (gossipsub) does not filter self-messages natively.
+Each `User` generates a random UUID (`app_id`) stored in the Waku message
+`meta` field. On receive, the application drops packets whose `app_id`
+matches the local user's. Waku relay (gossipsub) does not filter
+self-messages natively.
 
 ## Quick Start
 
@@ -159,8 +157,9 @@ Waku relay (gossipsub) does not filter self-messages natively.
 | `NODE_PORT`             | Yes      | TCP port for the embedded Waku node              |
 | `DISCV5_BOOTSTRAP_ENRS` | No       | Comma-separated ENR strings for discv5 bootstrap |
 
-discv5 peer discovery is always enabled. The discv5 UDP port is derived automatically (`NODE_PORT + 1000`).
-Use a unique `NODE_PORT` per local client so the embedded Waku nodes do not collide.
+discv5 peer discovery is always enabled. The discv5 UDP port is derived
+automatically as `NODE_PORT + 1000`. Use a unique `NODE_PORT` per local
+client so the embedded Waku nodes do not collide.
 
 ### Running Multiple Nodes For Example
 
@@ -170,7 +169,7 @@ No external relay required — just run multiple local nodes.
 **Node 1** (bootstrap node):
 
 ```bash
-NODE_PORT=60001 DISCV5=true DISCV5_UDP_PORT=9001 cargo run -p de-mls-desktop-ui
+NODE_PORT=60001 cargo run -p de-mls-desktop-ui
 ```
 
 Copy the `Local ENR: enr:-QE...` line from the logs.
@@ -178,9 +177,9 @@ Copy the `Local ENR: enr:-QE...` line from the logs.
 **Nodes 2–4** (bootstrap off node 1):
 
 ```bash
-NODE_PORT=60002 DISCV5=true DISCV5_UDP_PORT=9002 DISCV5_BOOTSTRAP_ENRS="enr:-QE..." cargo run -p de-mls-desktop-ui
-NODE_PORT=60003 DISCV5=true DISCV5_UDP_PORT=9003 DISCV5_BOOTSTRAP_ENRS="enr:-QE..." cargo run -p de-mls-desktop-ui
-NODE_PORT=60004 DISCV5=true DISCV5_UDP_PORT=9004 DISCV5_BOOTSTRAP_ENRS="enr:-QE..." cargo run -p de-mls-desktop-ui
+NODE_PORT=60002 DISCV5_BOOTSTRAP_ENRS="enr:-QE..." cargo run -p de-mls-desktop-ui
+NODE_PORT=60003 DISCV5_BOOTSTRAP_ENRS="enr:-QE..." cargo run -p de-mls-desktop-ui
+NODE_PORT=60004 DISCV5_BOOTSTRAP_ENRS="enr:-QE..." cargo run -p de-mls-desktop-ui
 ```
 
 All nodes discover each other via the DHT and form a gossipsub relay mesh automatically.
@@ -212,11 +211,32 @@ All nodes discover each other via the DHT and form a gossipsub relay mesh automa
   - Surfaces the proposal currently open for voting with `YES`/`NO` buttons
   - Stores the latest proposal decisions with timestamps for quick auditing
 
+## Library Usage
+
+The library is identity-agnostic — integrators implement
+`de_mls::identity::Identity` (bytes + display) for their own scheme
+(wallet, Ed25519 pubkey, account id, …) and construct a `User` directly:
+
+```rust,ignore
+use de_mls::app::User;
+
+let user = User::new_with_plugins(
+    Box::new(my_identity),   // anything implementing `Identity`
+    plugins,                 // a `UserPlugins<P, CP>` bundle
+    transport,               // your `DeliveryService` impl
+);
+```
+
+Reference plug-in implementations (in-memory MLS storage, default
+consensus backend over `hashgraph-like-consensus`, in-memory peer-score
+storage, etc.) live in `de_mls::defaults` and can be adopted wholesale
+or swapped piece-by-piece.
+
 ## Development Tips
 
-- `cargo test -p de_mls` – runs core tests (no libwaku required)
-- `cargo test -p de_mls --features waku` – includes Waku transport tests (needs libwaku in `libs/`)
-- `cargo fmt --all --check` / `cargo clippy` – keep formatting and linting consistent with the codebase
+- `cargo test -p de-mls` – runs core tests (no libwaku required)
+- `cargo test -p de-mls --features waku` – includes Waku transport tests (needs libwaku in `libs/`)
+- `cargo fmt --all --check` / `cargo clippy --all-targets -- -D warnings` – CI enforces both
 - `RUST_BACKTRACE=full` – helpful when debugging state-machine transitions during development
 
 Logs for the desktop UI live in `apps/de_mls_desktop_ui/logs/`; core logs are emitted to stdout as well.

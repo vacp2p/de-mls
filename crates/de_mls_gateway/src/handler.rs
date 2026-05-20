@@ -1,23 +1,22 @@
 //! Gateway-side fan-out from per-session [`SessionEvent`]s to the UI event pipe.
 //!
-//! [`crate::Gateway`] spawns one subscriber per logged-in user that consumes
-//! [`ConversationLifecycle::Created`] / `Removed` from
-//! [`User::subscribe_conversations`]. For each `Created`, it spawns a
-//! per-session subscriber that consumes [`SessionEvent`]s and dispatches
-//! them to `AppEvent` variants on the UI pipe — also maintaining the
-//! per-group `epoch_history` cache used by the History tab.
+//! [`crate::Gateway`] runs one polling task per logged-in user. Each tick
+//! drains [`de_mls::app::User::drain_lifecycle_events`] for `Created` /
+//! `Removed`, then drains [`de_mls::app::SessionRunner::drain_events`] on
+//! every active session and dispatches the [`SessionEvent`]s to `AppEvent`
+//! variants on the UI pipe — also maintaining the per-group
+//! `epoch_history` cache used by the History tab.
 
 use std::sync::Arc;
 
 use futures::channel::mpsc::UnboundedSender;
 
 use de_mls::{
-    app::format_conversation_request,
     core::SessionEvent,
     ds::TopicFilter,
     protos::de_mls::messages::v1::{AppMessage, ConversationMessage, app_message},
 };
-use de_mls_ui_protocol::v1::AppEvent;
+use de_mls_ui_protocol::v1::{AppEvent, format_conversation_request};
 
 use crate::{EpochHistoryStore, MAX_EPOCH_HISTORY, forwarder::display_batch};
 
@@ -41,7 +40,9 @@ impl GatewaySessionFanout {
                 // arranged at conversation creation.
             }
             SessionEvent::Leaving => {
-                self.topics.remove_many(conversation_name).await;
+                if let Err(e) = self.topics.remove_many(conversation_name) {
+                    tracing::warn!(error = %e, "topic filter remove failed");
+                }
                 self.epoch_history.lock().remove(conversation_name);
                 let _ = self
                     .evt_tx

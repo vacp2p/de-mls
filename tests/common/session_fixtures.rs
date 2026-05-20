@@ -8,68 +8,75 @@
 
 #![allow(dead_code)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use de_mls::app::{ConversationConfig, DefaultConversationPluginsFactory, SessionRunner, User};
-use de_mls::core::{DefaultConsensusPlugin, StewardListConfig};
-use de_mls::ds::{DeliveryService, DeliveryServiceError, InboundPacket, OutboundPacket};
+use de_mls::app::{ConversationConfig, SessionRunner, User};
+use de_mls::core::StewardListConfig;
+use de_mls::defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory};
+use de_mls::ds::{
+    DeliveryService, DeliveryServiceError, InboundPacket, OutboundPacket, SharedDeliveryService,
+};
 use prost::Message;
-use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
+
+use crate::common::wallet::user_from_private_key;
+
+/// Shared handle to the test transport. Tests own one of these per `User`
+/// and reach into it via `.lock().unwrap()`.
+pub type TransportHandle = Arc<Mutex<CapturingTransport>>;
 
 pub type TestUser = User<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
 pub type TestSession = SessionRunner<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
 pub type SessionArc = Arc<RwLock<TestSession>>;
 
 /// Test transport that captures every outbound packet for later inspection
-/// instead of sending. `subscribe()` returns a dangling receiver — tests
-/// deliver inbound explicitly via `process_inbound_packet`.
+/// instead of sending. `subscribe` is a no-op — tests deliver inbound
+/// explicitly via `process_inbound_packet`.
+#[derive(Debug, Default)]
 pub struct CapturingTransport {
-    packets: Mutex<Vec<OutboundPacket>>,
+    packets: Vec<OutboundPacket>,
 }
 
 impl CapturingTransport {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            packets: Mutex::new(Vec::new()),
-        })
+    pub fn new() -> TransportHandle {
+        Arc::new(Mutex::new(Self::default()))
     }
 
-    pub fn drain_packets(&self) -> Vec<OutboundPacket> {
-        std::mem::take(&mut *self.packets.lock().unwrap())
+    pub fn drain_packets(&mut self) -> Vec<OutboundPacket> {
+        std::mem::take(&mut self.packets)
     }
 
     pub fn snapshot(&self) -> Vec<OutboundPacket> {
-        self.packets.lock().unwrap().clone()
+        self.packets.clone()
     }
 
     pub fn count_matching(&self, pred: impl Fn(&OutboundPacket) -> bool) -> usize {
-        self.packets
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|p| pred(p))
-            .count()
+        self.packets.iter().filter(|p| pred(p)).count()
     }
 
-    pub fn drain_matching(&self, pred: impl Fn(&OutboundPacket) -> bool) -> Vec<OutboundPacket> {
-        let mut guard = self.packets.lock().unwrap();
-        let (matching, rest): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut *guard).into_iter().partition(pred);
-        *guard = rest;
+    pub fn drain_matching(
+        &mut self,
+        pred: impl Fn(&OutboundPacket) -> bool,
+    ) -> Vec<OutboundPacket> {
+        let (matching, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.packets)
+            .into_iter()
+            .partition(pred);
+        self.packets = rest;
         matching
     }
 }
 
 impl DeliveryService for CapturingTransport {
-    fn send(&self, pkt: OutboundPacket) -> Result<String, DeliveryServiceError> {
-        self.packets.lock().unwrap().push(pkt);
-        Ok("ok".into())
+    type Error = DeliveryServiceError;
+
+    fn publish(&mut self, packet: OutboundPacket) -> Result<(), Self::Error> {
+        self.packets.push(packet);
+        Ok(())
     }
-    fn subscribe(&self) -> std::sync::mpsc::Receiver<InboundPacket> {
-        let (_tx, rx) = std::sync::mpsc::channel();
-        rx
+
+    fn subscribe(&mut self, _delivery_address: &str) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 
@@ -153,14 +160,10 @@ pub fn make_user(
     private_key: &str,
     cfg: ConversationConfig,
     steward_cfg: StewardListConfig,
-) -> (TestUser, Arc<CapturingTransport>) {
+) -> (TestUser, TransportHandle) {
     let transport = CapturingTransport::new();
-    let mut user = User::with_private_key_and_config(
-        private_key,
-        transport.clone() as Arc<dyn DeliveryService>,
-        cfg,
-    )
-    .expect("build TestUser");
+    let mut user =
+        user_from_private_key(private_key, transport.clone() as SharedDeliveryService, cfg);
     user.set_default_steward_list_config(steward_cfg);
     (user, transport)
 }
@@ -222,7 +225,7 @@ pub async fn broadcast(packets: &[OutboundPacket], receivers: &[&TestUser]) {
 pub fn spawn_consensus_forwarder(session: SessionArc) -> JoinHandle<()> {
     use hashgraph_like_consensus::events::ConsensusEventBus;
     tokio::spawn(async move {
-        let mut rx = session.read().await.consensus.event_bus().subscribe();
+        let mut rx = session.read().unwrap().consensus.event_bus().subscribe();
         while let Ok((_conversation_name, event)) = rx.recv().await {
             let _ = SessionRunner::apply_consensus_outcome(&session, event).await;
         }
@@ -250,9 +253,10 @@ pub fn fast_test_config() -> ConversationConfig {
 /// check, and (for joiners) the pending-join tick. Mirrors the production
 /// `group_polling_loop` body in `de_mls_gateway::group`.
 pub async fn poll_once(session: &SessionArc) {
+    let _ = SessionRunner::tick_deadlines(session).await;
     let _ = SessionRunner::poll_freeze_status(session).await;
-    let _ = session.write().await.check_member_freeze().await;
-    let _ = SessionRunner::check_pending_join(session).await;
+    let _ = SessionRunner::check_member_freeze(session).await;
+    let _ = SessionRunner::check_pending_join(session);
 }
 
 /// Bring up a conversation with `keys[0]` as the creator and the rest as
@@ -280,13 +284,13 @@ pub async fn bootstrap_joined_conversation(
     conversation: &str,
     cfg: ConversationConfig,
     steward_cfg: StewardListConfig,
-) -> Vec<(TestUser, Arc<CapturingTransport>)> {
+) -> Vec<(TestUser, TransportHandle)> {
     use de_mls::core::ConversationState;
     use std::time::Duration;
     const MAX_ROUNDS: usize = 30;
     assert!(!keys.is_empty(), "bootstrap needs at least one key");
 
-    let mut users: Vec<(TestUser, Arc<CapturingTransport>)> = keys
+    let mut users: Vec<(TestUser, TransportHandle)> = keys
         .iter()
         .map(|k| make_user(k, cfg.clone(), steward_cfg.clone()))
         .collect();
@@ -306,7 +310,7 @@ pub async fn bootstrap_joined_conversation(
     for (u, _) in &users {
         sessions.push(
             u.lookup_entry(conversation)
-                .await
+                .unwrap()
                 .expect("session registered"),
         );
     }
@@ -321,16 +325,13 @@ pub async fn bootstrap_joined_conversation(
     // Joiners send KPs. Drain joiner transports, deliver to creator.
     for i in 1..users.len() {
         let kp = users[i].0.generate_key_package().expect("kp");
-        sessions[i]
-            .read()
-            .await
-            .send_kp_message(kp)
+        SessionRunner::send_kp_message(&sessions[i], kp)
             .await
             .expect("send kp");
     }
     let mut kp_packets = Vec::new();
     for (_, h) in users.iter().skip(1) {
-        kp_packets.extend(h.drain_packets());
+        kp_packets.extend(h.lock().unwrap().drain_packets());
     }
     for p in &kp_packets {
         let _ = users[0].0.process_inbound_packet(to_inbound(p)).await;
@@ -352,7 +353,7 @@ pub async fn bootstrap_joined_conversation(
         }
         let mut packets = Vec::new();
         for (_, h) in &users {
-            packets.extend(h.drain_packets());
+            packets.extend(h.lock().unwrap().drain_packets());
         }
         // Deliver each packet to every user. `process_inbound_packet`
         // dedups echoes of our own messages via `app_id`.
@@ -364,7 +365,7 @@ pub async fn bootstrap_joined_conversation(
 
         let mut all_working = true;
         for s in sessions.iter().skip(1) {
-            if s.read().await.get_conversation_state() != ConversationState::Working {
+            if s.read().unwrap().get_conversation_state() != ConversationState::Working {
                 all_working = false;
                 break;
             }

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use de_mls::app::{CreatorVote, DispatchOutcome, SessionRunner};
 use de_mls::core::{ConversationState, StewardListConfig};
-use de_mls::identity::parse_wallet_to_bytes;
+use de_mls::identity::Identity;
 use de_mls::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, RemoveMember, conversation_update_request,
 };
@@ -33,8 +33,8 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
 
     let mut target_idx = None;
     for (i, (u, _)) in users.iter().enumerate() {
-        let s = u.lookup_entry("rejoin").await.unwrap();
-        if !s.read().await.is_steward_for_self() {
+        let s = u.lookup_entry("rejoin").unwrap().unwrap();
+        if !s.read().unwrap().is_steward_for_self() {
             target_idx = Some(i);
             break;
         }
@@ -46,16 +46,22 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
 
     // Capture the pre-eviction epoch on the steward's side so we can
     // assert the rejoin lands at a strictly later one.
-    let steward_session = users[steward_idx].0.lookup_entry("rejoin").await.unwrap();
+    let steward_session = users[steward_idx]
+        .0
+        .lookup_entry("rejoin")
+        .unwrap()
+        .unwrap();
     let pre_remove_epoch = steward_session
         .read()
-        .await
+        .unwrap()
         .get_epoch_and_retry()
         .unwrap()
         .0;
 
     // Phase 1: removal.
-    let target_id = parse_wallet_to_bytes(&users[target_idx].0.identity_string()).unwrap();
+    let target_id = common::WalletIdentity::from_hex(&users[target_idx].0.identity_string())
+        .identity_bytes()
+        .to_vec();
     let request = ConversationUpdateRequest {
         payload: Some(conversation_update_request::Payload::RemoveMember(
             RemoveMember {
@@ -70,7 +76,12 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
     let mut target_evicted = false;
     for _ in 0..30 {
         drive_one_round(&users, target_idx).await;
-        if users[target_idx].0.lookup_entry("rejoin").await.is_none() {
+        if users[target_idx]
+            .0
+            .lookup_entry("rejoin")
+            .unwrap()
+            .is_none()
+        {
             target_evicted = true;
             break;
         }
@@ -86,15 +97,17 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
         .await
         .unwrap();
 
-    let new_session = users[target_idx].0.lookup_entry("rejoin").await.unwrap();
+    let new_session = users[target_idx].0.lookup_entry("rejoin").unwrap().unwrap();
     let kp = users[target_idx].0.generate_key_package().unwrap();
-    new_session.read().await.send_kp_message(kp).await.unwrap();
+    SessionRunner::send_kp_message(&new_session, kp)
+        .await
+        .unwrap();
 
     let mut rejoined = false;
     for _ in 0..30 {
         drive_one_round(&users, target_idx).await;
-        let s = users[target_idx].0.lookup_entry("rejoin").await.unwrap();
-        if s.read().await.get_conversation_state() == ConversationState::Working {
+        let s = users[target_idx].0.lookup_entry("rejoin").unwrap().unwrap();
+        if s.read().unwrap().get_conversation_state() == ConversationState::Working {
             rejoined = true;
             break;
         }
@@ -104,10 +117,10 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
     let post_rejoin_epoch = users[target_idx]
         .0
         .lookup_entry("rejoin")
-        .await
+        .unwrap()
         .unwrap()
         .read()
-        .await
+        .unwrap()
         .get_epoch_and_retry()
         .unwrap()
         .0;
@@ -119,14 +132,11 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
     // Steward sees the rejoined identity back in the member set.
     let steward_members = steward_session
         .read()
-        .await
+        .unwrap()
         .get_conversation_members()
         .unwrap();
-    let target_display = users[target_idx].0.identity_string().to_lowercase();
     assert!(
-        steward_members
-            .iter()
-            .any(|m| m.to_lowercase() == target_display),
+        steward_members.iter().any(|m| m == &target_id),
         "steward must see the rejoined identity in its member list, got {steward_members:?}"
     );
 }
@@ -134,25 +144,26 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
 async fn drive_one_round(
     users: &[(
         common::session_fixtures::TestUser,
-        std::sync::Arc<common::session_fixtures::CapturingTransport>,
+        common::session_fixtures::TransportHandle,
     )],
     target_idx: usize,
 ) {
     settle_for(Duration::from_millis(40)).await;
     for (i, (u, _)) in users.iter().enumerate() {
-        if let Some(s) = u.lookup_entry("rejoin").await {
+        if let Some(s) = u.lookup_entry("rejoin").unwrap() {
+            let _ = SessionRunner::tick_deadlines(&s).await;
             let pfs = SessionRunner::poll_freeze_status(&s).await;
             if i == target_idx && matches!(pfs, Ok((_, DispatchOutcome::LeaveRequested))) {
                 u.finalize_self_leave("rejoin").await.unwrap();
                 continue;
             }
-            let _ = s.write().await.check_member_freeze().await;
-            let _ = SessionRunner::check_pending_join(&s).await;
+            let _ = SessionRunner::check_member_freeze(&s).await;
+            let _ = SessionRunner::check_pending_join(&s).unwrap();
         }
     }
     let mut packets = Vec::new();
     for (_, h) in users {
-        packets.extend(h.drain_packets());
+        packets.extend(h.lock().unwrap().drain_packets());
     }
     for p in &packets {
         for (u, _) in users {

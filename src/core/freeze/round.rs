@@ -5,11 +5,11 @@
 use sha2::{Digest, Sha256};
 use tracing::info;
 
-use super::apply::apply_in_priority_order;
 use crate::{
     core::{
         Conversation, CoreError, FreezeBufferOutcome, NoopReason, ProcessResult, ScoreOp,
         StewardListPlugin, conversation::BufferedCommitCandidate,
+        freeze::apply::apply_in_priority_order,
     },
     ds::OutboundPacket,
     mls_crypto::{MlsMessageKind, MlsService},

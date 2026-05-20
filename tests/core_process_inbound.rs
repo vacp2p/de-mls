@@ -69,9 +69,9 @@ fn test_process_inbound_welcome_already_joined_ignores() {
 
 #[test]
 fn test_conversation_sync_propagates_divergent_per_conv_config() {
-    use de_mls::app::InMemoryPeerScoreStorage;
     use de_mls::core::{PeerScoringPlugin, PeerScoringService, ScoreSnapshot};
     use de_mls::core::{ScoreEvent, ScoreOp, ScoringConfig};
+    use de_mls::defaults::InMemoryPeerScoreStorage;
     use de_mls::protos::de_mls::messages::v1::{ConversationSync, PeerScore};
 
     const STEWARD_THRESHOLD: i64 = -50;

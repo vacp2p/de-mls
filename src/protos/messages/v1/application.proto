@@ -21,7 +21,7 @@ message AppMessage {
 }
 
 message BanRequest {
-  string user_to_ban = 1;
+  bytes user_to_ban = 1;
   string conversation_name = 2;
 }
 

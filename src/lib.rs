@@ -47,23 +47,19 @@
 //! ```ignore
 //! use de_mls::app::User;
 //!
-//! // Build a user from an Ethereum private key. The convenience
-//! // constructor pins both `User` generics to `DefaultConsensusPlugin`
-//! // and `DefaultConversationPluginsFactory`, so type inference works
-//! // without annotation.
-//! let mut user = User::with_private_key(
-//!     "0xac0974...",   // Private key
-//!     transport,       // Your `ds::DeliveryService` implementation
-//! )?;
-//!
-//! // Subscribe to user-level lifecycle events to discover new sessions.
-//! let mut lifecycle = user.subscribe_conversations();
+//! // Build a user from your own `Identity` impl plus the default plug-in
+//! // bundle. The library is identity-agnostic — anything implementing
+//! // `de_mls::identity::Identity` works (wallet, Ed25519, account id, …).
+//! let mut user = User::new_with_plugins(&identity, plugins, transport);
 //!
 //! // Start a conversation (as steward).
 //! user.start_conversation("de-mls-test", true).await?;
 //!
 //! // Send a message.
 //! user.send_app_message("de-mls-test", b"Hello, world!".to_vec()).await?;
+//!
+//! // Drain lifecycle + per-session events on your polling cycle.
+//! for event in user.drain_lifecycle_events() { /* … */ }
 //! ```
 
 /// Protocol implementation.
@@ -81,6 +77,12 @@ pub mod mls_crypto;
 
 /// User-level identity, decoupled from MLS state.
 pub mod identity;
+
+/// Reference implementations of the library's plug-in traits — in-memory
+/// MLS / peer-score storage, default consensus + per-conversation
+/// plug-in bundles, and a reference key-package provider. Production
+/// integrators swap one or more for their own implementations.
+pub mod defaults;
 
 #[cfg(test)]
 pub(crate) mod test_fixtures;

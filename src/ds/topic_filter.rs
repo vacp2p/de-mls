@@ -1,9 +1,9 @@
-//! Transport-agnostic topic filter used by the app as a fast allowlist.
+//! HashSet-based allowlist for inbound packet routing.
+
 use std::collections::HashSet;
+use std::sync::RwLock;
 
-use tokio::sync::RwLock;
-
-use crate::ds::SUBTOPICS;
+use crate::ds::{DeliveryServiceError, SUBTOPICS};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TopicKey {
@@ -20,7 +20,6 @@ impl TopicKey {
     }
 }
 
-/// Fast allowlist for inbound routing.
 #[derive(Default, Debug)]
 pub struct TopicFilter {
     set: RwLock<HashSet<TopicKey>>,
@@ -31,30 +30,48 @@ impl TopicFilter {
         Self::default()
     }
 
-    /// Add all subtopics for a conversation.
-    pub async fn add_many(&self, conversation_name: &str) {
-        let mut w = self.set.write().await;
+    /// Register every subtopic of `conversation_name` as allowed.
+    pub fn add_many(&self, conversation_name: &str) -> Result<(), DeliveryServiceError> {
+        let mut w = self
+            .set
+            .write()
+            .map_err(|_| DeliveryServiceError::LockPoisoned("TopicFilter"))?;
         for sub in SUBTOPICS {
             w.insert(TopicKey::new(conversation_name, sub));
         }
+        Ok(())
     }
 
-    /// Remove all subtopics for a conversation.
-    pub async fn remove_many(&self, conversation_name: &str) {
+    /// Remove every entry for `conversation_name`.
+    pub fn remove_many(&self, conversation_name: &str) -> Result<(), DeliveryServiceError> {
         self.set
             .write()
-            .await
+            .map_err(|_| DeliveryServiceError::LockPoisoned("TopicFilter"))?
             .retain(|x| x.conversation_id != conversation_name);
+        Ok(())
     }
 
-    /// Membership test (first-stage filter).
     #[inline]
-    pub async fn contains(&self, conversation_id: &str, subtopic: &str) -> bool {
+    pub fn contains(
+        &self,
+        conversation_id: &str,
+        subtopic: &str,
+    ) -> Result<bool, DeliveryServiceError> {
         let key = TopicKey::new(conversation_id, subtopic);
-        self.set.read().await.contains(&key)
+        Ok(self
+            .set
+            .read()
+            .map_err(|_| DeliveryServiceError::LockPoisoned("TopicFilter"))?
+            .contains(&key))
     }
 
-    pub async fn snapshot(&self) -> Vec<TopicKey> {
-        self.set.read().await.iter().cloned().collect()
+    pub fn snapshot(&self) -> Result<Vec<TopicKey>, DeliveryServiceError> {
+        Ok(self
+            .set
+            .read()
+            .map_err(|_| DeliveryServiceError::LockPoisoned("TopicFilter"))?
+            .iter()
+            .cloned()
+            .collect())
     }
 }

@@ -7,22 +7,94 @@
 //! into an `unreachable!()` branch, that's a sign the test is touching
 //! state it shouldn't be (and the panic location pinpoints the leak).
 
+use std::str::FromStr;
+use std::sync::Arc;
+
+use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 
 use crate::{
+    app::{ConsensusContext, ConversationConfig, User, UserPlugins},
     core::{
-        ConsensusPlugin, ConversationPluginsFactory, DefaultConsensusPlugin, ElectionDecision,
+        ConsensusPlugin, ConversationPluginsFactory, ElectionDecision, KeyPackageProvider,
         PeerScoringEvent, PeerScoringPlugin, PluginConsensus, ScoreOp, ScoreSnapshot,
         ScoringConfig, StewardList, StewardListConfig, StewardListEvent, StewardListPlugin,
     },
-    ds::OutboundPacket,
+    defaults::{
+        DefaultConsensusPlugin, DefaultConversationPluginsFactory, DefaultKeyPackageProvider,
+        MemoryDeMlsStorage,
+    },
+    ds::{OutboundPacket, SharedDeliveryService},
+    identity::Identity,
     mls_crypto::{
-        CommitCandidate, DecryptResult, MlsCommitInput, MlsError, MlsMessageKind, MlsService,
-        StagedCandidateResult,
+        CommitCandidate, DecryptResult, MlsCommitInput, MlsCredentials, MlsError, MlsMessageKind,
+        MlsService, StagedCandidateResult,
     },
     protos::de_mls::messages::v1::AppMessage,
 };
+
+/// Wallet-flavoured test `Identity`: 20-byte Ethereum address + EIP-55 hex.
+pub(crate) struct TestWalletIdentity {
+    bytes: Vec<u8>,
+    display: String,
+}
+
+impl TestWalletIdentity {
+    pub(crate) fn from_private_key(pk: &str) -> (Self, PrivateKeySigner) {
+        let signer = PrivateKeySigner::from_str(pk).expect("valid private key");
+        let addr: Address = signer.address();
+        let identity = Self {
+            bytes: addr.as_slice().to_vec(),
+            display: addr.to_checksum(None),
+        };
+        (identity, signer)
+    }
+}
+
+impl Identity for TestWalletIdentity {
+    fn identity_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    fn identity_display(&self) -> &str {
+        &self.display
+    }
+}
+
+/// Test helper: build a `User` keyed by an Ethereum private key. Mirrors
+/// what `tests/common/wallet.rs::user_from_private_key` does for the
+/// integration suite — kept here so crate-internal tests can construct a
+/// default-bundle `User` without a `tests/common` import.
+pub(crate) fn make_user_from_private_key(
+    private_key: &str,
+    transport: SharedDeliveryService,
+) -> User<DefaultConsensusPlugin, DefaultConversationPluginsFactory> {
+    let (identity, signer) = TestWalletIdentity::from_private_key(private_key);
+
+    let credentials = Arc::new(MlsCredentials::from_identity(&identity).expect("credentials"));
+    let storage = Arc::new(MemoryDeMlsStorage::new());
+
+    let conversation_plugins = Arc::new(DefaultConversationPluginsFactory::new(
+        Arc::clone(&storage),
+        Arc::clone(&credentials),
+    ));
+    let key_package_provider: Arc<dyn KeyPackageProvider> =
+        Arc::new(DefaultKeyPackageProvider::new(storage, credentials));
+
+    let consensus_signer = EthereumConsensusSigner::new(signer);
+    let consensus = ConsensusContext::<DefaultConsensusPlugin>::new(consensus_signer);
+
+    let plugins = UserPlugins {
+        conversation_plugins,
+        consensus,
+        key_package_provider,
+        default_conversation_config: ConversationConfig::default(),
+        default_scoring_config: ScoringConfig::default(),
+        default_steward_list_config: StewardListConfig::default(),
+    };
+
+    User::new_with_plugins(Box::new(identity), plugins, transport)
+}
 
 /// Build a `PluginConsensus<DefaultConsensusPlugin>` with a random signer for
 /// tests that need a `SessionRunner` but never exercise consensus operations.
@@ -35,20 +107,20 @@ pub(crate) fn make_test_consensus_service() -> PluginConsensus<DefaultConsensusP
     )
 }
 
-/// Transport stub for tests. `send` is unreachable (tests should never push
-/// outbound), and `subscribe` returns a disconnected receiver.
+/// Transport stub for tests. `publish` is unreachable (tests should never
+/// push outbound) and `subscribe` is a no-op.
+#[derive(Debug)]
 pub(crate) struct UnusedTransport;
 
 impl crate::ds::DeliveryService for UnusedTransport {
-    fn send(
-        &self,
-        _: crate::ds::OutboundPacket,
-    ) -> Result<String, crate::ds::DeliveryServiceError> {
-        unreachable!("UnusedTransport::send called")
+    type Error = crate::ds::DeliveryServiceError;
+
+    fn publish(&mut self, _: crate::ds::OutboundPacket) -> Result<(), Self::Error> {
+        unreachable!("UnusedTransport::publish called")
     }
-    fn subscribe(&self) -> std::sync::mpsc::Receiver<crate::ds::InboundPacket> {
-        let (_tx, rx) = std::sync::mpsc::channel();
-        rx
+
+    fn subscribe(&mut self, _delivery_address: &str) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 

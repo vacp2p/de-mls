@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use de_mls::app::{CreatorVote, SessionRunner};
 use de_mls::core::{ConversationState, StewardListConfig};
-use de_mls::identity::parse_wallet_to_bytes;
+use de_mls::identity::Identity;
 use de_mls::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, RemoveMember, conversation_update_request,
 };
@@ -36,25 +36,28 @@ async fn silent_steward_drives_observer_to_reelection() {
     )
     .await;
 
-    let alice_session = users[0].0.lookup_entry("b2").await.unwrap();
-    let bob_session = users[1].0.lookup_entry("b2").await.unwrap();
+    let alice_session = users[0].0.lookup_entry("b2").unwrap().unwrap();
+    let bob_session = users[1].0.lookup_entry("b2").unwrap().unwrap();
 
-    let alice_is_steward = alice_session.read().await.is_steward_for_self();
-    let bob_is_steward = bob_session.read().await.is_steward_for_self();
+    let alice_is_steward = alice_session.read().unwrap().is_steward_for_self();
+    let bob_is_steward = bob_session.read().unwrap().is_steward_for_self();
     assert!(
         alice_is_steward ^ bob_is_steward,
         "sn_max=1 must yield exactly one steward (alice_is_steward={alice_is_steward}, bob_is_steward={bob_is_steward})"
     );
 
     let (steward_idx, observer_idx) = if alice_is_steward { (0, 1) } else { (1, 0) };
-    let observer_session = users[observer_idx].0.lookup_entry("b2").await.unwrap();
+    let observer_session = users[observer_idx].0.lookup_entry("b2").unwrap().unwrap();
     let steward_tx = users[steward_idx].1.clone();
     let observer_tx = users[observer_idx].1.clone();
 
     // Observer files a proposal. With `CreatorVote::Yes` and `expected_voters=2`,
     // the steward's auto-vote completes consensus. The exact proposal payload
     // doesn't matter — we just need approved work in the queue.
-    let steward_identity = parse_wallet_to_bytes(&users[steward_idx].0.identity_string()).unwrap();
+    let steward_identity =
+        common::WalletIdentity::from_hex(&users[steward_idx].0.identity_string())
+            .identity_bytes()
+            .to_vec();
     let request = ConversationUpdateRequest {
         payload: Some(conversation_update_request::Payload::RemoveMember(
             RemoveMember {
@@ -72,15 +75,17 @@ async fn silent_steward_drives_observer_to_reelection() {
         settle_for(Duration::from_millis(40)).await;
         poll_once(&alice_session).await;
         poll_once(&bob_session).await;
-        for p in users[0].1.drain_packets() {
+        let packets = users[0].1.lock().unwrap().drain_packets();
+        for p in packets {
             let _ = users[1].0.process_inbound_packet(to_inbound(&p)).await;
         }
-        for p in users[1].1.drain_packets() {
+        let packets = users[1].1.lock().unwrap().drain_packets();
+        for p in packets {
             let _ = users[0].0.process_inbound_packet(to_inbound(&p)).await;
         }
         let observer_approved = observer_session
             .read()
-            .await
+            .unwrap()
             .get_approved_proposal_for_current_epoch()
             .len();
         if observer_approved > 0 {
@@ -102,15 +107,16 @@ async fn silent_steward_drives_observer_to_reelection() {
         poll_once(&bob_session).await;
 
         // Discard everything the steward emits, deliver everything else.
-        let _ = steward_tx.drain_packets();
-        for p in observer_tx.drain_packets() {
+        let _ = steward_tx.lock().unwrap().drain_packets();
+        let packets = observer_tx.lock().unwrap().drain_packets();
+        for p in packets {
             let _ = users[steward_idx]
                 .0
                 .process_inbound_packet(to_inbound(&p))
                 .await;
         }
 
-        let observer_state = observer_session.read().await.get_conversation_state();
+        let observer_state = observer_session.read().unwrap().get_conversation_state();
         if observer_state == ConversationState::Reelection {
             entered_reelection = true;
             break;

@@ -4,8 +4,9 @@
 //! bundle parameter rather than three independently-bounded type
 //! parameters; integrators implement it once to swap any of the
 //! per-conversation plug-ins. The convenience
-//! [`crate::app::DefaultConversationPluginsFactory`] supplies an in-memory
-//! build used by [`crate::app::User::with_private_key`].
+//! [`crate::defaults::DefaultConversationPluginsFactory`] supplies an in-memory
+//! reference build that integrators can hand to
+//! [`crate::app::User::new_with_plugins`].
 //!
 //! Key package generation lives on its own trait —
 //! [`crate::core::KeyPackageProvider`] — because it is identity-bound,

@@ -3,9 +3,9 @@
 
 use std::time::Duration;
 
+use de_mls::app::SessionRunner;
 use de_mls::core::{SessionEvent, StewardListConfig};
 use de_mls::protos::de_mls::messages::v1::app_message;
-use tokio::sync::broadcast;
 
 mod common;
 use common::session_fixtures::{
@@ -25,44 +25,35 @@ async fn chat_message_delivered_to_peer_as_app_message_event() {
     )
     .await;
 
-    let alice_session = users[0].0.lookup_entry("chat").await.unwrap();
-    let bob_session = users[1].0.lookup_entry("chat").await.unwrap();
+    let alice_session = users[0].0.lookup_entry("chat").unwrap().unwrap();
+    let bob_session = users[1].0.lookup_entry("chat").unwrap().unwrap();
 
-    let mut bob_events = bob_session.read().await.subscribe();
-
-    alice_session
-        .read()
-        .await
-        .send_app_message(b"Hello from alice".to_vec())
+    SessionRunner::send_app_message(&alice_session, b"Hello from alice".to_vec())
         .await
         .unwrap();
 
     // Relay alice's outbound to bob.
     settle_for(Duration::from_millis(40)).await;
-    for p in users[0].1.drain_packets() {
+    let packets = users[0].1.lock().unwrap().drain_packets();
+    for p in packets {
         let _ = users[1].0.process_inbound_packet(to_inbound(&p)).await;
     }
 
-    let chat = find_chat_message(&mut bob_events);
+    let chat = bob_session
+        .read()
+        .unwrap()
+        .drain_events()
+        .into_iter()
+        .find_map(|e| match e {
+            SessionEvent::AppMessage(msg) => match msg.payload {
+                Some(app_message::Payload::ConversationMessage(cm)) => {
+                    Some((cm.message, cm.sender))
+                }
+                _ => None,
+            },
+            _ => None,
+        });
     let (body, sender) = chat.expect("bob must surface alice's chat message as a SessionEvent");
     assert_eq!(body, b"Hello from alice");
     assert_eq!(sender, users[0].0.identity_string());
-}
-
-/// Drain events, find the first `ConversationMessage` payload and return
-/// its (body, sender).
-fn find_chat_message(rx: &mut broadcast::Receiver<SessionEvent>) -> Option<(Vec<u8>, String)> {
-    use tokio::sync::broadcast::error::TryRecvError;
-    loop {
-        match rx.try_recv() {
-            Ok(SessionEvent::AppMessage(msg)) => {
-                if let Some(app_message::Payload::ConversationMessage(cm)) = msg.payload {
-                    return Some((cm.message, cm.sender));
-                }
-            }
-            Ok(_) => {}
-            Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => return None,
-            Err(TryRecvError::Lagged(_)) => continue,
-        }
-    }
 }

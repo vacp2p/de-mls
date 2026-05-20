@@ -1,13 +1,19 @@
-//! Transport-agnostic envelopes + delivery service interface.
+//! Transport-agnostic envelopes and the [`DeliveryService`] trait.
+
+use std::{
+    fmt::{Debug, Display},
+    sync::{Arc, Mutex},
+};
+
 use crate::ds::DeliveryServiceError;
+
 /// A transport-agnostic packet that should be sent to the network.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundPacket {
     pub payload: Vec<u8>,
     pub subtopic: String,
     pub conversation_id: String,
-    /// Application instance identifier. Transported as the `meta` field on the
-    /// wire (Waku message JSON). Used for self-message filtering.
+    /// Application instance identifier. Used for self-message filtering.
     pub app_id: Vec<u8>,
 }
 
@@ -20,6 +26,11 @@ impl OutboundPacket {
             app_id: app_id.to_vec(),
         }
     }
+
+    /// Address this packet is delivered to.
+    pub fn delivery_address(&self) -> &str {
+        &self.conversation_id
+    }
 }
 
 /// A transport-agnostic packet delivered from the network into the application.
@@ -28,7 +39,7 @@ pub struct InboundPacket {
     pub payload: Vec<u8>,
     pub subtopic: String,
     pub conversation_id: String,
-    /// Transport-provided app instance id / metadata (used for self-message filtering).
+    /// Sender's application instance id.
     pub app_id: Vec<u8>,
     pub timestamp: i64,
 }
@@ -51,15 +62,18 @@ impl InboundPacket {
     }
 }
 
-pub trait DeliveryService: Send + Sync + 'static {
-    /// Send a packet to the network and return a transport message id (if available).
-    fn send(&self, pkt: OutboundPacket) -> Result<String, DeliveryServiceError>;
+pub trait DeliveryService: Debug + 'static {
+    type Error: Display + Debug + 'static;
 
-    /// Subscribe to inbound packets.
-    ///
-    /// Each call creates a new channel and registers its sender internally.
-    /// Senders are pruned when the corresponding receiver is dropped, but only
-    /// during the next inbound event dispatch. Avoid calling this in a loop
-    /// without dropping previous receivers.
-    fn subscribe(&self) -> std::sync::mpsc::Receiver<InboundPacket>;
+    /// Publish a packet to the network.
+    fn publish(&mut self, packet: OutboundPacket) -> Result<(), Self::Error>;
+
+    /// Register interest in a delivery address.
+    fn subscribe(&mut self, delivery_address: &str) -> Result<(), Self::Error>;
 }
+
+/// Trait-object shape used internally — pinned `Error` so dyn-dispatch
+/// is object-safe and `UserError::Transport(#[from] DeliveryServiceError)`
+/// resolves.
+pub type SharedDeliveryService =
+    Arc<Mutex<dyn DeliveryService<Error = DeliveryServiceError> + Send>>;

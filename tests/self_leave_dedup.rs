@@ -20,17 +20,17 @@ async fn double_leave_does_not_re_propose() {
     let (mut alice, h) = make_user(ALICE_KEY, cfg, steward_cfg);
 
     alice.start_conversation("c4", true).await.unwrap();
-    h.drain_packets();
+    h.lock().unwrap().drain_packets();
 
     alice.leave_conversation("c4").await.unwrap();
-    let after_first = h.snapshot().len();
+    let after_first = h.lock().unwrap().snapshot().len();
     assert!(
         after_first > 0,
         "first leave must file a self-leave proposal"
     );
 
     alice.leave_conversation("c4").await.unwrap();
-    let after_second = h.snapshot().len();
+    let after_second = h.lock().unwrap().snapshot().len();
 
     assert_eq!(
         after_first, after_second,

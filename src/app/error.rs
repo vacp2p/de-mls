@@ -1,11 +1,10 @@
 //! Error type for the app layer.
 
-use alloy::signers::local::LocalSignerError;
+use std::time::SystemTimeError;
+
 use hashgraph_like_consensus::error::ConsensusError;
 
-use crate::{
-    core::CoreError, ds::DeliveryServiceError, identity::IdentityError, mls_crypto::MlsError,
-};
+use crate::{core::CoreError, ds::DeliveryServiceError, mls_crypto::MlsError};
 
 /// Errors from User operations.
 #[derive(Debug, thiserror::Error)]
@@ -27,8 +26,6 @@ pub enum UserError {
     )]
     PartialFreeze,
 
-    /// Returned when the synchronous transport [`crate::ds::DeliveryService::send`]
-    /// reports failure (e.g. network unavailable, payload too large).
     #[error("Transport error: {0}")]
     Transport(#[from] DeliveryServiceError),
 
@@ -42,14 +39,11 @@ pub enum UserError {
     Message(#[from] prost::DecodeError),
 
     #[error("System time error: {0}")]
-    SystemTime(#[from] std::time::SystemTimeError),
-
-    #[error("Signer error: {0}")]
-    Signer(#[from] LocalSignerError),
+    SystemTime(#[from] SystemTimeError),
 
     #[error("MLS error: {0}")]
     Mls(#[from] MlsError),
 
-    #[error("Identity error: {0}")]
-    Identity(#[from] IdentityError),
+    #[error("Lock poisoned: {0}")]
+    LockPoisoned(&'static str),
 }

@@ -15,7 +15,6 @@ use crate::{
         freeze::buffer_commit_candidate,
         process_result::{NoopReason, ProcessResult},
     },
-    identity::{ShortId, parse_wallet_to_bytes},
     mls_crypto::{DecryptResult, MlsService},
     protos::de_mls::messages::v1::{
         AppMessage, ConversationUpdateRequest, app_message, conversation_update_request,
@@ -73,24 +72,23 @@ pub fn process_inbound<M: MlsService>(
                 warn!(
                     conversation = conversation.name(),
                     proposal_id = proposal.proposal_id,
-                    sender = %ShortId::new(&sender),
-                    owner = %ShortId::new(&proposal.proposal_owner),
+                    sender = ?sender,
+                    owner = ?proposal.proposal_owner,
                     "fast-path proposal rejected: sender is not the self-removal target"
                 );
                 return Ok(ProcessResult::Noop(NoopReason::FastPathRejected));
             }
             // Drop BanRequests whose target isn't in the conversation — saves a
             // useless consensus round.
-            if let Some(app_message::Payload::BanRequest(ban)) = &app_msg.payload {
-                let target = parse_wallet_to_bytes(&ban.user_to_ban)?;
-                if !mls.is_member(&target) {
-                    info!(
-                        conversation = conversation.name(),
-                        target = %ShortId::new(&target),
-                        "ban request skipped: target not a member"
-                    );
-                    return Ok(ProcessResult::Noop(NoopReason::BanTargetNotMember));
-                }
+            if let Some(app_message::Payload::BanRequest(ban)) = &app_msg.payload
+                && !mls.is_member(&ban.user_to_ban)
+            {
+                info!(
+                    conversation = conversation.name(),
+                    target = ?ban.user_to_ban,
+                    "ban request skipped: target not a member"
+                );
+                return Ok(ProcessResult::Noop(NoopReason::BanTargetNotMember));
             }
             app_msg.try_into()
         }

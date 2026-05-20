@@ -4,43 +4,46 @@
 //! prevention so a future-steward member doesn't propose Adds for
 //! already-joined identities.
 
+mod common;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use de_mls::app::{ConversationConfig, User};
-use de_mls::core::{DefaultConsensusPlugin, StewardListConfig};
-use de_mls::ds::{DeliveryService, DeliveryServiceError, InboundPacket, OutboundPacket};
+use de_mls::app::{ConversationConfig, SessionRunner, User};
+use de_mls::core::StewardListConfig;
+use de_mls::defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory};
+use de_mls::ds::{
+    DeliveryService, DeliveryServiceError, InboundPacket, OutboundPacket, SharedDeliveryService,
+};
 
 /// Test-only transport: captures every outbound packet for later inspection
-/// instead of sending it. `subscribe()` returns a dangling receiver so the
-/// blocking-channel half goes nowhere (tests deliver inbound by calling
-/// `process_inbound_packet` directly).
-#[derive(Clone)]
+/// instead of sending it. `subscribe` is a no-op — tests deliver inbound
+/// by calling `process_inbound_packet` directly.
+#[derive(Debug, Default)]
 struct H {
-    packets: Arc<Mutex<Vec<OutboundPacket>>>,
+    packets: Vec<OutboundPacket>,
 }
 
 impl H {
-    fn new() -> Self {
-        Self {
-            packets: Arc::new(Mutex::new(Vec::new())),
-        }
+    fn handle() -> Arc<Mutex<Self>> {
+        Arc::new(Mutex::new(Self::default()))
     }
-    fn drain_packets(&self) -> Vec<OutboundPacket> {
-        std::mem::take(&mut *self.packets.lock().unwrap())
+
+    fn drain_packets(&mut self) -> Vec<OutboundPacket> {
+        std::mem::take(&mut self.packets)
     }
 }
 
 impl DeliveryService for H {
-    fn send(&self, pkt: OutboundPacket) -> Result<String, DeliveryServiceError> {
-        self.packets.lock().unwrap().push(pkt);
-        Ok("ok".into())
+    type Error = DeliveryServiceError;
+
+    fn publish(&mut self, packet: OutboundPacket) -> Result<(), Self::Error> {
+        self.packets.push(packet);
+        Ok(())
     }
-    fn subscribe(&self) -> std::sync::mpsc::Receiver<InboundPacket> {
-        // Inbound is delivered explicitly via `process_inbound_packet` in
-        // these tests; the receiver is never polled.
-        let (_tx, rx) = std::sync::mpsc::channel();
-        rx
+
+    fn subscribe(&mut self, _delivery_address: &str) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 
@@ -49,11 +52,11 @@ const BOB_KEY: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6
 const CHARLIE_KEY: &str = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
 const DAVE_KEY: &str = "7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6";
 
-type TU = User<DefaultConsensusPlugin, de_mls::app::DefaultConversationPluginsFactory>;
+type TU = User<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
 
-fn make(key: &str, cfg: ConversationConfig, steward_cfg: StewardListConfig) -> (TU, H) {
-    let h = H::new();
-    let mut u = User::with_private_key_and_config(key, Arc::new(h.clone()), cfg).unwrap();
+fn make(key: &str, cfg: ConversationConfig, steward_cfg: StewardListConfig) -> (TU, Arc<Mutex<H>>) {
+    let h = H::handle();
+    let mut u = common::wallet::user_from_private_key(key, h.clone() as SharedDeliveryService, cfg);
     u.set_default_steward_list_config(steward_cfg);
     (u, h)
 }
@@ -108,15 +111,15 @@ async fn concurrent_joins_leave_joiners_with_empty_buffer() {
     // on the broadcast welcome subtopic.
     for u in [&bob, &charlie, &dave] {
         let kp = u.generate_key_package().unwrap();
-        let session = u.lookup_entry(group).await.unwrap();
-        session.read().await.send_kp_message(kp).await.unwrap();
+        let session = u.lookup_entry(group).unwrap().unwrap();
+        SessionRunner::send_kp_message(&session, kp).await.unwrap();
     }
 
     // Step 3: Broadcast every KP packet to every participant (mocks pubsub).
     // Each joiner receives its own KP + the others'. Alice receives all three.
     let mut all_kp_packets = vec![];
     for h in [&bh, &ch, &dh] {
-        all_kp_packets.extend(h.drain_packets());
+        all_kp_packets.extend(h.lock().unwrap().drain_packets());
     }
     for p in &all_kp_packets {
         let _ = alice.process_inbound_packet(to_in(p)).await;
@@ -129,8 +132,8 @@ async fn concurrent_joins_leave_joiners_with_empty_buffer() {
     // Regression guard: PendingJoin members must have empty pending_updates
     // buffers. Alice (steward) has the KPs in her buffer until she commits.
     for (name, user) in [("bob", &bob), ("charlie", &charlie), ("dave", &dave)] {
-        let session = user.lookup_entry(group).await.unwrap();
-        let count = session.read().await.get_pending_update_count();
+        let session = user.lookup_entry(group).unwrap().unwrap();
+        let count = session.read().unwrap().get_pending_update_count();
         assert_eq!(
             count, 0,
             "{name} in PendingJoin must not buffer broadcast KPs"

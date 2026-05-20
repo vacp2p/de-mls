@@ -1,12 +1,11 @@
 //! Create and leave operations for a conversation.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::{
-    app::{ConversationState, PhaseTimer, SessionRunner, User, UserError},
+    app::{ConversationState, LockExt, PhaseTimer, SessionRunner, User, UserError},
     core::{
         ConsensusPlugin, Conversation, ConversationConfig, ConversationLifecycle,
         ConversationPluginsFactory, ConversationStateMachine, PeerScoringPlugin, SessionEvent,
@@ -35,8 +34,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         is_creation: bool,
         config: ConversationConfig,
     ) -> Result<(), UserError> {
-        let mut conversations = self.conversations.write().await;
-        if conversations.contains_key(conversation_name) {
+        if self
+            .conversations
+            .read()
+            .map_err(|_| UserError::LockPoisoned("conversation registry"))?
+            .contains_key(conversation_name)
+        {
             return Err(UserError::ConversationAlreadyExists);
         }
 
@@ -103,22 +106,29 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             steward_list,
             consensus,
             Arc::clone(&self.transport),
-            Arc::clone(&self.self_identity),
-            Arc::clone(&self.identity_display),
-            Arc::clone(&self.app_id),
+            Arc::from(self.identity.identity_bytes()),
+            Arc::from(self.identity.identity_display()),
+            Arc::from(self.app_id.as_slice()),
         )));
-        conversations.insert(conversation_name.to_string(), Arc::clone(&session));
-        drop(conversations);
+        {
+            let mut conversations = self
+                .conversations
+                .write()
+                .map_err(|_| UserError::LockPoisoned("conversation registry"))?;
+            if conversations.contains_key(conversation_name) {
+                return Err(UserError::ConversationAlreadyExists);
+            }
+            conversations.insert(conversation_name.to_string(), Arc::clone(&session));
+        }
 
-        // Emit on the lifecycle channel first so integrators can subscribe
-        // to the new session's `SessionEvent` stream before any session
-        // events are fired.
-        let _ = self.lifecycle.send(ConversationLifecycle::Created(
+        // Record the lifecycle event first so integrators draining
+        // [`User::drain_lifecycle_events`] see `Created` before any
+        // per-session event emitted below.
+        self.emit_lifecycle(ConversationLifecycle::Created(
             conversation_name.to_string(),
         ));
         session
-            .read()
-            .await
+            .read_or_err("session")?
             .emit_event(SessionEvent::PhaseChange(initial_state));
 
         Ok(())
@@ -134,19 +144,23 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         info!(conversation = conversation_name, "leaving conversation");
 
         let entry_arc = self
-            .lookup_entry(conversation_name)
-            .await
+            .lookup_entry(conversation_name)?
             .ok_or(UserError::ConversationNotFound)?;
 
-        let is_pending_join =
-            entry_arc.read().await.handle.current_state() == ConversationState::PendingJoin;
+        let is_pending_join = entry_arc.read_or_err("session")?.handle.current_state()
+            == ConversationState::PendingJoin;
         if is_pending_join {
-            entry_arc.read().await.emit_event(SessionEvent::Leaving);
+            entry_arc
+                .read_or_err("session")?
+                .emit_event(SessionEvent::Leaving);
             // Cancel auto-vote timers before removing the registry entry —
             // see `finalize_self_leave` for the rationale.
             self.cleanup_consensus_scope(conversation_name).await?;
-            self.conversations.write().await.remove(conversation_name);
-            let _ = self.lifecycle.send(ConversationLifecycle::Removed(
+            self.conversations
+                .write()
+                .map_err(|_| UserError::LockPoisoned("conversation registry"))?
+                .remove(conversation_name);
+            self.emit_lifecycle(ConversationLifecycle::Removed(
                 conversation_name.to_string(),
             ));
             return Ok(());

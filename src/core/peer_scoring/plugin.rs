@@ -4,7 +4,7 @@
 //! at safe points and turns into protocol actions. Storage backends and
 //! event publishing are caller concerns.
 
-use super::types::{PeerScoringEvent, ScoreOp, ScoreSnapshot};
+use crate::core::{PeerScoringEvent, ScoreOp, ScoreSnapshot};
 
 /// Per-conversation peer-scoring plug-in. Mutating methods return any
 /// [`PeerScoringEvent`]s the call produced; the coordinator drains them

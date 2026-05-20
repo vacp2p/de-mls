@@ -8,7 +8,6 @@ use hashgraph_like_consensus::{
 
 use crate::{
     core::{CoreError, ScoreEvent, ScoreOp},
-    identity::parse_wallet_to_bytes,
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, CommitCandidate, ConversationMessage, ConversationSync,
         ConversationUpdateRequest, EmergencyCriteriaProposal, InvitationToJoin, Outcome,
@@ -267,7 +266,7 @@ impl TryFrom<AppMessage> for ProcessResult {
                 ProcessResult::MembershipChangeReceived(Box::new(ConversationUpdateRequest {
                     payload: Some(conversation_update_request::Payload::RemoveMember(
                         RemoveMember {
-                            identity: parse_wallet_to_bytes(ban_request.user_to_ban.as_str())?,
+                            identity: ban_request.user_to_ban.clone(),
                         },
                     )),
                 })),

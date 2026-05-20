@@ -13,7 +13,6 @@ use tracing::info;
 
 use crate::{
     core::{Conversation, CoreError},
-    identity::ShortId,
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, RemoveMember, StewardElectionProposal, ViolationEvidence,
         ViolationType, conversation_update_request,
@@ -115,7 +114,7 @@ pub fn apply_consensus_result(
         }
         info!(
             proposal_id,
-            target = %ShortId::new(target),
+            target = ?target,
             "removal proposal deduped — target already queued for removal"
         );
         return Ok(ConsensusApplyResult::NoAction);
@@ -149,14 +148,14 @@ pub fn apply_consensus_result(
         if approved {
             info!(
                 proposal_id,
-                target = %ShortId::new(&ev.target_member_id),
-                creator = %ShortId::new(&ev.creator_member_id),
+                target = ?ev.target_member_id,
+                creator = ?ev.creator_member_id,
                 "emergency criteria proposal accepted"
             );
         } else {
             info!(
                 proposal_id,
-                creator = %ShortId::new(&ev.creator_member_id),
+                creator = ?ev.creator_member_id,
                 "emergency criteria proposal rejected"
             );
         }

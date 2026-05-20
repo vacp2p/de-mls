@@ -14,13 +14,11 @@
 //!
 //! ```ignore
 //! use std::sync::Arc;
-//! use de_mls::identity::{WalletIdentity, parse_wallet_address};
 //! use de_mls::mls_crypto::{
 //!     MemoryDeMlsStorage, MlsCredentials, MlsService, OpenMlsService,
 //! };
 //!
-//! let wallet = parse_wallet_address("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")?;
-//! let identity = WalletIdentity::from_wallet(wallet);
+//! // `identity` is any type implementing `de_mls::identity::Identity`.
 //! let credentials = Arc::new(MlsCredentials::from_identity(&identity)?);
 //! let storage = MemoryDeMlsStorage::new();
 //!
@@ -50,7 +48,7 @@ mod types;
 pub use credentials::MlsCredentials;
 pub use error::MlsError;
 pub use service::{CIPHERSUITE, DEFAULT_COMMIT_BATCH_MAX, MlsService, OpenMlsService};
-pub use storage::{DeMlsStorage, MemoryDeMlsStorage};
+pub use storage::DeMlsStorage;
 pub use types::{
     CommitCandidate, DecryptResult, KeyPackageBytes, MlsCommitInput, MlsMessageKind,
     MlsProposalOutput, StagedCandidateResult, key_package_bytes_from_json,

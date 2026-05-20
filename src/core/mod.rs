@@ -6,13 +6,13 @@
 //! Integrators implement `SessionEvent` / `ConversationLifecycle` (transport
 //! + UI delivery) and feed inbound packets to [`crate::core::process_inbound`],
 //! then dispatch the returned [`crate::core::ProcessResult`].
-//! [`crate::core::DefaultConsensusPlugin`] bundles in-memory backends for tests
+//! [`crate::defaults::DefaultConsensusPlugin`] bundles in-memory backends for tests
 //! and simple deployments.
 //!
 //! Submodules: `conversation` (per-conversation state, handle, state machine,
 //! config), `consensus` (pure consensus result application),
 //! `consensus_plugin` ([`crate::core::ConsensusPlugin`] +
-//! [`crate::core::DefaultConsensusPlugin`]), `conversation_plugins`
+//! [`crate::defaults::DefaultConsensusPlugin`]), `conversation_plugins`
 //! ([`crate::core::ConversationPluginsFactory`] — the per-conversation
 //! plug-in factory bundle), `events` (`SessionEvent` /
 //! `ConversationLifecycle`), `freeze` (round selection + apply),
@@ -79,8 +79,8 @@ pub use steward_list::{
     StewardListConfig, StewardListEvent, StewardListPlugin,
 };
 
-// ── Consensus plug-in ──
-pub use consensus_plugin::{ConsensusPlugin, DefaultConsensusPlugin, PluginConsensus};
+// ── Consensus plug-in trait ──
+pub use consensus_plugin::{ConsensusPlugin, PluginConsensus};
 
 // ── Per-conversation plug-in bundle ──
 pub use conversation_plugins::ConversationPluginsFactory;

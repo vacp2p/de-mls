@@ -29,20 +29,20 @@ async fn pending_join_expires_evicts_entry_and_broadcasts_removal() {
 
     let (mut alice, _h) = make_user(ALICE_KEY, cfg, steward_cfg);
 
-    let mut lifecycle = alice.subscribe_conversations();
-
     // Alice joins a conversation no one else is in — no welcome will ever
     // arrive. The session sits in PendingJoin.
     alice.start_conversation(group, false).await.unwrap();
     assert!(
         alice
             .list_conversations()
-            .await
+            .unwrap()
             .contains(&group.to_string())
     );
 
-    let session = alice.lookup_entry(group).await.expect("session registered");
-    let mut session_events = session.read().await.subscribe();
+    let session = alice
+        .lookup_entry(group)
+        .unwrap()
+        .expect("session registered");
 
     // Poll until expiry. The first tick after start anchors the timer; we
     // need ≥ 3× inactivity to fire `Expired`.
@@ -54,9 +54,11 @@ async fn pending_join_expires_evicts_entry_and_broadcasts_removal() {
     );
 
     // The session must have emitted Leaving before returning Expired.
-    let saw_leaving = drain_for(&mut session_events, |e| matches!(e, SessionEvent::Leaving)).await;
+    let session_events = session.read().unwrap().drain_events();
     assert!(
-        saw_leaving,
+        session_events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::Leaving)),
         "session must emit Leaving on PendingJoin expiry"
     );
 
@@ -67,30 +69,30 @@ async fn pending_join_expires_evicts_entry_and_broadcasts_removal() {
     assert!(
         !alice
             .list_conversations()
-            .await
+            .unwrap()
             .contains(&group.to_string()),
         "registry entry must be evicted"
     );
     assert!(
-        alice.lookup_entry(group).await.is_none(),
+        alice.lookup_entry(group).unwrap().is_none(),
         "lookup_entry must return None after eviction"
     );
 
-    // User-level lifecycle channel announces removal (drain past any
-    // preceding `Created` event from `start_conversation`).
-    let removed = drain_for(
-        &mut lifecycle,
-        |e| matches!(e, ConversationLifecycle::Removed(name) if name == group),
-    )
-    .await;
-    assert!(removed, "lifecycle channel must announce Removed");
+    // User-level lifecycle drain surfaces Created + Removed.
+    let lifecycle_events = alice.drain_lifecycle_events();
+    assert!(
+        lifecycle_events
+            .iter()
+            .any(|e| matches!(e, ConversationLifecycle::Removed(name) if name == group)),
+        "lifecycle drain must include Removed"
+    );
 }
 
 async fn await_pending_join_outcome(session: &SessionArc, inactivity: Duration) -> PendingJoinTick {
     // Allow up to 6× inactivity so the test isn't fragile on slow CI.
     let deadline = tokio::time::Instant::now() + inactivity * 6;
     loop {
-        let tick = SessionRunner::check_pending_join(session).await;
+        let tick = SessionRunner::check_pending_join(session).unwrap();
         if tick != PendingJoinTick::StillPending {
             return tick;
         }
@@ -98,22 +100,5 @@ async fn await_pending_join_outcome(session: &SessionArc, inactivity: Duration) 
             return tick;
         }
         settle_for(inactivity / 4).await;
-    }
-}
-
-async fn drain_for<E, F>(rx: &mut tokio::sync::broadcast::Receiver<E>, pred: F) -> bool
-where
-    E: Clone,
-    F: Fn(&E) -> bool,
-{
-    use tokio::sync::broadcast::error::TryRecvError;
-    loop {
-        match rx.try_recv() {
-            Ok(ev) if pred(&ev) => return true,
-            Ok(_) => continue,
-            Err(TryRecvError::Empty) | Err(TryRecvError::Closed) | Err(TryRecvError::Lagged(_)) => {
-                return false;
-            }
-        }
     }
 }

@@ -1,9 +1,10 @@
 //! Deterministic SHA256-sort steward list — reference
 //! [`super::StewardListPlugin`] implementation.
 
-use super::list::{StewardList, StewardListConfig};
-use super::plugin::{DEFAULT_MAX_RETRIES, ElectionDecision, StewardListEvent, StewardListPlugin};
-use crate::core::error::CoreError;
+use crate::core::{
+    DEFAULT_MAX_RETRIES, ElectionDecision, StewardList, StewardListConfig, StewardListEvent,
+    StewardListPlugin, error::CoreError,
+};
 
 #[derive(Debug)]
 pub struct DeterministicStewardList {

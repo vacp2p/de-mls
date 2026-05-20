@@ -1,0 +1,97 @@
+//! Test-side wallet identity adapter.
+//!
+//! Bridges an Ethereum `PrivateKeySigner` to the library's
+//! identity-agnostic interfaces: builds a [`WalletIdentity`] that
+//! implements [`de_mls::identity::Identity`] and constructs a [`User`]
+//! with the default plug-in bundle wired to an
+//! [`EthereumConsensusSigner`]. Production callers ship their own
+//! identity adapter — this lives under `tests/common/` only because the
+//! integration suite uses Ethereum keys for convenience.
+
+use std::str::FromStr;
+use std::sync::Arc;
+
+use alloy::primitives::Address;
+use alloy::signers::local::PrivateKeySigner;
+use hashgraph_like_consensus::signing::EthereumConsensusSigner;
+
+use de_mls::app::{ConsensusContext, ConversationConfig, User, UserPlugins};
+use de_mls::core::{KeyPackageProvider, ScoringConfig, StewardListConfig};
+use de_mls::defaults::{
+    DefaultConsensusPlugin, DefaultConversationPluginsFactory, DefaultKeyPackageProvider,
+    MemoryDeMlsStorage,
+};
+use de_mls::ds::SharedDeliveryService;
+use de_mls::identity::Identity;
+use de_mls::mls_crypto::MlsCredentials;
+
+/// Wallet-flavoured [`Identity`] used by integration tests. Holds the
+/// 20-byte Ethereum address bytes and its EIP-55 checksummed hex form.
+#[derive(Debug, Clone)]
+pub struct WalletIdentity {
+    bytes: Vec<u8>,
+    display: String,
+}
+
+impl WalletIdentity {
+    /// Build from a parsed [`Address`].
+    pub fn from_address(addr: Address) -> Self {
+        Self {
+            bytes: addr.as_slice().to_vec(),
+            display: addr.to_checksum(None),
+        }
+    }
+
+    /// Parse a `0x…`-prefixed wallet hex string.
+    pub fn from_hex(hex: &str) -> Self {
+        let addr = Address::from_str(hex.trim()).expect("valid wallet hex");
+        Self::from_address(addr)
+    }
+}
+
+impl Identity for WalletIdentity {
+    fn identity_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    fn identity_display(&self) -> &str {
+        &self.display
+    }
+}
+
+/// Build a [`User`] keyed by an Ethereum private-key string. Uses the
+/// default plug-in bundle (in-memory MLS storage, default scoring +
+/// steward-list backends, [`EthereumConsensusSigner`] wrapping the parsed
+/// `PrivateKeySigner`).
+pub fn user_from_private_key(
+    private_key: &str,
+    transport: SharedDeliveryService,
+    cfg: ConversationConfig,
+) -> User<DefaultConsensusPlugin, DefaultConversationPluginsFactory> {
+    let signer = PrivateKeySigner::from_str(private_key).expect("valid private key");
+    let identity = WalletIdentity::from_address(signer.address());
+
+    let credentials = Arc::new(MlsCredentials::from_identity(&identity).expect("credentials"));
+    let storage = Arc::new(MemoryDeMlsStorage::new());
+
+    let conversation_plugins = Arc::new(DefaultConversationPluginsFactory::new(
+        Arc::clone(&storage),
+        Arc::clone(&credentials),
+    ));
+    let key_package_provider: Arc<dyn KeyPackageProvider> =
+        Arc::new(DefaultKeyPackageProvider::new(storage, credentials));
+
+    let consensus_signer = EthereumConsensusSigner::new(signer);
+    let consensus = ConsensusContext::<DefaultConsensusPlugin>::new(consensus_signer);
+
+    let plugins = UserPlugins {
+        conversation_plugins,
+        consensus,
+        key_package_provider,
+        default_conversation_config: cfg,
+        default_scoring_config: ScoringConfig::default(),
+        default_steward_list_config: StewardListConfig::default(),
+    };
+
+    User::new_with_plugins(Box::new(identity), plugins, transport)
+}

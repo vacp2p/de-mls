@@ -7,33 +7,47 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use tokio::{
-    sync::broadcast,
-    task::{JoinHandle, spawn_blocking},
-};
 use tracing::info;
 
 use crate::{
-    app::PhaseTimer,
+    app::{PhaseTimer, UserError},
     core::{
         ConsensusPlugin, Conversation, ConversationConfig, ConversationHandle,
         ConversationPluginsFactory, ConversationState, ConversationStateMachine, PluginConsensus,
         SessionEvent,
     },
+    ds::{OutboundPacket, SharedDeliveryService},
 };
+
+/// Free helper that publishes a packet on the supplied transport. Pure sync —
+/// the caller's task does the publish directly. Multi-thread integrators
+/// that want the publish off-runtime can wrap the call site in
+/// `spawn_blocking` themselves.
+pub(crate) fn send_packet(
+    transport: &SharedDeliveryService,
+    packet: OutboundPacket,
+) -> Result<(), UserError> {
+    transport
+        .lock()
+        .map_err(|_| UserError::LockPoisoned("transport"))?
+        .publish(packet)?;
+    Ok(())
+}
 
 /// Default capacity for a session's [`SessionEvent`] broadcast channel.
 /// Sized for bursty proposal sessions (proposals + votes + UI pushes in
-/// flight); subscribers that fall behind by more than this lose events.
-const SESSION_EVENT_CAPACITY: usize = 256;
-
-/// Per-conversation auto-vote timer registry. Spawned when a proposal first
-/// becomes visible locally (own submit or peer inbound); cancelled on
-/// manual vote, consensus resolution, or conversation leave.
-pub(crate) type AutoVoteTimers = Arc<Mutex<HashMap<u32, JoinHandle<()>>>>;
+/// One pending auto-vote: cast `vote` for `proposal_id` once the wall-clock
+/// catches up to `fire_at`. Registered by `initiate_proposal` (Deferred
+/// path) and `on_incoming_proposal`; cancelled on manual vote or consensus
+/// resolution; fired by [`SessionRunner::tick_deadlines`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AutoVoteEntry {
+    pub(crate) fire_at: Instant,
+    pub(crate) vote: bool,
+}
 
 pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Conversation name. Identifies this session in the User registry and
@@ -51,31 +65,36 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Wall-clock anchor combined with `handle.state_machine` by
     /// coordinator methods.
     phase_timer: PhaseTimer,
-    /// Per-proposal auto-vote timers. The spawned task holds a clone of
-    /// this `Arc` so it can self-clean on completion; coordinators use
-    /// `cancel_auto_vote` / `cancel_all_auto_votes` to abort early.
-    pub(crate) auto_vote_timers: AutoVoteTimers,
+    /// Pending auto-votes by `proposal_id`. Walked by
+    /// [`Self::tick_deadlines`]; each entry whose `fire_at` has passed
+    /// gets a `cast_vote` and is removed from the map. Cancelled (removed)
+    /// when a manual vote arrives or the consensus session resolves.
+    pub(crate) pending_auto_votes: HashMap<u32, AutoVoteEntry>,
+    /// Pending consensus-session timeouts: `proposal_id -> fire_at`.
+    /// Registered when a proposal opens (own or incoming peer); fired by
+    /// [`Self::tick_deadlines`] which calls
+    /// `consensus.handle_consensus_timeout`. Removed when the session
+    /// resolves naturally via `apply_consensus_outcome`.
+    pub(crate) pending_consensus_timeouts: HashMap<u32, Instant>,
     /// Synchronous outbound transport (cloned from `User`). Per-session
-    /// methods reach this via [`Self::send_outbound`] which wraps
-    /// [`crate::ds::DeliveryService::send`] in `spawn_blocking`.
-    transport: Arc<dyn crate::ds::DeliveryService>,
-    /// Cached identity bytes (cloned from `User`). Used by per-session
-    /// methods that need the local identity without re-walking the
-    /// `Identity` trait.
+    /// methods reach this via [`Self::transport`] and route through
+    /// [`send_packet`], a direct sync publish.
+    transport: SharedDeliveryService,
+    /// Identity bytes derived from `User.identity.identity_bytes()` at
+    /// session construction. Stored as `Arc<[u8]>` so hot-path session
+    /// code can clone the handle cheaply across lock-guard drops.
     pub(crate) self_identity: Arc<[u8]>,
-    /// Cached display form of the local identity (e.g. checksummed `0x…`
-    /// hex). Stable for the lifetime of the runner; populated at
-    /// construction from `User.identity.identity_display()`. Used by
-    /// session methods (`send_app_message`) that need the `sender` field
-    /// without re-walking the `Identity` trait + allocating each call.
+    /// Display form derived from `User.identity.identity_display()` at
+    /// session construction. `Arc<str>` for the same reason as
+    /// `self_identity` — cheap clone across guard boundaries.
     pub(crate) identity_display: Arc<str>,
     /// Per-User instance UUID (cloned from `User`). Tagged on every
     /// outbound packet for self-message filtering.
     pub(crate) app_id: Arc<[u8]>,
-    /// Per-session notification channel. Integrators subscribe via
-    /// [`Self::subscribe`] and consume [`SessionEvent`]s for UI / audit.
-    /// Fire-and-forget; no failure path back into the session.
-    events: broadcast::Sender<SessionEvent>,
+    /// Pending [`SessionEvent`]s waiting for a caller to drain. Interior
+    /// `Mutex` so producer-side `emit_event` stays `&self`; consumers
+    /// drain via [`Self::drain_events`] once per polling cycle.
+    pending_events: Mutex<Vec<SessionEvent>>,
 }
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
@@ -93,12 +112,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         scoring: CP::Scoring,
         steward_list: CP::StewardList,
         consensus: PluginConsensus<P>,
-        transport: Arc<dyn crate::ds::DeliveryService>,
+        transport: SharedDeliveryService,
         self_identity: Arc<[u8]>,
         identity_display: Arc<str>,
         app_id: Arc<[u8]>,
     ) -> Self {
-        let (events, _initial_rx) = broadcast::channel(SESSION_EVENT_CAPACITY);
         Self {
             conversation_name,
             handle: ConversationHandle::new(
@@ -111,62 +129,85 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             ),
             consensus,
             phase_timer,
-            auto_vote_timers: Arc::new(Mutex::new(HashMap::new())),
+            pending_auto_votes: HashMap::new(),
+            pending_consensus_timeouts: HashMap::new(),
             transport,
             self_identity,
             identity_display,
             app_id,
-            events,
+            pending_events: Mutex::new(Vec::new()),
         }
     }
 
-    /// Subscribe to per-session [`SessionEvent`] notifications. Each call
-    /// returns a fresh receiver; late subscribers miss earlier events.
-    pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
-        self.events.subscribe()
-    }
-
-    /// Emit a [`SessionEvent`] on the session's broadcast channel. Silently
-    /// drops the event when there are no live subscribers — events are
-    /// fire-and-forget.
+    /// Append a [`SessionEvent`] to the pending-events buffer. The caller's
+    /// polling cycle drains it via [`Self::drain_events`]. Stays `&self`
+    /// thanks to the interior [`Mutex`], so the many session-coordinator
+    /// methods that emit during a brief read guard don't need to escalate
+    /// to a write guard. Silent on poison — emit is fire-and-forget.
     pub(crate) fn emit_event(&self, event: SessionEvent) {
-        let _ = self.events.send(event);
-    }
-
-    /// Send an outbound packet via the session's transport. Wraps the
-    /// synchronous [`crate::ds::DeliveryService::send`] in `spawn_blocking`
-    /// so the async context isn't blocked.
-    pub(crate) async fn send_outbound(
-        &self,
-        packet: crate::ds::OutboundPacket,
-    ) -> Result<String, crate::app::UserError> {
-        let transport = Arc::clone(&self.transport);
-        let send_result = spawn_blocking(move || transport.send(packet))
-            .await
-            .expect("transport send task panicked");
-        Ok(send_result?)
-    }
-
-    // ── Auto-vote timers ────────────────────────────────────────────
-
-    /// Abort the auto-vote timer for `proposal_id` if one is registered.
-    /// No-op otherwise.
-    pub(crate) fn cancel_auto_vote(&self, proposal_id: u32) {
-        if let Ok(mut timers) = self.auto_vote_timers.lock()
-            && let Some(handle) = timers.remove(&proposal_id)
-        {
-            handle.abort();
+        if let Ok(mut buf) = self.pending_events.lock() {
+            buf.push(event);
         }
     }
 
-    /// Abort every auto-vote timer registered on this runner. Called on
-    /// conversation leave so no stale timers fire against a conversation we've left.
-    pub(crate) fn cancel_all_auto_votes(&self) {
-        if let Ok(mut timers) = self.auto_vote_timers.lock() {
-            for (_, handle) in timers.drain() {
-                handle.abort();
-            }
+    /// Drain every pending [`SessionEvent`] accumulated since the last
+    /// call. Returns events in insertion order. Callers (UI fanout,
+    /// audit log) invoke this once per polling cycle.
+    pub fn drain_events(&self) -> Vec<SessionEvent> {
+        match self.pending_events.lock() {
+            Ok(mut buf) => std::mem::take(&mut *buf),
+            Err(_) => Vec::new(),
         }
+    }
+
+    /// Borrow the session's transport without taking the runner lock —
+    /// callers that need to send while holding the runner lock briefly can
+    /// clone this and pass it to [`send_packet`] after dropping the guard.
+    pub(crate) fn transport(&self) -> &SharedDeliveryService {
+        &self.transport
+    }
+
+    // ── Pending deadlines (auto-votes + consensus timeouts) ─────────
+
+    /// Register an auto-vote to fire `delay` from now with the given
+    /// `vote` choice. Idempotent — re-registering for the same
+    /// `proposal_id` replaces the existing entry.
+    pub(crate) fn register_auto_vote(&mut self, proposal_id: u32, delay: Duration, vote: bool) {
+        self.pending_auto_votes.insert(
+            proposal_id,
+            AutoVoteEntry {
+                fire_at: Instant::now() + delay,
+                vote,
+            },
+        );
+    }
+
+    /// Drop the pending auto-vote for `proposal_id` if any is registered.
+    /// Called when a manual vote arrives (manual choice wins) or when the
+    /// consensus session resolves (vote no longer meaningful).
+    pub(crate) fn cancel_auto_vote(&mut self, proposal_id: u32) {
+        self.pending_auto_votes.remove(&proposal_id);
+    }
+
+    /// Drop every pending auto-vote on this runner. Called on conversation
+    /// leave so no stale entries fire against a conversation we've left.
+    pub(crate) fn cancel_all_auto_votes(&mut self) {
+        self.pending_auto_votes.clear();
+    }
+
+    /// Register a consensus-session timeout. Fires `delay` from now via
+    /// [`Self::tick_deadlines`]; removed naturally on consensus resolution.
+    pub(crate) fn register_consensus_timeout(&mut self, proposal_id: u32, delay: Duration) {
+        self.pending_consensus_timeouts
+            .insert(proposal_id, Instant::now() + delay);
+    }
+
+    /// Drop the pending consensus timeout for `proposal_id`. Called from
+    /// `apply_consensus_outcome` once the library reaches/fails consensus,
+    /// so the timeout can't fire a stale `handle_consensus_timeout` against
+    /// an already-resolved session.
+    pub(crate) fn unregister_consensus_timeout(&mut self, proposal_id: u32) {
+        self.pending_consensus_timeouts.remove(&proposal_id);
     }
 
     // ── State-machine + phase-timer coordinators ────────────────────
@@ -266,13 +307,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+    use std::time::Instant;
+
     use super::*;
     use crate::core::Conversation;
-    use crate::core::DefaultConsensusPlugin;
+    use crate::defaults::DefaultConsensusPlugin;
     use crate::test_fixtures::{
         StubPluginsFactory, StubScoring, StubStewardList, UnusedMls, make_test_consensus_service,
     };
-    use std::time::Instant;
 
     fn make_runner_pending_join(
         commit_inactivity: Duration,
@@ -291,7 +334,7 @@ mod tests {
             StubScoring,
             StubStewardList::member(),
             make_test_consensus_service(),
-            Arc::new(crate::test_fixtures::UnusedTransport),
+            Arc::new(Mutex::new(crate::test_fixtures::UnusedTransport)),
             Arc::from(&b"test-identity"[..]),
             Arc::from("0xtest-display"),
             Arc::from(&[0u8; 16][..]),
@@ -311,7 +354,7 @@ mod tests {
             StubScoring,
             StubStewardList::member(),
             make_test_consensus_service(),
-            Arc::new(crate::test_fixtures::UnusedTransport),
+            Arc::new(Mutex::new(crate::test_fixtures::UnusedTransport)),
             Arc::from(&b"test-identity"[..]),
             Arc::from("0xtest-display"),
             Arc::from(&[0u8; 16][..]),
@@ -407,5 +450,84 @@ mod tests {
             runner.phase_timer.started_at().is_none(),
             "no approved work must not start the timer"
         );
+    }
+
+    // ── Caller-polled deadlines + drain model ───────────────────────────
+
+    /// `emit_event` appends and `drain_events` returns insertion-ordered.
+    /// Establishes the contract relied on by integration tests that build
+    /// up an event log over multiple polling cycles.
+    #[test]
+    fn emit_event_then_drain_returns_insertion_order_and_clears_buffer() {
+        let runner = make_runner_working();
+        runner.emit_event(SessionEvent::Joined);
+        runner.emit_event(SessionEvent::Leaving);
+
+        let drained = runner.drain_events();
+        assert_eq!(drained.len(), 2);
+        assert!(matches!(drained[0], SessionEvent::Joined));
+        assert!(matches!(drained[1], SessionEvent::Leaving));
+
+        // Second drain returns empty — buffer was cleared.
+        assert!(runner.drain_events().is_empty());
+    }
+
+    /// `register_auto_vote` is idempotent — re-registering the same
+    /// `proposal_id` replaces the previous entry rather than stacking.
+    /// Caller relies on this when re-anchoring an auto-vote on a `Deferred`
+    /// re-submit.
+    #[test]
+    fn register_auto_vote_replaces_existing_entry() {
+        let mut runner = make_runner_working();
+        runner.register_auto_vote(7, Duration::from_secs(10), true);
+        let first_fire = runner.pending_auto_votes[&7].fire_at;
+
+        // Re-register with a different `vote` and a longer delay; the
+        // second insert must overwrite, not co-exist.
+        std::thread::sleep(Duration::from_millis(2));
+        runner.register_auto_vote(7, Duration::from_secs(20), false);
+        assert_eq!(runner.pending_auto_votes.len(), 1);
+        let entry = runner.pending_auto_votes[&7];
+        assert!(!entry.vote);
+        assert!(entry.fire_at > first_fire);
+    }
+
+    /// `cancel_auto_vote` drops one entry. `cancel_all_auto_votes` drops
+    /// every entry. Both are the only paths that should remove pending
+    /// auto-votes from outside `tick_deadlines`.
+    #[test]
+    fn cancel_auto_vote_removes_only_the_targeted_proposal() {
+        let mut runner = make_runner_working();
+        runner.register_auto_vote(1, Duration::from_secs(5), true);
+        runner.register_auto_vote(2, Duration::from_secs(5), false);
+        runner.register_auto_vote(3, Duration::from_secs(5), true);
+
+        runner.cancel_auto_vote(2);
+        assert!(runner.pending_auto_votes.contains_key(&1));
+        assert!(!runner.pending_auto_votes.contains_key(&2));
+        assert!(runner.pending_auto_votes.contains_key(&3));
+
+        runner.cancel_all_auto_votes();
+        assert!(runner.pending_auto_votes.is_empty());
+    }
+
+    /// `register_consensus_timeout` records `now + delay`;
+    /// `unregister_consensus_timeout` drops it. `apply_consensus_outcome`
+    /// uses the unregister path to drop deadlines on natural resolution
+    /// so `tick_deadlines` doesn't fire a stale `handle_consensus_timeout`.
+    #[test]
+    fn register_then_unregister_consensus_timeout() {
+        let mut runner = make_runner_working();
+        let before = Instant::now();
+        runner.register_consensus_timeout(42, Duration::from_secs(30));
+        let fire_at = runner.pending_consensus_timeouts[&42];
+        assert!(fire_at > before + Duration::from_secs(29));
+        assert!(fire_at < Instant::now() + Duration::from_secs(31));
+
+        runner.unregister_consensus_timeout(42);
+        assert!(!runner.pending_consensus_timeouts.contains_key(&42));
+
+        // Unregistering an unknown id is a no-op (no panic, no error).
+        runner.unregister_consensus_timeout(999);
     }
 }

@@ -10,7 +10,7 @@ use std::time::Duration;
 use de_mls::app::{CreatorVote, SessionRunner};
 use de_mls::core::StewardListConfig;
 use de_mls::ds::OutboundPacket;
-use de_mls::identity::parse_wallet_to_bytes;
+use de_mls::identity::Identity;
 use de_mls::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, RemoveMember, conversation_update_request,
 };
@@ -33,20 +33,22 @@ async fn steward_inactivity_fires_commit_candidate() {
     )
     .await;
 
-    let alice_session = users[0].0.lookup_entry("b1").await.unwrap();
-    let bob_session = users[1].0.lookup_entry("b1").await.unwrap();
+    let alice_session = users[0].0.lookup_entry("b1").unwrap().unwrap();
+    let bob_session = users[1].0.lookup_entry("b1").unwrap().unwrap();
     let alice_tx = users[0].1.clone();
     let bob_tx = users[1].1.clone();
 
     assert!(
-        alice_session.read().await.is_steward_for_self(),
+        alice_session.read().unwrap().is_steward_for_self(),
         "creator must be steward after bootstrap"
     );
 
     // Alice files a removal of Bob via the public surface. With bob's
     // auto-vote running on his consensus forwarder, the proposal resolves
     // YES and lands in alice's approved queue.
-    let bob_id = parse_wallet_to_bytes(&users[1].0.identity_string()).unwrap();
+    let bob_id = common::WalletIdentity::from_hex(&users[1].0.identity_string())
+        .identity_bytes()
+        .to_vec();
     let request = ConversationUpdateRequest {
         payload: Some(conversation_update_request::Payload::RemoveMember(
             RemoveMember { identity: bob_id },
@@ -65,8 +67,8 @@ async fn steward_inactivity_fires_commit_candidate() {
         poll_once(&alice_session).await;
         poll_once(&bob_session).await;
 
-        let new_alice = alice_tx.drain_packets();
-        let new_bob = bob_tx.drain_packets();
+        let new_alice = alice_tx.lock().unwrap().drain_packets();
+        let new_bob = bob_tx.lock().unwrap().drain_packets();
         for p in &new_alice {
             let _ = users[1].0.process_inbound_packet(to_inbound(p)).await;
         }

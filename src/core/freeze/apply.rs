@@ -2,11 +2,11 @@
 //! Per-candidate apply paths (local merge / remote stage-validate-merge),
 //! MLS staging, validation, and post-commit bookkeeping live here.
 
-use super::round::{FreezeFinalizeResult, FreezeOutcome, RoundContext};
 use crate::{
     core::{
-        Conversation, CoreError, ProcessResult, ScoreEvent, ScoreOp, StewardListPlugin,
-        conversation::BufferedCommitCandidate, proposal_framing::build_invitation_packet,
+        Conversation, CoreError, FreezeFinalizeResult, FreezeOutcome, ProcessResult, ScoreEvent,
+        ScoreOp, StewardListPlugin, conversation::BufferedCommitCandidate,
+        freeze::round::RoundContext, proposal_framing::build_invitation_packet,
     },
     mls_crypto::{MlsProposalOutput, MlsService, StagedCandidateResult},
     protos::de_mls::messages::v1::{

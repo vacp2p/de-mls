@@ -6,20 +6,18 @@
 //! [`SessionRunner::dispatch_inbound_result`] for MLS processing and
 //! per-conversation dispatch.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use prost::Message;
-use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::{
-    app::{DispatchOutcome, SessionRunner, User, UserError},
+    app::{DispatchOutcome, LockExt, SessionRunner, User, UserError},
     core::{
         ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, CoreError,
         ProcessResult, StewardListPlugin,
     },
     ds::{APP_MSG_SUBTOPIC, InboundPacket, WELCOME_SUBTOPIC},
-    identity::ShortId,
     mls_crypto::{MlsService, key_package_bytes_from_json},
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, InviteMember, WelcomeMessage, conversation_update_request,
@@ -43,8 +41,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         }
 
         let entry_arc = self
-            .lookup_entry(&conversation_name)
-            .await
+            .lookup_entry(&conversation_name)?
             .ok_or(UserError::ConversationNotFound)?;
 
         match packet.subtopic.as_str() {
@@ -54,7 +51,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             }
             APP_MSG_SUBTOPIC => {
                 let result = {
-                    let mut entry = entry_arc.write().await;
+                    let mut entry = entry_arc.write_or_err("session")?;
                     if entry.handle.mls().is_none() {
                         return Ok(());
                     }
@@ -84,8 +81,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         // `None` and the timers leak (still scheduled, will fire against a
         // conversation we've left).
         self.cleanup_consensus_scope(conversation_name).await?;
-        self.conversations.write().await.remove(conversation_name);
-        let _ = self.lifecycle.send(ConversationLifecycle::Removed(
+        self.conversations
+            .write()
+            .map_err(|_| UserError::LockPoisoned("conversation registry"))?
+            .remove(conversation_name);
+        self.emit_lifecycle(ConversationLifecycle::Removed(
             conversation_name.to_string(),
         ));
         Ok(())
@@ -112,7 +112,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                     key_package_bytes_from_json(user_kp.key_package_bytes)?;
 
                 let already_member = {
-                    let entry = entry_arc.read().await;
+                    let entry = entry_arc.read_or_err("session")?;
                     entry
                         .handle
                         .mls()
@@ -122,7 +122,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 if already_member {
                     info!(
                         conversation = conversation_name,
-                        identity = %ShortId::new(&identity),
+                        identity = ?identity,
                         "key package skipped: already a member"
                     );
                     return Ok(());
@@ -130,7 +130,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
                 info!(
                     conversation = conversation_name,
-                    identity = %ShortId::new(&identity),
+                    identity = ?identity,
                     "key package received"
                 );
 
@@ -147,7 +147,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             Some(welcome_message::Payload::InvitationToJoin(invitation)) => {
                 let self_id = self.self_identity();
                 let already_in = {
-                    let entry = entry_arc.read().await;
+                    let entry = entry_arc.read_or_err("session")?;
                     entry.handle.steward_list.is_steward(self_id) || entry.handle.mls().is_some()
                 };
                 if already_in {
@@ -164,7 +164,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 };
                 let joined_name = svc.conversation_id().to_string();
                 {
-                    let mut entry = entry_arc.write().await;
+                    let mut entry = entry_arc.write_or_err("session")?;
                     entry.handle.attach_mls(svc);
                 }
                 info!(
@@ -201,20 +201,25 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ds::{DeliveryService, DeliveryServiceError, InboundPacket, OutboundPacket};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
     use std::time::Duration;
 
-    /// Transport stub: `send` is a no-op so an outbound never reaches a
-    /// real network; `subscribe` returns a dangling receiver.
+    use crate::ds::{DeliveryService, DeliveryServiceError, OutboundPacket, SharedDeliveryService};
+    use crate::test_fixtures::make_user_from_private_key;
+
+    /// Transport stub: `publish` is a no-op so an outbound never reaches a
+    /// real network; `subscribe` is a no-op too.
+    #[derive(Debug)]
     struct NullTransport;
     impl DeliveryService for NullTransport {
-        fn send(&self, _: OutboundPacket) -> Result<String, DeliveryServiceError> {
-            Ok("noop".into())
+        type Error = DeliveryServiceError;
+
+        fn publish(&mut self, _: OutboundPacket) -> Result<(), Self::Error> {
+            Ok(())
         }
-        fn subscribe(&self) -> std::sync::mpsc::Receiver<InboundPacket> {
-            let (_tx, rx) = std::sync::mpsc::channel();
-            rx
+
+        fn subscribe(&mut self, _delivery_address: &str) -> Result<(), Self::Error> {
+            Ok(())
         }
     }
 
@@ -222,39 +227,39 @@ mod tests {
 
     /// Self-leave must abort auto-vote timers — otherwise they fire
     /// against a conversation we've left.
+    /// Self-leave must drop the pending auto-vote registry — otherwise
+    /// the next `tick_deadlines` would fire against a conversation
+    /// we've left.
     #[tokio::test]
-    async fn finalize_self_leave_cancels_registered_auto_votes() {
-        let transport: Arc<dyn DeliveryService> = Arc::new(NullTransport);
-        let mut user = User::with_private_key(ALICE_KEY, transport).unwrap();
+    async fn finalize_self_leave_clears_pending_auto_votes() {
+        let transport: SharedDeliveryService = Arc::new(Mutex::new(NullTransport));
+        let mut user = make_user_from_private_key(ALICE_KEY, transport);
         user.start_conversation("test-conv", true).await.unwrap();
 
         let session = user
             .lookup_entry("test-conv")
-            .await
+            .unwrap()
             .expect("creator session registered");
 
-        let executed = Arc::new(AtomicBool::new(false));
-        let canary = {
-            let executed = Arc::clone(&executed);
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                executed.store(true, Ordering::SeqCst);
-            })
-        };
+        // Seed a pending auto-vote with a far-future fire-at so the
+        // assertion isn't sensitive to wall-clock drift.
         session
-            .read()
-            .await
-            .auto_vote_timers
-            .lock()
+            .write()
             .unwrap()
-            .insert(42, canary);
+            .register_auto_vote(42, Duration::from_secs(600), true);
+        assert!(
+            session.read().unwrap().pending_auto_votes.contains_key(&42),
+            "auto-vote must be registered before self-leave"
+        );
 
         user.finalize_self_leave("test-conv").await.unwrap();
-        tokio::time::sleep(Duration::from_millis(500)).await;
 
+        // Session entry is gone from the registry, so the conversation's
+        // pending auto-votes can no longer fire from a poll cycle on this
+        // user.
         assert!(
-            !executed.load(Ordering::SeqCst),
-            "auto-vote timer must be aborted on self-leave"
+            user.lookup_entry("test-conv").unwrap().is_none(),
+            "registry entry must be evicted on self-leave"
         );
     }
 }

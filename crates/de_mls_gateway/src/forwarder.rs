@@ -1,12 +1,11 @@
 use std::sync::{Arc, atomic::Ordering};
 
 use de_mls::{
-    app::{SessionRunner, UserError, format_conversation_request},
+    app::{SessionRunner, UserError},
     ds::WakuDeliveryService,
-    identity::format_wallet_address,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
-use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
+use de_mls_ui_protocol::v1::{AppEvent, MemberInfo, encode_hex, format_conversation_request};
 use futures::channel::mpsc::UnboundedSender;
 use hashgraph_like_consensus::events::ConsensusEventBus;
 
@@ -21,8 +20,7 @@ pub(crate) async fn lookup_session(
 ) -> Result<SessionRef, UserError> {
     user.read()
         .await
-        .lookup_entry(conversation_name)
-        .await
+        .lookup_entry(conversation_name)?
         .ok_or(UserError::ConversationNotFound)
 }
 
@@ -43,33 +41,30 @@ pub(crate) async fn load_member_info(
     conversation_name: &str,
 ) -> anyhow::Result<Vec<MemberInfo>> {
     let session = lookup_session(user, conversation_name).await?;
-    let runner = session.read().await;
-    let addresses = runner.get_conversation_members()?;
+    let runner = session
+        .read()
+        .map_err(|_| UserError::LockPoisoned("session"))?;
+    let member_bytes = runner.get_conversation_members()?;
     let scores = runner.get_member_scores();
     let roles = runner.get_member_roles().unwrap_or_default();
-    let pending_leavers: Vec<String> = runner
-        .get_pending_leave_identities()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|id| format_wallet_address(id.as_slice()).to_string())
-        .collect();
+    let pending_leavers = runner.get_pending_leave_identities().unwrap_or_default();
 
-    Ok(addresses
+    Ok(member_bytes
         .into_iter()
-        .map(|address| {
+        .map(|id| {
             let score = scores
                 .iter()
-                .find(|(raw_id, _)| format_wallet_address(raw_id.as_slice()) == address)
+                .find(|(raw_id, _)| raw_id == &id)
                 .map(|(_, s)| *s)
                 .unwrap_or(100);
             let role = roles
                 .iter()
-                .find(|(raw_id, _)| format_wallet_address(raw_id.as_slice()) == address)
+                .find(|(raw_id, _)| raw_id == &id)
                 .map(|(_, r)| r.to_string())
                 .unwrap_or_else(|| "member".to_string());
-            let pending_leave = pending_leavers.iter().any(|a| a == &address);
+            let pending_leave = pending_leavers.iter().any(|p| p == &id);
             MemberInfo {
-                address,
+                address: encode_hex(&id),
                 score,
                 role,
                 pending_leave,
@@ -87,7 +82,16 @@ pub(crate) async fn push_consensus_state(
     let Ok(session) = lookup_session(user, conversation_name).await else {
         return;
     };
-    let runner = session.read().await;
+    let runner = match session.read() {
+        Ok(s) => s,
+        Err(_) => {
+            tracing::warn!(
+                conversation = %conversation_name,
+                "push_consensus_state skipped: session lock poisoned"
+            );
+            return;
+        }
+    };
     let proposals = runner.get_approved_proposal_for_current_epoch();
     let _ = evt_tx.unbounded_send(AppEvent::CurrentEpochProposals {
         conversation_id: conversation_name.to_string(),
@@ -123,7 +127,16 @@ pub(crate) async fn push_member_scores(
     let Ok(session) = lookup_session(user, conversation_name).await else {
         return;
     };
-    let is_steward = session.read().await.is_steward_for_self();
+    let is_steward = match session.read() {
+        Ok(s) => s.is_steward_for_self(),
+        Err(_) => {
+            tracing::warn!(
+                conversation = %conversation_name,
+                "is_steward read skipped: session lock poisoned"
+            );
+            return;
+        }
+    };
     let _ = evt_tx.unbounded_send(AppEvent::StewardStatus {
         conversation_id: conversation_name.to_string(),
         is_steward,
@@ -147,7 +160,16 @@ impl Gateway<WakuDeliveryService> {
                 );
                 return;
             };
-            let mut rx = session_arc.read().await.consensus.event_bus().subscribe();
+            let mut rx = match session_arc.read() {
+                Ok(s) => s.consensus.event_bus().subscribe(),
+                Err(_) => {
+                    tracing::warn!(
+                        conversation = %cname_owned,
+                        "consensus forwarder: session lock poisoned at subscribe"
+                    );
+                    return;
+                }
+            };
             tracing::info!("consensus forwarder started");
             while let Ok((conversation_name, event)) = rx.recv().await {
                 // Forward to UI
@@ -196,12 +218,13 @@ impl Gateway<WakuDeliveryService> {
                     }
                     Err(_) => break,
                 };
-                if !core
-                    .topics
-                    .contains(&pkt.conversation_id, &pkt.subtopic)
-                    .await
-                {
-                    continue;
+                match core.topics.contains(&pkt.conversation_id, &pkt.subtopic) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "topic filter contains check failed");
+                        continue;
+                    }
                 }
 
                 let conversation_id = pkt.conversation_id.clone();

@@ -9,18 +9,16 @@
 //! [`SessionRunner::initiate_proposal`] which itself spawns a background
 //! task. The rest are `&self` / `&mut self` methods on the runner.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use tokio::sync::RwLock;
 use tracing::{error, info};
 
 use crate::{
-    app::{CreatorVote, SessionRunner, UserError},
+    app::{CreatorVote, LockExt, SessionRunner, UserError, session::runner::send_packet},
     core::{
         ConsensusPlugin, ConversationPluginsFactory, ElectionDecision, PeerScoringPlugin,
         StewardListPlugin, member_set, scoring_member_diff, target_identity_of,
     },
-    identity::ShortId,
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationSync, ConversationUpdateRequest, PeerScore,
@@ -34,7 +32,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Add any MLS members not yet tracked in scoring, and drop scored
     /// entries for identities no longer in MLS. Diffing is delegated to
     /// [`scoring_member_diff`]; this method only applies the diff.
-    pub async fn sync_scoring_members(&mut self, mls_members: &[Vec<u8>]) {
+    pub fn sync_scoring_members(&mut self, mls_members: &[Vec<u8>]) {
         let scored: Vec<Vec<u8>> = self
             .handle
             .scoring
@@ -60,9 +58,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Election-initiate failures are logged, not surfaced — conversation
     /// state may legitimately reject a new proposal right now.
     pub async fn steward_list_housekeeping(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
-        arc.write().await.try_auto_fill_steward_list().await?;
+        arc.write_or_err("session")?.try_auto_fill_steward_list()?;
         if let Err(e) = Self::try_initiate_steward_election(arc, false, None).await {
-            let conv_name = arc.read().await.conversation_name.clone();
+            let conv_name = arc.read_or_err("session")?.conversation_name.clone();
             info!(conversation = %conv_name, error = %e, "election initiation deferred");
         }
         Ok(())
@@ -71,7 +69,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Regenerate the steward list at the current epoch against the current
     /// MLS member set — same effect as a successful election. Intended for
     /// tests and administrative tooling.
-    pub async fn regenerate_steward_list(&mut self) -> Result<(), UserError> {
+    pub fn regenerate_steward_list(&mut self) -> Result<(), UserError> {
         let current_epoch = self.handle.expect_mls()?.current_epoch()?;
         let members = self.handle.conversation_members()?;
         let sn = self
@@ -90,7 +88,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Drop Add entries whose target is now a member and Remove entries
     /// whose target is now gone, then expire entries older than
     /// `pending_update_max_epochs`.
-    pub async fn prune_pending_updates_after_commit(&mut self) -> Result<(), UserError> {
+    pub fn prune_pending_updates_after_commit(&mut self) -> Result<(), UserError> {
         let (current_epoch, members, max_age) = {
             let Some(mls) = self.handle.mls() else {
                 return Ok(());
@@ -132,7 +130,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             Vec<ConversationUpdateRequest>,
             String,
         ) = {
-            let s = arc.read().await;
+            let s = arc.read_or_err("session")?;
 
             let (current_epoch, members) = match s.handle.mls() {
                 Some(mls) => (mls.current_epoch()?, s.handle.conversation_members()?),
@@ -202,69 +200,88 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         Ok(())
     }
 
+    /// Build the encrypted `ConversationSync` packet without sending. Used
+    /// by callers that need to release the runner lock before awaiting on
+    /// the transport. Returns `Ok(None)` when there's no steward list yet.
+    pub(crate) fn build_conversation_sync_packet(
+        &self,
+    ) -> Result<Option<crate::ds::OutboundPacket>, UserError> {
+        // Sparse snapshot — only members whose score has diverged
+        // from `default_score`. Joiners init every member at default
+        // via membership sync before applying the snapshot, so
+        // missing entries imply default. Saves wire size at scale
+        // (Waku message budget concern past ~1k members).
+        let scores: Vec<PeerScore> = self
+            .handle
+            .scoring
+            .snapshot()
+            .diverged
+            .into_iter()
+            .map(|(id, score)| PeerScore {
+                member_id: id,
+                score,
+            })
+            .collect();
+
+        let list = match self.handle.steward_list.current_list() {
+            Some(l) => l,
+            None => return Ok(None),
+        };
+
+        let timing = TimingConfig::from(&self.handle.config);
+
+        // Filter ghosts and queued-removal targets so joiners don't
+        // inherit stewards they would have to walk past on the very
+        // first epoch.
+        let mls = self.handle.expect_mls()?;
+        let mls_members = self.handle.conversation_members()?;
+        let eligible = self.handle.conversation.steward_eligibility(&mls_members);
+        let steward_members = self.handle.steward_list.steward_members(&eligible);
+
+        // `retry_round` is the seed that produced the *stored* list —
+        // a frozen tag on `StewardList`, not the plug-in's dynamic
+        // counter for the next attempt (which resets to 0 on accept).
+        // Joiners re-derive the ordering from this seed.
+        let sync = ConversationSync {
+            steward_members,
+            election_epoch: list.election_epoch(),
+            sn_min: list.config().sn_min as u32,
+            sn_max: list.config().sn_max as u32,
+            allow_subset_candidates: self.handle.steward_list.config().allow_subset_candidates,
+            peer_scores: scores,
+            timing: Some(timing),
+            retry_round: list.retry_round(),
+            max_reelection_attempts: self.handle.steward_list.max_retries(),
+            liveness_criteria_yes: self.handle.config.liveness_criteria_yes,
+            threshold_peer_score: self.handle.scoring.threshold(),
+            pending_update_max_epochs: self.handle.config.pending_update_max_epochs,
+        };
+
+        let app_msg: AppMessage = sync.into();
+        Ok(Some(mls.build_message(&app_msg, &self.app_id)?))
+    }
+
     /// Broadcast steward list + protocol config + peer scores + timing as
     /// an encrypted `ConversationSync`. Steward calls this after an Add-bearing
     /// commit so new joiners can fully participate. Idempotent for members
     /// who already have a steward list.
-    pub async fn send_conversation_sync(&self) -> Result<(), UserError> {
-        let packet = {
-            // Sparse snapshot — only members whose score has diverged
-            // from `default_score`. Joiners init every member at default
-            // via membership sync before applying the snapshot, so
-            // missing entries imply default. Saves wire size at scale
-            // (Waku message budget concern past ~1k members).
-            let scores: Vec<PeerScore> = self
-                .handle
-                .scoring
-                .snapshot()
-                .diverged
-                .into_iter()
-                .map(|(id, score)| PeerScore {
-                    member_id: id,
-                    score,
-                })
-                .collect();
-
-            let list = match self.handle.steward_list.current_list() {
-                Some(l) => l,
-                None => return Ok(()),
+    ///
+    /// Takes `&Arc<RwLock<Self>>` so the runner lock is released before
+    /// awaiting on the transport.
+    pub async fn send_conversation_sync(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
+        let (transport, packet, conversation_name) = {
+            let s = arc.read_or_err("session")?;
+            let Some(packet) = s.build_conversation_sync_packet()? else {
+                return Ok(());
             };
-
-            let timing = TimingConfig::from(&self.handle.config);
-
-            // Filter ghosts and queued-removal targets so joiners don't
-            // inherit stewards they would have to walk past on the very
-            // first epoch.
-            let mls = self.handle.expect_mls()?;
-            let mls_members = self.handle.conversation_members()?;
-            let eligible = self.handle.conversation.steward_eligibility(&mls_members);
-            let steward_members = self.handle.steward_list.steward_members(&eligible);
-
-            // `retry_round` is the seed that produced the *stored* list —
-            // a frozen tag on `StewardList`, not the plug-in's dynamic
-            // counter for the next attempt (which resets to 0 on accept).
-            // Joiners re-derive the ordering from this seed.
-            let sync = ConversationSync {
-                steward_members,
-                election_epoch: list.election_epoch(),
-                sn_min: list.config().sn_min as u32,
-                sn_max: list.config().sn_max as u32,
-                allow_subset_candidates: self.handle.steward_list.config().allow_subset_candidates,
-                peer_scores: scores,
-                timing: Some(timing),
-                retry_round: list.retry_round(),
-                max_reelection_attempts: self.handle.steward_list.max_retries(),
-                liveness_criteria_yes: self.handle.config.liveness_criteria_yes,
-                threshold_peer_score: self.handle.scoring.threshold(),
-                pending_update_max_epochs: self.handle.config.pending_update_max_epochs,
-            };
-
-            let app_msg: AppMessage = sync.into();
-            mls.build_message(&app_msg, &self.app_id)?
+            (
+                Arc::clone(s.transport()),
+                packet,
+                s.conversation_name.clone(),
+            )
         };
-
-        self.send_outbound(packet).await?;
-        info!(conversation = %self.conversation_name, "conversation sync sent");
+        send_packet(&transport, packet)?;
+        info!(conversation = %conversation_name, "conversation sync sent");
         Ok(())
     }
 
@@ -279,7 +296,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // member to be at-or-below threshold. The scan is the source of
         // truth — events just trigger the look.
         let (epoch, to_remove, self_id_arc, conversation_name) = {
-            let mut s = arc.write().await;
+            let mut s = arc.write_or_err("session")?;
             let epoch = s.handle.expect_mls()?.current_epoch()?;
             let self_id_arc = Arc::clone(&s.self_identity);
             let is_steward = s.handle.steward_list.is_steward(&self_id_arc);
@@ -326,7 +343,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
             info!(
                 conversation = %conversation_name,
-                target = %ShortId::new(&target_id),
+                target = ?target_id,
                 score = current_score,
                 "initiating SCORE_BELOW_THRESHOLD removal"
             );
@@ -334,14 +351,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             // member must be removed. The steward's vote is YES by
             // protocol, so we bundle it at submit and skip the banner.
             if let Err(e) = Self::initiate_proposal(arc, request, CreatorVote::Yes).await {
-                arc.write()
-                    .await
+                arc.write_or_err("session")?
                     .handle
                     .conversation
                     .resolve_pending_removal(&target_id);
                 error!(
                     conversation = %conversation_name,
-                    target = %ShortId::new(&target_id),
+                    target = ?target_id,
                     error = %e,
                     "SCORE_BELOW_THRESHOLD vote failed to start"
                 );
@@ -366,7 +382,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         extra_exclude: Option<&[u8]>,
     ) -> Result<(), UserError> {
         let (proposed_stewards, election_epoch, retry_round, conversation_name) = {
-            let s = arc.read().await;
+            let s = arc.read_or_err("session")?;
             let epoch = s.handle.expect_mls()?.current_epoch()?;
             let mls_members = s.handle.conversation_members()?;
             let self_identity: &[u8] = &s.self_identity;
@@ -459,7 +475,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         arc: &Arc<RwLock<Self>>,
     ) -> Result<(), UserError> {
         let (is_authorized, self_id, epoch, conversation_name) = {
-            let s = arc.read().await;
+            let s = arc.read_or_err("session")?;
             let mls_members = s.handle.conversation_members()?;
             let self_id: &[u8] = &s.self_identity;
             // Deadlock proposer = election proposer with the stricter
@@ -508,7 +524,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// policy (the deterministic impl re-installs when membership drops
     /// below `sn_min`). Coordinator just supplies `epoch` + `members`
     /// and drains events.
-    async fn try_auto_fill_steward_list(&mut self) -> Result<(), UserError> {
+    fn try_auto_fill_steward_list(&mut self) -> Result<(), UserError> {
         let epoch = self.handle.expect_mls()?.current_epoch()?;
         let members = self.handle.conversation_members()?;
         let _events = self.handle.steward_list.maybe_auto_fill(epoch, &members)?;

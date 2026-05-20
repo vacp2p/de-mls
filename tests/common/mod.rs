@@ -18,26 +18,27 @@
 #![allow(dead_code)]
 
 pub mod session_fixtures;
+pub mod wallet;
+
+pub use wallet::WalletIdentity;
 
 use std::sync::{
     Arc,
     atomic::{AtomicU32, Ordering},
 };
 
-use de_mls::app::InMemoryPeerScoreStorage;
-use de_mls::core::PeerScoringService;
-use de_mls::core::default_score_deltas;
 use de_mls::core::{
     BufferedCommitCandidate, Conversation, CoreError, DeterministicStewardList, FreezeOutcome,
-    NoopReason, OperatingMode, ProcessResult, ProposalKind, ScoringConfig, StewardListConfig,
-    StewardListPlugin, build_key_package_message, compute_commit_hash, finalize_freeze_round,
-    member_set, process_inbound,
+    NoopReason, OperatingMode, PeerScoringService, ProcessResult, ProposalKind, ScoringConfig,
+    StewardListConfig, StewardListPlugin, build_key_package_message, compute_commit_hash,
+    default_score_deltas, finalize_freeze_round, member_set, process_inbound,
 };
+use de_mls::defaults::{InMemoryPeerScoreStorage, MemoryDeMlsStorage};
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
-use de_mls::identity::{Identity, WalletIdentity, parse_wallet_address};
+use de_mls::identity::Identity;
 use de_mls::mls_crypto::{
-    CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MemoryDeMlsStorage, MlsCommitInput,
-    MlsCredentials, MlsService, OpenMlsService, key_package_bytes_from_json,
+    CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MlsCommitInput, MlsCredentials,
+    MlsService, OpenMlsService, key_package_bytes_from_json,
 };
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, CommitCandidate, ConversationUpdateRequest, InviteMember, WelcomeMessage,
@@ -197,8 +198,7 @@ pub fn setup_identity_storage(
     Arc<MlsCredentials>,
     Arc<MemoryDeMlsStorage>,
 ) {
-    let wallet = parse_wallet_address(wallet_hex).unwrap();
-    let identity = Arc::new(WalletIdentity::from_wallet(wallet));
+    let identity = Arc::new(WalletIdentity::from_hex(wallet_hex));
     let credentials = Arc::new(MlsCredentials::from_identity(identity.as_ref()).unwrap());
     let storage = Arc::new(MemoryDeMlsStorage::new());
     (identity, credentials, storage)

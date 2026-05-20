@@ -13,13 +13,24 @@ pub mod handler;
 
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, atomic::AtomicBool},
+    str::FromStr,
+    sync::{Arc, Mutex as StdMutex, atomic::AtomicBool},
 };
 
+use alloy::primitives::Address;
+use alloy::signers::local::PrivateKeySigner;
+use hashgraph_like_consensus::signing::EthereumConsensusSigner;
+
 use de_mls::{
-    app::User,
-    core::DefaultConsensusPlugin,
-    ds::{DeliveryService, WakuDeliveryService},
+    app::{ConsensusContext, ConversationConfig, SessionEntry, User, UserPlugins},
+    core::{KeyPackageProvider, ScoringConfig, StewardListConfig},
+    defaults::{
+        DefaultConsensusPlugin, DefaultConversationPluginsFactory, DefaultKeyPackageProvider,
+        MemoryDeMlsStorage,
+    },
+    ds::{DeliveryService, SharedDeliveryService, WakuDeliveryService},
+    identity::Identity,
+    mls_crypto::MlsCredentials,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
@@ -44,22 +55,13 @@ pub use crate::bootstrap::{
 /// `Arc<MemoryDeMlsStorage>` — so per-group services share one storage
 /// (the `Arc<S>: DeMlsStorage` blanket impl makes this work). MLS
 /// credentials live on `User` and are passed in at service construction.
-type UserRef = Arc<
-    tokio::sync::RwLock<
-        User<DefaultConsensusPlugin, de_mls::app::DefaultConversationPluginsFactory>,
-    >,
->;
+type UserRef =
+    Arc<tokio::sync::RwLock<User<DefaultConsensusPlugin, DefaultConversationPluginsFactory>>>;
 
 /// Type alias for a per-conversation session reference obtained via
-/// `User::lookup_entry`. Mirrors [`UserRef`] but at the session granularity.
-pub(crate) type SessionRef = Arc<
-    tokio::sync::RwLock<
-        de_mls::app::SessionRunner<
-            DefaultConsensusPlugin,
-            de_mls::app::DefaultConversationPluginsFactory,
-        >,
-    >,
->;
+/// `User::lookup_entry`. Re-exports the sync-locked entry from `de_mls::app`.
+pub(crate) type SessionRef =
+    SessionEntry<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
 
 // Global, process-wide gateway instance
 pub static GATEWAY: Lazy<Gateway<WakuDeliveryService>> = Lazy::new(Gateway::new);
@@ -110,7 +112,7 @@ impl<DS: DeliveryService> Gateway<DS> {
             core: RwLock::new(None),
             user: RwLock::new(None),
             started: AtomicBool::new(false),
-            epoch_history: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            epoch_history: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
 
@@ -164,6 +166,71 @@ impl<DS: DeliveryService> Gateway<DS> {
     }
 }
 
+/// Wallet-flavoured [`Identity`]: 20-byte Ethereum address bytes plus its
+/// EIP-55 checksummed hex form. The library itself is identity-agnostic;
+/// this lives in the gateway because the desktop UI logs users in with
+/// Ethereum private keys.
+#[derive(Debug, Clone)]
+struct WalletIdentity {
+    bytes: Vec<u8>,
+    display: String,
+}
+
+impl WalletIdentity {
+    fn from_address(addr: Address) -> Self {
+        Self {
+            bytes: addr.as_slice().to_vec(),
+            display: addr.to_checksum(None),
+        }
+    }
+}
+
+impl Identity for WalletIdentity {
+    fn identity_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    fn identity_display(&self) -> &str {
+        &self.display
+    }
+}
+
+fn build_user_from_private_key(
+    private_key: &str,
+    transport: SharedDeliveryService,
+) -> anyhow::Result<User<DefaultConsensusPlugin, DefaultConversationPluginsFactory>> {
+    let signer = PrivateKeySigner::from_str(private_key)
+        .map_err(|e| anyhow::anyhow!("invalid private key: {e}"))?;
+    let identity = WalletIdentity::from_address(signer.address());
+
+    let credentials = Arc::new(MlsCredentials::from_identity(&identity)?);
+    let storage = Arc::new(MemoryDeMlsStorage::new());
+
+    let conversation_plugins = Arc::new(DefaultConversationPluginsFactory::new(
+        Arc::clone(&storage),
+        Arc::clone(&credentials),
+    ));
+    let key_package_provider: Arc<dyn KeyPackageProvider> =
+        Arc::new(DefaultKeyPackageProvider::new(storage, credentials));
+
+    let consensus_signer = EthereumConsensusSigner::new(signer);
+    let consensus = ConsensusContext::<DefaultConsensusPlugin>::new(consensus_signer);
+
+    let plugins = UserPlugins {
+        conversation_plugins,
+        consensus,
+        key_package_provider,
+        default_conversation_config: ConversationConfig::default(),
+        default_scoring_config: ScoringConfig::default(),
+        default_steward_list_config: StewardListConfig::default(),
+    };
+
+    Ok(User::new_with_plugins(
+        Box::new(identity),
+        plugins,
+        transport,
+    ))
+}
+
 // Login and forwarder setup is specific to the WakuDeliveryService gateway
 impl Gateway<WakuDeliveryService> {
     /// Create the user engine with a private key.
@@ -172,11 +239,12 @@ impl Gateway<WakuDeliveryService> {
         let core = self.core();
 
         // Hand the Waku delivery service directly to `User` as its transport.
-        // `WakuDeliveryService` implements `de_mls::ds::DeliveryService`.
-        let transport: Arc<dyn de_mls::ds::DeliveryService> =
-            Arc::new(core.app_state.delivery.clone());
+        // `WakuDeliveryService` implements `DeliveryService`. Wrap in a std
+        // `Mutex` because the trait takes `&mut self`.
+        let transport: SharedDeliveryService =
+            Arc::new(StdMutex::new(core.app_state.delivery.clone()));
 
-        let user = User::with_private_key(private_key.as_str(), transport)?;
+        let user = build_user_from_private_key(&private_key, transport)?;
 
         let user_address = user.identity_string();
         let user_ref: UserRef = Arc::new(tokio::sync::RwLock::new(user));
@@ -194,11 +262,12 @@ impl Gateway<WakuDeliveryService> {
         Ok(user_address)
     }
 
-    /// Spawn the user-level subscriber that watches
-    /// [`User::subscribe_conversations`] and, on each `Created(name)`,
-    /// spawns:
-    /// - a per-session `SessionEvent` subscriber (UI fan-out), and
-    /// - the existing per-conv consensus event forwarder.
+    /// Spawn the gateway's UI event pump. Once per polling cycle it
+    /// drains [`de_mls::app::User::drain_lifecycle_events`] (to learn
+    /// when new sessions appear or disappear) and
+    /// [`de_mls::app::SessionRunner::drain_events`] on every active
+    /// session (to forward UI-bound events). Replaces the previous
+    /// broadcast-channel subscriber pattern.
     fn spawn_session_subscribers(&self, user: UserRef) {
         let evt_tx = self.evt_tx.clone();
         let topics = self.core().topics.clone();
@@ -207,43 +276,52 @@ impl Gateway<WakuDeliveryService> {
         let gateway_for_consensus_spawn = user.clone();
 
         tokio::spawn(async move {
-            let mut lifecycle_rx = {
-                let u = user_for_loop.read().await;
-                u.subscribe_conversations()
-            };
-            while let Ok(event) = lifecycle_rx.recv().await {
-                match event {
-                    de_mls::core::ConversationLifecycle::Created(name) => {
-                        let fanout = Arc::new(GatewaySessionFanout {
-                            evt_tx: evt_tx.clone(),
-                            topics: topics.clone(),
-                            epoch_history: epoch_history.clone(),
-                        });
-                        let Some(session_rx) = ({
-                            let u = user_for_loop.read().await;
-                            u.lookup_entry(&name).await
-                        }) else {
+            let mut active_sessions: HashMap<String, Arc<GatewaySessionFanout>> = HashMap::new();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+                // Drain user-level lifecycle events first so newly-created
+                // sessions get their fanout registered before we look for
+                // events on them.
+                let lifecycle = user_for_loop.read().await.drain_lifecycle_events();
+                for event in lifecycle {
+                    match event {
+                        de_mls::core::ConversationLifecycle::Created(name) => {
+                            let fanout = Arc::new(GatewaySessionFanout {
+                                evt_tx: evt_tx.clone(),
+                                topics: topics.clone(),
+                                epoch_history: epoch_history.clone(),
+                            });
+                            active_sessions.insert(name.clone(), fanout);
+                            GATEWAY.spawn_consensus_forwarder(
+                                gateway_for_consensus_spawn.clone(),
+                                name,
+                            );
+                        }
+                        de_mls::core::ConversationLifecycle::Removed(name) => {
+                            active_sessions.remove(&name);
+                        }
+                    }
+                }
+
+                // Drain each active session's pending events.
+                for (name, fanout) in &active_sessions {
+                    let session = match user_for_loop.read().await.lookup_entry(name) {
+                        Ok(Some(s)) => s,
+                        _ => continue,
+                    };
+                    let events = match session.read() {
+                        Ok(g) => g.drain_events(),
+                        Err(_) => {
                             tracing::warn!(
                                 conversation = %name,
-                                "lifecycle::Created fired but session missing in registry"
+                                "session drain skipped: lock poisoned"
                             );
                             continue;
-                        };
-                        let name_for_sub = name.clone();
-                        let mut session_rx_inner = session_rx.read().await.subscribe();
-                        tokio::spawn(async move {
-                            while let Ok(event) = session_rx_inner.recv().await {
-                                fanout.handle(&name_for_sub, event).await;
-                            }
-                        });
-                        // Spawn the per-conv consensus event forwarder
-                        // (handles `AppEvent::ProposalDecided` + state pushes).
-                        GATEWAY
-                            .spawn_consensus_forwarder(gateway_for_consensus_spawn.clone(), name);
-                    }
-                    de_mls::core::ConversationLifecycle::Removed(_) => {
-                        // Per-session subscribers exit naturally when the
-                        // session's broadcast sender drops on entry removal.
+                        }
+                    };
+                    for event in events {
+                        fanout.handle(name, event).await;
                     }
                 }
             }

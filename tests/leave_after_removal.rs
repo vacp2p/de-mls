@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use de_mls::app::{CreatorVote, DispatchOutcome, SessionRunner};
 use de_mls::core::{SessionEvent, StewardListConfig};
-use de_mls::identity::parse_wallet_to_bytes;
+use de_mls::identity::Identity;
 use de_mls::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, RemoveMember, conversation_update_request,
 };
@@ -36,8 +36,8 @@ async fn removed_member_emits_leaving_and_is_evicted() {
     // Find the non-steward.
     let mut target_idx = None;
     for (i, (u, _)) in users.iter().enumerate() {
-        let s = u.lookup_entry("leave").await.unwrap();
-        if !s.read().await.is_steward_for_self() {
+        let s = u.lookup_entry("leave").unwrap().unwrap();
+        if !s.read().unwrap().is_steward_for_self() {
             target_idx = Some(i);
             break;
         }
@@ -48,14 +48,12 @@ async fn removed_member_emits_leaving_and_is_evicted() {
         .find(|i| *i != target_idx)
         .expect("at least one steward must exist");
 
-    let steward_session = users[steward_idx].0.lookup_entry("leave").await.unwrap();
-    let target_session = users[target_idx].0.lookup_entry("leave").await.unwrap();
-    let mut target_events = target_session.read().await.subscribe();
-    // Hold the Arc explicitly so the broadcast sender stays alive even
-    // after `User` evicts the entry from the registry.
-    let _target_session_keepalive = target_session;
+    let steward_session = users[steward_idx].0.lookup_entry("leave").unwrap().unwrap();
+    let target_session = users[target_idx].0.lookup_entry("leave").unwrap().unwrap();
 
-    let target_id = parse_wallet_to_bytes(&users[target_idx].0.identity_string()).unwrap();
+    let target_id = common::WalletIdentity::from_hex(&users[target_idx].0.identity_string())
+        .identity_bytes()
+        .to_vec();
     let request = ConversationUpdateRequest {
         payload: Some(conversation_update_request::Payload::RemoveMember(
             RemoveMember {
@@ -75,7 +73,8 @@ async fn removed_member_emits_leaving_and_is_evicted() {
     for _ in 0..30 {
         settle_for(Duration::from_millis(40)).await;
         for (i, (u, _)) in users.iter().enumerate() {
-            if let Some(s) = u.lookup_entry("leave").await {
+            if let Some(s) = u.lookup_entry("leave").unwrap() {
+                let _ = SessionRunner::tick_deadlines(&s).await;
                 if i == target_idx
                     && matches!(
                         SessionRunner::poll_freeze_status(&s).await,
@@ -85,20 +84,20 @@ async fn removed_member_emits_leaving_and_is_evicted() {
                     u.finalize_self_leave("leave").await.unwrap();
                 } else {
                     let _ = SessionRunner::poll_freeze_status(&s).await;
-                    let _ = s.write().await.check_member_freeze().await;
+                    let _ = SessionRunner::check_member_freeze(&s).await;
                 }
             }
         }
         let mut packets = Vec::new();
         for (_, h) in &users {
-            packets.extend(h.drain_packets());
+            packets.extend(h.lock().unwrap().drain_packets());
         }
         for p in &packets {
             for (u, _) in &users {
                 let _ = u.process_inbound_packet(to_inbound(p)).await;
             }
         }
-        if users[target_idx].0.lookup_entry("leave").await.is_none() {
+        if users[target_idx].0.lookup_entry("leave").unwrap().is_none() {
             target_evicted = true;
             break;
         }
@@ -108,21 +107,11 @@ async fn removed_member_emits_leaving_and_is_evicted() {
         "removed member must be evicted from their own registry"
     );
 
-    let saw_leaving = drain_for(&mut target_events, |e| matches!(e, SessionEvent::Leaving));
-    assert!(saw_leaving, "removed member's session must emit Leaving");
-}
-
-fn drain_for<F>(rx: &mut tokio::sync::broadcast::Receiver<SessionEvent>, pred: F) -> bool
-where
-    F: Fn(&SessionEvent) -> bool,
-{
-    use tokio::sync::broadcast::error::TryRecvError;
-    loop {
-        match rx.try_recv() {
-            Ok(ev) if pred(&ev) => return true,
-            Ok(_) => {}
-            Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => return false,
-            Err(TryRecvError::Lagged(_)) => continue,
-        }
-    }
+    let target_events = target_session.read().unwrap().drain_events();
+    assert!(
+        target_events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::Leaving)),
+        "removed member's session must emit Leaving"
+    );
 }

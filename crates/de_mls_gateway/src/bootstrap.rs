@@ -64,7 +64,7 @@ pub async fn bootstrap_core(
     let (pubsub_tx, _) = broadcast::channel::<InboundPacket>(512);
 
     // Subscribe before moving delivery into AppState.
-    let rx = delivery.subscribe();
+    let rx = delivery.inbound_receiver();
 
     let app_state = Arc::new(AppState {
         delivery,
@@ -95,11 +95,7 @@ pub async fn bootstrap_core(
                 }
                 info!("delivery forwarder stopped");
             })
-            .map_err(|e| {
-                BootstrapError::DeliveryServiceError(DeliveryServiceError::Other(anyhow::anyhow!(
-                    e
-                )))
-            })?;
+            .map_err(BootstrapError::ThreadSpawn)?;
     }
 
     Ok(Bootstrap {
@@ -139,4 +135,7 @@ pub enum BootstrapError {
 
     #[error(transparent)]
     DeliveryServiceError(#[from] DeliveryServiceError),
+
+    #[error("Failed to spawn ds-forwarder thread: {0}")]
+    ThreadSpawn(#[source] std::io::Error),
 }
