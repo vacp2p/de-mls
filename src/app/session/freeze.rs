@@ -212,8 +212,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                         let accuse_target = match s.handle.mls() {
                             Some(mls) => {
                                 let violation_epoch = mls.current_epoch()?;
+                                let members = mls.members()?;
                                 let self_identity: &[u8] = &s.self_identity;
-                                let members = s.handle.conversation_members()?;
                                 let eligible = s.handle.conversation.steward_eligibility(&members);
                                 s.handle
                                     .steward_list

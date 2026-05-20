@@ -53,10 +53,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// reported by MLS. Returns an empty vec when the local user has no
     /// MLS state yet (pending join).
     pub fn get_conversation_members(&self) -> Result<Vec<Vec<u8>>, UserError> {
-        if self.handle.mls().is_none() {
-            return Ok(Vec::new());
+        match self.handle.mls() {
+            Some(mls) => Ok(mls.members()?),
+            None => Ok(Vec::new()),
         }
-        Ok(self.handle.conversation_members()?)
     }
 
     pub fn get_member_scores(&self) -> Vec<(Vec<u8>, i64)> {
@@ -70,8 +70,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Identities that have an in-flight self-leave request. Used by the UI
     /// to render a "pending leave" indicator.
     pub fn get_pending_leave_identities(&self) -> Result<Vec<Vec<u8>>, UserError> {
-        self.handle.expect_mls()?;
-        let members = self.handle.conversation_members()?;
+        let members = self.handle.expect_mls()?.members()?;
         Ok(members
             .into_iter()
             .filter(|id| self.handle.conversation.is_pending_self_leave(id))
@@ -83,7 +82,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     pub fn get_member_roles(&self) -> Result<Vec<(Vec<u8>, MemberRole)>, UserError> {
         let mls = self.handle.expect_mls()?;
         let epoch = mls.current_epoch()?;
-        let members = self.handle.conversation_members()?;
+        let members = mls.members()?;
 
         let eligible = self.handle.conversation.steward_eligibility(&members);
         let (live_epoch, live_backup) = self.handle.steward_list.epoch_and_backup(epoch, &eligible);

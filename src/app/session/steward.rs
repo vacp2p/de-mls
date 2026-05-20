@@ -70,8 +70,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// MLS member set — same effect as a successful election. Intended for
     /// tests and administrative tooling.
     pub fn regenerate_steward_list(&mut self) -> Result<(), UserError> {
-        let current_epoch = self.handle.expect_mls()?.current_epoch()?;
-        let members = self.handle.conversation_members()?;
+        let mls = self.handle.expect_mls()?;
+        let current_epoch = mls.current_epoch()?;
+        let members = mls.members()?;
         let sn = self
             .handle
             .steward_list
@@ -95,7 +96,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             };
             (
                 mls.current_epoch()?,
-                self.handle.conversation_members()?,
+                mls.members()?,
                 self.handle.config.pending_update_max_epochs,
             )
         };
@@ -133,7 +134,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let s = arc.read_or_err("session")?;
 
             let (current_epoch, members) = match s.handle.mls() {
-                Some(mls) => (mls.current_epoch()?, s.handle.conversation_members()?),
+                Some(mls) => (mls.current_epoch()?, mls.members()?),
                 None => (0, Vec::new()),
             };
             let self_identity: &[u8] = &s.self_identity;
@@ -233,7 +234,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // Filter ghosts and queued-removal targets so joiners don't
         // inherit stewards they would have to walk past on the very
         // first epoch.
-        let mls_members = self.handle.conversation_members()?;
+        let mls_members = self.handle.expect_mls()?.members()?;
         let steward_members = {
             let eligible = self.handle.conversation.steward_eligibility(&mls_members);
             self.handle.steward_list.steward_members(&eligible)
@@ -387,8 +388,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     ) -> Result<(), UserError> {
         let (proposed_stewards, election_epoch, retry_round, conversation_name) = {
             let s = arc.read_or_err("session")?;
-            let epoch = s.handle.expect_mls()?.current_epoch()?;
-            let mls_members = s.handle.conversation_members()?;
+            let mls = s.handle.expect_mls()?;
+            let epoch = mls.current_epoch()?;
+            let mls_members = mls.members()?;
             let self_identity: &[u8] = &s.self_identity;
 
             // `has_election_in_flight` is a proposal-queue check, not a
@@ -480,7 +482,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     ) -> Result<(), UserError> {
         let (is_authorized, self_id, epoch, conversation_name) = {
             let s = arc.read_or_err("session")?;
-            let mls_members = s.handle.conversation_members()?;
+            let mls = s.handle.expect_mls()?;
+            let mls_members = mls.members()?;
+            let epoch = mls.current_epoch()?;
             let self_id: &[u8] = &s.self_identity;
             // Deadlock proposer = election proposer with the stricter
             // predicate (MLS-present and not queued for removal).
@@ -494,7 +498,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     mls_set.contains(c) && !conversation_ref.is_pending_removal(c)
                 })
                 .is_some_and(|proposer| proposer == self_id);
-            let epoch = s.handle.expect_mls()?.current_epoch()?;
             (
                 authorized,
                 Arc::clone(&s.self_identity),
@@ -529,8 +532,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// below `sn_min`). Coordinator just supplies `epoch` + `members`
     /// and drains events.
     fn try_auto_fill_steward_list(&mut self) -> Result<(), UserError> {
-        let epoch = self.handle.expect_mls()?.current_epoch()?;
-        let members = self.handle.conversation_members()?;
+        let mls = self.handle.expect_mls()?;
+        let epoch = mls.current_epoch()?;
+        let members = mls.members()?;
         let _events = self.handle.steward_list.maybe_auto_fill(epoch, &members)?;
         Ok(())
     }

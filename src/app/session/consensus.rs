@@ -125,11 +125,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let pending = s.handle.current_state() == ConversationState::PendingJoin;
             match (pending, s.handle.mls()) {
                 (true, _) | (false, None) => (pending, Vec::new(), 0u64),
-                (false, Some(mls)) => (
-                    false,
-                    s.handle.conversation_members()?,
-                    mls.current_epoch()?,
-                ),
+                (false, Some(mls)) => (false, mls.members()?, mls.current_epoch()?),
             }
         };
         if pending_join {
@@ -379,8 +375,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             }
         }
 
-        self.handle.expect_mls()?;
-        let members = self.handle.conversation_members()?;
+        let members = self.handle.expect_mls()?.members()?;
         Ok(members.len() as u32)
     }
 

@@ -130,16 +130,6 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
     // callsites don't destructure the entry. Protocol logic lives in
     // sibling `core` modules; these are pure delegation.
 
-    /// Current MLS members; errors with
-    /// [`CoreError::MlsGroupNotInitialized`] when no service is attached
-    /// (joiner pre-welcome).
-    pub(crate) fn conversation_members(&self) -> Result<Vec<Vec<u8>>, CoreError> {
-        match &self.mls {
-            Some(mls) => Ok(mls.members()?),
-            None => Err(CoreError::MlsGroupNotInitialized),
-        }
-    }
-
     /// Build a commit candidate. Errors with
     /// [`CoreError::MlsGroupNotInitialized`] when no MLS service is
     /// attached.
