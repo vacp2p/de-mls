@@ -452,4 +452,83 @@ mod tests {
             "no approved work must not start the timer"
         );
     }
+
+    // ── Caller-polled deadlines + drain model ───────────────────────────
+
+    /// `emit_event` appends and `drain_events` returns insertion-ordered.
+    /// Establishes the contract relied on by integration tests that build
+    /// up an event log over multiple polling cycles.
+    #[test]
+    fn emit_event_then_drain_returns_insertion_order_and_clears_buffer() {
+        let runner = make_runner_working();
+        runner.emit_event(SessionEvent::Joined);
+        runner.emit_event(SessionEvent::Leaving);
+
+        let drained = runner.drain_events();
+        assert_eq!(drained.len(), 2);
+        assert!(matches!(drained[0], SessionEvent::Joined));
+        assert!(matches!(drained[1], SessionEvent::Leaving));
+
+        // Second drain returns empty — buffer was cleared.
+        assert!(runner.drain_events().is_empty());
+    }
+
+    /// `register_auto_vote` is idempotent — re-registering the same
+    /// `proposal_id` replaces the previous entry rather than stacking.
+    /// Caller relies on this when re-anchoring an auto-vote on a `Deferred`
+    /// re-submit.
+    #[test]
+    fn register_auto_vote_replaces_existing_entry() {
+        let mut runner = make_runner_working();
+        runner.register_auto_vote(7, Duration::from_secs(10), true);
+        let first_fire = runner.pending_auto_votes[&7].fire_at;
+
+        // Re-register with a different `vote` and a longer delay; the
+        // second insert must overwrite, not co-exist.
+        std::thread::sleep(Duration::from_millis(2));
+        runner.register_auto_vote(7, Duration::from_secs(20), false);
+        assert_eq!(runner.pending_auto_votes.len(), 1);
+        let entry = runner.pending_auto_votes[&7];
+        assert!(!entry.vote);
+        assert!(entry.fire_at > first_fire);
+    }
+
+    /// `cancel_auto_vote` drops one entry. `cancel_all_auto_votes` drops
+    /// every entry. Both are the only paths that should remove pending
+    /// auto-votes from outside `tick_deadlines`.
+    #[test]
+    fn cancel_auto_vote_removes_only_the_targeted_proposal() {
+        let mut runner = make_runner_working();
+        runner.register_auto_vote(1, Duration::from_secs(5), true);
+        runner.register_auto_vote(2, Duration::from_secs(5), false);
+        runner.register_auto_vote(3, Duration::from_secs(5), true);
+
+        runner.cancel_auto_vote(2);
+        assert!(runner.pending_auto_votes.contains_key(&1));
+        assert!(!runner.pending_auto_votes.contains_key(&2));
+        assert!(runner.pending_auto_votes.contains_key(&3));
+
+        runner.cancel_all_auto_votes();
+        assert!(runner.pending_auto_votes.is_empty());
+    }
+
+    /// `register_consensus_timeout` records `now + delay`;
+    /// `unregister_consensus_timeout` drops it. `apply_consensus_outcome`
+    /// uses the unregister path to drop deadlines on natural resolution
+    /// so `tick_deadlines` doesn't fire a stale `handle_consensus_timeout`.
+    #[test]
+    fn register_then_unregister_consensus_timeout() {
+        let mut runner = make_runner_working();
+        let before = Instant::now();
+        runner.register_consensus_timeout(42, Duration::from_secs(30));
+        let fire_at = runner.pending_consensus_timeouts[&42];
+        assert!(fire_at > before + Duration::from_secs(29));
+        assert!(fire_at < Instant::now() + Duration::from_secs(31));
+
+        runner.unregister_consensus_timeout(42);
+        assert!(!runner.pending_consensus_timeouts.contains_key(&42));
+
+        // Unregistering an unknown id is a no-op (no panic, no error).
+        runner.unregister_consensus_timeout(999);
+    }
 }
