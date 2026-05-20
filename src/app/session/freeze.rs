@@ -178,9 +178,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 // to catch up.
                 if has_welcome {
                     let sync_packet_result = {
-                        let s = arc.read_or_err("session")?;
+                        let mut s = arc.write_or_err("session")?;
+                        let transport = Arc::clone(s.transport());
                         s.build_conversation_sync_packet()
-                            .map(|opt| opt.map(|packet| (Arc::clone(s.transport()), packet)))
+                            .map(|opt| opt.map(|packet| (transport, packet)))
                     };
                     match sync_packet_result {
                         Ok(Some((transport, packet))) => {

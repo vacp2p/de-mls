@@ -40,7 +40,7 @@ enum CandidateOutcome {
 /// lower-priority local candidate afterwards has nothing to apply.
 pub(super) fn apply_in_priority_order<M: MlsService>(
     conversation: &mut Conversation,
-    mls: &M,
+    mls: &mut M,
     steward: &dyn StewardListPlugin,
     sorted: Vec<BufferedCommitCandidate>,
     ctx: &RoundContext,
@@ -172,7 +172,7 @@ fn record_winner_scores(
 /// Always returns `Terminal(Applied)` on a clean merge.
 fn apply_local_candidate<M: MlsService>(
     conversation: &mut Conversation,
-    mls: &M,
+    mls: &mut M,
     chosen: BufferedCommitCandidate,
     ctx: &RoundContext,
     app_id: &[u8],
@@ -211,7 +211,7 @@ fn apply_local_candidate<M: MlsService>(
 /// only one per conversation at a time.
 fn apply_incoming_candidate<M: MlsService>(
     conversation: &mut Conversation,
-    mls: &M,
+    mls: &mut M,
     steward: &dyn StewardListPlugin,
     chosen: BufferedCommitCandidate,
     ctx: &RoundContext,
@@ -306,7 +306,7 @@ enum StagingOutcome {
 /// Leaves MLS in the staged state on `Staged`; the caller must clean up
 /// via `discard_staged_commit` for `Abort` / `Violation`.
 fn stage_candidate<M>(
-    mls: &M,
+    mls: &mut M,
     conversation_name: &str,
     candidate: &CommitCandidate,
     ctx: &RoundContext,

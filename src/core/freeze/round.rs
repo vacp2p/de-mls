@@ -55,7 +55,7 @@ pub fn compute_commit_hash(commit_message: &[u8]) -> Vec<u8> {
 /// hash. No MLS state is mutated.
 pub fn buffer_commit_candidate<M: MlsService>(
     conversation: &mut Conversation,
-    mls: &M,
+    mls: &mut M,
     candidate_msg: CommitCandidate,
 ) -> Result<ProcessResult, CoreError> {
     let conversation_name = conversation.name().to_owned();
@@ -148,7 +148,7 @@ pub fn buffer_commit_candidate<M: MlsService>(
 ///    MLS staging rejects the current one.
 pub fn finalize_freeze_round<M: MlsService>(
     conversation: &mut Conversation,
-    mls: &M,
+    mls: &mut M,
     steward: &dyn StewardListPlugin,
     in_recovery: bool,
     allow_subset_candidates: bool,
@@ -221,7 +221,7 @@ pub(super) struct RoundContext {
 impl RoundContext {
     fn snapshot<M: MlsService>(
         conversation: &Conversation,
-        mls: &M,
+        mls: &mut M,
         steward: &dyn StewardListPlugin,
         current_epoch: u64,
         in_recovery: bool,

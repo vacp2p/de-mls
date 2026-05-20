@@ -48,7 +48,7 @@ fn authorize_fast_path_proposal(proposal: &Proposal, mls_sender: &[u8]) -> bool 
 /// needed. Welcome-subtopic packets are handled at the app layer.
 pub fn process_inbound<M: MlsService>(
     conversation: &mut Conversation,
-    mls: &M,
+    mls: &mut M,
     payload: &[u8],
 ) -> Result<ProcessResult, CoreError> {
     // 1. Try plaintext CommitCandidate (sent as plaintext AppMessage)

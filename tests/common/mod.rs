@@ -66,7 +66,7 @@ pub const DEFAULT_SCORE: i64 = 100;
 /// identical logic. **Keep in sync with `ConversationHandle::create_commit_candidate`.**
 pub fn build_commit_candidate(
     group: &mut Conversation,
-    mls: &TestMls,
+    mls: &mut TestMls,
     steward_list: &DeterministicStewardList,
     in_recovery: bool,
     self_identity: &[u8],
@@ -213,7 +213,7 @@ pub fn setup_identity_storage(
 /// a fresh MLS service and attaches it to the joiner's group.
 pub fn process_inbound_compat(
     group: &mut Conversation,
-    mls: Option<&TestMls>,
+    mls: Option<&mut TestMls>,
     payload: &[u8],
     subtopic: &str,
 ) -> Result<ProcessResult, de_mls::core::CoreError> {
@@ -467,7 +467,7 @@ pub fn steward_add_joiner(
     let self_id = steward_handle.identity.clone();
     let packets = build_commit_candidate(
         &mut steward_handle.group,
-        &steward_handle.mls,
+        &mut steward_handle.mls,
         &steward_handle.steward_list,
         steward_handle.operating_mode == OperatingMode::Recovery,
         &self_id,
@@ -477,7 +477,7 @@ pub fn steward_add_joiner(
 
     let finalize = finalize_freeze_round(
         &mut steward_handle.group,
-        &steward_handle.mls,
+        &mut steward_handle.mls,
         &steward_handle.steward_list,
         steward_handle.operating_mode == OperatingMode::Recovery,
         false,

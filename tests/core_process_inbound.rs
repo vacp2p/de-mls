@@ -135,7 +135,7 @@ fn test_conversation_sync_propagates_divergent_per_conv_config() {
 
     let result = process_inbound_compat(
         &mut joiner.group,
-        joiner.mls.as_ref(),
+        joiner.mls.as_mut(),
         &sync_packet.payload,
         APP_MSG_SUBTOPIC,
     )

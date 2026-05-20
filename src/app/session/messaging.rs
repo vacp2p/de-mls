@@ -50,7 +50,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         message: Vec<u8>,
     ) -> Result<(), UserError> {
         let (transport, packet) = {
-            let s = arc.read_or_err("session")?;
+            let mut s = arc.write_or_err("session")?;
             let state = s.handle.current_state();
             if matches!(
                 state,
@@ -67,9 +67,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 conversation_name: s.conversation_name.clone(),
             }
             .into();
-
-            let packet = s.handle.expect_mls()?.build_message(&app_msg, &s.app_id)?;
-            (Arc::clone(s.transport()), packet)
+            let app_id = Arc::clone(&s.app_id);
+            let transport = Arc::clone(s.transport());
+            let packet = s
+                .handle
+                .expect_mls_mut()?
+                .build_message(&app_msg, &app_id)?;
+            (transport, packet)
         };
         send_packet(&transport, packet)?;
         Ok(())

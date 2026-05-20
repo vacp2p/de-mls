@@ -1,6 +1,6 @@
 //! OpenMLS-backed implementation of [`MlsService`].
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use openmls::{
     group::{
@@ -20,27 +20,15 @@ mod backend;
 pub use api::{CIPHERSUITE, DEFAULT_COMMIT_BATCH_MAX, MlsService};
 use backend::MlsProvider;
 
-/// OpenMLS-backed MLS service, scoped to a single conversation.
-///
-/// The service owns one `MlsGroup` plus an optional staged-commit slot
-/// for the inbound stage→merge/discard pipeline; both live behind a
-/// single [`RwLock<MlsGroupState>`] so a staged commit can never be
-/// observed against a divergent group state. MLS credentials and storage
-/// are supplied at construction. Credentials are `Arc<MlsCredentials>`
-/// so one user's credentials back every per-conversation service without
-/// copying the signing key.
+/// OpenMLS-backed MLS service, scoped to a single conversation. Owns
+/// one `MlsGroup` plus an optional staged-commit slot for the inbound
+/// stage→merge/discard pipeline. Credentials are `Arc<MlsCredentials>`
+/// so one user's keypair backs every per-conversation service.
 pub struct OpenMlsService<S: DeMlsStorage> {
     pub(super) storage: S,
     pub(super) crypto: RustCrypto,
     pub(super) credentials: Arc<MlsCredentials>,
     pub(super) conversation_id: String,
-    pub(super) state: RwLock<MlsGroupState>,
-}
-
-/// The two-field state guarded by `OpenMlsService::state`. The fields
-/// move together through stage → merge / discard, so giving them one
-/// `RwLock` removes the ordering hazard of locking them independently.
-pub(super) struct MlsGroupState {
     pub(super) group: MlsGroup,
     pub(super) pending_staged_commit: Option<StagedCommit>,
 }
@@ -72,10 +60,8 @@ impl<S: DeMlsStorage> OpenMlsService<S> {
             crypto,
             credentials,
             conversation_id,
-            state: RwLock::new(MlsGroupState {
-                group,
-                pending_staged_commit: None,
-            }),
+            group,
+            pending_staged_commit: None,
         })
     }
 
@@ -126,10 +112,8 @@ impl<S: DeMlsStorage> OpenMlsService<S> {
             crypto,
             credentials,
             conversation_id,
-            state: RwLock::new(MlsGroupState {
-                group,
-                pending_staged_commit: None,
-            }),
+            group,
+            pending_staged_commit: None,
         }))
     }
 

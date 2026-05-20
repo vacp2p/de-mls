@@ -59,13 +59,6 @@ impl<S> OpenMlsService<S>
 where
     S: DeMlsStorage,
 {
-    fn provider(&self) -> MlsProvider<'_, S::MlsStorage> {
-        MlsProvider {
-            crypto: &self.crypto,
-            storage: self.storage.mls_storage(),
-        }
-    }
-
     fn extract_proposal_action(
         group: &MlsGroup,
         proposal: &Proposal,
@@ -105,12 +98,9 @@ where
     // Conversation lifecycle
     // ══════════════════════════════════════════════════════════
 
-    fn delete(&self) -> Result<(), MlsError> {
-        let provider = self.provider();
-        self.state
-            .write()?
-            .group
-            .delete(provider.storage())
+    fn delete(&mut self) -> Result<(), MlsError> {
+        self.group
+            .delete(self.storage.mls_storage())
             .map_err(MlsError::storage)
     }
 
@@ -120,8 +110,6 @@ where
 
     fn members(&self) -> Result<Vec<Vec<u8>>, MlsError> {
         Ok(self
-            .state
-            .read()?
             .group
             .members()
             .map(|m| m.credential.serialized_content().to_vec())
@@ -135,7 +123,7 @@ where
     }
 
     fn current_epoch(&self) -> Result<u64, MlsError> {
-        Ok(self.state.read()?.group.epoch().as_u64())
+        Ok(self.group.epoch().as_u64())
     }
 
     // ══════════════════════════════════════════════════════════
@@ -143,14 +131,14 @@ where
     // ══════════════════════════════════════════════════════════
 
     fn create_commit_candidate(
-        &self,
+        &mut self,
         updates: &[MlsCommitInput],
     ) -> Result<CommitCandidate, MlsError> {
-        let provider = self.provider();
+        let crypto = &self.crypto;
+        let mls_storage = self.storage.mls_storage();
+        let provider = MlsProvider::new(crypto, mls_storage);
         let signer = self.credentials.signer();
-
-        let mut state = self.state.write()?;
-        let group = &mut state.group;
+        let group = &mut self.group;
         let mut mls_proposals = Vec::new();
 
         for update in updates {
@@ -163,9 +151,9 @@ where
                         group.propose_add_member(&provider, signer, &kp)?;
                     mls_proposals.push(mls_message_out.to_bytes()?);
                 }
-                MlsCommitInput::Remove(wallet_bytes) => {
+                MlsCommitInput::Remove(identity) => {
                     let member_index = group.members().find_map(|m| {
-                        if m.credential.serialized_content() == wallet_bytes {
+                        if m.credential.serialized_content() == identity {
                             Some(m.index)
                         } else {
                             None
@@ -195,21 +183,22 @@ where
         })
     }
 
-    fn merge_own_commit(&self) -> Result<(), MlsError> {
-        let provider = self.provider();
-        self.state.write()?.group.merge_pending_commit(&provider)?;
+    fn merge_own_commit(&mut self) -> Result<(), MlsError> {
+        let crypto = &self.crypto;
+        let mls_storage = self.storage.mls_storage();
+        let provider = MlsProvider::new(crypto, mls_storage);
+        self.group.merge_pending_commit(&provider)?;
         Ok(())
     }
 
-    fn discard_own_commit(&self) -> Result<(), MlsError> {
-        let provider = self.provider();
-        let mut state = self.state.write()?;
-        state
-            .group
+    fn discard_own_commit(&mut self) -> Result<(), MlsError> {
+        let crypto = &self.crypto;
+        let mls_storage = self.storage.mls_storage();
+        let provider = MlsProvider::new(crypto, mls_storage);
+        self.group
             .clear_pending_commit(provider.storage())
             .map_err(MlsError::storage)?;
-        state
-            .group
+        self.group
             .clear_pending_proposals(provider.storage())
             .map_err(MlsError::storage)?;
         Ok(())
@@ -220,112 +209,98 @@ where
     // ══════════════════════════════════════════════════════════
 
     fn stage_remote_commit(
-        &self,
+        &mut self,
         proposals: &[Vec<u8>],
         commit_bytes: &[u8],
     ) -> Result<StagedCandidateResult, MlsError> {
-        let provider = self.provider();
+        let provider = MlsProvider::new(&self.crypto, self.storage.mls_storage());
+        let group = &mut self.group;
+        let conversation_id = &self.conversation_id;
 
-        // Hold the state lock for the whole atomic stage. Anything we put
-        // into MLS pending state stays there for the caller to roll back
-        // via `discard_staged_commit` on Aborted; the pending-staged-commit
-        // slot is written before the lock drops so observers never see the
-        // group at the post-stage epoch with `pending_staged_commit = None`.
-        let mut state = self.state.write()?;
-        let outcome = {
-            let group = &mut state.group;
-
-            // ── Stage every proposal, collecting senders ──
-            let mut proposal_senders: Vec<Vec<u8>> = Vec::with_capacity(proposals.len());
-            for (i, proposal_bytes) in proposals.iter().enumerate() {
-                let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(proposal_bytes)?;
-                let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
-                let processed = group.process_message(&provider, protocol_message)?;
-                let sender = processed.credential().serialized_content().to_vec();
-                match processed.into_content() {
-                    ProcessedMessageContent::ProposalMessage(proposal) => {
-                        group
-                            .store_pending_proposal(provider.storage(), proposal.as_ref().clone())
-                            .map_err(MlsError::storage)?;
-                        proposal_senders.push(sender);
-                    }
-                    _ => {
-                        tracing::debug!(
-                            group = %self.conversation_id,
-                            index = i,
-                            "stage_remote_commit: non-proposal in proposal slot",
-                        );
-                        return Ok(StagedCandidateResult::Aborted);
-                    }
-                }
-            }
-
-            // ── Stage the commit ──
-            let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(commit_bytes)?;
+        // ── Stage every proposal, collecting senders ──
+        let mut proposal_senders: Vec<Vec<u8>> = Vec::with_capacity(proposals.len());
+        for (i, proposal_bytes) in proposals.iter().enumerate() {
+            let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(proposal_bytes)?;
             let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
-
-            if protocol_message.group_id().as_slice() != group.group_id().as_slice() {
-                tracing::debug!(
-                    "stage_remote_commit: ignoring commit for wrong group ID (expected {})",
-                    self.conversation_id,
-                );
-                return Ok(StagedCandidateResult::Aborted);
-            }
-            if protocol_message.epoch() < group.epoch() {
-                tracing::debug!(
-                    "stage_remote_commit: ignoring stale commit from epoch {} (current: {})",
-                    protocol_message.epoch().as_u64(),
-                    group.epoch().as_u64(),
-                );
-                return Ok(StagedCandidateResult::Aborted);
-            }
-
             let processed = group.process_message(&provider, protocol_message)?;
-            let commit_sender = processed.credential().serialized_content().to_vec();
-
+            let sender = processed.credential().serialized_content().to_vec();
             match processed.into_content() {
-                ProcessedMessageContent::StagedCommitMessage(staged) => {
-                    let self_removed = staged.self_removed();
-                    let mut actions = Vec::new();
-                    for add in staged.add_proposals() {
-                        let id = add
-                            .add_proposal()
-                            .key_package()
-                            .leaf_node()
-                            .credential()
-                            .serialized_content()
-                            .to_vec();
-                        actions.push(MlsProposalOutput::Add(id));
-                    }
-                    for remove in staged.remove_proposals() {
-                        let removed_index = remove.remove_proposal().removed();
-                        let id = group
-                            .member(removed_index)
-                            .map(|c| c.serialized_content().to_vec())
-                            .ok_or(MlsError::UnknownLeafIndex(removed_index.u32()))?;
-                        actions.push(MlsProposalOutput::Remove(id));
-                    }
-                    Some((
-                        commit_sender,
-                        proposal_senders,
-                        self_removed,
-                        actions,
-                        *staged,
-                    ))
+                ProcessedMessageContent::ProposalMessage(proposal) => {
+                    group
+                        .store_pending_proposal(provider.storage(), proposal.as_ref().clone())
+                        .map_err(MlsError::storage)?;
+                    proposal_senders.push(sender);
                 }
                 _ => {
                     tracing::debug!(
-                        "stage_remote_commit: ignoring non-commit message for group {}",
-                        self.conversation_id,
+                        group = %conversation_id,
+                        index = i,
+                        "stage_remote_commit: non-proposal in proposal slot",
                     );
-                    None
+                    return Ok(StagedCandidateResult::Aborted);
                 }
+            }
+        }
+
+        // ── Stage the commit ──
+        let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(commit_bytes)?;
+        let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
+
+        if protocol_message.group_id().as_slice() != group.group_id().as_slice() {
+            tracing::debug!(
+                "stage_remote_commit: ignoring commit for wrong group ID (expected {})",
+                conversation_id,
+            );
+            return Ok(StagedCandidateResult::Aborted);
+        }
+        if protocol_message.epoch() < group.epoch() {
+            tracing::debug!(
+                "stage_remote_commit: ignoring stale commit from epoch {} (current: {})",
+                protocol_message.epoch().as_u64(),
+                group.epoch().as_u64(),
+            );
+            return Ok(StagedCandidateResult::Aborted);
+        }
+
+        let processed = group.process_message(&provider, protocol_message)?;
+        let commit_sender = processed.credential().serialized_content().to_vec();
+
+        let outcome = match processed.into_content() {
+            ProcessedMessageContent::StagedCommitMessage(staged) => {
+                let self_removed = staged.self_removed();
+                let mut actions = Vec::new();
+                for add in staged.add_proposals() {
+                    let id = add
+                        .add_proposal()
+                        .key_package()
+                        .leaf_node()
+                        .credential()
+                        .serialized_content()
+                        .to_vec();
+                    actions.push(MlsProposalOutput::Add(id));
+                }
+                for remove in staged.remove_proposals() {
+                    let removed_index = remove.remove_proposal().removed();
+                    let id = group
+                        .member(removed_index)
+                        .map(|c| c.serialized_content().to_vec())
+                        .ok_or(MlsError::UnknownLeafIndex(removed_index.u32()))?;
+                    actions.push(MlsProposalOutput::Remove(id));
+                }
+                Some((commit_sender, self_removed, actions, *staged))
+            }
+            _ => {
+                tracing::debug!(
+                    "stage_remote_commit: ignoring non-commit message for group {}",
+                    conversation_id,
+                );
+                None
             }
         };
 
         match outcome {
-            Some((commit_sender, proposal_senders, self_removed, actions, staged)) => {
-                state.pending_staged_commit = Some(staged);
+            Some((commit_sender, self_removed, actions, staged)) => {
+                self.pending_staged_commit = Some(staged);
                 Ok(StagedCandidateResult::Staged {
                     commit_sender,
                     proposal_senders,
@@ -337,24 +312,20 @@ where
         }
     }
 
-    fn merge_staged_commit(&self) -> Result<(), MlsError> {
-        let provider = self.provider();
-        let mut state = self.state.write()?;
-        let staged = state
+    fn merge_staged_commit(&mut self) -> Result<(), MlsError> {
+        let provider = MlsProvider::new(&self.crypto, self.storage.mls_storage());
+        let staged = self
             .pending_staged_commit
             .take()
             .ok_or_else(|| MlsError::NoPendingStagedCommit(self.conversation_id.clone()))?;
-        state.group.merge_staged_commit(&provider, staged)?;
+        self.group.merge_staged_commit(&provider, staged)?;
         Ok(())
     }
 
-    fn discard_staged_commit(&self) -> Result<(), MlsError> {
-        let provider = self.provider();
-        let mut state = self.state.write()?;
-        state.pending_staged_commit = None;
-        state
-            .group
-            .clear_pending_proposals(provider.storage())
+    fn discard_staged_commit(&mut self) -> Result<(), MlsError> {
+        self.pending_staged_commit = None;
+        self.group
+            .clear_pending_proposals(self.storage.mls_storage())
             .map_err(MlsError::storage)?;
         Ok(())
     }
@@ -363,19 +334,15 @@ where
     // Application messages
     // ══════════════════════════════════════════════════════════
 
-    fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, MlsError> {
-        let provider = self.provider();
+    fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, MlsError> {
+        let provider = MlsProvider::new(&self.crypto, self.storage.mls_storage());
         let signer = self.credentials.signer();
-        let message = self
-            .state
-            .write()?
-            .group
-            .create_message(&provider, signer, plaintext)?;
+        let message = self.group.create_message(&provider, signer, plaintext)?;
         Ok(message.to_bytes()?)
     }
 
     fn build_message(
-        &self,
+        &mut self,
         app_msg: &AppMessage,
         app_id: &[u8],
     ) -> Result<OutboundPacket, MlsError> {
@@ -383,16 +350,14 @@ where
         Ok(OutboundPacket::new(
             bytes,
             APP_MSG_SUBTOPIC,
-            self.conversation_id(),
+            &self.conversation_id,
             app_id,
         ))
     }
 
-    fn decrypt_application_only(&self, ciphertext: &[u8]) -> Result<DecryptResult, MlsError> {
-        let provider = self.provider();
-
-        let mut state = self.state.write()?;
-        let group = &mut state.group;
+    fn decrypt_application_only(&mut self, ciphertext: &[u8]) -> Result<DecryptResult, MlsError> {
+        let provider = MlsProvider::new(&self.crypto, self.storage.mls_storage());
+        let group = &mut self.group;
 
         let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(ciphertext)?;
         let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
@@ -428,11 +393,10 @@ where
         }
     }
 
-    fn decrypt(&self, ciphertext: &[u8]) -> Result<DecryptResult, MlsError> {
-        let provider = self.provider();
-
-        let mut state = self.state.write()?;
-        let group = &mut state.group;
+    fn decrypt(&mut self, ciphertext: &[u8]) -> Result<DecryptResult, MlsError> {
+        let provider = MlsProvider::new(&self.crypto, self.storage.mls_storage());
+        let group = &mut self.group;
+        let conversation_id = &self.conversation_id;
 
         let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(ciphertext)?;
         let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
@@ -455,7 +419,7 @@ where
         if protocol_message.content_type() == ContentType::Commit {
             tracing::debug!(
                 "Ignoring commit on decrypt() path for group {}: use stage_remote_commit() instead",
-                self.conversation_id,
+                conversation_id,
             );
             return Ok(DecryptResult::Ignored);
         }

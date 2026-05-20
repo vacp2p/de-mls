@@ -204,7 +204,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// by callers that need to release the runner lock before awaiting on
     /// the transport. Returns `Ok(None)` when there's no steward list yet.
     pub(crate) fn build_conversation_sync_packet(
-        &self,
+        &mut self,
     ) -> Result<Option<crate::ds::OutboundPacket>, UserError> {
         // Sparse snapshot — only members whose score has diverged
         // from `default_score`. Joiners init every member at default
@@ -233,10 +233,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // Filter ghosts and queued-removal targets so joiners don't
         // inherit stewards they would have to walk past on the very
         // first epoch.
-        let mls = self.handle.expect_mls()?;
         let mls_members = self.handle.conversation_members()?;
-        let eligible = self.handle.conversation.steward_eligibility(&mls_members);
-        let steward_members = self.handle.steward_list.steward_members(&eligible);
+        let steward_members = {
+            let eligible = self.handle.conversation.steward_eligibility(&mls_members);
+            self.handle.steward_list.steward_members(&eligible)
+        };
 
         // `retry_round` is the seed that produced the *stored* list —
         // a frozen tag on `StewardList`, not the plug-in's dynamic
@@ -258,7 +259,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         };
 
         let app_msg: AppMessage = sync.into();
-        Ok(Some(mls.build_message(&app_msg, &self.app_id)?))
+        let app_id = Arc::clone(&self.app_id);
+        Ok(Some(
+            self.handle
+                .expect_mls_mut()?
+                .build_message(&app_msg, &app_id)?,
+        ))
     }
 
     /// Broadcast steward list + protocol config + peer scores + timing as
@@ -270,15 +276,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// awaiting on the transport.
     pub async fn send_conversation_sync(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
         let (transport, packet, conversation_name) = {
-            let s = arc.read_or_err("session")?;
+            let mut s = arc.write_or_err("session")?;
+            let transport = Arc::clone(s.transport());
+            let conversation_name = s.conversation_name.clone();
             let Some(packet) = s.build_conversation_sync_packet()? else {
                 return Ok(());
             };
-            (
-                Arc::clone(s.transport()),
-                packet,
-                s.conversation_name.clone(),
-            )
+            (transport, packet, conversation_name)
         };
         send_packet(&transport, packet)?;
         info!(conversation = %conversation_name, "conversation sync sent");

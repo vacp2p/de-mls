@@ -132,7 +132,7 @@ impl MlsService for UnusedMls {
     fn conversation_id(&self) -> &str {
         "unused"
     }
-    fn delete(&self) -> Result<(), MlsError> {
+    fn delete(&mut self) -> Result<(), MlsError> {
         unreachable!("UnusedMls::delete called")
     }
     fn members(&self) -> Result<Vec<Vec<u8>>, MlsError> {
@@ -144,38 +144,41 @@ impl MlsService for UnusedMls {
     fn current_epoch(&self) -> Result<u64, MlsError> {
         unreachable!("UnusedMls::current_epoch called")
     }
-    fn create_commit_candidate(&self, _: &[MlsCommitInput]) -> Result<CommitCandidate, MlsError> {
+    fn create_commit_candidate(
+        &mut self,
+        _: &[MlsCommitInput],
+    ) -> Result<CommitCandidate, MlsError> {
         unreachable!("UnusedMls::create_commit_candidate called")
     }
-    fn merge_own_commit(&self) -> Result<(), MlsError> {
+    fn merge_own_commit(&mut self) -> Result<(), MlsError> {
         unreachable!()
     }
-    fn discard_own_commit(&self) -> Result<(), MlsError> {
+    fn discard_own_commit(&mut self) -> Result<(), MlsError> {
         unreachable!()
     }
     fn stage_remote_commit(
-        &self,
+        &mut self,
         _: &[Vec<u8>],
         _: &[u8],
     ) -> Result<StagedCandidateResult, MlsError> {
         unreachable!()
     }
-    fn merge_staged_commit(&self) -> Result<(), MlsError> {
+    fn merge_staged_commit(&mut self) -> Result<(), MlsError> {
         unreachable!()
     }
-    fn discard_staged_commit(&self) -> Result<(), MlsError> {
+    fn discard_staged_commit(&mut self) -> Result<(), MlsError> {
         unreachable!()
     }
-    fn encrypt(&self, _: &[u8]) -> Result<Vec<u8>, MlsError> {
+    fn encrypt(&mut self, _: &[u8]) -> Result<Vec<u8>, MlsError> {
         unreachable!()
     }
-    fn build_message(&self, _: &AppMessage, _: &[u8]) -> Result<OutboundPacket, MlsError> {
+    fn build_message(&mut self, _: &AppMessage, _: &[u8]) -> Result<OutboundPacket, MlsError> {
         unreachable!()
     }
-    fn decrypt_application_only(&self, _: &[u8]) -> Result<DecryptResult, MlsError> {
+    fn decrypt_application_only(&mut self, _: &[u8]) -> Result<DecryptResult, MlsError> {
         unreachable!()
     }
-    fn decrypt(&self, _: &[u8]) -> Result<DecryptResult, MlsError> {
+    fn decrypt(&mut self, _: &[u8]) -> Result<DecryptResult, MlsError> {
         unreachable!()
     }
     fn inspect_message_kind(&self, _: &[u8]) -> Result<MlsMessageKind, MlsError> {
