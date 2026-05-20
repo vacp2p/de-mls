@@ -39,9 +39,8 @@ pub const DEFAULT_COMMIT_BATCH_MAX: usize = 50;
 /// Per-conversation MLS backend. Each instance corresponds to one MLS group.
 ///
 /// Read-only methods take `&self`; methods that advance MLS state take
-/// `&mut self`. Callers serialize via the outer per-session lock — the
-/// trait does not require an interior lock.
-pub trait MlsService: Send + Sync + 'static {
+/// `&mut self`. Callers serialize via the outer per-session lock.
+pub trait MlsService{
     /// The conversation id this service is scoped to.
     fn conversation_id(&self) -> &str;
 

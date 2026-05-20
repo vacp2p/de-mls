@@ -1,7 +1,7 @@
 //! Per-conversation steward-list plug-in trait and event vocabulary.
 
-use super::list::{StewardList, StewardListConfig};
 use crate::core::error::CoreError;
+use crate::core::steward_list::list::{StewardList, StewardListConfig};
 
 /// Fallback ceiling on steward-election retries. One retry gives the
 /// responsible proposer a second shot with a different list composition;
@@ -48,7 +48,7 @@ pub enum StewardListEvent {
 /// know about MLS membership or removal queues. When all candidates are
 /// eligible, the predicate-based queries return the nominal rotation
 /// position; otherwise they walk forward to the next eligible steward.
-pub trait StewardListPlugin: Send + Sync + 'static {
+pub trait StewardListPlugin {
     // ── Config & raw state ─────────────────────────────────────────
 
     /// Steward list bounds + protocol-level flags.

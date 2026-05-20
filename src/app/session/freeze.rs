@@ -176,26 +176,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 // ConversationSync carries the steward list + timing + scores
                 // to new joiners; send it only after the welcome they'll use
                 // to catch up.
-                if has_welcome {
-                    let sync_packet_result = {
-                        let mut s = arc.write_or_err("session")?;
-                        let transport = Arc::clone(s.transport());
-                        s.build_conversation_sync_packet()
-                            .map(|opt| opt.map(|packet| (transport, packet)))
-                    };
-                    match sync_packet_result {
-                        Ok(Some((transport, packet))) => {
-                            if let Err(e) = send_packet(&transport, packet) {
-                                error!(conversation = %conversation_name, error = %e, "conversation sync send failed");
-                            } else {
-                                info!(conversation = %conversation_name, "conversation sync sent");
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            error!(conversation = %conversation_name, error = %e, "conversation sync build failed");
-                        }
-                    }
+                if has_welcome && let Err(e) = Self::send_conversation_sync(arc).await {
+                    error!(conversation = %conversation_name, error = %e, "conversation sync send failed");
                 }
 
                 let outcome = match Self::dispatch_inbound_result(arc, result).await {
