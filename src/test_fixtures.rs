@@ -17,14 +17,11 @@ use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use crate::{
     app::{ConsensusContext, ConversationConfig, User, UserPlugins},
     core::{
-        ConsensusPlugin, ConversationPluginsFactory, ElectionDecision, KeyPackageProvider,
-        PeerScoringEvent, PeerScoringPlugin, PluginConsensus, ScoreOp, ScoreSnapshot,
-        ScoringConfig, StewardList, StewardListConfig, StewardListEvent, StewardListPlugin,
+        ConsensusPlugin, ConversationPluginsFactory, ElectionDecision, PeerScoringEvent,
+        PeerScoringPlugin, PluginConsensus, ScoreOp, ScoreSnapshot, ScoringConfig, StewardList,
+        StewardListConfig, StewardListEvent, StewardListPlugin,
     },
-    defaults::{
-        DefaultConsensusPlugin, DefaultConversationPluginsFactory, DefaultKeyPackageProvider,
-        MemoryDeMlsStorage,
-    },
+    defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage},
     ds::{OutboundPacket, SharedDeliveryService},
     identity::Identity,
     mls_crypto::{
@@ -73,13 +70,7 @@ pub(crate) fn make_user_from_private_key(
 
     let credentials = Arc::new(MlsCredentials::from_identity(&identity).expect("credentials"));
     let storage = Arc::new(MemoryDeMlsStorage::new());
-
-    let conversation_plugins = Arc::new(DefaultConversationPluginsFactory::new(
-        Arc::clone(&storage),
-        Arc::clone(&credentials),
-    ));
-    let key_package_provider: Arc<dyn KeyPackageProvider> =
-        Arc::new(DefaultKeyPackageProvider::new(storage, credentials));
+    let conversation_plugins = DefaultConversationPluginsFactory::new(storage, credentials);
 
     let consensus_signer = EthereumConsensusSigner::new(signer);
     let consensus = ConsensusContext::<DefaultConsensusPlugin>::new(consensus_signer);
@@ -87,7 +78,6 @@ pub(crate) fn make_user_from_private_key(
     let plugins = UserPlugins {
         conversation_plugins,
         consensus,
-        key_package_provider,
         default_conversation_config: ConversationConfig::default(),
         default_scoring_config: ScoringConfig::default(),
         default_steward_list_config: StewardListConfig::default(),
@@ -358,6 +348,9 @@ impl ConversationPluginsFactory for StubPluginsFactory {
         unreachable!()
     }
     fn make_steward_list(&self, _: &[u8], _: StewardListConfig) -> Self::StewardList {
+        unreachable!()
+    }
+    fn generate_key_package(&self) -> Result<crate::mls_crypto::KeyPackageBytes, MlsError> {
         unreachable!()
     }
 }

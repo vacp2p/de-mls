@@ -68,9 +68,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
     /// Generate a single-use key package for our identity. Conversation-free —
     /// callable before `start_conversation`. Delegates to the configured
-    /// [`crate::core::KeyPackageProvider`].
+    /// [`crate::core::ConversationPluginsFactory::generate_key_package`].
     pub fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
-        self.plugins.key_package_provider.generate()
+        self.plugins.conversation_plugins.generate_key_package()
     }
 
     /// Drain every pending [`ConversationLifecycle`] event accumulated
