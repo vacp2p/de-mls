@@ -70,10 +70,12 @@ async fn silent_steward_drives_observer_to_reelection() {
         settle_for(Duration::from_millis(40)).await;
         poll_once(&alice_session).await;
         poll_once(&bob_session).await;
-        for p in users[0].1.drain_packets() {
+        let packets = users[0].1.lock().unwrap().drain_packets();
+        for p in packets {
             let _ = users[1].0.process_inbound_packet(to_inbound(&p)).await;
         }
-        for p in users[1].1.drain_packets() {
+        let packets = users[1].1.lock().unwrap().drain_packets();
+        for p in packets {
             let _ = users[0].0.process_inbound_packet(to_inbound(&p)).await;
         }
         let observer_approved = observer_session
@@ -100,8 +102,9 @@ async fn silent_steward_drives_observer_to_reelection() {
         poll_once(&bob_session).await;
 
         // Discard everything the steward emits, deliver everything else.
-        let _ = steward_tx.drain_packets();
-        for p in observer_tx.drain_packets() {
+        let _ = steward_tx.lock().unwrap().drain_packets();
+        let packets = observer_tx.lock().unwrap().drain_packets();
+        for p in packets {
             let _ = users[steward_idx]
                 .0
                 .process_inbound_packet(to_inbound(&p))

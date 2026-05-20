@@ -56,16 +56,16 @@ async fn second_conversation_sync_is_a_no_op() {
     // decode of the payload can't peek inside. Right after we explicitly
     // called `send_conversation_sync`, alice's single outbound app-msg
     // packet IS the sync.
-    let outbound = alice_tx.drain_packets();
+    let outbound = alice_tx.lock().unwrap().drain_packets();
     let sync_packet = outbound
         .iter()
         .find(|p| predicate::is_app_msg(p))
         .cloned()
         .expect("alice must broadcast a sync packet");
 
-    bob_tx.drain_packets();
+    bob_tx.lock().unwrap().drain_packets();
     deliver(&users[1].0, &sync_packet).await;
-    let bob_outbound_after = bob_tx.drain_packets();
+    let bob_outbound_after = bob_tx.lock().unwrap().drain_packets();
     let roles_after = bob_session.read().unwrap().get_member_roles().unwrap();
     let scores_after = bob_session.read().unwrap().get_member_scores();
 

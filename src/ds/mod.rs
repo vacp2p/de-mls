@@ -39,15 +39,15 @@
 //! let ds = result.service;
 //!
 //! // Subscribe to inbound messages (multiple subscribers allowed).
-//! let rx = ds.subscribe();
+//! let rx = ds.inbound_receiver();
 //! std::thread::spawn(move || {
 //!     while let Ok(pkt) = rx.recv() {
 //!         println!("got {} bytes for conversation {}", pkt.payload.len(), pkt.conversation_id);
 //!     }
 //! });
 //!
-//! // Send a message.
-//! ds.send(OutboundPacket::new(
+//! // Publish a message.
+//! ds.publish(OutboundPacket::new(
 //!     b"hello".to_vec(),
 //!     "app_msg",
 //!     "my-conversation",
@@ -63,7 +63,7 @@
 //!
 //! The entire DS layer is **synchronous** — no tokio dependency. The Waku
 //! implementation runs an embedded node on a dedicated `std::thread`. Callers
-//! in an async context should wrap `DeliveryService::send` in
+//! in an async context should wrap `DeliveryService::publish` in
 //! `tokio::task::spawn_blocking`.
 
 mod error;
@@ -84,7 +84,7 @@ pub const SUBTOPICS: [&str; 2] = [APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC];
 
 pub use error::DeliveryServiceError;
 pub use topic_filter::TopicFilter;
-pub use transport::{DeliveryService, InboundPacket, OutboundPacket};
+pub use transport::{DeliveryService, InboundPacket, OutboundPacket, SharedDeliveryService};
 
 #[cfg(feature = "waku")]
 pub use waku::{

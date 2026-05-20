@@ -89,7 +89,7 @@ async fn removed_member_emits_leaving_and_is_evicted() {
         }
         let mut packets = Vec::new();
         for (_, h) in &users {
-            packets.extend(h.drain_packets());
+            packets.extend(h.lock().unwrap().drain_packets());
         }
         for p in &packets {
             for (u, _) in &users {

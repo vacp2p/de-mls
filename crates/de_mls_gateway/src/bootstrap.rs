@@ -64,7 +64,7 @@ pub async fn bootstrap_core(
     let (pubsub_tx, _) = broadcast::channel::<InboundPacket>(512);
 
     // Subscribe before moving delivery into AppState.
-    let rx = delivery.subscribe();
+    let rx = delivery.inbound_receiver();
 
     let app_state = Arc::new(AppState {
         delivery,

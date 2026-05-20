@@ -62,10 +62,12 @@ async fn deadlock_ecp_opens_recovery_and_force_freezes() {
         settle_for(Duration::from_millis(40)).await;
         poll_once(&alice_session).await;
         poll_once(&bob_session).await;
-        for p in alice_tx.drain_packets() {
+        let packets = alice_tx.lock().unwrap().drain_packets();
+        for p in packets {
             let _ = users[1].0.process_inbound_packet(to_inbound(&p)).await;
         }
-        for p in bob_tx.drain_packets() {
+        let packets = bob_tx.lock().unwrap().drain_packets();
+        for p in packets {
             let _ = users[0].0.process_inbound_packet(to_inbound(&p)).await;
         }
 

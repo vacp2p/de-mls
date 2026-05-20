@@ -27,7 +27,7 @@ pub enum UserError {
     )]
     PartialFreeze,
 
-    /// Returned when the synchronous transport [`crate::ds::DeliveryService::send`]
+    /// Returned when the synchronous transport [`crate::ds::DeliveryService::publish`]
     /// reports failure (e.g. network unavailable, payload too large).
     #[error("Transport error: {0}")]
     Transport(#[from] DeliveryServiceError),

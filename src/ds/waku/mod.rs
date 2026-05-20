@@ -65,7 +65,7 @@ pub struct WakuStartResult {
 /// Use [`WakuDeliveryService::start`] to create an instance. Call
 /// [`shutdown`](WakuDeliveryService::shutdown) for explicit cleanup, or
 /// simply drop all clones to stop the background thread.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct WakuDeliveryService {
     outbound: mpsc::SyncSender<OutboundCommand>,
     subscribers: SubscriberList,
@@ -142,7 +142,7 @@ impl WakuDeliveryService {
 
     /// Explicitly shut down the background Waku node thread.
     ///
-    /// After calling this, all subsequent [`send`](DeliveryService::send) calls
+    /// After calling this, all subsequent [`publish`](DeliveryService::publish) calls
     /// will return an error. Alternatively, dropping all clones of this service
     /// achieves the same effect.
     pub fn shutdown(self) {
@@ -337,22 +337,18 @@ impl WakuDeliveryService {
     }
 }
 
-impl DeliveryService for WakuDeliveryService {
-    fn send(&self, pkt: OutboundPacket) -> Result<String, DeliveryServiceError> {
-        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-        self.outbound
-            .send(OutboundCommand {
-                pkt,
-                reply: reply_tx,
-            })
-            .map_err(|e| DeliveryServiceError::Other(anyhow::anyhow!(e)))?;
-
-        reply_rx
-            .recv()
-            .map_err(|e| DeliveryServiceError::Other(anyhow::anyhow!(e)))?
-    }
-
-    fn subscribe(&self) -> mpsc::Receiver<InboundPacket> {
+impl WakuDeliveryService {
+    /// Open a pull-style inbound channel. Internal Waku consumers (the
+    /// gateway's pubsub forwarder, integration tests) call this to receive
+    /// every packet the node delivers; libchat-style integrators that
+    /// route packets via [`DeliveryService::subscribe`] don't use this.
+    ///
+    /// Each call creates a new channel and registers its sender
+    /// internally. Senders are pruned on the next inbound dispatch tick
+    /// when the corresponding receiver has been dropped, so calling this
+    /// in a tight loop without dropping receivers leaks slots until
+    /// the next packet arrives.
+    pub fn inbound_receiver(&self) -> mpsc::Receiver<InboundPacket> {
         let (tx, rx) = mpsc::sync_channel(256);
         match self.subscribers.lock() {
             Ok(mut g) => g.push(tx),
@@ -361,5 +357,36 @@ impl DeliveryService for WakuDeliveryService {
             }
         }
         rx
+    }
+}
+
+impl DeliveryService for WakuDeliveryService {
+    type Error = DeliveryServiceError;
+
+    fn publish(&mut self, packet: OutboundPacket) -> Result<(), Self::Error> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.outbound
+            .send(OutboundCommand {
+                pkt: packet,
+                reply: reply_tx,
+            })
+            .map_err(|e| DeliveryServiceError::Other(anyhow::anyhow!(e)))?;
+
+        // Discard the transport-assigned message id — the libchat-shaped
+        // trait returns `Result<(), _>` and de-mls's callers don't use the
+        // id for anything load-bearing.
+        reply_rx
+            .recv()
+            .map_err(|e| DeliveryServiceError::Other(anyhow::anyhow!(e)))??;
+        Ok(())
+    }
+
+    fn subscribe(&mut self, _delivery_address: &str) -> Result<(), Self::Error> {
+        // The Waku node already accepts every packet on the configured
+        // pubsub topic; per-address routing is done downstream by the
+        // gateway's TopicFilter. Recording the address here would be
+        // structural — kept as a no-op so the trait still matches
+        // libchat's signature one-for-one.
+        Ok(())
     }
 }

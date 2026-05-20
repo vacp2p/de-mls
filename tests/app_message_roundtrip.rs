@@ -37,7 +37,8 @@ async fn chat_message_delivered_to_peer_as_app_message_event() {
 
     // Relay alice's outbound to bob.
     settle_for(Duration::from_millis(40)).await;
-    for p in users[0].1.drain_packets() {
+    let packets = users[0].1.lock().unwrap().drain_packets();
+    for p in packets {
         let _ = users[1].0.process_inbound_packet(to_inbound(&p)).await;
     }
 

@@ -20,7 +20,7 @@ use crate::{
         ConsensusPlugin, ConversationConfig, ConversationLifecycle, ConversationPluginsFactory,
         DefaultConsensusPlugin, PluginConsensus, ScoringConfig, StewardListConfig,
     },
-    ds::DeliveryService,
+    ds::SharedDeliveryService,
     identity::{Identity, WalletIdentity},
     mls_crypto::{KeyPackageBytes, MlsError},
 };
@@ -57,9 +57,10 @@ pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// as `Arc<[u8]>` so each `SessionRunner` cheaply shares it.
     pub(crate) app_id: Arc<[u8]>,
     /// Synchronous outbound transport. Cloned into each `SessionRunner` at
-    /// construction; sessions wrap [`DeliveryService::send`] in
-    /// `spawn_blocking` for use in async contexts.
-    pub(crate) transport: Arc<dyn DeliveryService>,
+    /// construction; sessions wrap [`crate::ds::DeliveryService::publish`]
+    /// in `spawn_blocking` for use in async contexts. Stored behind a
+    /// `Mutex` because the libchat-shape trait takes `&mut self`.
+    pub(crate) transport: SharedDeliveryService,
     /// All User-level plugin state: the per-conversation factory, the
     /// consensus context, the key-package provider, and the three default
     /// configs cloned into newly-created sessions.
@@ -156,7 +157,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     fn new_with_plugins(
         identity: &dyn Identity,
         plugins: UserPlugins<P, CP>,
-        transport: Arc<dyn DeliveryService>,
+        transport: SharedDeliveryService,
     ) -> Self {
         let self_identity: Arc<[u8]> = Arc::from(identity.identity_bytes());
         let identity_display: Arc<str> = Arc::from(identity.identity_display());
@@ -179,7 +180,7 @@ impl User<DefaultConsensusPlugin, DefaultConversationPluginsFactory> {
     /// Construct a `User` on [`DefaultConsensusPlugin`] with the default config.
     pub fn with_private_key(
         private_key: &str,
-        transport: Arc<dyn DeliveryService>,
+        transport: SharedDeliveryService,
     ) -> Result<Self, UserError> {
         Self::with_private_key_and_config(private_key, transport, ConversationConfig::default())
     }
@@ -191,7 +192,7 @@ impl User<DefaultConsensusPlugin, DefaultConversationPluginsFactory> {
     /// the signer.
     pub fn with_private_key_and_config(
         private_key: &str,
-        transport: Arc<dyn DeliveryService>,
+        transport: SharedDeliveryService,
         default_conversation_config: ConversationConfig,
     ) -> Result<Self, UserError> {
         let private_key_signer = PrivateKeySigner::from_str(private_key)?;

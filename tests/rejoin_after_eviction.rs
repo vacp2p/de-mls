@@ -143,7 +143,7 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
 async fn drive_one_round(
     users: &[(
         common::session_fixtures::TestUser,
-        std::sync::Arc<common::session_fixtures::CapturingTransport>,
+        common::session_fixtures::TransportHandle,
     )],
     target_idx: usize,
 ) {
@@ -161,7 +161,7 @@ async fn drive_one_round(
     }
     let mut packets = Vec::new();
     for (_, h) in users {
-        packets.extend(h.drain_packets());
+        packets.extend(h.lock().unwrap().drain_packets());
     }
     for p in &packets {
         for (u, _) in users {

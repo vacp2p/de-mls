@@ -202,20 +202,24 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ds::{DeliveryService, DeliveryServiceError, InboundPacket, OutboundPacket};
+    use crate::ds::{DeliveryService, DeliveryServiceError, OutboundPacket, SharedDeliveryService};
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    /// Transport stub: `send` is a no-op so an outbound never reaches a
-    /// real network; `subscribe` returns a dangling receiver.
+    /// Transport stub: `publish` is a no-op so an outbound never reaches a
+    /// real network; `subscribe` is a no-op too.
+    #[derive(Debug)]
     struct NullTransport;
     impl DeliveryService for NullTransport {
-        fn send(&self, _: OutboundPacket) -> Result<String, DeliveryServiceError> {
-            Ok("noop".into())
+        type Error = DeliveryServiceError;
+
+        fn publish(&mut self, _: OutboundPacket) -> Result<(), Self::Error> {
+            Ok(())
         }
-        fn subscribe(&self) -> std::sync::mpsc::Receiver<InboundPacket> {
-            let (_tx, rx) = std::sync::mpsc::channel();
-            rx
+
+        fn subscribe(&mut self, _delivery_address: &str) -> Result<(), Self::Error> {
+            Ok(())
         }
     }
 
@@ -225,7 +229,7 @@ mod tests {
     /// against a conversation we've left.
     #[tokio::test]
     async fn finalize_self_leave_cancels_registered_auto_votes() {
-        let transport: Arc<dyn DeliveryService> = Arc::new(NullTransport);
+        let transport: SharedDeliveryService = Arc::new(Mutex::new(NullTransport));
         let mut user = User::with_private_key(ALICE_KEY, transport).unwrap();
         user.start_conversation("test-conv", true).await.unwrap();
 

@@ -63,8 +63,8 @@ async fn steward_inactivity_fires_commit_candidate() {
         poll_once(&alice_session).await;
         poll_once(&bob_session).await;
 
-        let new_alice = alice_tx.drain_packets();
-        let new_bob = bob_tx.drain_packets();
+        let new_alice = alice_tx.lock().unwrap().drain_packets();
+        let new_bob = bob_tx.lock().unwrap().drain_packets();
         for p in &new_alice {
             let _ = users[1].0.process_inbound_packet(to_inbound(p)).await;
         }

@@ -65,8 +65,8 @@ async fn freeze_cycle_emits_phase_events_in_order() {
         poll_once(&bob_session).await;
 
         let mut packets = Vec::new();
-        packets.extend(alice_tx.drain_packets());
-        packets.extend(bob_tx.drain_packets());
+        packets.extend(alice_tx.lock().unwrap().drain_packets());
+        packets.extend(bob_tx.lock().unwrap().drain_packets());
         for p in &packets {
             let _ = users[0].0.process_inbound_packet(to_inbound(p)).await;
             let _ = users[1].0.process_inbound_packet(to_inbound(p)).await;

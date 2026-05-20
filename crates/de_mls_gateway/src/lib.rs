@@ -13,13 +13,13 @@ pub mod handler;
 
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, atomic::AtomicBool},
+    sync::{Arc, Mutex as StdMutex, atomic::AtomicBool},
 };
 
 use de_mls::{
     app::User,
     core::DefaultConsensusPlugin,
-    ds::{DeliveryService, WakuDeliveryService},
+    ds::{DeliveryService, SharedDeliveryService, WakuDeliveryService},
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
@@ -168,9 +168,10 @@ impl Gateway<WakuDeliveryService> {
         let core = self.core();
 
         // Hand the Waku delivery service directly to `User` as its transport.
-        // `WakuDeliveryService` implements `de_mls::ds::DeliveryService`.
-        let transport: Arc<dyn de_mls::ds::DeliveryService> =
-            Arc::new(core.app_state.delivery.clone());
+        // `WakuDeliveryService` implements `DeliveryService`. Wrap in a std
+        // `Mutex` because the libchat-shape trait takes `&mut self`.
+        let transport: SharedDeliveryService =
+            Arc::new(StdMutex::new(core.app_state.delivery.clone()));
 
         let user = User::with_private_key(private_key.as_str(), transport)?;
 

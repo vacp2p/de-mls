@@ -35,20 +35,20 @@ pub(crate) fn make_test_consensus_service() -> PluginConsensus<DefaultConsensusP
     )
 }
 
-/// Transport stub for tests. `send` is unreachable (tests should never push
-/// outbound), and `subscribe` returns a disconnected receiver.
+/// Transport stub for tests. `publish` is unreachable (tests should never
+/// push outbound) and `subscribe` is a no-op.
+#[derive(Debug)]
 pub(crate) struct UnusedTransport;
 
 impl crate::ds::DeliveryService for UnusedTransport {
-    fn send(
-        &self,
-        _: crate::ds::OutboundPacket,
-    ) -> Result<String, crate::ds::DeliveryServiceError> {
-        unreachable!("UnusedTransport::send called")
+    type Error = crate::ds::DeliveryServiceError;
+
+    fn publish(&mut self, _: crate::ds::OutboundPacket) -> Result<(), Self::Error> {
+        unreachable!("UnusedTransport::publish called")
     }
-    fn subscribe(&self) -> std::sync::mpsc::Receiver<crate::ds::InboundPacket> {
-        let (_tx, rx) = std::sync::mpsc::channel();
-        rx
+
+    fn subscribe(&mut self, _delivery_address: &str) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 

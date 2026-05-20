@@ -26,16 +26,22 @@ use crate::{
 };
 
 /// Free helper that wraps the synchronous
-/// [`crate::ds::DeliveryService::send`] in `spawn_blocking`. Available so
-/// callers can hold the runner lock just long enough to clone the
+/// [`crate::ds::DeliveryService::publish`] in `spawn_blocking`. Available
+/// so callers can hold the runner lock just long enough to clone the
 /// transport, then `await` the send without the guard alive.
 pub(crate) async fn send_packet(
-    transport: &Arc<dyn crate::ds::DeliveryService>,
+    transport: &crate::ds::SharedDeliveryService,
     packet: crate::ds::OutboundPacket,
-) -> Result<String, crate::app::UserError> {
+) -> Result<(), crate::app::UserError> {
     let transport = Arc::clone(transport);
-    let send_result = spawn_blocking(move || transport.send(packet)).await?;
-    Ok(send_result?)
+    spawn_blocking(move || -> Result<(), crate::app::UserError> {
+        transport
+            .lock()
+            .map_err(|_| crate::app::UserError::LockPoisoned("transport"))?
+            .publish(packet)?;
+        Ok(())
+    })
+    .await?
 }
 
 /// Default capacity for a session's [`SessionEvent`] broadcast channel.
@@ -70,9 +76,9 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     pub(crate) auto_vote_timers: AutoVoteTimers,
     /// Synchronous outbound transport (cloned from `User`). Per-session
     /// methods reach this via [`Self::transport`] and route through
-    /// [`send_packet`], which wraps [`crate::ds::DeliveryService::send`]
+    /// [`send_packet`], which wraps [`crate::ds::DeliveryService::publish`]
     /// in `spawn_blocking`.
-    transport: Arc<dyn crate::ds::DeliveryService>,
+    transport: crate::ds::SharedDeliveryService,
     /// Cached identity bytes (cloned from `User`). Used by per-session
     /// methods that need the local identity without re-walking the
     /// `Identity` trait.
@@ -107,7 +113,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         scoring: CP::Scoring,
         steward_list: CP::StewardList,
         consensus: PluginConsensus<P>,
-        transport: Arc<dyn crate::ds::DeliveryService>,
+        transport: crate::ds::SharedDeliveryService,
         self_identity: Arc<[u8]>,
         identity_display: Arc<str>,
         app_id: Arc<[u8]>,
@@ -150,7 +156,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Borrow the session's transport without taking the runner lock —
     /// callers that need to send while holding the runner lock briefly can
     /// clone this and pass it to [`send_packet`] after dropping the guard.
-    pub(crate) fn transport(&self) -> &Arc<dyn crate::ds::DeliveryService> {
+    pub(crate) fn transport(&self) -> &crate::ds::SharedDeliveryService {
         &self.transport
     }
 
@@ -298,7 +304,7 @@ mod tests {
             StubScoring,
             StubStewardList::member(),
             make_test_consensus_service(),
-            Arc::new(crate::test_fixtures::UnusedTransport),
+            Arc::new(Mutex::new(crate::test_fixtures::UnusedTransport)),
             Arc::from(&b"test-identity"[..]),
             Arc::from("0xtest-display"),
             Arc::from(&[0u8; 16][..]),
@@ -318,7 +324,7 @@ mod tests {
             StubScoring,
             StubStewardList::member(),
             make_test_consensus_service(),
-            Arc::new(crate::test_fixtures::UnusedTransport),
+            Arc::new(Mutex::new(crate::test_fixtures::UnusedTransport)),
             Arc::from(&b"test-identity"[..]),
             Arc::from("0xtest-display"),
             Arc::from(&[0u8; 16][..]),

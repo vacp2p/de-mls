@@ -9,38 +9,38 @@ use std::time::Duration;
 
 use de_mls::app::{ConversationConfig, SessionRunner, User};
 use de_mls::core::{DefaultConsensusPlugin, StewardListConfig};
-use de_mls::ds::{DeliveryService, DeliveryServiceError, InboundPacket, OutboundPacket};
+use de_mls::ds::{
+    DeliveryService, DeliveryServiceError, InboundPacket, OutboundPacket, SharedDeliveryService,
+};
 
 /// Test-only transport: captures every outbound packet for later inspection
-/// instead of sending it. `subscribe()` returns a dangling receiver so the
-/// blocking-channel half goes nowhere (tests deliver inbound by calling
-/// `process_inbound_packet` directly).
-#[derive(Clone)]
+/// instead of sending it. `subscribe` is a no-op — tests deliver inbound
+/// by calling `process_inbound_packet` directly.
+#[derive(Debug, Default)]
 struct H {
-    packets: Arc<Mutex<Vec<OutboundPacket>>>,
+    packets: Vec<OutboundPacket>,
 }
 
 impl H {
-    fn new() -> Self {
-        Self {
-            packets: Arc::new(Mutex::new(Vec::new())),
-        }
+    fn handle() -> Arc<Mutex<Self>> {
+        Arc::new(Mutex::new(Self::default()))
     }
-    fn drain_packets(&self) -> Vec<OutboundPacket> {
-        std::mem::take(&mut *self.packets.lock().unwrap())
+
+    fn drain_packets(&mut self) -> Vec<OutboundPacket> {
+        std::mem::take(&mut self.packets)
     }
 }
 
 impl DeliveryService for H {
-    fn send(&self, pkt: OutboundPacket) -> Result<String, DeliveryServiceError> {
-        self.packets.lock().unwrap().push(pkt);
-        Ok("ok".into())
+    type Error = DeliveryServiceError;
+
+    fn publish(&mut self, packet: OutboundPacket) -> Result<(), Self::Error> {
+        self.packets.push(packet);
+        Ok(())
     }
-    fn subscribe(&self) -> std::sync::mpsc::Receiver<InboundPacket> {
-        // Inbound is delivered explicitly via `process_inbound_packet` in
-        // these tests; the receiver is never polled.
-        let (_tx, rx) = std::sync::mpsc::channel();
-        rx
+
+    fn subscribe(&mut self, _delivery_address: &str) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 
@@ -51,9 +51,10 @@ const DAVE_KEY: &str = "7c852118294e51e653712a81e05800f419141751be58f605c371e151
 
 type TU = User<DefaultConsensusPlugin, de_mls::app::DefaultConversationPluginsFactory>;
 
-fn make(key: &str, cfg: ConversationConfig, steward_cfg: StewardListConfig) -> (TU, H) {
-    let h = H::new();
-    let mut u = User::with_private_key_and_config(key, Arc::new(h.clone()), cfg).unwrap();
+fn make(key: &str, cfg: ConversationConfig, steward_cfg: StewardListConfig) -> (TU, Arc<Mutex<H>>) {
+    let h = H::handle();
+    let mut u =
+        User::with_private_key_and_config(key, h.clone() as SharedDeliveryService, cfg).unwrap();
     u.set_default_steward_list_config(steward_cfg);
     (u, h)
 }
@@ -116,7 +117,7 @@ async fn concurrent_joins_leave_joiners_with_empty_buffer() {
     // Each joiner receives its own KP + the others'. Alice receives all three.
     let mut all_kp_packets = vec![];
     for h in [&bh, &ch, &dh] {
-        all_kp_packets.extend(h.drain_packets());
+        all_kp_packets.extend(h.lock().unwrap().drain_packets());
     }
     for p in &all_kp_packets {
         let _ = alice.process_inbound_packet(to_in(p)).await;
