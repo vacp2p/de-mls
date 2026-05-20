@@ -42,7 +42,7 @@
 mod credentials;
 mod error;
 mod service;
-pub mod storage;
+mod storage;
 mod types;
 
 pub use credentials::MlsCredentials;

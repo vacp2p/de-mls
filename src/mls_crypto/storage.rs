@@ -1,9 +1,11 @@
-//! Storage abstraction for DE-MLS persistence.
-//!
+//! Storage abstraction for DE-MLS persistence. The reference in-memory
+//! backend lives in [`crate::defaults`]; integrators with persistence
+//! requirements implement their own.
 
-use openmls_traits::storage::StorageProvider;
 use std::error::Error;
 use std::sync::Arc;
+
+use openmls_traits::storage::StorageProvider;
 
 use crate::mls_crypto::MlsError;
 
