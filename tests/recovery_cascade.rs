@@ -4,11 +4,14 @@
 //! prevention so a future-steward member doesn't propose Adds for
 //! already-joined identities.
 
+mod common;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use de_mls::app::{ConversationConfig, SessionRunner, User};
-use de_mls::core::{DefaultConsensusPlugin, StewardListConfig};
+use de_mls::core::StewardListConfig;
+use de_mls::defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory};
 use de_mls::ds::{
     DeliveryService, DeliveryServiceError, InboundPacket, OutboundPacket, SharedDeliveryService,
 };
@@ -49,12 +52,11 @@ const BOB_KEY: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6
 const CHARLIE_KEY: &str = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
 const DAVE_KEY: &str = "7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6";
 
-type TU = User<DefaultConsensusPlugin, de_mls::app::DefaultConversationPluginsFactory>;
+type TU = User<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
 
 fn make(key: &str, cfg: ConversationConfig, steward_cfg: StewardListConfig) -> (TU, Arc<Mutex<H>>) {
     let h = H::handle();
-    let mut u =
-        User::with_private_key_and_config(key, h.clone() as SharedDeliveryService, cfg).unwrap();
+    let mut u = common::wallet::user_from_private_key(key, h.clone() as SharedDeliveryService, cfg);
     u.set_default_steward_list_config(steward_cfg);
     (u, h)
 }

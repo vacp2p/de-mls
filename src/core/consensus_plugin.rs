@@ -3,15 +3,12 @@
 //! today; per-conversation consensus is on the roadmap and will expand
 //! this surface. The concrete consensus service type is derived via
 //! [`PluginConsensus<P>`] — the voting algorithm itself is fixed.
-//! [`DefaultConsensusPlugin`] uses in-memory backends for tests and
-//! simple deployments.
+//!
+//! Reference impl: [`crate::defaults::DefaultConsensusPlugin`].
 
 use hashgraph_like_consensus::{
-    events::{BroadcastEventBus, ConsensusEventBus},
-    scope::ConsensusScope,
-    service::ConsensusService,
-    signing::{ConsensusSignatureScheme, EthereumConsensusSigner},
-    storage::{ConsensusStorage, InMemoryConsensusStorage},
+    events::ConsensusEventBus, scope::ConsensusScope, service::ConsensusService,
+    signing::ConsensusSignatureScheme, storage::ConsensusStorage,
 };
 
 /// User-level consensus backend bundle. Carries the four types the
@@ -30,7 +27,8 @@ pub trait ConsensusPlugin: 'static {
     type EventBus: ConsensusEventBus<Self::Scope> + 'static;
 
     /// Signature scheme for authenticating votes (default:
-    /// [`EthereumConsensusSigner`]). All peers on a network must agree.
+    /// [`hashgraph_like_consensus::signing::EthereumConsensusSigner`]).
+    /// All peers on a network must agree.
     type Signer: ConsensusSignatureScheme + Clone + 'static;
 
     /// Build a fresh storage handle. Called once at `User` init; the handle
@@ -53,21 +51,3 @@ pub type PluginConsensus<P> = ConsensusService<
     <P as ConsensusPlugin>::EventBus,
     <P as ConsensusPlugin>::Signer,
 >;
-
-/// In-memory consensus plug-in suitable for tests and simple deployments.
-pub struct DefaultConsensusPlugin;
-
-impl ConsensusPlugin for DefaultConsensusPlugin {
-    type Scope = String;
-    type ConsensusStorage = InMemoryConsensusStorage<String>;
-    type EventBus = BroadcastEventBus<String>;
-    type Signer = EthereumConsensusSigner;
-
-    fn new_storage() -> Self::ConsensusStorage {
-        InMemoryConsensusStorage::new()
-    }
-
-    fn new_event_bus() -> Self::EventBus {
-        BroadcastEventBus::default()
-    }
-}

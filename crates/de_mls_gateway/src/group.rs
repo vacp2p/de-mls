@@ -1,3 +1,7 @@
+use std::str::FromStr;
+
+use alloy::primitives::Address;
+
 use de_mls::{
     app::{DispatchOutcome, FreezeTimeoutStatus, PendingJoinTick, SessionRunner, UserError},
     ds::WakuDeliveryService,
@@ -29,9 +33,7 @@ fn is_polling_fatal(err: &UserError) -> bool {
         | UserError::Consensus(_)
         | UserError::Message(_)
         | UserError::SystemTime(_)
-        | UserError::Signer(_)
-        | UserError::Mls(_)
-        | UserError::Identity(_) => false,
+        | UserError::Mls(_) => false,
     }
 }
 
@@ -251,8 +253,10 @@ impl Gateway<WakuDeliveryService> {
         let user_ref = self.user()?;
         let session = lookup_session(&user_ref, &conversation_name).await?;
 
+        let target = Address::from_str(user_to_ban.trim())
+            .map_err(|e| anyhow::anyhow!("invalid ban target address {user_to_ban:?}: {e}"))?;
         let ban_request = BanRequest {
-            user_to_ban: user_to_ban.clone(),
+            user_to_ban: target.as_slice().to_vec(),
             conversation_name: conversation_name.clone(),
         };
 

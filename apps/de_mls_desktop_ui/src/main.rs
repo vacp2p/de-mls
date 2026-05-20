@@ -10,13 +10,14 @@ use std::{
     },
 };
 
-use de_mls::{
-    app::format_conversation_request,
-    identity::parse_wallet_address,
-    protos::de_mls::messages::v1::{ConversationMessage, ConversationUpdateRequest, VotePayload},
+use std::str::FromStr;
+
+use alloy::primitives::Address;
+use de_mls::protos::de_mls::messages::v1::{
+    ConversationMessage, ConversationUpdateRequest, VotePayload,
 };
 use de_mls_gateway::{GATEWAY, bootstrap_core_from_env};
-use de_mls_ui_protocol::v1::{AppCmd, AppEvent, MemberInfo};
+use de_mls_ui_protocol::v1::{AppCmd, AppEvent, MemberInfo, format_conversation_request};
 use dioxus::prelude::*;
 use dioxus_desktop::{Config, LogicalSize, WindowBuilder, launch::launch as desktop_launch};
 use hashgraph_like_consensus::types::ConsensusEvent;
@@ -879,10 +880,10 @@ fn ChatSection() -> Element {
     let submit_ban_request = {
         move |_| {
             let raw = ban_address.read().to_string();
-            let target = match parse_wallet_address(&raw) {
-                Ok(addr) => addr.to_string(),
+            let target = match Address::from_str(raw.trim()) {
+                Ok(addr) => addr.to_checksum(None),
                 Err(err) => {
-                    ban_error.set(Some(err.to_string()));
+                    ban_error.set(Some(format!("Invalid wallet address: {err}")));
                     return;
                 }
             };

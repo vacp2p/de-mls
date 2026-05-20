@@ -18,7 +18,6 @@ use crate::{
         ProcessResult, StewardListPlugin,
     },
     ds::{APP_MSG_SUBTOPIC, InboundPacket, WELCOME_SUBTOPIC},
-    identity::ShortId,
     mls_crypto::{MlsService, key_package_bytes_from_json},
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, InviteMember, WelcomeMessage, conversation_update_request,
@@ -123,7 +122,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 if already_member {
                     info!(
                         conversation = conversation_name,
-                        identity = %ShortId::new(&identity),
+                        identity = ?identity,
                         "key package skipped: already a member"
                     );
                     return Ok(());
@@ -131,7 +130,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
                 info!(
                     conversation = conversation_name,
-                    identity = %ShortId::new(&identity),
+                    identity = ?identity,
                     "key package received"
                 );
 
@@ -206,6 +205,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::ds::{DeliveryService, DeliveryServiceError, OutboundPacket, SharedDeliveryService};
+    use crate::test_fixtures::make_user_from_private_key;
 
     /// Transport stub: `publish` is a no-op so an outbound never reaches a
     /// real network; `subscribe` is a no-op too.
@@ -233,7 +233,7 @@ mod tests {
     #[tokio::test]
     async fn finalize_self_leave_clears_pending_auto_votes() {
         let transport: SharedDeliveryService = Arc::new(Mutex::new(NullTransport));
-        let mut user = User::with_private_key(ALICE_KEY, transport).unwrap();
+        let mut user = make_user_from_private_key(ALICE_KEY, transport);
         user.start_conversation("test-conv", true).await.unwrap();
 
         let session = user

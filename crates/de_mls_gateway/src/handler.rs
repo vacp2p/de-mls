@@ -12,12 +12,11 @@ use std::sync::Arc;
 use futures::channel::mpsc::UnboundedSender;
 
 use de_mls::{
-    app::format_conversation_request,
     core::SessionEvent,
     ds::TopicFilter,
     protos::de_mls::messages::v1::{AppMessage, ConversationMessage, app_message},
 };
-use de_mls_ui_protocol::v1::AppEvent;
+use de_mls_ui_protocol::v1::{AppEvent, format_conversation_request};
 
 use crate::{EpochHistoryStore, MAX_EPOCH_HISTORY, forwarder::display_batch};
 

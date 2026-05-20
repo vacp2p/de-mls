@@ -19,7 +19,17 @@ documentation = "https://docs.rs/de-mls"
 readme = "README.md"
 keywords = ["mls", "e2ee", "decentralized", "consensus", "group-messaging"]
 categories = ["cryptography", "network-programming"]
-exclude = ["logos-messaging-nim/", "libs/", "apps/", "examples/", ".github/"]
+exclude = [
+    "logos-messaging-nim/",
+    "libs/",
+    "apps/",
+    "crates/",
+    "examples/",
+    "tests/",
+    ".github/",
+    ".cargo/",
+    "Makefile",
+]
 
 [features]
 default = []
@@ -30,15 +40,6 @@ openmls = "0.8.1"
 openmls_basic_credential = "0.5.0"
 openmls_rust_crypto = "0.5.0"
 openmls_traits = "0.5.0"
-
-alloy = { version = "1.0.37", features = [
-    "providers",
-    "node-bindings",
-    "network",
-    "transports",
-    "k256",
-    "signer-local",
-] }
 
 base64 = { version = "0.22", optional = true }
 
@@ -57,6 +58,12 @@ hashgraph-like-consensus = "0.4.0"
 
 [dev-dependencies]
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "time"] }
+# Wallet-flavoured identity used by the integration test fixtures and the
+# desktop gateway. The library itself is identity-agnostic and has no
+# direct alloy dependency.
+alloy = { version = "1.0.37", default-features = false, features = [
+    "signer-local",
+] }
 
 [build-dependencies]
 prost-build = "0.13.5"

@@ -80,15 +80,13 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// methods reach this via [`Self::transport`] and route through
     /// [`send_packet`], a direct sync publish.
     transport: SharedDeliveryService,
-    /// Cached identity bytes (cloned from `User`). Used by per-session
-    /// methods that need the local identity without re-walking the
-    /// `Identity` trait.
+    /// Identity bytes derived from `User.identity.identity_bytes()` at
+    /// session construction. Stored as `Arc<[u8]>` so hot-path session
+    /// code can clone the handle cheaply across lock-guard drops.
     pub(crate) self_identity: Arc<[u8]>,
-    /// Cached display form of the local identity (e.g. checksummed `0x…`
-    /// hex). Stable for the lifetime of the runner; populated at
-    /// construction from `User.identity.identity_display()`. Used by
-    /// session methods (`send_app_message`) that need the `sender` field
-    /// without re-walking the `Identity` trait + allocating each call.
+    /// Display form derived from `User.identity.identity_display()` at
+    /// session construction. `Arc<str>` for the same reason as
+    /// `self_identity` — cheap clone across guard boundaries.
     pub(crate) identity_display: Arc<str>,
     /// Per-User instance UUID (cloned from `User`). Tagged on every
     /// outbound packet for self-message filtering.
@@ -313,7 +311,8 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::core::{Conversation, DefaultConsensusPlugin};
+    use crate::core::Conversation;
+    use crate::defaults::DefaultConsensusPlugin;
     use crate::test_fixtures::{
         StubPluginsFactory, StubScoring, StubStewardList, UnusedMls, make_test_consensus_service,
     };

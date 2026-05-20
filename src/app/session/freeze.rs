@@ -14,12 +14,11 @@ use std::sync::{Arc, RwLock};
 
 use tracing::{error, info};
 
-use super::DispatchOutcome;
-use super::lock::LockExt;
-use super::runner::send_packet;
-
 use crate::{
-    app::{ConversationState, FreezeTimeoutStatus, SessionRunner, UserError},
+    app::{
+        ConversationState, DispatchOutcome, FreezeTimeoutStatus, LockExt, SessionRunner, UserError,
+        session::runner::send_packet,
+    },
     core::{
         ConsensusPlugin, ConversationPluginsFactory, FreezeFinalizeResult, FreezeOutcome,
         PeerScoringEvent, PeerScoringPlugin, ScoreEvent, ScoreOp, SessionEvent, StewardListPlugin,

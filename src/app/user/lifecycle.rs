@@ -106,8 +106,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             steward_list,
             consensus,
             Arc::clone(&self.transport),
-            Arc::from(self.self_identity.as_slice()),
-            Arc::from(self.identity_display.as_str()),
+            Arc::from(self.identity.identity_bytes()),
+            Arc::from(self.identity.identity_display()),
             Arc::from(self.app_id.as_slice()),
         )));
         {

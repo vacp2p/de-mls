@@ -1,13 +1,8 @@
-//! Display helpers for rendering protobuf types in the UI.
-
 use std::fmt;
 
-use crate::{
-    identity::format_wallet_address,
-    protos::de_mls::messages::v1::{
-        ConversationUpdateRequest, ViolationEvidence, ViolationType, app_message,
-        conversation_update_request,
-    },
+use crate::protos::de_mls::messages::v1::{
+    ConversationUpdateRequest, ViolationEvidence, ViolationType, app_message,
+    conversation_update_request,
 };
 
 // ─────────────────────────── Member Role ───────────────────────────
@@ -108,47 +103,4 @@ impl ViolationEvidence {
             _ => "Unknown Violation",
         }
     }
-}
-
-// ─────────────────────────── Request Display ───────────────────────────
-
-/// Wallet address for membership / emergency-evidence targets, or
-/// `"epoch E | s1, s2, ..."` for elections (with `, retry R` appended
-/// when `R > 0`). `"unknown"` otherwise.
-pub fn format_conversation_request_target(request: &ConversationUpdateRequest) -> String {
-    match &request.payload {
-        Some(conversation_update_request::Payload::InviteMember(im)) => {
-            format_wallet_address(&im.identity)
-        }
-        Some(conversation_update_request::Payload::RemoveMember(rm)) => {
-            format_wallet_address(&rm.identity)
-        }
-        Some(conversation_update_request::Payload::EmergencyCriteria(ec)) => ec
-            .evidence
-            .as_ref()
-            .map(|e| format_wallet_address(&e.target_member_id))
-            .unwrap_or_else(|| "unknown".to_string()),
-        Some(conversation_update_request::Payload::StewardElection(se)) => {
-            let stewards: Vec<String> = se
-                .proposed_stewards
-                .iter()
-                .map(|s| format_wallet_address(s))
-                .collect();
-            let meta = if se.retry_round == 0 {
-                format!("epoch {}", se.election_epoch)
-            } else {
-                format!("epoch {}, retry {}", se.election_epoch, se.retry_round)
-            };
-            format!("{} | {}", meta, stewards.join(", "))
-        }
-        _ => "unknown".to_string(),
-    }
-}
-
-/// `(action, target)` pair suitable for UI rendering.
-pub fn format_conversation_request(request: &ConversationUpdateRequest) -> (String, String) {
-    (
-        request.message_type().to_string(),
-        format_conversation_request_target(request),
-    )
 }

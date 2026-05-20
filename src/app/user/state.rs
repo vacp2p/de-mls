@@ -4,24 +4,19 @@
 
 use std::{
     collections::HashMap,
-    str::FromStr,
     sync::{Arc, Mutex, RwLock},
 };
 
-use alloy::signers::local::PrivateKeySigner;
-
 use crate::{
-    app::{SessionRunner, UserError},
+    app::{SessionRunner, UserError, UserPlugins},
     core::{
-        ConsensusPlugin, ConversationConfig, ConversationLifecycle, ConversationPluginsFactory,
-        DefaultConsensusPlugin, PluginConsensus, ScoringConfig, StewardListConfig,
+        ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, PluginConsensus,
+        ScoringConfig, StewardListConfig,
     },
     ds::SharedDeliveryService,
-    identity::{Identity, WalletIdentity},
+    identity::Identity,
     mls_crypto::{KeyPackageBytes, MlsError},
 };
-
-use super::plugins::{DefaultConversationPluginsFactory, UserPlugins};
 
 /// Single registry entry: one `Arc<RwLock<SessionRunner>>` per conversation.
 /// Cloned out of the registry under the outer read lock, then locked
@@ -34,15 +29,12 @@ pub type SessionEntry<P, CP> = Arc<RwLock<SessionRunner<P, CP>>>;
 pub(crate) type ConversationRegistry<P, CP> = RwLock<HashMap<String, SessionEntry<P, CP>>>;
 
 pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
-    /// `identity.identity_bytes()` materialised once at construction so every
-    /// method that needs the local identity bytes reads them without
-    /// re-walking the `Identity` trait + allocating a fresh `Vec`.
-    pub(crate) self_identity: Vec<u8>,
-    /// Cached display form of the local identity (e.g. checksummed `0x…`
-    /// hex). Cloned into each `SessionRunner` so per-session methods
-    /// (`send_app_message`) can tag the `sender` field without re-walking
-    /// the `Identity` trait + allocating each call.
-    pub(crate) identity_display: String,
+    /// Local identity, set once at construction and read-only thereafter.
+    /// Accessed via the [`Identity`] trait wherever bytes or display
+    /// form are needed; per-session cached `Arc<[u8]>` + `Arc<str>` are
+    /// extracted from it at [`SessionRunner`] construction in
+    /// [`super::lifecycle`].
+    pub(crate) identity: Box<dyn Identity>,
     /// Per-instance UUID embedded in every outbound packet. Inbound packets
     /// carrying our `app_id` are self-echoes and silently dropped.
     pub(crate) app_id: Vec<u8>,
@@ -67,9 +59,11 @@ pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
 // ── Public API ──────────────────────────────────────────────────────────
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
-    /// Wallet address as checksummed hex.
+    /// Display form of the local identity, derived from
+    /// [`Identity::identity_display`]. Stable for the lifetime of the
+    /// `User`; intended for logs and UI.
     pub fn identity_string(&self) -> String {
-        self.identity_display.clone()
+        self.identity.identity_display().to_string()
     }
 
     /// Generate a single-use key package for our identity. Conversation-free —
@@ -109,9 +103,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 // ── User-internal helpers ───────────────────────────────────────────────
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
-    /// Borrow the local identity bytes. Cached at construction; cheap to call.
+    /// Borrow the local identity bytes via the [`Identity`] trait.
     pub(crate) fn self_identity(&self) -> &[u8] {
-        &self.self_identity
+        self.identity.identity_bytes()
     }
 
     /// Append a [`ConversationLifecycle`] event to the pending-events buffer
@@ -147,59 +141,18 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         Ok(())
     }
 
-    /// Build a `User` from a derived `Identity` + plug-in bundle. The
-    /// identity is consumed only for its bytes + display form; nothing
-    /// retains the trait object after construction.
-    fn new_with_plugins(
-        identity: &dyn Identity,
+    pub fn new_with_plugins(
+        identity: Box<dyn Identity>,
         plugins: UserPlugins<P, CP>,
         transport: SharedDeliveryService,
     ) -> Self {
-        let self_identity = identity.identity_bytes().to_vec();
-        let identity_display = identity.identity_display().to_string();
         Self {
-            self_identity,
-            identity_display,
+            identity,
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
             transport,
             plugins,
             conversations: RwLock::new(HashMap::new()),
             pending_lifecycle_events: Mutex::new(Vec::new()),
         }
-    }
-}
-
-// ── DefaultConsensusPlugin Convenience ──────────────────────────────────
-
-impl User<DefaultConsensusPlugin, DefaultConversationPluginsFactory> {
-    /// Construct a `User` on [`DefaultConsensusPlugin`] with the default config.
-    pub fn with_private_key(
-        private_key: &str,
-        transport: SharedDeliveryService,
-    ) -> Result<Self, UserError> {
-        Self::with_private_key_and_config(private_key, transport, ConversationConfig::default())
-    }
-
-    /// Construct a `User` on [`DefaultConsensusPlugin`] with a custom config.
-    /// The user-level consensus storage + signer are derived from the private
-    /// key; per-conversation `ConsensusService` instances are minted at
-    /// conversation creation time, sharing the storage handle and cloning
-    /// the signer.
-    pub fn with_private_key_and_config(
-        private_key: &str,
-        transport: SharedDeliveryService,
-        default_conversation_config: ConversationConfig,
-    ) -> Result<Self, UserError> {
-        let private_key_signer = PrivateKeySigner::from_str(private_key)?;
-        let user_address = private_key_signer.address();
-
-        let identity = WalletIdentity::from_wallet(user_address);
-        let plugins = UserPlugins::<DefaultConsensusPlugin, _>::default_for_wallet(
-            &identity,
-            private_key_signer,
-            default_conversation_config,
-        )?;
-
-        Ok(Self::new_with_plugins(&identity, plugins, transport))
     }
 }

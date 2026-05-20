@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use de_mls::app::{CreatorVote, DispatchOutcome, SessionRunner};
 use de_mls::core::{ConversationState, StewardListConfig};
-use de_mls::identity::parse_wallet_to_bytes;
+use de_mls::identity::Identity;
 use de_mls::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, RemoveMember, conversation_update_request,
 };
@@ -59,7 +59,9 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
         .0;
 
     // Phase 1: removal.
-    let target_id = parse_wallet_to_bytes(&users[target_idx].0.identity_string()).unwrap();
+    let target_id = common::WalletIdentity::from_hex(&users[target_idx].0.identity_string())
+        .identity_bytes()
+        .to_vec();
     let request = ConversationUpdateRequest {
         payload: Some(conversation_update_request::Payload::RemoveMember(
             RemoveMember {
@@ -133,11 +135,8 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
         .unwrap()
         .get_conversation_members()
         .unwrap();
-    let target_display = users[target_idx].0.identity_string().to_lowercase();
     assert!(
-        steward_members
-            .iter()
-            .any(|m| m.to_lowercase() == target_display),
+        steward_members.iter().any(|m| m == &target_id),
         "steward must see the rejoined identity in its member list, got {steward_members:?}"
     );
 }

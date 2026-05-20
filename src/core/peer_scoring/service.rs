@@ -4,9 +4,10 @@
 
 use std::collections::HashMap;
 
-use super::plugin::PeerScoringPlugin;
-use super::storage::PeerScoreStorage;
-use super::types::{PeerScoringEvent, ScoreEvent, ScoreOp, ScoreSnapshot, ScoringConfig};
+use crate::core::{
+    PeerScoreStorage, PeerScoringEvent, PeerScoringPlugin, ScoreEvent, ScoreOp, ScoreSnapshot,
+    ScoringConfig,
+};
 
 /// Per-conversation, per-member score tracker. Reference [`PeerScoringPlugin`]
 /// implementation. One instance per conversation; threshold travels with

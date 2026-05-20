@@ -18,19 +18,20 @@ use hashgraph_like_consensus::protos::consensus::v1::Proposal;
 use prost::Message;
 use tracing::{error, info};
 
-use super::consensus::build_vote_banner_event;
-use super::consensus_bridge::{forward_incoming_proposal, forward_incoming_vote};
-use super::lock::LockExt;
-use super::runner::send_packet;
-
 use crate::{
-    app::{ConversationState, SessionRunner, UserError},
+    app::{
+        ConversationState, LockExt, SessionRunner, UserError,
+        session::{
+            consensus::build_vote_banner_event,
+            consensus_bridge::{forward_incoming_proposal, forward_incoming_vote},
+            runner::send_packet,
+        },
+    },
     core::{
         ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin, ProcessResult,
         ProposalKind, ScoreSnapshot, SessionEvent, StewardList, StewardListConfig,
         StewardListPlugin, member_set,
     },
-    identity::ShortId,
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationMessage, ConversationSync, ConversationUpdateRequest, TimingConfig,
@@ -333,7 +334,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let conv_name = arc.read_or_err("session")?.conversation_name.clone();
             tracing::debug!(
                 conversation = %conv_name,
-                steward = %ShortId::new(steward),
+                steward = ?steward,
                 "candidate received from peer steward"
             );
         }

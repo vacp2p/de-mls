@@ -3,13 +3,12 @@
 
 use std::sync::{Arc, RwLock};
 
-use super::lock::LockExt;
-use super::runner::send_packet;
-
 use crate::{
-    app::{ConversationState, CreatorVote, SessionRunner, UserError},
+    app::{
+        ConversationState, CreatorVote, LockExt, SessionRunner, UserError,
+        session::runner::send_packet,
+    },
     core::{ConsensusPlugin, ConversationPluginsFactory, build_key_package_message},
-    identity::parse_wallet_to_bytes,
     mls_crypto::{KeyPackageBytes, MlsService},
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, ConversationMessage, ConversationUpdateRequest, RemoveMember,
@@ -97,7 +96,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             ConversationUpdateRequest {
                 payload: Some(conversation_update_request::Payload::RemoveMember(
                     RemoveMember {
-                        identity: parse_wallet_to_bytes(ban_request.user_to_ban.as_str())?,
+                        identity: ban_request.user_to_ban,
                     },
                 )),
             },

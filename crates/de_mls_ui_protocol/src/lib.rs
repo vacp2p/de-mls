@@ -3,12 +3,71 @@ pub mod v1 {
     use hashgraph_like_consensus::types::ConsensusEvent;
     use serde::{Deserialize, Serialize};
 
+    use std::fmt::Write;
+
     use de_mls::{
-        app::{MessageType, format_conversation_request_target},
+        app::MessageType,
         protos::de_mls::messages::v1::{
-            BanRequest, ConversationMessage, ProposalAdded, VotePayload,
+            BanRequest, ConversationMessage, ConversationUpdateRequest, ProposalAdded, VotePayload,
+            conversation_update_request,
         },
     };
+
+    /// Render raw identity bytes as a `0x…` lowercase hex string. The
+    /// library protocol carries identity bytes; the UI layer chooses how
+    /// to render them. This crate uses simple lowercase hex everywhere
+    /// the protocol surfaces a member identity (membership changes,
+    /// violation targets, election rosters, ban requests).
+    pub fn encode_hex(raw: &[u8]) -> String {
+        if raw.is_empty() {
+            return String::new();
+        }
+        let mut s = String::with_capacity(2 + raw.len() * 2);
+        s.push_str("0x");
+        for b in raw {
+            let _ = write!(s, "{b:02x}");
+        }
+        s
+    }
+
+    /// Target identity bytes (hex-encoded) for membership /
+    /// emergency-evidence targets, or `"epoch E | s1, s2, ..."` for
+    /// elections (with `, retry R` appended when `R > 0`). `"unknown"`
+    /// otherwise.
+    pub fn format_conversation_request_target(request: &ConversationUpdateRequest) -> String {
+        match &request.payload {
+            Some(conversation_update_request::Payload::InviteMember(im)) => {
+                encode_hex(&im.identity)
+            }
+            Some(conversation_update_request::Payload::RemoveMember(rm)) => {
+                encode_hex(&rm.identity)
+            }
+            Some(conversation_update_request::Payload::EmergencyCriteria(ec)) => ec
+                .evidence
+                .as_ref()
+                .map(|e| encode_hex(&e.target_member_id))
+                .unwrap_or_else(|| "unknown".to_string()),
+            Some(conversation_update_request::Payload::StewardElection(se)) => {
+                let stewards: Vec<String> =
+                    se.proposed_stewards.iter().map(|s| encode_hex(s)).collect();
+                let meta = if se.retry_round == 0 {
+                    format!("epoch {}", se.election_epoch)
+                } else {
+                    format!("epoch {}, retry {}", se.election_epoch, se.retry_round)
+                };
+                format!("{} | {}", meta, stewards.join(", "))
+            }
+            _ => "unknown".to_string(),
+        }
+    }
+
+    /// `(action, target)` pair suitable for UI rendering.
+    pub fn format_conversation_request(request: &ConversationUpdateRequest) -> (String, String) {
+        (
+            request.message_type().to_string(),
+            format_conversation_request_target(request),
+        )
+    }
 
     /// Information about a group member, including their peer score and steward role.
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -168,7 +227,7 @@ pub mod v1 {
             AppEvent::ProposalAdded {
                 conversation_id: ban_request.conversation_name.clone(),
                 action: "Remove Member".to_string(),
-                address: ban_request.user_to_ban.clone(),
+                address: encode_hex(&ban_request.user_to_ban),
             }
         }
     }

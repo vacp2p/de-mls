@@ -12,14 +12,16 @@ use hashgraph_like_consensus::{error::ConsensusError, storage::ConsensusStorage}
 use prost::Message;
 use tracing::{error, info};
 
-use super::consensus_bridge::{
-    ProposalParams, cast_vote, submit_proposal, submit_self_leave_proposal,
-};
-use super::lock::LockExt;
-use super::runner::send_packet;
-
 use crate::{
-    app::{ConversationState, SessionRunner, UserError},
+    app::{
+        ConversationState, LockExt, SessionRunner, UserError,
+        session::{
+            consensus_bridge::{
+                ProposalParams, cast_vote, submit_proposal, submit_self_leave_proposal,
+            },
+            runner::send_packet,
+        },
+    },
     core::{
         ConsensusPlugin, ConversationPluginsFactory, ProposalKind, SessionEvent, StewardListPlugin,
         self_leave_proposal_id, target_identity_of,

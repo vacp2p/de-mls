@@ -1,12 +1,11 @@
 use std::sync::{Arc, atomic::Ordering};
 
 use de_mls::{
-    app::{SessionRunner, UserError, format_conversation_request},
+    app::{SessionRunner, UserError},
     ds::WakuDeliveryService,
-    identity::format_wallet_address,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
-use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
+use de_mls_ui_protocol::v1::{AppEvent, MemberInfo, encode_hex, format_conversation_request};
 use futures::channel::mpsc::UnboundedSender;
 use hashgraph_like_consensus::events::ConsensusEventBus;
 
@@ -45,32 +44,27 @@ pub(crate) async fn load_member_info(
     let runner = session
         .read()
         .map_err(|_| UserError::LockPoisoned("session"))?;
-    let addresses = runner.get_conversation_members()?;
+    let member_bytes = runner.get_conversation_members()?;
     let scores = runner.get_member_scores();
     let roles = runner.get_member_roles().unwrap_or_default();
-    let pending_leavers: Vec<String> = runner
-        .get_pending_leave_identities()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|id| format_wallet_address(id.as_slice()).to_string())
-        .collect();
+    let pending_leavers = runner.get_pending_leave_identities().unwrap_or_default();
 
-    Ok(addresses
+    Ok(member_bytes
         .into_iter()
-        .map(|address| {
+        .map(|id| {
             let score = scores
                 .iter()
-                .find(|(raw_id, _)| format_wallet_address(raw_id.as_slice()) == address)
+                .find(|(raw_id, _)| raw_id == &id)
                 .map(|(_, s)| *s)
                 .unwrap_or(100);
             let role = roles
                 .iter()
-                .find(|(raw_id, _)| format_wallet_address(raw_id.as_slice()) == address)
+                .find(|(raw_id, _)| raw_id == &id)
                 .map(|(_, r)| r.to_string())
                 .unwrap_or_else(|| "member".to_string());
-            let pending_leave = pending_leavers.iter().any(|a| a == &address);
+            let pending_leave = pending_leavers.iter().any(|p| p == &id);
             MemberInfo {
-                address,
+                address: encode_hex(&id),
                 score,
                 role,
                 pending_leave,

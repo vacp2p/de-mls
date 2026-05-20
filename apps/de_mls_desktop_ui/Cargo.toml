@@ -29,3 +29,6 @@ tracing-subscriber = { version = "0.3.20", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2.3"
 hashgraph-like-consensus = "0.4.0"
 prost = "0.13.5"
+alloy = { version = "1.0.37", default-features = false, features = [
+    "signer-local",
+] }

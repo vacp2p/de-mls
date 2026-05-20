@@ -13,10 +13,8 @@ use hashgraph_like_consensus::{storage::ConsensusStorage, types::ConsensusEvent}
 use prost::Message;
 use tracing::{error, info};
 
-use super::lock::LockExt;
-
 use crate::{
-    app::{ConversationState, SessionRunner, UserError},
+    app::{ConversationState, LockExt, SessionRunner, UserError},
     core::{
         ConsensusApplyResult, ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin,
         ProposalKind, ScoreOp, SessionEvent, StewardListPlugin, apply_consensus_result,

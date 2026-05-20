@@ -5,14 +5,12 @@
 use std::sync::Arc;
 
 use crate::{
+    app::ConsensusContext,
     core::{
         ConsensusPlugin, ConversationConfig, ConversationPluginsFactory, KeyPackageProvider,
         ScoringConfig, StewardListConfig,
     },
-    mls_crypto::{MemoryDeMlsStorage, MlsCredentials, MlsError},
 };
-
-use super::{ConsensusContext, DefaultConversationPluginsFactory, DefaultKeyPackageProvider};
 
 /// Bundle of all User-level plugin state. Held on [`super::super::User`] as
 /// a single field so the User struct surfaces the registry + identity +
@@ -46,39 +44,5 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Clone for UserPlugins<P
             default_scoring_config: self.default_scoring_config.clone(),
             default_steward_list_config: self.default_steward_list_config.clone(),
         }
-    }
-}
-
-impl UserPlugins<crate::core::DefaultConsensusPlugin, DefaultConversationPluginsFactory> {
-    /// Build the default plug-in bundle from a wallet `PrivateKeySigner` and
-    /// the derived identity. Used by [`super::super::User::with_private_key`].
-    pub(crate) fn default_for_wallet(
-        identity: &dyn crate::identity::Identity,
-        signer: alloy::signers::local::PrivateKeySigner,
-        default_conversation_config: ConversationConfig,
-    ) -> Result<Self, MlsError> {
-        let credentials = Arc::new(MlsCredentials::from_identity(identity)?);
-        let storage = Arc::new(MemoryDeMlsStorage::new());
-        let conversation_plugins = Arc::new(DefaultConversationPluginsFactory {
-            storage: Arc::clone(&storage),
-            credentials: Arc::clone(&credentials),
-        });
-        let key_package_provider: Arc<dyn KeyPackageProvider> =
-            Arc::new(DefaultKeyPackageProvider {
-                storage,
-                credentials,
-            });
-        let consensus_signer =
-            hashgraph_like_consensus::signing::EthereumConsensusSigner::new(signer);
-        let consensus =
-            ConsensusContext::<crate::core::DefaultConsensusPlugin>::new(consensus_signer);
-        Ok(Self {
-            conversation_plugins,
-            consensus,
-            key_package_provider,
-            default_conversation_config,
-            default_scoring_config: ScoringConfig::default(),
-            default_steward_list_config: StewardListConfig::default(),
-        })
     }
 }

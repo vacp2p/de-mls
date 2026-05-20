@@ -9,7 +9,7 @@ use crate::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, ViolationEvidence, conversation_update_request::Payload,
 };
 
-use super::types::{ScoreEvent, ScoreOp, ScoringMemberDiff};
+use crate::core::{ScoreEvent, ScoreOp, ScoringMemberDiff};
 
 /// Diff between a scoring table snapshot and an MLS member roster.
 /// Caller applies the diff to its own [`super::PeerScoringPlugin`].

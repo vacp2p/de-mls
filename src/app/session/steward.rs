@@ -13,16 +13,12 @@ use std::sync::{Arc, RwLock};
 
 use tracing::{error, info};
 
-use super::lock::LockExt;
-use super::runner::send_packet;
-
 use crate::{
-    app::{CreatorVote, SessionRunner, UserError},
+    app::{CreatorVote, LockExt, SessionRunner, UserError, session::runner::send_packet},
     core::{
         ConsensusPlugin, ConversationPluginsFactory, ElectionDecision, PeerScoringPlugin,
         StewardListPlugin, member_set, scoring_member_diff, target_identity_of,
     },
-    identity::ShortId,
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationSync, ConversationUpdateRequest, PeerScore,
@@ -347,7 +343,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
             info!(
                 conversation = %conversation_name,
-                target = %ShortId::new(&target_id),
+                target = ?target_id,
                 score = current_score,
                 "initiating SCORE_BELOW_THRESHOLD removal"
             );
@@ -361,7 +357,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     .resolve_pending_removal(&target_id);
                 error!(
                     conversation = %conversation_name,
-                    target = %ShortId::new(&target_id),
+                    target = ?target_id,
                     error = %e,
                     "SCORE_BELOW_THRESHOLD vote failed to start"
                 );

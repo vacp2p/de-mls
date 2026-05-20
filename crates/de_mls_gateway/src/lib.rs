@@ -13,13 +13,24 @@ pub mod handler;
 
 use std::{
     collections::{HashMap, VecDeque},
+    str::FromStr,
     sync::{Arc, Mutex as StdMutex, atomic::AtomicBool},
 };
 
+use alloy::primitives::Address;
+use alloy::signers::local::PrivateKeySigner;
+use hashgraph_like_consensus::signing::EthereumConsensusSigner;
+
 use de_mls::{
-    app::User,
-    core::DefaultConsensusPlugin,
+    app::{ConsensusContext, ConversationConfig, SessionEntry, User, UserPlugins},
+    core::{KeyPackageProvider, ScoringConfig, StewardListConfig},
+    defaults::{
+        DefaultConsensusPlugin, DefaultConversationPluginsFactory, DefaultKeyPackageProvider,
+        MemoryDeMlsStorage,
+    },
     ds::{DeliveryService, SharedDeliveryService, WakuDeliveryService},
+    identity::Identity,
+    mls_crypto::MlsCredentials,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
@@ -44,18 +55,13 @@ pub use crate::bootstrap::{
 /// `Arc<MemoryDeMlsStorage>` — so per-group services share one storage
 /// (the `Arc<S>: DeMlsStorage` blanket impl makes this work). MLS
 /// credentials live on `User` and are passed in at service construction.
-type UserRef = Arc<
-    tokio::sync::RwLock<
-        User<DefaultConsensusPlugin, de_mls::app::DefaultConversationPluginsFactory>,
-    >,
->;
+type UserRef =
+    Arc<tokio::sync::RwLock<User<DefaultConsensusPlugin, DefaultConversationPluginsFactory>>>;
 
 /// Type alias for a per-conversation session reference obtained via
 /// `User::lookup_entry`. Re-exports the sync-locked entry from `de_mls::app`.
-pub(crate) type SessionRef = de_mls::app::SessionEntry<
-    DefaultConsensusPlugin,
-    de_mls::app::DefaultConversationPluginsFactory,
->;
+pub(crate) type SessionRef =
+    SessionEntry<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
 
 // Global, process-wide gateway instance
 pub static GATEWAY: Lazy<Gateway<WakuDeliveryService>> = Lazy::new(Gateway::new);
@@ -106,7 +112,7 @@ impl<DS: DeliveryService> Gateway<DS> {
             core: RwLock::new(None),
             user: RwLock::new(None),
             started: AtomicBool::new(false),
-            epoch_history: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            epoch_history: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
 
@@ -160,6 +166,71 @@ impl<DS: DeliveryService> Gateway<DS> {
     }
 }
 
+/// Wallet-flavoured [`Identity`]: 20-byte Ethereum address bytes plus its
+/// EIP-55 checksummed hex form. The library itself is identity-agnostic;
+/// this lives in the gateway because the desktop UI logs users in with
+/// Ethereum private keys.
+#[derive(Debug, Clone)]
+struct WalletIdentity {
+    bytes: Vec<u8>,
+    display: String,
+}
+
+impl WalletIdentity {
+    fn from_address(addr: Address) -> Self {
+        Self {
+            bytes: addr.as_slice().to_vec(),
+            display: addr.to_checksum(None),
+        }
+    }
+}
+
+impl Identity for WalletIdentity {
+    fn identity_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    fn identity_display(&self) -> &str {
+        &self.display
+    }
+}
+
+fn build_user_from_private_key(
+    private_key: &str,
+    transport: SharedDeliveryService,
+) -> anyhow::Result<User<DefaultConsensusPlugin, DefaultConversationPluginsFactory>> {
+    let signer = PrivateKeySigner::from_str(private_key)
+        .map_err(|e| anyhow::anyhow!("invalid private key: {e}"))?;
+    let identity = WalletIdentity::from_address(signer.address());
+
+    let credentials = Arc::new(MlsCredentials::from_identity(&identity)?);
+    let storage = Arc::new(MemoryDeMlsStorage::new());
+
+    let conversation_plugins = Arc::new(DefaultConversationPluginsFactory::new(
+        Arc::clone(&storage),
+        Arc::clone(&credentials),
+    ));
+    let key_package_provider: Arc<dyn KeyPackageProvider> =
+        Arc::new(DefaultKeyPackageProvider::new(storage, credentials));
+
+    let consensus_signer = EthereumConsensusSigner::new(signer);
+    let consensus = ConsensusContext::<DefaultConsensusPlugin>::new(consensus_signer);
+
+    let plugins = UserPlugins {
+        conversation_plugins,
+        consensus,
+        key_package_provider,
+        default_conversation_config: ConversationConfig::default(),
+        default_scoring_config: ScoringConfig::default(),
+        default_steward_list_config: StewardListConfig::default(),
+    };
+
+    Ok(User::new_with_plugins(
+        Box::new(identity),
+        plugins,
+        transport,
+    ))
+}
+
 // Login and forwarder setup is specific to the WakuDeliveryService gateway
 impl Gateway<WakuDeliveryService> {
     /// Create the user engine with a private key.
@@ -173,7 +244,7 @@ impl Gateway<WakuDeliveryService> {
         let transport: SharedDeliveryService =
             Arc::new(StdMutex::new(core.app_state.delivery.clone()));
 
-        let user = User::with_private_key(private_key.as_str(), transport)?;
+        let user = build_user_from_private_key(&private_key, transport)?;
 
         let user_address = user.identity_string();
         let user_ref: UserRef = Arc::new(tokio::sync::RwLock::new(user));

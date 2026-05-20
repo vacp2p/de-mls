@@ -22,7 +22,6 @@
 
 mod display;
 mod error;
-mod peer_scoring_backends;
 mod phase_timer;
 mod session;
 mod user;
@@ -33,16 +32,9 @@ pub use crate::core::{
     DEFAULT_PEER_SCORE, DEFAULT_PROPOSAL_EXPIRATION, DEFAULT_RECOVERY_INACTIVITY_DURATION,
     DEFAULT_THRESHOLD_PEER_SCORE, DEFAULT_VOTING_DELAY,
 };
-pub use display::{
-    MemberRole, MessageType, format_conversation_request, format_conversation_request_target,
-    message_types,
-};
+pub use display::{MemberRole, MessageType, message_types};
 pub use error::UserError;
-pub use peer_scoring_backends::InMemoryPeerScoreStorage;
 pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer};
 pub(crate) use session::LockExt;
 pub use session::{CreatorVote, DispatchOutcome, PendingJoinTick, SessionRunner};
-pub use user::{
-    DefaultConversationPluginsFactory, DefaultKeyPackageProvider, DefaultMlsService,
-    DefaultPeerScoring, DefaultStewardList, SessionEntry, User,
-};
+pub use user::{ConsensusContext, SessionEntry, User, UserPlugins};

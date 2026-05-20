@@ -1,11 +1,5 @@
 //! Storage abstraction for DE-MLS persistence.
 //!
-//! This module provides the `DeMlsStorage` trait for pluggable storage backends.
-//! Use `MemoryDeMlsStorage` for development/testing, or implement your own for persistence.
-
-mod memory;
-
-pub use memory::MemoryDeMlsStorage;
 
 use std::sync::Arc;
 
@@ -33,22 +27,10 @@ pub trait DeMlsStorage: Send + Sync + 'static {
     // Key Package Tracking
     // ─────────────────────────────────────────────────────────
 
-    /// Store a key package hash reference as "ours".
     fn store_key_package_ref(&self, hash_ref: &[u8]) -> Result<(), MlsError>;
-
-    /// Check if a key package hash reference belongs to us.
     fn is_our_key_package(&self, hash_ref: &[u8]) -> Result<bool, MlsError>;
-
-    /// Remove a key package reference (after it's used in a welcome).
     fn remove_key_package_ref(&self, hash_ref: &[u8]) -> Result<(), MlsError>;
 
-    // ─────────────────────────────────────────────────────────
-    // OpenMLS Storage Delegation
-    // ─────────────────────────────────────────────────────────
-
-    /// Get the OpenMLS storage provider.
-    ///
-    /// OpenMLS calls this synchronously for all MLS state persistence.
     fn mls_storage(&self) -> &Self::MlsStorage;
 }
 

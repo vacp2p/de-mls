@@ -11,13 +11,16 @@
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use de_mls::app::{ConversationConfig, DefaultConversationPluginsFactory, SessionRunner, User};
-use de_mls::core::{DefaultConsensusPlugin, StewardListConfig};
+use de_mls::app::{ConversationConfig, SessionRunner, User};
+use de_mls::core::StewardListConfig;
+use de_mls::defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory};
 use de_mls::ds::{
     DeliveryService, DeliveryServiceError, InboundPacket, OutboundPacket, SharedDeliveryService,
 };
 use prost::Message;
 use tokio::task::JoinHandle;
+
+use crate::common::wallet::user_from_private_key;
 
 /// Shared handle to the test transport. Tests own one of these per `User`
 /// and reach into it via `.lock().unwrap()`.
@@ -159,12 +162,8 @@ pub fn make_user(
     steward_cfg: StewardListConfig,
 ) -> (TestUser, TransportHandle) {
     let transport = CapturingTransport::new();
-    let mut user = User::with_private_key_and_config(
-        private_key,
-        transport.clone() as SharedDeliveryService,
-        cfg,
-    )
-    .expect("build TestUser");
+    let mut user =
+        user_from_private_key(private_key, transport.clone() as SharedDeliveryService, cfg);
     user.set_default_steward_list_config(steward_cfg);
     (user, transport)
 }

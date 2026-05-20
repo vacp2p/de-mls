@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use de_mls::app::{CreatorVote, SessionRunner};
 use de_mls::core::{ConversationState, SessionEvent, StewardListConfig};
-use de_mls::identity::parse_wallet_to_bytes;
+use de_mls::identity::Identity;
 use de_mls::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, RemoveMember, conversation_update_request,
 };
@@ -46,7 +46,9 @@ async fn freeze_cycle_emits_phase_events_in_order() {
     // events fired by the RemoveMember proposal we're about to file.
     let _ = alice_session.read().unwrap().drain_events();
 
-    let bob_id = parse_wallet_to_bytes(&users[1].0.identity_string()).unwrap();
+    let bob_id = common::WalletIdentity::from_hex(&users[1].0.identity_string())
+        .identity_bytes()
+        .to_vec();
     let remove_request = ConversationUpdateRequest {
         payload: Some(conversation_update_request::Payload::RemoveMember(
             RemoveMember {
