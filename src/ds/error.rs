@@ -18,4 +18,7 @@ pub enum DeliveryServiceError {
 
     #[error("An unknown error occurred: {0}")]
     Other(anyhow::Error),
+
+    #[error("Lock poisoned: {0}")]
+    LockPoisoned(&'static str),
 }

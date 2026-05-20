@@ -36,8 +36,8 @@ async fn silent_steward_drives_observer_to_reelection() {
     )
     .await;
 
-    let alice_session = users[0].0.lookup_entry("b2").await.unwrap();
-    let bob_session = users[1].0.lookup_entry("b2").await.unwrap();
+    let alice_session = users[0].0.lookup_entry("b2").unwrap().unwrap();
+    let bob_session = users[1].0.lookup_entry("b2").unwrap().unwrap();
 
     let alice_is_steward = alice_session.read().await.is_steward_for_self();
     let bob_is_steward = bob_session.read().await.is_steward_for_self();
@@ -47,7 +47,7 @@ async fn silent_steward_drives_observer_to_reelection() {
     );
 
     let (steward_idx, observer_idx) = if alice_is_steward { (0, 1) } else { (1, 0) };
-    let observer_session = users[observer_idx].0.lookup_entry("b2").await.unwrap();
+    let observer_session = users[observer_idx].0.lookup_entry("b2").unwrap().unwrap();
     let steward_tx = users[steward_idx].1.clone();
     let observer_tx = users[observer_idx].1.clone();
 

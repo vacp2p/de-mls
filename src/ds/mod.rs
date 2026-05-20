@@ -11,7 +11,7 @@
 //! src/ds/
 //! ├── transport.rs      DeliveryService trait, OutboundPacket, InboundPacket
 //! ├── error.rs          DeliveryServiceError
-//! ├── topic_filter.rs   TopicFilter (HashSet-based async allowlist)
+//! ├── topic_filter.rs   TopicFilter (HashSet-based allowlist)
 //! └── waku/             Waku relay implementation
 //!     ├── mod.rs        WakuDeliveryService, WakuConfig, content-topic helpers
 //!     ├── sys.rs        Raw FFI bindings to libwaku (C trampoline pattern)

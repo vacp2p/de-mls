@@ -108,7 +108,7 @@ async fn concurrent_joins_leave_joiners_with_empty_buffer() {
     // on the broadcast welcome subtopic.
     for u in [&bob, &charlie, &dave] {
         let kp = u.generate_key_package().unwrap();
-        let session = u.lookup_entry(group).await.unwrap();
+        let session = u.lookup_entry(group).unwrap().unwrap();
         session.read().await.send_kp_message(kp).await.unwrap();
     }
 
@@ -129,7 +129,7 @@ async fn concurrent_joins_leave_joiners_with_empty_buffer() {
     // Regression guard: PendingJoin members must have empty pending_updates
     // buffers. Alice (steward) has the KPs in her buffer until she commits.
     for (name, user) in [("bob", &bob), ("charlie", &charlie), ("dave", &dave)] {
-        let session = user.lookup_entry(group).await.unwrap();
+        let session = user.lookup_entry(group).unwrap().unwrap();
         let count = session.read().await.get_pending_update_count();
         assert_eq!(
             count, 0,

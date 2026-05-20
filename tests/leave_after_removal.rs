@@ -36,7 +36,7 @@ async fn removed_member_emits_leaving_and_is_evicted() {
     // Find the non-steward.
     let mut target_idx = None;
     for (i, (u, _)) in users.iter().enumerate() {
-        let s = u.lookup_entry("leave").await.unwrap();
+        let s = u.lookup_entry("leave").unwrap().unwrap();
         if !s.read().await.is_steward_for_self() {
             target_idx = Some(i);
             break;
@@ -48,8 +48,8 @@ async fn removed_member_emits_leaving_and_is_evicted() {
         .find(|i| *i != target_idx)
         .expect("at least one steward must exist");
 
-    let steward_session = users[steward_idx].0.lookup_entry("leave").await.unwrap();
-    let target_session = users[target_idx].0.lookup_entry("leave").await.unwrap();
+    let steward_session = users[steward_idx].0.lookup_entry("leave").unwrap().unwrap();
+    let target_session = users[target_idx].0.lookup_entry("leave").unwrap().unwrap();
     let mut target_events = target_session.read().await.subscribe();
     // Hold the Arc explicitly so the broadcast sender stays alive even
     // after `User` evicts the entry from the registry.
@@ -75,7 +75,7 @@ async fn removed_member_emits_leaving_and_is_evicted() {
     for _ in 0..30 {
         settle_for(Duration::from_millis(40)).await;
         for (i, (u, _)) in users.iter().enumerate() {
-            if let Some(s) = u.lookup_entry("leave").await {
+            if let Some(s) = u.lookup_entry("leave").unwrap() {
                 if i == target_idx
                     && matches!(
                         SessionRunner::poll_freeze_status(&s).await,
@@ -98,7 +98,7 @@ async fn removed_member_emits_leaving_and_is_evicted() {
                 let _ = u.process_inbound_packet(to_inbound(p)).await;
             }
         }
-        if users[target_idx].0.lookup_entry("leave").await.is_none() {
+        if users[target_idx].0.lookup_entry("leave").unwrap().is_none() {
             target_evicted = true;
             break;
         }

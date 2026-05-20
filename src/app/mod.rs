@@ -43,5 +43,5 @@ pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer};
 pub use session::{CreatorVote, DispatchOutcome, PendingJoinTick, SessionRunner};
 pub use user::{
     DefaultConversationPluginsFactory, DefaultKeyPackageProvider, DefaultMlsService,
-    DefaultPeerScoring, DefaultStewardList, User,
+    DefaultPeerScoring, DefaultStewardList, SessionEntry, User,
 };

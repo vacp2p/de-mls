@@ -37,11 +37,14 @@ async fn pending_join_expires_evicts_entry_and_broadcasts_removal() {
     assert!(
         alice
             .list_conversations()
-            .await
+            .unwrap()
             .contains(&group.to_string())
     );
 
-    let session = alice.lookup_entry(group).await.expect("session registered");
+    let session = alice
+        .lookup_entry(group)
+        .unwrap()
+        .expect("session registered");
     let mut session_events = session.read().await.subscribe();
 
     // Poll until expiry. The first tick after start anchors the timer; we
@@ -67,12 +70,12 @@ async fn pending_join_expires_evicts_entry_and_broadcasts_removal() {
     assert!(
         !alice
             .list_conversations()
-            .await
+            .unwrap()
             .contains(&group.to_string()),
         "registry entry must be evicted"
     );
     assert!(
-        alice.lookup_entry(group).await.is_none(),
+        alice.lookup_entry(group).unwrap().is_none(),
         "lookup_entry must return None after eviction"
     );
 

@@ -24,20 +24,21 @@ async fn write_lock_on_one_session_does_not_block_others() {
     alice.start_conversation("conv-a", true).await.unwrap();
     alice.start_conversation("conv-b", true).await.unwrap();
 
-    let session_a = alice.lookup_entry("conv-a").await.unwrap();
-    let session_b = alice.lookup_entry("conv-b").await.unwrap();
+    let session_a = alice.lookup_entry("conv-a").unwrap().unwrap();
+    let session_b = alice.lookup_entry("conv-b").unwrap().unwrap();
 
     // Hold conv-a's inner write lock for the whole test. If isolation is
     // broken, the operations on conv-b below would block here.
     let a_guard = session_a.write().await;
 
-    // Outer registry lookups touch only `Arc<RwLock<HashMap<…>>>`'s read
-    // lock, not the inner SessionRunner locks. Must complete instantly.
-    tokio::time::timeout(Duration::from_millis(100), alice.lookup_entry("conv-a"))
-        .await
+    // Outer registry lookups touch only the sync `RwLock<HashMap<…>>`,
+    // not the inner SessionRunner locks. The call is synchronous — it
+    // returns immediately even with the inner write lock held.
+    alice
+        .lookup_entry("conv-a")
         .expect("lookup_entry must not wait on a held inner write lock");
-    tokio::time::timeout(Duration::from_millis(100), alice.lookup_entry("conv-b"))
-        .await
+    alice
+        .lookup_entry("conv-b")
         .expect("lookup_entry on a different conversation must be unaffected");
 
     // Inner write lock on conv-b is a different `RwLock` instance — must

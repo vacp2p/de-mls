@@ -43,8 +43,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         }
 
         let entry_arc = self
-            .lookup_entry(&conversation_name)
-            .await
+            .lookup_entry(&conversation_name)?
             .ok_or(UserError::ConversationNotFound)?;
 
         match packet.subtopic.as_str() {
@@ -84,7 +83,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         // `None` and the timers leak (still scheduled, will fire against a
         // conversation we've left).
         self.cleanup_consensus_scope(conversation_name).await?;
-        self.conversations.write().await.remove(conversation_name);
+        self.conversations
+            .write()
+            .map_err(|_| UserError::LockPoisoned("conversation registry"))?
+            .remove(conversation_name);
         let _ = self.lifecycle.send(ConversationLifecycle::Removed(
             conversation_name.to_string(),
         ));
@@ -230,7 +232,7 @@ mod tests {
 
         let session = user
             .lookup_entry("test-conv")
-            .await
+            .unwrap()
             .expect("creator session registered");
 
         let executed = Arc::new(AtomicBool::new(false));

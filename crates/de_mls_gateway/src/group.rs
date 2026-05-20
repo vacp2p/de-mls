@@ -253,7 +253,11 @@ impl Gateway<WakuDeliveryService> {
 
     pub async fn group_list(&self) -> Vec<String> {
         match self.user() {
-            Ok(user_ref) => user_ref.read().await.list_conversations().await,
+            Ok(user_ref) => user_ref
+                .read()
+                .await
+                .list_conversations()
+                .unwrap_or_default(),
             Err(_) => Vec::new(),
         }
     }

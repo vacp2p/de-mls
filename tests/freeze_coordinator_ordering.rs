@@ -33,8 +33,8 @@ async fn freeze_cycle_emits_phase_events_in_order() {
     )
     .await;
 
-    let alice_session = users[0].0.lookup_entry("c3").await.unwrap();
-    let bob_session = users[1].0.lookup_entry("c3").await.unwrap();
+    let alice_session = users[0].0.lookup_entry("c3").unwrap().unwrap();
+    let bob_session = users[1].0.lookup_entry("c3").unwrap().unwrap();
     let alice_tx = users[0].1.clone();
     let bob_tx = users[1].1.clone();
 

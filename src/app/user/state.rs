@@ -5,7 +5,11 @@
 //! `User` is `Clone` — all fields are `Arc` or cheap `Clone` — so background
 //! tasks just take their own handle via `self.clone()`.
 
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use std::{
+    collections::HashMap,
+    str::FromStr,
+    sync::{Arc, RwLock as StdRwLock},
+};
 
 use alloy::signers::local::PrivateKeySigner;
 use tokio::sync::{RwLock, broadcast};
@@ -28,11 +32,15 @@ use super::plugins::{DefaultConversationPluginsFactory, UserPlugins};
 /// more than this lose events.
 const CONVERSATION_LIFECYCLE_CAPACITY: usize = 128;
 
-/// Per-user registry of conversation runners, with one outer lock for map
-/// CRUD and one inner lock per runner so writes on one conversation don't
-/// block reads on another.
-pub(crate) type ConversationRegistry<P, CP> =
-    Arc<RwLock<HashMap<String, Arc<RwLock<SessionRunner<P, CP>>>>>>;
+/// Single registry entry: one `Arc<RwLock<SessionRunner>>` per conversation.
+/// Cloned out of the registry under the outer read lock, then locked
+/// independently — writes on one conversation don't block reads on another.
+pub type SessionEntry<P, CP> = Arc<RwLock<SessionRunner<P, CP>>>;
+
+/// Per-user registry of conversation runners. The outer (sync) lock guards
+/// map CRUD; the inner (async) lock per runner ensures a write on
+/// conversation A doesn't block reads on conversation B.
+pub(crate) type ConversationRegistry<P, CP> = Arc<StdRwLock<HashMap<String, SessionEntry<P, CP>>>>;
 
 pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// `identity.identity_bytes()` materialised once at construction so every
@@ -131,7 +139,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         &self,
         conversation_name: &str,
     ) -> Result<(), UserError> {
-        if let Some(entry_arc) = self.lookup_entry(conversation_name).await {
+        if let Some(entry_arc) = self.lookup_entry(conversation_name)? {
             entry_arc.read().await.cancel_all_auto_votes();
         }
         let scope = P::Scope::from(conversation_name.to_string());
@@ -156,7 +164,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             app_id: Arc::from(uuid::Uuid::new_v4().as_bytes().as_slice()),
             transport,
             plugins,
-            conversations: Arc::new(RwLock::new(HashMap::new())),
+            conversations: Arc::new(StdRwLock::new(HashMap::new())),
             lifecycle,
         }
     }

@@ -33,8 +33,8 @@ async fn steward_inactivity_fires_commit_candidate() {
     )
     .await;
 
-    let alice_session = users[0].0.lookup_entry("b1").await.unwrap();
-    let bob_session = users[1].0.lookup_entry("b1").await.unwrap();
+    let alice_session = users[0].0.lookup_entry("b1").unwrap().unwrap();
+    let bob_session = users[1].0.lookup_entry("b1").unwrap().unwrap();
     let alice_tx = users[0].1.clone();
     let bob_tx = users[1].1.clone();
 

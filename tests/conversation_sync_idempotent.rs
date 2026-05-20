@@ -27,8 +27,8 @@ async fn second_conversation_sync_is_a_no_op() {
     )
     .await;
 
-    let alice_session = users[0].0.lookup_entry("c2").await.unwrap();
-    let bob_session = users[1].0.lookup_entry("c2").await.unwrap();
+    let alice_session = users[0].0.lookup_entry("c2").unwrap().unwrap();
+    let bob_session = users[1].0.lookup_entry("c2").unwrap().unwrap();
     let alice_tx = users[0].1.clone();
     let bob_tx = users[1].1.clone();
 

@@ -25,8 +25,8 @@ async fn chat_message_delivered_to_peer_as_app_message_event() {
     )
     .await;
 
-    let alice_session = users[0].0.lookup_entry("chat").await.unwrap();
-    let bob_session = users[1].0.lookup_entry("chat").await.unwrap();
+    let alice_session = users[0].0.lookup_entry("chat").unwrap().unwrap();
+    let bob_session = users[1].0.lookup_entry("chat").unwrap().unwrap();
 
     let mut bob_events = bob_session.read().await.subscribe();
 

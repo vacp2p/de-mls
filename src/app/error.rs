@@ -52,4 +52,7 @@ pub enum UserError {
 
     #[error("Identity error: {0}")]
     Identity(#[from] IdentityError),
+
+    #[error("Lock poisoned: {0}")]
+    LockPoisoned(&'static str),
 }

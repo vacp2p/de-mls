@@ -306,7 +306,7 @@ pub async fn bootstrap_joined_conversation(
     for (u, _) in &users {
         sessions.push(
             u.lookup_entry(conversation)
-                .await
+                .unwrap()
                 .expect("session registered"),
         );
     }

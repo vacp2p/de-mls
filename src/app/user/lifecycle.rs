@@ -35,8 +35,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         is_creation: bool,
         config: ConversationConfig,
     ) -> Result<(), UserError> {
-        let mut conversations = self.conversations.write().await;
-        if conversations.contains_key(conversation_name) {
+        if self
+            .conversations
+            .read()
+            .map_err(|_| UserError::LockPoisoned("conversation registry"))?
+            .contains_key(conversation_name)
+        {
             return Err(UserError::ConversationAlreadyExists);
         }
 
@@ -107,8 +111,16 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             Arc::clone(&self.identity_display),
             Arc::clone(&self.app_id),
         )));
-        conversations.insert(conversation_name.to_string(), Arc::clone(&session));
-        drop(conversations);
+        {
+            let mut conversations = self
+                .conversations
+                .write()
+                .map_err(|_| UserError::LockPoisoned("conversation registry"))?;
+            if conversations.contains_key(conversation_name) {
+                return Err(UserError::ConversationAlreadyExists);
+            }
+            conversations.insert(conversation_name.to_string(), Arc::clone(&session));
+        }
 
         // Emit on the lifecycle channel first so integrators can subscribe
         // to the new session's `SessionEvent` stream before any session
@@ -134,8 +146,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         info!(conversation = conversation_name, "leaving conversation");
 
         let entry_arc = self
-            .lookup_entry(conversation_name)
-            .await
+            .lookup_entry(conversation_name)?
             .ok_or(UserError::ConversationNotFound)?;
 
         let is_pending_join =
@@ -145,7 +156,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             // Cancel auto-vote timers before removing the registry entry —
             // see `finalize_self_leave` for the rationale.
             self.cleanup_consensus_scope(conversation_name).await?;
-            self.conversations.write().await.remove(conversation_name);
+            self.conversations
+                .write()
+                .map_err(|_| UserError::LockPoisoned("conversation registry"))?
+                .remove(conversation_name);
             let _ = self.lifecycle.send(ConversationLifecycle::Removed(
                 conversation_name.to_string(),
             ));

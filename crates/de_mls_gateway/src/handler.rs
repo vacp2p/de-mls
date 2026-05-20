@@ -41,7 +41,9 @@ impl GatewaySessionFanout {
                 // arranged at conversation creation.
             }
             SessionEvent::Leaving => {
-                self.topics.remove_many(conversation_name).await;
+                if let Err(e) = self.topics.remove_many(conversation_name) {
+                    tracing::warn!(error = %e, "topic filter remove failed");
+                }
                 self.epoch_history.lock().remove(conversation_name);
                 let _ = self
                     .evt_tx

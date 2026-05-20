@@ -221,7 +221,17 @@ impl Gateway<WakuDeliveryService> {
                         });
                         let Some(session_rx) = ({
                             let u = user_for_loop.read().await;
-                            u.lookup_entry(&name).await
+                            match u.lookup_entry(&name) {
+                                Ok(opt) => opt,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        conversation = %name,
+                                        error = %e,
+                                        "lookup_entry failed in lifecycle::Created"
+                                    );
+                                    continue;
+                                }
+                            }
                         }) else {
                             tracing::warn!(
                                 conversation = %name,

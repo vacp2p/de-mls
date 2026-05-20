@@ -28,4 +28,4 @@ pub use plugins::{
     DefaultConversationPluginsFactory, DefaultKeyPackageProvider, DefaultMlsService,
     DefaultPeerScoring, DefaultStewardList,
 };
-pub use state::User;
+pub use state::{SessionEntry, User};
