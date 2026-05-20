@@ -18,9 +18,15 @@ impl KeyPackageBytes {
         Self { bytes, identity }
     }
 
-    /// Get the serialized key package bytes.
+    /// Serialized key package bytes.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Identity bytes of the key package's owner, extracted from the
+    /// MLS credential at construction time.
+    pub fn identity(&self) -> &[u8] {
+        &self.identity
     }
 }
 

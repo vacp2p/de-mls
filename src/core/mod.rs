@@ -38,7 +38,9 @@ mod proposal_kind;
 mod steward_list;
 
 // ── Core conversation operations ──
-pub use freeze::{FreezeFinalizeResult, FreezeOutcome, compute_commit_hash, finalize_freeze_round};
+pub use freeze::{
+    CommitHash, FreezeFinalizeResult, FreezeOutcome, compute_commit_hash, finalize_freeze_round,
+};
 pub use inbound::process_inbound;
 pub use proposal_framing::build_key_package_message;
 

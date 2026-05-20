@@ -4,8 +4,8 @@
 
 use crate::{
     core::{
-        Conversation, CoreError, FreezeFinalizeResult, FreezeOutcome, ProcessResult, ScoreEvent,
-        ScoreOp, StewardListPlugin, conversation::BufferedCommitCandidate,
+        CommitHash, Conversation, CoreError, FreezeFinalizeResult, FreezeOutcome, ProcessResult,
+        ScoreEvent, ScoreOp, StewardListPlugin, conversation::BufferedCommitCandidate,
         freeze::round::RoundContext, proposal_framing::build_invitation_packet,
     },
     mls_crypto::{MlsProposalOutput, MlsService, StagedCandidateResult},
@@ -468,7 +468,7 @@ fn check_commit_sender_authorized<St: StewardListPlugin>(
 /// the app layer can archive it for UI history.
 fn record_applied_commit(
     conversation: &mut Conversation,
-    commit_hash: Vec<u8>,
+    commit_hash: CommitHash,
 ) -> Vec<ConversationUpdateRequest> {
     conversation.record_committed_batch(commit_hash);
     let snapshot = if let Some(target) = conversation.take_urgent_commit_target() {
