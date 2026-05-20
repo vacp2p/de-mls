@@ -21,17 +21,17 @@ use hashgraph_like_consensus::{
 /// The concrete service is materialised via [`PluginConsensus`].
 pub trait ConsensusPlugin: 'static {
     /// Conversation-identifier type used as consensus scope (default: `String`).
-    type Scope: ConsensusScope + From<String> + Send + Sync + 'static;
+    type Scope: ConsensusScope + From<String> + 'static;
 
     /// Proposal/vote persistence (default: `InMemoryConsensusStorage<String>`).
-    type ConsensusStorage: ConsensusStorage<Self::Scope> + Send + Sync + 'static;
+    type ConsensusStorage: ConsensusStorage<Self::Scope> + 'static;
 
     /// Consensus-outcome delivery (default: `BroadcastEventBus<String>`).
-    type EventBus: ConsensusEventBus<Self::Scope> + Send + Sync + 'static;
+    type EventBus: ConsensusEventBus<Self::Scope> + 'static;
 
     /// Signature scheme for authenticating votes (default:
     /// [`EthereumConsensusSigner`]). All peers on a network must agree.
-    type Signer: ConsensusSignatureScheme + Clone + Send + Sync + 'static;
+    type Signer: ConsensusSignatureScheme + Clone + 'static;
 
     /// Build a fresh storage handle. Called once at `User` init; the handle
     /// is cloned per conversation so all per-conv `ConsensusService` instances
