@@ -39,8 +39,8 @@ async fn silent_steward_drives_observer_to_reelection() {
     let alice_session = users[0].0.lookup_entry("b2").unwrap().unwrap();
     let bob_session = users[1].0.lookup_entry("b2").unwrap().unwrap();
 
-    let alice_is_steward = alice_session.read().await.is_steward_for_self();
-    let bob_is_steward = bob_session.read().await.is_steward_for_self();
+    let alice_is_steward = alice_session.read().unwrap().is_steward_for_self();
+    let bob_is_steward = bob_session.read().unwrap().is_steward_for_self();
     assert!(
         alice_is_steward ^ bob_is_steward,
         "sn_max=1 must yield exactly one steward (alice_is_steward={alice_is_steward}, bob_is_steward={bob_is_steward})"
@@ -62,9 +62,7 @@ async fn silent_steward_drives_observer_to_reelection() {
             },
         )),
     };
-    SessionRunner::initiate_proposal(&observer_session, request, CreatorVote::Yes)
-        .await
-        .unwrap();
+    SessionRunner::initiate_proposal(&observer_session, request, CreatorVote::Yes).unwrap();
 
     // Phase 1: pump packets normally until both sides have approved=1.
     let mut consensus_reached = false;
@@ -80,7 +78,7 @@ async fn silent_steward_drives_observer_to_reelection() {
         }
         let observer_approved = observer_session
             .read()
-            .await
+            .unwrap()
             .get_approved_proposal_for_current_epoch()
             .len();
         if observer_approved > 0 {
@@ -110,7 +108,7 @@ async fn silent_steward_drives_observer_to_reelection() {
                 .await;
         }
 
-        let observer_state = observer_session.read().await.get_conversation_state();
+        let observer_state = observer_session.read().unwrap().get_conversation_state();
         if observer_state == ConversationState::Reelection {
             entered_reelection = true;
             break;

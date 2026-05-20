@@ -40,6 +40,7 @@ pub use display::{
 pub use error::UserError;
 pub use peer_scoring_backends::InMemoryPeerScoreStorage;
 pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer};
+pub(crate) use session::LockExt;
 pub use session::{CreatorVote, DispatchOutcome, PendingJoinTick, SessionRunner};
 pub use user::{
     DefaultConversationPluginsFactory, DefaultKeyPackageProvider, DefaultMlsService,

@@ -25,6 +25,19 @@ use crate::{
     },
 };
 
+/// Free helper that wraps the synchronous
+/// [`crate::ds::DeliveryService::send`] in `spawn_blocking`. Available so
+/// callers can hold the runner lock just long enough to clone the
+/// transport, then `await` the send without the guard alive.
+pub(crate) async fn send_packet(
+    transport: &Arc<dyn crate::ds::DeliveryService>,
+    packet: crate::ds::OutboundPacket,
+) -> Result<String, crate::app::UserError> {
+    let transport = Arc::clone(transport);
+    let send_result = spawn_blocking(move || transport.send(packet)).await?;
+    Ok(send_result?)
+}
+
 /// Default capacity for a session's [`SessionEvent`] broadcast channel.
 /// Sized for bursty proposal sessions (proposals + votes + UI pushes in
 /// flight); subscribers that fall behind by more than this lose events.
@@ -56,8 +69,9 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// `cancel_auto_vote` / `cancel_all_auto_votes` to abort early.
     pub(crate) auto_vote_timers: AutoVoteTimers,
     /// Synchronous outbound transport (cloned from `User`). Per-session
-    /// methods reach this via [`Self::send_outbound`] which wraps
-    /// [`crate::ds::DeliveryService::send`] in `spawn_blocking`.
+    /// methods reach this via [`Self::transport`] and route through
+    /// [`send_packet`], which wraps [`crate::ds::DeliveryService::send`]
+    /// in `spawn_blocking`.
     transport: Arc<dyn crate::ds::DeliveryService>,
     /// Cached identity bytes (cloned from `User`). Used by per-session
     /// methods that need the local identity without re-walking the
@@ -133,18 +147,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         let _ = self.events.send(event);
     }
 
-    /// Send an outbound packet via the session's transport. Wraps the
-    /// synchronous [`crate::ds::DeliveryService::send`] in `spawn_blocking`
-    /// so the async context isn't blocked.
-    pub(crate) async fn send_outbound(
-        &self,
-        packet: crate::ds::OutboundPacket,
-    ) -> Result<String, crate::app::UserError> {
-        let transport = Arc::clone(&self.transport);
-        let send_result = spawn_blocking(move || transport.send(packet))
-            .await
-            .expect("transport send task panicked");
-        Ok(send_result?)
+    /// Borrow the session's transport without taking the runner lock —
+    /// callers that need to send while holding the runner lock briefly can
+    /// clone this and pass it to [`send_packet`] after dropping the guard.
+    pub(crate) fn transport(&self) -> &Arc<dyn crate::ds::DeliveryService> {
+        &self.transport
     }
 
     // ── Auto-vote timers ────────────────────────────────────────────

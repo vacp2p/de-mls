@@ -42,7 +42,7 @@ async fn freeze_cycle_emits_phase_events_in_order() {
     // Freezing event. We only assert on the steward (alice); the target's
     // (bob's) event stream is complicated by the LeaveConversation path
     // and is covered separately in the self-leave tests.
-    let mut alice_events = alice_session.read().await.subscribe();
+    let mut alice_events = alice_session.read().unwrap().subscribe();
 
     let bob_id = parse_wallet_to_bytes(&users[1].0.identity_string()).unwrap();
     let remove_request = ConversationUpdateRequest {
@@ -52,9 +52,7 @@ async fn freeze_cycle_emits_phase_events_in_order() {
             },
         )),
     };
-    SessionRunner::initiate_proposal(&alice_session, remove_request, CreatorVote::Yes)
-        .await
-        .unwrap();
+    SessionRunner::initiate_proposal(&alice_session, remove_request, CreatorVote::Yes).unwrap();
 
     // Drive polling + packet relay until both sessions are back in
     // Working (bob will actually exit the conversation, so we check
@@ -75,7 +73,7 @@ async fn freeze_cycle_emits_phase_events_in_order() {
         }
 
         alice_phases.extend(drain_phase_log(&mut alice_events));
-        let alice_state = alice_session.read().await.get_conversation_state();
+        let alice_state = alice_session.read().unwrap().get_conversation_state();
         if alice_state == ConversationState::Freezing || alice_state == ConversationState::Selection
         {
             saw_freezing = true;

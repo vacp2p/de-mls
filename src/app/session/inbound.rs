@@ -12,15 +12,16 @@
 //! session method returns [`DispatchOutcome::LeaveRequested`] so the caller
 //! knows to finish the lifecycle on the User side.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use hashgraph_like_consensus::protos::consensus::v1::Proposal;
 use prost::Message;
-use tokio::sync::RwLock;
 use tracing::{error, info};
 
 use super::consensus::build_vote_banner_event;
 use super::consensus_bridge::{forward_incoming_proposal, forward_incoming_vote};
+use super::lock::LockExt;
+use super::runner::send_packet;
 
 use crate::{
     app::{ConversationState, SessionRunner, UserError},
@@ -63,7 +64,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     ) -> Result<DispatchOutcome, UserError> {
         match result {
             ProcessResult::AppMessage(msg) => {
-                arc.read().await.emit_event(SessionEvent::AppMessage(*msg));
+                arc.read_or_err("session")?
+                    .emit_event(SessionEvent::AppMessage(*msg));
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::Proposal(proposal) => {
@@ -71,12 +73,23 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::Vote(vote) => {
-                let s = arc.read().await;
-                forward_incoming_vote::<P>(&s.handle.conversation, *vote, &s.consensus).await?;
+                let proposal_id = vote.proposal_id;
+                let (consensus, conversation_name, outcome_applied) = {
+                    let s = arc.read_or_err("session")?;
+                    (
+                        s.consensus.clone(),
+                        s.conversation_name.clone(),
+                        s.handle
+                            .conversation
+                            .is_consensus_outcome_applied(proposal_id),
+                    )
+                };
+                forward_incoming_vote::<P>(&conversation_name, *vote, &consensus, outcome_applied)
+                    .await?;
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::MembershipChangeReceived(request) => {
-                Self::handle_incoming_update_request(arc, *request).await?;
+                Self::handle_incoming_update_request(arc, *request)?;
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::JoinedConversation(_name) => {
@@ -91,7 +104,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::LeaveConversation => {
-                Self::prepare_self_leave(arc).await?;
+                Self::prepare_self_leave(arc)?;
                 Ok(DispatchOutcome::LeaveRequested)
             }
             ProcessResult::CommitCandidateReceived { steward } => {
@@ -99,11 +112,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::ConversationSyncReceived(sync) => {
-                Self::on_conversation_sync(arc, *sync).await?;
+                Self::on_conversation_sync(arc, *sync)?;
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::Noop(reason) => {
-                let conv_name = arc.read().await.conversation_name.clone();
+                let conv_name = arc.read_or_err("session")?.conversation_name.clone();
                 tracing::debug!(
                     conversation = %conv_name,
                     ?reason,
@@ -131,7 +144,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     ) -> Result<(), UserError> {
         let decoded = ConversationUpdateRequest::decode(proposal.payload.as_slice()).ok();
         if let Some(req) = decoded.as_ref() {
-            let mut s = arc.write().await;
+            let mut s = arc.write_or_err("session")?;
             let current_epoch = match s.handle.mls() {
                 Some(mls) => mls.current_epoch()?,
                 None => 0,
@@ -159,7 +172,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             .map(ProposalKind::of)
             .unwrap_or(ProposalKind::Commit);
         let (consensus, conversation_name) = {
-            let s = arc.read().await;
+            let s = arc.read_or_err("session")?;
             (s.consensus.clone(), s.conversation_name.clone())
         };
         forward_incoming_proposal::<P>(&conversation_name, proposal, &consensus).await?;
@@ -168,17 +181,16 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // nothing to vote on.
         if expected_voters > 1 {
             let banner = build_vote_banner_event(&conversation_name, proposal_id, payload);
-            arc.read()
-                .await
+            arc.read_or_err("session")?
                 .emit_event(SessionEvent::AppMessage(banner));
             let (delay, vote) = {
-                let s = arc.read().await;
+                let s = arc.read_or_err("session")?;
                 (
                     s.handle.config.voting_delay_for(kind),
                     s.handle.config.liveness_criteria_yes,
                 )
             };
-            Self::spawn_auto_vote(arc, proposal_id, delay, vote).await;
+            Self::spawn_auto_vote(arc, proposal_id, delay, vote)?;
         }
         Ok(())
     }
@@ -187,13 +199,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// sync scoring, and transition to Working. Pending-update pruning is
     /// defensive — PendingJoin doesn't buffer, but paths may change.
     async fn on_joined_conversation(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
-        arc.write()
-            .await
-            .prune_pending_updates_after_commit()
-            .await?;
+        arc.write_or_err("session")?
+            .prune_pending_updates_after_commit()?;
 
         let (packet, mls_members, conversation_name) = {
-            let s = arc.read().await;
+            let s = arc.read_or_err("session")?;
             let msg: AppMessage = ConversationMessage {
                 message: format!("User {} joined the conversation", s.identity_display)
                     .into_bytes(),
@@ -206,13 +216,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let members = s.handle.conversation_members().unwrap_or_default();
             (packet, members, s.conversation_name.clone())
         };
-        arc.read().await.send_outbound(packet).await?;
-        arc.read().await.emit_event(SessionEvent::Joined);
-        arc.write().await.sync_scoring_members(&mls_members).await;
+        let transport = Arc::clone(arc.read_or_err("session")?.transport());
+        send_packet(&transport, packet).await?;
+        arc.read_or_err("session")?.emit_event(SessionEvent::Joined);
+        arc.write_or_err("session")?
+            .sync_scoring_members(&mls_members);
 
-        let event = arc.write().await.start_working();
-        arc.read()
-            .await
+        let event = arc.write_or_err("session")?.start_working();
+        arc.read_or_err("session")?
             .emit_event(SessionEvent::PhaseChange(event));
         info!(conversation = %conversation_name, "joined conversation");
         Ok(())
@@ -224,24 +235,23 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// reward is emitted by `finalize_freeze_round`, not here.
     async fn on_conversation_updated(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
         let mls_members = {
-            let s = arc.read().await;
+            let s = arc.read_or_err("session")?;
             if s.handle.mls().is_some() {
                 s.handle.conversation_members().unwrap_or_default()
             } else {
                 Vec::new()
             }
         };
-        arc.write().await.sync_scoring_members(&mls_members).await;
-        arc.write()
-            .await
-            .prune_pending_updates_after_commit()
-            .await?;
+        arc.write_or_err("session")?
+            .sync_scoring_members(&mls_members);
+        arc.write_or_err("session")?
+            .prune_pending_updates_after_commit()?;
 
         // Transition to Working BEFORE steward checks (election needs Working
         // state). Reset reelection_round: this commit advanced the epoch,
         // so whatever retry cycle we were in belongs to the previous epoch.
         let working_event = {
-            let mut s = arc.write().await;
+            let mut s = arc.write_or_err("session")?;
             s.handle.steward_list.reset_retry();
             let state = s.handle.current_state();
             if matches!(
@@ -257,13 +267,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             }
         };
 
-        Self::steward_list_housekeeping(arc).await?;
-        Self::process_buffered_updates(arc).await?;
-        Self::maybe_close_recovery_window(arc).await;
+        Self::steward_list_housekeeping(arc)?;
+        Self::process_buffered_updates(arc)?;
+        Self::maybe_close_recovery_window(arc);
 
         if let Some(event) = working_event {
-            arc.read()
-                .await
+            arc.read_or_err("session")?
                 .emit_event(SessionEvent::PhaseChange(event));
         }
         Ok(())
@@ -271,13 +280,22 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
     /// Fire a steward election while `recovery_mode` is set so the next
     /// list installs and closes the window.
-    async fn maybe_close_recovery_window(arc: &Arc<RwLock<Self>>) {
-        let in_recovery_mode = arc.read().await.handle.is_in_recovery_mode();
+    fn maybe_close_recovery_window(arc: &Arc<RwLock<Self>>) {
+        let in_recovery_mode = match arc.read_or_err("session") {
+            Ok(s) => s.handle.is_in_recovery_mode(),
+            Err(e) => {
+                tracing::warn!(error = %e, "recovery window check skipped: session lock poisoned");
+                return;
+            }
+        };
         if !in_recovery_mode {
             return;
         }
-        if let Err(e) = Self::try_initiate_steward_election(arc, true, None).await {
-            let conv_name = arc.read().await.conversation_name.clone();
+        if let Err(e) = Self::try_initiate_steward_election(arc, true, None) {
+            let conv_name = arc
+                .read_or_err("session")
+                .map(|s| s.conversation_name.clone())
+                .unwrap_or_else(|_| "<poisoned>".to_string());
             info!(
                 conversation = %conv_name,
                 error = %e,
@@ -290,9 +308,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// the session's bus and delete the local MLS state. The User-side
     /// caller drops the entry from the registry and broadcasts
     /// `ConversationLifecycle::Removed`.
-    async fn prepare_self_leave(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
-        arc.read().await.emit_event(SessionEvent::Leaving);
-        if let Some(mls) = arc.write().await.handle.take_mls() {
+    fn prepare_self_leave(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
+        arc.read_or_err("session")?
+            .emit_event(SessionEvent::Leaving);
+        if let Some(mls) = arc.write_or_err("session")?.handle.take_mls() {
             mls.delete()?;
         }
         Ok(())
@@ -305,7 +324,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         steward: &[u8],
     ) -> Result<(), UserError> {
         {
-            let conv_name = arc.read().await.conversation_name.clone();
+            let conv_name = arc.read_or_err("session")?.conversation_name.clone();
             tracing::debug!(
                 conversation = %conv_name,
                 steward = %ShortId::new(steward),
@@ -313,7 +332,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             );
         }
         let (event, outbound) = {
-            let mut s = arc.write().await;
+            let mut s = arc.write_or_err("session")?;
             if s.handle.current_state() != ConversationState::Working {
                 return Ok(());
             }
@@ -342,11 +361,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             (event, outbound)
         };
 
-        arc.read()
-            .await
+        arc.read_or_err("session")?
             .emit_event(SessionEvent::PhaseChange(event));
         if let Some(message) = outbound {
-            arc.read().await.send_outbound(message).await?;
+            let transport = Arc::clone(arc.read_or_err("session")?.transport());
+            send_packet(&transport, message).await?;
         }
         Ok(())
     }
@@ -355,12 +374,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// list. Validates the proposed list against the members it carries
     /// (not the full MLS set — the list may have been generated before we
     /// existed), then applies list + protocol flags + timing + peer scores.
-    async fn on_conversation_sync(
+    fn on_conversation_sync(
         arc: &Arc<RwLock<Self>>,
         sync: ConversationSync,
     ) -> Result<(), UserError> {
         let (members, current_epoch, local_default_peer_score, conversation_name) = {
-            let s = arc.read().await;
+            let s = arc.read_or_err("session")?;
             if s.handle.steward_list.current_list().is_some() {
                 return Ok(());
             }
@@ -383,7 +402,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         }
 
         let sn = sync.steward_members.len();
-        arc.write().await.apply_conversation_sync_to_entry(&sync)?;
+        arc.write_or_err("session")?
+            .apply_conversation_sync_to_entry(&sync)?;
 
         info!(
             conversation = %conversation_name,

@@ -8,11 +8,11 @@
 use std::{
     collections::HashMap,
     str::FromStr,
-    sync::{Arc, RwLock as StdRwLock},
+    sync::{Arc, RwLock},
 };
 
 use alloy::signers::local::PrivateKeySigner;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::broadcast;
 
 use crate::{
     app::{SessionRunner, UserError},
@@ -37,10 +37,10 @@ const CONVERSATION_LIFECYCLE_CAPACITY: usize = 128;
 /// independently — writes on one conversation don't block reads on another.
 pub type SessionEntry<P, CP> = Arc<RwLock<SessionRunner<P, CP>>>;
 
-/// Per-user registry of conversation runners. The outer (sync) lock guards
-/// map CRUD; the inner (async) lock per runner ensures a write on
-/// conversation A doesn't block reads on conversation B.
-pub(crate) type ConversationRegistry<P, CP> = Arc<StdRwLock<HashMap<String, SessionEntry<P, CP>>>>;
+/// Per-user registry of conversation runners. The outer lock guards map
+/// CRUD; the inner per-runner lock guards per-conversation reads/mutations
+/// so a write on conversation A doesn't block reads on conversation B.
+pub(crate) type ConversationRegistry<P, CP> = Arc<RwLock<HashMap<String, SessionEntry<P, CP>>>>;
 
 pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// `identity.identity_bytes()` materialised once at construction so every
@@ -140,7 +140,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         conversation_name: &str,
     ) -> Result<(), UserError> {
         if let Some(entry_arc) = self.lookup_entry(conversation_name)? {
-            entry_arc.read().await.cancel_all_auto_votes();
+            entry_arc
+                .read()
+                .map_err(|_| UserError::LockPoisoned("session"))?
+                .cancel_all_auto_votes();
         }
         let scope = P::Scope::from(conversation_name.to_string());
         self.plugins.consensus.delete_scope(&scope).await?;
@@ -164,7 +167,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             app_id: Arc::from(uuid::Uuid::new_v4().as_bytes().as_slice()),
             transport,
             plugins,
-            conversations: Arc::new(StdRwLock::new(HashMap::new())),
+            conversations: Arc::new(RwLock::new(HashMap::new())),
             lifecycle,
         }
     }

@@ -37,7 +37,7 @@ async fn removed_member_emits_leaving_and_is_evicted() {
     let mut target_idx = None;
     for (i, (u, _)) in users.iter().enumerate() {
         let s = u.lookup_entry("leave").unwrap().unwrap();
-        if !s.read().await.is_steward_for_self() {
+        if !s.read().unwrap().is_steward_for_self() {
             target_idx = Some(i);
             break;
         }
@@ -50,7 +50,7 @@ async fn removed_member_emits_leaving_and_is_evicted() {
 
     let steward_session = users[steward_idx].0.lookup_entry("leave").unwrap().unwrap();
     let target_session = users[target_idx].0.lookup_entry("leave").unwrap().unwrap();
-    let mut target_events = target_session.read().await.subscribe();
+    let mut target_events = target_session.read().unwrap().subscribe();
     // Hold the Arc explicitly so the broadcast sender stays alive even
     // after `User` evicts the entry from the registry.
     let _target_session_keepalive = target_session;
@@ -63,9 +63,7 @@ async fn removed_member_emits_leaving_and_is_evicted() {
             },
         )),
     };
-    SessionRunner::initiate_proposal(&steward_session, request, CreatorVote::Yes)
-        .await
-        .unwrap();
+    SessionRunner::initiate_proposal(&steward_session, request, CreatorVote::Yes).unwrap();
 
     // Drive packet relay + polling until the target is evicted from its
     // User registry. Mirrors the gateway's polling loop: when
@@ -85,7 +83,7 @@ async fn removed_member_emits_leaving_and_is_evicted() {
                     u.finalize_self_leave("leave").await.unwrap();
                 } else {
                     let _ = SessionRunner::poll_freeze_status(&s).await;
-                    let _ = s.write().await.check_member_freeze().await;
+                    let _ = SessionRunner::check_member_freeze(&s).await;
                 }
             }
         }

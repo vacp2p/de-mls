@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use de_mls::app::MemberRole;
+use de_mls::app::{MemberRole, SessionRunner};
 use de_mls::core::StewardListConfig;
 
 mod common;
@@ -34,7 +34,7 @@ async fn second_conversation_sync_is_a_no_op() {
 
     // Bootstrap-driven sync left bob with steward-list state. (Proves the
     // first sync delivery applied — without a sync, joiners have no list.)
-    let roles_before = bob_session.read().await.get_member_roles().unwrap();
+    let roles_before = bob_session.read().unwrap().get_member_roles().unwrap();
     assert!(
         roles_before.iter().any(|(_, r)| matches!(
             r,
@@ -42,15 +42,12 @@ async fn second_conversation_sync_is_a_no_op() {
         )),
         "bob must see at least one steward after bootstrap, got {roles_before:?}"
     );
-    let scores_before = bob_session.read().await.get_member_scores();
+    let scores_before = bob_session.read().unwrap().get_member_scores();
 
     // Alice emits a fresh ConversationSync. Drain her transport, find the
     // sync packet, deliver it to bob — the second delivery (the first one
     // landed during bootstrap).
-    alice_session
-        .read()
-        .await
-        .send_conversation_sync()
+    SessionRunner::send_conversation_sync(&alice_session)
         .await
         .unwrap();
     settle_for(Duration::from_millis(30)).await;
@@ -69,8 +66,8 @@ async fn second_conversation_sync_is_a_no_op() {
     bob_tx.drain_packets();
     deliver(&users[1].0, &sync_packet).await;
     let bob_outbound_after = bob_tx.drain_packets();
-    let roles_after = bob_session.read().await.get_member_roles().unwrap();
-    let scores_after = bob_session.read().await.get_member_scores();
+    let roles_after = bob_session.read().unwrap().get_member_roles().unwrap();
+    let scores_after = bob_session.read().unwrap().get_member_scores();
 
     assert!(
         bob_outbound_after.is_empty(),

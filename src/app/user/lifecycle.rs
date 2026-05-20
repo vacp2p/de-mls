@@ -1,12 +1,11 @@
 //! Create and leave operations for a conversation.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::{
-    app::{ConversationState, PhaseTimer, SessionRunner, User, UserError},
+    app::{ConversationState, LockExt, PhaseTimer, SessionRunner, User, UserError},
     core::{
         ConsensusPlugin, Conversation, ConversationConfig, ConversationLifecycle,
         ConversationPluginsFactory, ConversationStateMachine, PeerScoringPlugin, SessionEvent,
@@ -129,8 +128,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             conversation_name.to_string(),
         ));
         session
-            .read()
-            .await
+            .read_or_err("session")?
             .emit_event(SessionEvent::PhaseChange(initial_state));
 
         Ok(())
@@ -149,10 +147,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .lookup_entry(conversation_name)?
             .ok_or(UserError::ConversationNotFound)?;
 
-        let is_pending_join =
-            entry_arc.read().await.handle.current_state() == ConversationState::PendingJoin;
+        let is_pending_join = entry_arc.read_or_err("session")?.handle.current_state()
+            == ConversationState::PendingJoin;
         if is_pending_join {
-            entry_arc.read().await.emit_event(SessionEvent::Leaving);
+            entry_arc
+                .read_or_err("session")?
+                .emit_event(SessionEvent::Leaving);
             // Cancel auto-vote timers before removing the registry entry —
             // see `finalize_self_leave` for the rationale.
             self.cleanup_consensus_scope(conversation_name).await?;

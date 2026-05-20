@@ -45,7 +45,7 @@ async fn pending_join_expires_evicts_entry_and_broadcasts_removal() {
         .lookup_entry(group)
         .unwrap()
         .expect("session registered");
-    let mut session_events = session.read().await.subscribe();
+    let mut session_events = session.read().unwrap().subscribe();
 
     // Poll until expiry. The first tick after start anchors the timer; we
     // need ≥ 3× inactivity to fire `Expired`.
@@ -93,7 +93,7 @@ async fn await_pending_join_outcome(session: &SessionArc, inactivity: Duration) 
     // Allow up to 6× inactivity so the test isn't fragile on slow CI.
     let deadline = tokio::time::Instant::now() + inactivity * 6;
     loop {
-        let tick = SessionRunner::check_pending_join(session).await;
+        let tick = SessionRunner::check_pending_join(session).unwrap();
         if tick != PendingJoinTick::StillPending {
             return tick;
         }

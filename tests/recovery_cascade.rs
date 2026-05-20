@@ -7,7 +7,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use de_mls::app::{ConversationConfig, User};
+use de_mls::app::{ConversationConfig, SessionRunner, User};
 use de_mls::core::{DefaultConsensusPlugin, StewardListConfig};
 use de_mls::ds::{DeliveryService, DeliveryServiceError, InboundPacket, OutboundPacket};
 
@@ -109,7 +109,7 @@ async fn concurrent_joins_leave_joiners_with_empty_buffer() {
     for u in [&bob, &charlie, &dave] {
         let kp = u.generate_key_package().unwrap();
         let session = u.lookup_entry(group).unwrap().unwrap();
-        session.read().await.send_kp_message(kp).await.unwrap();
+        SessionRunner::send_kp_message(&session, kp).await.unwrap();
     }
 
     // Step 3: Broadcast every KP packet to every participant (mocks pubsub).
@@ -130,7 +130,7 @@ async fn concurrent_joins_leave_joiners_with_empty_buffer() {
     // buffers. Alice (steward) has the KPs in her buffer until she commits.
     for (name, user) in [("bob", &bob), ("charlie", &charlie), ("dave", &dave)] {
         let session = user.lookup_entry(group).unwrap().unwrap();
-        let count = session.read().await.get_pending_update_count();
+        let count = session.read().unwrap().get_pending_update_count();
         assert_eq!(
             count, 0,
             "{name} in PendingJoin must not buffer broadcast KPs"

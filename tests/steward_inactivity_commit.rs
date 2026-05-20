@@ -39,7 +39,7 @@ async fn steward_inactivity_fires_commit_candidate() {
     let bob_tx = users[1].1.clone();
 
     assert!(
-        alice_session.read().await.is_steward_for_self(),
+        alice_session.read().unwrap().is_steward_for_self(),
         "creator must be steward after bootstrap"
     );
 
@@ -52,9 +52,7 @@ async fn steward_inactivity_fires_commit_candidate() {
             RemoveMember { identity: bob_id },
         )),
     };
-    SessionRunner::initiate_proposal(&alice_session, request, CreatorVote::Yes)
-        .await
-        .unwrap();
+    SessionRunner::initiate_proposal(&alice_session, request, CreatorVote::Yes).unwrap();
 
     // Drive polling + packet relay. Accumulate alice's outbound so we can
     // verify a `CommitCandidate` packet appears — without any explicit

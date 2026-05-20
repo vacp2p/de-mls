@@ -8,14 +8,13 @@
 
 #![allow(dead_code)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use de_mls::app::{ConversationConfig, DefaultConversationPluginsFactory, SessionRunner, User};
 use de_mls::core::{DefaultConsensusPlugin, StewardListConfig};
 use de_mls::ds::{DeliveryService, DeliveryServiceError, InboundPacket, OutboundPacket};
 use prost::Message;
-use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
 pub type TestUser = User<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
@@ -222,7 +221,7 @@ pub async fn broadcast(packets: &[OutboundPacket], receivers: &[&TestUser]) {
 pub fn spawn_consensus_forwarder(session: SessionArc) -> JoinHandle<()> {
     use hashgraph_like_consensus::events::ConsensusEventBus;
     tokio::spawn(async move {
-        let mut rx = session.read().await.consensus.event_bus().subscribe();
+        let mut rx = session.read().unwrap().consensus.event_bus().subscribe();
         while let Ok((_conversation_name, event)) = rx.recv().await {
             let _ = SessionRunner::apply_consensus_outcome(&session, event).await;
         }
@@ -251,8 +250,8 @@ pub fn fast_test_config() -> ConversationConfig {
 /// `group_polling_loop` body in `de_mls_gateway::group`.
 pub async fn poll_once(session: &SessionArc) {
     let _ = SessionRunner::poll_freeze_status(session).await;
-    let _ = session.write().await.check_member_freeze().await;
-    let _ = SessionRunner::check_pending_join(session).await;
+    let _ = SessionRunner::check_member_freeze(session).await;
+    let _ = SessionRunner::check_pending_join(session);
 }
 
 /// Bring up a conversation with `keys[0]` as the creator and the rest as
@@ -321,10 +320,7 @@ pub async fn bootstrap_joined_conversation(
     // Joiners send KPs. Drain joiner transports, deliver to creator.
     for i in 1..users.len() {
         let kp = users[i].0.generate_key_package().expect("kp");
-        sessions[i]
-            .read()
-            .await
-            .send_kp_message(kp)
+        SessionRunner::send_kp_message(&sessions[i], kp)
             .await
             .expect("send kp");
     }
@@ -364,7 +360,7 @@ pub async fn bootstrap_joined_conversation(
 
         let mut all_working = true;
         for s in sessions.iter().skip(1) {
-            if s.read().await.get_conversation_state() != ConversationState::Working {
+            if s.read().unwrap().get_conversation_state() != ConversationState::Working {
                 all_working = false;
                 break;
             }

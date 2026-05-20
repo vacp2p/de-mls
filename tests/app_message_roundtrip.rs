@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use de_mls::app::SessionRunner;
 use de_mls::core::{SessionEvent, StewardListConfig};
 use de_mls::protos::de_mls::messages::v1::app_message;
 use tokio::sync::broadcast;
@@ -28,12 +29,9 @@ async fn chat_message_delivered_to_peer_as_app_message_event() {
     let alice_session = users[0].0.lookup_entry("chat").unwrap().unwrap();
     let bob_session = users[1].0.lookup_entry("chat").unwrap().unwrap();
 
-    let mut bob_events = bob_session.read().await.subscribe();
+    let mut bob_events = bob_session.read().unwrap().subscribe();
 
-    alice_session
-        .read()
-        .await
-        .send_app_message(b"Hello from alice".to_vec())
+    SessionRunner::send_app_message(&alice_session, b"Hello from alice".to_vec())
         .await
         .unwrap();
 

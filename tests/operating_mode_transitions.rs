@@ -39,19 +39,22 @@ async fn deadlock_ecp_opens_recovery_and_force_freezes() {
     let alice_tx = users[0].1.clone();
     let bob_tx = users[1].1.clone();
 
-    let mut alice_events = alice_session.read().await.subscribe();
-    let mut bob_events = bob_session.read().await.subscribe();
+    let mut alice_events = alice_session.read().unwrap().subscribe();
+    let mut bob_events = bob_session.read().unwrap().subscribe();
 
     // File a Deadlock ECP. With both members as stewards and bob's
     // auto-vote, the emergency proposal reaches consensus YES.
-    let current_epoch = alice_session.read().await.get_epoch_and_retry().unwrap().0;
+    let current_epoch = alice_session
+        .read()
+        .unwrap()
+        .get_epoch_and_retry()
+        .unwrap()
+        .0;
     let request = ViolationEvidence::deadlock(current_epoch)
         .with_creator(b"alice-creator".to_vec())
         .into_update_request()
         .unwrap();
-    SessionRunner::initiate_proposal(&alice_session, request, CreatorVote::Yes)
-        .await
-        .unwrap();
+    SessionRunner::initiate_proposal(&alice_session, request, CreatorVote::Yes).unwrap();
 
     let mut alice_saw_freezing = false;
     let mut bob_saw_freezing = false;

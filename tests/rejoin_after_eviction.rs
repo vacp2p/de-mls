@@ -34,7 +34,7 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
     let mut target_idx = None;
     for (i, (u, _)) in users.iter().enumerate() {
         let s = u.lookup_entry("rejoin").unwrap().unwrap();
-        if !s.read().await.is_steward_for_self() {
+        if !s.read().unwrap().is_steward_for_self() {
             target_idx = Some(i);
             break;
         }
@@ -53,7 +53,7 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
         .unwrap();
     let pre_remove_epoch = steward_session
         .read()
-        .await
+        .unwrap()
         .get_epoch_and_retry()
         .unwrap()
         .0;
@@ -67,9 +67,7 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
             },
         )),
     };
-    SessionRunner::initiate_proposal(&steward_session, request, CreatorVote::Yes)
-        .await
-        .unwrap();
+    SessionRunner::initiate_proposal(&steward_session, request, CreatorVote::Yes).unwrap();
 
     let mut target_evicted = false;
     for _ in 0..30 {
@@ -97,13 +95,15 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
 
     let new_session = users[target_idx].0.lookup_entry("rejoin").unwrap().unwrap();
     let kp = users[target_idx].0.generate_key_package().unwrap();
-    new_session.read().await.send_kp_message(kp).await.unwrap();
+    SessionRunner::send_kp_message(&new_session, kp)
+        .await
+        .unwrap();
 
     let mut rejoined = false;
     for _ in 0..30 {
         drive_one_round(&users, target_idx).await;
         let s = users[target_idx].0.lookup_entry("rejoin").unwrap().unwrap();
-        if s.read().await.get_conversation_state() == ConversationState::Working {
+        if s.read().unwrap().get_conversation_state() == ConversationState::Working {
             rejoined = true;
             break;
         }
@@ -116,7 +116,7 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
         .unwrap()
         .unwrap()
         .read()
-        .await
+        .unwrap()
         .get_epoch_and_retry()
         .unwrap()
         .0;
@@ -128,7 +128,7 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
     // Steward sees the rejoined identity back in the member set.
     let steward_members = steward_session
         .read()
-        .await
+        .unwrap()
         .get_conversation_members()
         .unwrap();
     let target_display = users[target_idx].0.identity_string().to_lowercase();
@@ -155,8 +155,8 @@ async fn drive_one_round(
                 u.finalize_self_leave("rejoin").await.unwrap();
                 continue;
             }
-            let _ = s.write().await.check_member_freeze().await;
-            let _ = SessionRunner::check_pending_join(&s).await;
+            let _ = SessionRunner::check_member_freeze(&s).await;
+            let _ = SessionRunner::check_pending_join(&s).unwrap();
         }
     }
     let mut packets = Vec::new();

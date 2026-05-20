@@ -6,14 +6,13 @@
 //! [`SessionRunner::dispatch_inbound_result`] for MLS processing and
 //! per-conversation dispatch.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use prost::Message;
-use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::{
-    app::{DispatchOutcome, SessionRunner, User, UserError},
+    app::{DispatchOutcome, LockExt, SessionRunner, User, UserError},
     core::{
         ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, CoreError,
         ProcessResult, StewardListPlugin,
@@ -53,7 +52,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             }
             APP_MSG_SUBTOPIC => {
                 let result = {
-                    let mut entry = entry_arc.write().await;
+                    let mut entry = entry_arc.write_or_err("session")?;
                     if entry.handle.mls().is_none() {
                         return Ok(());
                     }
@@ -114,7 +113,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                     key_package_bytes_from_json(user_kp.key_package_bytes)?;
 
                 let already_member = {
-                    let entry = entry_arc.read().await;
+                    let entry = entry_arc.read_or_err("session")?;
                     entry
                         .handle
                         .mls()
@@ -144,12 +143,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                         },
                     )),
                 };
-                SessionRunner::handle_incoming_update_request(entry_arc, gur).await
+                SessionRunner::handle_incoming_update_request(entry_arc, gur)
             }
             Some(welcome_message::Payload::InvitationToJoin(invitation)) => {
                 let self_id = self.self_identity();
                 let already_in = {
-                    let entry = entry_arc.read().await;
+                    let entry = entry_arc.read_or_err("session")?;
                     entry.handle.steward_list.is_steward(self_id) || entry.handle.mls().is_some()
                 };
                 if already_in {
@@ -166,7 +165,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 };
                 let joined_name = svc.conversation_id().to_string();
                 {
-                    let mut entry = entry_arc.write().await;
+                    let mut entry = entry_arc.write_or_err("session")?;
                     entry.handle.attach_mls(svc);
                 }
                 info!(
@@ -245,7 +244,7 @@ mod tests {
         };
         session
             .read()
-            .await
+            .unwrap()
             .auto_vote_timers
             .lock()
             .unwrap()

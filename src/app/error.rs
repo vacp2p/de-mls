@@ -55,4 +55,7 @@ pub enum UserError {
 
     #[error("Lock poisoned: {0}")]
     LockPoisoned(&'static str),
+
+    #[error("Background task join failed: {0}")]
+    TaskJoin(#[from] tokio::task::JoinError),
 }

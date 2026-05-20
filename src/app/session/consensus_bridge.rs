@@ -16,7 +16,7 @@ use tracing::info;
 
 use crate::{
     app::error::UserError,
-    core::{ConsensusPlugin, Conversation, CoreError, PluginConsensus, self_leave_proposal_id},
+    core::{ConsensusPlugin, CoreError, PluginConsensus, self_leave_proposal_id},
     protos::de_mls::messages::v1::{
         AppMessage, ConversationUpdateRequest, RemoveMember, conversation_update_request,
     },
@@ -42,7 +42,7 @@ pub(crate) struct ProposalParams {
 ///
 /// In both cases the caller must record ownership *before*
 /// casting, so a single-voter consensus transition can't fire before
-/// [`Conversation::is_owner_of_proposal`] is true.
+/// [`crate::core::Conversation::is_owner_of_proposal`] is true.
 pub(crate) async fn submit_proposal<P: ConsensusPlugin>(
     conversation_name: &str,
     request: &ConversationUpdateRequest,
@@ -130,23 +130,28 @@ pub(crate) async fn forward_incoming_proposal<P: ConsensusPlugin>(
 
 /// Forward a peer's vote into the local consensus service.
 ///
-/// Late-arrival classification uses the resolved-proposals cache on
-/// [`Conversation`] to tell benign late packets from suspicious unknowns:
+/// `outcome_applied_locally` is the result of
+/// `Conversation::is_consensus_outcome_applied(vote.proposal_id)` computed
+/// by the caller — passed in eagerly so this helper doesn't have to borrow
+/// the conversation across the consensus `.await`. It's only consulted on
+/// the `SessionNotFound` branch.
+///
+/// Late-arrival classification:
 /// - `SessionNotActive` — session exists but already resolved. Benign, debug.
-/// - `SessionNotFound` with id in the resolved-proposals cache — session
+/// - `SessionNotFound` with `outcome_applied_locally = true` — session
 ///   was trimmed after local resolution. Benign, debug.
-/// - `SessionNotFound` with id NOT in the cache — we never saw this
-///   proposal. Suspicious (spurious packet or lost proposal). Warn-log,
-///   swallow the error so inbound dispatch keeps draining.
+/// - `SessionNotFound` with `outcome_applied_locally = false` — we never
+///   saw this proposal. Suspicious (spurious packet or lost proposal).
+///   Warn-log, swallow the error so inbound dispatch keeps draining.
 ///
 /// Other consensus errors propagate.
 pub(crate) async fn forward_incoming_vote<P: ConsensusPlugin>(
-    conversation: &Conversation,
+    conversation_name: &str,
     vote: Vote,
     consensus: &PluginConsensus<P>,
+    outcome_applied_locally: bool,
 ) -> Result<(), CoreError> {
     let proposal_id = vote.proposal_id;
-    let conversation_name = conversation.name();
     let scope = P::Scope::from(conversation_name.to_string());
     match consensus.process_incoming_vote(&scope, vote).await {
         Ok(()) => Ok(()),
@@ -159,7 +164,7 @@ pub(crate) async fn forward_incoming_vote<P: ConsensusPlugin>(
             Ok(())
         }
         Err(ConsensusError::SessionNotFound) => {
-            if conversation.is_consensus_outcome_applied(proposal_id) {
+            if outcome_applied_locally {
                 tracing::debug!(
                     conversation = conversation_name,
                     proposal_id,
