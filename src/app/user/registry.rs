@@ -1,11 +1,8 @@
-//! Registry CRUD on the `User` side: per-conversation session lookup +
-//! the conversation-lifecycle broadcast channel.
-
-use tokio::sync::broadcast;
+//! Registry CRUD on the `User` side: per-conversation session lookup.
 
 use crate::{
     app::{SessionEntry, User, UserError},
-    core::{ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory},
+    core::{ConsensusPlugin, ConversationPluginsFactory},
 };
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
@@ -34,13 +31,5 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .keys()
             .cloned()
             .collect())
-    }
-
-    /// Subscribe to User-level conversation lifecycle events. Integrators
-    /// use this to discover new sessions and subscribe to their per-session
-    /// [`crate::core::SessionEvent`] streams. Each call returns a fresh
-    /// receiver.
-    pub fn subscribe_conversations(&self) -> broadcast::Receiver<ConversationLifecycle> {
-        self.lifecycle.subscribe()
     }
 }

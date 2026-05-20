@@ -6,11 +6,10 @@
 
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
-use tokio::sync::broadcast;
 use tracing::info;
 
 use crate::{
@@ -40,9 +39,6 @@ pub(crate) fn send_packet(
 
 /// Default capacity for a session's [`SessionEvent`] broadcast channel.
 /// Sized for bursty proposal sessions (proposals + votes + UI pushes in
-/// flight); subscribers that fall behind by more than this lose events.
-const SESSION_EVENT_CAPACITY: usize = 256;
-
 /// One pending auto-vote: cast `vote` for `proposal_id` once the wall-clock
 /// catches up to `fire_at`. Registered by `initiate_proposal` (Deferred
 /// path) and `on_incoming_proposal`; cancelled on manual vote or consensus
@@ -97,10 +93,10 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Per-User instance UUID (cloned from `User`). Tagged on every
     /// outbound packet for self-message filtering.
     pub(crate) app_id: Arc<[u8]>,
-    /// Per-session notification channel. Integrators subscribe via
-    /// [`Self::subscribe`] and consume [`SessionEvent`]s for UI / audit.
-    /// Fire-and-forget; no failure path back into the session.
-    events: broadcast::Sender<SessionEvent>,
+    /// Pending [`SessionEvent`]s waiting for a caller to drain. Interior
+    /// `Mutex` so producer-side `emit_event` stays `&self`; consumers
+    /// drain via [`Self::drain_events`] once per polling cycle.
+    pending_events: Mutex<Vec<SessionEvent>>,
 }
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
@@ -123,7 +119,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         identity_display: Arc<str>,
         app_id: Arc<[u8]>,
     ) -> Self {
-        let (events, _initial_rx) = broadcast::channel(SESSION_EVENT_CAPACITY);
         Self {
             conversation_name,
             handle: ConversationHandle::new(
@@ -142,21 +137,29 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             self_identity,
             identity_display,
             app_id,
-            events,
+            pending_events: Mutex::new(Vec::new()),
         }
     }
 
-    /// Subscribe to per-session [`SessionEvent`] notifications. Each call
-    /// returns a fresh receiver; late subscribers miss earlier events.
-    pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
-        self.events.subscribe()
+    /// Append a [`SessionEvent`] to the pending-events buffer. The caller's
+    /// polling cycle drains it via [`Self::drain_events`]. Stays `&self`
+    /// thanks to the interior [`Mutex`], so the many session-coordinator
+    /// methods that emit during a brief read guard don't need to escalate
+    /// to a write guard. Silent on poison — emit is fire-and-forget.
+    pub(crate) fn emit_event(&self, event: SessionEvent) {
+        if let Ok(mut buf) = self.pending_events.lock() {
+            buf.push(event);
+        }
     }
 
-    /// Emit a [`SessionEvent`] on the session's broadcast channel. Silently
-    /// drops the event when there are no live subscribers — events are
-    /// fire-and-forget.
-    pub(crate) fn emit_event(&self, event: SessionEvent) {
-        let _ = self.events.send(event);
+    /// Drain every pending [`SessionEvent`] accumulated since the last
+    /// call. Returns events in insertion order. Callers (UI fanout,
+    /// audit log) invoke this once per polling cycle.
+    pub fn drain_events(&self) -> Vec<SessionEvent> {
+        match self.pending_events.lock() {
+            Ok(mut buf) => std::mem::take(&mut *buf),
+            Err(_) => Vec::new(),
+        }
     }
 
     /// Borrow the session's transport without taking the runner lock —

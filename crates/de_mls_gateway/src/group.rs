@@ -20,9 +20,7 @@ fn is_polling_fatal(err: &UserError) -> bool {
         // Conversation-level terminal states.
         UserError::ConversationNotFound | UserError::AlreadyLeaving => true,
         // Lock poisoning means the session is corrupted — no recovery.
-        // Background task join failure means a spawned task panicked or
-        // was cancelled; conservative response is to exit the loop.
-        UserError::LockPoisoned(_) | UserError::TaskJoin(_) => true,
+        UserError::LockPoisoned(_) => true,
         UserError::ConversationAlreadyExists
         | UserError::ConversationBlocked(_)
         | UserError::PartialFreeze

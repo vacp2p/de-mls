@@ -4,7 +4,6 @@ use std::time::SystemTimeError;
 
 use alloy::signers::local::LocalSignerError;
 use hashgraph_like_consensus::error::ConsensusError;
-use tokio::task::JoinError;
 
 use crate::{
     core::CoreError, ds::DeliveryServiceError, identity::IdentityError, mls_crypto::MlsError,
@@ -58,7 +57,4 @@ pub enum UserError {
 
     #[error("Lock poisoned: {0}")]
     LockPoisoned(&'static str),
-
-    #[error("Background task join failed: {0}")]
-    TaskJoin(#[from] JoinError),
 }

@@ -86,7 +86,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .write()
             .map_err(|_| UserError::LockPoisoned("conversation registry"))?
             .remove(conversation_name);
-        let _ = self.lifecycle.send(ConversationLifecycle::Removed(
+        self.emit_lifecycle(ConversationLifecycle::Removed(
             conversation_name.to_string(),
         ));
         Ok(())

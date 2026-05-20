@@ -50,10 +50,6 @@ async fn removed_member_emits_leaving_and_is_evicted() {
 
     let steward_session = users[steward_idx].0.lookup_entry("leave").unwrap().unwrap();
     let target_session = users[target_idx].0.lookup_entry("leave").unwrap().unwrap();
-    let mut target_events = target_session.read().unwrap().subscribe();
-    // Hold the Arc explicitly so the broadcast sender stays alive even
-    // after `User` evicts the entry from the registry.
-    let _target_session_keepalive = target_session;
 
     let target_id = parse_wallet_to_bytes(&users[target_idx].0.identity_string()).unwrap();
     let request = ConversationUpdateRequest {
@@ -109,21 +105,11 @@ async fn removed_member_emits_leaving_and_is_evicted() {
         "removed member must be evicted from their own registry"
     );
 
-    let saw_leaving = drain_for(&mut target_events, |e| matches!(e, SessionEvent::Leaving));
-    assert!(saw_leaving, "removed member's session must emit Leaving");
-}
-
-fn drain_for<F>(rx: &mut tokio::sync::broadcast::Receiver<SessionEvent>, pred: F) -> bool
-where
-    F: Fn(&SessionEvent) -> bool,
-{
-    use tokio::sync::broadcast::error::TryRecvError;
-    loop {
-        match rx.try_recv() {
-            Ok(ev) if pred(&ev) => return true,
-            Ok(_) => {}
-            Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => return false,
-            Err(TryRecvError::Lagged(_)) => continue,
-        }
-    }
+    let target_events = target_session.read().unwrap().drain_events();
+    assert!(
+        target_events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::Leaving)),
+        "removed member's session must emit Leaving"
+    );
 }

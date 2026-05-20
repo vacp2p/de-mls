@@ -58,13 +58,6 @@
 //! ds.shutdown();
 //! # Ok::<(), de_mls::ds::DeliveryServiceError>(())
 //! ```
-//!
-//! # Threading model
-//!
-//! The entire DS layer is **synchronous** — no tokio dependency. The Waku
-//! implementation runs an embedded node on a dedicated `std::thread`. Callers
-//! in an async context should wrap `DeliveryService::publish` in
-//! `tokio::task::spawn_blocking`.
 
 mod error;
 mod topic_filter;

@@ -19,9 +19,10 @@ use crate::{
     protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest},
 };
 
-/// Per-conversation notification. Sessions broadcast these; integrators
-/// subscribe via [`crate::app::SessionRunner::subscribe`]. All variants are
-/// fire-and-forget — no failure path back to the session.
+/// Per-conversation notification. Sessions append these to their pending
+/// buffer; integrators drain via
+/// [`crate::app::SessionRunner::drain_events`] once per polling cycle. All
+/// variants are fire-and-forget — no failure path back to the session.
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
     /// Decrypted application message (chat, vote request, proposal
@@ -61,10 +62,11 @@ pub enum SessionEvent {
     ProposalDecided(ConsensusEvent),
 }
 
-/// User-level conversation lifecycle event. Sent on [`crate::app::User`]'s
-/// lifecycle channel; integrators subscribe via
-/// [`crate::app::User::subscribe_conversations`] and use `Created` as the
-/// trigger to subscribe to the new session's [`SessionEvent`] stream.
+/// User-level conversation lifecycle event. Appended to [`crate::app::User`]'s
+/// pending buffer; integrators drain via
+/// [`crate::app::User::drain_lifecycle_events`] once per polling cycle and
+/// use `Created` as the trigger to begin draining per-session
+/// [`SessionEvent`]s.
 #[derive(Debug, Clone)]
 pub enum ConversationLifecycle {
     /// A new conversation entry has been registered. The session is in the

@@ -14,7 +14,6 @@ use std::time::Duration;
 use de_mls::app::{CreatorVote, SessionRunner};
 use de_mls::core::{ConversationState, SessionEvent, StewardListConfig};
 use de_mls::protos::de_mls::messages::v1::ViolationEvidence;
-use tokio::sync::broadcast;
 
 mod common;
 use common::session_fixtures::{
@@ -39,8 +38,8 @@ async fn deadlock_ecp_opens_recovery_and_force_freezes() {
     let alice_tx = users[0].1.clone();
     let bob_tx = users[1].1.clone();
 
-    let mut alice_events = alice_session.read().unwrap().subscribe();
-    let mut bob_events = bob_session.read().unwrap().subscribe();
+    let mut alice_events: Vec<SessionEvent> = Vec::new();
+    let mut bob_events: Vec<SessionEvent> = Vec::new();
 
     // File a Deadlock ECP. With both members as stewards and bob's
     // auto-vote, the emergency proposal reaches consensus YES.
@@ -73,10 +72,18 @@ async fn deadlock_ecp_opens_recovery_and_force_freezes() {
             let _ = users[0].0.process_inbound_packet(to_inbound(&p)).await;
         }
 
-        if any_phase_change(&mut alice_events, ConversationState::Freezing) {
+        alice_events.extend(alice_session.read().unwrap().drain_events());
+        bob_events.extend(bob_session.read().unwrap().drain_events());
+        if alice_events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::PhaseChange(s) if *s == ConversationState::Freezing))
+        {
             alice_saw_freezing = true;
         }
-        if any_phase_change(&mut bob_events, ConversationState::Freezing) {
+        if bob_events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::PhaseChange(s) if *s == ConversationState::Freezing))
+        {
             bob_saw_freezing = true;
         }
         if alice_saw_freezing && bob_saw_freezing {
@@ -88,19 +95,4 @@ async fn deadlock_ecp_opens_recovery_and_force_freezes() {
         "after a Deadlock ECP YES both members must emit PhaseChange(Freezing) \
          (alice={alice_saw_freezing}, bob={bob_saw_freezing})"
     );
-}
-
-/// Drain pending events, return true if any was a `PhaseChange(want)`.
-fn any_phase_change(rx: &mut broadcast::Receiver<SessionEvent>, want: ConversationState) -> bool {
-    use tokio::sync::broadcast::error::TryRecvError;
-    let mut found = false;
-    loop {
-        match rx.try_recv() {
-            Ok(SessionEvent::PhaseChange(state)) if state == want => found = true,
-            Ok(_) => {}
-            Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
-            Err(TryRecvError::Lagged(_)) => continue,
-        }
-    }
-    found
 }

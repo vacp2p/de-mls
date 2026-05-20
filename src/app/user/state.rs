@@ -1,18 +1,14 @@
-//! [`User`] struct definition, `Clone`, constructor, accessors, and the
+//! [`User`] struct definition, constructor, accessors, and the
 //! consensus-context helpers shared across the User submodules
 //! (`lifecycle`, `inbound`, `registry`).
-//!
-//! `User` is `Clone` — all fields are `Arc` or cheap `Clone` — so background
-//! tasks just take their own handle via `self.clone()`.
 
 use std::{
     collections::HashMap,
     str::FromStr,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use alloy::signers::local::PrivateKeySigner;
-use tokio::sync::broadcast;
 
 use crate::{
     app::{SessionRunner, UserError},
@@ -27,66 +23,45 @@ use crate::{
 
 use super::plugins::{DefaultConversationPluginsFactory, UserPlugins};
 
-/// Default capacity for the User's [`ConversationLifecycle`] broadcast
-/// channel. Sized for batch login flows; subscribers that fall behind by
-/// more than this lose events.
-const CONVERSATION_LIFECYCLE_CAPACITY: usize = 128;
-
 /// Single registry entry: one `Arc<RwLock<SessionRunner>>` per conversation.
 /// Cloned out of the registry under the outer read lock, then locked
 /// independently — writes on one conversation don't block reads on another.
 pub type SessionEntry<P, CP> = Arc<RwLock<SessionRunner<P, CP>>>;
 
-/// Per-user registry of conversation runners. The outer lock guards map
-/// CRUD; the inner per-runner lock guards per-conversation reads/mutations
-/// so a write on conversation A doesn't block reads on conversation B.
-pub(crate) type ConversationRegistry<P, CP> = Arc<RwLock<HashMap<String, SessionEntry<P, CP>>>>;
+/// Per-user registry of conversation runners. Each entry's inner per-runner
+/// lock guards per-conversation reads/mutations so a write on conversation
+/// A doesn't block reads on conversation B.
+pub(crate) type ConversationRegistry<P, CP> = RwLock<HashMap<String, SessionEntry<P, CP>>>;
 
 pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// `identity.identity_bytes()` materialised once at construction so every
     /// method that needs the local identity bytes reads them without
     /// re-walking the `Identity` trait + allocating a fresh `Vec`.
-    pub(crate) self_identity: Arc<[u8]>,
+    pub(crate) self_identity: Vec<u8>,
     /// Cached display form of the local identity (e.g. checksummed `0x…`
     /// hex). Cloned into each `SessionRunner` so per-session methods
     /// (`send_app_message`) can tag the `sender` field without re-walking
     /// the `Identity` trait + allocating each call.
-    pub(crate) identity_display: Arc<str>,
+    pub(crate) identity_display: String,
     /// Per-instance UUID embedded in every outbound packet. Inbound packets
-    /// carrying our `app_id` are self-echoes and silently dropped. Cached
-    /// as `Arc<[u8]>` so each `SessionRunner` cheaply shares it.
-    pub(crate) app_id: Arc<[u8]>,
+    /// carrying our `app_id` are self-echoes and silently dropped.
+    pub(crate) app_id: Vec<u8>,
     /// Synchronous outbound transport. Cloned into each `SessionRunner` at
-    /// construction; sessions wrap [`crate::ds::DeliveryService::publish`]
-    /// in `spawn_blocking` for use in async contexts. Stored behind a
-    /// `Mutex` because the trait takes `&mut self`.
+    /// construction. Stored behind a `Mutex` because the trait takes
+    /// `&mut self`.
     pub(crate) transport: SharedDeliveryService,
     /// All User-level plugin state: the per-conversation factory, the
     /// consensus context, the key-package provider, and the three default
     /// configs cloned into newly-created sessions.
     pub(crate) plugins: UserPlugins<P, CP>,
-    /// Per-conversation `SessionRunner`s. Outer lock guards map CRUD;
-    /// inner per-runner lock guards per-conversation reads/mutations so a
-    /// write on conversation A doesn't block reads on conversation B.
+    /// Per-conversation `SessionRunner`s.
     pub(crate) conversations: ConversationRegistry<P, CP>,
-    /// User-level conversation lifecycle channel. Emits `Created(name)` /
-    /// `Removed(name)` so integrators can subscribe to per-session
-    /// [`crate::core::SessionEvent`] streams as conversations come and go.
-    pub(crate) lifecycle: broadcast::Sender<ConversationLifecycle>,
-}
-
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Clone for User<P, CP> {
-    fn clone(&self) -> Self {
-        Self {
-            self_identity: Arc::clone(&self.self_identity),
-            identity_display: Arc::clone(&self.identity_display),
-            app_id: Arc::clone(&self.app_id),
-            transport: Arc::clone(&self.transport),
-            plugins: self.plugins.clone(),
-            conversations: Arc::clone(&self.conversations),
-            lifecycle: self.lifecycle.clone(),
-        }
-    }
+    /// User-level conversation lifecycle events: `Created(name)` /
+    /// `Removed(name)`. Integrators drain via
+    /// [`Self::drain_lifecycle_events`] once per polling cycle to learn
+    /// when new sessions appear and old ones disappear. Interior `Mutex`
+    /// so producer-side methods stay `&self`.
+    pub(crate) pending_lifecycle_events: Mutex<Vec<ConversationLifecycle>>,
 }
 
 // ── Public API ──────────────────────────────────────────────────────────
@@ -94,7 +69,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Clone for User<P, CP> {
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Wallet address as checksummed hex.
     pub fn identity_string(&self) -> String {
-        self.identity_display.to_string()
+        self.identity_display.clone()
     }
 
     /// Generate a single-use key package for our identity. Conversation-free —
@@ -102,6 +77,18 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`crate::core::KeyPackageProvider`].
     pub fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
         self.plugins.key_package_provider.generate()
+    }
+
+    /// Drain every pending [`ConversationLifecycle`] event accumulated
+    /// since the last call. Returns events in insertion order. Callers
+    /// (gateway, integrator) invoke this once per polling cycle to discover
+    /// `Created` / `Removed` sessions and wire up per-session event
+    /// drains via [`SessionRunner::drain_events`].
+    pub fn drain_lifecycle_events(&self) -> Vec<ConversationLifecycle> {
+        match self.pending_lifecycle_events.lock() {
+            Ok(mut buf) => std::mem::take(&mut *buf),
+            Err(_) => Vec::new(),
+        }
     }
 
     /// Override the seed [`ScoringConfig`] used for newly-created per-conversation
@@ -127,6 +114,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         &self.self_identity
     }
 
+    /// Append a [`ConversationLifecycle`] event to the pending-events buffer
+    /// for [`Self::drain_lifecycle_events`]. Silent on poison —
+    /// emit is fire-and-forget.
+    pub(crate) fn emit_lifecycle(&self, event: ConversationLifecycle) {
+        if let Ok(mut buf) = self.pending_lifecycle_events.lock() {
+            buf.push(event);
+        }
+    }
+
     /// Build a fresh per-conversation `ConsensusService` via the User's
     /// `ConsensusContext`.
     pub(crate) fn build_consensus_service(&self) -> PluginConsensus<P> {
@@ -134,7 +130,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     }
 
     /// Drop this conversation's consensus scope from the shared storage and
-    /// abort every auto-vote timer belonging to it. Called on leave and
+    /// clear every auto-vote registered for it. Called on leave and
     /// pending-join timeout.
     pub(crate) async fn cleanup_consensus_scope(
         &self,
@@ -159,17 +155,16 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         plugins: UserPlugins<P, CP>,
         transport: SharedDeliveryService,
     ) -> Self {
-        let self_identity: Arc<[u8]> = Arc::from(identity.identity_bytes());
-        let identity_display: Arc<str> = Arc::from(identity.identity_display());
-        let (lifecycle, _initial_rx) = broadcast::channel(CONVERSATION_LIFECYCLE_CAPACITY);
+        let self_identity = identity.identity_bytes().to_vec();
+        let identity_display = identity.identity_display().to_string();
         Self {
             self_identity,
             identity_display,
-            app_id: Arc::from(uuid::Uuid::new_v4().as_bytes().as_slice()),
+            app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
             transport,
             plugins,
-            conversations: Arc::new(RwLock::new(HashMap::new())),
-            lifecycle,
+            conversations: RwLock::new(HashMap::new()),
+            pending_lifecycle_events: Mutex::new(Vec::new()),
         }
     }
 }

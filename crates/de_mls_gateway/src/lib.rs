@@ -191,11 +191,12 @@ impl Gateway<WakuDeliveryService> {
         Ok(user_address)
     }
 
-    /// Spawn the user-level subscriber that watches
-    /// [`User::subscribe_conversations`] and, on each `Created(name)`,
-    /// spawns:
-    /// - a per-session `SessionEvent` subscriber (UI fan-out), and
-    /// - the existing per-conv consensus event forwarder.
+    /// Spawn the gateway's UI event pump. Once per polling cycle it
+    /// drains [`de_mls::app::User::drain_lifecycle_events`] (to learn
+    /// when new sessions appear or disappear) and
+    /// [`de_mls::app::SessionRunner::drain_events`] on every active
+    /// session (to forward UI-bound events). Replaces the previous
+    /// broadcast-channel subscriber pattern.
     fn spawn_session_subscribers(&self, user: UserRef) {
         let evt_tx = self.evt_tx.clone();
         let topics = self.core().topics.clone();
@@ -204,63 +205,52 @@ impl Gateway<WakuDeliveryService> {
         let gateway_for_consensus_spawn = user.clone();
 
         tokio::spawn(async move {
-            let mut lifecycle_rx = {
-                let u = user_for_loop.read().await;
-                u.subscribe_conversations()
-            };
-            while let Ok(event) = lifecycle_rx.recv().await {
-                match event {
-                    de_mls::core::ConversationLifecycle::Created(name) => {
-                        let fanout = Arc::new(GatewaySessionFanout {
-                            evt_tx: evt_tx.clone(),
-                            topics: topics.clone(),
-                            epoch_history: epoch_history.clone(),
-                        });
-                        let Some(session_rx) = ({
-                            let u = user_for_loop.read().await;
-                            match u.lookup_entry(&name) {
-                                Ok(opt) => opt,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        conversation = %name,
-                                        error = %e,
-                                        "lookup_entry failed in lifecycle::Created"
-                                    );
-                                    continue;
-                                }
-                            }
-                        }) else {
+            let mut active_sessions: HashMap<String, Arc<GatewaySessionFanout>> = HashMap::new();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+                // Drain user-level lifecycle events first so newly-created
+                // sessions get their fanout registered before we look for
+                // events on them.
+                let lifecycle = user_for_loop.read().await.drain_lifecycle_events();
+                for event in lifecycle {
+                    match event {
+                        de_mls::core::ConversationLifecycle::Created(name) => {
+                            let fanout = Arc::new(GatewaySessionFanout {
+                                evt_tx: evt_tx.clone(),
+                                topics: topics.clone(),
+                                epoch_history: epoch_history.clone(),
+                            });
+                            active_sessions.insert(name.clone(), fanout);
+                            GATEWAY.spawn_consensus_forwarder(
+                                gateway_for_consensus_spawn.clone(),
+                                name,
+                            );
+                        }
+                        de_mls::core::ConversationLifecycle::Removed(name) => {
+                            active_sessions.remove(&name);
+                        }
+                    }
+                }
+
+                // Drain each active session's pending events.
+                for (name, fanout) in &active_sessions {
+                    let session = match user_for_loop.read().await.lookup_entry(name) {
+                        Ok(Some(s)) => s,
+                        _ => continue,
+                    };
+                    let events = match session.read() {
+                        Ok(g) => g.drain_events(),
+                        Err(_) => {
                             tracing::warn!(
                                 conversation = %name,
-                                "lifecycle::Created fired but session missing in registry"
+                                "session drain skipped: lock poisoned"
                             );
                             continue;
-                        };
-                        let name_for_sub = name.clone();
-                        let session_rx_clone = session_rx.clone();
-                        let mut session_rx_inner = match session_rx_clone.read() {
-                            Ok(s) => s.subscribe(),
-                            Err(_) => {
-                                tracing::warn!(
-                                    conversation = %name,
-                                    "session event subscribe skipped: session lock poisoned"
-                                );
-                                continue;
-                            }
-                        };
-                        tokio::spawn(async move {
-                            while let Ok(event) = session_rx_inner.recv().await {
-                                fanout.handle(&name_for_sub, event).await;
-                            }
-                        });
-                        // Spawn the per-conv consensus event forwarder
-                        // (handles `AppEvent::ProposalDecided` + state pushes).
-                        GATEWAY
-                            .spawn_consensus_forwarder(gateway_for_consensus_spawn.clone(), name);
-                    }
-                    de_mls::core::ConversationLifecycle::Removed(_) => {
-                        // Per-session subscribers exit naturally when the
-                        // session's broadcast sender drops on entry removal.
+                        }
+                    };
+                    for event in events {
+                        fanout.handle(name, event).await;
                     }
                 }
             }

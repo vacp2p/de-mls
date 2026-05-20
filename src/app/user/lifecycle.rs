@@ -106,9 +106,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             steward_list,
             consensus,
             Arc::clone(&self.transport),
-            Arc::clone(&self.self_identity),
-            Arc::clone(&self.identity_display),
-            Arc::clone(&self.app_id),
+            Arc::from(self.self_identity.as_slice()),
+            Arc::from(self.identity_display.as_str()),
+            Arc::from(self.app_id.as_slice()),
         )));
         {
             let mut conversations = self
@@ -121,10 +121,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             conversations.insert(conversation_name.to_string(), Arc::clone(&session));
         }
 
-        // Emit on the lifecycle channel first so integrators can subscribe
-        // to the new session's `SessionEvent` stream before any session
-        // events are fired.
-        let _ = self.lifecycle.send(ConversationLifecycle::Created(
+        // Record the lifecycle event first so integrators draining
+        // [`User::drain_lifecycle_events`] see `Created` before any
+        // per-session event emitted below.
+        self.emit_lifecycle(ConversationLifecycle::Created(
             conversation_name.to_string(),
         ));
         session
@@ -160,7 +160,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 .write()
                 .map_err(|_| UserError::LockPoisoned("conversation registry"))?
                 .remove(conversation_name);
-            let _ = self.lifecycle.send(ConversationLifecycle::Removed(
+            self.emit_lifecycle(ConversationLifecycle::Removed(
                 conversation_name.to_string(),
             ));
             return Ok(());
