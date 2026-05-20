@@ -1,14 +1,15 @@
 //! Safe synchronous wrapper around the raw libwaku FFI.
 //!
-//! Some methods are intentionally unused today (kept for future bring-up of
-//! discv5/peer-id/version exposure); the `#![allow(unused)]` covers them.
+//! `#![allow(unused)]` covers methods exposed for completeness that no
+//! caller currently invokes (version, peer id, discv5 control).
 #![allow(unused)]
+
 use std::{cell::OnceCell, ffi::CString, os::raw::c_void};
 
 use crate::ds::waku::sys::{self as waku_sys, RET_OK, get_trampoline};
 
-/// Structured error from a libwaku FFI call. The `op` carries the C symbol
-/// name so logs and `Display` output identify which call failed.
+/// Structured error from a libwaku FFI call. `op` carries the C symbol
+/// name so `Display` output identifies which call failed.
 #[derive(Debug, thiserror::Error)]
 pub enum WakuFfiError {
     #[error("invalid C string for {arg}: {source}")]
@@ -30,17 +31,18 @@ pub enum WakuFfiError {
 fn invalid_cstring(arg: &'static str) -> impl FnOnce(std::ffi::NulError) -> WakuFfiError {
     move |source| WakuFfiError::InvalidCString { arg, source }
 }
+
 /// Opaque handle to a libwaku node context.
 pub struct WakuNodeCtx {
     ctx: *mut c_void,
 }
 
-// The libwaku ctx pointer is thread-safe (single node, serialized calls inside C).
+// Single node, all calls serialized inside C.
 unsafe impl Send for WakuNodeCtx {}
 unsafe impl Sync for WakuNodeCtx {}
 
 impl WakuNodeCtx {
-    /// Create a new waku node. `config_json` is the JSON string for node configuration.
+    /// Create a new waku node from a libwaku JSON config.
     pub fn new(config_json: &str) -> Result<Self, WakuFfiError> {
         let config_cstr = CString::new(config_json).map_err(invalid_cstring("config_json"))?;
 
@@ -61,9 +63,10 @@ impl WakuNodeCtx {
         };
 
         if ctx.is_null() || err.is_some() {
+            // Null ctx without a code: report 0 as a sentinel.
             return Err(WakuFfiError::Call {
                 op: "waku_new",
-                code: RET_OK, // null ctx surfaces with no code; report 0 as sentinel
+                code: RET_OK,
                 msg: err.unwrap_or_else(|| "returned null".into()),
             });
         }
@@ -179,7 +182,7 @@ impl WakuNodeCtx {
         Ok(())
     }
 
-    /// Publish a message via relay. `json_message` is the waku message JSON.
+    /// Publish `json_message` (a serialized Waku relay message) on `pubsub_topic`.
     pub fn relay_publish(
         &self,
         pubsub_topic: &str,
@@ -252,8 +255,8 @@ impl WakuNodeCtx {
         Ok(())
     }
 
-    /// Register the event callback. Returns the boxed closure — caller must keep
-    /// it alive for the lifetime of the node (dropping it invalidates the FFI pointer).
+    /// Register the event callback. The returned `Box` must outlive the
+    /// node — dropping it invalidates the FFI pointer libwaku holds.
     pub fn set_event_callback<C>(&self, closure: C) -> Box<C>
     where
         C: FnMut(i32, &str),
@@ -266,7 +269,8 @@ impl WakuNodeCtx {
         boxed
     }
 
-    /// Stop the node. Should be called before dropping to cleanly release resources.
+    /// Stop the node. Called from `Drop`, so explicit calls are usually
+    /// unnecessary unless an early shutdown error needs to be surfaced.
     pub fn stop(&self) -> Result<(), WakuFfiError> {
         let mut err: Option<String> = None;
         let mut closure = |ret: i32, data: &str| {

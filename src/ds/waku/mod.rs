@@ -18,12 +18,12 @@ use crate::ds::{
     waku::wrapper::WakuNodeCtx,
 };
 
-/// The pubsub topic for the Waku Node.
+/// Pubsub topic of the Waku Node.
 pub fn pubsub_topic() -> String {
     "/waku/2/rs/15/1".to_string()
 }
 
-/// Build the content topics for a conversation.
+/// Content topics this conversation subscribes to (one per subtopic).
 pub fn build_content_topics(conversation_name: &str) -> Vec<String> {
     SUBTOPICS
         .iter()
@@ -31,7 +31,7 @@ pub fn build_content_topics(conversation_name: &str) -> Vec<String> {
         .collect()
 }
 
-/// Build the content topic string: `/{conversation_name}/{version}/{subtopic}/proto`
+/// `/{conversation_name}/{version}/{subtopic}/proto`.
 pub fn build_content_topic(
     conversation_name: &str,
     conversation_version: &str,
@@ -40,31 +40,25 @@ pub fn build_content_topic(
     format!("/{conversation_name}/{conversation_version}/{subtopic}/proto")
 }
 
-// ── Outbound command ────────────────────────────────────────────────────────
 struct OutboundCommand {
     pkt: OutboundPacket,
     reply: mpsc::SyncSender<Result<String, DeliveryServiceError>>,
 }
 
-// ── Subscriber registry ─────────────────────────────────────────────────────
 type SubscriberList = Arc<Mutex<Vec<mpsc::SyncSender<InboundPacket>>>>;
 
 /// Result returned by [`WakuDeliveryService::start`].
 pub struct WakuStartResult {
     pub service: WakuDeliveryService,
-    /// The local ENR (Ethereum Node Record) if discv5 is enabled.
-    /// Pass this to other nodes via `WakuConfig::discv5_bootstrap_enrs`.
+    /// Local ENR — present when discv5 is enabled; pass to other nodes via
+    /// [`WakuConfig::discv5_bootstrap_enrs`].
     pub enr: Option<String>,
 }
 
-/// Waku-backed delivery service.
-///
-/// The service starts an embedded Waku node on a dedicated `std::thread`.
-/// All interaction is via synchronous `std::sync::mpsc` channels.
-///
-/// Use [`WakuDeliveryService::start`] to create an instance. Call
-/// [`shutdown`](WakuDeliveryService::shutdown) for explicit cleanup, or
-/// simply drop all clones to stop the background thread.
+/// Waku-backed delivery service. Runs an embedded Waku node on a
+/// dedicated `std::thread`; all interaction is via synchronous
+/// `std::sync::mpsc` channels. Drop every clone (or call
+/// [`shutdown`](Self::shutdown)) to stop the node.
 #[derive(Clone, Debug)]
 pub struct WakuDeliveryService {
     outbound: mpsc::SyncSender<OutboundCommand>,
@@ -75,13 +69,12 @@ pub struct WakuDeliveryService {
 #[derive(Debug, Clone)]
 pub struct WakuConfig {
     pub node_port: u16,
-    /// Enable discv5 peer discovery. Nodes on the same clusterId/shard
-    /// will find each other automatically.
+    /// Enable discv5 peer discovery.
     pub discv5: bool,
-    /// UDP port for discv5 discovery (default: 9000).
+    /// UDP port for discv5 discovery.
     pub discv5_udp_port: u16,
-    /// Bootstrap ENR strings for discv5. If empty and discv5 is enabled,
-    /// this node acts as a bootstrap node (others must know its ENR).
+    /// Bootstrap ENRs for discv5. Empty means this node acts as a
+    /// bootstrap node (peers must know its ENR out-of-band).
     pub discv5_bootstrap_enrs: Vec<String>,
 }
 
@@ -97,8 +90,8 @@ impl Default for WakuConfig {
 }
 
 impl WakuDeliveryService {
-    /// Start a Waku node and return both the delivery service and the local ENR
-    /// (if discv5 is enabled).
+    /// Start the node and return the delivery service + the local ENR
+    /// (when discv5 is enabled).
     pub fn start(cfg: WakuConfig) -> Result<WakuStartResult, DeliveryServiceError> {
         let (out_tx, out_rx) = mpsc::sync_channel::<OutboundCommand>(256);
         let subscribers: SubscriberList = Arc::new(Mutex::new(Vec::new()));
@@ -120,12 +113,11 @@ impl WakuDeliveryService {
                     error!("waku-node thread panicked: {msg}");
                 }
             })
-            .map_err(|e| DeliveryServiceError::Other(anyhow::anyhow!(e)))?;
+            .map_err(DeliveryServiceError::ThreadSpawn)?;
 
-        // Wait for the node to either start or fail.
         let enr = ready_rx
             .recv()
-            .map_err(|e| DeliveryServiceError::Other(anyhow::anyhow!(e)))??;
+            .map_err(|_| DeliveryServiceError::WakuChannelClosed)??;
 
         let service = Self {
             outbound: out_tx,
@@ -135,16 +127,13 @@ impl WakuDeliveryService {
         Ok(WakuStartResult { service, enr })
     }
 
-    /// The local ENR (Ethereum Node Record), available when discv5 is enabled.
+    /// Local ENR — `Some` when discv5 is enabled.
     pub fn enr(&self) -> Option<&str> {
         self.enr.as_deref()
     }
 
-    /// Explicitly shut down the background Waku node thread.
-    ///
-    /// After calling this, all subsequent [`publish`](DeliveryService::publish) calls
-    /// will return an error. Alternatively, dropping all clones of this service
-    /// achieves the same effect.
+    /// Shut down the background Waku node thread. Subsequent
+    /// [`publish`](DeliveryService::publish) calls return an error.
     pub fn shutdown(self) {
         drop(self.outbound);
     }
@@ -163,8 +152,8 @@ impl WakuDeliveryService {
             "shards": [1],
             "numShardsInNetwork": 8,
             "logLevel": "ERROR",
-            // Keep metrics disabled for libwaku runtime to avoid exposing
-            // Prometheus/logging endpoints from embedded nodes.
+            // Disable libwaku metrics — would expose Prometheus/logging
+            // endpoints from embedded nodes otherwise.
             "metricsServer": false,
             "metricsLogging": false,
         });
@@ -179,7 +168,6 @@ impl WakuDeliveryService {
 
         let config_json = config.to_string();
 
-        // Create node
         let waku = match WakuNodeCtx::new(&config_json) {
             Ok(w) => w,
             Err(e) => {
@@ -188,7 +176,6 @@ impl WakuDeliveryService {
             }
         };
 
-        // Start node
         if let Err(e) = waku.start() {
             let _ = ready_tx.send(Err(DeliveryServiceError::WakuStartup(e)));
             return;
@@ -197,8 +184,8 @@ impl WakuDeliveryService {
 
         thread::sleep(Duration::from_secs(2));
 
-        // Retrieve ENR for discv5 bootstrapping (discv5 is started automatically
-        // by waku_start when discv5Discovery=true is in the config JSON).
+        // discv5 is auto-started by `waku_start` when `discv5Discovery=true`
+        // is in the config JSON — we only fetch the ENR here.
         let local_enr = if cfg.discv5 {
             match waku.get_enr() {
                 Ok(enr) => {
@@ -214,48 +201,41 @@ impl WakuDeliveryService {
             None
         };
 
-        // Explicit relay subscribe as safety net (config shards may auto-subscribe,
-        // but this ensures we're subscribed regardless of libwaku version behavior).
+        // Explicit subscribe as a safety net — config shards may auto-
+        // subscribe, but behaviour varies between libwaku versions.
         let topic = pubsub_topic();
         if let Err(e) = waku.relay_subscribe(&topic) {
-            // Non-fatal: some libwaku versions reject duplicate subscribe
             info!("relay_subscribe returned (may already be subscribed): {e}");
         }
 
-        // Set event callback — this closure must live for the node lifetime.
         let subs_for_cb = subscribers.clone();
         let event_closure = move |_ret: i32, data: &str| {
             if let Some(pkt) = Self::parse_event(data) {
-                let guard = subs_for_cb.lock();
-                // If the mutex is poisoned, subscribers are lost — log and skip.
-                let mut guard = match guard {
+                let mut guard = match subs_for_cb.lock() {
                     Ok(g) => g,
                     Err(e) => {
-                        error!("Subscriber mutex poisoned: {e}");
+                        error!("Subscriber mutex poisoned, dropping event: {e}");
                         return;
                     }
                 };
                 guard.retain(|tx| match tx.try_send(pkt.clone()) {
                     Ok(()) => true,
-                    Err(mpsc::TrySendError::Full(_)) => true, // keep — just slow
-                    Err(mpsc::TrySendError::Disconnected(_)) => false, // drop — dead
+                    Err(mpsc::TrySendError::Full(_)) => true,
+                    Err(mpsc::TrySendError::Disconnected(_)) => false,
                 });
             }
         };
-        // Heap-allocated closure — must stay alive until node stops.
+        // Box must outlive the node — libwaku holds a raw pointer to it.
         let _event_cb_guard = waku.set_event_callback(event_closure);
 
-        // Signal ready (with ENR)
         let _ = ready_tx.send(Ok(local_enr));
 
-        // Outbound loop — blocks until all senders drop
         let topic = pubsub_topic();
         while let Ok(cmd) = out_rx.recv() {
             let res = Self::do_publish(&waku, &topic, cmd.pkt);
             let _ = cmd.reply.try_send(res);
         }
 
-        // _event_cb_guard dropped here, then waku dropped (calls waku_stop via Drop)
         info!("Waku outbound loop finished");
     }
 
@@ -289,7 +269,8 @@ impl WakuDeliveryService {
             })
     }
 
-    /// Parse a waku event JSON into an InboundPacket (if it's a message event).
+    /// Parse a waku event JSON into an [`InboundPacket`]. Returns `None`
+    /// for non-message events or malformed payloads.
     fn parse_event(data: &str) -> Option<InboundPacket> {
         let v: serde_json::Value = serde_json::from_str(data).ok()?;
 
@@ -308,7 +289,6 @@ impl WakuDeliveryService {
             .and_then(|m| BASE64.decode(m).ok())
             .unwrap_or_default();
 
-        // Parse content topic: /{conversation_name}/{version}/{subtopic}/proto
         let (conversation_id, subtopic) = Self::parse_content_topic(content_topic)?;
 
         debug!("Inbound message: conversation={conversation_id} subtopic={subtopic}");
@@ -322,11 +302,11 @@ impl WakuDeliveryService {
         })
     }
 
-    /// Parse `/{conversation_name}/{version}/{subtopic}/proto` into (conversation_id, subtopic).
+    /// Split `/{conversation_name}/{version}/{subtopic}/proto` into
+    /// `(conversation_id, subtopic)`.
     fn parse_content_topic(ct: &str) -> Option<(String, String)> {
-        // Expected: "/{conversation_name}/{version}/{subtopic}/proto"
         let mut parts = ct.split('/');
-        let _empty = parts.next()?; // leading ""
+        let _empty = parts.next()?;
         let conversation_id = parts.next()?;
         let _version = parts.next()?;
         let subtopic = parts.next()?;
@@ -338,16 +318,9 @@ impl WakuDeliveryService {
 }
 
 impl WakuDeliveryService {
-    /// Open a pull-style inbound channel. Internal Waku consumers (the
-    /// gateway's pubsub forwarder, integration tests) call this to receive
-    /// every packet the node delivers; alternative integrators that
-    /// route packets via [`DeliveryService::subscribe`] don't use this.
-    ///
-    /// Each call creates a new channel and registers its sender
-    /// internally. Senders are pruned on the next inbound dispatch tick
-    /// when the corresponding receiver has been dropped, so calling this
-    /// in a tight loop without dropping receivers leaks slots until
-    /// the next packet arrives.
+    /// Open a pull-style inbound channel. Each call creates a fresh
+    /// receiver; the matching sender is pruned next time an inbound
+    /// packet finds it disconnected.
     pub fn inbound_receiver(&self) -> mpsc::Receiver<InboundPacket> {
         let (tx, rx) = mpsc::sync_channel(256);
         match self.subscribers.lock() {
@@ -370,22 +343,17 @@ impl DeliveryService for WakuDeliveryService {
                 pkt: packet,
                 reply: reply_tx,
             })
-            .map_err(|e| DeliveryServiceError::Other(anyhow::anyhow!(e)))?;
+            .map_err(|_| DeliveryServiceError::WakuChannelClosed)?;
 
-        // Discard the transport-assigned message id — the trait returns
-        // `Result<(), _>` and no caller uses the id for anything
-        // load-bearing.
         reply_rx
             .recv()
-            .map_err(|e| DeliveryServiceError::Other(anyhow::anyhow!(e)))??;
+            .map_err(|_| DeliveryServiceError::WakuChannelClosed)??;
         Ok(())
     }
 
     fn subscribe(&mut self, _delivery_address: &str) -> Result<(), Self::Error> {
-        // The Waku node already accepts every packet on the configured
-        // pubsub topic; per-address routing is done downstream by the
-        // gateway's TopicFilter. Recording the address here would be
-        // structural — kept as a no-op.
+        // The Waku node accepts every packet on the configured pubsub
+        // topic; per-address filtering is done downstream by `TopicFilter`.
         Ok(())
     }
 }

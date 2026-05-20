@@ -1,6 +1,5 @@
-//! Raw FFI declarations matching libwaku.h (trampoline pattern).
-//!
-//! No `#[link]` attribute — build.rs handles linking to libwaku.dylib.
+//! Raw FFI declarations matching `libwaku.h`. Linking is set up in
+//! `build.rs`, not here.
 #![allow(unused)]
 
 use std::os::raw::{c_char, c_int, c_uint, c_void};
@@ -64,8 +63,8 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
-// ── Trampoline pattern ──────────────────────────────────────────────────────
-
+/// Trampoline that adapts a Rust `FnMut(i32, &str)` closure to libwaku's
+/// `FFICallBack` signature. The closure is passed via `user_data`.
 pub unsafe extern "C" fn trampoline<C>(
     return_val: c_int,
     buffer: *const c_char,

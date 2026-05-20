@@ -1,4 +1,5 @@
-//! Transport-agnostic topic filter used by the app as a fast allowlist.
+//! HashSet-based allowlist for inbound packet routing.
+
 use std::collections::HashSet;
 use std::sync::RwLock;
 
@@ -19,7 +20,6 @@ impl TopicKey {
     }
 }
 
-/// Fast allowlist for inbound routing.
 #[derive(Default, Debug)]
 pub struct TopicFilter {
     set: RwLock<HashSet<TopicKey>>,
@@ -30,7 +30,7 @@ impl TopicFilter {
         Self::default()
     }
 
-    /// Add all subtopics for a conversation.
+    /// Register every subtopic of `conversation_name` as allowed.
     pub fn add_many(&self, conversation_name: &str) -> Result<(), DeliveryServiceError> {
         let mut w = self
             .set
@@ -42,7 +42,7 @@ impl TopicFilter {
         Ok(())
     }
 
-    /// Remove all subtopics for a conversation.
+    /// Remove every entry for `conversation_name`.
     pub fn remove_many(&self, conversation_name: &str) -> Result<(), DeliveryServiceError> {
         self.set
             .write()
@@ -51,7 +51,6 @@ impl TopicFilter {
         Ok(())
     }
 
-    /// Membership test (first-stage filter).
     #[inline]
     pub fn contains(
         &self,

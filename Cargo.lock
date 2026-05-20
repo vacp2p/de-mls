@@ -1790,7 +1790,6 @@ name = "de-mls"
 version = "2.1.0"
 dependencies = [
  "alloy",
- "anyhow",
  "base64",
  "hashgraph-like-consensus",
  "libc",
