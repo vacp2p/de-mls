@@ -146,10 +146,10 @@ pub fn buffer_commit_candidate<M: MlsService>(
 /// 2. Filter candidates by action count and rank them by RFC priority.
 /// 3. Apply in priority order, falling back on the next candidate when
 ///    MLS staging rejects the current one.
-pub fn finalize_freeze_round<M: MlsService>(
+pub fn finalize_freeze_round<M: MlsService, St: StewardListPlugin>(
     conversation: &mut Conversation,
     mls: &mut M,
-    steward: &dyn StewardListPlugin,
+    steward: &St,
     in_recovery: bool,
     allow_subset_candidates: bool,
     app_id: &[u8],
@@ -219,10 +219,10 @@ pub(super) struct RoundContext {
 }
 
 impl RoundContext {
-    fn snapshot<M: MlsService>(
+    fn snapshot<M: MlsService, St: StewardListPlugin>(
         conversation: &Conversation,
         mls: &mut M,
-        steward: &dyn StewardListPlugin,
+        steward: &St,
         current_epoch: u64,
         in_recovery: bool,
         self_identity: &[u8],

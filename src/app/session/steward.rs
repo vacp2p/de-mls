@@ -422,7 +422,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 epoch,
                 &candidate_pool,
                 self_identity,
-                &eligible,
+                eligible,
                 recovery,
             )? {
                 ElectionDecision::Skip(reason) => {
@@ -494,7 +494,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let authorized = s
                 .handle
                 .steward_list
-                .election_proposer(&|c: &[u8]| {
+                .election_proposer(|c: &[u8]| {
                     mls_set.contains(c) && !conversation_ref.is_pending_removal(c)
                 })
                 .is_some_and(|proposer| proposer == self_id);

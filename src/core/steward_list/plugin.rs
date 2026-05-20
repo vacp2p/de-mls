@@ -88,27 +88,27 @@ pub trait StewardListPlugin {
     // ── Position queries (eligibility-filtered) ────────────────────
 
     /// Steward responsible for `epoch`, walking the rotation past any
-    /// candidate for whom `eligible` returns false. Pass `&|_| true`
+    /// candidate for whom `eligible` returns false. Pass `|_| true`
     /// for the nominal position.
-    fn epoch_steward(&self, epoch: u64, eligible: &dyn Fn(&[u8]) -> bool) -> Option<&[u8]>;
+    fn epoch_steward<F: Fn(&[u8]) -> bool>(&self, epoch: u64, eligible: F) -> Option<&[u8]>;
 
     /// Live epoch steward + backup, guaranteed distinct when ≥2 are
     /// eligible. Backup is `None` when fewer than two stewards are
     /// eligible.
-    fn epoch_and_backup(
+    fn epoch_and_backup<F: Fn(&[u8]) -> bool>(
         &self,
         epoch: u64,
-        eligible: &dyn Fn(&[u8]) -> bool,
+        eligible: F,
     ) -> (Option<&[u8]>, Option<&[u8]>);
 
     /// Steward roster filtered by `eligible`. Used by the coordinator
     /// to build `ConversationSync.steward_members` so joiners don't inherit
     /// ghosts or members queued for removal.
-    fn steward_members(&self, eligible: &dyn Fn(&[u8]) -> bool) -> Vec<Vec<u8>>;
+    fn steward_members<F: Fn(&[u8]) -> bool>(&self, eligible: F) -> Vec<Vec<u8>>;
 
     /// Deterministic election proposer when the list exhausts. Walks
     /// rotation from index 0; returns `None` if no steward is eligible.
-    fn election_proposer(&self, eligible: &dyn Fn(&[u8]) -> bool) -> Option<&[u8]>;
+    fn election_proposer<F: Fn(&[u8]) -> bool>(&self, eligible: F) -> Option<&[u8]>;
 
     // ── Mutators ───────────────────────────────────────────────────
 
@@ -155,12 +155,12 @@ pub trait StewardListPlugin {
     /// `recovery = true` to bypass the list-exhaustion gate, and the
     /// node's own identity. Plug-in handles authorization + ordering;
     /// coordinator handles `has_election_in_flight` + the I/O submit.
-    fn propose_election(
+    fn propose_election<F: Fn(&[u8]) -> bool>(
         &self,
         epoch: u64,
         candidate_pool: &[Vec<u8>],
         self_identity: &[u8],
-        eligible: &dyn Fn(&[u8]) -> bool,
+        eligible: F,
         recovery: bool,
     ) -> Result<ElectionDecision, CoreError>;
 

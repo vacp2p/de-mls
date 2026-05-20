@@ -223,20 +223,20 @@ impl StewardListPlugin for StubStewardList {
     fn is_exhausted(&self, _: u64) -> bool {
         unreachable!()
     }
-    fn epoch_steward(&self, _: u64, _: &dyn Fn(&[u8]) -> bool) -> Option<&[u8]> {
+    fn epoch_steward<F: Fn(&[u8]) -> bool>(&self, _: u64, _: F) -> Option<&[u8]> {
         unreachable!()
     }
-    fn epoch_and_backup(
+    fn epoch_and_backup<F: Fn(&[u8]) -> bool>(
         &self,
         _: u64,
-        _: &dyn Fn(&[u8]) -> bool,
+        _: F,
     ) -> (Option<&[u8]>, Option<&[u8]>) {
         unreachable!()
     }
-    fn steward_members(&self, _: &dyn Fn(&[u8]) -> bool) -> Vec<Vec<u8>> {
+    fn steward_members<F: Fn(&[u8]) -> bool>(&self, _: F) -> Vec<Vec<u8>> {
         unreachable!()
     }
-    fn election_proposer(&self, _: &dyn Fn(&[u8]) -> bool) -> Option<&[u8]> {
+    fn election_proposer<F: Fn(&[u8]) -> bool>(&self, _: F) -> Option<&[u8]> {
         unreachable!()
     }
     fn install_list(
@@ -264,12 +264,12 @@ impl StewardListPlugin for StubStewardList {
     ) -> Result<bool, crate::core::CoreError> {
         unreachable!()
     }
-    fn propose_election(
+    fn propose_election<F: Fn(&[u8]) -> bool>(
         &self,
         _: u64,
         _: &[Vec<u8>],
         _: &[u8],
-        _: &dyn Fn(&[u8]) -> bool,
+        _: F,
         _: bool,
     ) -> Result<ElectionDecision, crate::core::CoreError> {
         unreachable!()
