@@ -10,6 +10,7 @@ use crate::{
         conversation::util::{
             is_auto_approved_entry, member_set, self_leave_proposal_id, target_identity_of,
         },
+        freeze::CommitHash,
         proposal_kind::ProposalKind,
     },
     protos::de_mls::messages::v1::{
@@ -39,7 +40,7 @@ const MAX_COMMITTED_HASHES: usize = 10;
 #[derive(Clone, Debug)]
 pub struct BufferedCommitCandidate {
     pub candidate_msg: CommitCandidate,
-    pub commit_hash: Vec<u8>,
+    pub commit_hash: CommitHash,
     pub is_local_candidate: bool,
     pub welcome_bytes: Option<Vec<u8>>,
 }
@@ -87,7 +88,7 @@ pub struct Conversation {
     /// Members with pending score-based removal ECPs (dedup to prevent duplicates).
     pending_removal_targets: HashSet<Vec<u8>>,
     /// Recent commit hashes for dedup.
-    committed_batch_hashes: VecDeque<Vec<u8>>,
+    committed_batch_hashes: VecDeque<CommitHash>,
     /// Freeze-round candidate buffer for deterministic selection.
     freeze_round: Option<FreezeRound>,
     /// Buffer of membership updates (Add/Remove) that every member records so a
@@ -540,14 +541,14 @@ impl Conversation {
     /// Check if a commit hash has already been committed (in committed history).
     ///
     /// Note: freeze round buffer dedup is handled separately by `add_freeze_candidate`.
-    pub(crate) fn is_duplicate_commit_candidate(&self, commit_hash: &[u8]) -> bool {
+    pub(crate) fn is_duplicate_commit_candidate(&self, commit_hash: &CommitHash) -> bool {
         self.committed_batch_hashes
             .iter()
             .any(|ch| ch == commit_hash)
     }
 
     /// Record a committed batch's hash for future dedup.
-    pub(crate) fn record_committed_batch(&mut self, commit_hash: Vec<u8>) {
+    pub(crate) fn record_committed_batch(&mut self, commit_hash: CommitHash) {
         if self.committed_batch_hashes.len() >= MAX_COMMITTED_HASHES {
             self.committed_batch_hashes.pop_front();
         }

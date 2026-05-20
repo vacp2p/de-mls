@@ -18,9 +18,8 @@
 //!   [`crate::defaults::DefaultStewardList`] — type aliases for the
 //!   default-bundle per-conversation plug-ins.
 //! - [`crate::defaults::DefaultConversationPluginsFactory`] —
-//!   `ConversationPluginsFactory` wired to the above.
-//! - [`crate::defaults::DefaultKeyPackageProvider`] — `KeyPackageProvider`
-//!   over the same storage + credentials handles.
+//!   `ConversationPluginsFactory` wired to the above (covers the
+//!   identity-bound `generate_key_package` entry as well).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -31,8 +30,8 @@ use hashgraph_like_consensus::{
 use openmls_rust_crypto::MemoryStorage;
 
 use crate::core::{
-    ConsensusPlugin, ConversationPluginsFactory, DeterministicStewardList, KeyPackageProvider,
-    PeerScoreStorage, PeerScoringService, ScoringConfig, StewardListConfig, default_score_deltas,
+    ConsensusPlugin, ConversationPluginsFactory, DeterministicStewardList, PeerScoreStorage,
+    PeerScoringService, ScoringConfig, StewardListConfig, default_score_deltas,
 };
 use crate::mls_crypto::{DeMlsStorage, KeyPackageBytes, MlsCredentials, MlsError, OpenMlsService};
 
@@ -207,34 +206,8 @@ impl ConversationPluginsFactory for DefaultConversationPluginsFactory {
     ) -> Self::StewardList {
         DeterministicStewardList::empty(conversation_id.to_vec(), config)
     }
-}
 
-// ═══════════════════════════════════════════════════════════════════
-// Default key-package provider
-// ═══════════════════════════════════════════════════════════════════
-
-/// Default reference implementation of [`KeyPackageProvider`] backed by
-/// in-memory MLS storage + a User-level [`MlsCredentials`]. Generates a
-/// fresh single-use key package on each `generate()` call.
-pub struct DefaultKeyPackageProvider {
-    pub(crate) storage: Arc<MemoryDeMlsStorage>,
-    pub(crate) credentials: Arc<MlsCredentials>,
-}
-
-impl DefaultKeyPackageProvider {
-    /// Build the default key-package provider from an MLS storage handle
-    /// and the User-level [`MlsCredentials`]. Both are typically shared
-    /// with [`DefaultConversationPluginsFactory`].
-    pub fn new(storage: Arc<MemoryDeMlsStorage>, credentials: Arc<MlsCredentials>) -> Self {
-        Self {
-            storage,
-            credentials,
-        }
-    }
-}
-
-impl KeyPackageProvider for DefaultKeyPackageProvider {
-    fn generate(&self) -> Result<KeyPackageBytes, MlsError> {
+    fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
         OpenMlsService::<Arc<MemoryDeMlsStorage>>::generate_key_package(
             &self.storage,
             &self.credentials,

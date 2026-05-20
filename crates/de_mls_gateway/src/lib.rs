@@ -23,11 +23,8 @@ use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 
 use de_mls::{
     app::{ConsensusContext, ConversationConfig, SessionEntry, User, UserPlugins},
-    core::{KeyPackageProvider, ScoringConfig, StewardListConfig},
-    defaults::{
-        DefaultConsensusPlugin, DefaultConversationPluginsFactory, DefaultKeyPackageProvider,
-        MemoryDeMlsStorage,
-    },
+    core::{ScoringConfig, StewardListConfig},
+    defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage},
     ds::{DeliveryService, SharedDeliveryService, WakuDeliveryService},
     identity::Identity,
     mls_crypto::MlsCredentials,
@@ -204,13 +201,7 @@ fn build_user_from_private_key(
 
     let credentials = Arc::new(MlsCredentials::from_identity(&identity)?);
     let storage = Arc::new(MemoryDeMlsStorage::new());
-
-    let conversation_plugins = Arc::new(DefaultConversationPluginsFactory::new(
-        Arc::clone(&storage),
-        Arc::clone(&credentials),
-    ));
-    let key_package_provider: Arc<dyn KeyPackageProvider> =
-        Arc::new(DefaultKeyPackageProvider::new(storage, credentials));
+    let conversation_plugins = DefaultConversationPluginsFactory::new(storage, credentials);
 
     let consensus_signer = EthereumConsensusSigner::new(signer);
     let consensus = ConsensusContext::<DefaultConsensusPlugin>::new(consensus_signer);
@@ -218,7 +209,6 @@ fn build_user_from_private_key(
     let plugins = UserPlugins {
         conversation_plugins,
         consensus,
-        key_package_provider,
         default_conversation_config: ConversationConfig::default(),
         default_scoring_config: ScoringConfig::default(),
         default_steward_list_config: StewardListConfig::default(),

@@ -125,11 +125,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let pending = s.handle.current_state() == ConversationState::PendingJoin;
             match (pending, s.handle.mls()) {
                 (true, _) | (false, None) => (pending, Vec::new(), 0u64),
-                (false, Some(mls)) => (
-                    false,
-                    s.handle.conversation_members()?,
-                    mls.current_epoch()?,
-                ),
+                (false, Some(mls)) => (false, mls.members()?, mls.current_epoch()?),
             }
         };
         if pending_join {
@@ -214,10 +210,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
         let app_message = cast_vote::<P>(&conversation_name, proposal_id, vote, &consensus).await?;
         let packet = {
-            let s = arc.read_or_err("session")?;
+            let mut s = arc.write_or_err("session")?;
+            let app_id = Arc::clone(&s.app_id);
             s.handle
-                .expect_mls()?
-                .build_message(&app_message, &s.app_id)?
+                .expect_mls_mut()?
+                .build_message(&app_message, &app_id)?
         };
         let transport = Arc::clone(arc.read_or_err("session")?.transport());
         send_packet(&transport, packet)?;
@@ -341,8 +338,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         };
 
         let packet = {
-            let s = arc.read_or_err("session")?;
-            s.handle.expect_mls()?.build_message(&app_msg, &s.app_id)?
+            let mut s = arc.write_or_err("session")?;
+            let app_id = Arc::clone(&s.app_id);
+            s.handle
+                .expect_mls_mut()?
+                .build_message(&app_msg, &app_id)?
         };
         let transport = Arc::clone(arc.read_or_err("session")?.transport());
         send_packet(&transport, packet)?;
@@ -375,8 +375,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             }
         }
 
-        self.handle.expect_mls()?;
-        let members = self.handle.conversation_members()?;
+        let members = self.handle.expect_mls()?.members()?;
         Ok(members.len() as u32)
     }
 
@@ -470,8 +469,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 );
                 let outbound: AppMessage = proposal.into();
                 let packet = {
-                    let s = arc.read_or_err("session")?;
-                    s.handle.expect_mls()?.build_message(&outbound, &s.app_id)?
+                    let mut s = arc.write_or_err("session")?;
+                    let app_id = Arc::clone(&s.app_id);
+                    s.handle
+                        .expect_mls_mut()?
+                        .build_message(&outbound, &app_id)?
                 };
                 let transport = Arc::clone(arc.read_or_err("session")?.transport());
                 send_packet(&transport, packet)?;
@@ -487,10 +489,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 // creator the banner like peers and start their own
                 // auto-vote timer; peers run their own timers locally.
                 let packet = {
-                    let s = arc.read_or_err("session")?;
+                    let mut s = arc.write_or_err("session")?;
+                    let app_id = Arc::clone(&s.app_id);
                     s.handle
-                        .expect_mls()?
-                        .build_message(&unbundled, &s.app_id)?
+                        .expect_mls_mut()?
+                        .build_message(&unbundled, &app_id)?
                 };
                 let transport = Arc::clone(arc.read_or_err("session")?.transport());
                 send_packet(&transport, packet)?;
@@ -587,10 +590,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         };
         let app_message = cast_vote::<P>(&conversation_name, proposal_id, vote, &consensus).await?;
         let packet = {
-            let s = arc.read_or_err("session")?;
+            let mut s = arc.write_or_err("session")?;
+            let app_id = Arc::clone(&s.app_id);
             s.handle
-                .expect_mls()?
-                .build_message(&app_message, &s.app_id)?
+                .expect_mls_mut()?
+                .build_message(&app_message, &app_id)?
         };
         let transport = Arc::clone(arc.read_or_err("session")?.transport());
         send_packet(&transport, packet)?;

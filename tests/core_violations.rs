@@ -41,7 +41,7 @@ fn test_emergency_mixed_with_regular_returns_error() {
     );
     let result = process_inbound_compat(
         &mut steward_handle.group,
-        Some(&steward_handle.mls),
+        Some(&mut steward_handle.mls),
         &joiner2.kp_packet.payload,
         WELCOME_SUBTOPIC,
     )
@@ -64,7 +64,7 @@ fn test_emergency_mixed_with_regular_returns_error() {
 
     let result = build_commit_candidate(
         &mut steward_handle.group,
-        &steward_handle.mls,
+        &mut steward_handle.mls,
         &steward_handle.steward_list,
         false,
         &steward_handle.identity,
@@ -105,7 +105,7 @@ fn test_duplicate_batch_returns_noop() {
 
     let result = process_inbound_compat(
         &mut steward_handle.group,
-        Some(&steward_handle.mls),
+        Some(&mut steward_handle.mls),
         &joiner2.kp_packet.payload,
         WELCOME_SUBTOPIC,
     )
@@ -120,7 +120,7 @@ fn test_duplicate_batch_returns_noop() {
     joiner.group.insert_approved_proposal(proposal_id, gur);
     let packets = build_commit_candidate(
         &mut steward_handle.group,
-        &steward_handle.mls,
+        &mut steward_handle.mls,
         &steward_handle.steward_list,
         false,
         &steward_handle.identity,
@@ -139,7 +139,7 @@ fn test_duplicate_batch_returns_noop() {
     // First receive: candidate buffered → CommitCandidateReceived
     let r1 = process_inbound_compat(
         &mut joiner.group,
-        joiner.mls.as_ref(),
+        joiner.mls.as_mut(),
         &batch_packet.payload,
         APP_MSG_SUBTOPIC,
     )
@@ -153,7 +153,7 @@ fn test_duplicate_batch_returns_noop() {
     // Second receive of same batch: should be detected as duplicate
     let r2 = process_inbound_compat(
         &mut joiner.group,
-        joiner.mls.as_ref(),
+        joiner.mls.as_mut(),
         &batch_packet.payload,
         APP_MSG_SUBTOPIC,
     )
@@ -189,7 +189,7 @@ fn test_candidate_ignored_without_freeze_round() {
 
     let result = process_inbound_compat(
         &mut steward_handle.group,
-        Some(&steward_handle.mls),
+        Some(&mut steward_handle.mls),
         &joiner2.kp_packet.payload,
         WELCOME_SUBTOPIC,
     )
@@ -203,7 +203,7 @@ fn test_candidate_ignored_without_freeze_round() {
     steward_handle.insert_approved_proposal(proposal_id, gur.clone());
     let packets = build_commit_candidate(
         &mut steward_handle.group,
-        &steward_handle.mls,
+        &mut steward_handle.mls,
         &steward_handle.steward_list,
         false,
         &steward_handle.identity,
@@ -218,7 +218,7 @@ fn test_candidate_ignored_without_freeze_round() {
     // Joiner has NO freeze round active → candidate ignored
     let result = process_inbound_compat(
         &mut joiner.group,
-        joiner.mls.as_ref(),
+        joiner.mls.as_mut(),
         &batch_packet.payload,
         APP_MSG_SUBTOPIC,
     )
@@ -255,7 +255,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     );
     let result = process_inbound_compat(
         &mut steward_handle.group,
-        Some(&steward_handle.mls),
+        Some(&mut steward_handle.mls),
         &joiner2.kp_packet.payload,
         WELCOME_SUBTOPIC,
     )
@@ -271,7 +271,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
 
     let packets = build_commit_candidate(
         &mut steward_handle.group,
-        &steward_handle.mls,
+        &mut steward_handle.mls,
         &steward_handle.steward_list,
         false,
         &steward_handle.identity,
@@ -290,7 +290,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     // Joiner receives candidate — should buffer it
     let result = process_inbound_compat(
         &mut joiner.group,
-        joiner.mls.as_ref(),
+        joiner.mls.as_mut(),
         &batch_packet.payload,
         APP_MSG_SUBTOPIC,
     )
@@ -305,7 +305,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     let joiner_id = joiner.self_identity();
     let finalize = finalize_freeze_round(
         &mut joiner.group,
-        joiner.mls.as_ref().unwrap(),
+        joiner.mls.as_mut().unwrap(),
         &joiner.steward_list,
         false,
         false,
@@ -362,7 +362,7 @@ fn test_backup_commit_scores_absent_steward() {
     let charlie = setup_joiner(conversation_name, charlie_hex);
     let gur = match process_inbound_compat(
         &mut alice_group.group,
-        Some(&alice_group.mls),
+        Some(&mut alice_group.mls),
         &charlie.kp_packet.payload,
         WELCOME_SUBTOPIC,
     )
@@ -379,7 +379,7 @@ fn test_backup_commit_scores_absent_steward() {
     // the only applicable entry when he finalises.
     let _ = build_commit_candidate(
         &mut bob.group,
-        bob.mls.as_ref().unwrap(),
+        bob.mls.as_mut().unwrap(),
         &bob.steward_list,
         false,
         bob.identity.identity_bytes(),
@@ -397,7 +397,7 @@ fn test_backup_commit_scores_absent_steward() {
     let bob_id = bob.self_identity();
     let result = finalize_freeze_round(
         &mut bob.group,
-        bob.mls.as_ref().unwrap(),
+        bob.mls.as_mut().unwrap(),
         &bob.steward_list,
         false,
         false,
@@ -469,7 +469,7 @@ fn test_forged_steward_identity_scores_mls_sender() {
     let third = setup_joiner(conversation_name, third_hex);
     let result = process_inbound_compat(
         &mut steward_handle.group,
-        Some(&steward_handle.mls),
+        Some(&mut steward_handle.mls),
         &third.kp_packet.payload,
         WELCOME_SUBTOPIC,
     )
@@ -485,7 +485,7 @@ fn test_forged_steward_identity_scores_mls_sender() {
 
     let packets = build_commit_candidate(
         &mut steward_handle.group,
-        &steward_handle.mls,
+        &mut steward_handle.mls,
         &steward_handle.steward_list,
         false,
         &steward_handle.identity,
@@ -518,7 +518,7 @@ fn test_forged_steward_identity_scores_mls_sender() {
 
     let result = process_inbound_compat(
         &mut joiner.group,
-        joiner.mls.as_ref(),
+        joiner.mls.as_mut(),
         &forged_payload,
         APP_MSG_SUBTOPIC,
     )
@@ -532,7 +532,7 @@ fn test_forged_steward_identity_scores_mls_sender() {
     let joiner_id = joiner.self_identity();
     let finalize = finalize_freeze_round(
         &mut joiner.group,
-        joiner.mls.as_ref().unwrap(),
+        joiner.mls.as_mut().unwrap(),
         &joiner.steward_list,
         false,
         false,
@@ -582,7 +582,7 @@ fn test_no_valid_candidate_triggers_no_candidate() {
     let group_id = group.self_identity().to_vec();
     let finalize = finalize_freeze_round(
         &mut group.group,
-        &group.mls,
+        &mut group.mls,
         &group.steward_list,
         false,
         false,

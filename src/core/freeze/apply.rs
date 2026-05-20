@@ -4,8 +4,8 @@
 
 use crate::{
     core::{
-        Conversation, CoreError, FreezeFinalizeResult, FreezeOutcome, ProcessResult, ScoreEvent,
-        ScoreOp, StewardListPlugin, conversation::BufferedCommitCandidate,
+        CommitHash, Conversation, CoreError, FreezeFinalizeResult, FreezeOutcome, ProcessResult,
+        ScoreEvent, ScoreOp, StewardListPlugin, conversation::BufferedCommitCandidate,
         freeze::round::RoundContext, proposal_framing::build_invitation_packet,
     },
     mls_crypto::{MlsProposalOutput, MlsService, StagedCandidateResult},
@@ -38,10 +38,10 @@ enum CandidateOutcome {
 /// `own_commit_discarded` enforces MLS's one-pending-commit rule: the
 /// first incoming attempt wipes our own pending commit, so a
 /// lower-priority local candidate afterwards has nothing to apply.
-pub(super) fn apply_in_priority_order<M: MlsService>(
+pub(super) fn apply_in_priority_order<M: MlsService, St: StewardListPlugin>(
     conversation: &mut Conversation,
-    mls: &M,
-    steward: &dyn StewardListPlugin,
+    mls: &mut M,
+    steward: &St,
     sorted: Vec<BufferedCommitCandidate>,
     ctx: &RoundContext,
     self_identity: &[u8],
@@ -122,13 +122,13 @@ pub(super) fn apply_in_priority_order<M: MlsService>(
 /// Δ-synchrony (same approved set, different MLS entropy) and MUST NOT
 /// be classified as misbehaviour. The steward-list check rejects forged
 /// credit claims from non-stewards.
-fn record_winner_scores(
+fn record_winner_scores<St: StewardListPlugin>(
     score_ops: &mut Vec<ScoreOp>,
     committer: &[u8],
     self_identity: &[u8],
     ctx: &RoundContext,
     losers: impl Iterator<Item = BufferedCommitCandidate>,
-    steward: &dyn StewardListPlugin,
+    steward: &St,
     conversation_name: &str,
 ) {
     score_ops.push(ScoreOp {
@@ -172,7 +172,7 @@ fn record_winner_scores(
 /// Always returns `Terminal(Applied)` on a clean merge.
 fn apply_local_candidate<M: MlsService>(
     conversation: &mut Conversation,
-    mls: &M,
+    mls: &mut M,
     chosen: BufferedCommitCandidate,
     ctx: &RoundContext,
     app_id: &[u8],
@@ -209,10 +209,10 @@ fn apply_local_candidate<M: MlsService>(
 ///
 /// Caller must have discarded any own pending commit first — MLS allows
 /// only one per conversation at a time.
-fn apply_incoming_candidate<M: MlsService>(
+fn apply_incoming_candidate<M: MlsService, St: StewardListPlugin>(
     conversation: &mut Conversation,
-    mls: &M,
-    steward: &dyn StewardListPlugin,
+    mls: &mut M,
+    steward: &St,
     chosen: BufferedCommitCandidate,
     ctx: &RoundContext,
 ) -> Result<CandidateOutcome, CoreError> {
@@ -306,7 +306,7 @@ enum StagingOutcome {
 /// Leaves MLS in the staged state on `Staged`; the caller must clean up
 /// via `discard_staged_commit` for `Abort` / `Violation`.
 fn stage_candidate<M>(
-    mls: &M,
+    mls: &mut M,
     conversation_name: &str,
     candidate: &CommitCandidate,
     ctx: &RoundContext,
@@ -433,9 +433,9 @@ fn action_projection_from_mls(action: &MlsProposalOutput) -> (u8, &[u8]) {
 /// (re-election in progress), and "Layer-3 recovery_mode active" (RFC
 /// §Anti-Deadlock: any member MAY commit to restore liveness; mirrors
 /// the relaxed gate in `create_commit_candidate`).
-fn check_commit_sender_authorized(
+fn check_commit_sender_authorized<St: StewardListPlugin>(
     conversation: &Conversation,
-    steward: &dyn StewardListPlugin,
+    steward: &St,
     commit_sender: &[u8],
     ctx: &RoundContext,
 ) -> Option<ViolationEvidence> {
@@ -468,7 +468,7 @@ fn check_commit_sender_authorized(
 /// the app layer can archive it for UI history.
 fn record_applied_commit(
     conversation: &mut Conversation,
-    commit_hash: Vec<u8>,
+    commit_hash: CommitHash,
 ) -> Vec<ConversationUpdateRequest> {
     conversation.record_committed_batch(commit_hash);
     let snapshot = if let Some(target) = conversation.take_urgent_commit_target() {

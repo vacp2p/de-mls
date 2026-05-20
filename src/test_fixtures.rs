@@ -17,14 +17,11 @@ use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use crate::{
     app::{ConsensusContext, ConversationConfig, User, UserPlugins},
     core::{
-        ConsensusPlugin, ConversationPluginsFactory, ElectionDecision, KeyPackageProvider,
-        PeerScoringEvent, PeerScoringPlugin, PluginConsensus, ScoreOp, ScoreSnapshot,
-        ScoringConfig, StewardList, StewardListConfig, StewardListEvent, StewardListPlugin,
+        ConsensusPlugin, ConversationPluginsFactory, ElectionDecision, PeerScoringEvent,
+        PeerScoringPlugin, PluginConsensus, ScoreOp, ScoreSnapshot, ScoringConfig, StewardList,
+        StewardListConfig, StewardListEvent, StewardListPlugin,
     },
-    defaults::{
-        DefaultConsensusPlugin, DefaultConversationPluginsFactory, DefaultKeyPackageProvider,
-        MemoryDeMlsStorage,
-    },
+    defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage},
     ds::{OutboundPacket, SharedDeliveryService},
     identity::Identity,
     mls_crypto::{
@@ -73,13 +70,7 @@ pub(crate) fn make_user_from_private_key(
 
     let credentials = Arc::new(MlsCredentials::from_identity(&identity).expect("credentials"));
     let storage = Arc::new(MemoryDeMlsStorage::new());
-
-    let conversation_plugins = Arc::new(DefaultConversationPluginsFactory::new(
-        Arc::clone(&storage),
-        Arc::clone(&credentials),
-    ));
-    let key_package_provider: Arc<dyn KeyPackageProvider> =
-        Arc::new(DefaultKeyPackageProvider::new(storage, credentials));
+    let conversation_plugins = DefaultConversationPluginsFactory::new(storage, credentials);
 
     let consensus_signer = EthereumConsensusSigner::new(signer);
     let consensus = ConsensusContext::<DefaultConsensusPlugin>::new(consensus_signer);
@@ -87,7 +78,6 @@ pub(crate) fn make_user_from_private_key(
     let plugins = UserPlugins {
         conversation_plugins,
         consensus,
-        key_package_provider,
         default_conversation_config: ConversationConfig::default(),
         default_scoring_config: ScoringConfig::default(),
         default_steward_list_config: StewardListConfig::default(),
@@ -132,7 +122,7 @@ impl MlsService for UnusedMls {
     fn conversation_id(&self) -> &str {
         "unused"
     }
-    fn delete(&self) -> Result<(), MlsError> {
+    fn delete(&mut self) -> Result<(), MlsError> {
         unreachable!("UnusedMls::delete called")
     }
     fn members(&self) -> Result<Vec<Vec<u8>>, MlsError> {
@@ -144,38 +134,41 @@ impl MlsService for UnusedMls {
     fn current_epoch(&self) -> Result<u64, MlsError> {
         unreachable!("UnusedMls::current_epoch called")
     }
-    fn create_commit_candidate(&self, _: &[MlsCommitInput]) -> Result<CommitCandidate, MlsError> {
+    fn create_commit_candidate(
+        &mut self,
+        _: &[MlsCommitInput],
+    ) -> Result<CommitCandidate, MlsError> {
         unreachable!("UnusedMls::create_commit_candidate called")
     }
-    fn merge_own_commit(&self) -> Result<(), MlsError> {
+    fn merge_own_commit(&mut self) -> Result<(), MlsError> {
         unreachable!()
     }
-    fn discard_own_commit(&self) -> Result<(), MlsError> {
+    fn discard_own_commit(&mut self) -> Result<(), MlsError> {
         unreachable!()
     }
     fn stage_remote_commit(
-        &self,
+        &mut self,
         _: &[Vec<u8>],
         _: &[u8],
     ) -> Result<StagedCandidateResult, MlsError> {
         unreachable!()
     }
-    fn merge_staged_commit(&self) -> Result<(), MlsError> {
+    fn merge_staged_commit(&mut self) -> Result<(), MlsError> {
         unreachable!()
     }
-    fn discard_staged_commit(&self) -> Result<(), MlsError> {
+    fn discard_staged_commit(&mut self) -> Result<(), MlsError> {
         unreachable!()
     }
-    fn encrypt(&self, _: &[u8]) -> Result<Vec<u8>, MlsError> {
+    fn encrypt(&mut self, _: &[u8]) -> Result<Vec<u8>, MlsError> {
         unreachable!()
     }
-    fn build_message(&self, _: &AppMessage, _: &[u8]) -> Result<OutboundPacket, MlsError> {
+    fn build_message(&mut self, _: &AppMessage, _: &[u8]) -> Result<OutboundPacket, MlsError> {
         unreachable!()
     }
-    fn decrypt_application_only(&self, _: &[u8]) -> Result<DecryptResult, MlsError> {
+    fn decrypt_application_only(&mut self, _: &[u8]) -> Result<DecryptResult, MlsError> {
         unreachable!()
     }
-    fn decrypt(&self, _: &[u8]) -> Result<DecryptResult, MlsError> {
+    fn decrypt(&mut self, _: &[u8]) -> Result<DecryptResult, MlsError> {
         unreachable!()
     }
     fn inspect_message_kind(&self, _: &[u8]) -> Result<MlsMessageKind, MlsError> {
@@ -230,20 +223,20 @@ impl StewardListPlugin for StubStewardList {
     fn is_exhausted(&self, _: u64) -> bool {
         unreachable!()
     }
-    fn epoch_steward(&self, _: u64, _: &dyn Fn(&[u8]) -> bool) -> Option<&[u8]> {
+    fn epoch_steward<F: Fn(&[u8]) -> bool>(&self, _: u64, _: F) -> Option<&[u8]> {
         unreachable!()
     }
-    fn epoch_and_backup(
+    fn epoch_and_backup<F: Fn(&[u8]) -> bool>(
         &self,
         _: u64,
-        _: &dyn Fn(&[u8]) -> bool,
+        _: F,
     ) -> (Option<&[u8]>, Option<&[u8]>) {
         unreachable!()
     }
-    fn steward_members(&self, _: &dyn Fn(&[u8]) -> bool) -> Vec<Vec<u8>> {
+    fn steward_members<F: Fn(&[u8]) -> bool>(&self, _: F) -> Vec<Vec<u8>> {
         unreachable!()
     }
-    fn election_proposer(&self, _: &dyn Fn(&[u8]) -> bool) -> Option<&[u8]> {
+    fn election_proposer<F: Fn(&[u8]) -> bool>(&self, _: F) -> Option<&[u8]> {
         unreachable!()
     }
     fn install_list(
@@ -271,12 +264,12 @@ impl StewardListPlugin for StubStewardList {
     ) -> Result<bool, crate::core::CoreError> {
         unreachable!()
     }
-    fn propose_election(
+    fn propose_election<F: Fn(&[u8]) -> bool>(
         &self,
         _: u64,
         _: &[Vec<u8>],
         _: &[u8],
-        _: &dyn Fn(&[u8]) -> bool,
+        _: F,
         _: bool,
     ) -> Result<ElectionDecision, crate::core::CoreError> {
         unreachable!()
@@ -355,6 +348,9 @@ impl ConversationPluginsFactory for StubPluginsFactory {
         unreachable!()
     }
     fn make_steward_list(&self, _: &[u8], _: StewardListConfig) -> Self::StewardList {
+        unreachable!()
+    }
+    fn generate_key_package(&self) -> Result<crate::mls_crypto::KeyPackageBytes, MlsError> {
         unreachable!()
     }
 }

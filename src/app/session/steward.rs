@@ -70,8 +70,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// MLS member set — same effect as a successful election. Intended for
     /// tests and administrative tooling.
     pub fn regenerate_steward_list(&mut self) -> Result<(), UserError> {
-        let current_epoch = self.handle.expect_mls()?.current_epoch()?;
-        let members = self.handle.conversation_members()?;
+        let mls = self.handle.expect_mls()?;
+        let current_epoch = mls.current_epoch()?;
+        let members = mls.members()?;
         let sn = self
             .handle
             .steward_list
@@ -95,7 +96,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             };
             (
                 mls.current_epoch()?,
-                self.handle.conversation_members()?,
+                mls.members()?,
                 self.handle.config.pending_update_max_epochs,
             )
         };
@@ -133,7 +134,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let s = arc.read_or_err("session")?;
 
             let (current_epoch, members) = match s.handle.mls() {
-                Some(mls) => (mls.current_epoch()?, s.handle.conversation_members()?),
+                Some(mls) => (mls.current_epoch()?, mls.members()?),
                 None => (0, Vec::new()),
             };
             let self_identity: &[u8] = &s.self_identity;
@@ -204,7 +205,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// by callers that need to release the runner lock before awaiting on
     /// the transport. Returns `Ok(None)` when there's no steward list yet.
     pub(crate) fn build_conversation_sync_packet(
-        &self,
+        &mut self,
     ) -> Result<Option<crate::ds::OutboundPacket>, UserError> {
         // Sparse snapshot — only members whose score has diverged
         // from `default_score`. Joiners init every member at default
@@ -233,10 +234,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // Filter ghosts and queued-removal targets so joiners don't
         // inherit stewards they would have to walk past on the very
         // first epoch.
-        let mls = self.handle.expect_mls()?;
-        let mls_members = self.handle.conversation_members()?;
-        let eligible = self.handle.conversation.steward_eligibility(&mls_members);
-        let steward_members = self.handle.steward_list.steward_members(&eligible);
+        let mls_members = self.handle.expect_mls()?.members()?;
+        let steward_members = {
+            let eligible = self.handle.conversation.steward_eligibility(&mls_members);
+            self.handle.steward_list.steward_members(&eligible)
+        };
 
         // `retry_round` is the seed that produced the *stored* list —
         // a frozen tag on `StewardList`, not the plug-in's dynamic
@@ -258,7 +260,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         };
 
         let app_msg: AppMessage = sync.into();
-        Ok(Some(mls.build_message(&app_msg, &self.app_id)?))
+        let app_id = Arc::clone(&self.app_id);
+        Ok(Some(
+            self.handle
+                .expect_mls_mut()?
+                .build_message(&app_msg, &app_id)?,
+        ))
     }
 
     /// Broadcast steward list + protocol config + peer scores + timing as
@@ -270,15 +277,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// awaiting on the transport.
     pub async fn send_conversation_sync(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
         let (transport, packet, conversation_name) = {
-            let s = arc.read_or_err("session")?;
+            let mut s = arc.write_or_err("session")?;
+            let transport = Arc::clone(s.transport());
+            let conversation_name = s.conversation_name.clone();
             let Some(packet) = s.build_conversation_sync_packet()? else {
                 return Ok(());
             };
-            (
-                Arc::clone(s.transport()),
-                packet,
-                s.conversation_name.clone(),
-            )
+            (transport, packet, conversation_name)
         };
         send_packet(&transport, packet)?;
         info!(conversation = %conversation_name, "conversation sync sent");
@@ -383,8 +388,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     ) -> Result<(), UserError> {
         let (proposed_stewards, election_epoch, retry_round, conversation_name) = {
             let s = arc.read_or_err("session")?;
-            let epoch = s.handle.expect_mls()?.current_epoch()?;
-            let mls_members = s.handle.conversation_members()?;
+            let mls = s.handle.expect_mls()?;
+            let epoch = mls.current_epoch()?;
+            let mls_members = mls.members()?;
             let self_identity: &[u8] = &s.self_identity;
 
             // `has_election_in_flight` is a proposal-queue check, not a
@@ -416,7 +422,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 epoch,
                 &candidate_pool,
                 self_identity,
-                &eligible,
+                eligible,
                 recovery,
             )? {
                 ElectionDecision::Skip(reason) => {
@@ -476,7 +482,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     ) -> Result<(), UserError> {
         let (is_authorized, self_id, epoch, conversation_name) = {
             let s = arc.read_or_err("session")?;
-            let mls_members = s.handle.conversation_members()?;
+            let mls = s.handle.expect_mls()?;
+            let mls_members = mls.members()?;
+            let epoch = mls.current_epoch()?;
             let self_id: &[u8] = &s.self_identity;
             // Deadlock proposer = election proposer with the stricter
             // predicate (MLS-present and not queued for removal).
@@ -486,11 +494,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let authorized = s
                 .handle
                 .steward_list
-                .election_proposer(&|c: &[u8]| {
+                .election_proposer(|c: &[u8]| {
                     mls_set.contains(c) && !conversation_ref.is_pending_removal(c)
                 })
                 .is_some_and(|proposer| proposer == self_id);
-            let epoch = s.handle.expect_mls()?.current_epoch()?;
             (
                 authorized,
                 Arc::clone(&s.self_identity),
@@ -525,8 +532,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// below `sn_min`). Coordinator just supplies `epoch` + `members`
     /// and drains events.
     fn try_auto_fill_steward_list(&mut self) -> Result<(), UserError> {
-        let epoch = self.handle.expect_mls()?.current_epoch()?;
-        let members = self.handle.conversation_members()?;
+        let mls = self.handle.expect_mls()?;
+        let epoch = mls.current_epoch()?;
+        let members = mls.members()?;
         let _events = self.handle.steward_list.maybe_auto_fill(epoch, &members)?;
         Ok(())
     }

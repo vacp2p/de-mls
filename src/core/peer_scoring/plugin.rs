@@ -10,7 +10,7 @@ use crate::core::{PeerScoringEvent, ScoreOp, ScoreSnapshot};
 /// [`PeerScoringEvent`]s the call produced; the coordinator drains them
 /// at safe points and turns threshold crossings into protocol actions.
 /// Storage backends and event publishing are caller concerns.
-pub trait PeerScoringPlugin: Send + Sync + 'static {
+pub trait PeerScoringPlugin {
     /// Start tracking a member at the plug-in's default score.
     ///
     /// MUST be called at most once per member: a duplicate call resets

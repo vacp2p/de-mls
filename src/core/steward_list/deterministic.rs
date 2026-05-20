@@ -91,16 +91,16 @@ impl StewardListPlugin for DeterministicStewardList {
         self.list.as_ref().is_some_and(|l| l.is_exhausted(epoch))
     }
 
-    fn epoch_steward(&self, epoch: u64, eligible: &dyn Fn(&[u8]) -> bool) -> Option<&[u8]> {
+    fn epoch_steward<F: Fn(&[u8]) -> bool>(&self, epoch: u64, eligible: F) -> Option<&[u8]> {
         self.list
             .as_ref()
             .and_then(|l| l.live_steward_from(epoch, 0, eligible))
     }
 
-    fn epoch_and_backup(
+    fn epoch_and_backup<F: Fn(&[u8]) -> bool>(
         &self,
         epoch: u64,
-        eligible: &dyn Fn(&[u8]) -> bool,
+        eligible: F,
     ) -> (Option<&[u8]>, Option<&[u8]>) {
         match self.list.as_ref() {
             Some(l) => l.live_epoch_and_backup(epoch, eligible),
@@ -108,7 +108,7 @@ impl StewardListPlugin for DeterministicStewardList {
         }
     }
 
-    fn steward_members(&self, eligible: &dyn Fn(&[u8]) -> bool) -> Vec<Vec<u8>> {
+    fn steward_members<F: Fn(&[u8]) -> bool>(&self, eligible: F) -> Vec<Vec<u8>> {
         self.list
             .as_ref()
             .map(|l| {
@@ -121,7 +121,7 @@ impl StewardListPlugin for DeterministicStewardList {
             .unwrap_or_default()
     }
 
-    fn election_proposer(&self, eligible: &dyn Fn(&[u8]) -> bool) -> Option<&[u8]> {
+    fn election_proposer<F: Fn(&[u8]) -> bool>(&self, eligible: F) -> Option<&[u8]> {
         // Election proposer = nominal index 0 = the steward whose
         // rotation slot covers `election_epoch` itself.
         self.list
@@ -170,19 +170,19 @@ impl StewardListPlugin for DeterministicStewardList {
         )
     }
 
-    fn propose_election(
+    fn propose_election<F: Fn(&[u8]) -> bool>(
         &self,
         epoch: u64,
         candidate_pool: &[Vec<u8>],
         self_identity: &[u8],
-        eligible: &dyn Fn(&[u8]) -> bool,
+        eligible: F,
         recovery: bool,
     ) -> Result<ElectionDecision, CoreError> {
         if !recovery && !self.is_exhausted(epoch) {
             return Ok(ElectionDecision::Skip("steward list not exhausted"));
         }
         let is_authorized = self
-            .election_proposer(eligible)
+            .election_proposer(&eligible)
             .is_some_and(|proposer| proposer == self_identity);
         if !is_authorized {
             return Ok(ElectionDecision::Skip("not the responsible proposer"));
@@ -265,7 +265,7 @@ mod tests {
         assert!(p.current_list().is_none());
         assert!(!p.is_steward(&member(1)));
         assert!(!p.is_exhausted(0));
-        assert_eq!(p.epoch_steward(0, &|_| true), None);
+        assert_eq!(p.epoch_steward(0, |_: &[u8]| true), None);
         assert_eq!(p.election_epoch(), None);
     }
 
@@ -304,8 +304,10 @@ mod tests {
         let mems = members(&[1, 2, 3]);
         let _ = p.install_list(0, &mems, 3, 0).unwrap();
 
-        let nominal = p.epoch_steward(0, &|_| true).unwrap().to_vec();
-        let next = p.epoch_steward(0, &|c| c != nominal.as_slice()).unwrap();
+        let nominal = p.epoch_steward(0, |_: &[u8]| true).unwrap().to_vec();
+        let next = p
+            .epoch_steward(0, |c: &[u8]| c != nominal.as_slice())
+            .unwrap();
         assert_ne!(next, nominal.as_slice());
         assert!(mems.iter().any(|m| m == next));
     }
@@ -317,7 +319,7 @@ mod tests {
         let mems = members(&[1, 2, 3]);
         let _ = p.install_list(0, &mems, 3, 0).unwrap();
 
-        let (e, b) = p.epoch_and_backup(0, &|_| true);
+        let (e, b) = p.epoch_and_backup(0, |_: &[u8]| true);
         assert!(e.is_some() && b.is_some());
         assert_ne!(e.unwrap(), b.unwrap());
     }
@@ -331,7 +333,7 @@ mod tests {
         let _ = p.install_list(0, &mems, 3, 0).unwrap();
 
         let survivor = mems[0].clone();
-        let (e, b) = p.epoch_and_backup(0, &|c| c == survivor.as_slice());
+        let (e, b) = p.epoch_and_backup(0, |c: &[u8]| c == survivor.as_slice());
         assert_eq!(e.unwrap(), survivor.as_slice());
         assert!(b.is_none());
     }
@@ -387,7 +389,7 @@ mod tests {
         let mems = members(&[1, 2, 3]);
         let _ = p.install_list(0, &mems, 3, 0).unwrap();
         let dropped = mems[0].clone();
-        let filtered = p.steward_members(&|c| c != dropped.as_slice());
+        let filtered = p.steward_members(|c: &[u8]| c != dropped.as_slice());
         assert_eq!(filtered.len(), 2);
         assert!(filtered.iter().all(|m| m != &dropped));
     }
@@ -415,8 +417,10 @@ mod tests {
         let mems = members(&[1, 2, 3]);
         let _ = p.install_list(0, &mems, 3, 0).unwrap();
 
-        let proposer = p.election_proposer(&|_| true).unwrap().to_vec();
-        let next = p.election_proposer(&|c| c != proposer.as_slice()).unwrap();
+        let proposer = p.election_proposer(|_: &[u8]| true).unwrap().to_vec();
+        let next = p
+            .election_proposer(|c: &[u8]| c != proposer.as_slice())
+            .unwrap();
         assert_ne!(next, proposer.as_slice());
     }
 

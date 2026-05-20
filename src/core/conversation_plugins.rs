@@ -1,20 +1,15 @@
 //! [`ConversationPluginsFactory`] trait — bundle of per-conversation plug-in
-//! types plus the construction methods for each. The trait lives in
-//! `core` so [`crate::core::ConversationHandle`] can take a single
-//! bundle parameter rather than three independently-bounded type
-//! parameters; integrators implement it once to swap any of the
-//! per-conversation plug-ins. The convenience
-//! [`crate::defaults::DefaultConversationPluginsFactory`] supplies an in-memory
-//! reference build that integrators can hand to
-//! [`crate::app::User::new_with_plugins`].
-//!
-//! Key package generation lives on its own trait —
-//! [`crate::core::KeyPackageProvider`] — because it is identity-bound,
-//! not conversation-bound.
+//! types plus the construction methods for each, *plus* the
+//! identity-bound `generate_key_package` entry that joiners use before
+//! any conversation exists. The trait lives in `core` so
+//! [`crate::core::ConversationHandle`] can take a single bundle parameter
+//! rather than several independently-bounded type parameters;
+//! integrators implement it once to swap any of the per-conversation
+//! plug-ins.
 
 use crate::{
     core::{PeerScoringPlugin, ScoringConfig, StewardListConfig, StewardListPlugin},
-    mls_crypto::{MlsError, MlsService},
+    mls_crypto::{KeyPackageBytes, MlsError, MlsService},
 };
 
 /// Per-conversation plug-in bundle. One trait carries the three plug-in
@@ -22,7 +17,7 @@ use crate::{
 /// for each. Identity is intentionally **not** part of this bundle — it
 /// lives parallel to the conversation registry as `Arc<dyn Identity>` on
 /// `User`.
-pub trait ConversationPluginsFactory: Send + Sync + 'static {
+pub trait ConversationPluginsFactory {
     type Mls: MlsService;
     type Scoring: PeerScoringPlugin;
     type StewardList: StewardListPlugin;
@@ -45,4 +40,9 @@ pub trait ConversationPluginsFactory: Send + Sync + 'static {
         conversation_id: &[u8],
         config: StewardListConfig,
     ) -> Self::StewardList;
+
+    /// Mint a single-use key package. Identity-bound (not
+    /// conversation-bound): joiners publish a KP before any conversation
+    /// exists, so this method takes no `conversation_id`.
+    fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError>;
 }

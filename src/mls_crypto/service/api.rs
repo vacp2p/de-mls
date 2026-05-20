@@ -37,7 +37,10 @@ pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_
 pub const DEFAULT_COMMIT_BATCH_MAX: usize = 50;
 
 /// Per-conversation MLS backend. Each instance corresponds to one MLS group.
-pub trait MlsService: Send + Sync + 'static {
+///
+/// Read-only methods take `&self`; methods that advance MLS state take
+/// `&mut self`. Callers serialize via the outer per-session lock.
+pub trait MlsService {
     /// The conversation id this service is scoped to.
     fn conversation_id(&self) -> &str;
 
@@ -52,7 +55,7 @@ pub trait MlsService: Send + Sync + 'static {
 
     /// Tear down all local MLS state for this conversation. Idempotent so
     /// repeated leave / cleanup is safe.
-    fn delete(&self) -> Result<(), MlsError>;
+    fn delete(&mut self) -> Result<(), MlsError>;
 
     // ── Membership / state queries ──
 
@@ -79,19 +82,19 @@ pub trait MlsService: Send + Sync + 'static {
     /// wins selection, or [`discard_own_commit`](Self::discard_own_commit)
     /// to roll back.
     fn create_commit_candidate(
-        &self,
+        &mut self,
         updates: &[MlsCommitInput],
     ) -> Result<CommitCandidate, MlsError>;
 
     /// Apply our pending commit, advancing the MLS epoch. Call after a
     /// successful [`create_commit_candidate`](Self::create_commit_candidate)
     /// when our candidate has won the freeze round.
-    fn merge_own_commit(&self) -> Result<(), MlsError>;
+    fn merge_own_commit(&mut self) -> Result<(), MlsError>;
 
     /// Roll back the local side effects of
     /// [`create_commit_candidate`](Self::create_commit_candidate):
     /// drop the pending commit and the pending proposals it contained.
-    fn discard_own_commit(&self) -> Result<(), MlsError>;
+    fn discard_own_commit(&mut self) -> Result<(), MlsError>;
 
     // ── Inbound commit pipeline (someone else committed) ──
 
@@ -111,31 +114,31 @@ pub trait MlsService: Send + Sync + 'static {
     /// must still call `discard_staged_commit` to clean up any partial
     /// state before trying the next candidate.
     fn stage_remote_commit(
-        &self,
+        &mut self,
         proposals: &[Vec<u8>],
         commit_bytes: &[u8],
     ) -> Result<StagedCandidateResult, MlsError>;
 
     /// Apply the previously staged inbound commit, advancing the MLS
     /// epoch. Errors if no commit is staged.
-    fn merge_staged_commit(&self) -> Result<(), MlsError>;
+    fn merge_staged_commit(&mut self) -> Result<(), MlsError>;
 
     /// Roll back [`stage_remote_commit`](Self::stage_remote_commit):
     /// drop the staged commit and clear the pending proposals it
     /// staged on top of.
-    fn discard_staged_commit(&self) -> Result<(), MlsError>;
+    fn discard_staged_commit(&mut self) -> Result<(), MlsError>;
 
     // ── Application messages ──
 
     /// Encrypt an application message for the conversation, returning the raw
     /// MLS wire bytes.
-    fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, MlsError>;
+    fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, MlsError>;
 
     /// Encode and encrypt `app_msg` and wrap the result as an
     /// [`OutboundPacket`] on the application subtopic. The convenience
     /// path most senders use.
     fn build_message(
-        &self,
+        &mut self,
         app_msg: &AppMessage,
         app_id: &[u8],
     ) -> Result<OutboundPacket, MlsError>;
@@ -144,14 +147,14 @@ pub trait MlsService: Send + Sync + 'static {
     /// silently ignoring anything else (including proposals and commits).
     /// This guards the app subtopic against MLS-state pollution from
     /// peers that misroute control messages.
-    fn decrypt_application_only(&self, ciphertext: &[u8]) -> Result<DecryptResult, MlsError>;
+    fn decrypt_application_only(&mut self, ciphertext: &[u8]) -> Result<DecryptResult, MlsError>;
 
     /// General decrypt: accepts `Application` messages and stores
     /// incoming proposals as pending. Commits are out of scope here —
     /// route them through
     /// [`stage_remote_commit`](Self::stage_remote_commit) so they pass
     /// the validation pipeline.
-    fn decrypt(&self, ciphertext: &[u8]) -> Result<DecryptResult, MlsError>;
+    fn decrypt(&mut self, ciphertext: &[u8]) -> Result<DecryptResult, MlsError>;
 
     /// Peek the untrusted outer kind of an MLS wire message without
     /// processing or signature-checking it. Used for cheap pre-dispatch

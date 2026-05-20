@@ -106,6 +106,12 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
         self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)
     }
 
+    /// Mutable [`Self::expect_mls`] — required for the commit pipeline
+    /// and encrypt/decrypt methods that advance MLS state.
+    pub(crate) fn expect_mls_mut(&mut self) -> Result<&mut CP::Mls, CoreError> {
+        self.mls.as_mut().ok_or(CoreError::MlsGroupNotInitialized)
+    }
+
     /// Attach an MLS service. Called by joiners after the welcome
     /// arrives. Caller is responsible for not double-attaching.
     pub(crate) fn attach_mls(&mut self, mls: CP::Mls) {
@@ -124,16 +130,6 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
     // callsites don't destructure the entry. Protocol logic lives in
     // sibling `core` modules; these are pure delegation.
 
-    /// Current MLS members; errors with
-    /// [`CoreError::MlsGroupNotInitialized`] when no service is attached
-    /// (joiner pre-welcome).
-    pub(crate) fn conversation_members(&self) -> Result<Vec<Vec<u8>>, CoreError> {
-        match &self.mls {
-            Some(mls) => Ok(mls.members()?),
-            None => Err(CoreError::MlsGroupNotInitialized),
-        }
-    }
-
     /// Build a commit candidate. Errors with
     /// [`CoreError::MlsGroupNotInitialized`] when no MLS service is
     /// attached.
@@ -142,7 +138,9 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
         self_identity: &[u8],
         app_id: &[u8],
     ) -> Result<Option<OutboundPacket>, CoreError> {
-        let mls = self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)?;
+        if self.mls.is_none() {
+            return Err(CoreError::MlsGroupNotInitialized);
+        }
         if !self.steward_list.is_steward(self_identity) && !self.is_in_recovery_mode() {
             return Err(CoreError::NotASteward);
         }
@@ -177,6 +175,8 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
                 proposal_ids: non_mls_ids,
             });
         }
+
+        let mls = self.mls.as_mut().ok_or(CoreError::MlsGroupNotInitialized)?;
 
         // Drop approved entries already reflected in conversation state (stale
         // rebroadcast KPs, duplicate removes) — without this MLS would reject
@@ -292,8 +292,8 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
         app_id: &[u8],
         self_identity: &[u8],
     ) -> Result<FreezeFinalizeResult, CoreError> {
-        let mls = self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)?;
         let in_recovery = self.operating_mode == OperatingMode::Recovery;
+        let mls = self.mls.as_mut().ok_or(CoreError::MlsGroupNotInitialized)?;
         finalize_freeze_round(
             &mut self.conversation,
             mls,
@@ -309,7 +309,7 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
     /// [`CoreError::MlsGroupNotInitialized`] when no MLS service is
     /// attached — caller should check `mls().is_some()` first.
     pub(crate) fn process_inbound(&mut self, payload: &[u8]) -> Result<ProcessResult, CoreError> {
-        let mls = self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)?;
+        let mls = self.mls.as_mut().ok_or(CoreError::MlsGroupNotInitialized)?;
         process_inbound(&mut self.conversation, mls, payload)
     }
 }

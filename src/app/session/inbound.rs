@@ -205,7 +205,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             .prune_pending_updates_after_commit()?;
 
         let (packet, mls_members, conversation_name) = {
-            let s = arc.read_or_err("session")?;
+            let mut s = arc.write_or_err("session")?;
             let msg: AppMessage = ConversationMessage {
                 message: format!("User {} joined the conversation", s.identity_display)
                     .into_bytes(),
@@ -213,10 +213,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 conversation_name: s.conversation_name.clone(),
             }
             .into();
-            let mls = s.handle.expect_mls()?;
-            let packet = mls.build_message(&msg, &s.app_id)?;
-            let members = s.handle.conversation_members().unwrap_or_default();
-            (packet, members, s.conversation_name.clone())
+            let app_id = Arc::clone(&s.app_id);
+            let conversation_name = s.conversation_name.clone();
+            let mls = s.handle.expect_mls_mut()?;
+            let members = mls.members().unwrap_or_default();
+            let packet = mls.build_message(&msg, &app_id)?;
+            (packet, members, conversation_name)
         };
         let transport = Arc::clone(arc.read_or_err("session")?.transport());
         send_packet(&transport, packet)?;
@@ -238,10 +240,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     async fn on_conversation_updated(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
         let mls_members = {
             let s = arc.read_or_err("session")?;
-            if s.handle.mls().is_some() {
-                s.handle.conversation_members().unwrap_or_default()
-            } else {
-                Vec::new()
+            match s.handle.mls() {
+                Some(mls) => mls.members().unwrap_or_default(),
+                None => Vec::new(),
             }
         };
         arc.write_or_err("session")?
@@ -318,7 +319,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // lifetime would keep every other task on this session blocked
         // throughout the delete.
         let taken_mls = arc.write_or_err("session")?.handle.take_mls();
-        if let Some(mls) = taken_mls {
+        if let Some(mut mls) = taken_mls {
             mls.delete()?;
         }
         Ok(())
@@ -392,7 +393,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             }
             let mls = s.handle.expect_mls()?;
             (
-                s.handle.conversation_members()?,
+                mls.members()?,
                 mls.current_epoch()?,
                 s.handle.scoring.default_score(),
                 s.conversation_name.clone(),

@@ -9,6 +9,6 @@ mod apply;
 mod round;
 
 pub use round::{
-    FreezeFinalizeResult, FreezeOutcome, buffer_commit_candidate, compute_commit_hash,
+    CommitHash, FreezeFinalizeResult, FreezeOutcome, buffer_commit_candidate, compute_commit_hash,
     finalize_freeze_round,
 };

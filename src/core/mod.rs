@@ -31,7 +31,6 @@ mod error;
 mod events;
 mod freeze;
 mod inbound;
-mod key_package;
 mod peer_scoring;
 mod process_result;
 mod proposal_framing;
@@ -39,7 +38,9 @@ mod proposal_kind;
 mod steward_list;
 
 // ── Core conversation operations ──
-pub use freeze::{FreezeFinalizeResult, FreezeOutcome, compute_commit_hash, finalize_freeze_round};
+pub use freeze::{
+    CommitHash, FreezeFinalizeResult, FreezeOutcome, compute_commit_hash, finalize_freeze_round,
+};
 pub use inbound::process_inbound;
 pub use proposal_framing::build_key_package_message;
 
@@ -66,9 +67,6 @@ pub use error::CoreError;
 
 // ── Session-event types ──
 pub use events::{ConversationLifecycle, SessionEvent};
-
-// ── Key package generation trait (identity-bound, no conversation) ──
-pub use key_package::KeyPackageProvider;
 
 // ── Proposal classification ──
 pub use proposal_kind::ProposalKind;

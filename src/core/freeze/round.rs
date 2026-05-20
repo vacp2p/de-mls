@@ -43,11 +43,24 @@ pub enum FreezeOutcome {
     NoCandidate,
 }
 
+/// SHA-256 of a commit message. Used for dedup of buffered and
+/// committed candidates, and as the final tiebreak in candidate
+/// ordering. Fixed-size, no allocation per hash.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CommitHash([u8; 32]);
+
+impl CommitHash {
+    /// Raw 32-byte hash.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// Canonical commit hash used for dedup of buffered/committed candidates.
-pub fn compute_commit_hash(commit_message: &[u8]) -> Vec<u8> {
+pub fn compute_commit_hash(commit_message: &[u8]) -> CommitHash {
     let mut hasher = Sha256::new();
     hasher.update(commit_message);
-    hasher.finalize().to_vec()
+    CommitHash(hasher.finalize().into())
 }
 
 /// Buffer a remote commit candidate. Enforces non-empty proposals/commit,
@@ -55,7 +68,7 @@ pub fn compute_commit_hash(commit_message: &[u8]) -> Vec<u8> {
 /// hash. No MLS state is mutated.
 pub fn buffer_commit_candidate<M: MlsService>(
     conversation: &mut Conversation,
-    mls: &M,
+    mls: &mut M,
     candidate_msg: CommitCandidate,
 ) -> Result<ProcessResult, CoreError> {
     let conversation_name = conversation.name().to_owned();
@@ -146,10 +159,10 @@ pub fn buffer_commit_candidate<M: MlsService>(
 /// 2. Filter candidates by action count and rank them by RFC priority.
 /// 3. Apply in priority order, falling back on the next candidate when
 ///    MLS staging rejects the current one.
-pub fn finalize_freeze_round<M: MlsService>(
+pub fn finalize_freeze_round<M: MlsService, St: StewardListPlugin>(
     conversation: &mut Conversation,
-    mls: &M,
-    steward: &dyn StewardListPlugin,
+    mls: &mut M,
+    steward: &St,
     in_recovery: bool,
     allow_subset_candidates: bool,
     app_id: &[u8],
@@ -219,10 +232,10 @@ pub(super) struct RoundContext {
 }
 
 impl RoundContext {
-    fn snapshot<M: MlsService>(
+    fn snapshot<M: MlsService, St: StewardListPlugin>(
         conversation: &Conversation,
-        mls: &M,
-        steward: &dyn StewardListPlugin,
+        mls: &mut M,
+        steward: &St,
         current_epoch: u64,
         in_recovery: bool,
         self_identity: &[u8],
@@ -348,16 +361,20 @@ mod tests {
         candidates.sort_by(|a, b| compare_candidate_priority(a, b, epoch_steward_id));
     }
 
+    fn hash(byte: u8) -> CommitHash {
+        CommitHash([byte; 32])
+    }
+
     fn make_candidate(
         steward_identity: Vec<u8>,
         actions_count: usize,
-        commit_hash: Vec<u8>,
+        commit_hash: CommitHash,
     ) -> BufferedCommitCandidate {
         BufferedCommitCandidate {
             candidate_msg: CommitCandidate {
                 conversation_name: b"test-conversation".to_vec(),
                 mls_proposals: vec![vec![0xFF; 10]; actions_count],
-                commit_message: commit_hash.clone(),
+                commit_message: commit_hash.as_bytes().to_vec(),
                 steward_identity,
             },
             commit_hash,
@@ -373,8 +390,8 @@ mod tests {
         let other_id = vec![0x03];
 
         let mut candidates = vec![
-            make_candidate(epoch_id.clone(), 3, vec![0xAA]),
-            make_candidate(other_id.clone(), 5, vec![0xBB]),
+            make_candidate(epoch_id.clone(), 3, hash(0xAA)),
+            make_candidate(other_id.clone(), 5, hash(0xBB)),
         ];
 
         sort_by_priority(&mut candidates, Some(&epoch_id));
@@ -390,8 +407,8 @@ mod tests {
         let other_id = vec![0x02];
 
         let mut candidates = vec![
-            make_candidate(other_id.clone(), 3, vec![0xAA]),
-            make_candidate(epoch_id.clone(), 3, vec![0xBB]),
+            make_candidate(other_id.clone(), 3, hash(0xAA)),
+            make_candidate(epoch_id.clone(), 3, hash(0xBB)),
         ];
 
         sort_by_priority(&mut candidates, Some(&epoch_id));
@@ -407,8 +424,8 @@ mod tests {
         let other_b = vec![0x03];
 
         let mut candidates = vec![
-            make_candidate(other_a.clone(), 3, vec![0xAA]),
-            make_candidate(other_b.clone(), 3, vec![0xBB]),
+            make_candidate(other_a.clone(), 3, hash(0xAA)),
+            make_candidate(other_b.clone(), 3, hash(0xBB)),
         ];
 
         sort_by_priority(&mut candidates, Some(&epoch_id));
@@ -422,13 +439,13 @@ mod tests {
         let id = vec![0x05];
 
         let mut candidates = vec![
-            make_candidate(id.clone(), 3, vec![0xCC]),
-            make_candidate(id.clone(), 3, vec![0xAA]),
+            make_candidate(id.clone(), 3, hash(0xCC)),
+            make_candidate(id.clone(), 3, hash(0xAA)),
         ];
 
         sort_by_priority(&mut candidates, Some(&[0x01]));
 
-        assert_eq!(candidates[0].commit_hash, vec![0xAA]);
+        assert_eq!(candidates[0].commit_hash, hash(0xAA));
     }
 
     /// No steward list → tier is always 1, so the tier check is a no-op and
@@ -439,8 +456,8 @@ mod tests {
         let id_b = vec![0x03];
 
         let mut candidates = vec![
-            make_candidate(id_a.clone(), 3, vec![0xAA]),
-            make_candidate(id_b.clone(), 3, vec![0xBB]),
+            make_candidate(id_a.clone(), 3, hash(0xAA)),
+            make_candidate(id_b.clone(), 3, hash(0xBB)),
         ];
 
         sort_by_priority(&mut candidates, None);
@@ -459,9 +476,9 @@ mod tests {
         let other_b = vec![0x04];
 
         let mut candidates = vec![
-            make_candidate(other_b.clone(), 5, vec![0x11]),
-            make_candidate(other_a.clone(), 3, vec![0x22]),
-            make_candidate(epoch_id.clone(), 3, vec![0x44]),
+            make_candidate(other_b.clone(), 5, hash(0x11)),
+            make_candidate(other_a.clone(), 3, hash(0x22)),
+            make_candidate(epoch_id.clone(), 3, hash(0x44)),
         ];
 
         sort_by_priority(&mut candidates, Some(&epoch_id));
