@@ -28,3 +28,4 @@ alloy = { version = "1.0.37", default-features = false, features = [
 
 de-mls-ui-protocol = { path = "../de_mls_ui_protocol" }
 de-mls = { path = "../../", features = ["waku"] }
+prost = "0.13"

@@ -1,10 +1,11 @@
 //! User-side inbound entry point.
 //!
-//! `process_inbound_packet` owns echo dedup + name routing; the welcome
-//! subtopic handler reaches the per-conv plugin factory (`welcome_mls`),
-//! which lives at the User layer. App-message packets are handed off to
+//! `process_inbound_packet` owns echo dedup + name routing. Welcome-
+//! subtopic packets carry [`MemberInvite`] (KP-broadcast); app-message
+//! packets are handed off to
 //! [`SessionRunner::dispatch_inbound_result`] for MLS processing and
-//! per-conversation dispatch.
+//! per-conversation dispatch. Raw MLS welcomes enter through
+//! [`User::accept_welcome`].
 
 use std::sync::{Arc, RwLock};
 
@@ -15,13 +16,12 @@ use crate::{
     app::{DispatchOutcome, LockExt, SessionRunner, User, UserError},
     core::{
         ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, CoreError,
-        ProcessResult, StewardListPlugin,
+        ProcessResult,
     },
     ds::{APP_MSG_SUBTOPIC, InboundPacket, WELCOME_SUBTOPIC},
-    mls_crypto::{MlsService, key_package_bytes_from_json},
+    mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
-        ConversationUpdateRequest, InviteMember, WelcomeMessage, conversation_update_request,
-        welcome_message,
+        ConversationUpdateRequest, MemberInvite, conversation_update_request,
     },
 };
 
@@ -93,98 +93,54 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
     // ── Private ──────────────────────────────────────────────────────
 
-    /// Welcome-subtopic dispatch. Two payload kinds:
-    /// - `UserKeyPackage` — a peer wants to join. If we already have an MLS
-    ///   service for this conversation and the candidate isn't a member, surface
-    ///   it as a membership-change request.
-    /// - `InvitationToJoin` — try the welcome factory. If it returns
-    ///   `Some(svc)`, attach to the runner and fire the join flow.
+    /// Welcome-subtopic dispatch. Carries [`MemberInvite`] only — a peer
+    /// broadcasting their key package so existing members can propose
+    /// adding them. If we already have an MLS service for this
+    /// conversation and the candidate isn't a member, surface it as a
+    /// membership-change request.
+    ///
+    /// Raw MLS welcomes are not framed here — they reach the library via
+    /// [`User::accept_welcome`].
     async fn process_welcome_packet(
         &self,
         conversation_name: &str,
         payload: &[u8],
         entry_arc: &Arc<RwLock<SessionRunner<P, CP>>>,
     ) -> Result<(), UserError> {
-        let welcome_msg = WelcomeMessage::decode(payload)?;
-        match welcome_msg.payload {
-            Some(welcome_message::Payload::UserKeyPackage(user_kp)) => {
-                let (key_package_bytes, identity) =
-                    key_package_bytes_from_json(user_kp.key_package_bytes)?;
+        let invite = MemberInvite::decode(payload)?;
 
-                let already_member = {
-                    let entry = entry_arc.read_or_err("session")?;
-                    entry
-                        .handle
-                        .mls()
-                        .map(|m| m.is_member(&identity))
-                        .unwrap_or(false)
-                };
-                if already_member {
-                    info!(
-                        conversation = conversation_name,
-                        identity = ?identity,
-                        "key package skipped: already a member"
-                    );
-                    return Ok(());
-                }
-
-                info!(
-                    conversation = conversation_name,
-                    identity = ?identity,
-                    "key package received"
-                );
-
-                let gur = ConversationUpdateRequest {
-                    payload: Some(conversation_update_request::Payload::InviteMember(
-                        InviteMember {
-                            key_package_bytes,
-                            identity,
-                        },
-                    )),
-                };
-                SessionRunner::handle_incoming_update_request(entry_arc, gur).await
-            }
-            Some(welcome_message::Payload::InvitationToJoin(invitation)) => {
-                let self_id = self.self_identity();
-                let already_in = {
-                    let entry = entry_arc.read_or_err("session")?;
-                    entry.handle.steward_list.is_steward(self_id) || entry.handle.mls().is_some()
-                };
-                if already_in {
-                    return Ok(());
-                }
-
-                let svc = self
-                    .plugins
-                    .conversation_plugins
-                    .welcome_mls(&invitation.mls_message_out_bytes)?;
-                let Some(svc) = svc else {
-                    // Welcome wasn't for us.
-                    return Ok(());
-                };
-                let joined_name = svc.conversation_id().to_string();
-                {
-                    let mut entry = entry_arc.write_or_err("session")?;
-                    entry.handle.attach_mls(svc);
-                }
-                info!(
-                    conversation = conversation_name,
-                    "joined conversation via welcome"
-                );
-                self.finish_dispatch(
-                    conversation_name,
-                    entry_arc,
-                    ProcessResult::JoinedConversation(joined_name),
-                )
-                .await
-            }
-            None => Ok(()),
+        let already_member = {
+            let entry = entry_arc.read_or_err("session")?;
+            entry
+                .handle
+                .mls()
+                .map(|m| m.is_member(&invite.identity))
+                .unwrap_or(false)
+        };
+        if already_member {
+            info!(
+                conversation = conversation_name,
+                identity = ?invite.identity,
+                "key package skipped: already a member"
+            );
+            return Ok(());
         }
+
+        info!(
+            conversation = conversation_name,
+            identity = ?invite.identity,
+            "key package received"
+        );
+
+        let gur = ConversationUpdateRequest {
+            payload: Some(conversation_update_request::Payload::MemberInvite(invite)),
+        };
+        SessionRunner::handle_incoming_update_request(entry_arc, gur).await
     }
 
     /// Drive the session-side dispatcher and finish lifecycle work on the
     /// User side when the session signals `LeaveRequested`.
-    async fn finish_dispatch(
+    pub(crate) async fn finish_dispatch(
         &self,
         conversation_name: &str,
         entry_arc: &Arc<RwLock<SessionRunner<P, CP>>>,

@@ -71,7 +71,7 @@ impl MessageType for app_message::Payload {
 impl MessageType for ConversationUpdateRequest {
     fn message_type(&self) -> &'static str {
         match &self.payload {
-            Some(conversation_update_request::Payload::InviteMember(_)) => "Add Member",
+            Some(conversation_update_request::Payload::MemberInvite(_)) => "Add Member",
             Some(conversation_update_request::Payload::RemoveMember(_)) => "Remove Member",
             Some(conversation_update_request::Payload::EmergencyCriteria(ec)) => ec
                 .evidence

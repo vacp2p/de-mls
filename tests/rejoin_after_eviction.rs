@@ -12,7 +12,7 @@ use de_mls::protos::de_mls::messages::v1::{
 
 mod common;
 use common::session_fixtures::{
-    bootstrap_joined_conversation, fast_test_config, settle_for, to_inbound,
+    bootstrap_joined_conversation, fast_test_config, route_welcomes, settle_for, to_inbound,
 };
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -75,7 +75,7 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
 
     let mut target_evicted = false;
     for _ in 0..30 {
-        drive_one_round(&users, target_idx).await;
+        drive_one_round(&mut users, target_idx).await;
         if users[target_idx]
             .0
             .lookup_entry("rejoin")
@@ -105,7 +105,7 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
 
     let mut rejoined = false;
     for _ in 0..30 {
-        drive_one_round(&users, target_idx).await;
+        drive_one_round(&mut users, target_idx).await;
         let s = users[target_idx].0.lookup_entry("rejoin").unwrap().unwrap();
         if s.read().unwrap().get_conversation_state() == ConversationState::Working {
             rejoined = true;
@@ -142,13 +142,14 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
 }
 
 async fn drive_one_round(
-    users: &[(
+    users: &mut [(
         common::session_fixtures::TestUser,
         common::session_fixtures::TransportHandle,
     )],
     target_idx: usize,
 ) {
     settle_for(Duration::from_millis(40)).await;
+    let mut sessions = Vec::with_capacity(users.len());
     for (i, (u, _)) in users.iter().enumerate() {
         if let Some(s) = u.lookup_entry("rejoin").unwrap() {
             let _ = SessionRunner::tick_deadlines(&s).await;
@@ -159,14 +160,19 @@ async fn drive_one_round(
             }
             let _ = SessionRunner::check_member_freeze(&s).await;
             let _ = SessionRunner::check_pending_join(&s).unwrap();
+            sessions.push(s);
         }
     }
+    // Route the steward's WelcomeReady event to the rejoining target
+    // before relaying packets — ConversationSync emitted in the same
+    // round needs the target's MLS attached first.
+    route_welcomes(&sessions, users).await;
     let mut packets = Vec::new();
-    for (_, h) in users {
+    for (_, h) in users.iter() {
         packets.extend(h.lock().unwrap().drain_packets());
     }
     for p in &packets {
-        for (u, _) in users {
+        for (u, _) in users.iter() {
             let _ = u.process_inbound_packet(to_inbound(p)).await;
         }
     }

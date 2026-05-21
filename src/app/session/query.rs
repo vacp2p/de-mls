@@ -14,6 +14,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         self.handle.current_state()
     }
 
+    /// Name of the conversation this session runs.
+    pub fn conversation_name(&self) -> &str {
+        &self.conversation_name
+    }
+
     /// Current MLS epoch + reelection retry round. `(0, 0)` when the
     /// conversation has no MLS state yet (pending join). Intended for UI
     /// status display.

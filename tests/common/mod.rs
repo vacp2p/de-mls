@@ -27,22 +27,23 @@ use std::sync::{
     atomic::{AtomicU32, Ordering},
 };
 
+use de_mls::app::build_key_package_message;
 use de_mls::core::{
     BufferedCommitCandidate, Conversation, CoreError, DeterministicStewardList, FreezeOutcome,
     NoopReason, OperatingMode, PeerScoringService, ProcessResult, ProposalKind, ScoringConfig,
-    StewardListConfig, StewardListPlugin, build_key_package_message, compute_commit_hash,
-    default_score_deltas, finalize_freeze_round, member_set, process_inbound,
+    StewardListConfig, StewardListPlugin, compute_commit_hash, default_score_deltas,
+    finalize_freeze_round, member_set, process_inbound,
 };
 use de_mls::defaults::{InMemoryPeerScoreStorage, MemoryDeMlsStorage};
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
 use de_mls::identity::Identity;
 use de_mls::mls_crypto::{
     CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MlsCommitInput, MlsCredentials,
-    MlsService, OpenMlsService, key_package_bytes_from_json,
+    MlsService, OpenMlsService,
 };
 use de_mls::protos::de_mls::messages::v1::{
-    AppMessage, CommitCandidate, ConversationUpdateRequest, InviteMember, WelcomeMessage,
-    conversation_update_request, welcome_message,
+    AppMessage, CommitCandidate, ConversationUpdateRequest, MemberInvite,
+    conversation_update_request,
 };
 use prost::Message as _;
 
@@ -117,7 +118,7 @@ pub fn build_commit_candidate(
             continue;
         };
         match proposal.payload.as_ref() {
-            Some(conversation_update_request::Payload::InviteMember(im)) => {
+            Some(conversation_update_request::Payload::MemberInvite(im)) => {
                 if urgent_target.is_some() {
                     continue;
                 }
@@ -204,13 +205,11 @@ pub fn setup_identity_storage(
     (identity, credentials, storage)
 }
 
-/// Compat shim that mirrors the pre-refactor `core::process_inbound`
-/// 4-arg surface for tests that drive packet relay manually. Routes
-/// app-subtopic packets to the new `core::process_inbound`, and synthesises
-/// the steward-side `UserKeyPackage` membership-change response that used
-/// to live inside core. `InvitationToJoin` packets must instead be
-/// accepted via [`JoinerHandle::accept_welcome_packet`], which constructs
-/// a fresh MLS service and attaches it to the joiner's group.
+/// Test-side packet router. WELCOME_SUBTOPIC carries [`MemberInvite`]
+/// (KP-broadcast) and is surfaced as `MembershipChangeReceived`;
+/// raw MLS welcomes flow out of band — tests apply them via
+/// [`JoinerHandle::accept_welcome`]. APP_MSG_SUBTOPIC delegates to
+/// [`process_inbound`].
 pub fn process_inbound_compat(
     group: &mut Conversation,
     mls: Option<&mut TestMls>,
@@ -218,35 +217,17 @@ pub fn process_inbound_compat(
     subtopic: &str,
 ) -> Result<ProcessResult, de_mls::core::CoreError> {
     if subtopic == WELCOME_SUBTOPIC {
-        let welcome_msg = WelcomeMessage::decode(payload)?;
-        match welcome_msg.payload {
-            Some(welcome_message::Payload::UserKeyPackage(user_kp)) => {
-                let (key_package_bytes, identity) =
-                    key_package_bytes_from_json(user_kp.key_package_bytes)?;
-                if let Some(mls) = mls
-                    && mls.is_member(&identity)
-                {
-                    return Ok(ProcessResult::Noop(NoopReason::UnknownAppMessage));
-                }
-                Ok(ProcessResult::MembershipChangeReceived(Box::new(
-                    ConversationUpdateRequest {
-                        payload: Some(conversation_update_request::Payload::InviteMember(
-                            InviteMember {
-                                key_package_bytes,
-                                identity,
-                            },
-                        )),
-                    },
-                )))
-            }
-            Some(welcome_message::Payload::InvitationToJoin(_)) => {
-                panic!(
-                    "InvitationToJoin is handled by the User layer; \
-                     tests using this shim should call JoinerHandle::accept_welcome_packet"
-                );
-            }
-            None => Ok(ProcessResult::Noop(NoopReason::UnknownAppMessage)),
+        let invite = MemberInvite::decode(payload)?;
+        if let Some(mls) = mls
+            && mls.is_member(&invite.identity)
+        {
+            return Ok(ProcessResult::Noop(NoopReason::UnknownAppMessage));
         }
+        Ok(ProcessResult::MembershipChangeReceived(Box::new(
+            ConversationUpdateRequest {
+                payload: Some(conversation_update_request::Payload::MemberInvite(invite)),
+            },
+        )))
     } else if subtopic == APP_MSG_SUBTOPIC {
         let Some(mls) = mls else {
             // App messages on a conversation with no MLS state are
@@ -374,18 +355,13 @@ impl JoinerHandle {
         )
     }
 
-    /// Accept a welcome `OutboundPacket` (the kind `steward_add_joiner`
+    /// Accept raw MLS welcome bytes (the kind `steward_add_joiner`
     /// returns) and store the resulting MLS service on the handle.
-    /// Panics if the packet isn't an `InvitationToJoin` or doesn't match
-    /// this joiner's key package — both indicate a test setup bug.
-    pub fn accept_welcome_packet(&mut self, welcome_packet: &OutboundPacket) {
-        let welcome_msg = WelcomeMessage::decode(welcome_packet.payload.as_slice()).unwrap();
-        let invitation = match welcome_msg.payload {
-            Some(welcome_message::Payload::InvitationToJoin(inv)) => inv,
-            other => panic!("expected InvitationToJoin, got {:?}", other),
-        };
+    /// Panics if the welcome doesn't match this joiner's key package —
+    /// a test setup bug.
+    pub fn accept_welcome(&mut self, welcome_bytes: &[u8]) {
         let svc = self
-            .try_accept_welcome(&invitation.mls_message_out_bytes)
+            .try_accept_welcome(welcome_bytes)
             .unwrap()
             .expect("welcome did not match this joiner's KP");
         self.mls = Some(svc);
@@ -423,9 +399,11 @@ pub fn setup_joiner_with_config(
     }
 }
 
-/// Full join: steward processes the joiner's KP, commits, and finalizes the
-/// freeze round. Returns `(welcome_packet, batch_packet)`; callers needing
-/// only the welcome can take `.0` and drop the rest.
+/// Full join: steward processes the joiner's KP-broadcast packet,
+/// commits, and finalizes the freeze round. Returns
+/// `(welcome_bytes, batch_packet)` — `welcome_bytes` is the raw MLS
+/// welcome blob the joiner feeds into
+/// [`JoinerHandle::accept_welcome`].
 ///
 /// Proposal IDs come from a process-local atomic counter starting at 100 —
 /// high enough not to collide with the manually-picked IDs test code uses
@@ -433,31 +411,15 @@ pub fn setup_joiner_with_config(
 pub fn steward_add_joiner(
     steward_handle: &mut StewardHandle,
     joiner_kp_packet: &OutboundPacket,
-) -> (OutboundPacket, OutboundPacket) {
+) -> (Vec<u8>, OutboundPacket) {
     static PROPOSAL_COUNTER: AtomicU32 = AtomicU32::new(100);
 
-    // The User-layer welcome handler constructs a service from a welcome
-    // via the app-supplied factory. Tests that drive packet relay
-    // manually still need the inviter side: decode the KP envelope here
-    // and synthesise the matching membership-change request directly.
-    let welcome_msg = WelcomeMessage::decode(joiner_kp_packet.payload.as_slice()).unwrap();
-    let user_kp = match welcome_msg.payload {
-        Some(welcome_message::Payload::UserKeyPackage(kp)) => kp,
-        other => panic!("Expected UserKeyPackage, got {:?}", other),
-    };
-    let (key_package_bytes, identity) =
-        key_package_bytes_from_json(user_kp.key_package_bytes).unwrap();
-    let already_member = steward_handle.mls.is_member(&identity);
-    if already_member {
+    let invite = MemberInvite::decode(joiner_kp_packet.payload.as_slice()).unwrap();
+    if steward_handle.mls.is_member(&invite.identity) {
         panic!("Expected key package skipped for already-member");
     }
     let gur = ConversationUpdateRequest {
-        payload: Some(conversation_update_request::Payload::InviteMember(
-            InviteMember {
-                key_package_bytes,
-                identity,
-            },
-        )),
+        payload: Some(conversation_update_request::Payload::MemberInvite(invite)),
     };
 
     let proposal_id = PROPOSAL_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -481,21 +443,19 @@ pub fn steward_add_joiner(
         &steward_handle.steward_list,
         steward_handle.operating_mode == OperatingMode::Recovery,
         false,
-        b"test-app-id",
         &self_id,
     )
     .unwrap();
-    let welcome_packet = match finalize.outcome {
-        FreezeOutcome::Applied { result, outbound } => {
+    let welcome_bytes = match finalize.outcome {
+        FreezeOutcome::Applied { result, welcome } => {
             assert!(
                 matches!(result, ProcessResult::ConversationUpdated),
                 "Expected ConversationUpdated, got {:?}",
                 result
             );
-            outbound
-                .into_iter()
-                .find(|p| p.subtopic == WELCOME_SUBTOPIC)
-                .expect("Expected a deferred welcome packet from finalize_freeze_round")
+            welcome
+                .expect("Expected a welcome artifact from finalize_freeze_round")
+                .welcome_bytes
         }
         other => panic!("Expected Applied, got {:?}", other),
     };
@@ -506,7 +466,7 @@ pub fn steward_add_joiner(
         .expect("Expected batch proposals packet")
         .clone();
 
-    (welcome_packet, batch_packet)
+    (welcome_bytes, batch_packet)
 }
 
 // ─────────────────────────── Scoring ───────────────────────────

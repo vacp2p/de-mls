@@ -33,7 +33,8 @@ fn is_polling_fatal(err: &UserError) -> bool {
         | UserError::Consensus(_)
         | UserError::Message(_)
         | UserError::SystemTime(_)
-        | UserError::Mls(_) => false,
+        | UserError::Mls(_)
+        | UserError::WelcomeNotForUs => false,
     }
 }
 

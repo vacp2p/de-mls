@@ -11,10 +11,10 @@ use crate::{
         StewardListPlugin, conversation::BufferedCommitCandidate,
         freeze::apply::apply_in_priority_order,
     },
-    ds::OutboundPacket,
     mls_crypto::{MlsMessageKind, MlsService},
     protos::de_mls::messages::v1::{
-        CommitCandidate, ConversationUpdateRequest, conversation_update_request::Payload,
+        CommitCandidate, ConversationUpdateRequest, MemberWelcome,
+        conversation_update_request::Payload,
     },
 };
 
@@ -36,8 +36,10 @@ pub struct FreezeFinalizeResult {
 pub enum FreezeOutcome {
     Applied {
         result: ProcessResult,
-        /// Deferred welcomes when our own candidate won.
-        outbound: Option<OutboundPacket>,
+        /// Welcome artifact when our own commit added members.
+        /// Surfaced to integrators via
+        /// [`crate::core::SessionEvent::WelcomeReady`].
+        welcome: Option<MemberWelcome>,
     },
     #[default]
     NoCandidate,
@@ -165,7 +167,6 @@ pub fn finalize_freeze_round<M: MlsService, St: StewardListPlugin>(
     steward: &St,
     in_recovery: bool,
     allow_subset_candidates: bool,
-    app_id: &[u8],
     self_identity: &[u8],
 ) -> Result<FreezeFinalizeResult, CoreError> {
     let current_epoch = mls.current_epoch()?;
@@ -198,15 +199,7 @@ pub fn finalize_freeze_round<M: MlsService, St: StewardListPlugin>(
         return Ok(FreezeFinalizeResult::default());
     }
 
-    apply_in_priority_order(
-        conversation,
-        mls,
-        steward,
-        sorted,
-        &ctx,
-        self_identity,
-        app_id,
-    )
+    apply_in_priority_order(conversation, mls, steward, sorted, &ctx, self_identity)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -269,7 +262,7 @@ impl RoundContext {
 pub(super) fn produces_mls_action(req: &ConversationUpdateRequest) -> bool {
     matches!(
         req.payload.as_ref(),
-        Some(Payload::InviteMember(_) | Payload::RemoveMember(_))
+        Some(Payload::MemberInvite(_) | Payload::RemoveMember(_))
     )
 }
 

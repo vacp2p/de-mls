@@ -32,8 +32,8 @@ fn test_emergency_mixed_with_regular_returns_error() {
         "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
     );
 
-    let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
-    joiner.accept_welcome_packet(&welcome_packet);
+    let (welcome_bytes, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
+    joiner.accept_welcome(&welcome_bytes);
 
     let joiner2 = setup_joiner(
         conversation_name,
@@ -95,8 +95,8 @@ fn test_duplicate_batch_returns_noop() {
         "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
     );
 
-    let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
-    joiner.accept_welcome_packet(&welcome_packet);
+    let (welcome_bytes, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
+    joiner.accept_welcome(&welcome_bytes);
 
     let joiner2 = setup_joiner(
         conversation_name,
@@ -179,8 +179,8 @@ fn test_candidate_ignored_without_freeze_round() {
         "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
     );
 
-    let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
-    joiner.accept_welcome_packet(&welcome_packet);
+    let (welcome_bytes, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
+    joiner.accept_welcome(&welcome_bytes);
 
     let joiner2 = setup_joiner(
         conversation_name,
@@ -245,8 +245,8 @@ fn test_commit_candidate_roundtrip_sender_identity() {
         "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
     );
 
-    let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
-    joiner.accept_welcome_packet(&welcome_packet);
+    let (welcome_bytes, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
+    joiner.accept_welcome(&welcome_bytes);
 
     // Add a third member proposal
     let joiner2 = setup_joiner(
@@ -309,7 +309,6 @@ fn test_commit_candidate_roundtrip_sender_identity() {
         &joiner.steward_list,
         false,
         false,
-        b"test-app-id",
         &joiner_id,
     )
     .unwrap();
@@ -343,8 +342,8 @@ fn test_backup_commit_scores_absent_steward() {
     let alice_id = alice_group.self_identity().to_vec();
     let bob_id = bob.self_identity();
 
-    let (welcome, _) = steward_add_joiner(&mut alice_group, &bob.kp_packet);
-    bob.accept_welcome_packet(&welcome);
+    let (welcome_bytes, _) = steward_add_joiner(&mut alice_group, &bob.kp_packet);
+    bob.accept_welcome(&welcome_bytes);
 
     // After the join, both are MLS members. Regenerate the steward list
     // over [Alice, Bob] so both are stewards at the current epoch.
@@ -401,7 +400,6 @@ fn test_backup_commit_scores_absent_steward() {
         &bob.steward_list,
         false,
         false,
-        b"test-app-id",
         &bob_id,
     )
     .unwrap();
@@ -463,8 +461,8 @@ fn test_forged_steward_identity_scores_mls_sender() {
     let mut steward_handle = setup_steward(conversation_name, steward_hex);
     let mut joiner = setup_joiner(conversation_name, joiner_hex);
 
-    let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
-    joiner.accept_welcome_packet(&welcome_packet);
+    let (welcome_bytes, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
+    joiner.accept_welcome(&welcome_bytes);
 
     let third = setup_joiner(conversation_name, third_hex);
     let result = process_inbound_compat(
@@ -536,7 +534,6 @@ fn test_forged_steward_identity_scores_mls_sender() {
         &joiner.steward_list,
         false,
         false,
-        b"test-app-id",
         &joiner_id,
     )
     .unwrap();
@@ -586,7 +583,6 @@ fn test_no_valid_candidate_triggers_no_candidate() {
         &group.steward_list,
         false,
         false,
-        b"test-app-id",
         &group_id,
     )
     .unwrap();

@@ -55,7 +55,7 @@ impl ProposalKind {
 mod tests {
     use super::*;
     use crate::protos::de_mls::messages::v1::{
-        EmergencyCriteriaProposal, InviteMember, RemoveMember, StewardElectionProposal,
+        EmergencyCriteriaProposal, MemberInvite, RemoveMember, StewardElectionProposal,
         ViolationEvidence,
     };
 
@@ -68,7 +68,7 @@ mod tests {
     #[test]
     fn invite_and_remove_are_commit() {
         assert_eq!(
-            ProposalKind::of(&req(Payload::InviteMember(InviteMember::default()))),
+            ProposalKind::of(&req(Payload::MemberInvite(MemberInvite::default()))),
             ProposalKind::Commit,
         );
         assert_eq!(

@@ -94,23 +94,20 @@ impl DeliveryService for CapturingTransport {
 /// the new epoch before they could even tell whose commit it is.
 /// `WELCOME_SUBTOPIC` is similarly plaintext on its outer prost layer.
 ///
-/// In practice: [`is_commit_candidate`], [`is_kp`], and [`is_invitation`]
-/// can prost-decode the wire payload. For everything else on the app-msg
-/// subtopic, identify packets by ordering / sender state (e.g. "the
-/// single packet emitted right after `send_conversation_sync`") rather
-/// than by payload inspection.
+/// In practice: [`is_commit_candidate`] and [`is_kp`] can prost-decode
+/// the wire payload. For everything else on the app-msg subtopic,
+/// identify packets by ordering / sender state rather than by payload
+/// inspection.
 pub mod predicate {
     use super::*;
     use de_mls::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
-    use de_mls::protos::de_mls::messages::v1::{
-        AppMessage, WelcomeMessage, app_message, welcome_message,
-    };
+    use de_mls::protos::de_mls::messages::v1::{AppMessage, MemberInvite, app_message};
 
     pub fn is_app_msg(p: &OutboundPacket) -> bool {
         p.subtopic == APP_MSG_SUBTOPIC
     }
 
-    pub fn is_welcome(p: &OutboundPacket) -> bool {
+    pub fn is_welcome_subtopic(p: &OutboundPacket) -> bool {
         p.subtopic == WELCOME_SUBTOPIC
     }
 
@@ -127,30 +124,12 @@ pub mod predicate {
         matches!(msg.payload, Some(app_message::Payload::CommitCandidate(_)))
     }
 
+    /// Matches a KP-broadcast packet on the welcome subtopic.
     pub fn is_kp(p: &OutboundPacket) -> bool {
         if p.subtopic != WELCOME_SUBTOPIC {
             return false;
         }
-        let Ok(msg) = WelcomeMessage::decode(p.payload.as_slice()) else {
-            return false;
-        };
-        matches!(
-            msg.payload,
-            Some(welcome_message::Payload::UserKeyPackage(_))
-        )
-    }
-
-    pub fn is_invitation(p: &OutboundPacket) -> bool {
-        if p.subtopic != WELCOME_SUBTOPIC {
-            return false;
-        }
-        let Ok(msg) = WelcomeMessage::decode(p.payload.as_slice()) else {
-            return false;
-        };
-        matches!(
-            msg.payload,
-            Some(welcome_message::Payload::InvitationToJoin(_))
-        )
+        MemberInvite::decode(p.payload.as_slice()).is_ok()
     }
 }
 
@@ -206,6 +185,58 @@ pub async fn broadcast(packets: &[OutboundPacket], receivers: &[&TestUser]) {
             let _ = r.process_inbound_packet(to_inbound(p)).await;
         }
     }
+}
+
+/// Drain `SessionEvent::WelcomeReady` events from each session and
+/// route each welcome to the matching joiner via
+/// [`TestUser::accept_welcome`], then replay the bundled
+/// `conversation_sync_bytes` through `process_inbound_packet`. Returns
+/// the number of welcomes that were successfully accepted. Call this
+/// once per polling round, BEFORE relaying packets — same-round
+/// app-msg packets (e.g. the post-commit steward election proposal)
+/// need the joiner's MLS attached first.
+pub async fn route_welcomes(
+    sessions: &[SessionArc],
+    users: &mut [(TestUser, TransportHandle)],
+) -> usize {
+    use de_mls::core::SessionEvent;
+    use de_mls::protos::de_mls::messages::v1::MemberWelcome;
+
+    let mut welcomes: Vec<MemberWelcome> = Vec::new();
+    for s in sessions {
+        for event in s.read().unwrap().drain_events() {
+            if let SessionEvent::WelcomeReady(welcome) = event {
+                welcomes.push(welcome);
+            }
+        }
+    }
+    let mut delivered = 0;
+    for welcome in welcomes {
+        let conv_name = sessions
+            .first()
+            .map(|s| s.read().unwrap().conversation_name().to_string())
+            .unwrap_or_default();
+        for (u, _) in users.iter_mut() {
+            // Try every user — `welcome_mls` returns `Ok(None)` (which
+            // `accept_welcome` surfaces as `Err(WelcomeNotForUs)`) for
+            // anyone the welcome doesn't address. Only the targeted
+            // joiner attaches MLS and gets the bundled sync replayed.
+            if u.accept_welcome(&welcome.welcome_bytes).await.is_ok() {
+                delivered += 1;
+                if !welcome.conversation_sync_bytes.is_empty() {
+                    let sync_pkt = de_mls::ds::InboundPacket::new(
+                        welcome.conversation_sync_bytes.clone(),
+                        de_mls::ds::APP_MSG_SUBTOPIC,
+                        &conv_name,
+                        u.app_id().to_vec(),
+                        0,
+                    );
+                    let _ = u.process_inbound_packet(sync_pkt).await;
+                }
+            }
+        }
+    }
+    delivered
 }
 
 /// Mirror of `de_mls_gateway::Gateway::spawn_consensus_forwarder` — one
@@ -351,6 +382,14 @@ pub async fn bootstrap_joined_conversation(
         for s in &sessions {
             poll_once(s).await;
         }
+
+        // Welcomes never traverse the test transport: the steward emits
+        // them as `SessionEvent::WelcomeReady`. Route each welcome to
+        // its joiner BEFORE relaying packets — same-round app-msg
+        // traffic (the post-commit steward election proposal) needs
+        // the joiner's MLS attached first.
+        let delivered_welcome = route_welcomes(&sessions, &mut users).await > 0;
+
         let mut packets = Vec::new();
         for (_, h) in &users {
             packets.extend(h.lock().unwrap().drain_packets());
@@ -370,7 +409,7 @@ pub async fn bootstrap_joined_conversation(
                 break;
             }
         }
-        if all_working && packets.is_empty() {
+        if all_working && packets.is_empty() && !delivered_welcome {
             quiet_rounds += 1;
             if quiet_rounds >= QUIET_THRESHOLD {
                 tracing::debug!(rounds = round + 1, "bootstrap converged");

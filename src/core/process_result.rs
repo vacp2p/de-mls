@@ -10,9 +10,9 @@ use crate::{
     core::{CoreError, ScoreEvent, ScoreOp},
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, CommitCandidate, ConversationMessage, ConversationSync,
-        ConversationUpdateRequest, EmergencyCriteriaProposal, InvitationToJoin, Outcome,
-        ProposalAdded, RemoveMember, UserKeyPackage, UserVote, ViolationEvidence, ViolationType,
-        VotePayload, WelcomeMessage, app_message, conversation_update_request, welcome_message,
+        ConversationUpdateRequest, EmergencyCriteriaProposal, Outcome, ProposalAdded, RemoveMember,
+        UserVote, ViolationEvidence, ViolationType, VotePayload, app_message,
+        conversation_update_request,
     },
 };
 
@@ -219,12 +219,6 @@ macro_rules! impl_payload_from {
         )+
     };
 }
-
-impl_payload_from!(
-    WelcomeMessage,
-    UserKeyPackage   => welcome_message::Payload::UserKeyPackage,
-    InvitationToJoin => welcome_message::Payload::InvitationToJoin,
-);
 
 impl_payload_from!(
     AppMessage,

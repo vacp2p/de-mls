@@ -43,7 +43,7 @@ pub fn member_set(members: &[Vec<u8>]) -> HashSet<&[u8]> {
 /// requests (emergency criteria, steward election).
 pub fn target_identity_of(request: &ConversationUpdateRequest) -> Option<&[u8]> {
     match request.payload.as_ref()? {
-        conversation_update_request::Payload::InviteMember(m) => Some(&m.identity),
+        conversation_update_request::Payload::MemberInvite(m) => Some(&m.identity),
         conversation_update_request::Payload::RemoveMember(m) => Some(&m.identity),
         _ => None,
     }

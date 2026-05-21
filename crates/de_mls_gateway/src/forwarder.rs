@@ -229,6 +229,45 @@ impl Gateway<WakuDeliveryService> {
 
                 let conversation_id = pkt.conversation_id.clone();
 
+                if pkt.subtopic == de_mls::ds::WELCOME_SUBTOPIC
+                    && let Some(mw) = crate::welcome_envelope::decode(&pkt.payload)
+                {
+                    let accepted = user.write().await.accept_welcome(&mw.welcome_bytes).await;
+                    match accepted {
+                        Ok(_) if !mw.conversation_sync_bytes.is_empty() => {
+                            // Replay the bundled ConversationSync
+                            // through the standard inbound path now
+                            // that MLS is attached — the sync payload
+                            // is an MLS-encrypted app message
+                            // addressed to the new epoch.
+                            let sync_pkt = de_mls::ds::InboundPacket::new(
+                                mw.conversation_sync_bytes,
+                                de_mls::ds::APP_MSG_SUBTOPIC,
+                                &pkt.conversation_id,
+                                pkt.app_id.clone(),
+                                pkt.timestamp,
+                            );
+                            if let Err(e) = user.read().await.process_inbound_packet(sync_pkt).await
+                            {
+                                tracing::warn!(
+                                    group = %conversation_id,
+                                    error = %e,
+                                    "bundled sync replay failed"
+                                );
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                group = %conversation_id,
+                                error = %e,
+                                "accept_welcome failed"
+                            );
+                        }
+                    }
+                    continue;
+                }
+
                 if let Err(e) = user.read().await.process_inbound_packet(pkt).await {
                     tracing::error!(group = %conversation_id, error = %e, "process_inbound_packet failed");
                 }

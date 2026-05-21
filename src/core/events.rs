@@ -12,11 +12,9 @@
 //! [`crate::ds::DeliveryService`], passed to `User` at construction and
 //! cloned into each session.
 
-use hashgraph_like_consensus::types::ConsensusEvent;
-
 use crate::{
     core::ConversationState,
-    protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest},
+    protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest, MemberWelcome},
 };
 
 /// Per-conversation notification. Sessions append these to their pending
@@ -28,10 +26,6 @@ pub enum SessionEvent {
     /// Decrypted application message (chat, vote request, proposal
     /// notification, ban request, …).
     AppMessage(AppMessage),
-
-    /// Welcome processed and MLS state initialised. Epoch timers + state
-    /// transitions are already wired — surface to UI only.
-    Joined,
 
     /// The user is out of this conversation (self-leave commit merged, or
     /// someone else removed us). The session entry is about to be removed
@@ -57,9 +51,10 @@ pub enum SessionEvent {
     /// Conversation transitioned into `state`.
     PhaseChange(ConversationState),
 
-    /// A consensus session reached an outcome. Fired after the runner has
-    /// applied the result to local state.
-    ProposalDecided(ConsensusEvent),
+    /// Our merged commit added members. Carries the MLS welcome blob
+    /// and the encrypted `ConversationSync` payload bundled for atomic
+    /// delivery. The integrator owns delivery to each joiner.
+    WelcomeReady(MemberWelcome),
 }
 
 /// User-level conversation lifecycle event. Appended to [`crate::app::User`]'s

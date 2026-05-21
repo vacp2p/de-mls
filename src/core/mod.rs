@@ -18,8 +18,7 @@
 //! `ConversationLifecycle`), `freeze` (round selection + apply),
 //! `inbound` (app-subtopic packet routing), `peer_scoring`
 //! (scoring plug-in contract), `process_result`
-//! ([`crate::core::ProcessResult`]), `proposal_framing` (welcome-subtopic
-//! + consensus-library framing helpers), `proposal_kind`
+//! ([`crate::core::ProcessResult`]), `proposal_kind`
 //! ([`crate::core::ProposalKind`] classifier), `steward_list`
 //! (steward-list plug-in).
 
@@ -33,7 +32,6 @@ mod freeze;
 mod inbound;
 mod peer_scoring;
 mod process_result;
-mod proposal_framing;
 mod proposal_kind;
 mod steward_list;
 
@@ -42,7 +40,6 @@ pub use freeze::{
     CommitHash, FreezeFinalizeResult, FreezeOutcome, compute_commit_hash, finalize_freeze_round,
 };
 pub use inbound::process_inbound;
-pub use proposal_framing::build_key_package_message;
 
 // ── Per-conversation types: state, handle, state machine, config ──
 pub use conversation::{

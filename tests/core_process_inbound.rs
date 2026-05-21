@@ -29,8 +29,8 @@ fn test_process_inbound_welcome_already_joined_ignores() {
         "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
     );
 
-    let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
-    joiner.accept_welcome_packet(&welcome_packet);
+    let (welcome_bytes, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
+    joiner.accept_welcome(&welcome_bytes);
 
     // A second welcome (this one for joiner2's KP) doesn't address us, so
     // try_accept_welcome surfaces "not for us" rather than disturbing our
@@ -41,19 +41,10 @@ fn test_process_inbound_welcome_already_joined_ignores() {
         conversation_name,
         "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
     );
-    let (welcome_packet2, _) = steward_add_joiner(&mut steward_handle, &joiner2.kp_packet);
+    let (welcome_bytes2, _) = steward_add_joiner(&mut steward_handle, &joiner2.kp_packet);
 
-    let invitation = match prost::Message::decode(welcome_packet2.payload.as_slice())
-        .map(|w: de_mls::protos::de_mls::messages::v1::WelcomeMessage| w.payload)
-        .unwrap()
-    {
-        Some(de_mls::protos::de_mls::messages::v1::welcome_message::Payload::InvitationToJoin(
-            inv,
-        )) => inv,
-        other => panic!("Expected InvitationToJoin, got {:?}", other),
-    };
     let outcome = joiner
-        .try_accept_welcome(&invitation.mls_message_out_bytes)
+        .try_accept_welcome(&welcome_bytes2)
         .expect("non-matching welcomes parse cleanly");
     assert!(
         outcome.is_none(),
@@ -61,7 +52,7 @@ fn test_process_inbound_welcome_already_joined_ignores() {
     );
 
     // Joiner2 actually accepts theirs as a sanity check.
-    joiner2.accept_welcome_packet(&welcome_packet2);
+    joiner2.accept_welcome(&welcome_bytes2);
     assert!(joiner2.mls.is_some());
 }
 
@@ -98,8 +89,8 @@ fn test_conversation_sync_propagates_divergent_per_conv_config() {
     assert_ne!(joiner.steward_list.config().sn_min, STEWARD_SN_MIN);
     assert_ne!(joiner.steward_list.config().sn_max, STEWARD_SN_MAX);
 
-    let (welcome_packet, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
-    joiner.accept_welcome_packet(&welcome_packet);
+    let (welcome_bytes, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
+    joiner.accept_welcome(&welcome_bytes);
 
     let alice = b"alice".to_vec();
     let bob = b"bob".to_vec();

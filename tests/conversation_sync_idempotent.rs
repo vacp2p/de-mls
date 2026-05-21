@@ -4,15 +4,11 @@
 //! the join). A second sync delivered to that joiner must short-circuit
 //! inside `on_conversation_sync` — no state change, no new outbound.
 
-use std::time::Duration;
-
-use de_mls::app::{MemberRole, SessionRunner};
+use de_mls::app::MemberRole;
 use de_mls::core::StewardListConfig;
 
 mod common;
-use common::session_fixtures::{
-    bootstrap_joined_conversation, deliver, fast_test_config, predicate, settle_for,
-};
+use common::session_fixtures::{bootstrap_joined_conversation, deliver, fast_test_config};
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
@@ -29,7 +25,6 @@ async fn second_conversation_sync_is_a_no_op() {
 
     let alice_session = users[0].0.lookup_entry("c2").unwrap().unwrap();
     let bob_session = users[1].0.lookup_entry("c2").unwrap().unwrap();
-    let alice_tx = users[0].1.clone();
     let bob_tx = users[1].1.clone();
 
     // Bootstrap-driven sync left bob with steward-list state. (Proves the
@@ -44,24 +39,16 @@ async fn second_conversation_sync_is_a_no_op() {
     );
     let scores_before = bob_session.read().unwrap().get_member_scores();
 
-    // Alice emits a fresh ConversationSync. Drain her transport, find the
-    // sync packet, deliver it to bob — the second delivery (the first one
-    // landed during bootstrap).
-    SessionRunner::send_conversation_sync(&alice_session)
-        .await
-        .unwrap();
-    settle_for(Duration::from_millis(30)).await;
-
-    // ConversationSync packets are MLS-encrypted on the wire, so a prost
-    // decode of the payload can't peek inside. Right after we explicitly
-    // called `send_conversation_sync`, alice's single outbound app-msg
-    // packet IS the sync.
-    let outbound = alice_tx.lock().unwrap().drain_packets();
-    let sync_packet = outbound
-        .iter()
-        .find(|p| predicate::is_app_msg(p))
-        .cloned()
-        .expect("alice must broadcast a sync packet");
+    // Alice builds a fresh ConversationSync packet from the current
+    // snapshot. The library returns the packet directly; this test
+    // delivers it to bob as a second sync (the first landed during
+    // bootstrap).
+    let sync_packet = alice_session
+        .write()
+        .unwrap()
+        .build_conversation_sync_packet()
+        .unwrap()
+        .expect("steward must produce a sync packet");
 
     bob_tx.lock().unwrap().drain_packets();
     deliver(&users[1].0, &sync_packet).await;
