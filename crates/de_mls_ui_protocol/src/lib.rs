@@ -36,7 +36,7 @@ pub mod v1 {
     /// otherwise.
     pub fn format_conversation_request_target(request: &ConversationUpdateRequest) -> String {
         match &request.payload {
-            Some(conversation_update_request::Payload::InviteMember(im)) => {
+            Some(conversation_update_request::Payload::MemberInvite(im)) => {
                 encode_hex(&im.identity)
             }
             Some(conversation_update_request::Payload::RemoveMember(rm)) => {

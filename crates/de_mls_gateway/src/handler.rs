@@ -13,12 +13,12 @@ use futures::channel::mpsc::UnboundedSender;
 
 use de_mls::{
     core::SessionEvent,
-    ds::TopicFilter,
+    ds::{OutboundPacket, SharedDeliveryService, TopicFilter, WELCOME_SUBTOPIC},
     protos::de_mls::messages::v1::{AppMessage, ConversationMessage, app_message},
 };
 use de_mls_ui_protocol::v1::{AppEvent, format_conversation_request};
 
-use crate::{EpochHistoryStore, MAX_EPOCH_HISTORY, forwarder::display_batch};
+use crate::{EpochHistoryStore, MAX_EPOCH_HISTORY, forwarder::display_batch, welcome_envelope};
 
 /// Fan-out target for [`SessionEvent`]s on a single conversation. Held as
 /// `Arc` because the spawned per-session subscriber task owns a clone.
@@ -26,6 +26,13 @@ pub(crate) struct GatewaySessionFanout {
     pub evt_tx: UnboundedSender<AppEvent>,
     pub topics: Arc<TopicFilter>,
     pub epoch_history: EpochHistoryStore,
+    /// Shared transport handle. The [`SessionEvent::WelcomeReady`] arm
+    /// uses it to publish the envelope-wrapped welcome on
+    /// [`WELCOME_SUBTOPIC`].
+    pub transport: SharedDeliveryService,
+    /// `app_id` of the local user — stamped on the outbound welcome
+    /// packet so the steward's own gateway dedupes the echo.
+    pub app_id: Vec<u8>,
 }
 
 impl GatewaySessionFanout {
@@ -34,10 +41,6 @@ impl GatewaySessionFanout {
         match event {
             SessionEvent::AppMessage(message) => {
                 let _ = forward_app_message(&self.evt_tx, message);
-            }
-            SessionEvent::Joined => {
-                // No UI event today; topic subscription was already
-                // arranged at conversation creation.
             }
             SessionEvent::Leaving => {
                 if let Err(e) = self.topics.remove_many(conversation_name) {
@@ -97,11 +100,39 @@ impl GatewaySessionFanout {
                     epochs: formatted,
                 });
             }
-            SessionEvent::ProposalDecided(_) => {
-                // Handled by the per-conv consensus forwarder
-                // (see `Gateway::spawn_consensus_forwarder`) which pushes
-                // `AppEvent::ProposalDecided` directly and also drives
-                // `push_consensus_state` / `push_member_scores`.
+            SessionEvent::WelcomeReady(welcome) => {
+                let bytes = welcome.welcome_bytes.len();
+                let sync_bytes = welcome.conversation_sync_bytes.len();
+                let packet = OutboundPacket::new(
+                    welcome_envelope::encode_welcome(welcome),
+                    WELCOME_SUBTOPIC,
+                    conversation_name,
+                    &self.app_id,
+                );
+                match self.transport.lock() {
+                    Ok(mut t) => {
+                        if let Err(e) = t.publish(packet) {
+                            tracing::error!(
+                                conversation = %conversation_name,
+                                error = %e,
+                                "welcome publish failed"
+                            );
+                        } else {
+                            tracing::info!(
+                                conversation = %conversation_name,
+                                welcome_bytes = bytes,
+                                sync_bytes,
+                                "welcome forwarded on welcome subtopic"
+                            );
+                        }
+                    }
+                    Err(_) => {
+                        tracing::error!(
+                            conversation = %conversation_name,
+                            "welcome publish skipped: transport lock poisoned"
+                        );
+                    }
+                }
             }
         }
     }

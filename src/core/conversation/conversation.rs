@@ -451,7 +451,7 @@ impl Conversation {
                 None => return false,
             };
             match payload {
-                conversation_update_request::Payload::InviteMember(_) => {
+                conversation_update_request::Payload::MemberInvite(_) => {
                     !in_conversation.contains(identity)
                 }
                 conversation_update_request::Payload::RemoveMember(_) => {
@@ -629,7 +629,7 @@ impl ResolvedProposalCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protos::de_mls::messages::v1::{InviteMember, RemoveMember};
+    use crate::protos::de_mls::messages::v1::{MemberInvite, RemoveMember};
 
     fn member(id: u8) -> Vec<u8> {
         vec![id; 20]
@@ -738,8 +738,8 @@ mod tests {
         insert_remove_member(&mut conversation, &member(2), ban_id);
         insert_remove_member(&mut conversation, &member(3), ecp_id);
         let add = ConversationUpdateRequest {
-            payload: Some(conversation_update_request::Payload::InviteMember(
-                InviteMember {
+            payload: Some(conversation_update_request::Payload::MemberInvite(
+                MemberInvite {
                     key_package_bytes: vec![0; 8],
                     identity: member(99),
                 },

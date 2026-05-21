@@ -23,7 +23,6 @@ use crate::{
         ConsensusPlugin, ConversationPluginsFactory, FreezeFinalizeResult, FreezeOutcome,
         PeerScoringEvent, PeerScoringPlugin, ScoreEvent, ScoreOp, SessionEvent, StewardListPlugin,
     },
-    ds::WELCOME_SUBTOPIC,
     mls_crypto::MlsService,
 };
 
@@ -114,12 +113,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let mut s = arc.write_or_err("session")?;
             let allow_subset = s.handle.steward_list.config().allow_subset_candidates;
             let self_identity = Arc::clone(&s.self_identity);
-            let app_id = Arc::clone(&s.app_id);
             let result = if s.handle.mls().is_some() {
-                match s
-                    .handle
-                    .finalize_freeze_round(allow_subset, &app_id, &self_identity)
-                {
+                match s.handle.finalize_freeze_round(allow_subset, &self_identity) {
                     Ok(result) => result,
                     Err(e) => {
                         error!(conversation = %s.conversation_name, error = %e, "freeze finalize failed");
@@ -160,24 +155,20 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         }
 
         match finalize_result.outcome {
-            FreezeOutcome::Applied { result, outbound } => {
-                // Welcomes are deferred to here so joiners can't advance
-                // epoch ahead of the steward.
-                let has_welcome = outbound
-                    .as_ref()
-                    .is_some_and(|p| p.subtopic == WELCOME_SUBTOPIC);
-                if let Some(packet) = outbound {
-                    let transport = Arc::clone(arc.read_or_err("session")?.transport());
-                    if let Err(e) = send_packet(&transport, packet) {
-                        error!(conversation = %conversation_name, error = %e, "deferred welcome send failed");
-                    }
-                }
-
-                // ConversationSync carries the steward list + timing + scores
-                // to new joiners; send it only after the welcome they'll use
-                // to catch up.
-                if has_welcome && let Err(e) = Self::send_conversation_sync(arc).await {
-                    error!(conversation = %conversation_name, error = %e, "conversation sync send failed");
+            FreezeOutcome::Applied { result, welcome } => {
+                if let Some(mut welcome) = welcome {
+                    // Bundle ConversationSync (steward list + timing +
+                    // scores) into the welcome event so the integrator
+                    // delivers both atomically. The joiner replays the
+                    // sync payload through `process_inbound_packet`
+                    // after MLS attaches.
+                    welcome.conversation_sync_bytes = arc
+                        .write_or_err("session")?
+                        .build_conversation_sync_packet()?
+                        .map(|p| p.payload)
+                        .unwrap_or_default();
+                    arc.read_or_err("session")?
+                        .emit_event(SessionEvent::WelcomeReady(welcome));
                 }
 
                 let outcome = match Self::dispatch_inbound_result(arc, result).await {

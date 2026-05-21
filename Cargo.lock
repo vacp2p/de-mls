@@ -1845,6 +1845,7 @@ dependencies = [
  "hashgraph-like-consensus",
  "once_cell",
  "parking_lot",
+ "prost",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",

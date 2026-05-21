@@ -23,4 +23,5 @@ pub use consensus::CreatorVote;
 pub use freeze::PendingJoinTick;
 pub use inbound::DispatchOutcome;
 pub(crate) use lock::LockExt;
+pub use messaging::build_key_package_message;
 pub use runner::SessionRunner;

@@ -112,7 +112,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         Ok(())
     }
 
-    /// Handle an incoming membership update (KP-derived `InviteMember` or
+    /// Handle an incoming membership update (KP-derived `MemberInvite` or
     /// `RemoveMember`): buffer it so every member has a durable record, then
     /// promote it to a voting proposal if this node is the current epoch
     /// steward and the conversation accepts new proposals.

@@ -156,7 +156,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                         .conversation
                         .observe_emergency(proposal.proposal_id);
                 }
-                Some(conversation_update_request::Payload::InviteMember(_))
+                Some(conversation_update_request::Payload::MemberInvite(_))
                 | Some(conversation_update_request::Payload::RemoveMember(_)) => {
                     s.handle
                         .conversation
@@ -197,13 +197,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         Ok(())
     }
 
-    /// We just joined via welcome. Broadcast a system "joined" chat message,
-    /// sync scoring, and transition to Working. Pending-update pruning is
-    /// defensive — PendingJoin doesn't buffer, but paths may change.
+    /// We just joined via welcome. Broadcast a system "joined" chat
+    /// message, seed scoring with the current member set, and
+    /// transition to Working.
     async fn on_joined_conversation(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
-        arc.write_or_err("session")?
-            .prune_pending_updates_after_commit()?;
-
         let (packet, mls_members, conversation_name) = {
             let mut s = arc.write_or_err("session")?;
             let msg: AppMessage = ConversationMessage {
@@ -222,7 +219,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         };
         let transport = Arc::clone(arc.read_or_err("session")?.transport());
         send_packet(&transport, packet)?;
-        arc.read_or_err("session")?.emit_event(SessionEvent::Joined);
         arc.write_or_err("session")?
             .sync_scoring_members(&mls_members);
 

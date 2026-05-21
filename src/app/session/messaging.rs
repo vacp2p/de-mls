@@ -3,18 +3,41 @@
 
 use std::sync::{Arc, RwLock};
 
+use prost::Message;
+
 use crate::{
     app::{
         ConversationState, CreatorVote, LockExt, SessionRunner, UserError,
         session::runner::send_packet,
     },
-    core::{ConsensusPlugin, ConversationPluginsFactory, build_key_package_message},
+    core::{ConsensusPlugin, ConversationPluginsFactory},
+    ds::{OutboundPacket, WELCOME_SUBTOPIC},
     mls_crypto::{KeyPackageBytes, MlsService},
     protos::de_mls::messages::v1::{
-        AppMessage, BanRequest, ConversationMessage, ConversationUpdateRequest, RemoveMember,
-        conversation_update_request,
+        AppMessage, BanRequest, ConversationMessage, ConversationUpdateRequest, MemberInvite,
+        RemoveMember, conversation_update_request,
     },
 };
+
+/// Build a KP-broadcast packet for the welcome subtopic. The joiner
+/// sends this so existing members can pick up the key package and
+/// propose them for an Add.
+pub fn build_key_package_message(
+    conversation_name: &str,
+    key_package: KeyPackageBytes,
+    app_id: &[u8],
+) -> OutboundPacket {
+    let invite = MemberInvite {
+        key_package_bytes: key_package.as_bytes().to_vec(),
+        identity: key_package.identity().to_vec(),
+    };
+    OutboundPacket::new(
+        invite.encode_to_vec(),
+        WELCOME_SUBTOPIC,
+        conversation_name,
+        app_id,
+    )
+}
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Broadcast `key_package` on this conversation's welcome subtopic so

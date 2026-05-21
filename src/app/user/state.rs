@@ -8,14 +8,17 @@ use std::{
 };
 
 use crate::{
-    app::{SessionRunner, UserError, UserPlugins},
+    app::{CreatorVote, LockExt, SessionRunner, UserError, UserPlugins},
     core::{
         ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, PluginConsensus,
         ScoringConfig, StewardListConfig,
     },
     ds::SharedDeliveryService,
     identity::Identity,
-    mls_crypto::{KeyPackageBytes, MlsError},
+    mls_crypto::{KeyPackageBytes, MlsError, MlsService, key_package_bytes_from_json},
+    protos::de_mls::messages::v1::{
+        ConversationUpdateRequest, MemberInvite, conversation_update_request,
+    },
 };
 
 /// Single registry entry: one `Arc<RwLock<SessionRunner>>` per conversation.
@@ -66,6 +69,19 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         self.identity.identity_display().to_string()
     }
 
+    /// Identity bytes of the local user, via the [`Identity`] trait.
+    /// Stable for the lifetime of the `User`.
+    pub fn identity_bytes(&self) -> &[u8] {
+        self.identity.identity_bytes()
+    }
+
+    /// Per-instance `app_id` embedded in every outbound packet. Inbound
+    /// packets carrying this `app_id` are self-echoes and are dropped
+    /// by [`Self::process_inbound_packet`].
+    pub fn app_id(&self) -> &[u8] {
+        &self.app_id
+    }
+
     /// Generate a single-use key package for our identity. Conversation-free —
     /// callable before `start_conversation`. Delegates to the configured
     /// [`crate::core::ConversationPluginsFactory::generate_key_package`].
@@ -97,6 +113,70 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`Self::set_default_scoring_config`].
     pub fn set_default_steward_list_config(&mut self, config: StewardListConfig) {
         self.plugins.default_steward_list_config = config;
+    }
+
+    /// Propose adding the holder of `key_package_bytes` to `conversation_name`.
+    /// `key_package_bytes` is a serialized MLS key package obtained out
+    /// of band — the caller has chosen this candidate consciously, so
+    /// the local vote is bundled YES at submit. On consensus YES, the
+    /// epoch steward authors a commit containing the Add and the
+    /// resulting welcome arrives via
+    /// [`crate::core::SessionEvent::WelcomeReady`].
+    pub async fn add_member(
+        &self,
+        conversation_name: &str,
+        key_package_bytes: &[u8],
+    ) -> Result<(), UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        let (key_package_bytes, identity) =
+            key_package_bytes_from_json(key_package_bytes.to_vec())?;
+        let request = ConversationUpdateRequest {
+            payload: Some(conversation_update_request::Payload::MemberInvite(
+                MemberInvite {
+                    key_package_bytes,
+                    identity,
+                },
+            )),
+        };
+        SessionRunner::initiate_proposal(&entry, request, CreatorVote::Yes).await
+    }
+
+    /// Ingest a raw MLS welcome blob delivered out of band (e.g. the
+    /// inviter's [`crate::core::SessionEvent::WelcomeReady`] routed
+    /// through the integrator's transport). Returns the joined
+    /// conversation name, or [`UserError::WelcomeNotForUs`] if the
+    /// welcome doesn't address this user's key package.
+    pub async fn accept_welcome(&mut self, welcome_bytes: &[u8]) -> Result<String, UserError> {
+        let svc = self
+            .plugins
+            .conversation_plugins
+            .welcome_mls(welcome_bytes)?
+            .ok_or(UserError::WelcomeNotForUs)?;
+        let conversation_name = svc.conversation_id().to_string();
+
+        if self.lookup_entry(&conversation_name)?.is_none() {
+            self.start_conversation(&conversation_name, false).await?;
+        }
+        let entry_arc = self
+            .lookup_entry(&conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+
+        {
+            let mut entry = entry_arc.write_or_err("session")?;
+            if entry.handle.mls().is_some() {
+                return Ok(conversation_name);
+            }
+            entry.handle.attach_mls(svc);
+        }
+        self.finish_dispatch(
+            &conversation_name,
+            &entry_arc,
+            crate::core::ProcessResult::JoinedConversation(conversation_name.clone()),
+        )
+        .await?;
+        Ok(conversation_name)
     }
 }
 

@@ -6,11 +6,11 @@ use crate::{
     core::{
         CommitHash, Conversation, CoreError, FreezeFinalizeResult, FreezeOutcome, ProcessResult,
         ScoreEvent, ScoreOp, StewardListPlugin, conversation::BufferedCommitCandidate,
-        freeze::round::RoundContext, proposal_framing::build_invitation_packet,
+        freeze::round::RoundContext,
     },
     mls_crypto::{MlsProposalOutput, MlsService, StagedCandidateResult},
     protos::de_mls::messages::v1::{
-        CommitCandidate, ConversationUpdateRequest, ViolationEvidence,
+        CommitCandidate, ConversationUpdateRequest, MemberWelcome, ViolationEvidence,
         conversation_update_request::Payload,
     },
 };
@@ -45,7 +45,6 @@ pub(super) fn apply_in_priority_order<M: MlsService, St: StewardListPlugin>(
     sorted: Vec<BufferedCommitCandidate>,
     ctx: &RoundContext,
     self_identity: &[u8],
-    app_id: &[u8],
 ) -> Result<FreezeFinalizeResult, CoreError> {
     let mut score_ops: Vec<ScoreOp> = Vec::new();
     let mut own_commit_discarded = false;
@@ -61,7 +60,7 @@ pub(super) fn apply_in_priority_order<M: MlsService, St: StewardListPlugin>(
                 );
                 continue;
             }
-            apply_local_candidate(conversation, mls, chosen, ctx, app_id)?
+            apply_local_candidate(conversation, mls, chosen, ctx)?
         } else {
             if !own_commit_discarded && steward.is_steward(self_identity) {
                 // A failure here leaves an old pending commit in MLS and
@@ -175,7 +174,6 @@ fn apply_local_candidate<M: MlsService>(
     mls: &mut M,
     chosen: BufferedCommitCandidate,
     ctx: &RoundContext,
-    app_id: &[u8],
 ) -> Result<CandidateOutcome, CoreError> {
     // Local candidate: we wrote the message, so the wire-claimed identity
     // is our own and is trusted by definition.
@@ -183,12 +181,16 @@ fn apply_local_candidate<M: MlsService>(
 
     mls.merge_own_commit()?;
 
-    // Welcomes go out only after our merge — joiners must not race ahead of the steward's epoch.
-    let outbound = chosen
-        .welcome_bytes
-        .map(|bytes| build_invitation_packet(bytes, conversation.name(), app_id));
-
     let committed_batch = record_applied_commit(conversation, chosen.commit_hash);
+
+    // Build the welcome artifact only after merge.
+    // `conversation_sync_bytes` is populated at the app layer (which
+    // owns scoring + steward-list snapshot state) before the
+    // [`crate::core::SessionEvent::WelcomeReady`] event is emitted.
+    let welcome = chosen.welcome_bytes.map(|welcome_bytes| MemberWelcome {
+        welcome_bytes,
+        conversation_sync_bytes: Vec::new(),
+    });
 
     let result = if ctx.self_remove_pending {
         ProcessResult::LeaveConversation
@@ -196,7 +198,7 @@ fn apply_local_candidate<M: MlsService>(
         ProcessResult::ConversationUpdated
     };
     Ok(CandidateOutcome::Terminal {
-        outcome: FreezeOutcome::Applied { result, outbound },
+        outcome: FreezeOutcome::Applied { result, welcome },
         committer,
         committed_batch,
     })
@@ -279,7 +281,7 @@ fn apply_incoming_candidate<M: MlsService, St: StewardListPlugin>(
     Ok(CandidateOutcome::Terminal {
         outcome: FreezeOutcome::Applied {
             result,
-            outbound: None,
+            welcome: None,
         },
         committer: commit_sender,
         committed_batch,
@@ -410,7 +412,7 @@ fn validate_commit_candidate(
 /// Returns `None` for non-MLS payloads (emergency/election).
 fn action_projection_from_request(req: &ConversationUpdateRequest) -> Option<(u8, &[u8])> {
     match req.payload.as_ref()? {
-        Payload::InviteMember(im) => Some((0, &im.identity)),
+        Payload::MemberInvite(im) => Some((0, &im.identity)),
         Payload::RemoveMember(rm) => Some((1, &rm.identity)),
         _ => None,
     }

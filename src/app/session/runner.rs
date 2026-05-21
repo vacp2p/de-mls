@@ -460,12 +460,15 @@ mod tests {
     #[test]
     fn emit_event_then_drain_returns_insertion_order_and_clears_buffer() {
         let runner = make_runner_working();
-        runner.emit_event(SessionEvent::Joined);
+        runner.emit_event(SessionEvent::PhaseChange(ConversationState::Working));
         runner.emit_event(SessionEvent::Leaving);
 
         let drained = runner.drain_events();
         assert_eq!(drained.len(), 2);
-        assert!(matches!(drained[0], SessionEvent::Joined));
+        assert!(matches!(
+            drained[0],
+            SessionEvent::PhaseChange(ConversationState::Working)
+        ));
         assert!(matches!(drained[1], SessionEvent::Leaving));
 
         // Second drain returns empty — buffer was cleared.

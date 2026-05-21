@@ -14,7 +14,7 @@ use std::sync::{Arc, RwLock};
 use tracing::{error, info};
 
 use crate::{
-    app::{CreatorVote, LockExt, SessionRunner, UserError, session::runner::send_packet},
+    app::{CreatorVote, LockExt, SessionRunner, UserError},
     core::{
         ConsensusPlugin, ConversationPluginsFactory, ElectionDecision, PeerScoringPlugin,
         StewardListPlugin, member_set, scoring_member_diff, target_identity_of,
@@ -166,7 +166,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     // Drop Add for already-member and Remove for non-member.
                     let is_member = members_set.contains(id.as_slice());
                     match p.request.payload.as_ref() {
-                        Some(conversation_update_request::Payload::InviteMember(_)) => !is_member,
+                        Some(conversation_update_request::Payload::MemberInvite(_)) => !is_member,
                         Some(conversation_update_request::Payload::RemoveMember(_)) => is_member,
                         _ => false,
                     }
@@ -201,10 +201,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         Ok(())
     }
 
-    /// Build the encrypted `ConversationSync` packet without sending. Used
-    /// by callers that need to release the runner lock before awaiting on
-    /// the transport. Returns `Ok(None)` when there's no steward list yet.
-    pub(crate) fn build_conversation_sync_packet(
+    /// Build an encrypted `ConversationSync` packet from the current
+    /// steward list + protocol config + peer scores + timing snapshot.
+    /// Returns `Ok(None)` when there's no steward list yet. The caller
+    /// owns publish: hand the packet to the transport for a
+    /// re-broadcast, or feed the payload into another channel. The
+    /// post-commit join path bundles the same payload into
+    /// [`crate::core::SessionEvent::WelcomeReady`].
+    pub fn build_conversation_sync_packet(
         &mut self,
     ) -> Result<Option<crate::ds::OutboundPacket>, UserError> {
         // Sparse snapshot — only members whose score has diverged
@@ -266,28 +270,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 .expect_mls_mut()?
                 .build_message(&app_msg, &app_id)?,
         ))
-    }
-
-    /// Broadcast steward list + protocol config + peer scores + timing as
-    /// an encrypted `ConversationSync`. Steward calls this after an Add-bearing
-    /// commit so new joiners can fully participate. Idempotent for members
-    /// who already have a steward list.
-    ///
-    /// Takes `&Arc<RwLock<Self>>` so the runner lock is released before
-    /// awaiting on the transport.
-    pub async fn send_conversation_sync(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
-        let (transport, packet, conversation_name) = {
-            let mut s = arc.write_or_err("session")?;
-            let transport = Arc::clone(s.transport());
-            let conversation_name = s.conversation_name.clone();
-            let Some(packet) = s.build_conversation_sync_packet()? else {
-                return Ok(());
-            };
-            (transport, packet, conversation_name)
-        };
-        send_packet(&transport, packet)?;
-        info!(conversation = %conversation_name, "conversation sync sent");
-        Ok(())
     }
 
     /// Steward-only: file `ScoreBelowThreshold` ECPs for any member whose

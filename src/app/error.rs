@@ -15,6 +15,9 @@ pub enum UserError {
     #[error("Conversation not found")]
     ConversationNotFound,
 
+    #[error("Welcome does not address this user's key package")]
+    WelcomeNotForUs,
+
     #[error("Already leaving this conversation")]
     AlreadyLeaving,
 

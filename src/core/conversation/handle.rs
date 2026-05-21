@@ -201,7 +201,7 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
                 continue;
             };
             match proposal.payload.as_ref() {
-                Some(Payload::InviteMember(im)) => {
+                Some(Payload::MemberInvite(im)) => {
                     if urgent_target.is_some() {
                         continue;
                     }
@@ -245,8 +245,8 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
             steward_identity: self_identity.to_vec(),
         };
 
-        // Welcome bytes are deferred: sent from finalize_freeze_round after the
-        // commit merges, so joiners can't advance epoch ahead of the steward.
+        // Welcome bytes are deferred until our merge so joiners can't
+        // advance epoch ahead of the steward.
         let commit_hash = compute_commit_hash(&candidate.commit_message);
         let epoch = mls.current_epoch()?;
         let outcome = self.conversation.add_freeze_candidate(
@@ -289,7 +289,6 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
     pub(crate) fn finalize_freeze_round(
         &mut self,
         allow_subset_candidates: bool,
-        app_id: &[u8],
         self_identity: &[u8],
     ) -> Result<FreezeFinalizeResult, CoreError> {
         let in_recovery = self.operating_mode == OperatingMode::Recovery;
@@ -300,7 +299,6 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
             &self.steward_list,
             in_recovery,
             allow_subset_candidates,
-            app_id,
             self_identity,
         )
     }

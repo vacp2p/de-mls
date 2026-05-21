@@ -10,6 +10,7 @@ mod bootstrap;
 pub(crate) mod forwarder;
 mod group;
 pub mod handler;
+mod welcome_envelope;
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -233,6 +234,7 @@ impl Gateway<WakuDeliveryService> {
         // `Mutex` because the trait takes `&mut self`.
         let transport: SharedDeliveryService =
             Arc::new(StdMutex::new(core.app_state.delivery.clone()));
+        let transport_for_subscribers = transport.clone();
 
         let user = build_user_from_private_key(&private_key, transport)?;
 
@@ -246,7 +248,7 @@ impl Gateway<WakuDeliveryService> {
         // subscribes to the new session's `SessionEvent` stream and
         // forwards to the UI pipe; the consensus event forwarder is
         // spawned on the same trigger.
-        self.spawn_session_subscribers(user_ref.clone());
+        self.spawn_session_subscribers(user_ref.clone(), transport_for_subscribers);
 
         self.spawn_delivery_service_forwarder(core.clone(), user_ref.clone());
         Ok(user_address)
@@ -258,7 +260,7 @@ impl Gateway<WakuDeliveryService> {
     /// [`de_mls::app::SessionRunner::drain_events`] on every active
     /// session (to forward UI-bound events). Replaces the previous
     /// broadcast-channel subscriber pattern.
-    fn spawn_session_subscribers(&self, user: UserRef) {
+    fn spawn_session_subscribers(&self, user: UserRef, transport: SharedDeliveryService) {
         let evt_tx = self.evt_tx.clone();
         let topics = self.core().topics.clone();
         let epoch_history = self.epoch_history.clone();
@@ -274,6 +276,7 @@ impl Gateway<WakuDeliveryService> {
                 // sessions get their fanout registered before we look for
                 // events on them.
                 let lifecycle = user_for_loop.read().await.drain_lifecycle_events();
+                let app_id_snapshot = user_for_loop.read().await.app_id().to_vec();
                 for event in lifecycle {
                     match event {
                         de_mls::core::ConversationLifecycle::Created(name) => {
@@ -281,6 +284,8 @@ impl Gateway<WakuDeliveryService> {
                                 evt_tx: evt_tx.clone(),
                                 topics: topics.clone(),
                                 epoch_history: epoch_history.clone(),
+                                transport: transport.clone(),
+                                app_id: app_id_snapshot.clone(),
                             });
                             active_sessions.insert(name.clone(), fanout);
                             GATEWAY.spawn_consensus_forwarder(

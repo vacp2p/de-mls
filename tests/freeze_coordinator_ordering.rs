@@ -42,7 +42,7 @@ async fn freeze_cycle_emits_phase_events_in_order() {
     // separately in the self-leave tests.
     //
     // Drain whatever bootstrap emitted (e.g. the join-cycle's
-    // `CommitApplied(InviteMember(bob))`) so the loop below only collects
+    // `CommitApplied(MemberInvite(bob))`) so the loop below only collects
     // events fired by the RemoveMember proposal we're about to file.
     let _ = alice_session.read().unwrap().drain_events();
 
