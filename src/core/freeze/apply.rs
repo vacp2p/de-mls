@@ -130,10 +130,9 @@ fn record_winner_scores<St: StewardListPlugin>(
         event: ScoreEvent::SuccessfulCommit,
     });
 
-    // The walk in `live_epoch_steward_id` already filters out
-    // queued-removal targets, so a draining named steward never appears
-    // here as `expected`.
-    if let Some(expected) = ctx.live_epoch_steward_id.as_deref()
+    // `epoch_steward_id` was resolved through `steward_eligibility`, so
+    // `expected` can't be a queued-removal target — no extra guard needed.
+    if let Some(expected) = ctx.epoch_steward_id.as_deref()
         && expected != committer
         && expected != self_member_id
     {
@@ -153,7 +152,7 @@ fn record_winner_scores<St: StewardListPlugin>(
         } else {
             tracing::debug!(
                 conversation = %conversation_id,
-                "dropping HonestCommitAttempt: claimed identity not on steward list"
+                "dropping HonestCommitAttempt: claimed user not on steward list"
             );
         }
     }
@@ -170,18 +169,11 @@ fn apply_local_candidate<M: MlsService>(
     chosen: BufferedCommitCandidate,
     ctx: &RoundContext,
 ) -> Result<CandidateOutcome, CoreError> {
-    // Local candidate: we wrote the message, so the wire-claimed identity
-    // is our own and is trusted by definition.
-    let committer = chosen.candidate_msg.steward_member_id.clone();
-
     mls.merge_own_commit()?;
 
     let committed_batch = record_applied_commit(conversation, chosen.commit_hash);
 
     // Build the welcome artifact only after merge.
-    // `conversation_sync_bytes` is populated at the app layer (which
-    // owns scoring + steward-list snapshot state) before the
-    // [`crate::core::SessionEvent::WelcomeReady`] event is emitted.
     let welcome = chosen.welcome_bytes.map(|welcome_bytes| MemberWelcome {
         welcome_bytes,
         conversation_sync_bytes: Vec::new(),
@@ -194,7 +186,7 @@ fn apply_local_candidate<M: MlsService>(
     };
     Ok(CandidateOutcome::Terminal {
         outcome: FreezeOutcome::Applied { result, welcome },
-        committer,
+        committer: chosen.candidate_msg.steward_member_id.clone(),
         committed_batch,
     })
 }
@@ -413,13 +405,11 @@ fn action_projection_from_request(req: &ConversationUpdateRequest) -> Option<(u8
     }
 }
 
-/// `(kind_tag, member_id)` projection of an MLS-staged action. `Other`
-/// gets a distinct tag so it never matches voted Add/Remove.
+/// `(kind_tag, member_id)` projection of an MLS-staged action.
 fn action_projection_from_mls(action: &MlsProposalOutput) -> (u8, &[u8]) {
     match action {
         MlsProposalOutput::Add(id) => (0, id),
         MlsProposalOutput::Remove(id) => (1, id),
-        MlsProposalOutput::Other(_) => (2, b""),
     }
 }
 

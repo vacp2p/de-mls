@@ -77,7 +77,7 @@ pub trait StewardListPlugin {
 
     // ── State predicates ───────────────────────────────────────────
 
-    /// True iff `identity` sits in the active list.
+    /// True iff `member_id` sits in the active list.
     fn is_steward(&self, member_id: &[u8]) -> bool;
 
     /// True iff `epoch` falls outside the list's covered window
@@ -147,14 +147,9 @@ pub trait StewardListPlugin {
         retry_round: u32,
     ) -> Result<bool, CoreError>;
 
-    /// Decide whether this node SHOULD file a steward-election
-    /// proposal and, if so, return the proposal contents. Coordinator
-    /// passes the candidate pool it built (MLS members minus
-    /// pending-removal targets minus any extra excludes), the
-    /// eligibility predicate (typically the same set as the pool),
-    /// `recovery = true` to bypass the list-exhaustion gate, and the
-    /// node's own identity. Plug-in handles authorization + ordering;
-    /// coordinator handles `has_election_in_flight` + the I/O submit.
+    /// Decide if this node should propose a steward election and return the proposal if so.
+    /// Coordinator provides the candidate pool, eligibility filter, self id, and `recovery` to force proposal.
+    /// Plug-in handles proposal logic; coordinator submits if needed.
     fn propose_election<F: Fn(&[u8]) -> bool>(
         &self,
         epoch: u64,

@@ -385,7 +385,7 @@ fn test_backup_commit_scores_absent_steward() {
         b"test-app-id",
     )
     .unwrap();
-    let live_epoch_steward = {
+    let epoch_steward = {
         let eligible = bob.group.steward_eligibility(&members);
         bob.steward_list
             .epoch_steward(epoch, &eligible)
@@ -427,7 +427,7 @@ fn test_backup_commit_scores_absent_steward() {
         "Bob (committer) should receive SuccessfulCommit, got {events:?}",
     );
 
-    if live_epoch_steward == alice_id {
+    if epoch_steward == alice_id {
         // Alice was supposed to commit; Bob (self) stood in for her. Alice
         // isn't self, so she picks up CensorshipInactivity.
         assert!(

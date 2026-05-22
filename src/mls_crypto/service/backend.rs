@@ -82,7 +82,7 @@ where
                     .ok_or(MlsError::UnknownLeafIndex(removed.u32()))?;
                 Ok(MlsProposalOutput::Remove(id))
             }
-            other => Ok(MlsProposalOutput::Other(format!("{other:?}"))),
+            _ => Err(MlsError::UnknownProposalAction),
         }
     }
 }
@@ -386,13 +386,12 @@ where
         }
 
         let processed = group.process_message(&provider, protocol_message)?;
-        let sender_identity = processed.credential().serialized_content().to_vec();
+        let sender_id = processed.credential().serialized_content().to_vec();
 
         match processed.into_content() {
-            ProcessedMessageContent::ApplicationMessage(app) => Ok(DecryptResult::Application(
-                app.into_bytes(),
-                sender_identity,
-            )),
+            ProcessedMessageContent::ApplicationMessage(app) => {
+                Ok(DecryptResult::Application(app.into_bytes(), sender_id))
+            }
             _ => Ok(DecryptResult::Ignored),
         }
     }
@@ -429,13 +428,12 @@ where
         }
 
         let processed = group.process_message(&provider, protocol_message)?;
-        let sender_identity = processed.credential().serialized_content().to_vec();
+        let sender_id = processed.credential().serialized_content().to_vec();
 
         match processed.into_content() {
-            ProcessedMessageContent::ApplicationMessage(app) => Ok(DecryptResult::Application(
-                app.into_bytes(),
-                sender_identity,
-            )),
+            ProcessedMessageContent::ApplicationMessage(app) => {
+                Ok(DecryptResult::Application(app.into_bytes(), sender_id))
+            }
             ProcessedMessageContent::ProposalMessage(proposal) => {
                 let action =
                     OpenMlsService::<S>::extract_proposal_action(group, proposal.proposal())?;
@@ -443,7 +441,7 @@ where
                 group
                     .store_pending_proposal(provider.storage(), proposal.as_ref().clone())
                     .map_err(MlsError::storage)?;
-                Ok(DecryptResult::ProposalStored(sender_identity, action))
+                Ok(DecryptResult::ProposalStored(sender_id, action))
             }
             ProcessedMessageContent::StagedCommitMessage(_) => Ok(DecryptResult::Ignored),
             ProcessedMessageContent::ExternalJoinProposalMessage(_) => Ok(DecryptResult::Ignored),

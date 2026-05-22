@@ -223,7 +223,7 @@ pub(super) struct RoundContext {
     /// Pre-merge eligibility-filtered steward expected at
     /// `current_epoch`. Used to penalise an absent steward when a
     /// backup commits in their place.
-    pub(super) live_epoch_steward_id: Option<Vec<u8>>,
+    pub(super) epoch_steward_id: Option<Vec<u8>>,
 }
 
 impl RoundContext {
@@ -244,7 +244,7 @@ impl RoundContext {
 
         let members = mls.members()?;
         let eligible = conversation.steward_eligibility(&members);
-        let live_epoch_steward_id = steward
+        let epoch_steward_id = steward
             .epoch_steward(current_epoch, &eligible)
             .map(|s| s.to_vec());
 
@@ -253,7 +253,7 @@ impl RoundContext {
             self_remove_pending,
             current_epoch,
             in_recovery,
-            live_epoch_steward_id,
+            epoch_steward_id,
         })
     }
 }
@@ -294,7 +294,7 @@ fn rank_applicable_candidates(
             }
         })
         .collect();
-    sorted.sort_by(|a, b| compare_candidate_priority(a, b, ctx.live_epoch_steward_id.as_deref()));
+    sorted.sort_by(|a, b| compare_candidate_priority(a, b, ctx.epoch_steward_id.as_deref()));
     sorted
 }
 
@@ -411,7 +411,7 @@ mod tests {
         assert_eq!(candidates[0].candidate_msg.steward_member_id, epoch_id);
     }
 
-    /// Third criterion: equal tier → lexicographically smallest identity wins.
+    /// Third criterion: equal tier → lexicographically smallest member_id wins.
     #[test]
     fn lexicographic_member_id_tiebreak_when_tier_equal() {
         let epoch_id = vec![0x01];
@@ -428,7 +428,7 @@ mod tests {
         assert_eq!(candidates[0].candidate_msg.steward_member_id, other_b);
     }
 
-    /// Final tiebreak: same identity, same action count → lowest commit hash wins.
+    /// Final tiebreak: same member_id, same action count → lowest commit hash wins.
     #[test]
     fn commit_hash_as_final_tiebreak() {
         let id = vec![0x05];
@@ -444,7 +444,7 @@ mod tests {
     }
 
     /// No steward list → tier is always 1, so the tier check is a no-op and
-    /// we fall through to identity comparison.
+    /// we fall through to member_id comparison.
     #[test]
     fn no_steward_list_flattens_tier_and_falls_through_to_member_id() {
         let id_a = vec![0x05];

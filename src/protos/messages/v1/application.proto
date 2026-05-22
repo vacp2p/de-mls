@@ -80,10 +80,10 @@ enum ViolationType {
 
 message ViolationEvidence {
   ViolationType violation_type = 1;
-  bytes target_member_id = 2;       // Malicious steward's identity
+  bytes target_member_id = 2;       // Malicious steward
   bytes evidence_payload = 3;       // Proof (mismatched hashes, timestamps, etc.)
   uint64 epoch = 4;                 // Epoch where violation occurred
-  bytes creator_member_id = 5;      // Identity of the proposal creator (for scoring)
+  bytes creator_member_id = 5;      // Creator's member_id for scoring
 }
 
 message EmergencyCriteriaProposal {

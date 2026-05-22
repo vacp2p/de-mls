@@ -1,11 +1,7 @@
 //! MLS-specific credential bundle: signing keypair + credential.
 //!
 //! Built once per user from an [`crate::member_id::MemberId`] at User init
-//! and shared across every per-conversation `MlsService` via
-//! `Arc<MlsCredentials>`. The signing key is the long-lived MLS identity;
-//! the credential's serialized content is the user's identity bytes —
-//! the link back to whatever real-world identifier the
-//! [`crate::member_id::MemberId`] represents.
+//! and shared across every per-conversation.
 
 use openmls::credentials::{BasicCredential, CredentialWithKey};
 use openmls_basic_credential::SignatureKeyPair;
@@ -24,11 +20,7 @@ pub struct MlsCredentials {
 }
 
 impl MlsCredentials {
-    /// Build credentials from an [`MemberId`]. Generates a fresh
-    /// signing keypair (held only in this struct, not stored in MLS
-    /// keystore until consumed by a service / KP build) and bundles it
-    /// with a basic credential whose serialized content is
-    /// `identity.member_id_bytes()`.
+    /// Build credentials from an [`MemberId`].
     pub fn from_member_id<I: MemberId + ?Sized>(member_id: &I) -> Result<Self, MlsError> {
         let credential = BasicCredential::new(member_id.member_id_bytes().to_vec());
         let signer = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm())?;
@@ -41,14 +33,10 @@ impl MlsCredentials {
         })
     }
 
-    /// MLS credential bundle — public part of the identity, embedded in
-    /// every signed MLS message we produce.
     pub fn credential(&self) -> &CredentialWithKey {
         &self.credential
     }
 
-    /// MLS signing keypair — owns the private key used to sign MLS
-    /// messages and proposals.
     pub fn signer(&self) -> &SignatureKeyPair {
         &self.signer
     }

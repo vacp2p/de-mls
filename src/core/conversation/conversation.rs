@@ -348,7 +348,7 @@ impl Conversation {
 
     /// Insert a `ConversationUpdateRequest` into the pending-updates buffer.
     ///
-    /// Keyed by target identity — a second insertion for the same identity
+    /// Keyed by target user — a second insertion for the same user
     /// keeps the original `first_seen_epoch` so it can still expire on schedule.
     /// Returns `true` if this is a new entry, `false` if already buffered.
     pub fn buffer_pending_update(
@@ -373,7 +373,7 @@ impl Conversation {
         true
     }
 
-    /// True if `identity` has a self-leave waiting for the next commit —
+    /// True if `member_id` has a self-leave waiting for the next commit —
     /// an approved `RemoveMember(member_id)` under the deterministic
     /// self-leave ID. Used by live rotation to skip the leaver.
     pub fn is_pending_self_leave(&self, member_id: &[u8]) -> bool {
@@ -383,7 +383,7 @@ impl Conversation {
             .is_some_and(|req| is_auto_approved_entry(pid, req))
     }
 
-    /// Drop a buffered update by target identity.
+    /// Drop a buffered update by target member_id.
     ///
     /// Returns `true` if an entry was removed.
     pub fn remove_pending_update(&mut self, member_id: &[u8]) -> bool {
@@ -400,7 +400,7 @@ impl Conversation {
         self.pending_updates.len()
     }
 
-    /// Check whether a pending update exists for the given identity.
+    /// Check whether a pending update exists for the given member_id.
     pub fn has_pending_update(&self, member_id: &[u8]) -> bool {
         self.pending_updates.contains_key(member_id)
     }

@@ -1,21 +1,23 @@
-//! Pluggable MLS backend trait, scoped per conversation.
+//! [`MlsService`] trait and protocol constants for one MLS group per instance.
 //!
-//! [`MlsService`] is the swap point for MLS implementations. The default
-//! impl is [`OpenMlsService`](super::OpenMlsService). One service instance
-//! corresponds to one MLS group; the user's MLS credentials and conversation id
-//! are set at construction and every method operates on that implicit
-//! conversation.
+//! DE-MLS talks to an MLS engine only through [`MlsService`]. Methods take
+//! boundary types from [`crate::mls_crypto`] (wire bytes, [`MlsCommitInput`],
+//! etc.) so protocol and app code do not depend on OpenMLS. The only
+//! engine-specific export here is [`CIPHERSUITE`], which pins the default
+//! [`OpenMlsService`](super::OpenMlsService) backend.
 //!
-//! Conversation construction is intentionally *not* on the trait — concrete impls
-//! expose their own constructors (e.g. `OpenMlsService::new_as_creator` /
-//! `new_from_welcome`), and key-package generation is also off the trait
-//! because a joiner needs to publish a key package before any conversation exists.
+//! # Construction
 //!
-//! The trait surface uses only opaque boundary types: no `openmls::*`
-//! types appear here, so swapping in a different MLS engine is purely a
-//! matter of writing a new impl. Identity is a separate User-level
-//! concept ([`crate::member_id::MemberId`]) — the MLS service consumes
-//! credentials built from it but does not own the identity itself.
+//! Creating a group, joining from a welcome, and publishing key packages are
+//! not on the trait: they are inherent methods on [`OpenMlsService`](super::OpenMlsService),
+//! because a joiner must publish a key package before any per-conversation
+//! service exists. See the quick-start in [`crate::mls_crypto`].
+//!
+//! # Constants
+//!
+//! * [`CIPHERSUITE`] — algorithm suite for [`OpenMlsService`](super::OpenMlsService).
+//! * [`DEFAULT_COMMIT_BATCH_MAX`] — default cap on proposals per steward commit;
+//!   override per instance with [`MlsService::commit_batch_max`].
 
 use openmls::prelude::Ciphersuite;
 
@@ -63,7 +65,7 @@ pub trait MlsService {
     /// per leaf, in MLS leaf order).
     fn members(&self) -> Result<Vec<Vec<u8>>, MlsError>;
 
-    /// Whether `identity` is currently a member.
+    /// Whether user is currently a member.
     fn is_member(&self, member_id: &[u8]) -> bool;
 
     /// Current MLS epoch. This is the single source of truth — never

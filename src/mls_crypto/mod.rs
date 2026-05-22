@@ -18,7 +18,7 @@
 //!     MemoryDeMlsStorage, MlsCredentials, MlsService, OpenMlsService,
 //! };
 //!
-//! // `identity` is any type implementing `de_mls::member_id::MemberId`.
+//! // `member_id` is any type implementing `de_mls::member_id::MemberId`.
 //! let credentials = Arc::new(MlsCredentials::from_member_id(&member_id)?);
 //! let storage = MemoryDeMlsStorage::new();
 //!

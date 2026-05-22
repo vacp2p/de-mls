@@ -141,46 +141,33 @@ impl StewardList {
             .all(|(&i, want)| &member_ids[i] == want))
     }
 
-    /// Nominal epoch steward at index `(epoch - election_epoch) % len`.
-    /// Use [`Self::live_steward_from`] with the eligibility predicate to
-    /// skip stewards no longer in the conversation.
-    pub fn epoch_steward(&self, epoch: u64) -> Option<&[u8]> {
-        if self.is_exhausted(epoch) {
-            return None;
-        }
-        let index = ((epoch - self.election_epoch) as usize) % self.members.len();
-        Some(&self.members[index])
+    /// Epoch steward at `epoch`, walking the rotation past any candidate
+    /// for whom `eligible` returns false. Pass `|_| true` from tests that
+    /// want the nominal index position. Returns `None` when the list is
+    /// exhausted at `epoch` or no candidate is eligible.
+    pub fn epoch_steward<F: Fn(&[u8]) -> bool>(&self, epoch: u64, eligible: F) -> Option<&[u8]> {
+        self.steward_from(epoch, 0, eligible)
     }
 
-    /// Nominal backup steward at index `(epoch - election_epoch + 1) % len`.
-    pub fn backup_steward(&self, epoch: u64) -> Option<&[u8]> {
-        if self.is_exhausted(epoch) {
-            return None;
-        }
-        let index = ((epoch - self.election_epoch) as usize + 1) % self.members.len();
-        Some(&self.members[index])
-    }
-
-    /// Live epoch steward + a distinct backup. Resolving them together
-    /// stops the epoch-steward walk from landing on the nominal backup
-    /// and collapsing both roles onto the same identity. Backup is
-    /// `None` when fewer than two stewards are eligible.
-    pub fn live_epoch_and_backup<F: Fn(&[u8]) -> bool>(
+    /// Epoch steward + a distinct backup. Resolving them together stops
+    /// the epoch-steward walk from landing on the nominal backup and
+    /// collapsing both roles onto the same identity. Backup is `None`
+    /// when fewer than two stewards are eligible.
+    pub fn epoch_and_backup<F: Fn(&[u8]) -> bool>(
         &self,
         epoch: u64,
         eligible: F,
     ) -> (Option<&[u8]>, Option<&[u8]>) {
-        let epoch_steward = self.live_steward_from(epoch, 0, &eligible);
-        let backup = epoch_steward
-            .and_then(|es| self.live_steward_from(epoch, 1, |c| c != es && eligible(c)));
+        let epoch_steward = self.steward_from(epoch, 0, &eligible);
+        let backup =
+            epoch_steward.and_then(|es| self.steward_from(epoch, 1, |c| c != es && eligible(c)));
         (epoch_steward, backup)
     }
 
     /// Walk the rotation starting at `offset` past `eligible == false`
     /// and return the first eligible steward. `offset = 0` resolves the
-    /// epoch steward; `offset = 1` resolves the backup. Returns `None`
-    /// when the list is exhausted at `epoch` or no candidate is eligible.
-    pub fn live_steward_from<F: Fn(&[u8]) -> bool>(
+    /// epoch steward; `offset = 1` resolves the backup.
+    fn steward_from<F: Fn(&[u8]) -> bool>(
         &self,
         epoch: u64,
         offset: usize,
@@ -410,26 +397,30 @@ mod tests {
         let mems = members(&[1, 2, 3]);
 
         let list = StewardList::generate(0, b"conversation", &mems, 3, config, 0).unwrap();
-        let s0 = list.epoch_steward(0).unwrap().to_vec();
-        let s1 = list.epoch_steward(1).unwrap().to_vec();
-        let s2 = list.epoch_steward(2).unwrap().to_vec();
+        let s0 = list.epoch_steward(0, |_| true).unwrap().to_vec();
+        let s1 = list.epoch_steward(1, |_| true).unwrap().to_vec();
+        let s2 = list.epoch_steward(2, |_| true).unwrap().to_vec();
 
         assert_ne!(s0, s1);
         assert_ne!(s1, s2);
         assert_ne!(s0, s2);
     }
 
-    /// Backup at epoch `e` is the epoch steward at `e + 1` (mod len).
+    /// Backup at epoch `e` sits at rotation slot `(e + 1) % len`,
+    /// wrapping back to slot 0 at the end of the list.
     #[test]
-    fn test_backup_steward() {
+    fn test_backup_is_next_rotation_slot() {
         let config = StewardListConfig::new(3, 3).unwrap();
         let mems = members(&[1, 2, 3]);
 
         let list = StewardList::generate(0, b"conversation", &mems, 3, config, 0).unwrap();
+        let order: Vec<&[u8]> = list.members().iter().map(|m| m.as_slice()).collect();
 
-        assert_eq!(list.backup_steward(0), list.epoch_steward(1));
-        assert_eq!(list.backup_steward(1), list.epoch_steward(2));
-        assert_eq!(list.backup_steward(2), list.epoch_steward(0));
+        for epoch in 0..3u64 {
+            let (epoch_steward, backup) = list.epoch_and_backup(epoch, |_| true);
+            assert_eq!(epoch_steward, Some(order[epoch as usize % 3]));
+            assert_eq!(backup, Some(order[(epoch as usize + 1) % 3]));
+        }
     }
 
     #[test]
@@ -450,8 +441,8 @@ mod tests {
         );
 
         // Exhausted epochs return None from both rotation slots.
-        assert!(list.epoch_steward(8).is_none());
-        assert!(list.backup_steward(8).is_none());
+        assert!(list.epoch_steward(8, |_| true).is_none());
+        assert!(list.epoch_and_backup(8, |_| true).1.is_none());
     }
 
     #[test]
@@ -529,30 +520,33 @@ mod tests {
 
         let list = StewardList::generate(0, b"conversation", &mems, 1, config, 0).unwrap();
         assert_eq!(list.len(), 1);
-        // With one steward, epoch and backup slots collapse to the same person.
-        assert_eq!(list.epoch_steward(0), list.backup_steward(0));
+        // With one steward, epoch resolves; backup collapses to None since
+        // it would have to equal the epoch steward.
+        let (e, b) = list.epoch_and_backup(0, |_| true);
+        assert!(e.is_some());
+        assert!(b.is_none());
         assert!(list.is_exhausted(1));
     }
 
-    /// With everyone eligible, live == nominal. With the nominal filtered out,
-    /// live rotates to the next eligible steward.
+    /// With everyone eligible, the walk lands on the nominal index. With
+    /// the nominal filtered out, it rotates to the next eligible steward.
     #[test]
-    fn test_live_steward_from_skips_ineligible() {
+    fn test_epoch_steward_walks_past_ineligible() {
         let config = StewardListConfig::new(3, 3).unwrap();
         let mems = members(&[1, 2, 3]);
 
         let list = StewardList::generate(0, b"conversation", &mems, 3, config, 0).unwrap();
-        let nominal = list.epoch_steward(0).unwrap().to_vec();
+        let nominal = list.epoch_steward(0, |_| true).unwrap().to_vec();
 
         let all_eligible = |c: &[u8]| mems.iter().any(|m| m == c);
         assert_eq!(
-            list.live_steward_from(0, 0, all_eligible),
+            list.epoch_steward(0, all_eligible),
             Some(nominal.as_slice())
         );
 
         let after: Vec<Vec<u8>> = mems.iter().filter(|m| **m != nominal).cloned().collect();
         let live = list
-            .live_steward_from(0, 0, |c| after.iter().any(|m| m == c))
+            .epoch_steward(0, |c| after.iter().any(|m| m == c))
             .unwrap();
         assert_ne!(live, nominal.as_slice());
         assert!(after.iter().any(|m| m == live));
@@ -561,16 +555,16 @@ mod tests {
     /// All stewards ineligible → both slots are None. One eligible → epoch
     /// resolves, backup stays None (can't be distinct from epoch).
     #[test]
-    fn test_live_epoch_and_backup_all_ineligible_and_single_survivor() {
+    fn test_epoch_and_backup_all_ineligible_and_single_survivor() {
         let config = StewardListConfig::new(2, 2).unwrap();
         let mems = members(&[1, 2]);
         let list = StewardList::generate(0, b"conversation", &mems, 2, config, 0).unwrap();
 
-        let (e, b) = list.live_epoch_and_backup(0, |_| false);
+        let (e, b) = list.epoch_and_backup(0, |_| false);
         assert!(e.is_none() && b.is_none());
 
         let survivor = mems[0].clone();
-        let (e, b) = list.live_epoch_and_backup(0, |c| c == survivor.as_slice());
+        let (e, b) = list.epoch_and_backup(0, |c| c == survivor.as_slice());
         assert_eq!(e.unwrap(), survivor.as_slice());
         assert!(b.is_none());
     }
@@ -578,30 +572,30 @@ mod tests {
     /// 3 stewards with the nominal epoch steward ineligible: both slots must
     /// rotate and stay distinct rather than collapsing onto the same identity.
     #[test]
-    fn test_live_epoch_and_backup_rotates_when_epoch_leaves() {
+    fn test_epoch_and_backup_rotates_when_epoch_leaves() {
         let config = StewardListConfig::new(3, 3).unwrap();
         let mems = members(&[1, 2, 3]);
         let list = StewardList::generate(0, b"conversation", &mems, 3, config, 0).unwrap();
 
-        let nominal = list.epoch_steward(0).unwrap().to_vec();
-        let (e, b) = list.live_epoch_and_backup(0, |c| c != nominal.as_slice());
+        let nominal = list.epoch_steward(0, |_| true).unwrap().to_vec();
+        let (e, b) = list.epoch_and_backup(0, |c| c != nominal.as_slice());
         assert!(e.is_some() && b.is_some());
         assert_ne!(e.unwrap(), b.unwrap());
         assert_ne!(e.unwrap(), nominal.as_slice());
         assert_ne!(b.unwrap(), nominal.as_slice());
     }
 
-    /// Happy path (no leavers) → matches the nominal `epoch_steward` /
-    /// `backup_steward` assignment.
+    /// Happy path (no leavers): epoch_and_backup with all eligible returns
+    /// the nominal rotation pair (epoch slot N, backup slot N+1).
     #[test]
-    fn test_live_epoch_and_backup_matches_nominal_when_all_eligible() {
+    fn test_epoch_and_backup_matches_nominal_when_all_eligible() {
         let config = StewardListConfig::new(3, 3).unwrap();
         let mems = members(&[1, 2, 3]);
         let list = StewardList::generate(0, b"conversation", &mems, 3, config, 0).unwrap();
 
-        let (e, b) = list.live_epoch_and_backup(0, |_| true);
-        assert_eq!(e, list.epoch_steward(0));
-        assert_eq!(b, list.backup_steward(0));
+        let (e, b) = list.epoch_and_backup(0, |_| true);
+        assert_eq!(e, list.epoch_steward(0, |_| true));
+        assert_eq!(b, list.epoch_steward(1, |_| true));
     }
 
     #[test]

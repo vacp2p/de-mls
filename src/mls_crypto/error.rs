@@ -98,6 +98,9 @@ pub enum MlsError {
 
     #[error("Remove proposal references leaf index {0} with no active credential")]
     UnknownLeafIndex(u32),
+
+    #[error("Unexpected Proposal Action type")]
+    UnknownProposalAction,
 }
 
 impl MlsError {

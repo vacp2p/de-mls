@@ -94,7 +94,7 @@ impl StewardListPlugin for DeterministicStewardList {
     fn epoch_steward<F: Fn(&[u8]) -> bool>(&self, epoch: u64, eligible: F) -> Option<&[u8]> {
         self.list
             .as_ref()
-            .and_then(|l| l.live_steward_from(epoch, 0, eligible))
+            .and_then(|l| l.epoch_steward(epoch, eligible))
     }
 
     fn epoch_and_backup<F: Fn(&[u8]) -> bool>(
@@ -103,7 +103,7 @@ impl StewardListPlugin for DeterministicStewardList {
         eligible: F,
     ) -> (Option<&[u8]>, Option<&[u8]>) {
         match self.list.as_ref() {
-            Some(l) => l.live_epoch_and_backup(epoch, eligible),
+            Some(l) => l.epoch_and_backup(epoch, eligible),
             None => (None, None),
         }
     }
@@ -126,7 +126,7 @@ impl StewardListPlugin for DeterministicStewardList {
         // rotation slot covers `election_epoch` itself.
         self.list
             .as_ref()
-            .and_then(|l| l.live_steward_from(l.election_epoch(), 0, eligible))
+            .and_then(|l| l.epoch_steward(l.election_epoch(), eligible))
     }
 
     fn install_list(
