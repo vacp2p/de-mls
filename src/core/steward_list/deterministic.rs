@@ -1,5 +1,4 @@
-//! Deterministic SHA256-sort steward list — reference
-//! [`super::StewardListPlugin`] implementation.
+//! [`DeterministicStewardList`] — SHA256-sorted [`super::StewardListPlugin`] impl.
 
 use crate::core::{
     DEFAULT_MAX_RETRIES, ElectionDecision, StewardList, StewardListConfig, StewardListEvent,
@@ -16,8 +15,7 @@ pub struct DeterministicStewardList {
 }
 
 impl DeterministicStewardList {
-    /// Joiner-side: empty list. The coordinator fills it from the
-    /// `ConversationSync` it receives after the welcome.
+    /// Joiner: no list until `ConversationSync`.
     pub fn empty(conversation_id: impl Into<Vec<u8>>, config: StewardListConfig) -> Self {
         Self {
             list: None,
@@ -28,8 +26,7 @@ impl DeterministicStewardList {
         }
     }
 
-    /// Creator-side: bootstrap with the creator as the sole steward at
-    /// epoch 0. No election, no retries.
+    /// Creator: sole steward at epoch 0.
     pub fn with_creator(
         conversation_id: impl Into<Vec<u8>>,
         creator_member_id: Vec<u8>,
@@ -122,8 +119,6 @@ impl StewardListPlugin for DeterministicStewardList {
     }
 
     fn election_proposer<F: Fn(&[u8]) -> bool>(&self, eligible: F) -> Option<&[u8]> {
-        // Election proposer = nominal index 0 = the steward whose
-        // rotation slot covers `election_epoch` itself.
         self.list
             .as_ref()
             .and_then(|l| l.epoch_steward(l.election_epoch(), eligible))
@@ -215,10 +210,6 @@ impl StewardListPlugin for DeterministicStewardList {
         epoch: u64,
         members: &[Vec<u8>],
     ) -> Result<Vec<StewardListEvent>, CoreError> {
-        // RFC §Steward list creation: when total membership drops below
-        // `sn_min`, every member must be a steward. Re-derive over the
-        // full member set with `retry_round = 0` (auto-fill is not an
-        // election outcome).
         if members.len() >= self.config.sn_min {
             return Ok(Vec::new());
         }
@@ -296,8 +287,6 @@ mod tests {
         assert_eq!(p.election_epoch(), Some(0));
     }
 
-    /// Filtering the nominal epoch steward out forces rotation to walk to
-    /// the next eligible candidate.
     #[test]
     fn epoch_steward_filters_by_eligibility() {
         let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
@@ -324,8 +313,6 @@ mod tests {
         assert_ne!(e.unwrap(), b.unwrap());
     }
 
-    /// Single eligible survivor → epoch resolves, backup stays None
-    /// (nothing to be distinct from).
     #[test]
     fn backup_is_none_when_only_one_eligible() {
         let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
@@ -338,8 +325,6 @@ mod tests {
         assert!(b.is_none());
     }
 
-    /// `bump_retry` past `max_retries` emits `RetryExhausted` exactly
-    /// once; default max is 1, so the second bump triggers it.
     #[test]
     fn bump_retry_emits_exhausted_after_max() {
         let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
@@ -424,10 +409,6 @@ mod tests {
         assert_ne!(next, proposer.as_slice());
     }
 
-    /// When membership drops below `sn_min`, `maybe_auto_fill` regenerates
-    /// the steward list over the full member set with `retry_round = 0`.
-    /// RFC §"Steward list creation": every member must be a steward once
-    /// the conversation is below `sn_min`.
     #[test]
     fn maybe_auto_fill_installs_full_member_set_when_below_sn_min() {
         let cfg = StewardListConfig::new(3, 5).unwrap();
@@ -452,8 +433,6 @@ mod tests {
         }
     }
 
-    /// When membership is at or above `sn_min`, `maybe_auto_fill` is a
-    /// no-op: no events emitted and any existing list is left untouched.
     #[test]
     fn maybe_auto_fill_no_op_when_at_or_above_sn_min() {
         let cfg = StewardListConfig::new(2, 5).unwrap();

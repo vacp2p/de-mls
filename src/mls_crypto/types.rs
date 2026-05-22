@@ -87,23 +87,33 @@ pub enum DecryptResult {
     Ignored,
 }
 
-/// Result of trying to stage a remote commit.
-/// Success carries sender info and actions. Aborted means not processable, not an error.
+/// Outcome of staging a remote commit. `Staged` is the happy path;
+/// `Aborted` is a benign rejection (cleanup MLS state, no penalty);
+/// `BundleSenderMismatch` is a protocol violation (caller emits
+/// `BROKEN_COMMIT` evidence against `commit_sender`).
 #[derive(Clone, Debug)]
 pub enum StagedCandidateResult {
-    /// Candidate staged successfully. All members are MLS-authenticated.
+    /// Candidate staged successfully. `commit_sender` is the
+    /// MLS-authenticated signer of the commit; the de-mls invariant
+    /// "all bundled proposals match the commit sender" was checked
+    /// during staging.
     Staged {
         commit_sender: Vec<u8>,
-        /// Sender identities for each proposal in commit, in order;
-        /// used to verify all proposals are by the committer.
-        proposal_senders: Vec<Vec<u8>>,
         /// Whether this commit removes us from the conversation.
         self_removed: bool,
         /// Membership changes (Add/Remove) contained in the commit's proposals.
         actions: Vec<MlsProposalOutput>,
     },
-    /// Candidate was benign but not processable. Caller cleans MLS state.
+    /// Candidate was benign but not processable (stale epoch, wrong
+    /// group, non-proposal in proposal slot, non-commit in commit slot).
+    /// Caller cleans MLS state and drops the candidate without penalty.
     Aborted,
+    /// One or more bundled proposals weren't signed by the commit
+    /// sender. MLS itself allows commits to reference others'
+    /// proposals, but de-mls's protocol layer requires every bundled
+    /// proposal to come from the committer. Caller emits a
+    /// `BROKEN_COMMIT` violation against `commit_sender`.
+    BundleSenderMismatch { commit_sender: Vec<u8> },
 }
 
 /// Result of creating a commit candidate (not merged yet).

@@ -303,18 +303,30 @@ fn stage_candidate<M>(
 where
     M: MlsService,
 {
-    let Ok(StagedCandidateResult::Staged {
-        commit_sender,
-        proposal_senders,
-        self_removed,
-        actions: commit_actions,
-    }) = mls
+    let staged_result = mls
         .stage_remote_commit(&candidate.mls_proposals, &candidate.commit_message)
         .inspect_err(|e| {
             tracing::debug!(conversation = conversation_id, error = %e, "candidate failed to stage");
-        })
-    else {
-        return Ok(StagingOutcome::Abort);
+        });
+
+    let (commit_sender, self_removed, commit_actions) = match staged_result {
+        Ok(StagedCandidateResult::Staged {
+            commit_sender,
+            self_removed,
+            actions,
+        }) => (commit_sender, self_removed, actions),
+        Ok(StagedCandidateResult::BundleSenderMismatch { commit_sender }) => {
+            tracing::warn!(
+                conversation = conversation_id,
+                "violation: bundled proposals don't match the commit sender"
+            );
+            return Ok(StagingOutcome::Violation(ViolationEvidence::broken_commit(
+                commit_sender,
+                ctx.current_epoch,
+                "commit bundles proposals not signed by the committer",
+            )));
+        }
+        Ok(StagedCandidateResult::Aborted) | Err(_) => return Ok(StagingOutcome::Abort),
     };
 
     // Wire-claimed `steward_member_id` must match the MLS-verified
@@ -329,23 +341,6 @@ where
             commit_sender,
             ctx.current_epoch,
             "commit candidate's steward_member_id doesn't match MLS commit sender",
-        )));
-    }
-
-    // Every bundled proposal must come from the committer — catches both
-    // "proposals signed by a third party" and "proposals don't all agree
-    // on a sender". Attribution always lands on the committer (RFC
-    // §Steward violation list: only the member who released the commit is
-    // accused).
-    if proposal_senders.iter().any(|s| s != &commit_sender) {
-        tracing::warn!(
-            conversation = conversation_id,
-            "violation: bundled proposals don't match the commit sender"
-        );
-        return Ok(StagingOutcome::Violation(ViolationEvidence::broken_commit(
-            commit_sender,
-            ctx.current_epoch,
-            "commit bundles proposals not signed by the committer",
         )));
     }
 

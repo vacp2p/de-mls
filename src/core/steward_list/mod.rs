@@ -1,20 +1,11 @@
-//! Steward list plug-in: passive, per-conversation steward roster.
+//! Steward list plug-in: deterministic roster and rotation queries.
 //!
-//! Answers "who is the steward at epoch N?", "am I a steward?", and
-//! "is the list exhausted?". Stores its own list, election epoch, retry
-//! round, and retry policy. Never reaches into MLS, consensus, or other
-//! plug-ins — the coordinator composes the eligibility predicate (MLS
-//! membership minus pending-removal proposals) and passes it on every
-//! position query.
+//! Passive per-conversation state — no MLS or consensus I/O. The coordinator
+//! passes an `eligible` predicate on every live position query.
 //!
-//! Mutators return [`StewardListEvent`]s so the coordinator can chain
-//! protocol actions (broadcast `ConversationSync` after install, escalate to a
-//! Layer-3 `Deadlock` ECP after retry exhaustion).
-//!
-//! Layout:
-//! - [`list`] — the deterministic [`StewardList`] data type and config.
-//! - [`plugin`] — the [`StewardListPlugin`] trait + event vocabulary.
-//! - [`deterministic`] — reference impl ([`DeterministicStewardList`]).
+//! - [`list`] — [`StewardList`] and [`StewardListConfig`]
+//! - [`plugin`] — [`StewardListPlugin`] trait and events
+//! - [`deterministic`] — [`DeterministicStewardList`] reference impl
 
 mod deterministic;
 mod list;

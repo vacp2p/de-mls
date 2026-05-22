@@ -304,10 +304,15 @@ where
 
         match outcome {
             Some((commit_sender, self_removed, actions, staged)) => {
+                // de-mls invariant: every bundled proposal must come
+                // from the committer. MLS allows reference-by-id of
+                // others' proposals; we don't.
+                if proposal_senders.iter().any(|s| s != &commit_sender) {
+                    return Ok(StagedCandidateResult::BundleSenderMismatch { commit_sender });
+                }
                 self.pending_staged_commit = Some(staged);
                 Ok(StagedCandidateResult::Staged {
                     commit_sender,
-                    proposal_senders,
                     self_removed,
                     actions,
                 })
