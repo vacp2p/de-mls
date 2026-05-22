@@ -37,31 +37,31 @@ pub(crate) struct GatewaySessionFanout {
 
 impl GatewaySessionFanout {
     /// Dispatch one [`SessionEvent`] to the UI pipe + side caches.
-    pub(crate) async fn handle(&self, conversation_name: &str, event: SessionEvent) {
+    pub(crate) async fn handle(&self, conversation_id: &str, event: SessionEvent) {
         match event {
             SessionEvent::AppMessage(message) => {
                 let _ = forward_app_message(&self.evt_tx, message);
             }
             SessionEvent::Leaving => {
-                if let Err(e) = self.topics.remove_many(conversation_name) {
+                if let Err(e) = self.topics.remove_many(conversation_id) {
                     tracing::warn!(error = %e, "topic filter remove failed");
                 }
-                self.epoch_history.lock().remove(conversation_name);
+                self.epoch_history.lock().remove(conversation_id);
                 let _ = self
                     .evt_tx
-                    .unbounded_send(AppEvent::GroupRemoved(conversation_name.to_string()));
+                    .unbounded_send(AppEvent::GroupRemoved(conversation_id.to_string()));
                 let _ = self
                     .evt_tx
                     .unbounded_send(AppEvent::ChatMessage(ConversationMessage {
-                        message: format!("You're removed from the group {conversation_name}")
+                        message: format!("You're removed from the group {conversation_id}")
                             .into_bytes(),
                         sender: "system".to_string(),
-                        conversation_name: conversation_name.to_string(),
+                        conversation_id: conversation_id.to_string(),
                     }));
             }
             SessionEvent::Error { operation, message } => {
                 let _ = self.evt_tx.unbounded_send(AppEvent::Error(format!(
-                    "{operation} failed for group {conversation_name}: {message}"
+                    "{operation} failed for group {conversation_id}: {message}"
                 )));
             }
             SessionEvent::OwnProposalSubmitted {
@@ -70,7 +70,7 @@ impl GatewaySessionFanout {
             } => {
                 let (action, address) = format_conversation_request(&request);
                 let _ = self.evt_tx.unbounded_send(AppEvent::OwnProposalSubmitted {
-                    conversation_id: conversation_name.to_string(),
+                    conversation_id: conversation_id.to_string(),
                     proposal_id,
                     action,
                     address,
@@ -78,7 +78,7 @@ impl GatewaySessionFanout {
             }
             SessionEvent::PhaseChange(state) => {
                 let _ = self.evt_tx.unbounded_send(AppEvent::GroupStateChanged {
-                    conversation_id: conversation_name.to_string(),
+                    conversation_id: conversation_id.to_string(),
                     state: state.to_string(),
                 });
             }
@@ -88,7 +88,7 @@ impl GatewaySessionFanout {
                 }
                 let formatted: Vec<Vec<(String, String)>> = {
                     let mut store = self.epoch_history.lock();
-                    let entry = store.entry(conversation_name.to_string()).or_default();
+                    let entry = store.entry(conversation_id.to_string()).or_default();
                     if entry.len() >= MAX_EPOCH_HISTORY {
                         entry.pop_front();
                     }
@@ -96,7 +96,7 @@ impl GatewaySessionFanout {
                     entry.iter().map(|b| display_batch(b)).collect()
                 };
                 let _ = self.evt_tx.unbounded_send(AppEvent::EpochHistory {
-                    conversation_id: conversation_name.to_string(),
+                    conversation_id: conversation_id.to_string(),
                     epochs: formatted,
                 });
             }
@@ -106,20 +106,20 @@ impl GatewaySessionFanout {
                 let packet = OutboundPacket::new(
                     welcome_envelope::encode_welcome(welcome),
                     WELCOME_SUBTOPIC,
-                    conversation_name,
+                    conversation_id,
                     &self.app_id,
                 );
                 match self.transport.lock() {
                     Ok(mut t) => {
                         if let Err(e) = t.publish(packet) {
                             tracing::error!(
-                                conversation = %conversation_name,
+                                conversation = %conversation_id,
                                 error = %e,
                                 "welcome publish failed"
                             );
                         } else {
                             tracing::info!(
-                                conversation = %conversation_name,
+                                conversation = %conversation_id,
                                 welcome_bytes = bytes,
                                 sync_bytes,
                                 "welcome forwarded on welcome subtopic"
@@ -128,7 +128,7 @@ impl GatewaySessionFanout {
                     }
                     Err(_) => {
                         tracing::error!(
-                            conversation = %conversation_name,
+                            conversation = %conversation_id,
                             "welcome publish skipped: transport lock poisoned"
                         );
                     }

@@ -60,7 +60,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     pub async fn steward_list_housekeeping(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
         arc.write_or_err("session")?.try_auto_fill_steward_list()?;
         if let Err(e) = Self::try_initiate_steward_election(arc, false, None).await {
-            let conv_name = arc.read_or_err("session")?.conversation_name.clone();
+            let conv_name = arc.read_or_err("session")?.conversation_id.clone();
             info!(conversation = %conv_name, error = %e, "election initiation deferred");
         }
         Ok(())
@@ -112,7 +112,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         let after = self.handle.conversation.pending_update_count();
         if before != after {
             info!(
-                conversation = %self.conversation_name,
+                conversation = %self.conversation_id,
                 before,
                 after,
                 expired = expired.len(),
@@ -126,7 +126,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// buffer into voting proposals. Skips entries already covered by the
     /// current voting/approved queues so we don't double-propose.
     pub async fn process_buffered_updates(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
-        let (current_epoch, to_propose, conversation_name): (
+        let (current_epoch, to_propose, conversation_id): (
             u64,
             Vec<ConversationUpdateRequest>,
             String,
@@ -173,7 +173,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 })
                 .map(|(_, p)| p.request.clone())
                 .collect();
-            (current_epoch, to_propose, s.conversation_name.clone())
+            (current_epoch, to_propose, s.conversation_id.clone())
         };
 
         if to_propose.is_empty() {
@@ -181,7 +181,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         }
 
         info!(
-            conversation = %conversation_name,
+            conversation = %conversation_id,
             epoch = current_epoch,
             count = to_propose.len(),
             "promoting buffered updates to proposals"
@@ -192,7 +192,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         for request in to_propose {
             if let Err(e) = Self::initiate_proposal(arc, request, CreatorVote::Deferred).await {
                 info!(
-                    conversation = %conversation_name,
+                    conversation = %conversation_id,
                     error = %e,
                     "buffered proposal deferred"
                 );
@@ -282,7 +282,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // emitted a downward cross, so we expect at least one tracked
         // member to be at-or-below threshold. The scan is the source of
         // truth — events just trigger the look.
-        let (epoch, to_remove, self_id_arc, conversation_name) = {
+        let (epoch, to_remove, self_id_arc, conversation_id) = {
             let mut s = arc.write_or_err("session")?;
             let epoch = s.handle.expect_mls()?.current_epoch()?;
             let self_id_arc = Arc::clone(&s.self_identity);
@@ -318,7 +318,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             for (id, _) in &to_remove {
                 s.handle.conversation.observe_pending_removal(id.clone());
             }
-            (epoch, to_remove, self_id_arc, s.conversation_name.clone())
+            (epoch, to_remove, self_id_arc, s.conversation_id.clone())
         };
 
         // Submit proposals without holding the lock.
@@ -329,7 +329,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let request = evidence.into_update_request()?;
 
             info!(
-                conversation = %conversation_name,
+                conversation = %conversation_id,
                 target = ?target_id,
                 score = current_score,
                 "initiating SCORE_BELOW_THRESHOLD removal"
@@ -343,7 +343,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     .conversation
                     .resolve_pending_removal(&target_id);
                 error!(
-                    conversation = %conversation_name,
+                    conversation = %conversation_id,
                     target = ?target_id,
                     error = %e,
                     "SCORE_BELOW_THRESHOLD vote failed to start"
@@ -368,7 +368,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         recovery: bool,
         extra_exclude: Option<&[u8]>,
     ) -> Result<(), UserError> {
-        let (proposed_stewards, election_epoch, retry_round, conversation_name) = {
+        let (proposed_stewards, election_epoch, retry_round, conversation_id) = {
             let s = arc.read_or_err("session")?;
             let mls = s.handle.expect_mls()?;
             let epoch = mls.current_epoch()?;
@@ -410,7 +410,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 ElectionDecision::Skip(reason) => {
                     if matches!(reason, "no eligible candidates after filter") {
                         info!(
-                            conversation = %s.conversation_name,
+                            conversation = %s.conversation_id,
                             "skipping election: {reason}"
                         );
                     }
@@ -424,7 +424,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     proposed_stewards,
                     election_epoch,
                     retry_round,
-                    s.conversation_name.clone(),
+                    s.conversation_id.clone(),
                 ),
             }
         };
@@ -441,7 +441,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         };
 
         info!(
-            conversation = %conversation_name,
+            conversation = %conversation_id,
             epoch = election_epoch,
             retry_round,
             stewards = stewards_len,
@@ -460,7 +460,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// exhaust. Only the deterministic responsible proposer submits;
     /// others no-op. On YES the ECP opens `recovery_mode`.
     pub async fn try_initiate_deadlock_ecp(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
-        let (is_authorized, self_id, epoch, conversation_name) = {
+        let (is_authorized, self_id, epoch, conversation_id) = {
             let s = arc.read_or_err("session")?;
             let mls = s.handle.expect_mls()?;
             let mls_members = mls.members()?;
@@ -482,7 +482,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 authorized,
                 Arc::clone(&s.self_identity),
                 epoch,
-                s.conversation_name.clone(),
+                s.conversation_id.clone(),
             )
         };
 
@@ -495,7 +495,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             .into_update_request()?;
 
         info!(
-            conversation = %conversation_name,
+            conversation = %conversation_id,
             epoch, "initiating Deadlock ECP"
         );
 

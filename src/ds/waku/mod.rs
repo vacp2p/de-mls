@@ -24,20 +24,20 @@ pub fn pubsub_topic() -> String {
 }
 
 /// Content topics this conversation subscribes to (one per subtopic).
-pub fn build_content_topics(conversation_name: &str) -> Vec<String> {
+pub fn build_content_topics(conversation_id: &str) -> Vec<String> {
     SUBTOPICS
         .iter()
-        .map(|subtopic| build_content_topic(conversation_name, CONVERSATION_VERSION, subtopic))
+        .map(|subtopic| build_content_topic(conversation_id, CONVERSATION_VERSION, subtopic))
         .collect()
 }
 
-/// `/{conversation_name}/{version}/{subtopic}/proto`.
+/// `/{conversation_id}/{version}/{subtopic}/proto`.
 pub fn build_content_topic(
-    conversation_name: &str,
+    conversation_id: &str,
     conversation_version: &str,
     subtopic: &str,
 ) -> String {
-    format!("/{conversation_name}/{conversation_version}/{subtopic}/proto")
+    format!("/{conversation_id}/{conversation_version}/{subtopic}/proto")
 }
 
 struct OutboundCommand {
@@ -302,7 +302,7 @@ impl WakuDeliveryService {
         })
     }
 
-    /// Split `/{conversation_name}/{version}/{subtopic}/proto` into
+    /// Split `/{conversation_id}/{version}/{subtopic}/proto` into
     /// `(conversation_id, subtopic)`.
     fn parse_content_topic(ct: &str) -> Option<(String, String)> {
         let mut parts = ct.split('/');

@@ -225,7 +225,7 @@ pub mod v1 {
     impl From<BanRequest> for AppEvent {
         fn from(ban_request: BanRequest) -> Self {
             AppEvent::ProposalAdded {
-                conversation_id: ban_request.conversation_name.clone(),
+                conversation_id: ban_request.conversation_id.clone(),
                 action: "Remove Member".to_string(),
                 address: encode_hex(&ban_request.user_to_ban),
             }

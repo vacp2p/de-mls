@@ -48,14 +48,14 @@ pub(super) fn apply_in_priority_order<M: MlsService, St: StewardListPlugin>(
 ) -> Result<FreezeFinalizeResult, CoreError> {
     let mut score_ops: Vec<ScoreOp> = Vec::new();
     let mut own_commit_discarded = false;
-    let conversation_name = conversation.name().to_owned();
+    let conversation_id = conversation.name().to_owned();
 
     let mut remaining = sorted.into_iter();
     while let Some(chosen) = remaining.next() {
         let apply_result = if chosen.is_local_candidate {
             if own_commit_discarded {
                 tracing::debug!(
-                    conversation = %conversation_name,
+                    conversation = %conversation_id,
                     "own pending commit is discarded; skipping local candidate"
                 );
                 continue;
@@ -85,7 +85,7 @@ pub(super) fn apply_in_priority_order<M: MlsService, St: StewardListPlugin>(
                     ctx,
                     remaining,
                     steward,
-                    &conversation_name,
+                    &conversation_id,
                 );
                 return Ok(FreezeFinalizeResult {
                     outcome,
@@ -128,7 +128,7 @@ fn record_winner_scores<St: StewardListPlugin>(
     ctx: &RoundContext,
     losers: impl Iterator<Item = BufferedCommitCandidate>,
     steward: &St,
-    conversation_name: &str,
+    conversation_id: &str,
 ) {
     score_ops.push(ScoreOp {
         member_id: committer.to_vec(),
@@ -157,7 +157,7 @@ fn record_winner_scores<St: StewardListPlugin>(
             });
         } else {
             tracing::debug!(
-                conversation = %conversation_name,
+                conversation = %conversation_id,
                 "dropping HonestCommitAttempt: claimed identity not on steward list"
             );
         }
@@ -218,10 +218,10 @@ fn apply_incoming_candidate<M: MlsService, St: StewardListPlugin>(
     chosen: BufferedCommitCandidate,
     ctx: &RoundContext,
 ) -> Result<CandidateOutcome, CoreError> {
-    let conversation_name = conversation.name().to_owned();
+    let conversation_id = conversation.name().to_owned();
 
     let (commit_sender, self_removed, commit_actions) =
-        match stage_candidate(mls, &conversation_name, &chosen.candidate_msg, ctx)? {
+        match stage_candidate(mls, &conversation_id, &chosen.candidate_msg, ctx)? {
             StagingOutcome::Staged {
                 commit_sender,
                 self_removed,
@@ -309,7 +309,7 @@ enum StagingOutcome {
 /// via `discard_staged_commit` for `Abort` / `Violation`.
 fn stage_candidate<M>(
     mls: &mut M,
-    conversation_name: &str,
+    conversation_id: &str,
     candidate: &CommitCandidate,
     ctx: &RoundContext,
 ) -> Result<StagingOutcome, CoreError>
@@ -324,7 +324,7 @@ where
     }) = mls
         .stage_remote_commit(&candidate.mls_proposals, &candidate.commit_message)
         .inspect_err(|e| {
-            tracing::debug!(conversation = conversation_name, error = %e, "candidate failed to stage");
+            tracing::debug!(conversation = conversation_id, error = %e, "candidate failed to stage");
         })
     else {
         return Ok(StagingOutcome::Abort);
@@ -335,7 +335,7 @@ where
     // violation list) and is attributed to the actual signer.
     if candidate.steward_identity != commit_sender {
         tracing::warn!(
-            conversation = conversation_name,
+            conversation = conversation_id,
             "violation: wire steward_identity doesn't match MLS commit_sender"
         );
         return Ok(StagingOutcome::Violation(ViolationEvidence::broken_commit(
@@ -352,7 +352,7 @@ where
     // accused).
     if proposal_senders.iter().any(|s| s != &commit_sender) {
         tracing::warn!(
-            conversation = conversation_name,
+            conversation = conversation_id,
             "violation: bundled proposals don't match the commit sender"
         );
         return Ok(StagingOutcome::Violation(ViolationEvidence::broken_commit(

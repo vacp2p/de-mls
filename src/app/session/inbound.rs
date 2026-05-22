@@ -75,17 +75,17 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             }
             ProcessResult::Vote(vote) => {
                 let proposal_id = vote.proposal_id;
-                let (consensus, conversation_name, outcome_applied) = {
+                let (consensus, conversation_id, outcome_applied) = {
                     let s = arc.read_or_err("session")?;
                     (
                         s.consensus.clone(),
-                        s.conversation_name.clone(),
+                        s.conversation_id.clone(),
                         s.handle
                             .conversation
                             .is_consensus_outcome_applied(proposal_id),
                     )
                 };
-                forward_incoming_vote::<P>(&conversation_name, *vote, &consensus, outcome_applied)
+                forward_incoming_vote::<P>(&conversation_id, *vote, &consensus, outcome_applied)
                     .await?;
                 Ok(DispatchOutcome::Done)
             }
@@ -96,7 +96,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             ProcessResult::JoinedConversation(_name) => {
                 // `name` is always this conversation's name — `process_inbound`
                 // emits it via the local MLS service. Use the session's own
-                // `conversation_name` rather than the parameter.
+                // `conversation_id` rather than the parameter.
                 Self::on_joined_conversation(arc).await?;
                 Ok(DispatchOutcome::Done)
             }
@@ -117,7 +117,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::Noop(reason) => {
-                let conv_name = arc.read_or_err("session")?.conversation_name.clone();
+                let conv_name = arc.read_or_err("session")?.conversation_id.clone();
                 tracing::debug!(
                     conversation = %conv_name,
                     ?reason,
@@ -172,16 +172,16 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             .as_ref()
             .map(ProposalKind::of)
             .unwrap_or(ProposalKind::Commit);
-        let (consensus, conversation_name) = {
+        let (consensus, conversation_id) = {
             let s = arc.read_or_err("session")?;
-            (s.consensus.clone(), s.conversation_name.clone())
+            (s.consensus.clone(), s.conversation_id.clone())
         };
-        forward_incoming_proposal::<P>(&conversation_name, proposal, &consensus).await?;
+        forward_incoming_proposal::<P>(&conversation_id, proposal, &consensus).await?;
         // Skip the banner + auto-vote for fast-path proposals: the
         // creator's bundled YES already resolved the session, so peers have
         // nothing to vote on.
         if expected_voters > 1 {
-            let banner = build_vote_banner_event(&conversation_name, proposal_id, payload);
+            let banner = build_vote_banner_event(&conversation_id, proposal_id, payload);
             arc.read_or_err("session")?
                 .emit_event(SessionEvent::AppMessage(banner));
             let (delay, vote) = {
@@ -201,21 +201,21 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// message, seed scoring with the current member set, and
     /// transition to Working.
     async fn on_joined_conversation(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
-        let (packet, mls_members, conversation_name) = {
+        let (packet, mls_members, conversation_id) = {
             let mut s = arc.write_or_err("session")?;
             let msg: AppMessage = ConversationMessage {
                 message: format!("User {} joined the conversation", s.identity_display)
                     .into_bytes(),
                 sender: "SYSTEM".to_string(),
-                conversation_name: s.conversation_name.clone(),
+                conversation_id: s.conversation_id.clone(),
             }
             .into();
             let app_id = Arc::clone(&s.app_id);
-            let conversation_name = s.conversation_name.clone();
+            let conversation_id = s.conversation_id.clone();
             let mls = s.handle.expect_mls_mut()?;
             let members = mls.members().unwrap_or_default();
             let packet = mls.build_message(&msg, &app_id)?;
-            (packet, members, conversation_name)
+            (packet, members, conversation_id)
         };
         let transport = Arc::clone(arc.read_or_err("session")?.transport());
         send_packet(&transport, packet)?;
@@ -225,7 +225,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         let event = arc.write_or_err("session")?.start_working();
         arc.read_or_err("session")?
             .emit_event(SessionEvent::PhaseChange(event));
-        info!(conversation = %conversation_name, "joined conversation");
+        info!(conversation = %conversation_id, "joined conversation");
         Ok(())
     }
 
@@ -293,7 +293,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         if let Err(e) = Self::try_initiate_steward_election(arc, true, None).await {
             let conv_name = arc
                 .read_or_err("session")
-                .map(|s| s.conversation_name.clone())
+                .map(|s| s.conversation_id.clone())
                 .unwrap_or_else(|_| "<poisoned>".to_string());
             info!(
                 conversation = %conv_name,
@@ -328,7 +328,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         steward: &[u8],
     ) -> Result<(), UserError> {
         {
-            let conv_name = arc.read_or_err("session")?.conversation_name.clone();
+            let conv_name = arc.read_or_err("session")?.conversation_id.clone();
             tracing::debug!(
                 conversation = %conv_name,
                 steward = ?steward,
@@ -352,7 +352,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(
-                            conversation = %s.conversation_name,
+                            conversation = %s.conversation_id,
                             error = %e,
                             "own commit candidate build failed"
                         );
@@ -382,7 +382,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         arc: &Arc<RwLock<Self>>,
         sync: ConversationSync,
     ) -> Result<(), UserError> {
-        let (members, current_epoch, local_default_peer_score, conversation_name) = {
+        let (members, current_epoch, local_default_peer_score, conversation_id) = {
             let s = arc.read_or_err("session")?;
             if s.handle.steward_list.current_list().is_some() {
                 return Ok(());
@@ -392,11 +392,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 mls.members()?,
                 mls.current_epoch()?,
                 s.handle.scoring.default_score(),
-                s.conversation_name.clone(),
+                s.conversation_id.clone(),
             )
         };
         if !validate_conversation_sync(
-            &conversation_name,
+            &conversation_id,
             &sync,
             current_epoch,
             &members,
@@ -410,7 +410,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             .apply_conversation_sync_to_entry(&sync)?;
 
         info!(
-            conversation = %conversation_name,
+            conversation = %conversation_id,
             election_epoch = sync.election_epoch,
             stewards = sn,
             scores = sync.peer_scores.len(),
@@ -474,7 +474,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 /// or below the synced threshold prevents a misconfiguration where every
 /// new member added by this joiner starts already eligible for removal.
 fn validate_conversation_sync(
-    conversation_name: &str,
+    conversation_id: &str,
     sync: &ConversationSync,
     current_epoch: u64,
     members: &[Vec<u8>],
@@ -482,7 +482,7 @@ fn validate_conversation_sync(
 ) -> Result<bool, UserError> {
     if sync.election_epoch > current_epoch {
         info!(
-            conversation = conversation_name,
+            conversation = conversation_id,
             election_epoch = sync.election_epoch,
             current_epoch,
             "conversation sync rejected: election_epoch > current_epoch"
@@ -498,14 +498,14 @@ fn validate_conversation_sync(
     let ordering_valid = StewardList::validate(
         &sync.steward_members,
         sync.election_epoch,
-        conversation_name.as_bytes(),
+        conversation_id.as_bytes(),
         &sync.steward_members,
         &StewardListConfig::new(sync.sn_min as usize, sync.sn_max as usize)?,
         sync.retry_round,
     )?;
     if !(any_present && ordering_valid) {
         info!(
-            conversation = conversation_name,
+            conversation = conversation_id,
             any_present,
             ordering = ordering_valid,
             "conversation sync rejected: invalid"
@@ -517,7 +517,7 @@ fn validate_conversation_sync(
         && let Some(zero_field) = first_zero_timing_field(timing)
     {
         info!(
-            conversation = conversation_name,
+            conversation = conversation_id,
             field = zero_field,
             "conversation sync rejected: zero-valued timing field"
         );
@@ -526,7 +526,7 @@ fn validate_conversation_sync(
 
     if local_default_peer_score <= sync.threshold_peer_score {
         info!(
-            conversation = conversation_name,
+            conversation = conversation_id,
             local_default_peer_score,
             threshold_peer_score = sync.threshold_peer_score,
             "conversation sync rejected: default_peer_score at or below threshold would mark new members removable on add"

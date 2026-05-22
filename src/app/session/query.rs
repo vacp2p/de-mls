@@ -15,8 +15,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     }
 
     /// Name of the conversation this session runs.
-    pub fn conversation_name(&self) -> &str {
-        &self.conversation_name
+    pub fn conversation_id(&self) -> &str {
+        &self.conversation_id
     }
 
     /// Current MLS epoch + reelection retry round. `(0, 0)` when the

@@ -156,7 +156,7 @@ pub fn build_commit_candidate(
     } = mls.create_commit_candidate(&updates)?;
 
     let candidate = CommitCandidate {
-        conversation_name: group.name_bytes().to_vec(),
+        conversation_id: group.name_bytes().to_vec(),
         mls_proposals,
         commit_message: commit,
         steward_identity: self_identity.to_vec(),
@@ -283,26 +283,26 @@ impl std::ops::DerefMut for StewardHandle {
     }
 }
 
-pub fn setup_steward(conversation_name: &str, wallet_hex: &str) -> StewardHandle {
-    setup_steward_with_config(conversation_name, wallet_hex, default_steward_list_config())
+pub fn setup_steward(conversation_id: &str, wallet_hex: &str) -> StewardHandle {
+    setup_steward_with_config(conversation_id, wallet_hex, default_steward_list_config())
 }
 
 pub fn setup_steward_with_config(
-    conversation_name: &str,
+    conversation_id: &str,
     wallet_hex: &str,
     config: StewardListConfig,
 ) -> StewardHandle {
     let (identity, credentials, storage) = setup_identity_storage(wallet_hex);
     let mls = OpenMlsService::new_as_creator(
-        conversation_name.to_string(),
+        conversation_id.to_string(),
         storage,
         Arc::clone(&credentials),
     )
     .unwrap();
     let identity_bytes = identity.identity_bytes().to_vec();
-    let group = Conversation::new(conversation_name);
+    let group = Conversation::new(conversation_id);
     let mut steward_list =
-        DeterministicStewardList::empty(conversation_name.as_bytes().to_vec(), config);
+        DeterministicStewardList::empty(conversation_id.as_bytes().to_vec(), config);
     let _events = steward_list
         .install_list(0, std::slice::from_ref(&identity_bytes), 1, 0)
         .expect("bootstrap list install");
@@ -368,23 +368,22 @@ impl JoinerHandle {
     }
 }
 
-pub fn setup_joiner(conversation_name: &str, wallet_hex: &str) -> JoinerHandle {
-    setup_joiner_with_config(conversation_name, wallet_hex, default_steward_list_config())
+pub fn setup_joiner(conversation_id: &str, wallet_hex: &str) -> JoinerHandle {
+    setup_joiner_with_config(conversation_id, wallet_hex, default_steward_list_config())
 }
 
 pub fn setup_joiner_with_config(
-    conversation_name: &str,
+    conversation_id: &str,
     wallet_hex: &str,
     config: StewardListConfig,
 ) -> JoinerHandle {
     let (identity, credentials, storage) = setup_identity_storage(wallet_hex);
-    let group = Conversation::new(conversation_name);
-    let steward_list =
-        DeterministicStewardList::empty(conversation_name.as_bytes().to_vec(), config);
+    let group = Conversation::new(conversation_id);
+    let steward_list = DeterministicStewardList::empty(conversation_id.as_bytes().to_vec(), config);
     let key_package =
         OpenMlsService::<Arc<MemoryDeMlsStorage>>::generate_key_package(&storage, &credentials)
             .unwrap();
-    let kp_packet = build_key_package_packet(conversation_name, key_package, b"test-app-id");
+    let kp_packet = build_key_package_packet(conversation_id, key_package, b"test-app-id");
     JoinerHandle {
         identity,
         credentials,

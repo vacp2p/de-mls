@@ -23,7 +23,7 @@ use crate::{
 /// sends this so existing members can pick up the key package and
 /// propose them for an Add.
 pub fn build_key_package_packet(
-    conversation_name: &str,
+    conversation_id: &str,
     key_package: KeyPackageBytes,
     app_id: &[u8],
 ) -> OutboundPacket {
@@ -34,7 +34,7 @@ pub fn build_key_package_packet(
     OutboundPacket::new(
         invite.encode_to_vec(),
         WELCOME_SUBTOPIC,
-        conversation_name,
+        conversation_id,
         app_id,
     )
 }
@@ -54,7 +54,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     ) -> Result<SessionTick, UserError> {
         let (transport, packet) = {
             let s = arc.read_or_err("session")?;
-            let packet = build_key_package_packet(&s.conversation_name, key_package, &s.app_id);
+            let packet = build_key_package_packet(&s.conversation_id, key_package, &s.app_id);
             (Arc::clone(s.transport()), packet)
         };
         send_packet(&transport, packet)?;
@@ -87,7 +87,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let app_msg: AppMessage = ConversationMessage {
                 message,
                 sender: s.identity_display.to_string(),
-                conversation_name: s.conversation_name.clone(),
+                conversation_id: s.conversation_id.clone(),
             }
             .into();
             let app_id = Arc::clone(&s.app_id);

@@ -22,13 +22,13 @@ use common::{
 /// causes an error.
 #[test]
 fn test_emergency_mixed_with_regular_returns_error() {
-    let conversation_name = "emergency-digest-filter";
+    let conversation_id = "emergency-digest-filter";
     let mut steward_handle = setup_steward(
-        conversation_name,
+        conversation_id,
         "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
     );
     let mut joiner = setup_joiner(
-        conversation_name,
+        conversation_id,
         "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
     );
 
@@ -36,7 +36,7 @@ fn test_emergency_mixed_with_regular_returns_error() {
     joiner.accept_welcome(&welcome_bytes);
 
     let joiner2 = setup_joiner(
-        conversation_name,
+        conversation_id,
         "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
     );
     let result = process_inbound_compat(
@@ -84,14 +84,14 @@ fn test_emergency_mixed_with_regular_returns_error() {
 /// Test: same batch received twice hits dedup and returns Noop.
 #[test]
 fn test_duplicate_batch_returns_noop() {
-    let conversation_name = "dedup-batch";
+    let conversation_id = "dedup-batch";
 
     let mut steward_handle = setup_steward(
-        conversation_name,
+        conversation_id,
         "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
     );
     let mut joiner = setup_joiner(
-        conversation_name,
+        conversation_id,
         "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
     );
 
@@ -99,7 +99,7 @@ fn test_duplicate_batch_returns_noop() {
     joiner.accept_welcome(&welcome_bytes);
 
     let joiner2 = setup_joiner(
-        conversation_name,
+        conversation_id,
         "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
     );
 
@@ -168,14 +168,14 @@ fn test_duplicate_batch_returns_noop() {
 /// Test: candidate arriving without a freeze round is ignored.
 #[test]
 fn test_candidate_ignored_without_freeze_round() {
-    let conversation_name = "no-freeze-round";
+    let conversation_id = "no-freeze-round";
 
     let mut steward_handle = setup_steward(
-        conversation_name,
+        conversation_id,
         "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
     );
     let mut joiner = setup_joiner(
-        conversation_name,
+        conversation_id,
         "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
     );
 
@@ -183,7 +183,7 @@ fn test_candidate_ignored_without_freeze_round() {
     joiner.accept_welcome(&welcome_bytes);
 
     let joiner2 = setup_joiner(
-        conversation_name,
+        conversation_id,
         "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
     );
 
@@ -234,14 +234,14 @@ fn test_candidate_ignored_without_freeze_round() {
 /// uses MLS-authenticated sender identity from the staged commit.
 #[test]
 fn test_commit_candidate_roundtrip_sender_identity() {
-    let conversation_name = "candidate-sender-id";
+    let conversation_id = "candidate-sender-id";
 
     let mut steward_handle = setup_steward(
-        conversation_name,
+        conversation_id,
         "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
     );
     let mut joiner = setup_joiner(
-        conversation_name,
+        conversation_id,
         "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
     );
 
@@ -250,7 +250,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
 
     // Add a third member proposal
     let joiner2 = setup_joiner(
-        conversation_name,
+        conversation_id,
         "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
     );
     let result = process_inbound_compat(
@@ -332,13 +332,13 @@ fn test_commit_candidate_roundtrip_sender_identity() {
 /// skip keeps the score-op list free of `CensorshipInactivity`.
 #[test]
 fn test_backup_commit_scores_absent_steward() {
-    let conversation_name = "absent-steward";
+    let conversation_id = "absent-steward";
     let alice_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
     let bob_hex = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
     let charlie_hex = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
 
-    let mut alice_group = setup_steward(conversation_name, alice_hex);
-    let mut bob = setup_joiner(conversation_name, bob_hex);
+    let mut alice_group = setup_steward(conversation_id, alice_hex);
+    let mut bob = setup_joiner(conversation_id, bob_hex);
     let alice_id = alice_group.self_identity().to_vec();
     let bob_id = bob.self_identity();
 
@@ -358,7 +358,7 @@ fn test_backup_commit_scores_absent_steward() {
         .unwrap();
 
     // Produce an approved proposal (invite Charlie) on both sides.
-    let charlie = setup_joiner(conversation_name, charlie_hex);
+    let charlie = setup_joiner(conversation_id, charlie_hex);
     let gur = match process_inbound_compat(
         &mut alice_group.group,
         Some(&mut alice_group.mls),
@@ -452,19 +452,19 @@ fn test_backup_commit_scores_absent_steward() {
 /// attributed to the actual MLS sender, not the forged wire claim.
 #[test]
 fn test_forged_steward_identity_scores_mls_sender() {
-    let conversation_name = "forged-steward-id";
+    let conversation_id = "forged-steward-id";
 
     let steward_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
     let joiner_hex = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
     let third_hex = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
 
-    let mut steward_handle = setup_steward(conversation_name, steward_hex);
-    let mut joiner = setup_joiner(conversation_name, joiner_hex);
+    let mut steward_handle = setup_steward(conversation_id, steward_hex);
+    let mut joiner = setup_joiner(conversation_id, joiner_hex);
 
     let (welcome_bytes, _) = steward_add_joiner(&mut steward_handle, &joiner.kp_packet);
     joiner.accept_welcome(&welcome_bytes);
 
-    let third = setup_joiner(conversation_name, third_hex);
+    let third = setup_joiner(conversation_id, third_hex);
     let result = process_inbound_compat(
         &mut steward_handle.group,
         Some(&mut steward_handle.mls),
@@ -564,10 +564,10 @@ fn test_forged_steward_identity_scores_mls_sender() {
 /// Test: no valid candidate triggers NoCandidate result.
 #[test]
 fn test_no_valid_candidate_triggers_no_candidate() {
-    let conversation_name = "no-candidate";
+    let conversation_id = "no-candidate";
 
     let mut group = setup_steward(
-        conversation_name,
+        conversation_id,
         "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
     );
 

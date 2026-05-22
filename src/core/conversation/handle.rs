@@ -239,7 +239,7 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
         } = mls.create_commit_candidate(&updates)?;
 
         let candidate = CommitCandidate {
-            conversation_name: self.conversation.name_bytes().to_vec(),
+            conversation_id: self.conversation.name_bytes().to_vec(),
             mls_proposals,
             commit_message: commit,
             steward_identity: self_identity.to_vec(),

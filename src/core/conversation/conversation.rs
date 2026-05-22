@@ -74,7 +74,7 @@ pub enum FreezeBufferOutcome {
 /// Per-conversation protocol state. Stewards batch commits; members vote.
 /// Construct with [`Conversation::new`].
 pub struct Conversation {
-    conversation_name: String,
+    conversation_id: String,
     /// Proposals that passed consensus, waiting for steward to commit.
     approved_proposals: HashMap<ProposalId, ConversationUpdateRequest>,
     /// Insertion order of `approved_proposals` (FIFO). Library proposal
@@ -107,9 +107,9 @@ pub struct Conversation {
 }
 
 impl Conversation {
-    pub fn new(conversation_name: &str) -> Self {
+    pub fn new(conversation_id: &str) -> Self {
         Self {
-            conversation_name: conversation_name.to_string(),
+            conversation_id: conversation_id.to_string(),
             approved_proposals: HashMap::new(),
             approved_order: Vec::new(),
             voting_proposals: HashMap::new(),
@@ -124,11 +124,11 @@ impl Conversation {
     }
 
     pub fn name(&self) -> &str {
-        &self.conversation_name
+        &self.conversation_id
     }
 
     pub fn name_bytes(&self) -> &[u8] {
-        self.conversation_name.as_bytes()
+        self.conversation_id.as_bytes()
     }
 
     /// Build the eligibility predicate that the steward plug-in's "live"

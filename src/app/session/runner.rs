@@ -52,7 +52,7 @@ pub struct AutoVoteEntry {
 pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Conversation name. Identifies this session in the User registry and
     /// is used to construct scope keys for consensus operations.
-    pub conversation_name: String,
+    pub conversation_id: String,
     pub(crate) handle: ConversationHandle<CP>,
     /// Per-conversation consensus service. Owns this conversation's scope
     /// in the shared storage and a private event bus. Constructed at
@@ -103,7 +103,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// `handle.attach_mls`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        conversation_name: String,
+        conversation_id: String,
         conversation: Conversation,
         mls: Option<CP::Mls>,
         state_machine: ConversationStateMachine,
@@ -118,7 +118,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         app_id: Arc<[u8]>,
     ) -> Self {
         Self {
-            conversation_name,
+            conversation_id,
             handle: ConversationHandle::new(
                 conversation,
                 mls,

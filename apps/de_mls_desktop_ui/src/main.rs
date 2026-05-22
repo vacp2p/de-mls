@@ -634,7 +634,7 @@ fn StatusStrip() -> Element {
     let session = use_context::<Signal<SessionState>>();
 
     let opened = chat.read().opened_group.clone();
-    let Some(conversation_name) = opened else {
+    let Some(conversation_id) = opened else {
         return rsx! {};
     };
 
@@ -658,7 +658,7 @@ fn StatusStrip() -> Element {
 
     rsx! {
         div { class: "status-strip",
-            span { class: "status-group", "{conversation_name}" }
+            span { class: "status-group", "{conversation_id}" }
             span { class: "status-sep" }
             span { class: "status-label", "State" }
             span { class: "state-pill {state_cls}", "{state_text}" }
@@ -937,7 +937,7 @@ fn ChatSection() -> Element {
         chat.read()
             .messages
             .iter()
-            .filter(|m| Some(m.conversation_name.as_str()) == opened.as_deref())
+            .filter(|m| Some(m.conversation_id.as_str()) == opened.as_deref())
             .cloned()
             .collect::<Vec<_>>()
     };

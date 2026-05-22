@@ -119,40 +119,40 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         self.plugins.default_steward_list_config = config;
     }
 
-    /// Send a chat message on `conversation_name`. Thin wrapper over
+    /// Send a chat message on `conversation_id`. Thin wrapper over
     /// [`SessionRunner::send_app_message`]. Errors with
     /// `ConversationNotFound` if the conversation has been removed, or
     /// `ConversationBlocked` if the session is gating chat traffic.
     pub async fn send_app_message(
         &self,
-        conversation_name: &str,
+        conversation_id: &str,
         message: Vec<u8>,
     ) -> Result<SessionTick, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         SessionRunner::send_app_message(&entry, message).await
     }
 
-    /// Broadcast `key_package` on `conversation_name`'s welcome subtopic
+    /// Broadcast `key_package` on `conversation_id`'s welcome subtopic
     /// so existing members can propose adding us. Thin wrapper over
     /// [`SessionRunner::send_key_package`].
     pub async fn send_key_package(
         &self,
-        conversation_name: &str,
+        conversation_id: &str,
         key_package: KeyPackageBytes,
     ) -> Result<SessionTick, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         SessionRunner::send_key_package(&entry, key_package).await
     }
 
-    /// Walk pending deadlines on `conversation_name`. Thin wrapper over
+    /// Walk pending deadlines on `conversation_id`. Thin wrapper over
     /// [`SessionRunner::tick_deadlines`].
-    pub async fn tick_deadlines(&self, conversation_name: &str) -> Result<SessionTick, UserError> {
+    pub async fn tick_deadlines(&self, conversation_id: &str) -> Result<SessionTick, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         SessionRunner::tick_deadlines(&entry).await
     }
@@ -166,9 +166,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// transition the session is currently expecting. Drained events
     /// (e.g. `Leaving` on `PendingJoin` expiry) are read separately via
     /// [`Self::drain_events`].
-    pub async fn poll_session(&self, conversation_name: &str) -> Result<SessionTick, UserError> {
+    pub async fn poll_session(&self, conversation_id: &str) -> Result<SessionTick, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         SessionRunner::tick_deadlines(&entry).await?;
         SessionRunner::poll_freeze_status(&entry).await?;
@@ -177,38 +177,38 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         Ok(entry.read_or_err("session")?.tick())
     }
 
-    /// Drain pending [`SessionEvent`]s for `conversation_name`. Thin
+    /// Drain pending [`SessionEvent`]s for `conversation_id`. Thin
     /// wrapper over [`SessionRunner::drain_events`].
-    pub fn drain_events(&self, conversation_name: &str) -> Result<Vec<SessionEvent>, UserError> {
+    pub fn drain_events(&self, conversation_id: &str) -> Result<Vec<SessionEvent>, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         Ok(entry.read_or_err("session")?.drain_events())
     }
 
-    /// Earliest pending deadline on `conversation_name` relative to now,
+    /// Earliest pending deadline on `conversation_id` relative to now,
     /// `None` if nothing is scheduled. Mirrors
     /// [`SessionRunner::next_wakeup_in`].
-    pub fn next_wakeup_in(&self, conversation_name: &str) -> Result<Option<Duration>, UserError> {
+    pub fn next_wakeup_in(&self, conversation_id: &str) -> Result<Option<Duration>, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         Ok(entry.read_or_err("session")?.next_wakeup_in())
     }
 
     /// Propose adding the holder of `key_package_bytes` to
-    /// `conversation_name`. The local vote is bundled YES at submit. On
+    /// `conversation_id`. The local vote is bundled YES at submit. On
     /// consensus YES the epoch steward authors a commit containing the
     /// Add; the resulting welcome arrives via
     /// [`crate::core::SessionEvent::WelcomeReady`] for the integrator to
     /// deliver out of band.
     pub async fn add_member(
         &self,
-        conversation_name: &str,
+        conversation_id: &str,
         key_package_bytes: &[u8],
     ) -> Result<SessionTick, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         let (key_package_bytes, identity) = key_package_bytes_from_tls(key_package_bytes.to_vec())?;
         let request = ConversationUpdateRequest {
@@ -237,30 +237,30 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .conversation_plugins
             .welcome_mls(welcome_bytes)?
             .ok_or(UserError::WelcomeNotForUs)?;
-        let conversation_name = svc.conversation_id().to_string();
+        let conversation_id = svc.conversation_id().to_string();
 
-        if self.lookup_entry(&conversation_name)?.is_none() {
-            self.start_conversation(&conversation_name, false).await?;
+        if self.lookup_entry(&conversation_id)?.is_none() {
+            self.start_conversation(&conversation_id, false).await?;
         }
         let entry_arc = self
-            .lookup_entry(&conversation_name)?
+            .lookup_entry(&conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
 
         {
             let mut entry = entry_arc.write_or_err("session")?;
             if entry.handle.mls().is_some() {
-                return Ok((conversation_name, entry.tick()));
+                return Ok((conversation_id, entry.tick()));
             }
             entry.handle.attach_mls(svc);
         }
         self.finish_dispatch(
-            &conversation_name,
+            &conversation_id,
             &entry_arc,
-            crate::core::ProcessResult::JoinedConversation(conversation_name.clone()),
+            crate::core::ProcessResult::JoinedConversation(conversation_id.clone()),
         )
         .await?;
         let tick = entry_arc.read_or_err("session")?.tick();
-        Ok((conversation_name, tick))
+        Ok((conversation_id, tick))
     }
 
     // ── UI actions ─────────────────────────────────────────────────────
@@ -270,12 +270,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`SessionRunner::process_user_vote`].
     pub async fn process_user_vote(
         &self,
-        conversation_name: &str,
+        conversation_id: &str,
         proposal_id: u32,
         vote: bool,
     ) -> Result<SessionTick, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         SessionRunner::process_user_vote(&entry, proposal_id, vote).await?;
         Ok(entry.read_or_err("session")?.tick())
@@ -286,11 +286,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Thin wrapper over [`SessionRunner::process_ban_request`].
     pub async fn process_ban_request(
         &self,
-        conversation_name: &str,
+        conversation_id: &str,
         ban_request: BanRequest,
     ) -> Result<SessionTick, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         SessionRunner::process_ban_request(&entry, ban_request).await
     }
@@ -302,12 +302,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`SessionRunner::initiate_proposal`].
     pub async fn initiate_proposal(
         &self,
-        conversation_name: &str,
+        conversation_id: &str,
         request: ConversationUpdateRequest,
         creator_vote: CreatorVote,
     ) -> Result<SessionTick, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         SessionRunner::initiate_proposal(&entry, request, creator_vote).await?;
         Ok(entry.read_or_err("session")?.tick())
@@ -320,10 +320,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`SessionRunner::initiate_self_leave`].
     pub async fn initiate_self_leave(
         &self,
-        conversation_name: &str,
+        conversation_id: &str,
     ) -> Result<SessionTick, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         SessionRunner::initiate_self_leave(&entry).await?;
         Ok(entry.read_or_err("session")?.tick())
@@ -331,33 +331,33 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
     // ── State queries ──────────────────────────────────────────────────
 
-    /// Current state-machine value for `conversation_name`. Mirrors
+    /// Current state-machine value for `conversation_id`. Mirrors
     /// [`SessionRunner::get_conversation_state`].
     pub fn get_conversation_state(
         &self,
-        conversation_name: &str,
+        conversation_id: &str,
     ) -> Result<ConversationState, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         Ok(entry.read_or_err("session")?.get_conversation_state())
     }
 
     /// `true` if the local user is on the current steward list for
-    /// `conversation_name`. Mirrors [`SessionRunner::is_steward_for_self`].
-    pub fn is_steward(&self, conversation_name: &str) -> Result<bool, UserError> {
+    /// `conversation_id`. Mirrors [`SessionRunner::is_steward_for_self`].
+    pub fn is_steward(&self, conversation_id: &str) -> Result<bool, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         Ok(entry.read_or_err("session")?.is_steward_for_self())
     }
 
-    /// MLS epoch + reelection retry round for `conversation_name`. `(0, 0)`
+    /// MLS epoch + reelection retry round for `conversation_id`. `(0, 0)`
     /// before MLS is attached. Mirrors
     /// [`SessionRunner::get_epoch_and_retry`].
-    pub fn get_epoch_and_retry(&self, conversation_name: &str) -> Result<(u64, u32), UserError> {
+    pub fn get_epoch_and_retry(&self, conversation_id: &str) -> Result<(u64, u32), UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         entry.read_or_err("session")?.get_epoch_and_retry()
     }
@@ -366,10 +366,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`SessionRunner::get_conversation_members`].
     pub fn get_conversation_members(
         &self,
-        conversation_name: &str,
+        conversation_id: &str,
     ) -> Result<Vec<Vec<u8>>, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         entry.read_or_err("session")?.get_conversation_members()
     }
@@ -378,10 +378,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`SessionRunner::get_member_scores`].
     pub fn get_member_scores(
         &self,
-        conversation_name: &str,
+        conversation_id: &str,
     ) -> Result<Vec<(Vec<u8>, i64)>, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         Ok(entry.read_or_err("session")?.get_member_scores())
     }
@@ -390,11 +390,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`SessionRunner::get_member_score`].
     pub fn get_member_score(
         &self,
-        conversation_name: &str,
+        conversation_id: &str,
         member_id: &[u8],
     ) -> Result<Option<i64>, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         Ok(entry.read_or_err("session")?.get_member_score(member_id))
     }
@@ -403,10 +403,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`SessionRunner::get_member_roles`].
     pub fn get_member_roles(
         &self,
-        conversation_name: &str,
+        conversation_id: &str,
     ) -> Result<Vec<(Vec<u8>, MemberRole)>, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         entry.read_or_err("session")?.get_member_roles()
     }
@@ -415,19 +415,19 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`SessionRunner::get_pending_leave_identities`].
     pub fn get_pending_leave_identities(
         &self,
-        conversation_name: &str,
+        conversation_id: &str,
     ) -> Result<Vec<Vec<u8>>, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         entry.read_or_err("session")?.get_pending_leave_identities()
     }
 
     /// Buffered pending membership-update count. Mirrors
     /// [`SessionRunner::get_pending_update_count`].
-    pub fn get_pending_update_count(&self, conversation_name: &str) -> Result<usize, UserError> {
+    pub fn get_pending_update_count(&self, conversation_id: &str) -> Result<usize, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         Ok(entry.read_or_err("session")?.get_pending_update_count())
     }
@@ -436,10 +436,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`SessionRunner::get_freeze_candidate_count`].
     pub fn get_freeze_candidate_count(
         &self,
-        conversation_name: &str,
+        conversation_id: &str,
     ) -> Result<(usize, usize), UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         Ok(entry.read_or_err("session")?.get_freeze_candidate_count())
     }
@@ -448,10 +448,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`SessionRunner::get_approved_proposals_for_current_epoch`].
     pub fn get_approved_proposals_for_current_epoch(
         &self,
-        conversation_name: &str,
+        conversation_id: &str,
     ) -> Result<Vec<ConversationUpdateRequest>, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         Ok(entry
             .read_or_err("session")?
@@ -487,15 +487,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// pending-join timeout.
     pub(crate) async fn cleanup_consensus_scope(
         &self,
-        conversation_name: &str,
+        conversation_id: &str,
     ) -> Result<(), UserError> {
-        if let Some(entry_arc) = self.lookup_entry(conversation_name)? {
+        if let Some(entry_arc) = self.lookup_entry(conversation_id)? {
             entry_arc
                 .write()
                 .map_err(|_| UserError::LockPoisoned("session"))?
                 .cancel_all_auto_votes();
         }
-        let scope = P::Scope::from(conversation_name.to_string());
+        let scope = P::Scope::from(conversation_id.to_string());
         self.plugins.consensus.delete_scope(&scope).await?;
         Ok(())
     }

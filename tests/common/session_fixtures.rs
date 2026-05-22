@@ -214,7 +214,7 @@ pub async fn route_welcomes(
     for welcome in welcomes {
         let conv_name = sessions
             .first()
-            .map(|s| s.read().unwrap().conversation_name().to_string())
+            .map(|s| s.read().unwrap().conversation_id().to_string())
             .unwrap_or_default();
         for (u, _) in users.iter_mut() {
             // Try every user — `welcome_mls` returns `Ok(None)` (which
@@ -257,7 +257,7 @@ pub fn spawn_consensus_forwarder(session: SessionArc) -> JoinHandle<()> {
     use hashgraph_like_consensus::events::ConsensusEventBus;
     tokio::spawn(async move {
         let mut rx = session.read().unwrap().consensus.event_bus().subscribe();
-        while let Ok((_conversation_name, event)) = rx.recv().await {
+        while let Ok((_conversation_id, event)) = rx.recv().await {
             let _ = SessionRunner::apply_consensus_outcome(&session, event).await;
         }
     })

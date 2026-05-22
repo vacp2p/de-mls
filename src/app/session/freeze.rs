@@ -54,12 +54,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// after emitting `SessionEvent::Leaving` once the pending-join window
     /// elapses; the caller handles registry-side cleanup.
     pub fn check_pending_join(arc: &Arc<RwLock<Self>>) -> Result<PendingJoinTick, UserError> {
-        let (state, expired, conversation_name) = {
+        let (state, expired, conversation_id) = {
             let s = arc.read_or_err("session")?;
             (
                 s.handle.current_state(),
                 s.is_pending_join_expired(),
-                s.conversation_name.clone(),
+                s.conversation_id.clone(),
             )
         };
         if state != ConversationState::PendingJoin {
@@ -68,7 +68,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         if !expired {
             return Ok(PendingJoinTick::StillPending);
         }
-        info!(conversation = %conversation_name, "pending join timed out");
+        info!(conversation = %conversation_id, "pending join timed out");
         arc.read_or_err("session")?
             .emit_event(SessionEvent::Leaving);
         Ok(PendingJoinTick::Expired)
@@ -109,7 +109,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         arc.read_or_err("session")?
             .emit_event(SessionEvent::PhaseChange(selection_event));
 
-        let (mut finalize_result, downward_cross, conversation_name) = {
+        let (mut finalize_result, downward_cross, conversation_id) = {
             let mut s = arc.write_or_err("session")?;
             let allow_subset = s.handle.steward_list.config().allow_subset_candidates;
             let self_identity = Arc::clone(&s.self_identity);
@@ -117,7 +117,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 match s.handle.finalize_freeze_round(allow_subset, &self_identity) {
                     Ok(result) => result,
                     Err(e) => {
-                        error!(conversation = %s.conversation_name, error = %e, "freeze finalize failed");
+                        error!(conversation = %s.conversation_id, error = %e, "freeze finalize failed");
                         FreezeFinalizeResult::default()
                     }
                 }
@@ -135,7 +135,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             } else {
                 false
             };
-            (result, cross, s.conversation_name.clone())
+            (result, cross, s.conversation_id.clone())
         };
 
         if !finalize_result.committed_batch.is_empty() {
@@ -151,7 +151,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // lock across that await would block other operations on this
         // conversation, so we drop the lock above before chaining.
         if downward_cross && let Err(e) = Self::check_and_initiate_score_removals(arc).await {
-            error!(conversation = %conversation_name, error = %e, "score-removal check failed (freeze finalize)");
+            error!(conversation = %conversation_id, error = %e, "score-removal check failed (freeze finalize)");
         }
 
         match finalize_result.outcome {
@@ -174,7 +174,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 let outcome = match Self::dispatch_inbound_result(arc, result).await {
                     Ok(o) => o,
                     Err(e) => {
-                        error!(conversation = %conversation_name, error = %e, "finalize result dispatch failed");
+                        error!(conversation = %conversation_id, error = %e, "finalize result dispatch failed");
                         DispatchOutcome::Done
                     }
                 };
@@ -234,7 +234,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
                 if downward_cross && let Err(e) = Self::check_and_initiate_score_removals(arc).await
                 {
-                    error!(conversation = %conversation_name, error = %e, "score-removal check failed (freeze timeout)");
+                    error!(conversation = %conversation_id, error = %e, "score-removal check failed (freeze timeout)");
                 }
 
                 let entered_reelection = transition_event == ConversationState::Reelection;
@@ -246,7 +246,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 if entered_reelection
                     && let Err(e) = Self::try_initiate_steward_election(arc, true, None).await
                 {
-                    info!(conversation = %conversation_name, error = %e, "recovery election deferred");
+                    info!(conversation = %conversation_id, error = %e, "recovery election deferred");
                 }
             }
         }
@@ -305,7 +305,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(
-                            conversation = %s.conversation_name,
+                            conversation = %s.conversation_id,
                             error = %e,
                             "commit candidate build failed"
                         );
@@ -317,7 +317,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             };
 
             info!(
-                conversation = %s.conversation_name,
+                conversation = %s.conversation_id,
                 approved = proposal_count,
                 "steward inactivity transition"
             );

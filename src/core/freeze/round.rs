@@ -73,13 +73,13 @@ pub fn buffer_commit_candidate<M: MlsService>(
     mls: &mut M,
     candidate_msg: CommitCandidate,
 ) -> Result<ProcessResult, CoreError> {
-    let conversation_name = conversation.name().to_owned();
+    let conversation_id = conversation.name().to_owned();
 
     // Auto-start a freeze round if we already have approved proposals —
     // otherwise the candidate would be silently dropped.
     if conversation.freeze_round().is_none() {
         if conversation.approved_proposals_count() == 0 {
-            tracing::debug!(conversation = %conversation_name, "candidate ignored: no approved proposals");
+            tracing::debug!(conversation = %conversation_id, "candidate ignored: no approved proposals");
             return Ok(ProcessResult::Noop(NoopReason::NoApprovedProposals));
         }
         let epoch = mls.current_epoch()?;
@@ -88,17 +88,17 @@ pub fn buffer_commit_candidate<M: MlsService>(
 
     let commit_hash = compute_commit_hash(&candidate_msg.commit_message);
     if conversation.is_duplicate_commit_candidate(&commit_hash) {
-        tracing::debug!(conversation = %conversation_name, "candidate ignored: already committed");
+        tracing::debug!(conversation = %conversation_id, "candidate ignored: already committed");
         return Ok(ProcessResult::Noop(NoopReason::AlreadyCommitted));
     }
 
     if candidate_msg.mls_proposals.is_empty() || candidate_msg.commit_message.is_empty() {
-        tracing::debug!(conversation = %conversation_name, "candidate ignored: empty proposals or commit");
+        tracing::debug!(conversation = %conversation_id, "candidate ignored: empty proposals or commit");
         return Ok(ProcessResult::Noop(NoopReason::EmptyCandidatePayload));
     }
 
     if candidate_msg.steward_identity.is_empty() {
-        tracing::debug!(conversation = %conversation_name, "candidate ignored: empty steward_identity");
+        tracing::debug!(conversation = %conversation_id, "candidate ignored: empty steward_identity");
         return Ok(ProcessResult::Noop(NoopReason::EmptyStewardIdentity));
     }
 
@@ -113,7 +113,7 @@ pub fn buffer_commit_candidate<M: MlsService>(
     );
     if !proposals_ok || !commit_ok {
         tracing::debug!(
-            conversation = %conversation_name,
+            conversation = %conversation_id,
             proposals_ok,
             commit_ok,
             "candidate ignored: wire kind mismatch (not Proposal/Commit)"
@@ -135,7 +135,7 @@ pub fn buffer_commit_candidate<M: MlsService>(
     match outcome {
         FreezeBufferOutcome::Buffered => {
             info!(
-                conversation = %conversation_name,
+                conversation = %conversation_id,
                 epoch,
                 total_candidates = conversation.freeze_candidate_count(),
                 "remote candidate buffered"
@@ -365,7 +365,7 @@ mod tests {
     ) -> BufferedCommitCandidate {
         BufferedCommitCandidate {
             candidate_msg: CommitCandidate {
-                conversation_name: b"test-conversation".to_vec(),
+                conversation_id: b"test-conversation".to_vec(),
                 mls_proposals: vec![vec![0xFF; 10]; actions_count],
                 commit_message: commit_hash.as_bytes().to_vec(),
                 steward_identity,
