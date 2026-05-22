@@ -114,13 +114,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             entry
                 .handle
                 .mls()
-                .map(|m| m.is_member(&invite.identity))
+                .map(|m| m.is_member(&invite.member_id))
                 .unwrap_or(false)
         };
         if already_member {
             info!(
                 conversation = conversation_id,
-                identity = ?invite.identity,
+                member = ?invite.member_id,
                 "key package skipped: already a member"
             );
             return Ok(());
@@ -128,7 +128,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
         info!(
             conversation = conversation_id,
-            identity = ?invite.identity,
+            member = ?invite.member_id,
             "key package received"
         );
 

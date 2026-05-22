@@ -27,4 +27,4 @@ pub use conversation::{
 };
 pub use handle::ConversationHandle;
 pub use state_machine::{ConversationState, ConversationStateMachine, OperatingMode};
-pub use util::{member_set, self_leave_proposal_id, target_identity_of};
+pub use util::{member_set, self_leave_proposal_id, target_member_id_of};

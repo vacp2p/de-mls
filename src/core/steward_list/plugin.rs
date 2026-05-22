@@ -78,7 +78,7 @@ pub trait StewardListPlugin {
     // ── State predicates ───────────────────────────────────────────
 
     /// True iff `identity` sits in the active list.
-    fn is_steward(&self, identity: &[u8]) -> bool;
+    fn is_steward(&self, member_id: &[u8]) -> bool;
 
     /// True iff `epoch` falls outside the list's covered window
     /// `[election_epoch, election_epoch + len)`. A new election MUST
@@ -159,7 +159,7 @@ pub trait StewardListPlugin {
         &self,
         epoch: u64,
         candidate_pool: &[Vec<u8>],
-        self_identity: &[u8],
+        self_member_id: &[u8],
         eligible: F,
         recovery: bool,
     ) -> Result<ElectionDecision, CoreError>;

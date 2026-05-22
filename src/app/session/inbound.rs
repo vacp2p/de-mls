@@ -108,7 +108,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 Self::prepare_self_leave(arc)?;
                 Ok(DispatchOutcome::LeaveRequested)
             }
-            ProcessResult::CommitCandidateReceived { steward } => {
+            ProcessResult::CommitCandidateReceived {
+                steward_id: steward,
+            } => {
                 Self::on_commit_candidate_received(arc, &steward).await?;
                 Ok(DispatchOutcome::Done)
             }
@@ -204,7 +206,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         let (packet, mls_members, conversation_id) = {
             let mut s = arc.write_or_err("session")?;
             let msg: AppMessage = ConversationMessage {
-                message: format!("User {} joined the conversation", s.identity_display)
+                message: format!("User {} joined the conversation", s.member_id_display)
                     .into_bytes(),
                 sender: "SYSTEM".to_string(),
                 conversation_id: s.conversation_id.clone(),
@@ -290,7 +292,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         if !in_recovery_mode {
             return;
         }
-        if let Err(e) = Self::try_initiate_steward_election(arc, true, None).await {
+        if let Err(e) = Self::initiate_steward_election(arc, true).await {
             let conv_name = arc
                 .read_or_err("session")
                 .map(|s| s.conversation_id.clone())
@@ -345,10 +347,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let epoch = s.handle.expect_mls()?.current_epoch()?;
             s.handle.conversation.ensure_freeze_round(epoch);
 
-            let self_identity = Arc::clone(&s.self_identity);
+            let self_member_id = Arc::clone(&s.self_member_id);
             let app_id = Arc::clone(&s.app_id);
-            let outbound = if s.handle.steward_list.is_steward(&self_identity) {
-                match s.handle.create_commit_candidate(&self_identity, &app_id) {
+            let outbound = if s.handle.steward_list.is_steward(&self_member_id) {
+                match s.handle.create_commit_candidate(&self_member_id, &app_id) {
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(

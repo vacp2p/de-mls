@@ -240,7 +240,7 @@ fn removal_request_for(evidence: &ViolationEvidence) -> ConversationUpdateReques
     ConversationUpdateRequest {
         payload: Some(conversation_update_request::Payload::RemoveMember(
             RemoveMember {
-                identity: evidence.target_member_id.clone(),
+                member_id: evidence.target_member_id.clone(),
             },
         )),
     }
@@ -267,7 +267,7 @@ fn pending_removal_target(
         return None;
     }
     match request.payload.as_ref() {
-        Some(conversation_update_request::Payload::RemoveMember(r)) => Some(r.identity.clone()),
+        Some(conversation_update_request::Payload::RemoveMember(r)) => Some(r.member_id.clone()),
         _ => None,
     }
 }
@@ -379,7 +379,7 @@ mod tests {
     fn remove_request(target: Vec<u8>) -> ConversationUpdateRequest {
         ConversationUpdateRequest {
             payload: Some(conversation_update_request::Payload::RemoveMember(
-                RemoveMember { identity: target },
+                RemoveMember { member_id: target },
             )),
         }
     }

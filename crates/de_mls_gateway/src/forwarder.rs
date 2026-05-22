@@ -24,7 +24,7 @@ pub(crate) async fn lookup_session(
         .ok_or(UserError::ConversationNotFound)
 }
 
-/// Render a batch of approved proposals as `(action, identity)` pairs,
+/// Render a batch of approved proposals as `(action, member_id)` pairs,
 /// dropping any entry with an empty payload.
 pub(crate) fn display_batch(batch: &[ConversationUpdateRequest]) -> Vec<(String, String)> {
     batch
@@ -47,7 +47,7 @@ pub(crate) async fn load_member_info(
     let member_bytes = runner.get_conversation_members()?;
     let scores = runner.get_member_scores();
     let roles = runner.get_member_roles().unwrap_or_default();
-    let pending_leavers = runner.get_pending_leave_identities().unwrap_or_default();
+    let pending_leavers = runner.get_pending_leave_member_ids().unwrap_or_default();
 
     Ok(member_bytes
         .into_iter()

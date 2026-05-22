@@ -299,7 +299,7 @@ pub async fn poll_once(session: &SessionArc) {
 ///
 /// The quiet-period exit matters: the InviteMember commit's
 /// `on_conversation_updated` handler fires
-/// `steward_list_housekeeping` → `try_initiate_steward_election` right as
+/// `steward_list_housekeeping` → `initiate_steward_election` right as
 /// joiners reach Working. If bootstrap exits the instant joiners are
 /// Working, that election gets orphaned — its `consensus_timeout` fires
 /// without enough votes, `handle_election_rejected` bumps the creator's

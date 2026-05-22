@@ -342,7 +342,7 @@ impl Gateway<WakuDeliveryService> {
 
     /// Get epoch history for a group (past batches of approved proposals).
     ///
-    /// Returns up to the last 10 epochs, each as a list of `(action, identity)` pairs.
+    /// Returns up to the last 10 epochs, each as a list of `(action, member_id)` pairs.
     pub async fn get_epoch_history(
         &self,
         conversation_id: String,

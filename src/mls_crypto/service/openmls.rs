@@ -147,12 +147,12 @@ impl<S: DeMlsStorage> OpenMlsService<S> {
 
         storage.store_key_package_ref(&hash_ref)?;
 
-        let identity_bytes = credentials
+        let member_id_bytes = credentials
             .credential()
             .credential
             .serialized_content()
             .to_vec();
 
-        Ok(KeyPackageBytes::new(bytes, identity_bytes))
+        Ok(KeyPackageBytes::new(bytes, member_id_bytes))
     }
 }

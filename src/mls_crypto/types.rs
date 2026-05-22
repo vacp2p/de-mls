@@ -10,12 +10,12 @@ use crate::mls_crypto::MlsError;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyPackageBytes {
     bytes: Vec<u8>,
-    identity: Vec<u8>,
+    member_id: Vec<u8>,
 }
 
 impl KeyPackageBytes {
-    pub fn new(bytes: Vec<u8>, identity: Vec<u8>) -> Self {
-        Self { bytes, identity }
+    pub fn new(bytes: Vec<u8>, member_id: Vec<u8>) -> Self {
+        Self { bytes, member_id }
     }
 
     /// Serialized key package bytes.
@@ -23,10 +23,10 @@ impl KeyPackageBytes {
         &self.bytes
     }
 
-    /// Identity bytes of the key package's owner, extracted from the
+    /// Member-id bytes of the key package's owner, extracted from the
     /// MLS credential at construction time.
-    pub fn identity(&self) -> &[u8] {
-        &self.identity
+    pub fn member_id(&self) -> &[u8] {
+        &self.member_id
     }
 }
 
@@ -132,16 +132,16 @@ pub struct CommitCandidate {
 }
 
 /// Parse TLS-serialized key package bytes and extract the leaf-credential
-/// identity. Returns `(key_package_bytes, identity)` — the bytes are
+/// identity. Returns `(key_package_bytes, member_id)` — the bytes are
 /// passed through unchanged so the caller can re-broadcast them on the
 /// wire without a second serialization pass.
 pub fn key_package_bytes_from_tls(bytes: Vec<u8>) -> Result<(Vec<u8>, Vec<u8>), MlsError> {
     let (kp_in, _rest) =
         KeyPackageIn::tls_deserialize_bytes(&bytes).map_err(MlsError::KeyPackageTls)?;
-    let identity = kp_in
+    let member_id = kp_in
         .unverified_credential()
         .credential
         .serialized_content()
         .to_vec();
-    Ok((bytes, identity))
+    Ok((bytes, member_id))
 }

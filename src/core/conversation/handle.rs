@@ -135,13 +135,13 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
     /// attached.
     pub(crate) fn create_commit_candidate(
         &mut self,
-        self_identity: &[u8],
+        self_member_id: &[u8],
         app_id: &[u8],
     ) -> Result<Option<OutboundPacket>, CoreError> {
         if self.mls.is_none() {
             return Err(CoreError::MlsGroupNotInitialized);
         }
-        if !self.steward_list.is_steward(self_identity) && !self.is_in_recovery_mode() {
+        if !self.steward_list.is_steward(self_member_id) && !self.is_in_recovery_mode() {
             return Err(CoreError::NotASteward);
         }
 
@@ -152,7 +152,7 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
         // MLS forbids committing one's own removal. If the approved batch contains
         // RemoveMember(self), skip local candidate creation — another steward will
         // commit the batch (including this node's removal) once they enter freeze.
-        if self.conversation.is_pending_removal(self_identity) {
+        if self.conversation.is_pending_removal(self_member_id) {
             info!(
                 conversation = self.conversation.name(),
                 "commit candidate skipped: approved batch contains self-remove"
@@ -192,37 +192,32 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
         // Iterate in insertion order (FIFO): library proposal IDs are
         // content-derived hashes, so sort-by-id is not temporal.
         let k_max = mls.commit_batch_max();
-        let mut updates = Vec::with_capacity(self.conversation.approved_order().len().min(k_max));
-        for pid in self.conversation.approved_order() {
-            if updates.len() >= k_max {
-                break;
-            }
-            let Some(proposal) = self.conversation.approved_proposals().get(pid) else {
-                continue;
-            };
+        let approved = self.conversation.approved_proposals();
+        let mut updates = Vec::with_capacity(approved.len().min(k_max));
+        for (_pid, proposal) in approved.iter().take(k_max) {
             match proposal.payload.as_ref() {
                 Some(Payload::MemberInvite(im)) => {
                     if urgent_target.is_some() {
                         continue;
                     }
-                    if is_member(&im.identity) {
+                    if is_member(&im.member_id) {
                         continue;
                     }
                     updates.push(MlsCommitInput::Add(KeyPackageBytes::new(
                         im.key_package_bytes.clone(),
-                        im.identity.clone(),
+                        im.member_id.clone(),
                     )));
                 }
                 Some(Payload::RemoveMember(rm)) => {
                     if let Some(target) = urgent_target.as_deref()
-                        && rm.identity != target
+                        && rm.member_id != target
                     {
                         continue;
                     }
-                    if !is_member(&rm.identity) {
+                    if !is_member(&rm.member_id) {
                         continue;
                     }
-                    updates.push(MlsCommitInput::Remove(rm.identity.clone()));
+                    updates.push(MlsCommitInput::Remove(rm.member_id.clone()));
                 }
                 _ => return Err(CoreError::InvalidConversationUpdateRequest),
             }
@@ -242,7 +237,7 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
             conversation_id: self.conversation.name_bytes().to_vec(),
             mls_proposals,
             commit_message: commit,
-            steward_identity: self_identity.to_vec(),
+            steward_member_id: self_member_id.to_vec(),
         };
 
         // Welcome bytes are deferred until our merge so joiners can't
@@ -289,7 +284,7 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
     pub(crate) fn finalize_freeze_round(
         &mut self,
         allow_subset_candidates: bool,
-        self_identity: &[u8],
+        self_member_id: &[u8],
     ) -> Result<FreezeFinalizeResult, CoreError> {
         let in_recovery = self.operating_mode == OperatingMode::Recovery;
         let mls = self.mls.as_mut().ok_or(CoreError::MlsGroupNotInitialized)?;
@@ -299,7 +294,7 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
             &self.steward_list,
             in_recovery,
             allow_subset_candidates,
-            self_identity,
+            self_member_id,
         )
     }
 

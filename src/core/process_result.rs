@@ -21,9 +21,7 @@ use crate::{
 ///
 /// Heavy protobuf payloads (`AppMessage`, `Proposal`, `Vote`,
 /// `ConversationUpdateRequest`, `ConversationSync` — each 88–144 bytes) are
-/// boxed so the enum stays small. Without boxing the enum is sized to its
-/// largest variant and every return / clone / match-move copies ~150 bytes;
-/// with boxing it drops to ~32 bytes.
+/// boxed so the enum stays small.
 #[derive(Debug, Clone)]
 pub enum ProcessResult {
     /// Decrypted application message ready to deliver to the UI.
@@ -48,17 +46,12 @@ pub enum ProcessResult {
     ConversationUpdated,
 
     /// Remote commit candidate was buffered in the active freeze round.
-    /// `steward` is the wire-claimed identity from the candidate; the app
-    /// layer uses it for dispatch context (logging, scoring attribution).
-    CommitCandidateReceived { steward: Vec<u8> },
+    CommitCandidateReceived { steward_id: Vec<u8> },
 
-    /// Conversation-sync message from the steward (steward list, scores, timing,
-    /// protocol flags). Meaningful only for joiners with no steward list yet.
+    /// Conversation-sync message from the steward.
     ConversationSyncReceived(Box<ConversationSync>),
 
-    /// Nothing to do. The reason variant names the specific case so the
-    /// app layer can match precisely instead of relying on producer-side
-    /// log lines for context.
+    /// Nothing to do.
     Noop(NoopReason),
 }
 
@@ -77,18 +70,17 @@ pub enum NoopReason {
     DecryptIgnored,
     /// Decrypt returned a non-Application MLS payload on the app subtopic.
     UnexpectedMlsType,
-    /// `buffer_commit_candidate` found no approved proposals to commit.
+    /// No approved proposals to commit.
     NoApprovedProposals,
     /// Commit hash matches a recent committed batch — duplicate broadcast.
     AlreadyCommitted,
     /// Candidate carried an empty proposals or commit payload.
     EmptyCandidatePayload,
-    /// Candidate carried an empty `steward_identity` field.
-    EmptyStewardIdentity,
+    /// Candidate carried an empty `steward_member_id` field.
+    EmptyStewardMemberId,
     /// Candidate's wire kind doesn't match Proposal/Commit.
     WireKindMismatch,
-    /// Freeze round selection is locked — the buffer no longer accepts
-    /// candidates.
+    /// Freeze round selection is locked — the buffer no longer accepts candidates.
     SelectionLocked,
     /// Caller's epoch doesn't match the buffered round's epoch.
     StaleEpoch,
@@ -157,7 +149,7 @@ impl ViolationEvidence {
         }
     }
 
-    /// Set the creator identity on this evidence (called by app layer before voting).
+    /// Set the creator member_id on this evidence (called by app layer before voting).
     pub fn with_creator(mut self, creator: Vec<u8>) -> Self {
         self.creator_member_id = creator;
         self
@@ -166,7 +158,7 @@ impl ViolationEvidence {
     /// Wrap this evidence into a `ConversationUpdateRequest` for consensus voting.
     ///
     /// Returns an error if `creator_member_id` is empty. Call `.with_creator()` before this
-    /// method — every ECP must carry the creator identity for peer scoring (RFC §"Peer Scoring").
+    /// method — every ECP must carry the creator member_id for peer scoring (RFC §"Peer Scoring").
     pub fn into_update_request(self) -> Result<ConversationUpdateRequest, CoreError> {
         if self.creator_member_id.is_empty() {
             return Err(CoreError::InvalidConversationUpdateRequest);
@@ -229,7 +221,7 @@ impl_payload_from!(
     BanRequest          => app_message::Payload::BanRequest,
     Proposal            => app_message::Payload::Proposal,
     Vote                => app_message::Payload::Vote,
-    ConversationSync           => app_message::Payload::ConversationSync,
+    ConversationSync    => app_message::Payload::ConversationSync,
     ProposalAdded       => app_message::Payload::ProposalAdded,
 );
 
@@ -260,7 +252,7 @@ impl TryFrom<AppMessage> for ProcessResult {
                 ProcessResult::MembershipChangeReceived(Box::new(ConversationUpdateRequest {
                     payload: Some(conversation_update_request::Payload::RemoveMember(
                         RemoveMember {
-                            identity: ban_request.user_to_ban.clone(),
+                            member_id: ban_request.user_to_ban.clone(),
                         },
                     )),
                 })),
@@ -304,7 +296,7 @@ mod tests {
         assert_eq!(ev.creator_member_id, vec![0x01]);
     }
 
-    /// `into_update_request` rejects evidence with no creator identity.
+    /// `into_update_request` rejects evidence with no creator id.
     #[test]
     fn into_update_request_errors_without_creator() {
         let evidence = ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new());

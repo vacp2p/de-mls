@@ -20,7 +20,7 @@
 pub mod session_fixtures;
 pub mod wallet;
 
-pub use wallet::WalletIdentity;
+pub use wallet::WalletMemberId;
 
 use std::sync::{
     Arc,
@@ -36,7 +36,7 @@ use de_mls::core::{
 };
 use de_mls::defaults::{InMemoryPeerScoreStorage, MemoryDeMlsStorage};
 use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
-use de_mls::identity::Identity;
+use de_mls::member_id::MemberId;
 use de_mls::mls_crypto::{
     CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MlsCommitInput, MlsCredentials,
     MlsService, OpenMlsService,
@@ -70,10 +70,10 @@ pub fn build_commit_candidate(
     mls: &mut TestMls,
     steward_list: &DeterministicStewardList,
     in_recovery: bool,
-    self_identity: &[u8],
+    self_member_id: &[u8],
     app_id: &[u8],
 ) -> Result<Option<OutboundPacket>, CoreError> {
-    if !steward_list.is_steward(self_identity) && !in_recovery {
+    if !steward_list.is_steward(self_member_id) && !in_recovery {
         return Err(CoreError::NotASteward);
     }
     if group.approved_proposals().is_empty() {
@@ -84,7 +84,7 @@ pub fn build_commit_candidate(
         matches!(
             req.payload.as_ref(),
             Some(conversation_update_request::Payload::RemoveMember(r))
-                if r.identity == self_identity
+                if r.member_id == self_member_id
         )
     });
     if self_removal_pending {
@@ -109,37 +109,32 @@ pub fn build_commit_candidate(
     let urgent_target = group.urgent_commit_target().map(|t| t.to_vec());
 
     let k_max = mls.commit_batch_max();
-    let mut updates = Vec::with_capacity(group.approved_order().len().min(k_max));
-    for pid in group.approved_order() {
-        if updates.len() >= k_max {
-            break;
-        }
-        let Some(proposal) = group.approved_proposals().get(pid) else {
-            continue;
-        };
+    let approved = group.approved_proposals();
+    let mut updates = Vec::with_capacity(approved.len().min(k_max));
+    for (_pid, proposal) in approved.iter().take(k_max) {
         match proposal.payload.as_ref() {
             Some(conversation_update_request::Payload::MemberInvite(im)) => {
                 if urgent_target.is_some() {
                     continue;
                 }
-                if is_member(&im.identity) {
+                if is_member(&im.member_id) {
                     continue;
                 }
                 updates.push(MlsCommitInput::Add(KeyPackageBytes::new(
                     im.key_package_bytes.clone(),
-                    im.identity.clone(),
+                    im.member_id.clone(),
                 )));
             }
             Some(conversation_update_request::Payload::RemoveMember(rm)) => {
                 if let Some(target) = urgent_target.as_deref()
-                    && rm.identity != target
+                    && rm.member_id != target
                 {
                     continue;
                 }
-                if !is_member(&rm.identity) {
+                if !is_member(&rm.member_id) {
                     continue;
                 }
-                updates.push(MlsCommitInput::Remove(rm.identity.clone()));
+                updates.push(MlsCommitInput::Remove(rm.member_id.clone()));
             }
             _ => return Err(CoreError::InvalidConversationUpdateRequest),
         }
@@ -159,7 +154,7 @@ pub fn build_commit_candidate(
         conversation_id: group.name_bytes().to_vec(),
         mls_proposals,
         commit_message: commit,
-        steward_identity: self_identity.to_vec(),
+        steward_member_id: self_member_id.to_vec(),
     };
 
     let commit_hash = compute_commit_hash(&candidate.commit_message);
@@ -195,14 +190,14 @@ pub fn default_steward_list_config() -> StewardListConfig {
 pub fn setup_identity_storage(
     wallet_hex: &str,
 ) -> (
-    Arc<WalletIdentity>,
+    Arc<WalletMemberId>,
     Arc<MlsCredentials>,
     Arc<MemoryDeMlsStorage>,
 ) {
-    let identity = Arc::new(WalletIdentity::from_hex(wallet_hex));
-    let credentials = Arc::new(MlsCredentials::from_identity(identity.as_ref()).unwrap());
+    let member_id = Arc::new(WalletMemberId::from_hex(wallet_hex));
+    let credentials = Arc::new(MlsCredentials::from_member_id(member_id.as_ref()).unwrap());
     let storage = Arc::new(MemoryDeMlsStorage::new());
-    (identity, credentials, storage)
+    (member_id, credentials, storage)
 }
 
 /// Test-side packet router. WELCOME_SUBTOPIC carries [`MemberInvite`]
@@ -219,7 +214,7 @@ pub fn process_inbound_compat(
     if subtopic == WELCOME_SUBTOPIC {
         let invite = MemberInvite::decode(payload)?;
         if let Some(mls) = mls
-            && mls.is_member(&invite.identity)
+            && mls.is_member(&invite.member_id)
         {
             return Ok(ProcessResult::Noop(NoopReason::UnknownAppMessage));
         }
@@ -251,22 +246,22 @@ pub struct StewardHandle {
     pub group: Conversation,
     pub mls: TestMls,
     pub steward_list: DeterministicStewardList,
-    pub identity: Vec<u8>,
+    pub member_id: Vec<u8>,
     pub liveness_criteria_yes: bool,
     pub pending_update_max_epochs: u32,
     pub operating_mode: OperatingMode,
 }
 
 impl StewardHandle {
-    /// Self-identity bytes for plug-in queries.
+    /// Self member-id bytes for plug-in queries.
     pub fn self_id(&self) -> &[u8] {
-        &self.identity
+        &self.member_id
     }
 
-    /// Test convenience: identity bytes stored on the handle; matches the
-    /// value the User layer caches on `User::self_identity`.
-    pub fn self_identity(&self) -> &[u8] {
-        &self.identity
+    /// Test convenience: member-id bytes stored on the handle; matches
+    /// the value the User layer caches on `User::self_member_id`.
+    pub fn self_member_id(&self) -> &[u8] {
+        &self.member_id
     }
 }
 
@@ -292,25 +287,25 @@ pub fn setup_steward_with_config(
     wallet_hex: &str,
     config: StewardListConfig,
 ) -> StewardHandle {
-    let (identity, credentials, storage) = setup_identity_storage(wallet_hex);
+    let (member_id, credentials, storage) = setup_identity_storage(wallet_hex);
     let mls = OpenMlsService::new_as_creator(
         conversation_id.to_string(),
         storage,
         Arc::clone(&credentials),
     )
     .unwrap();
-    let identity_bytes = identity.identity_bytes().to_vec();
+    let member_id_bytes = member_id.member_id_bytes().to_vec();
     let group = Conversation::new(conversation_id);
     let mut steward_list =
         DeterministicStewardList::empty(conversation_id.as_bytes().to_vec(), config);
     let _events = steward_list
-        .install_list(0, std::slice::from_ref(&identity_bytes), 1, 0)
+        .install_list(0, std::slice::from_ref(&member_id_bytes), 1, 0)
         .expect("bootstrap list install");
     StewardHandle {
         group,
         mls,
         steward_list,
-        identity: identity_bytes,
+        member_id: member_id_bytes,
         liveness_criteria_yes: de_mls::core::DEFAULT_LIVENESS_CRITERIA_YES,
         pending_update_max_epochs: de_mls::core::DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
         operating_mode: OperatingMode::Normal,
@@ -322,7 +317,7 @@ pub fn setup_steward_with_config(
 /// `storage` to build one via [`OpenMlsService::new_from_welcome`] when a
 /// welcome arrives. KP generation uses the same storage/credentials pair.
 pub struct JoinerHandle {
-    pub identity: Arc<WalletIdentity>,
+    pub member_id: Arc<WalletMemberId>,
     pub credentials: Arc<MlsCredentials>,
     pub storage: Arc<MemoryDeMlsStorage>,
     pub group: Conversation,
@@ -336,9 +331,9 @@ pub struct JoinerHandle {
 
 impl JoinerHandle {
     /// Test convenience: identity bytes stored on the handle; matches the
-    /// value the User layer caches on `User::self_identity`.
-    pub fn self_identity(&self) -> Vec<u8> {
-        self.identity.identity_bytes().to_vec()
+    /// value the User layer caches on `User::self_member_id`.
+    pub fn self_member_id(&self) -> Vec<u8> {
+        self.member_id.member_id_bytes().to_vec()
     }
 
     /// Try to accept a serialized welcome, materialising the joiner's
@@ -377,7 +372,7 @@ pub fn setup_joiner_with_config(
     wallet_hex: &str,
     config: StewardListConfig,
 ) -> JoinerHandle {
-    let (identity, credentials, storage) = setup_identity_storage(wallet_hex);
+    let (member_id, credentials, storage) = setup_identity_storage(wallet_hex);
     let group = Conversation::new(conversation_id);
     let steward_list = DeterministicStewardList::empty(conversation_id.as_bytes().to_vec(), config);
     let key_package =
@@ -385,7 +380,7 @@ pub fn setup_joiner_with_config(
             .unwrap();
     let kp_packet = build_key_package_packet(conversation_id, key_package, b"test-app-id");
     JoinerHandle {
-        identity,
+        member_id,
         credentials,
         storage,
         group,
@@ -414,7 +409,7 @@ pub fn steward_add_joiner(
     static PROPOSAL_COUNTER: AtomicU32 = AtomicU32::new(100);
 
     let invite = MemberInvite::decode(joiner_kp_packet.payload.as_slice()).unwrap();
-    if steward_handle.mls.is_member(&invite.identity) {
+    if steward_handle.mls.is_member(&invite.member_id) {
         panic!("Expected key package skipped for already-member");
     }
     let gur = ConversationUpdateRequest {
@@ -425,7 +420,7 @@ pub fn steward_add_joiner(
     steward_handle
         .group
         .insert_approved_proposal(proposal_id, gur);
-    let self_id = steward_handle.identity.clone();
+    let self_id = steward_handle.member_id.clone();
     let packets = build_commit_candidate(
         &mut steward_handle.group,
         &mut steward_handle.mls,

@@ -80,14 +80,14 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// methods reach this via [`Self::transport`] and route through
     /// [`send_packet`], a direct sync publish.
     transport: SharedDeliveryService,
-    /// Identity bytes derived from `User.identity.identity_bytes()` at
+    /// Identity bytes derived from `User.member_id.member_id_bytes()` at
     /// session construction. Stored as `Arc<[u8]>` so hot-path session
     /// code can clone the handle cheaply across lock-guard drops.
-    pub self_identity: Arc<[u8]>,
-    /// Display form derived from `User.identity.identity_display()` at
+    pub self_member_id: Arc<[u8]>,
+    /// Display form derived from `User.member_id.member_id_display()` at
     /// session construction. `Arc<str>` for the same reason as
-    /// `self_identity` — cheap clone across guard boundaries.
-    pub identity_display: Arc<str>,
+    /// `self_member_id` — cheap clone across guard boundaries.
+    pub member_id_display: Arc<str>,
     /// Per-User instance UUID (cloned from `User`). Tagged on every
     /// outbound packet for self-message filtering.
     pub app_id: Arc<[u8]>,
@@ -113,8 +113,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         steward_list: CP::StewardList,
         consensus: PluginConsensus<P>,
         transport: SharedDeliveryService,
-        self_identity: Arc<[u8]>,
-        identity_display: Arc<str>,
+        self_member_id: Arc<[u8]>,
+        member_id_display: Arc<str>,
         app_id: Arc<[u8]>,
     ) -> Self {
         Self {
@@ -132,8 +132,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             pending_auto_votes: HashMap::new(),
             pending_consensus_timeouts: HashMap::new(),
             transport,
-            self_identity,
-            identity_display,
+            self_member_id,
+            member_id_display,
             app_id,
             pending_events: Mutex::new(Vec::new()),
         }
@@ -390,7 +390,7 @@ mod tests {
             StubStewardList::member(),
             make_test_consensus_service(),
             Arc::new(Mutex::new(crate::test_fixtures::UnusedTransport)),
-            Arc::from(&b"test-identity"[..]),
+            Arc::from(&b"test-member-id"[..]),
             Arc::from("0xtest-display"),
             Arc::from(&[0u8; 16][..]),
         );
@@ -410,7 +410,7 @@ mod tests {
             StubStewardList::member(),
             make_test_consensus_service(),
             Arc::new(Mutex::new(crate::test_fixtures::UnusedTransport)),
-            Arc::from(&b"test-identity"[..]),
+            Arc::from(&b"test-member-id"[..]),
             Arc::from("0xtest-display"),
             Arc::from(&[0u8; 16][..]),
         )

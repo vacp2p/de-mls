@@ -18,7 +18,7 @@ use crate::{
         ScoringConfig, SessionEvent, StewardListConfig,
     },
     ds::SharedDeliveryService,
-    identity::Identity,
+    member_id::MemberId,
     mls_crypto::{KeyPackageBytes, MlsError, MlsService, key_package_bytes_from_tls},
     protos::de_mls::messages::v1::{
         BanRequest, ConversationUpdateRequest, MemberInvite, conversation_update_request,
@@ -36,12 +36,7 @@ pub type SessionEntry<P, CP> = Arc<RwLock<SessionRunner<P, CP>>>;
 pub(crate) type ConversationRegistry<P, CP> = RwLock<HashMap<String, SessionEntry<P, CP>>>;
 
 pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
-    /// Local identity, set once at construction and read-only thereafter.
-    /// Accessed via the [`Identity`] trait wherever bytes or display
-    /// form are needed; per-session cached `Arc<[u8]>` + `Arc<str>` are
-    /// extracted from it at [`SessionRunner`] construction in
-    /// [`super::lifecycle`].
-    pub(crate) identity: Box<dyn Identity>,
+    pub(crate) member_id: Box<dyn MemberId>,
     /// Per-instance UUID embedded in every outbound packet. Inbound packets
     /// carrying our `app_id` are self-echoes and silently dropped.
     pub(crate) app_id: Vec<u8>,
@@ -66,17 +61,14 @@ pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
 // ── Public API ──────────────────────────────────────────────────────────
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
-    /// Display form of the local identity, derived from
-    /// [`Identity::identity_display`]. Stable for the lifetime of the
-    /// `User`; intended for logs and UI.
-    pub fn identity_string(&self) -> String {
-        self.identity.identity_display().to_string()
+    /// Display form of the local member_id, derived from [`MemberId::member_id_display`].
+    pub fn member_id_string(&self) -> String {
+        self.member_id.member_id_display().to_string()
     }
 
-    /// Identity bytes of the local user, via the [`Identity`] trait.
-    /// Stable for the lifetime of the `User`.
-    pub fn identity_bytes(&self) -> &[u8] {
-        self.identity.identity_bytes()
+    /// Identity bytes of the local user, via the [`MemberId`] trait.
+    pub fn member_id_bytes(&self) -> &[u8] {
+        self.member_id.member_id_bytes()
     }
 
     /// Per-instance `app_id` embedded in every outbound packet. Inbound
@@ -86,9 +78,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         &self.app_id
     }
 
-    /// Generate a single-use key package for our identity. Conversation-free —
-    /// callable before `start_conversation`. Delegates to the configured
-    /// [`crate::core::ConversationPluginsFactory::generate_key_package`].
+    /// Generate a single-use key package.
     pub fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
         self.plugins.conversation_plugins.generate_key_package()
     }
@@ -210,12 +200,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        let (key_package_bytes, identity) = key_package_bytes_from_tls(key_package_bytes.to_vec())?;
+        let (key_package_bytes, member_id) =
+            key_package_bytes_from_tls(key_package_bytes.to_vec())?;
         let request = ConversationUpdateRequest {
             payload: Some(conversation_update_request::Payload::MemberInvite(
                 MemberInvite {
                     key_package_bytes,
-                    identity,
+                    member_id,
                 },
             )),
         };
@@ -362,8 +353,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         entry.read_or_err("session")?.get_epoch_and_retry()
     }
 
-    /// Roster as identity-bytes. Empty before MLS is attached. Mirrors
-    /// [`SessionRunner::get_conversation_members`].
     pub fn get_conversation_members(
         &self,
         conversation_id: &str,
@@ -374,8 +363,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         entry.read_or_err("session")?.get_conversation_members()
     }
 
-    /// Per-member scoring values. Mirrors
-    /// [`SessionRunner::get_member_scores`].
     pub fn get_member_scores(
         &self,
         conversation_id: &str,
@@ -386,8 +373,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         Ok(entry.read_or_err("session")?.get_member_scores())
     }
 
-    /// Single-member score lookup. Mirrors
-    /// [`SessionRunner::get_member_score`].
     pub fn get_member_score(
         &self,
         conversation_id: &str,
@@ -399,8 +384,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         Ok(entry.read_or_err("session")?.get_member_score(member_id))
     }
 
-    /// Per-member roles for the current epoch. Mirrors
-    /// [`SessionRunner::get_member_roles`].
     pub fn get_member_roles(
         &self,
         conversation_id: &str,
@@ -412,15 +395,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     }
 
     /// Identities with an in-flight self-leave request. Mirrors
-    /// [`SessionRunner::get_pending_leave_identities`].
-    pub fn get_pending_leave_identities(
+    /// [`SessionRunner::get_pending_leave_member_ids`].
+    pub fn get_pending_leave_member_ids(
         &self,
         conversation_id: &str,
     ) -> Result<Vec<Vec<u8>>, UserError> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        entry.read_or_err("session")?.get_pending_leave_identities()
+        entry.read_or_err("session")?.get_pending_leave_member_ids()
     }
 
     /// Buffered pending membership-update count. Mirrors
@@ -462,15 +445,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 // ── User-internal helpers ───────────────────────────────────────────────
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
-    /// Borrow the local identity bytes via the [`Identity`] trait.
-    pub(crate) fn self_identity(&self) -> &[u8] {
-        self.identity.identity_bytes()
+    pub fn self_member_id(&self) -> &[u8] {
+        self.member_id.member_id_bytes()
     }
 
     /// Append a [`ConversationLifecycle`] event to the pending-events buffer
     /// for [`Self::drain_lifecycle_events`]. Silent on poison —
     /// emit is fire-and-forget.
-    pub(crate) fn emit_lifecycle(&self, event: ConversationLifecycle) {
+    pub fn emit_lifecycle(&self, event: ConversationLifecycle) {
         if let Ok(mut buf) = self.pending_lifecycle_events.lock() {
             buf.push(event);
         }
@@ -478,17 +460,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
     /// Build a fresh per-conversation `ConsensusService` via the User's
     /// `ConsensusContext`.
-    pub(crate) fn build_consensus_service(&self) -> PluginConsensus<P> {
+    pub fn build_consensus_service(&self) -> PluginConsensus<P> {
         self.plugins.consensus.build_service()
     }
 
     /// Drop this conversation's consensus scope from the shared storage and
     /// clear every auto-vote registered for it. Called on leave and
     /// pending-join timeout.
-    pub(crate) async fn cleanup_consensus_scope(
-        &self,
-        conversation_id: &str,
-    ) -> Result<(), UserError> {
+    pub async fn cleanup_consensus_scope(&self, conversation_id: &str) -> Result<(), UserError> {
         if let Some(entry_arc) = self.lookup_entry(conversation_id)? {
             entry_arc
                 .write()
@@ -501,12 +480,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     }
 
     pub fn new_with_plugins(
-        identity: Box<dyn Identity>,
+        member_id: Box<dyn MemberId>,
         plugins: UserPlugins<P, CP>,
         transport: SharedDeliveryService,
     ) -> Self {
         Self {
-            identity,
+            member_id,
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
             transport,
             plugins,

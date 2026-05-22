@@ -35,7 +35,7 @@ message CommitCandidate {
   bytes conversation_id = 1;
   repeated bytes mls_proposals = 2;
   bytes commit_message = 3;
-  bytes steward_identity = 4;
+  bytes steward_member_id = 4;
 }
 
 // Yes/No vote for a given proposal. Based on the result, the `Vote` will be created.
@@ -92,11 +92,11 @@ message EmergencyCriteriaProposal {
 
 message MemberInvite {
   bytes key_package_bytes = 1;
-  bytes identity = 2;
+  bytes member_id = 2;
 }
 
 message RemoveMember {
-  bytes identity = 1;
+  bytes member_id = 1;
 }
 
 message MemberWelcome {

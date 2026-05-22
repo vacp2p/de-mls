@@ -32,14 +32,14 @@ impl DeterministicStewardList {
     /// epoch 0. No election, no retries.
     pub fn with_creator(
         conversation_id: impl Into<Vec<u8>>,
-        creator_identity: Vec<u8>,
+        creator_member_id: Vec<u8>,
         config: StewardListConfig,
     ) -> Result<Self, CoreError> {
         let conversation_id = conversation_id.into();
         let list = StewardList::generate(
             0,
             &conversation_id,
-            &[creator_identity],
+            &[creator_member_id],
             1,
             config.clone(),
             0,
@@ -83,8 +83,8 @@ impl StewardListPlugin for DeterministicStewardList {
         self.max_retries = max;
     }
 
-    fn is_steward(&self, identity: &[u8]) -> bool {
-        self.list.as_ref().is_some_and(|l| l.contains(identity))
+    fn is_steward(&self, member_id: &[u8]) -> bool {
+        self.list.as_ref().is_some_and(|l| l.contains(member_id))
     }
 
     fn is_exhausted(&self, epoch: u64) -> bool {
@@ -174,7 +174,7 @@ impl StewardListPlugin for DeterministicStewardList {
         &self,
         epoch: u64,
         candidate_pool: &[Vec<u8>],
-        self_identity: &[u8],
+        self_member_id: &[u8],
         eligible: F,
         recovery: bool,
     ) -> Result<ElectionDecision, CoreError> {
@@ -183,7 +183,7 @@ impl StewardListPlugin for DeterministicStewardList {
         }
         let is_authorized = self
             .election_proposer(&eligible)
-            .is_some_and(|proposer| proposer == self_identity);
+            .is_some_and(|proposer| proposer == self_member_id);
         if !is_authorized {
             return Ok(ElectionDecision::Skip("not the responsible proposer"));
         }

@@ -12,7 +12,7 @@ desktop client built with Dioxus drives the MLS core directly.
 
 | Crate / Path                  | Description                                                                          |
 | ----------------------------- | ------------------------------------------------------------------------------------ |
-| **de-mls** (`src/`)           | Core library — MLS conversations, consensus, identity trait, and the delivery layer  |
+| **de-mls** (`src/`)           | Core library — MLS conversations, consensus, member-id trait, and the delivery layer |
 | **crates/de_mls_ui_protocol** | Shared UI ↔ gateway message types (`AppCmd`, `AppEvent`, `MemberInfo`) + hex display |
 | **crates/de_mls_gateway**     | Bridges UI commands to the core runtime and streams events back                      |
 | **crates/ui_bridge**          | Bootstrap glue that hosts the async command loop for desktop clients                 |
@@ -81,15 +81,15 @@ src/ds/
 
 ### Key types
 
-| Type                  | Feature | Description                                                                          |
-| --------------------- | ------- | ------------------------------------------------------------------------------------ |
-| `DeliveryService`     | —       | Trait — `publish()` and `subscribe()`, both synchronous                              |
-| `OutboundPacket`      | —       | Payload + conversation id + subtopic + app id (self-message filter)                  |
-| `InboundPacket`       | —       | Payload + conversation id + subtopic + app id + timestamp                            |
-| `TopicFilter`         | —       | Allowlist used by the gateway to filter inbound packets by conversation              |
-| `WakuDeliveryService` | `waku`  | Concrete impl — runs an embedded Waku node on a background `std::thread`             |
-| `WakuConfig`          | `waku`  | Node port, discv5 settings                                                           |
-| `WakuStartResult`     | `waku`  | Returned by `start()` — contains the service + optional local ENR                    |
+| Type                  | Feature | Description                                                              |
+| --------------------- | ------- | ------------------------------------------------------------------------ |
+| `DeliveryService`     | —       | Trait — `publish()` and `subscribe()`, both synchronous                  |
+| `OutboundPacket`      | —       | Payload + conversation id + subtopic + app id (self-message filter)      |
+| `InboundPacket`       | —       | Payload + conversation id + subtopic + app id + timestamp                |
+| `TopicFilter`         | —       | Allowlist used by the gateway to filter inbound packets by conversation  |
+| `WakuDeliveryService` | `waku`  | Concrete impl — runs an embedded Waku node on a background `std::thread` |
+| `WakuConfig`          | `waku`  | Node port, discv5 settings                                               |
+| `WakuStartResult`     | `waku`  | Returned by `start()` — contains the service + optional local ENR        |
 
 ### Basic usage
 

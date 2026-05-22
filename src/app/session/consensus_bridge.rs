@@ -188,7 +188,7 @@ pub(crate) async fn forward_incoming_vote<P: ConsensusPlugin>(
 /// `apply_consensus_outcome` path commits `RemoveMember(self)`.
 ///
 /// Unlike [`submit_proposal`], the `Proposal` is hand-crafted to carry
-/// `self_leave_proposal_id(identity)`. Every node derives the same id, so a
+/// `self_leave_proposal_id(member_id)`. Every node derives the same id, so a
 /// retransmitted self-leave dedupes via `ProposalAlreadyExist` and lands in
 /// every `approved_proposals` under the same key.
 ///
@@ -196,7 +196,7 @@ pub(crate) async fn forward_incoming_vote<P: ConsensusPlugin>(
 /// `Ok(None)` — already in flight (e.g. double-click); no broadcast.
 pub(crate) async fn submit_self_leave_proposal<P>(
     conversation_id: &str,
-    self_identity: &[u8],
+    self_member_id: &[u8],
     consensus: &PluginConsensus<P>,
     params: ProposalParams,
 ) -> Result<Option<(u32, AppMessage)>, UserError>
@@ -206,7 +206,7 @@ where
     let request = ConversationUpdateRequest {
         payload: Some(conversation_update_request::Payload::RemoveMember(
             RemoveMember {
-                identity: self_identity.to_vec(),
+                member_id: self_member_id.to_vec(),
             },
         )),
     };
@@ -218,12 +218,12 @@ where
         .as_secs();
     let expiration = now.saturating_add(params.proposal_expiration.as_secs());
 
-    let proposal_id = self_leave_proposal_id(self_identity);
+    let proposal_id = self_leave_proposal_id(self_member_id);
     let mut proposal = Proposal {
         name: format!("self-leave:{proposal_id}"),
         payload,
         proposal_id,
-        proposal_owner: self_identity.to_vec(),
+        proposal_owner: self_member_id.to_vec(),
         votes: Vec::new(),
         expected_voters_count: params.expected_voters,
         round: 1,

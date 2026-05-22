@@ -117,9 +117,9 @@ where
             .collect())
     }
 
-    fn is_member(&self, identity: &[u8]) -> bool {
+    fn is_member(&self, member_id: &[u8]) -> bool {
         self.members()
-            .map(|members| members.iter().any(|m| m.as_slice() == identity))
+            .map(|members| members.iter().any(|m| m.as_slice() == member_id))
             .unwrap_or(false)
     }
 
@@ -155,9 +155,9 @@ where
                         group.propose_add_member(&provider, signer, &kp)?;
                     mls_proposals.push(mls_message_out.to_bytes()?);
                 }
-                MlsCommitInput::Remove(identity) => {
+                MlsCommitInput::Remove(member_id) => {
                     let member_index = group.members().find_map(|m| {
-                        if m.credential.serialized_content() == identity {
+                        if m.credential.serialized_content() == member_id {
                             Some(m.index)
                         } else {
                             None

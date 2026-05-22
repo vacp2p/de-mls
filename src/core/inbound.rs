@@ -40,7 +40,7 @@ fn authorize_fast_path_proposal(proposal: &Proposal, mls_sender: &[u8]) -> bool 
     };
     matches!(
         request.payload,
-        Some(conversation_update_request::Payload::RemoveMember(ref r)) if r.identity == mls_sender
+        Some(conversation_update_request::Payload::RemoveMember(ref r)) if r.member_id == mls_sender
     )
 }
 
@@ -120,11 +120,11 @@ mod tests {
         vec![id; 20]
     }
 
-    fn remove_payload(identity: &[u8]) -> Vec<u8> {
+    fn remove_payload(member_id: &[u8]) -> Vec<u8> {
         ConversationUpdateRequest {
             payload: Some(conversation_update_request::Payload::RemoveMember(
                 RemoveMember {
-                    identity: identity.to_vec(),
+                    member_id: member_id.to_vec(),
                 },
             )),
         }

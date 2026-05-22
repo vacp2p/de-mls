@@ -4,7 +4,7 @@
 use de_mls::core::StewardListPlugin;
 use de_mls::core::{FreezeOutcome, ProcessResult, ProposalId, ScoreEvent, finalize_freeze_round};
 use de_mls::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
-use de_mls::identity::Identity;
+use de_mls::member_id::MemberId;
 use de_mls::mls_crypto::MlsService;
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, ViolationEvidence, app_message,
@@ -67,7 +67,7 @@ fn test_emergency_mixed_with_regular_returns_error() {
         &mut steward_handle.mls,
         &steward_handle.steward_list,
         false,
-        &steward_handle.identity,
+        &steward_handle.member_id,
         b"test-app-id",
     );
     assert!(result.is_err());
@@ -123,7 +123,7 @@ fn test_duplicate_batch_returns_noop() {
         &mut steward_handle.mls,
         &steward_handle.steward_list,
         false,
-        &steward_handle.identity,
+        &steward_handle.member_id,
         b"test-app-id",
     )
     .unwrap();
@@ -206,7 +206,7 @@ fn test_candidate_ignored_without_freeze_round() {
         &mut steward_handle.mls,
         &steward_handle.steward_list,
         false,
-        &steward_handle.identity,
+        &steward_handle.member_id,
         b"test-app-id",
     )
     .unwrap();
@@ -274,7 +274,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
         &mut steward_handle.mls,
         &steward_handle.steward_list,
         false,
-        &steward_handle.identity,
+        &steward_handle.member_id,
         b"test-app-id",
     )
     .unwrap();
@@ -302,7 +302,7 @@ fn test_commit_candidate_roundtrip_sender_identity() {
     );
 
     // Finalize: MLS commit staging authenticates the sender
-    let joiner_id = joiner.self_identity();
+    let joiner_id = joiner.self_member_id();
     let finalize = finalize_freeze_round(
         &mut joiner.group,
         joiner.mls.as_mut().unwrap(),
@@ -339,8 +339,8 @@ fn test_backup_commit_scores_absent_steward() {
 
     let mut alice_group = setup_steward(conversation_id, alice_hex);
     let mut bob = setup_joiner(conversation_id, bob_hex);
-    let alice_id = alice_group.self_identity().to_vec();
-    let bob_id = bob.self_identity();
+    let alice_id = alice_group.self_member_id().to_vec();
+    let bob_id = bob.self_member_id();
 
     let (welcome_bytes, _) = steward_add_joiner(&mut alice_group, &bob.kp_packet);
     bob.accept_welcome(&welcome_bytes);
@@ -381,7 +381,7 @@ fn test_backup_commit_scores_absent_steward() {
         bob.mls.as_mut().unwrap(),
         &bob.steward_list,
         false,
-        bob.identity.identity_bytes(),
+        bob.member_id.member_id_bytes(),
         b"test-app-id",
     )
     .unwrap();
@@ -393,7 +393,7 @@ fn test_backup_commit_scores_absent_steward() {
             .to_vec()
     };
 
-    let bob_id = bob.self_identity();
+    let bob_id = bob.self_member_id();
     let result = finalize_freeze_round(
         &mut bob.group,
         bob.mls.as_mut().unwrap(),
@@ -447,11 +447,11 @@ fn test_backup_commit_scores_absent_steward() {
     }
 }
 
-/// Test: a candidate whose wire `steward_identity` doesn't match the
+/// Test: a candidate whose wire `steward_member_id` doesn't match the
 /// MLS-verified commit sender is dropped as `BrokenCommit`. Score is
 /// attributed to the actual MLS sender, not the forged wire claim.
 #[test]
-fn test_forged_steward_identity_scores_mls_sender() {
+fn test_forged_steward_member_id_scores_mls_sender() {
     let conversation_id = "forged-steward-id";
 
     let steward_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
@@ -486,7 +486,7 @@ fn test_forged_steward_identity_scores_mls_sender() {
         &mut steward_handle.mls,
         &steward_handle.steward_list,
         false,
-        &steward_handle.identity,
+        &steward_handle.member_id,
         b"test-app-id",
     )
     .unwrap();
@@ -495,19 +495,19 @@ fn test_forged_steward_identity_scores_mls_sender() {
         .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
         .expect("Expected batch proposals packet");
 
-    // Forge `steward_identity` to impersonate a different identity. The
+    // Forge `steward_member_id` to impersonate a different identity. The
     // MLS commit message is still signed by the real steward_list, so staging
     // succeeds and the cross-check fires.
     let mut app_msg = AppMessage::decode(batch_packet.payload.as_slice()).unwrap();
-    let real_steward_id = steward_handle.self_identity().to_vec();
+    let real_steward_id = steward_handle.self_member_id().to_vec();
     let forged_id = vec![0xCC; real_steward_id.len()];
     match &mut app_msg.payload {
         Some(app_message::Payload::CommitCandidate(c)) => {
             assert_eq!(
-                c.steward_identity, real_steward_id,
-                "fixture: steward_identity should start equal to MLS sender"
+                c.steward_member_id, real_steward_id,
+                "fixture: steward_member_id should start equal to MLS sender"
             );
-            c.steward_identity = forged_id.clone();
+            c.steward_member_id = forged_id.clone();
         }
         other => panic!("Expected CommitCandidate, got {:?}", other),
     }
@@ -527,7 +527,7 @@ fn test_forged_steward_identity_scores_mls_sender() {
         result
     );
 
-    let joiner_id = joiner.self_identity();
+    let joiner_id = joiner.self_member_id();
     let finalize = finalize_freeze_round(
         &mut joiner.group,
         joiner.mls.as_mut().unwrap(),
@@ -576,7 +576,7 @@ fn test_no_valid_candidate_triggers_no_candidate() {
     let epoch = group.mls.current_epoch().unwrap();
     group.start_freeze_round(epoch);
 
-    let group_id = group.self_identity().to_vec();
+    let group_id = group.self_member_id().to_vec();
     let finalize = finalize_freeze_round(
         &mut group.group,
         &mut group.mls,

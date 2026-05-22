@@ -43,7 +43,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             return Err(UserError::ConversationAlreadyExists);
         }
 
-        let self_identity_bytes = self.self_identity().to_vec();
+        let self_member_id_bytes = self.self_member_id().to_vec();
         let (conversation, mls_opt, state_machine, phase_timer) = if is_creation {
             let mls = self
                 .plugins
@@ -71,7 +71,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         // epoch 0. Joiner path leaves the plug-in empty until `ConversationSync`.
         if is_creation {
             let _events =
-                steward_list.install_list(0, std::slice::from_ref(&self_identity_bytes), 1, 0)?;
+                steward_list.install_list(0, std::slice::from_ref(&self_member_id_bytes), 1, 0)?;
         }
 
         let mut scoring = self
@@ -83,7 +83,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             // Creator is self at `default_score`; under standard config
             // (`default > threshold`) no cross event fires, so we drop
             // the return value here.
-            let _events = scoring.add_member(&self_identity_bytes);
+            let _events = scoring.add_member(&self_member_id_bytes);
         }
 
         let initial_state = state_machine.current_state();
@@ -106,8 +106,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             steward_list,
             consensus,
             Arc::clone(&self.transport),
-            Arc::from(self.identity.identity_bytes()),
-            Arc::from(self.identity.identity_display()),
+            Arc::from(self.member_id.member_id_bytes()),
+            Arc::from(self.member_id.member_id_display()),
             Arc::from(self.app_id.as_slice()),
         )));
         {

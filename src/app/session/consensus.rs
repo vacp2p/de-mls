@@ -24,7 +24,7 @@ use crate::{
     },
     core::{
         ConsensusPlugin, ConversationPluginsFactory, ProposalKind, SessionEvent, StewardListPlugin,
-        self_leave_proposal_id, target_identity_of,
+        self_leave_proposal_id, target_member_id_of,
     },
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
@@ -136,7 +136,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let mut s = arc.write_or_err("session")?;
 
             // Defensive — core only emits membership changes here.
-            if target_identity_of(&request).is_none() {
+            if target_member_id_of(&request).is_none() {
                 return Ok(());
             }
 
@@ -147,7 +147,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
             // Only the epoch steward proposes immediately. The buffer
             // survives freeze rounds so a later steward can retry.
-            let self_identity = Arc::clone(&s.self_identity);
+            let self_member_id = Arc::clone(&s.self_member_id);
             let eligible = s
                 .handle
                 .conversation
@@ -156,7 +156,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 .handle
                 .steward_list
                 .epoch_steward(current_epoch, &eligible)
-                .is_some_and(|es| es == &*self_identity);
+                .is_some_and(|es| es == &*self_member_id);
             let state = s.handle.current_state();
             let total = s.handle.conversation.pending_update_count();
             let should = is_es && state == ConversationState::Working;
@@ -276,12 +276,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// check, and a retransmit dedupes inside the consensus library via
     /// the deterministic [`self_leave_proposal_id`].
     pub async fn initiate_self_leave(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
-        let self_identity = Arc::clone(&arc.read_or_err("session")?.self_identity);
+        let self_member_id = Arc::clone(&arc.read_or_err("session")?.self_member_id);
 
         let (already_pending, conversation_id) = {
             let s = arc.read_or_err("session")?;
             (
-                s.handle.conversation.is_pending_self_leave(&self_identity),
+                s.handle.conversation.is_pending_self_leave(&self_member_id),
                 s.conversation_id.clone(),
             )
         };
@@ -296,11 +296,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         let request = ConversationUpdateRequest {
             payload: Some(conversation_update_request::Payload::RemoveMember(
                 RemoveMember {
-                    identity: self_identity.to_vec(),
+                    member_id: self_member_id.to_vec(),
                 },
             )),
         };
-        let proposal_id = self_leave_proposal_id(&self_identity);
+        let proposal_id = self_leave_proposal_id(&self_member_id);
 
         // Register ownership BEFORE the session opens — the bundled YES
         // fires `ConsensusReached` synchronously, and
@@ -320,7 +320,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
         let submitted = submit_self_leave_proposal::<P>(
             &conversation_id,
-            &self_identity,
+            &self_member_id,
             &consensus,
             ProposalParams {
                 expected_voters: 1,
@@ -407,7 +407,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             voting_delay,
             consensus,
             conversation_id,
-            self_identity,
+            self_member_id,
         ) = {
             let s = arc.read_or_err("session")?;
             (
@@ -417,14 +417,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 s.handle.config.voting_delay_for(kind),
                 s.consensus.clone(),
                 s.conversation_id.clone(),
-                Arc::clone(&s.self_identity),
+                Arc::clone(&s.self_member_id),
             )
         };
 
         let (proposal_id, unbundled) = submit_proposal::<P>(
             &conversation_id,
             &request,
-            &self_identity,
+            &self_member_id,
             &consensus,
             ProposalParams {
                 expected_voters,

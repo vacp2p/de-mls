@@ -14,7 +14,7 @@
 //! The trait surface uses only opaque boundary types: no `openmls::*`
 //! types appear here, so swapping in a different MLS engine is purely a
 //! matter of writing a new impl. Identity is a separate User-level
-//! concept ([`crate::identity::Identity`]) — the MLS service consumes
+//! concept ([`crate::member_id::MemberId`]) — the MLS service consumes
 //! credentials built from it but does not own the identity itself.
 
 use openmls::prelude::Ciphersuite;
@@ -64,7 +64,7 @@ pub trait MlsService {
     fn members(&self) -> Result<Vec<Vec<u8>>, MlsError>;
 
     /// Whether `identity` is currently a member.
-    fn is_member(&self, identity: &[u8]) -> bool;
+    fn is_member(&self, member_id: &[u8]) -> bool;
 
     /// Current MLS epoch. This is the single source of truth — never
     /// maintain a parallel counter at the app layer.

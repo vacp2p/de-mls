@@ -27,7 +27,7 @@ use de_mls::{
     core::{ScoringConfig, StewardListConfig},
     defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage},
     ds::{DeliveryService, SharedDeliveryService, WakuDeliveryService},
-    identity::Identity,
+    member_id::MemberId,
     mls_crypto::MlsCredentials,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
@@ -164,17 +164,13 @@ impl<DS: DeliveryService> Gateway<DS> {
     }
 }
 
-/// Wallet-flavoured [`Identity`]: 20-byte Ethereum address bytes plus its
-/// EIP-55 checksummed hex form. The library itself is identity-agnostic;
-/// this lives in the gateway because the desktop UI logs users in with
-/// Ethereum private keys.
 #[derive(Debug, Clone)]
-struct WalletIdentity {
+struct WalletMemberId {
     bytes: Vec<u8>,
     display: String,
 }
 
-impl WalletIdentity {
+impl WalletMemberId {
     fn from_address(addr: Address) -> Self {
         Self {
             bytes: addr.as_slice().to_vec(),
@@ -183,11 +179,11 @@ impl WalletIdentity {
     }
 }
 
-impl Identity for WalletIdentity {
-    fn identity_bytes(&self) -> &[u8] {
+impl MemberId for WalletMemberId {
+    fn member_id_bytes(&self) -> &[u8] {
         &self.bytes
     }
-    fn identity_display(&self) -> &str {
+    fn member_id_display(&self) -> &str {
         &self.display
     }
 }
@@ -198,9 +194,9 @@ fn build_user_from_private_key(
 ) -> anyhow::Result<User<DefaultConsensusPlugin, DefaultConversationPluginsFactory>> {
     let signer = PrivateKeySigner::from_str(private_key)
         .map_err(|e| anyhow::anyhow!("invalid private key: {e}"))?;
-    let identity = WalletIdentity::from_address(signer.address());
+    let member_id = WalletMemberId::from_address(signer.address());
 
-    let credentials = Arc::new(MlsCredentials::from_identity(&identity)?);
+    let credentials = Arc::new(MlsCredentials::from_member_id(&member_id)?);
     let storage = Arc::new(MemoryDeMlsStorage::new());
     let conversation_plugins = DefaultConversationPluginsFactory::new(storage, credentials);
 
@@ -216,7 +212,7 @@ fn build_user_from_private_key(
     };
 
     Ok(User::new_with_plugins(
-        Box::new(identity),
+        Box::new(member_id),
         plugins,
         transport,
     ))
@@ -238,7 +234,7 @@ impl Gateway<WakuDeliveryService> {
 
         let user = build_user_from_private_key(&private_key, transport)?;
 
-        let user_address = user.identity_string();
+        let user_address = user.member_id_string();
         let user_ref: UserRef = Arc::new(tokio::sync::RwLock::new(user));
 
         *self.user.write() = Some(user_ref.clone());

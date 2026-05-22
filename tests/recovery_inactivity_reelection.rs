@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use de_mls::app::{CreatorVote, SessionRunner};
 use de_mls::core::{ConversationState, StewardListConfig};
-use de_mls::identity::Identity;
+use de_mls::member_id::MemberId;
 use de_mls::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, RemoveMember, conversation_update_request,
 };
@@ -54,14 +54,14 @@ async fn silent_steward_drives_observer_to_reelection() {
     // Observer files a proposal. With `CreatorVote::Yes` and `expected_voters=2`,
     // the steward's auto-vote completes consensus. The exact proposal payload
     // doesn't matter — we just need approved work in the queue.
-    let steward_identity =
-        common::WalletIdentity::from_hex(&users[steward_idx].0.identity_string())
-            .identity_bytes()
+    let steward_member_id =
+        common::WalletMemberId::from_hex(&users[steward_idx].0.member_id_string())
+            .member_id_bytes()
             .to_vec();
     let request = ConversationUpdateRequest {
         payload: Some(conversation_update_request::Payload::RemoveMember(
             RemoveMember {
-                identity: steward_identity,
+                member_id: steward_member_id,
             },
         )),
     };

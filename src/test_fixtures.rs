@@ -23,7 +23,7 @@ use crate::{
     },
     defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage},
     ds::{OutboundPacket, SharedDeliveryService},
-    identity::Identity,
+    member_id::MemberId,
     mls_crypto::{
         CommitCandidate, DecryptResult, MlsCommitInput, MlsCredentials, MlsError, MlsMessageKind,
         MlsService, StagedCandidateResult,
@@ -31,29 +31,29 @@ use crate::{
     protos::de_mls::messages::v1::AppMessage,
 };
 
-/// Wallet-flavoured test `Identity`: 20-byte Ethereum address + EIP-55 hex.
-pub(crate) struct TestWalletIdentity {
+/// Wallet-flavoured test `MemberId`: 20-byte Ethereum address + EIP-55 hex.
+pub(crate) struct TestWalletMemberId {
     bytes: Vec<u8>,
     display: String,
 }
 
-impl TestWalletIdentity {
+impl TestWalletMemberId {
     pub(crate) fn from_private_key(pk: &str) -> (Self, PrivateKeySigner) {
         let signer = PrivateKeySigner::from_str(pk).expect("valid private key");
         let addr: Address = signer.address();
-        let identity = Self {
+        let member_id = Self {
             bytes: addr.as_slice().to_vec(),
             display: addr.to_checksum(None),
         };
-        (identity, signer)
+        (member_id, signer)
     }
 }
 
-impl Identity for TestWalletIdentity {
-    fn identity_bytes(&self) -> &[u8] {
+impl MemberId for TestWalletMemberId {
+    fn member_id_bytes(&self) -> &[u8] {
         &self.bytes
     }
-    fn identity_display(&self) -> &str {
+    fn member_id_display(&self) -> &str {
         &self.display
     }
 }
@@ -66,9 +66,9 @@ pub(crate) fn make_user_from_private_key(
     private_key: &str,
     transport: SharedDeliveryService,
 ) -> User<DefaultConsensusPlugin, DefaultConversationPluginsFactory> {
-    let (identity, signer) = TestWalletIdentity::from_private_key(private_key);
+    let (member_id, signer) = TestWalletMemberId::from_private_key(private_key);
 
-    let credentials = Arc::new(MlsCredentials::from_identity(&identity).expect("credentials"));
+    let credentials = Arc::new(MlsCredentials::from_member_id(&member_id).expect("credentials"));
     let storage = Arc::new(MemoryDeMlsStorage::new());
     let conversation_plugins = DefaultConversationPluginsFactory::new(storage, credentials);
 
@@ -83,7 +83,7 @@ pub(crate) fn make_user_from_private_key(
         default_steward_list_config: StewardListConfig::default(),
     };
 
-    User::new_with_plugins(Box::new(identity), plugins, transport)
+    User::new_with_plugins(Box::new(member_id), plugins, transport)
 }
 
 /// Build a `PluginConsensus<DefaultConsensusPlugin>` with a random signer for

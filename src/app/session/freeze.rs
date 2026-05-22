@@ -112,9 +112,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         let (mut finalize_result, downward_cross, conversation_id) = {
             let mut s = arc.write_or_err("session")?;
             let allow_subset = s.handle.steward_list.config().allow_subset_candidates;
-            let self_identity = Arc::clone(&s.self_identity);
+            let self_member_id = Arc::clone(&s.self_member_id);
             let result = if s.handle.mls().is_some() {
-                match s.handle.finalize_freeze_round(allow_subset, &self_identity) {
+                match s
+                    .handle
+                    .finalize_freeze_round(allow_subset, &self_member_id)
+                {
                     Ok(result) => result,
                     Err(e) => {
                         error!(conversation = %s.conversation_id, error = %e, "freeze finalize failed");
@@ -204,12 +207,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                             Some(mls) => {
                                 let violation_epoch = mls.current_epoch()?;
                                 let members = mls.members()?;
-                                let self_identity: &[u8] = &s.self_identity;
+                                let self_member_id: &[u8] = &s.self_member_id;
                                 let eligible = s.handle.conversation.steward_eligibility(&members);
                                 s.handle
                                     .steward_list
                                     .epoch_steward(violation_epoch, &eligible)
-                                    .filter(|id| !id.is_empty() && *id != self_identity)
+                                    .filter(|id| !id.is_empty() && *id != self_member_id)
                                     .map(|id| id.to_vec())
                             }
                             None => None,
@@ -244,7 +247,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 // Layer 2 recovery: regenerate the steward list. Only the
                 // responsible proposer's call actually submits.
                 if entered_reelection
-                    && let Err(e) = Self::try_initiate_steward_election(arc, true, None).await
+                    && let Err(e) = Self::initiate_steward_election(arc, true).await
                 {
                     info!(conversation = %conversation_id, error = %e, "recovery election deferred");
                 }
@@ -298,10 +301,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let epoch = s.handle.expect_mls()?.current_epoch()?;
             s.handle.conversation.ensure_freeze_round(epoch);
 
-            let self_identity = Arc::clone(&s.self_identity);
+            let self_member_id = Arc::clone(&s.self_member_id);
             let app_id = Arc::clone(&s.app_id);
-            let outbound = if s.handle.steward_list.is_steward(&self_identity) {
-                match s.handle.create_commit_candidate(&self_identity, &app_id) {
+            let outbound = if s.handle.steward_list.is_steward(&self_member_id) {
+                match s.handle.create_commit_candidate(&self_member_id, &app_id) {
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(

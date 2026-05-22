@@ -18,7 +18,7 @@ use crate::{
     core::{
         ConsensusApplyResult, ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin,
         ProposalKind, ScoreOp, SessionEvent, StewardListPlugin, apply_consensus_result,
-        emergency_score_ops, target_identity_of,
+        emergency_score_ops, target_member_id_of,
     },
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, conversation_update_request,
@@ -111,7 +111,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         if !approved && let Ok(req) = ConversationUpdateRequest::decode(payload.as_slice()) {
             if ProposalKind::of(&req).is_steward_election() {
                 Self::handle_election_rejected(arc).await?;
-            } else if let Some(target) = target_identity_of(&req) {
+            } else if let Some(target) = target_member_id_of(&req) {
                 let target = target.to_vec();
                 arc.write_or_err("session")?
                     .handle
@@ -159,7 +159,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         if !target_was_steward {
             return Ok(());
         }
-        if let Err(e) = Self::try_initiate_steward_election(arc, true, Some(target)).await {
+        if let Err(e) = Self::initiate_steward_election(arc, true).await {
             let conv_name = arc.read_or_err("session")?.conversation_id.clone();
             info!(
                 conversation = %conv_name,
@@ -252,7 +252,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 conversation = %conversation_id,
                 round, max, "election retries exhausted; escalating to Layer 3"
             );
-            if let Err(e) = Self::try_initiate_deadlock_ecp(arc).await {
+            if let Err(e) = Self::initiate_deadlock_ecp(arc).await {
                 error!(conversation = %conversation_id, error = %e, "Deadlock ECP filing failed");
                 arc.read_or_err("session")?.emit_event(SessionEvent::Error {
                     operation: "Reelection stuck".to_string(),
@@ -265,7 +265,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             conversation = %conversation_id,
             round, max, "steward election rejected, retrying"
         );
-        if let Err(e) = Self::try_initiate_steward_election(arc, true, None).await {
+        if let Err(e) = Self::initiate_steward_election(arc, true).await {
             info!(conversation = %conversation_id, error = %e, "election retry deferred");
         }
         Ok(())

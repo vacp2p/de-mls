@@ -13,11 +13,7 @@ pub mod v1 {
         },
     };
 
-    /// Render raw identity bytes as a `0x…` lowercase hex string. The
-    /// library protocol carries identity bytes; the UI layer chooses how
-    /// to render them. This crate uses simple lowercase hex everywhere
-    /// the protocol surfaces a member identity (membership changes,
-    /// violation targets, election rosters, ban requests).
+    /// Render raw member id bytes as a `0x…` lowercase hex string.
     pub fn encode_hex(raw: &[u8]) -> String {
         if raw.is_empty() {
             return String::new();
@@ -30,17 +26,17 @@ pub mod v1 {
         s
     }
 
-    /// Target identity bytes (hex-encoded) for membership /
+    /// Target member-id bytes (hex-encoded) for membership /
     /// emergency-evidence targets, or `"epoch E | s1, s2, ..."` for
     /// elections (with `, retry R` appended when `R > 0`). `"unknown"`
     /// otherwise.
     pub fn format_conversation_request_target(request: &ConversationUpdateRequest) -> String {
         match &request.payload {
             Some(conversation_update_request::Payload::MemberInvite(im)) => {
-                encode_hex(&im.identity)
+                encode_hex(&im.member_id)
             }
             Some(conversation_update_request::Payload::RemoveMember(rm)) => {
-                encode_hex(&rm.identity)
+                encode_hex(&rm.member_id)
             }
             Some(conversation_update_request::Payload::EmergencyCriteria(ec)) => ec
                 .evidence

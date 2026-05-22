@@ -51,7 +51,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     }
 
     pub fn is_steward_for_self(&self) -> bool {
-        self.handle.steward_list.is_steward(&self.self_identity)
+        self.handle.steward_list.is_steward(&self.self_member_id)
     }
 
     /// Identity bytes of every current member of this conversation, as
@@ -74,7 +74,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
     /// Identities that have an in-flight self-leave request. Used by the UI
     /// to render a "pending leave" indicator.
-    pub fn get_pending_leave_identities(&self) -> Result<Vec<Vec<u8>>, UserError> {
+    pub fn get_pending_leave_member_ids(&self) -> Result<Vec<Vec<u8>>, UserError> {
         let members = self.handle.expect_mls()?.members()?;
         Ok(members
             .into_iter()

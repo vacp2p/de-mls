@@ -55,5 +55,5 @@ async fn chat_message_delivered_to_peer_as_app_message_event() {
         });
     let (body, sender) = chat.expect("bob must surface alice's chat message as a SessionEvent");
     assert_eq!(body, b"Hello from alice");
-    assert_eq!(sender, users[0].0.identity_string());
+    assert_eq!(sender, users[0].0.member_id_string());
 }

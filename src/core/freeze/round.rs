@@ -66,7 +66,7 @@ pub fn compute_commit_hash(commit_message: &[u8]) -> CommitHash {
 }
 
 /// Buffer a remote commit candidate. Enforces non-empty proposals/commit,
-/// valid MLS wire kinds, non-empty `steward_identity`, and non-duplicate
+/// valid MLS wire kinds, non-empty `steward_member_id`, and non-duplicate
 /// hash. No MLS state is mutated.
 pub fn buffer_commit_candidate<M: MlsService>(
     conversation: &mut Conversation,
@@ -97,9 +97,9 @@ pub fn buffer_commit_candidate<M: MlsService>(
         return Ok(ProcessResult::Noop(NoopReason::EmptyCandidatePayload));
     }
 
-    if candidate_msg.steward_identity.is_empty() {
-        tracing::debug!(conversation = %conversation_id, "candidate ignored: empty steward_identity");
-        return Ok(ProcessResult::Noop(NoopReason::EmptyStewardIdentity));
+    if candidate_msg.steward_member_id.is_empty() {
+        tracing::debug!(conversation = %conversation_id, "candidate ignored: empty steward_member_id");
+        return Ok(ProcessResult::Noop(NoopReason::EmptyStewardMemberId));
     }
 
     // Wire-level kind check — no MLS staging.
@@ -121,7 +121,7 @@ pub fn buffer_commit_candidate<M: MlsService>(
         return Ok(ProcessResult::Noop(NoopReason::WireKindMismatch));
     }
 
-    let steward = candidate_msg.steward_identity.clone();
+    let steward = candidate_msg.steward_member_id.clone();
     let epoch = mls.current_epoch()?;
     let outcome = conversation.add_freeze_candidate(
         BufferedCommitCandidate {
@@ -140,7 +140,9 @@ pub fn buffer_commit_candidate<M: MlsService>(
                 total_candidates = conversation.freeze_candidate_count(),
                 "remote candidate buffered"
             );
-            Ok(ProcessResult::CommitCandidateReceived { steward })
+            Ok(ProcessResult::CommitCandidateReceived {
+                steward_id: steward,
+            })
         }
         // Legitimate runtime states, not errors — drop quietly.
         FreezeBufferOutcome::SelectionLocked => {
@@ -167,7 +169,7 @@ pub fn finalize_freeze_round<M: MlsService, St: StewardListPlugin>(
     steward: &St,
     in_recovery: bool,
     allow_subset_candidates: bool,
-    self_identity: &[u8],
+    self_member_id: &[u8],
 ) -> Result<FreezeFinalizeResult, CoreError> {
     let current_epoch = mls.current_epoch()?;
     conversation.lock_freeze_round_selection(current_epoch);
@@ -190,7 +192,7 @@ pub fn finalize_freeze_round<M: MlsService, St: StewardListPlugin>(
         steward,
         current_epoch,
         in_recovery,
-        self_identity,
+        self_member_id,
     )?;
     let sorted = rank_applicable_candidates(candidates, &ctx, allow_subset_candidates);
 
@@ -199,7 +201,7 @@ pub fn finalize_freeze_round<M: MlsService, St: StewardListPlugin>(
         return Ok(FreezeFinalizeResult::default());
     }
 
-    apply_in_priority_order(conversation, mls, steward, sorted, &ctx, self_identity)
+    apply_in_priority_order(conversation, mls, steward, sorted, &ctx, self_member_id)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -231,14 +233,14 @@ impl RoundContext {
         steward: &St,
         current_epoch: u64,
         in_recovery: bool,
-        self_identity: &[u8],
+        self_member_id: &[u8],
     ) -> Result<Self, CoreError> {
         let mls_count = conversation
             .approved_proposals()
             .values()
             .filter(|req| produces_mls_action(req))
             .count();
-        let self_remove_pending = conversation.is_pending_removal(self_identity);
+        let self_remove_pending = conversation.is_pending_removal(self_member_id);
 
         let members = mls.members()?;
         let eligible = conversation.steward_eligibility(&members);
@@ -299,7 +301,7 @@ fn rank_applicable_candidates(
 /// RFC §"Commit validation service" selection priority, in order:
 ///   1. largest proposal count,
 ///   2. epoch steward before anyone else,
-///   3. lexicographically smallest `steward_identity`,
+///   3. lexicographically smallest `steward_member_id`,
 ///   4. lowest `commit_hash`.
 ///
 /// `is_local_candidate` is deliberately ignored — it's node-local and would
@@ -323,7 +325,7 @@ fn compare_candidate_priority(
     // Tier: 0 for epoch steward, 1 for everyone else.
     let tier = |c: &BufferedCommitCandidate| -> u8 {
         match epoch_steward_id {
-            Some(es) if c.candidate_msg.steward_identity == es => 0,
+            Some(es) if c.candidate_msg.steward_member_id == es => 0,
             _ => 1,
         }
     };
@@ -334,8 +336,8 @@ fn compare_candidate_priority(
 
     let id_cmp = a
         .candidate_msg
-        .steward_identity
-        .cmp(&b.candidate_msg.steward_identity);
+        .steward_member_id
+        .cmp(&b.candidate_msg.steward_member_id);
     if id_cmp != std::cmp::Ordering::Equal {
         return id_cmp;
     }
@@ -359,7 +361,7 @@ mod tests {
     }
 
     fn make_candidate(
-        steward_identity: Vec<u8>,
+        steward_member_id: Vec<u8>,
         actions_count: usize,
         commit_hash: CommitHash,
     ) -> BufferedCommitCandidate {
@@ -368,7 +370,7 @@ mod tests {
                 conversation_id: b"test-conversation".to_vec(),
                 mls_proposals: vec![vec![0xFF; 10]; actions_count],
                 commit_message: commit_hash.as_bytes().to_vec(),
-                steward_identity,
+                steward_member_id,
             },
             commit_hash,
             is_local_candidate: false,
@@ -389,7 +391,7 @@ mod tests {
 
         sort_by_priority(&mut candidates, Some(&epoch_id));
 
-        assert_eq!(candidates[0].candidate_msg.steward_identity, other_id);
+        assert_eq!(candidates[0].candidate_msg.steward_member_id, other_id);
         assert_eq!(candidates[0].candidate_msg.mls_proposals.len(), 5);
     }
 
@@ -406,12 +408,12 @@ mod tests {
 
         sort_by_priority(&mut candidates, Some(&epoch_id));
 
-        assert_eq!(candidates[0].candidate_msg.steward_identity, epoch_id);
+        assert_eq!(candidates[0].candidate_msg.steward_member_id, epoch_id);
     }
 
     /// Third criterion: equal tier → lexicographically smallest identity wins.
     #[test]
-    fn lexicographic_identity_tiebreak_when_tier_equal() {
+    fn lexicographic_member_id_tiebreak_when_tier_equal() {
         let epoch_id = vec![0x01];
         let other_a = vec![0x05];
         let other_b = vec![0x03];
@@ -423,7 +425,7 @@ mod tests {
 
         sort_by_priority(&mut candidates, Some(&epoch_id));
 
-        assert_eq!(candidates[0].candidate_msg.steward_identity, other_b);
+        assert_eq!(candidates[0].candidate_msg.steward_member_id, other_b);
     }
 
     /// Final tiebreak: same identity, same action count → lowest commit hash wins.
@@ -444,7 +446,7 @@ mod tests {
     /// No steward list → tier is always 1, so the tier check is a no-op and
     /// we fall through to identity comparison.
     #[test]
-    fn no_steward_list_flattens_tier_and_falls_through_to_identity() {
+    fn no_steward_list_flattens_tier_and_falls_through_to_member_id() {
         let id_a = vec![0x05];
         let id_b = vec![0x03];
 
@@ -455,12 +457,12 @@ mod tests {
 
         sort_by_priority(&mut candidates, None);
 
-        assert_eq!(candidates[0].candidate_msg.steward_identity, id_b);
+        assert_eq!(candidates[0].candidate_msg.steward_member_id, id_b);
     }
 
     /// Integration: three candidates mixing all criteria in one ordering.
     #[test]
-    fn full_priority_order_actions_first_then_tier_then_identity() {
+    fn full_priority_order_actions_first_then_tier_then_member_id() {
         // other_b: 5 actions (wins on primary)
         // epoch:   3 actions, epoch-steward tier
         // other_a: 3 actions, non-epoch
@@ -476,8 +478,8 @@ mod tests {
 
         sort_by_priority(&mut candidates, Some(&epoch_id));
 
-        assert_eq!(candidates[0].candidate_msg.steward_identity, other_b);
-        assert_eq!(candidates[1].candidate_msg.steward_identity, epoch_id);
-        assert_eq!(candidates[2].candidate_msg.steward_identity, other_a);
+        assert_eq!(candidates[0].candidate_msg.steward_member_id, other_b);
+        assert_eq!(candidates[1].candidate_msg.steward_member_id, epoch_id);
+        assert_eq!(candidates[2].candidate_msg.steward_member_id, other_a);
     }
 }

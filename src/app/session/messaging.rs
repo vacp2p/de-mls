@@ -29,7 +29,7 @@ pub fn build_key_package_packet(
 ) -> OutboundPacket {
     let invite = MemberInvite {
         key_package_bytes: key_package.as_bytes().to_vec(),
-        identity: key_package.identity().to_vec(),
+        member_id: key_package.member_id().to_vec(),
     };
     OutboundPacket::new(
         invite.encode_to_vec(),
@@ -41,10 +41,7 @@ pub fn build_key_package_packet(
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Broadcast `key_package` on this conversation's welcome subtopic so
-    /// the steward can invite us. The caller (typically the integrator)
-    /// generates the key package via [`crate::app::User::generate_key_package`] —
-    /// KP minting is identity-bound, not conversation-bound, so it stays
-    /// at the User layer.
+    /// the steward can invite us.
     ///
     /// Takes `&Arc<RwLock<Self>>` so the runner lock is released before
     /// awaiting on the transport.
@@ -86,7 +83,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
             let app_msg: AppMessage = ConversationMessage {
                 message,
-                sender: s.identity_display.to_string(),
+                sender: s.member_id_display.to_string(),
                 conversation_id: s.conversation_id.clone(),
             }
             .into();
@@ -123,7 +120,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             ConversationUpdateRequest {
                 payload: Some(conversation_update_request::Payload::RemoveMember(
                     RemoveMember {
-                        identity: ban_request.user_to_ban,
+                        member_id: ban_request.user_to_ban,
                     },
                 )),
             },
