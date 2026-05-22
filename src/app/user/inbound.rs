@@ -1,11 +1,12 @@
 //! User-side inbound entry point.
 //!
-//! `process_inbound_packet` owns echo dedup + name routing. Welcome-
-//! subtopic packets carry [`MemberInvite`] (KP-broadcast); app-message
-//! packets are handed off to
+//! `process_inbound_packet` owns echo dedup + name routing.
+//! `WELCOME_SUBTOPIC` packets carry [`MemberInvite`] — a peer
+//! broadcasting their own key package so existing members can propose
+//! adding them. App-message packets are handed off to
 //! [`SessionRunner::dispatch_inbound_result`] for MLS processing and
-//! per-conversation dispatch. Raw MLS welcomes enter through
-//! [`User::accept_welcome`].
+//! per-conversation dispatch. Raw MLS welcomes never traverse the wire
+//! here — they enter the library through [`User::accept_welcome`].
 
 use std::sync::{Arc, RwLock};
 
@@ -13,7 +14,7 @@ use prost::Message;
 use tracing::info;
 
 use crate::{
-    app::{DispatchOutcome, LockExt, SessionRunner, User, UserError},
+    app::{DispatchOutcome, LockExt, SessionRunner, SessionTick, User, UserError},
     core::{
         ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, CoreError,
         ProcessResult,
@@ -32,12 +33,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// dedup, name-based routing, and the welcome subtopic's plug-in-
     /// factory access. App-message packets are handed off to the session
     /// for MLS processing and dispatch.
-    pub async fn process_inbound_packet(&self, packet: InboundPacket) -> Result<(), UserError> {
+    pub async fn process_inbound_packet(
+        &self,
+        packet: InboundPacket,
+    ) -> Result<SessionTick, UserError> {
         let conversation_name = packet.conversation_id.clone();
 
         // Echo dedup: drop our own messages received back from pub/sub.
         if packet.app_id.as_slice() == &*self.app_id {
-            return Ok(());
+            return Ok(SessionTick::empty());
         }
 
         let entry_arc = self
@@ -46,19 +50,21 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
         match packet.subtopic.as_str() {
             WELCOME_SUBTOPIC => {
-                self.process_welcome_packet(&conversation_name, &packet.payload, &entry_arc)
-                    .await
+                self.process_key_package_broadcast(&conversation_name, &packet.payload, &entry_arc)
+                    .await?;
+                Ok(entry_arc.read_or_err("session")?.tick())
             }
             APP_MSG_SUBTOPIC => {
                 let result = {
                     let mut entry = entry_arc.write_or_err("session")?;
                     if entry.handle.mls().is_none() {
-                        return Ok(());
+                        return Ok(SessionTick::empty());
                     }
                     entry.handle.process_inbound(&packet.payload)?
                 };
                 self.finish_dispatch(&conversation_name, &entry_arc, result)
-                    .await
+                    .await?;
+                Ok(entry_arc.read_or_err("session")?.tick())
             }
             other => Err(UserError::Core(CoreError::InvalidSubtopic(
                 other.to_string(),
@@ -93,15 +99,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
     // ── Private ──────────────────────────────────────────────────────
 
-    /// Welcome-subtopic dispatch. Carries [`MemberInvite`] only — a peer
-    /// broadcasting their key package so existing members can propose
-    /// adding them. If we already have an MLS service for this
-    /// conversation and the candidate isn't a member, surface it as a
-    /// membership-change request.
-    ///
-    /// Raw MLS welcomes are not framed here — they reach the library via
-    /// [`User::accept_welcome`].
-    async fn process_welcome_packet(
+    /// Decode a key-package broadcast off `WELCOME_SUBTOPIC` and, if the
+    /// holder isn't already a member, promote it to a `MemberInvite`
+    /// membership-change request. Raw MLS welcomes do not flow here —
+    /// they enter through [`User::accept_welcome`].
+    async fn process_key_package_broadcast(
         &self,
         conversation_name: &str,
         payload: &[u8],

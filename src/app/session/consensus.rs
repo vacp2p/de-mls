@@ -14,7 +14,7 @@ use tracing::{error, info};
 
 use crate::{
     app::{
-        ConversationState, LockExt, SessionRunner, UserError,
+        ConversationState, LockExt, SessionRunner, SessionTick, UserError,
         session::{
             consensus_bridge::{
                 ProposalParams, cast_vote, submit_proposal, submit_self_leave_proposal,
@@ -225,7 +225,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Call from the caller's polling loop. Drains entries synchronously
     /// under a brief write guard, then awaits the async fire (consensus
     /// call or vote cast + publish) without holding the lock.
-    pub async fn tick_deadlines(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
+    pub async fn tick_deadlines(arc: &Arc<RwLock<Self>>) -> Result<SessionTick, UserError> {
         let now = std::time::Instant::now();
         let (auto_votes_due, timeouts_due) = {
             let mut s = arc.write_or_err("session")?;
@@ -263,7 +263,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             Self::resolve_on_timeout(arc, proposal_id).await;
         }
 
-        Ok(())
+        Ok(arc.read_or_err("session")?.tick())
     }
 
     // ── Crate-internal ───────────────────────────────────────────────
@@ -275,7 +275,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// after a successful submit short-circuits on the local pending-leave
     /// check, and a retransmit dedupes inside the consensus library via
     /// the deterministic [`self_leave_proposal_id`].
-    pub(crate) async fn initiate_self_leave(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
+    pub async fn initiate_self_leave(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
         let self_identity = Arc::clone(&arc.read_or_err("session")?.self_identity);
 
         let (already_pending, conversation_name) = {

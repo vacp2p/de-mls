@@ -356,7 +356,7 @@ pub async fn bootstrap_joined_conversation(
     // Joiners send KPs. Drain joiner transports, deliver to creator.
     for i in 1..users.len() {
         let kp = users[i].0.generate_key_package().expect("kp");
-        SessionRunner::send_kp_message(&sessions[i], kp)
+        SessionRunner::send_key_package(&sessions[i], kp)
             .await
             .expect("send kp");
     }

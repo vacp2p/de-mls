@@ -86,7 +86,7 @@ async fn silent_steward_drives_observer_to_reelection() {
         let observer_approved = observer_session
             .read()
             .unwrap()
-            .get_approved_proposal_for_current_epoch()
+            .get_approved_proposals_for_current_epoch()
             .len();
         if observer_approved > 0 {
             consensus_reached = true;

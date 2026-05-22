@@ -10,6 +10,7 @@
 
 use std::error::Error as StdError;
 
+use openmls::prelude::tls_codec::Error as TlsCodecError;
 use openmls::{
     error::LibraryError,
     group::{NewGroupError, ProposeRemoveMemberError, WelcomeError},
@@ -37,8 +38,8 @@ pub enum MlsError {
     #[error("Failed to create signer: {0}")]
     UnableToCreateSigner(#[from] CryptoError),
 
-    #[error("JSON encoding error: {0}")]
-    InvalidJson(serde_json::Error),
+    #[error("Key package TLS codec error: {0}")]
+    KeyPackageTls(TlsCodecError),
 
     // ── MLS wire format (not parameterised over storage) ──
     #[error(transparent)]
@@ -49,9 +50,6 @@ pub enum MlsError {
 
     #[error(transparent)]
     MlsMessageSerialize(#[from] openmls::framing::errors::MlsMessageError),
-
-    #[error("Invalid key package bytes: {0}")]
-    KeyPackageJson(serde_json::Error),
 
     // ── MLS group operations (storage-error payloads erased) ──
     #[error(transparent)]

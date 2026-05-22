@@ -27,7 +27,7 @@ use std::sync::{
     atomic::{AtomicU32, Ordering},
 };
 
-use de_mls::app::build_key_package_message;
+use de_mls::app::build_key_package_packet;
 use de_mls::core::{
     BufferedCommitCandidate, Conversation, CoreError, DeterministicStewardList, FreezeOutcome,
     NoopReason, OperatingMode, PeerScoringService, ProcessResult, ProposalKind, ScoringConfig,
@@ -384,7 +384,7 @@ pub fn setup_joiner_with_config(
     let key_package =
         OpenMlsService::<Arc<MemoryDeMlsStorage>>::generate_key_package(&storage, &credentials)
             .unwrap();
-    let kp_packet = build_key_package_message(conversation_name, key_package, b"test-app-id");
+    let kp_packet = build_key_package_packet(conversation_name, key_package, b"test-app-id");
     JoinerHandle {
         identity,
         credentials,

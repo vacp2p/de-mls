@@ -51,5 +51,5 @@ pub use service::{CIPHERSUITE, DEFAULT_COMMIT_BATCH_MAX, MlsService, OpenMlsServ
 pub use storage::DeMlsStorage;
 pub use types::{
     CommitCandidate, DecryptResult, KeyPackageBytes, MlsCommitInput, MlsMessageKind,
-    MlsProposalOutput, StagedCandidateResult, key_package_bytes_from_json,
+    MlsProposalOutput, StagedCandidateResult, key_package_bytes_from_tls,
 };

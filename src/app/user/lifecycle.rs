@@ -19,7 +19,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         conversation_name: &str,
         is_creation: bool,
     ) -> Result<(), UserError> {
-        self.create_conversation_with_config(
+        self.start_conversation_with_config(
             conversation_name,
             is_creation,
             self.plugins.default_conversation_config.clone(),
@@ -28,7 +28,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     }
 
     /// Like [`Self::start_conversation`] but with a per-conversation config override.
-    pub async fn create_conversation_with_config(
+    pub async fn start_conversation_with_config(
         &mut self,
         conversation_name: &str,
         is_creation: bool,

@@ -92,7 +92,7 @@ pub(crate) async fn push_consensus_state(
             return;
         }
     };
-    let proposals = runner.get_approved_proposal_for_current_epoch();
+    let proposals = runner.get_approved_proposals_for_current_epoch();
     let _ = evt_tx.unbounded_send(AppEvent::CurrentEpochProposals {
         conversation_id: conversation_name.to_string(),
         proposals: display_batch(&proposals),

@@ -363,7 +363,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// `recovery = true` bypasses the list-exhaustion gate and filters
     /// queued-removal targets out of the candidate pool. `extra_exclude`
     /// drops one more identity not yet in `approved_proposals`.
-    pub(crate) async fn try_initiate_steward_election(
+    pub async fn try_initiate_steward_election(
         arc: &Arc<RwLock<Self>>,
         recovery: bool,
         extra_exclude: Option<&[u8]>,
@@ -459,9 +459,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Layer 3 escalation: file a `Deadlock` ECP after re-election retries
     /// exhaust. Only the deterministic responsible proposer submits;
     /// others no-op. On YES the ECP opens `recovery_mode`.
-    pub(crate) async fn try_initiate_deadlock_ecp(
-        arc: &Arc<RwLock<Self>>,
-    ) -> Result<(), UserError> {
+    pub async fn try_initiate_deadlock_ecp(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
         let (is_authorized, self_id, epoch, conversation_name) = {
             let s = arc.read_or_err("session")?;
             let mls = s.handle.expect_mls()?;

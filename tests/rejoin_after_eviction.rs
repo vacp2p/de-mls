@@ -99,7 +99,7 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
 
     let new_session = users[target_idx].0.lookup_entry("rejoin").unwrap().unwrap();
     let kp = users[target_idx].0.generate_key_package().unwrap();
-    SessionRunner::send_kp_message(&new_session, kp)
+    SessionRunner::send_key_package(&new_session, kp)
         .await
         .unwrap();
 

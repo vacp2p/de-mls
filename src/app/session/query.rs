@@ -120,7 +120,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         Ok(roles)
     }
 
-    pub fn get_approved_proposal_for_current_epoch(&self) -> Vec<ConversationUpdateRequest> {
+    pub fn get_approved_proposals_for_current_epoch(&self) -> Vec<ConversationUpdateRequest> {
         self.handle
             .conversation
             .approved_proposals()

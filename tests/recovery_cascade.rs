@@ -112,7 +112,7 @@ async fn concurrent_joins_leave_joiners_with_empty_buffer() {
     for u in [&bob, &charlie, &dave] {
         let kp = u.generate_key_package().unwrap();
         let session = u.lookup_entry(group).unwrap().unwrap();
-        SessionRunner::send_kp_message(&session, kp).await.unwrap();
+        SessionRunner::send_key_package(&session, kp).await.unwrap();
     }
 
     // Step 3: Broadcast every KP packet to every participant (mocks pubsub).

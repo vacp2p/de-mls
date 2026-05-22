@@ -14,7 +14,7 @@ use prost::Message;
 use tracing::{error, info};
 
 use crate::{
-    app::{ConversationState, LockExt, SessionRunner, UserError},
+    app::{ConversationState, LockExt, SessionRunner, SessionTick, UserError},
     core::{
         ConsensusApplyResult, ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin,
         ProposalKind, ScoreOp, SessionEvent, StewardListPlugin, apply_consensus_result,
@@ -33,7 +33,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     pub async fn apply_consensus_outcome(
         arc: &Arc<RwLock<Self>>,
         event: ConsensusEvent,
-    ) -> Result<(), UserError> {
+    ) -> Result<SessionTick, UserError> {
         let (proposal_id, approved) = match &event {
             ConsensusEvent::ConsensusReached {
                 proposal_id,
@@ -60,7 +60,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 proposal_id,
                 "duplicate consensus outcome dropped"
             );
-            return Ok(());
+            return Ok(arc.read_or_err("session")?.tick());
         }
 
         // Fetch payload from the per-conversation consensus storage.
@@ -92,7 +92,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         match consensus_apply {
             ConsensusApplyResult::NoAction => {}
             ConsensusApplyResult::ElectionAccepted(election) => {
-                return Self::handle_election_accepted(arc, election).await;
+                Self::handle_election_accepted(arc, election).await?;
+                return Ok(arc.read_or_err("session")?.tick());
             }
             ConsensusApplyResult::RecoveryModeOpened => {
                 arc.write_or_err("session")?.handle.enter_recovery_mode();
@@ -129,7 +130,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             Self::handle_emergency_scored(arc, proposal_id, &payload, &score_ops).await?;
         }
 
-        Ok(())
+        Ok(arc.read_or_err("session")?.tick())
     }
 
     /// Bypass the inactivity timer and emit the resulting phase change.

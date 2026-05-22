@@ -37,6 +37,7 @@ pub use error::UserError;
 pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer};
 pub(crate) use session::LockExt;
 pub use session::{
-    CreatorVote, DispatchOutcome, PendingJoinTick, SessionRunner, build_key_package_message,
+    CreatorVote, DispatchOutcome, PendingJoinTick, SessionRunner, SessionTick,
+    build_key_package_packet,
 };
 pub use user::{ConsensusContext, SessionEntry, User, UserPlugins};

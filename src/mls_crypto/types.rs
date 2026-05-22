@@ -1,6 +1,6 @@
 //! MLS types and operation results.
 
-use openmls::key_packages::KeyPackage as MlsKeyPackage;
+use openmls::{key_packages::KeyPackageIn, prelude::DeserializeBytes};
 
 use crate::mls_crypto::MlsError;
 
@@ -131,14 +131,17 @@ pub struct CommitCandidate {
     pub welcome: Option<Vec<u8>>,
 }
 
-/// Parse a JSON-serialized key package and extract the identity.
-///
-/// Returns `(key_package_bytes, identity)` where:
-/// - `key_package_bytes` is the original JSON bytes (passed through)
-/// - `identity` is the identity bytes from the leaf credential
-pub fn key_package_bytes_from_json(json_bytes: Vec<u8>) -> Result<(Vec<u8>, Vec<u8>), MlsError> {
-    let kp: MlsKeyPackage =
-        serde_json::from_slice(&json_bytes).map_err(MlsError::KeyPackageJson)?;
-    let identity = kp.leaf_node().credential().serialized_content().to_vec();
-    Ok((json_bytes, identity))
+/// Parse TLS-serialized key package bytes and extract the leaf-credential
+/// identity. Returns `(key_package_bytes, identity)` — the bytes are
+/// passed through unchanged so the caller can re-broadcast them on the
+/// wire without a second serialization pass.
+pub fn key_package_bytes_from_tls(bytes: Vec<u8>) -> Result<(Vec<u8>, Vec<u8>), MlsError> {
+    let (kp_in, _rest) =
+        KeyPackageIn::tls_deserialize_bytes(&bytes).map_err(MlsError::KeyPackageTls)?;
+    let identity = kp_in
+        .unverified_credential()
+        .credential
+        .serialized_content()
+        .to_vec();
+    Ok((bytes, identity))
 }

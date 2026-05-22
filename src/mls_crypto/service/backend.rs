@@ -7,9 +7,10 @@
 
 use openmls::{
     group::MlsGroup,
+    key_packages::KeyPackageIn,
     prelude::{
         ContentType, DeserializeBytes, MlsMessageBodyIn, MlsMessageIn, ProcessedMessageContent,
-        Proposal, ProtocolMessage,
+        Proposal, ProtocolMessage, ProtocolVersion,
     },
 };
 use openmls_rust_crypto::RustCrypto;
@@ -144,9 +145,12 @@ where
         for update in updates {
             match update {
                 MlsCommitInput::Add(key_package) => {
-                    let kp: openmls::key_packages::KeyPackage =
-                        serde_json::from_slice(key_package.as_bytes())
-                            .map_err(MlsError::KeyPackageJson)?;
+                    let (kp_in, _rest) =
+                        KeyPackageIn::tls_deserialize_bytes(key_package.as_bytes())
+                            .map_err(MlsError::KeyPackageTls)?;
+                    let kp = kp_in
+                        .validate(provider.crypto(), ProtocolVersion::Mls10)
+                        .map_err(MlsError::storage)?;
                     let (mls_message_out, _proposal_ref) =
                         group.propose_add_member(&provider, signer, &kp)?;
                     mls_proposals.push(mls_message_out.to_bytes()?);

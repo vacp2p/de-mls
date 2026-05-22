@@ -18,10 +18,12 @@ mod messaging;
 mod query;
 mod runner;
 mod steward;
+mod tick;
 
 pub use consensus::CreatorVote;
 pub use freeze::PendingJoinTick;
 pub use inbound::DispatchOutcome;
 pub(crate) use lock::LockExt;
-pub use messaging::build_key_package_message;
+pub use messaging::build_key_package_packet;
 pub use runner::SessionRunner;
+pub use tick::SessionTick;

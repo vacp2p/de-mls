@@ -5,19 +5,23 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, RwLock},
+    time::Duration,
 };
 
 use crate::{
-    app::{CreatorVote, LockExt, SessionRunner, UserError, UserPlugins},
+    app::{
+        ConversationState, CreatorVote, LockExt, MemberRole, SessionRunner, SessionTick, UserError,
+        UserPlugins,
+    },
     core::{
         ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, PluginConsensus,
-        ScoringConfig, StewardListConfig,
+        ScoringConfig, SessionEvent, StewardListConfig,
     },
     ds::SharedDeliveryService,
     identity::Identity,
-    mls_crypto::{KeyPackageBytes, MlsError, MlsService, key_package_bytes_from_json},
+    mls_crypto::{KeyPackageBytes, MlsError, MlsService, key_package_bytes_from_tls},
     protos::de_mls::messages::v1::{
-        ConversationUpdateRequest, MemberInvite, conversation_update_request,
+        BanRequest, ConversationUpdateRequest, MemberInvite, conversation_update_request,
     },
 };
 
@@ -115,23 +119,98 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         self.plugins.default_steward_list_config = config;
     }
 
-    /// Propose adding the holder of `key_package_bytes` to `conversation_name`.
-    /// `key_package_bytes` is a serialized MLS key package obtained out
-    /// of band — the caller has chosen this candidate consciously, so
-    /// the local vote is bundled YES at submit. On consensus YES, the
-    /// epoch steward authors a commit containing the Add and the
-    /// resulting welcome arrives via
-    /// [`crate::core::SessionEvent::WelcomeReady`].
+    /// Send a chat message on `conversation_name`. Thin wrapper over
+    /// [`SessionRunner::send_app_message`]. Errors with
+    /// `ConversationNotFound` if the conversation has been removed, or
+    /// `ConversationBlocked` if the session is gating chat traffic.
+    pub async fn send_app_message(
+        &self,
+        conversation_name: &str,
+        message: Vec<u8>,
+    ) -> Result<SessionTick, UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::send_app_message(&entry, message).await
+    }
+
+    /// Broadcast `key_package` on `conversation_name`'s welcome subtopic
+    /// so existing members can propose adding us. Thin wrapper over
+    /// [`SessionRunner::send_key_package`].
+    pub async fn send_key_package(
+        &self,
+        conversation_name: &str,
+        key_package: KeyPackageBytes,
+    ) -> Result<SessionTick, UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::send_key_package(&entry, key_package).await
+    }
+
+    /// Walk pending deadlines on `conversation_name`. Thin wrapper over
+    /// [`SessionRunner::tick_deadlines`].
+    pub async fn tick_deadlines(&self, conversation_name: &str) -> Result<SessionTick, UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::tick_deadlines(&entry).await
+    }
+
+    /// Advance every per-conversation polling path: deadlines (auto-votes
+    /// and consensus timeouts), freeze coordinator, member-side freeze
+    /// check, and `PendingJoin` expiry. Bundled so an integrator's
+    /// periodic wakeup needs one call to drive a session forward.
+    ///
+    /// The returned `SessionTick.next_wakeup_in` covers every time-based
+    /// transition the session is currently expecting. Drained events
+    /// (e.g. `Leaving` on `PendingJoin` expiry) are read separately via
+    /// [`Self::drain_events`].
+    pub async fn poll_session(&self, conversation_name: &str) -> Result<SessionTick, UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::tick_deadlines(&entry).await?;
+        SessionRunner::poll_freeze_status(&entry).await?;
+        SessionRunner::check_member_freeze(&entry).await?;
+        SessionRunner::check_pending_join(&entry)?;
+        Ok(entry.read_or_err("session")?.tick())
+    }
+
+    /// Drain pending [`SessionEvent`]s for `conversation_name`. Thin
+    /// wrapper over [`SessionRunner::drain_events`].
+    pub fn drain_events(&self, conversation_name: &str) -> Result<Vec<SessionEvent>, UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        Ok(entry.read_or_err("session")?.drain_events())
+    }
+
+    /// Earliest pending deadline on `conversation_name` relative to now,
+    /// `None` if nothing is scheduled. Mirrors
+    /// [`SessionRunner::next_wakeup_in`].
+    pub fn next_wakeup_in(&self, conversation_name: &str) -> Result<Option<Duration>, UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        Ok(entry.read_or_err("session")?.next_wakeup_in())
+    }
+
+    /// Propose adding the holder of `key_package_bytes` to
+    /// `conversation_name`. The local vote is bundled YES at submit. On
+    /// consensus YES the epoch steward authors a commit containing the
+    /// Add; the resulting welcome arrives via
+    /// [`crate::core::SessionEvent::WelcomeReady`] for the integrator to
+    /// deliver out of band.
     pub async fn add_member(
         &self,
         conversation_name: &str,
         key_package_bytes: &[u8],
-    ) -> Result<(), UserError> {
+    ) -> Result<SessionTick, UserError> {
         let entry = self
             .lookup_entry(conversation_name)?
             .ok_or(UserError::ConversationNotFound)?;
-        let (key_package_bytes, identity) =
-            key_package_bytes_from_json(key_package_bytes.to_vec())?;
+        let (key_package_bytes, identity) = key_package_bytes_from_tls(key_package_bytes.to_vec())?;
         let request = ConversationUpdateRequest {
             payload: Some(conversation_update_request::Payload::MemberInvite(
                 MemberInvite {
@@ -140,7 +219,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 },
             )),
         };
-        SessionRunner::initiate_proposal(&entry, request, CreatorVote::Yes).await
+        SessionRunner::initiate_proposal(&entry, request, CreatorVote::Yes).await?;
+        Ok(entry.read_or_err("session")?.tick())
     }
 
     /// Ingest a raw MLS welcome blob delivered out of band (e.g. the
@@ -148,7 +228,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// through the integrator's transport). Returns the joined
     /// conversation name, or [`UserError::WelcomeNotForUs`] if the
     /// welcome doesn't address this user's key package.
-    pub async fn accept_welcome(&mut self, welcome_bytes: &[u8]) -> Result<String, UserError> {
+    pub async fn accept_welcome(
+        &mut self,
+        welcome_bytes: &[u8],
+    ) -> Result<(String, SessionTick), UserError> {
         let svc = self
             .plugins
             .conversation_plugins
@@ -166,7 +249,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         {
             let mut entry = entry_arc.write_or_err("session")?;
             if entry.handle.mls().is_some() {
-                return Ok(conversation_name);
+                return Ok((conversation_name, entry.tick()));
             }
             entry.handle.attach_mls(svc);
         }
@@ -176,7 +259,203 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             crate::core::ProcessResult::JoinedConversation(conversation_name.clone()),
         )
         .await?;
-        Ok(conversation_name)
+        let tick = entry_arc.read_or_err("session")?.tick();
+        Ok((conversation_name, tick))
+    }
+
+    // ── UI actions ─────────────────────────────────────────────────────
+
+    /// Cast the local member's manual vote on `proposal_id`. Cancels any
+    /// pending auto-vote so the manual choice wins. Thin wrapper over
+    /// [`SessionRunner::process_user_vote`].
+    pub async fn process_user_vote(
+        &self,
+        conversation_name: &str,
+        proposal_id: u32,
+        vote: bool,
+    ) -> Result<SessionTick, UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::process_user_vote(&entry, proposal_id, vote).await?;
+        Ok(entry.read_or_err("session")?.tick())
+    }
+
+    /// Open a `RemoveMember` consensus round targeting
+    /// `ban_request.user_to_ban`. The local vote is bundled YES at submit.
+    /// Thin wrapper over [`SessionRunner::process_ban_request`].
+    pub async fn process_ban_request(
+        &self,
+        conversation_name: &str,
+        ban_request: BanRequest,
+    ) -> Result<SessionTick, UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::process_ban_request(&entry, ban_request).await
+    }
+
+    /// Submit `request` as a fresh consensus proposal with
+    /// `creator_vote`. Lower-level than
+    /// [`Self::add_member`] / [`Self::process_ban_request`]; use those
+    /// for membership changes. Thin wrapper over
+    /// [`SessionRunner::initiate_proposal`].
+    pub async fn initiate_proposal(
+        &self,
+        conversation_name: &str,
+        request: ConversationUpdateRequest,
+        creator_vote: CreatorVote,
+    ) -> Result<SessionTick, UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::initiate_proposal(&entry, request, creator_vote).await?;
+        Ok(entry.read_or_err("session")?.tick())
+    }
+
+    /// Open a self-leave consensus round for the local member. The
+    /// resulting commit ejects us; the session emits
+    /// [`SessionEvent::Leaving`] and the caller follows up with
+    /// [`Self::finalize_self_leave`]. Thin wrapper over
+    /// [`SessionRunner::initiate_self_leave`].
+    pub async fn initiate_self_leave(
+        &self,
+        conversation_name: &str,
+    ) -> Result<SessionTick, UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::initiate_self_leave(&entry).await?;
+        Ok(entry.read_or_err("session")?.tick())
+    }
+
+    // ── State queries ──────────────────────────────────────────────────
+
+    /// Current state-machine value for `conversation_name`. Mirrors
+    /// [`SessionRunner::get_conversation_state`].
+    pub fn get_conversation_state(
+        &self,
+        conversation_name: &str,
+    ) -> Result<ConversationState, UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        Ok(entry.read_or_err("session")?.get_conversation_state())
+    }
+
+    /// `true` if the local user is on the current steward list for
+    /// `conversation_name`. Mirrors [`SessionRunner::is_steward_for_self`].
+    pub fn is_steward(&self, conversation_name: &str) -> Result<bool, UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        Ok(entry.read_or_err("session")?.is_steward_for_self())
+    }
+
+    /// MLS epoch + reelection retry round for `conversation_name`. `(0, 0)`
+    /// before MLS is attached. Mirrors
+    /// [`SessionRunner::get_epoch_and_retry`].
+    pub fn get_epoch_and_retry(&self, conversation_name: &str) -> Result<(u64, u32), UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        entry.read_or_err("session")?.get_epoch_and_retry()
+    }
+
+    /// Roster as identity-bytes. Empty before MLS is attached. Mirrors
+    /// [`SessionRunner::get_conversation_members`].
+    pub fn get_conversation_members(
+        &self,
+        conversation_name: &str,
+    ) -> Result<Vec<Vec<u8>>, UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        entry.read_or_err("session")?.get_conversation_members()
+    }
+
+    /// Per-member scoring values. Mirrors
+    /// [`SessionRunner::get_member_scores`].
+    pub fn get_member_scores(
+        &self,
+        conversation_name: &str,
+    ) -> Result<Vec<(Vec<u8>, i64)>, UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        Ok(entry.read_or_err("session")?.get_member_scores())
+    }
+
+    /// Single-member score lookup. Mirrors
+    /// [`SessionRunner::get_member_score`].
+    pub fn get_member_score(
+        &self,
+        conversation_name: &str,
+        member_id: &[u8],
+    ) -> Result<Option<i64>, UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        Ok(entry.read_or_err("session")?.get_member_score(member_id))
+    }
+
+    /// Per-member roles for the current epoch. Mirrors
+    /// [`SessionRunner::get_member_roles`].
+    pub fn get_member_roles(
+        &self,
+        conversation_name: &str,
+    ) -> Result<Vec<(Vec<u8>, MemberRole)>, UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        entry.read_or_err("session")?.get_member_roles()
+    }
+
+    /// Identities with an in-flight self-leave request. Mirrors
+    /// [`SessionRunner::get_pending_leave_identities`].
+    pub fn get_pending_leave_identities(
+        &self,
+        conversation_name: &str,
+    ) -> Result<Vec<Vec<u8>>, UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        entry.read_or_err("session")?.get_pending_leave_identities()
+    }
+
+    /// Buffered pending membership-update count. Mirrors
+    /// [`SessionRunner::get_pending_update_count`].
+    pub fn get_pending_update_count(&self, conversation_name: &str) -> Result<usize, UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        Ok(entry.read_or_err("session")?.get_pending_update_count())
+    }
+
+    /// Freeze-round progress as `(received, expected)`. Mirrors
+    /// [`SessionRunner::get_freeze_candidate_count`].
+    pub fn get_freeze_candidate_count(
+        &self,
+        conversation_name: &str,
+    ) -> Result<(usize, usize), UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        Ok(entry.read_or_err("session")?.get_freeze_candidate_count())
+    }
+
+    /// Approved proposals for the current epoch. Mirrors
+    /// [`SessionRunner::get_approved_proposals_for_current_epoch`].
+    pub fn get_approved_proposals_for_current_epoch(
+        &self,
+        conversation_name: &str,
+    ) -> Result<Vec<ConversationUpdateRequest>, UserError> {
+        let entry = self
+            .lookup_entry(conversation_name)?
+            .ok_or(UserError::ConversationNotFound)?;
+        Ok(entry
+            .read_or_err("session")?
+            .get_approved_proposals_for_current_epoch())
     }
 }
 
