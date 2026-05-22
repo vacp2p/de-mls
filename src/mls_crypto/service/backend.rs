@@ -7,9 +7,10 @@
 
 use openmls::{
     group::MlsGroup,
+    key_packages::KeyPackageIn,
     prelude::{
         ContentType, DeserializeBytes, MlsMessageBodyIn, MlsMessageIn, ProcessedMessageContent,
-        Proposal, ProtocolMessage,
+        Proposal, ProtocolMessage, ProtocolVersion,
     },
 };
 use openmls_rust_crypto::RustCrypto;
@@ -81,7 +82,7 @@ where
                     .ok_or(MlsError::UnknownLeafIndex(removed.u32()))?;
                 Ok(MlsProposalOutput::Remove(id))
             }
-            other => Ok(MlsProposalOutput::Other(format!("{other:?}"))),
+            _ => Err(MlsError::UnknownProposalAction),
         }
     }
 }
@@ -116,9 +117,9 @@ where
             .collect())
     }
 
-    fn is_member(&self, identity: &[u8]) -> bool {
+    fn is_member(&self, member_id: &[u8]) -> bool {
         self.members()
-            .map(|members| members.iter().any(|m| m.as_slice() == identity))
+            .map(|members| members.iter().any(|m| m.as_slice() == member_id))
             .unwrap_or(false)
     }
 
@@ -144,16 +145,19 @@ where
         for update in updates {
             match update {
                 MlsCommitInput::Add(key_package) => {
-                    let kp: openmls::key_packages::KeyPackage =
-                        serde_json::from_slice(key_package.as_bytes())
-                            .map_err(MlsError::KeyPackageJson)?;
+                    let (kp_in, _rest) =
+                        KeyPackageIn::tls_deserialize_bytes(key_package.as_bytes())
+                            .map_err(MlsError::KeyPackageTls)?;
+                    let kp = kp_in
+                        .validate(provider.crypto(), ProtocolVersion::Mls10)
+                        .map_err(MlsError::storage)?;
                     let (mls_message_out, _proposal_ref) =
                         group.propose_add_member(&provider, signer, &kp)?;
                     mls_proposals.push(mls_message_out.to_bytes()?);
                 }
-                MlsCommitInput::Remove(identity) => {
+                MlsCommitInput::Remove(member_id) => {
                     let member_index = group.members().find_map(|m| {
-                        if m.credential.serialized_content() == identity {
+                        if m.credential.serialized_content() == member_id {
                             Some(m.index)
                         } else {
                             None
@@ -300,10 +304,15 @@ where
 
         match outcome {
             Some((commit_sender, self_removed, actions, staged)) => {
+                // de-mls invariant: every bundled proposal must come
+                // from the committer. MLS allows reference-by-id of
+                // others' proposals; we don't.
+                if proposal_senders.iter().any(|s| s != &commit_sender) {
+                    return Ok(StagedCandidateResult::BundleSenderMismatch { commit_sender });
+                }
                 self.pending_staged_commit = Some(staged);
                 Ok(StagedCandidateResult::Staged {
                     commit_sender,
-                    proposal_senders,
                     self_removed,
                     actions,
                 })
@@ -382,13 +391,12 @@ where
         }
 
         let processed = group.process_message(&provider, protocol_message)?;
-        let sender_identity = processed.credential().serialized_content().to_vec();
+        let sender_id = processed.credential().serialized_content().to_vec();
 
         match processed.into_content() {
-            ProcessedMessageContent::ApplicationMessage(app) => Ok(DecryptResult::Application(
-                app.into_bytes(),
-                sender_identity,
-            )),
+            ProcessedMessageContent::ApplicationMessage(app) => {
+                Ok(DecryptResult::Application(app.into_bytes(), sender_id))
+            }
             _ => Ok(DecryptResult::Ignored),
         }
     }
@@ -425,13 +433,12 @@ where
         }
 
         let processed = group.process_message(&provider, protocol_message)?;
-        let sender_identity = processed.credential().serialized_content().to_vec();
+        let sender_id = processed.credential().serialized_content().to_vec();
 
         match processed.into_content() {
-            ProcessedMessageContent::ApplicationMessage(app) => Ok(DecryptResult::Application(
-                app.into_bytes(),
-                sender_identity,
-            )),
+            ProcessedMessageContent::ApplicationMessage(app) => {
+                Ok(DecryptResult::Application(app.into_bytes(), sender_id))
+            }
             ProcessedMessageContent::ProposalMessage(proposal) => {
                 let action =
                     OpenMlsService::<S>::extract_proposal_action(group, proposal.proposal())?;
@@ -439,7 +446,7 @@ where
                 group
                     .store_pending_proposal(provider.storage(), proposal.as_ref().clone())
                     .map_err(MlsError::storage)?;
-                Ok(DecryptResult::ProposalStored(sender_identity, action))
+                Ok(DecryptResult::ProposalStored(sender_id, action))
             }
             ProcessedMessageContent::StagedCommitMessage(_) => Ok(DecryptResult::Ignored),
             ProcessedMessageContent::ExternalJoinProposalMessage(_) => Ok(DecryptResult::Ignored),

@@ -48,7 +48,7 @@ pub use conversation::{
     DEFAULT_CONSENSUS_TIMEOUT, DEFAULT_ELECTION_VOTING_DELAY, DEFAULT_LIVENESS_CRITERIA_YES,
     DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION,
     DEFAULT_RECOVERY_INACTIVITY_DURATION, DEFAULT_VOTING_DELAY, FreezeBufferOutcome, OperatingMode,
-    PendingUpdate, ProposalId, member_set, self_leave_proposal_id, target_identity_of,
+    PendingUpdate, ProposalId, member_set, self_leave_proposal_id, target_member_id_of,
 };
 
 // ── Consensus result application (pure, synchronous) ──

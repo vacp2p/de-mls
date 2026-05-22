@@ -1792,6 +1792,7 @@ dependencies = [
  "alloy",
  "base64",
  "hashgraph-like-consensus",
+ "indexmap 2.14.0",
  "libc",
  "openmls",
  "openmls_basic_credential",

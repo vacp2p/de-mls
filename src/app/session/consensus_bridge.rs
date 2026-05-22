@@ -44,7 +44,7 @@ pub(crate) struct ProposalParams {
 /// casting, so a single-voter consensus transition can't fire before
 /// [`crate::core::Conversation::is_owner_of_proposal`] is true.
 pub(crate) async fn submit_proposal<P: ConsensusPlugin>(
-    conversation_name: &str,
+    conversation_id: &str,
     request: &ConversationUpdateRequest,
     creator_id: &[u8],
     consensus: &PluginConsensus<P>,
@@ -59,7 +59,7 @@ pub(crate) async fn submit_proposal<P: ConsensusPlugin>(
         params.liveness_criteria_yes,
     )?;
 
-    let scope = P::Scope::from(conversation_name.to_string());
+    let scope = P::Scope::from(conversation_id.to_string());
     let proposal = consensus
         .create_proposal_with_config(
             &scope,
@@ -69,7 +69,7 @@ pub(crate) async fn submit_proposal<P: ConsensusPlugin>(
         .await?;
 
     info!(
-        conversation = conversation_name,
+        conversation = conversation_id,
         proposal_id = proposal.proposal_id,
         voters = params.expected_voters,
         "proposal opened"
@@ -92,7 +92,7 @@ pub(crate) async fn submit_proposal<P: ConsensusPlugin>(
 /// helper, because that is the only legitimate case for broadcasting
 /// proposal + vote atomically in a single wire message.
 pub(crate) async fn cast_vote<P>(
-    conversation_name: &str,
+    conversation_id: &str,
     proposal_id: u32,
     vote: bool,
     consensus: &PluginConsensus<P>,
@@ -100,11 +100,11 @@ pub(crate) async fn cast_vote<P>(
 where
     P: ConsensusPlugin,
 {
-    let scope = P::Scope::from(conversation_name.to_string());
+    let scope = P::Scope::from(conversation_id.to_string());
 
     let choice = if vote { "YES" } else { "NO" };
     info!(
-        conversation = conversation_name,
+        conversation = conversation_id,
         proposal_id, choice, "vote cast"
     );
 
@@ -117,11 +117,11 @@ where
 /// (`expected_voters_count == 1`) the session resolves on arrival, so
 /// there's nothing to vote on.
 pub(crate) async fn forward_incoming_proposal<P: ConsensusPlugin>(
-    conversation_name: &str,
+    conversation_id: &str,
     proposal: Proposal,
     consensus: &PluginConsensus<P>,
 ) -> Result<(), UserError> {
-    let scope = P::Scope::from(conversation_name.to_string());
+    let scope = P::Scope::from(conversation_id.to_string());
     consensus
         .process_incoming_proposal(&scope, proposal)
         .await?;
@@ -146,18 +146,18 @@ pub(crate) async fn forward_incoming_proposal<P: ConsensusPlugin>(
 ///
 /// Other consensus errors propagate.
 pub(crate) async fn forward_incoming_vote<P: ConsensusPlugin>(
-    conversation_name: &str,
+    conversation_id: &str,
     vote: Vote,
     consensus: &PluginConsensus<P>,
     outcome_applied_locally: bool,
 ) -> Result<(), CoreError> {
     let proposal_id = vote.proposal_id;
-    let scope = P::Scope::from(conversation_name.to_string());
+    let scope = P::Scope::from(conversation_id.to_string());
     match consensus.process_incoming_vote(&scope, vote).await {
         Ok(()) => Ok(()),
         Err(ConsensusError::SessionNotActive) => {
             tracing::debug!(
-                conversation = conversation_name,
+                conversation = conversation_id,
                 proposal_id,
                 "late vote dropped: consensus session already resolved"
             );
@@ -166,13 +166,13 @@ pub(crate) async fn forward_incoming_vote<P: ConsensusPlugin>(
         Err(ConsensusError::SessionNotFound) => {
             if outcome_applied_locally {
                 tracing::debug!(
-                    conversation = conversation_name,
+                    conversation = conversation_id,
                     proposal_id,
                     "late vote dropped: session trimmed after local resolution"
                 );
             } else {
                 tracing::warn!(
-                    conversation = conversation_name,
+                    conversation = conversation_id,
                     proposal_id,
                     "vote for unknown proposal id dropped: no local session and not in resolved cache"
                 );
@@ -188,15 +188,15 @@ pub(crate) async fn forward_incoming_vote<P: ConsensusPlugin>(
 /// `apply_consensus_outcome` path commits `RemoveMember(self)`.
 ///
 /// Unlike [`submit_proposal`], the `Proposal` is hand-crafted to carry
-/// `self_leave_proposal_id(identity)`. Every node derives the same id, so a
+/// `self_leave_proposal_id(member_id)`. Every node derives the same id, so a
 /// retransmitted self-leave dedupes via `ProposalAlreadyExist` and lands in
 /// every `approved_proposals` under the same key.
 ///
 /// `Ok(Some(_))` — newly opened; caller broadcasts the `AppMessage`.
 /// `Ok(None)` — already in flight (e.g. double-click); no broadcast.
 pub(crate) async fn submit_self_leave_proposal<P>(
-    conversation_name: &str,
-    self_identity: &[u8],
+    conversation_id: &str,
+    self_member_id: &[u8],
     consensus: &PluginConsensus<P>,
     params: ProposalParams,
 ) -> Result<Option<(u32, AppMessage)>, UserError>
@@ -206,7 +206,7 @@ where
     let request = ConversationUpdateRequest {
         payload: Some(conversation_update_request::Payload::RemoveMember(
             RemoveMember {
-                identity: self_identity.to_vec(),
+                member_id: self_member_id.to_vec(),
             },
         )),
     };
@@ -218,12 +218,12 @@ where
         .as_secs();
     let expiration = now.saturating_add(params.proposal_expiration.as_secs());
 
-    let proposal_id = self_leave_proposal_id(self_identity);
+    let proposal_id = self_leave_proposal_id(self_member_id);
     let mut proposal = Proposal {
         name: format!("self-leave:{proposal_id}"),
         payload,
         proposal_id,
-        proposal_owner: self_identity.to_vec(),
+        proposal_owner: self_member_id.to_vec(),
         votes: Vec::new(),
         expected_voters_count: params.expected_voters,
         round: 1,
@@ -235,21 +235,21 @@ where
     let yes_vote = build_vote(&proposal, true, consensus.signer()).await?;
     proposal.votes.push(yes_vote);
 
-    let scope = P::Scope::from(conversation_name.to_string());
+    let scope = P::Scope::from(conversation_id.to_string());
     match consensus
         .process_incoming_proposal(&scope, proposal.clone())
         .await
     {
         Ok(()) => {
             info!(
-                conversation = conversation_name,
+                conversation = conversation_id,
                 proposal_id, "self-leave proposal opened (expected_voters=1, bundled YES)"
             );
             Ok(Some((proposal_id, proposal.into())))
         }
         Err(ConsensusError::ProposalAlreadyExist) => {
             info!(
-                conversation = conversation_name,
+                conversation = conversation_id,
                 proposal_id, "self-leave already in flight, skipping retransmit"
             );
             Ok(None)

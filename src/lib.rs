@@ -47,10 +47,9 @@
 //! ```ignore
 //! use de_mls::app::User;
 //!
-//! // Build a user from your own `Identity` impl plus the default plug-in
-//! // bundle. The library is identity-agnostic — anything implementing
-//! // `de_mls::identity::Identity` works (wallet, Ed25519, account id, …).
-//! let mut user = User::new_with_plugins(&identity, plugins, transport);
+//! // Build a user from your own `MemberId` impl plus the default plug-in
+//! // bundle.
+//! let mut user = User::new_with_plugins(&member_id, plugins, transport);
 //!
 //! // Start a conversation (as steward).
 //! user.start_conversation("de-mls-test", true).await?;
@@ -75,8 +74,9 @@ pub mod ds;
 /// MLS cryptographic operations: OpenMLS wrapper for encryption/decryption.
 pub mod mls_crypto;
 
-/// User-level identity, decoupled from MLS state.
-pub mod identity;
+/// Local member-id trait, decoupled from MLS state. Provides the
+/// canonical bytes that name a participant in the protocol.
+pub mod member_id;
 
 /// Reference implementations of the library's plug-in traits — in-memory
 /// MLS / peer-score storage, default consensus + per-conversation

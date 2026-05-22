@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use openmls::prelude::tls_codec::Serialize as _;
 use openmls::{
     group::{
         GroupId, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, StagedCommit, StagedWelcome,
@@ -140,16 +141,18 @@ impl<S: DeMlsStorage> OpenMlsService<S> {
 
         let kp = kp_bundle.key_package();
         let hash_ref = kp.hash_ref(provider.crypto())?.as_slice().to_vec();
-        let bytes = serde_json::to_vec(kp).map_err(MlsError::InvalidJson)?;
+        let bytes = kp
+            .tls_serialize_detached()
+            .map_err(MlsError::KeyPackageTls)?;
 
         storage.store_key_package_ref(&hash_ref)?;
 
-        let identity_bytes = credentials
+        let member_id_bytes = credentials
             .credential()
             .credential
             .serialized_content()
             .to_vec();
 
-        Ok(KeyPackageBytes::new(bytes, identity_bytes))
+        Ok(KeyPackageBytes::new(bytes, member_id_bytes))
     }
 }

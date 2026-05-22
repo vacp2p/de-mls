@@ -214,7 +214,7 @@ pub async fn route_welcomes(
     for welcome in welcomes {
         let conv_name = sessions
             .first()
-            .map(|s| s.read().unwrap().conversation_name().to_string())
+            .map(|s| s.read().unwrap().conversation_id().to_string())
             .unwrap_or_default();
         for (u, _) in users.iter_mut() {
             // Try every user — `welcome_mls` returns `Ok(None)` (which
@@ -257,7 +257,7 @@ pub fn spawn_consensus_forwarder(session: SessionArc) -> JoinHandle<()> {
     use hashgraph_like_consensus::events::ConsensusEventBus;
     tokio::spawn(async move {
         let mut rx = session.read().unwrap().consensus.event_bus().subscribe();
-        while let Ok((_conversation_name, event)) = rx.recv().await {
+        while let Ok((_conversation_id, event)) = rx.recv().await {
             let _ = SessionRunner::apply_consensus_outcome(&session, event).await;
         }
     })
@@ -299,7 +299,7 @@ pub async fn poll_once(session: &SessionArc) {
 ///
 /// The quiet-period exit matters: the InviteMember commit's
 /// `on_conversation_updated` handler fires
-/// `steward_list_housekeeping` → `try_initiate_steward_election` right as
+/// `steward_list_housekeeping` → `initiate_steward_election` right as
 /// joiners reach Working. If bootstrap exits the instant joiners are
 /// Working, that election gets orphaned — its `consensus_timeout` fires
 /// without enough votes, `handle_election_rejected` bumps the creator's
@@ -356,7 +356,7 @@ pub async fn bootstrap_joined_conversation(
     // Joiners send KPs. Drain joiner transports, deliver to creator.
     for i in 1..users.len() {
         let kp = users[i].0.generate_key_package().expect("kp");
-        SessionRunner::send_kp_message(&sessions[i], kp)
+        SessionRunner::send_key_package(&sessions[i], kp)
             .await
             .expect("send kp");
     }

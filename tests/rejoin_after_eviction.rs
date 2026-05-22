@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use de_mls::app::{CreatorVote, DispatchOutcome, SessionRunner};
 use de_mls::core::{ConversationState, StewardListConfig};
-use de_mls::identity::Identity;
+use de_mls::member_id::MemberId;
 use de_mls::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, RemoveMember, conversation_update_request,
 };
@@ -59,13 +59,13 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
         .0;
 
     // Phase 1: removal.
-    let target_id = common::WalletIdentity::from_hex(&users[target_idx].0.identity_string())
-        .identity_bytes()
+    let target_id = common::WalletMemberId::from_hex(&users[target_idx].0.member_id_string())
+        .member_id_bytes()
         .to_vec();
     let request = ConversationUpdateRequest {
         payload: Some(conversation_update_request::Payload::RemoveMember(
             RemoveMember {
-                identity: target_id.clone(),
+                member_id: target_id.clone(),
             },
         )),
     };
@@ -99,7 +99,7 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
 
     let new_session = users[target_idx].0.lookup_entry("rejoin").unwrap().unwrap();
     let kp = users[target_idx].0.generate_key_package().unwrap();
-    SessionRunner::send_kp_message(&new_session, kp)
+    SessionRunner::send_key_package(&new_session, kp)
         .await
         .unwrap();
 

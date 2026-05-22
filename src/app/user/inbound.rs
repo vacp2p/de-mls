@@ -1,11 +1,12 @@
 //! User-side inbound entry point.
 //!
-//! `process_inbound_packet` owns echo dedup + name routing. Welcome-
-//! subtopic packets carry [`MemberInvite`] (KP-broadcast); app-message
-//! packets are handed off to
+//! `process_inbound_packet` owns echo dedup + name routing.
+//! `WELCOME_SUBTOPIC` packets carry [`MemberInvite`] — a peer
+//! broadcasting their own key package so existing members can propose
+//! adding them. App-message packets are handed off to
 //! [`SessionRunner::dispatch_inbound_result`] for MLS processing and
-//! per-conversation dispatch. Raw MLS welcomes enter through
-//! [`User::accept_welcome`].
+//! per-conversation dispatch. Raw MLS welcomes never traverse the wire
+//! here — they enter the library through [`User::accept_welcome`].
 
 use std::sync::{Arc, RwLock};
 
@@ -13,7 +14,7 @@ use prost::Message;
 use tracing::info;
 
 use crate::{
-    app::{DispatchOutcome, LockExt, SessionRunner, User, UserError},
+    app::{DispatchOutcome, LockExt, SessionRunner, SessionTick, User, UserError},
     core::{
         ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, CoreError,
         ProcessResult,
@@ -32,33 +33,38 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// dedup, name-based routing, and the welcome subtopic's plug-in-
     /// factory access. App-message packets are handed off to the session
     /// for MLS processing and dispatch.
-    pub async fn process_inbound_packet(&self, packet: InboundPacket) -> Result<(), UserError> {
-        let conversation_name = packet.conversation_id.clone();
+    pub async fn process_inbound_packet(
+        &self,
+        packet: InboundPacket,
+    ) -> Result<SessionTick, UserError> {
+        let conversation_id = packet.conversation_id.clone();
 
         // Echo dedup: drop our own messages received back from pub/sub.
         if packet.app_id.as_slice() == &*self.app_id {
-            return Ok(());
+            return Ok(SessionTick::empty());
         }
 
         let entry_arc = self
-            .lookup_entry(&conversation_name)?
+            .lookup_entry(&conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
 
         match packet.subtopic.as_str() {
             WELCOME_SUBTOPIC => {
-                self.process_welcome_packet(&conversation_name, &packet.payload, &entry_arc)
-                    .await
+                self.process_key_package_broadcast(&conversation_id, &packet.payload, &entry_arc)
+                    .await?;
+                Ok(entry_arc.read_or_err("session")?.tick())
             }
             APP_MSG_SUBTOPIC => {
                 let result = {
                     let mut entry = entry_arc.write_or_err("session")?;
                     if entry.handle.mls().is_none() {
-                        return Ok(());
+                        return Ok(SessionTick::empty());
                     }
                     entry.handle.process_inbound(&packet.payload)?
                 };
-                self.finish_dispatch(&conversation_name, &entry_arc, result)
-                    .await
+                self.finish_dispatch(&conversation_id, &entry_arc, result)
+                    .await?;
+                Ok(entry_arc.read_or_err("session")?.tick())
             }
             other => Err(UserError::Core(CoreError::InvalidSubtopic(
                 other.to_string(),
@@ -74,36 +80,30 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`SessionRunner::check_pending_join`]; this method is the cleanup
     /// callers run when those signal "registry should be removed"
     /// (`DispatchOutcome::LeaveRequested` or `PendingJoinTick::Expired`).
-    pub async fn finalize_self_leave(&self, conversation_name: &str) -> Result<(), UserError> {
+    pub async fn finalize_self_leave(&self, conversation_id: &str) -> Result<(), UserError> {
         // Cancel auto-vote timers before removing the registry entry —
         // `cleanup_consensus_scope` finds the runner via `lookup_entry` and
         // aborts its timers. If the entry is gone first, the lookup returns
         // `None` and the timers leak (still scheduled, will fire against a
         // conversation we've left).
-        self.cleanup_consensus_scope(conversation_name).await?;
+        self.cleanup_consensus_scope(conversation_id).await?;
         self.conversations
             .write()
             .map_err(|_| UserError::LockPoisoned("conversation registry"))?
-            .remove(conversation_name);
-        self.emit_lifecycle(ConversationLifecycle::Removed(
-            conversation_name.to_string(),
-        ));
+            .remove(conversation_id);
+        self.emit_lifecycle(ConversationLifecycle::Removed(conversation_id.to_string()));
         Ok(())
     }
 
     // ── Private ──────────────────────────────────────────────────────
 
-    /// Welcome-subtopic dispatch. Carries [`MemberInvite`] only — a peer
-    /// broadcasting their key package so existing members can propose
-    /// adding them. If we already have an MLS service for this
-    /// conversation and the candidate isn't a member, surface it as a
-    /// membership-change request.
-    ///
-    /// Raw MLS welcomes are not framed here — they reach the library via
-    /// [`User::accept_welcome`].
-    async fn process_welcome_packet(
+    /// Decode a key-package broadcast off `WELCOME_SUBTOPIC` and, if the
+    /// holder isn't already a member, promote it to a `MemberInvite`
+    /// membership-change request. Raw MLS welcomes do not flow here —
+    /// they enter through [`User::accept_welcome`].
+    async fn process_key_package_broadcast(
         &self,
-        conversation_name: &str,
+        conversation_id: &str,
         payload: &[u8],
         entry_arc: &Arc<RwLock<SessionRunner<P, CP>>>,
     ) -> Result<(), UserError> {
@@ -114,21 +114,21 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             entry
                 .handle
                 .mls()
-                .map(|m| m.is_member(&invite.identity))
+                .map(|m| m.is_member(&invite.member_id))
                 .unwrap_or(false)
         };
         if already_member {
             info!(
-                conversation = conversation_name,
-                identity = ?invite.identity,
+                conversation = conversation_id,
+                member = ?invite.member_id,
                 "key package skipped: already a member"
             );
             return Ok(());
         }
 
         info!(
-            conversation = conversation_name,
-            identity = ?invite.identity,
+            conversation = conversation_id,
+            member = ?invite.member_id,
             "key package received"
         );
 
@@ -142,13 +142,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// User side when the session signals `LeaveRequested`.
     pub(crate) async fn finish_dispatch(
         &self,
-        conversation_name: &str,
+        conversation_id: &str,
         entry_arc: &Arc<RwLock<SessionRunner<P, CP>>>,
         result: ProcessResult,
     ) -> Result<(), UserError> {
         let outcome = SessionRunner::dispatch_inbound_result(entry_arc, result).await?;
         if matches!(outcome, DispatchOutcome::LeaveRequested) {
-            self.finalize_self_leave(conversation_name).await?;
+            self.finalize_self_leave(conversation_id).await?;
         }
         Ok(())
     }

@@ -4,10 +4,10 @@
 //! `MlsService` trait defines the per-conversation surface; constructors for the
 //! OpenMLS impl live as inherent methods on `OpenMlsService`.
 //!
-//! Identity and MLS credentials are split: [`crate::identity::Identity`]
-//! is the user-level abstraction (just `identity_bytes` + display);
+//! Identity and MLS credentials are split: [`crate::member_id::MemberId`]
+//! is the user-level abstraction (just `member_id_bytes` + display);
 //! `MlsCredentials` (re-exported here) holds the MLS-specific signing keypair and
-//! credential, built from an `Identity` at User init and shared across
+//! credential, built from an `MemberId` at User init and shared across
 //! every per-conversation service.
 //!
 //! # Quick Start
@@ -18,8 +18,8 @@
 //!     MemoryDeMlsStorage, MlsCredentials, MlsService, OpenMlsService,
 //! };
 //!
-//! // `identity` is any type implementing `de_mls::identity::Identity`.
-//! let credentials = Arc::new(MlsCredentials::from_identity(&identity)?);
+//! // `member_id` is any type implementing `de_mls::member_id::MemberId`.
+//! let credentials = Arc::new(MlsCredentials::from_member_id(&member_id)?);
 //! let storage = MemoryDeMlsStorage::new();
 //!
 //! // Create a fresh group as its sole initial member.
@@ -51,5 +51,5 @@ pub use service::{CIPHERSUITE, DEFAULT_COMMIT_BATCH_MAX, MlsService, OpenMlsServ
 pub use storage::DeMlsStorage;
 pub use types::{
     CommitCandidate, DecryptResult, KeyPackageBytes, MlsCommitInput, MlsMessageKind,
-    MlsProposalOutput, StagedCandidateResult, key_package_bytes_from_json,
+    MlsProposalOutput, StagedCandidateResult, key_package_bytes_from_tls,
 };

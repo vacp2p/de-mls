@@ -5,19 +5,23 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, RwLock},
+    time::Duration,
 };
 
 use crate::{
-    app::{CreatorVote, LockExt, SessionRunner, UserError, UserPlugins},
+    app::{
+        ConversationState, CreatorVote, LockExt, MemberRole, SessionRunner, SessionTick, UserError,
+        UserPlugins,
+    },
     core::{
         ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, PluginConsensus,
-        ScoringConfig, StewardListConfig,
+        ScoringConfig, SessionEvent, StewardListConfig,
     },
     ds::SharedDeliveryService,
-    identity::Identity,
-    mls_crypto::{KeyPackageBytes, MlsError, MlsService, key_package_bytes_from_json},
+    member_id::MemberId,
+    mls_crypto::{KeyPackageBytes, MlsError, MlsService, key_package_bytes_from_tls},
     protos::de_mls::messages::v1::{
-        ConversationUpdateRequest, MemberInvite, conversation_update_request,
+        BanRequest, ConversationUpdateRequest, MemberInvite, conversation_update_request,
     },
 };
 
@@ -32,12 +36,7 @@ pub type SessionEntry<P, CP> = Arc<RwLock<SessionRunner<P, CP>>>;
 pub(crate) type ConversationRegistry<P, CP> = RwLock<HashMap<String, SessionEntry<P, CP>>>;
 
 pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
-    /// Local identity, set once at construction and read-only thereafter.
-    /// Accessed via the [`Identity`] trait wherever bytes or display
-    /// form are needed; per-session cached `Arc<[u8]>` + `Arc<str>` are
-    /// extracted from it at [`SessionRunner`] construction in
-    /// [`super::lifecycle`].
-    pub(crate) identity: Box<dyn Identity>,
+    pub(crate) member_id: Box<dyn MemberId>,
     /// Per-instance UUID embedded in every outbound packet. Inbound packets
     /// carrying our `app_id` are self-echoes and silently dropped.
     pub(crate) app_id: Vec<u8>,
@@ -62,17 +61,14 @@ pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
 // ── Public API ──────────────────────────────────────────────────────────
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
-    /// Display form of the local identity, derived from
-    /// [`Identity::identity_display`]. Stable for the lifetime of the
-    /// `User`; intended for logs and UI.
-    pub fn identity_string(&self) -> String {
-        self.identity.identity_display().to_string()
+    /// Display form of the local member_id, derived from [`MemberId::member_id_display`].
+    pub fn member_id_string(&self) -> String {
+        self.member_id.member_id_display().to_string()
     }
 
-    /// Identity bytes of the local user, via the [`Identity`] trait.
-    /// Stable for the lifetime of the `User`.
-    pub fn identity_bytes(&self) -> &[u8] {
-        self.identity.identity_bytes()
+    /// Identity bytes of the local user, via the [`MemberId`] trait.
+    pub fn member_id_bytes(&self) -> &[u8] {
+        self.member_id.member_id_bytes()
     }
 
     /// Per-instance `app_id` embedded in every outbound packet. Inbound
@@ -82,9 +78,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         &self.app_id
     }
 
-    /// Generate a single-use key package for our identity. Conversation-free —
-    /// callable before `start_conversation`. Delegates to the configured
-    /// [`crate::core::ConversationPluginsFactory::generate_key_package`].
+    /// Generate a single-use key package.
     pub fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
         self.plugins.conversation_plugins.generate_key_package()
     }
@@ -115,32 +109,109 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         self.plugins.default_steward_list_config = config;
     }
 
-    /// Propose adding the holder of `key_package_bytes` to `conversation_name`.
-    /// `key_package_bytes` is a serialized MLS key package obtained out
-    /// of band — the caller has chosen this candidate consciously, so
-    /// the local vote is bundled YES at submit. On consensus YES, the
-    /// epoch steward authors a commit containing the Add and the
-    /// resulting welcome arrives via
-    /// [`crate::core::SessionEvent::WelcomeReady`].
+    /// Send a chat message on `conversation_id`. Thin wrapper over
+    /// [`SessionRunner::send_app_message`]. Errors with
+    /// `ConversationNotFound` if the conversation has been removed, or
+    /// `ConversationBlocked` if the session is gating chat traffic.
+    pub async fn send_app_message(
+        &self,
+        conversation_id: &str,
+        message: Vec<u8>,
+    ) -> Result<SessionTick, UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::send_app_message(&entry, message).await
+    }
+
+    /// Broadcast `key_package` on `conversation_id`'s welcome subtopic
+    /// so existing members can propose adding us. Thin wrapper over
+    /// [`SessionRunner::send_key_package`].
+    pub async fn send_key_package(
+        &self,
+        conversation_id: &str,
+        key_package: KeyPackageBytes,
+    ) -> Result<SessionTick, UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::send_key_package(&entry, key_package).await
+    }
+
+    /// Walk pending deadlines on `conversation_id`. Thin wrapper over
+    /// [`SessionRunner::tick_deadlines`].
+    pub async fn tick_deadlines(&self, conversation_id: &str) -> Result<SessionTick, UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::tick_deadlines(&entry).await
+    }
+
+    /// Advance every per-conversation polling path: deadlines (auto-votes
+    /// and consensus timeouts), freeze coordinator, member-side freeze
+    /// check, and `PendingJoin` expiry. Bundled so an integrator's
+    /// periodic wakeup needs one call to drive a session forward.
+    ///
+    /// The returned `SessionTick.next_wakeup_in` covers every time-based
+    /// transition the session is currently expecting. Drained events
+    /// (e.g. `Leaving` on `PendingJoin` expiry) are read separately via
+    /// [`Self::drain_events`].
+    pub async fn poll_session(&self, conversation_id: &str) -> Result<SessionTick, UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::tick_deadlines(&entry).await?;
+        SessionRunner::poll_freeze_status(&entry).await?;
+        SessionRunner::check_member_freeze(&entry).await?;
+        SessionRunner::check_pending_join(&entry)?;
+        Ok(entry.read_or_err("session")?.tick())
+    }
+
+    /// Drain pending [`SessionEvent`]s for `conversation_id`. Thin
+    /// wrapper over [`SessionRunner::drain_events`].
+    pub fn drain_events(&self, conversation_id: &str) -> Result<Vec<SessionEvent>, UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        Ok(entry.read_or_err("session")?.drain_events())
+    }
+
+    /// Earliest pending deadline on `conversation_id` relative to now,
+    /// `None` if nothing is scheduled. Mirrors
+    /// [`SessionRunner::next_wakeup_in`].
+    pub fn next_wakeup_in(&self, conversation_id: &str) -> Result<Option<Duration>, UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        Ok(entry.read_or_err("session")?.next_wakeup_in())
+    }
+
+    /// Propose adding the holder of `key_package_bytes` to
+    /// `conversation_id`. The local vote is bundled YES at submit. On
+    /// consensus YES the epoch steward authors a commit containing the
+    /// Add; the resulting welcome arrives via
+    /// [`crate::core::SessionEvent::WelcomeReady`] for the integrator to
+    /// deliver out of band.
     pub async fn add_member(
         &self,
-        conversation_name: &str,
+        conversation_id: &str,
         key_package_bytes: &[u8],
-    ) -> Result<(), UserError> {
+    ) -> Result<SessionTick, UserError> {
         let entry = self
-            .lookup_entry(conversation_name)?
+            .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        let (key_package_bytes, identity) =
-            key_package_bytes_from_json(key_package_bytes.to_vec())?;
+        let (key_package_bytes, member_id) =
+            key_package_bytes_from_tls(key_package_bytes.to_vec())?;
         let request = ConversationUpdateRequest {
             payload: Some(conversation_update_request::Payload::MemberInvite(
                 MemberInvite {
                     key_package_bytes,
-                    identity,
+                    member_id,
                 },
             )),
         };
-        SessionRunner::initiate_proposal(&entry, request, CreatorVote::Yes).await
+        SessionRunner::initiate_proposal(&entry, request, CreatorVote::Yes).await?;
+        Ok(entry.read_or_err("session")?.tick())
     }
 
     /// Ingest a raw MLS welcome blob delivered out of band (e.g. the
@@ -148,50 +219,240 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// through the integrator's transport). Returns the joined
     /// conversation name, or [`UserError::WelcomeNotForUs`] if the
     /// welcome doesn't address this user's key package.
-    pub async fn accept_welcome(&mut self, welcome_bytes: &[u8]) -> Result<String, UserError> {
+    pub async fn accept_welcome(
+        &mut self,
+        welcome_bytes: &[u8],
+    ) -> Result<(String, SessionTick), UserError> {
         let svc = self
             .plugins
             .conversation_plugins
             .welcome_mls(welcome_bytes)?
             .ok_or(UserError::WelcomeNotForUs)?;
-        let conversation_name = svc.conversation_id().to_string();
+        let conversation_id = svc.conversation_id().to_string();
 
-        if self.lookup_entry(&conversation_name)?.is_none() {
-            self.start_conversation(&conversation_name, false).await?;
+        if self.lookup_entry(&conversation_id)?.is_none() {
+            self.start_conversation(&conversation_id, false).await?;
         }
         let entry_arc = self
-            .lookup_entry(&conversation_name)?
+            .lookup_entry(&conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
 
         {
             let mut entry = entry_arc.write_or_err("session")?;
             if entry.handle.mls().is_some() {
-                return Ok(conversation_name);
+                return Ok((conversation_id, entry.tick()));
             }
             entry.handle.attach_mls(svc);
         }
         self.finish_dispatch(
-            &conversation_name,
+            &conversation_id,
             &entry_arc,
-            crate::core::ProcessResult::JoinedConversation(conversation_name.clone()),
+            crate::core::ProcessResult::JoinedConversation(conversation_id.clone()),
         )
         .await?;
-        Ok(conversation_name)
+        let tick = entry_arc.read_or_err("session")?.tick();
+        Ok((conversation_id, tick))
+    }
+
+    // ── UI actions ─────────────────────────────────────────────────────
+
+    /// Cast the local member's manual vote on `proposal_id`. Cancels any
+    /// pending auto-vote so the manual choice wins. Thin wrapper over
+    /// [`SessionRunner::process_user_vote`].
+    pub async fn process_user_vote(
+        &self,
+        conversation_id: &str,
+        proposal_id: u32,
+        vote: bool,
+    ) -> Result<SessionTick, UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::process_user_vote(&entry, proposal_id, vote).await?;
+        Ok(entry.read_or_err("session")?.tick())
+    }
+
+    /// Open a `RemoveMember` consensus round targeting
+    /// `ban_request.user_to_ban`. The local vote is bundled YES at submit.
+    /// Thin wrapper over [`SessionRunner::process_ban_request`].
+    pub async fn process_ban_request(
+        &self,
+        conversation_id: &str,
+        ban_request: BanRequest,
+    ) -> Result<SessionTick, UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::process_ban_request(&entry, ban_request).await
+    }
+
+    /// Submit `request` as a fresh consensus proposal with
+    /// `creator_vote`. Lower-level than
+    /// [`Self::add_member`] / [`Self::process_ban_request`]; use those
+    /// for membership changes. Thin wrapper over
+    /// [`SessionRunner::initiate_proposal`].
+    pub async fn initiate_proposal(
+        &self,
+        conversation_id: &str,
+        request: ConversationUpdateRequest,
+        creator_vote: CreatorVote,
+    ) -> Result<SessionTick, UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::initiate_proposal(&entry, request, creator_vote).await?;
+        Ok(entry.read_or_err("session")?.tick())
+    }
+
+    /// Open a self-leave consensus round for the local member. The
+    /// resulting commit ejects us; the session emits
+    /// [`SessionEvent::Leaving`] and the caller follows up with
+    /// [`Self::finalize_self_leave`]. Thin wrapper over
+    /// [`SessionRunner::initiate_self_leave`].
+    pub async fn initiate_self_leave(
+        &self,
+        conversation_id: &str,
+    ) -> Result<SessionTick, UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        SessionRunner::initiate_self_leave(&entry).await?;
+        Ok(entry.read_or_err("session")?.tick())
+    }
+
+    // ── State queries ──────────────────────────────────────────────────
+
+    /// Current state-machine value for `conversation_id`. Mirrors
+    /// [`SessionRunner::get_conversation_state`].
+    pub fn get_conversation_state(
+        &self,
+        conversation_id: &str,
+    ) -> Result<ConversationState, UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        Ok(entry.read_or_err("session")?.get_conversation_state())
+    }
+
+    /// `true` if the local user is on the current steward list for
+    /// `conversation_id`. Mirrors [`SessionRunner::is_steward_for_self`].
+    pub fn is_steward(&self, conversation_id: &str) -> Result<bool, UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        Ok(entry.read_or_err("session")?.is_steward_for_self())
+    }
+
+    /// MLS epoch + reelection retry round for `conversation_id`. `(0, 0)`
+    /// before MLS is attached. Mirrors
+    /// [`SessionRunner::get_epoch_and_retry`].
+    pub fn get_epoch_and_retry(&self, conversation_id: &str) -> Result<(u64, u32), UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        entry.read_or_err("session")?.get_epoch_and_retry()
+    }
+
+    pub fn get_conversation_members(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<Vec<u8>>, UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        entry.read_or_err("session")?.get_conversation_members()
+    }
+
+    pub fn get_member_scores(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<(Vec<u8>, i64)>, UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        Ok(entry.read_or_err("session")?.get_member_scores())
+    }
+
+    pub fn get_member_score(
+        &self,
+        conversation_id: &str,
+        member_id: &[u8],
+    ) -> Result<Option<i64>, UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        Ok(entry.read_or_err("session")?.get_member_score(member_id))
+    }
+
+    pub fn get_member_roles(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<(Vec<u8>, MemberRole)>, UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        entry.read_or_err("session")?.get_member_roles()
+    }
+
+    /// Identities with an in-flight self-leave request. Mirrors
+    /// [`SessionRunner::get_pending_leave_member_ids`].
+    pub fn get_pending_leave_member_ids(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<Vec<u8>>, UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        entry.read_or_err("session")?.get_pending_leave_member_ids()
+    }
+
+    /// Buffered pending membership-update count. Mirrors
+    /// [`SessionRunner::get_pending_update_count`].
+    pub fn get_pending_update_count(&self, conversation_id: &str) -> Result<usize, UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        Ok(entry.read_or_err("session")?.get_pending_update_count())
+    }
+
+    /// Freeze-round progress as `(received, expected)`. Mirrors
+    /// [`SessionRunner::get_freeze_candidate_count`].
+    pub fn get_freeze_candidate_count(
+        &self,
+        conversation_id: &str,
+    ) -> Result<(usize, usize), UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        Ok(entry.read_or_err("session")?.get_freeze_candidate_count())
+    }
+
+    /// Approved proposals for the current epoch. Mirrors
+    /// [`SessionRunner::get_approved_proposals_for_current_epoch`].
+    pub fn get_approved_proposals_for_current_epoch(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<ConversationUpdateRequest>, UserError> {
+        let entry = self
+            .lookup_entry(conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        Ok(entry
+            .read_or_err("session")?
+            .get_approved_proposals_for_current_epoch())
     }
 }
 
 // ── User-internal helpers ───────────────────────────────────────────────
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
-    /// Borrow the local identity bytes via the [`Identity`] trait.
-    pub(crate) fn self_identity(&self) -> &[u8] {
-        self.identity.identity_bytes()
+    pub fn self_member_id(&self) -> &[u8] {
+        self.member_id.member_id_bytes()
     }
 
     /// Append a [`ConversationLifecycle`] event to the pending-events buffer
     /// for [`Self::drain_lifecycle_events`]. Silent on poison —
     /// emit is fire-and-forget.
-    pub(crate) fn emit_lifecycle(&self, event: ConversationLifecycle) {
+    pub fn emit_lifecycle(&self, event: ConversationLifecycle) {
         if let Ok(mut buf) = self.pending_lifecycle_events.lock() {
             buf.push(event);
         }
@@ -199,35 +460,32 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
     /// Build a fresh per-conversation `ConsensusService` via the User's
     /// `ConsensusContext`.
-    pub(crate) fn build_consensus_service(&self) -> PluginConsensus<P> {
+    pub fn build_consensus_service(&self) -> PluginConsensus<P> {
         self.plugins.consensus.build_service()
     }
 
     /// Drop this conversation's consensus scope from the shared storage and
     /// clear every auto-vote registered for it. Called on leave and
     /// pending-join timeout.
-    pub(crate) async fn cleanup_consensus_scope(
-        &self,
-        conversation_name: &str,
-    ) -> Result<(), UserError> {
-        if let Some(entry_arc) = self.lookup_entry(conversation_name)? {
+    pub async fn cleanup_consensus_scope(&self, conversation_id: &str) -> Result<(), UserError> {
+        if let Some(entry_arc) = self.lookup_entry(conversation_id)? {
             entry_arc
                 .write()
                 .map_err(|_| UserError::LockPoisoned("session"))?
                 .cancel_all_auto_votes();
         }
-        let scope = P::Scope::from(conversation_name.to_string());
+        let scope = P::Scope::from(conversation_id.to_string());
         self.plugins.consensus.delete_scope(&scope).await?;
         Ok(())
     }
 
     pub fn new_with_plugins(
-        identity: Box<dyn Identity>,
+        member_id: Box<dyn MemberId>,
         plugins: UserPlugins<P, CP>,
         transport: SharedDeliveryService,
     ) -> Self {
         Self {
-            identity,
+            member_id,
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
             transport,
             plugins,

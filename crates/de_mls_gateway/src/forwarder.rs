@@ -16,15 +16,15 @@ use crate::{CoreCtx, Gateway, SessionRef, UserRef};
 /// Centralized so every call site uses the same lookup + error shape.
 pub(crate) async fn lookup_session(
     user: &UserRef,
-    conversation_name: &str,
+    conversation_id: &str,
 ) -> Result<SessionRef, UserError> {
     user.read()
         .await
-        .lookup_entry(conversation_name)?
+        .lookup_entry(conversation_id)?
         .ok_or(UserError::ConversationNotFound)
 }
 
-/// Render a batch of approved proposals as `(action, identity)` pairs,
+/// Render a batch of approved proposals as `(action, member_id)` pairs,
 /// dropping any entry with an empty payload.
 pub(crate) fn display_batch(batch: &[ConversationUpdateRequest]) -> Vec<(String, String)> {
     batch
@@ -34,20 +34,20 @@ pub(crate) fn display_batch(batch: &[ConversationUpdateRequest]) -> Vec<(String,
         .collect()
 }
 
-/// Load the member roster for `conversation_name`, joining addresses with scores,
+/// Load the member roster for `conversation_id`, joining addresses with scores,
 /// roles, and pending-leave markers into `MemberInfo` records.
 pub(crate) async fn load_member_info(
     user: &UserRef,
-    conversation_name: &str,
+    conversation_id: &str,
 ) -> anyhow::Result<Vec<MemberInfo>> {
-    let session = lookup_session(user, conversation_name).await?;
+    let session = lookup_session(user, conversation_id).await?;
     let runner = session
         .read()
         .map_err(|_| UserError::LockPoisoned("session"))?;
     let member_bytes = runner.get_conversation_members()?;
     let scores = runner.get_member_scores();
     let roles = runner.get_member_roles().unwrap_or_default();
-    let pending_leavers = runner.get_pending_leave_identities().unwrap_or_default();
+    let pending_leavers = runner.get_pending_leave_member_ids().unwrap_or_default();
 
     Ok(member_bytes
         .into_iter()
@@ -77,30 +77,30 @@ pub(crate) async fn load_member_info(
 pub(crate) async fn push_consensus_state(
     user: &UserRef,
     evt_tx: &UnboundedSender<AppEvent>,
-    conversation_name: &str,
+    conversation_id: &str,
 ) {
-    let Ok(session) = lookup_session(user, conversation_name).await else {
+    let Ok(session) = lookup_session(user, conversation_id).await else {
         return;
     };
     let runner = match session.read() {
         Ok(s) => s,
         Err(_) => {
             tracing::warn!(
-                conversation = %conversation_name,
+                conversation = %conversation_id,
                 "push_consensus_state skipped: session lock poisoned"
             );
             return;
         }
     };
-    let proposals = runner.get_approved_proposal_for_current_epoch();
+    let proposals = runner.get_approved_proposals_for_current_epoch();
     let _ = evt_tx.unbounded_send(AppEvent::CurrentEpochProposals {
-        conversation_id: conversation_name.to_string(),
+        conversation_id: conversation_id.to_string(),
         proposals: display_batch(&proposals),
     });
 
     if let Ok((epoch, retry_round)) = runner.get_epoch_and_retry() {
         let _ = evt_tx.unbounded_send(AppEvent::GroupEpoch {
-            conversation_id: conversation_name.to_string(),
+            conversation_id: conversation_id.to_string(),
             epoch,
             retry_round,
         });
@@ -114,31 +114,31 @@ pub(crate) async fn push_consensus_state(
 pub(crate) async fn push_member_scores(
     user: &UserRef,
     evt_tx: &UnboundedSender<AppEvent>,
-    conversation_name: &str,
+    conversation_id: &str,
 ) {
-    let Ok(members) = load_member_info(user, conversation_name).await else {
+    let Ok(members) = load_member_info(user, conversation_id).await else {
         return;
     };
     let _ = evt_tx.unbounded_send(AppEvent::GroupMembers {
-        conversation_id: conversation_name.to_string(),
+        conversation_id: conversation_id.to_string(),
         members,
     });
 
-    let Ok(session) = lookup_session(user, conversation_name).await else {
+    let Ok(session) = lookup_session(user, conversation_id).await else {
         return;
     };
     let is_steward = match session.read() {
         Ok(s) => s.is_steward_for_self(),
         Err(_) => {
             tracing::warn!(
-                conversation = %conversation_name,
+                conversation = %conversation_id,
                 "is_steward read skipped: session lock poisoned"
             );
             return;
         }
     };
     let _ = evt_tx.unbounded_send(AppEvent::StewardStatus {
-        conversation_id: conversation_name.to_string(),
+        conversation_id: conversation_id.to_string(),
         is_steward,
     });
 }
@@ -147,10 +147,10 @@ impl Gateway<WakuDeliveryService> {
     /// Spawn a per-conversation consensus event forwarder. One task per
     /// conversation; it subscribes to that conversation's private event bus
     /// and exits naturally when the bus is dropped (conversation removed).
-    pub(crate) fn spawn_consensus_forwarder(&self, user: UserRef, conversation_name: String) {
+    pub(crate) fn spawn_consensus_forwarder(&self, user: UserRef, conversation_id: String) {
         let evt_tx = self.evt_tx.clone();
         let user_for_sub = user.clone();
-        let cname_owned = conversation_name.clone();
+        let cname_owned = conversation_id.clone();
 
         tokio::spawn(async move {
             let Ok(session_arc) = lookup_session(&user_for_sub, &cname_owned).await else {
@@ -171,20 +171,20 @@ impl Gateway<WakuDeliveryService> {
                 }
             };
             tracing::info!("consensus forwarder started");
-            while let Ok((conversation_name, event)) = rx.recv().await {
+            while let Ok((conversation_id, event)) = rx.recv().await {
                 // Forward to UI
                 let _ = evt_tx.unbounded_send(AppEvent::ProposalDecided(
-                    conversation_name.clone(),
+                    conversation_id.clone(),
                     event.clone(),
                 ));
 
                 if let Err(e) = SessionRunner::apply_consensus_outcome(&session_arc, event).await {
-                    tracing::warn!(group = %conversation_name, error = %e, "apply_consensus_outcome failed");
+                    tracing::warn!(group = %conversation_id, error = %e, "apply_consensus_outcome failed");
                 }
 
                 // Push refreshed approved queue, epoch history, and member scores
-                push_consensus_state(&user, &evt_tx, &conversation_name).await;
-                push_member_scores(&user, &evt_tx, &conversation_name).await;
+                push_consensus_state(&user, &evt_tx, &conversation_id).await;
+                push_member_scores(&user, &evt_tx, &conversation_id).await;
             }
             tracing::info!("consensus forwarder ended");
         });

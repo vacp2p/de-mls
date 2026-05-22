@@ -1,5 +1,5 @@
 //! [`UserPlugins`] — bundle of all User-level plugin state on one struct
-//! so the `User` definition surfaces registry + identity + transport at
+//! so the `User` definition surfaces registry, transport at
 //! top level and groups plugin concerns here.
 
 use crate::{
@@ -14,7 +14,7 @@ use crate::{
 /// seed configs, owned outright.
 pub struct UserPlugins<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Builds per-conversation plug-in instances (MLS service, scoring,
-    /// steward list) and mints identity-bound key packages for joiners.
+    /// steward list) and generate key packages for joiners.
     pub conversation_plugins: CP,
     /// Consensus-plugin state. Owns the shared storage handle + signer
     /// and mints per-conv services on demand.

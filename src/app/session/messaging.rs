@@ -7,7 +7,7 @@ use prost::Message;
 
 use crate::{
     app::{
-        ConversationState, CreatorVote, LockExt, SessionRunner, UserError,
+        ConversationState, CreatorVote, LockExt, SessionRunner, SessionTick, UserError,
         session::runner::send_packet,
     },
     core::{ConsensusPlugin, ConversationPluginsFactory},
@@ -22,43 +22,40 @@ use crate::{
 /// Build a KP-broadcast packet for the welcome subtopic. The joiner
 /// sends this so existing members can pick up the key package and
 /// propose them for an Add.
-pub fn build_key_package_message(
-    conversation_name: &str,
+pub fn build_key_package_packet(
+    conversation_id: &str,
     key_package: KeyPackageBytes,
     app_id: &[u8],
 ) -> OutboundPacket {
     let invite = MemberInvite {
         key_package_bytes: key_package.as_bytes().to_vec(),
-        identity: key_package.identity().to_vec(),
+        member_id: key_package.member_id().to_vec(),
     };
     OutboundPacket::new(
         invite.encode_to_vec(),
         WELCOME_SUBTOPIC,
-        conversation_name,
+        conversation_id,
         app_id,
     )
 }
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Broadcast `key_package` on this conversation's welcome subtopic so
-    /// the steward can invite us. The caller (typically the integrator)
-    /// generates the key package via [`crate::app::User::generate_key_package`] —
-    /// KP minting is identity-bound, not conversation-bound, so it stays
-    /// at the User layer.
+    /// the steward can invite us.
     ///
     /// Takes `&Arc<RwLock<Self>>` so the runner lock is released before
     /// awaiting on the transport.
-    pub async fn send_kp_message(
+    pub async fn send_key_package(
         arc: &Arc<RwLock<Self>>,
         key_package: KeyPackageBytes,
-    ) -> Result<(), UserError> {
+    ) -> Result<SessionTick, UserError> {
         let (transport, packet) = {
             let s = arc.read_or_err("session")?;
-            let packet = build_key_package_message(&s.conversation_name, key_package, &s.app_id);
+            let packet = build_key_package_packet(&s.conversation_id, key_package, &s.app_id);
             (Arc::clone(s.transport()), packet)
         };
         send_packet(&transport, packet)?;
-        Ok(())
+        Ok(arc.read_or_err("session")?.tick())
     }
 
     /// Send a chat message. Blocked in `PendingJoin` (no keys yet),
@@ -71,7 +68,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     pub async fn send_app_message(
         arc: &Arc<RwLock<Self>>,
         message: Vec<u8>,
-    ) -> Result<(), UserError> {
+    ) -> Result<SessionTick, UserError> {
         let (transport, packet) = {
             let mut s = arc.write_or_err("session")?;
             let state = s.handle.current_state();
@@ -86,8 +83,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
             let app_msg: AppMessage = ConversationMessage {
                 message,
-                sender: s.identity_display.to_string(),
-                conversation_name: s.conversation_name.clone(),
+                sender: s.member_id_display.to_string(),
+                conversation_id: s.conversation_id.clone(),
             }
             .into();
             let app_id = Arc::clone(&s.app_id);
@@ -99,7 +96,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             (transport, packet)
         };
         send_packet(&transport, packet)?;
-        Ok(())
+        Ok(arc.read_or_err("session")?.tick())
     }
 
     /// Start a `RemoveMember` consensus round targeting `ban_request.user_to_ban`.
@@ -109,7 +106,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     pub async fn process_ban_request(
         arc: &Arc<RwLock<Self>>,
         ban_request: BanRequest,
-    ) -> Result<(), UserError> {
+    ) -> Result<SessionTick, UserError> {
         {
             let s = arc.read_or_err("session")?;
             let state = s.handle.current_state();
@@ -123,7 +120,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             ConversationUpdateRequest {
                 payload: Some(conversation_update_request::Payload::RemoveMember(
                     RemoveMember {
-                        identity: ban_request.user_to_ban,
+                        member_id: ban_request.user_to_ban,
                     },
                 )),
             },
@@ -131,6 +128,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         )
         .await?;
 
-        Ok(())
+        Ok(arc.read_or_err("session")?.tick())
     }
 }

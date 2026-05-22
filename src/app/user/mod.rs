@@ -1,14 +1,13 @@
 //! [`User`] — multi-conversation facade over core. One node owns one `User`,
-//! which holds the per-conversation registry, the identity-bound key-package
+//! which holds the per-conversation registry, the key-package
 //! provider, the consensus context, and the outbound transport. Per-conv
 //! protocol work lives on each [`crate::app::SessionRunner`]; callers reach
 //! a session via [`User::lookup_entry`].
 //!
 //! Submodules:
 //! - [`state`] — `User` struct, constructor, accessors, and consensus-
-//!   scope cleanup. Construct via `User::new_with_plugins(&identity,
-//!   plugins, transport)` — the library is identity-agnostic, so the
-//!   wallet glue lives outside.
+//!   scope cleanup. Construct via `User::new_with_plugins(&member_id,
+//!   plugins, transport)`
 //! - [`lifecycle`] — `start_conversation`, `leave_conversation` (registry CUD).
 //! - [`registry`] — `lookup_entry`, `list_conversations`,
 //!   `subscribe_conversations`.

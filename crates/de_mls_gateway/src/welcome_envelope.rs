@@ -1,7 +1,7 @@
 //! Wire envelope for gateway-published welcomes on the welcome
 //! subtopic. Wraps a `MemberWelcome` so the receiver can tell it apart
 //! from a bare `MemberInvite` published by the library's
-//! `send_kp_message` — envelope decode succeeds for welcomes; raw
+//! `send_key_package` — envelope decode succeeds for welcomes; raw
 //! `MemberInvite` bytes fall through (the receiver forwards them
 //! untouched to `User::process_inbound_packet`).
 //!
@@ -27,7 +27,7 @@ pub fn encode_welcome(welcome: MemberWelcome) -> Vec<u8> {
 
 /// Decode a welcome-subtopic payload. Returns `Some(welcome)` for an
 /// envelope produced by another gateway; `None` for any other bytes
-/// (typically a bare `MemberInvite` from `send_kp_message`).
+/// (typically a bare `MemberInvite` from `send_key_package`).
 pub fn decode(bytes: &[u8]) -> Option<MemberWelcome> {
     WelcomeSubtopicEnvelope::decode(bytes).ok()?.welcome
 }

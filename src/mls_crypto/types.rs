@@ -1,67 +1,62 @@
 //! MLS types and operation results.
 
-use openmls::key_packages::KeyPackage as MlsKeyPackage;
+use openmls::{key_packages::KeyPackageIn, prelude::DeserializeBytes};
 
 use crate::mls_crypto::MlsError;
 
-/// Serialized key package for joining a conversation.
-///
-/// Carries the TLS-serialized key package and the owner's identity bytes.
+/// Serialized key package for joining a conversation. Carries the
+/// TLS-serialized key package alongside the owner's member-id.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyPackageBytes {
     bytes: Vec<u8>,
-    identity: Vec<u8>,
+    member_id: Vec<u8>,
 }
 
 impl KeyPackageBytes {
-    pub fn new(bytes: Vec<u8>, identity: Vec<u8>) -> Self {
-        Self { bytes, identity }
+    pub fn new(bytes: Vec<u8>, member_id: Vec<u8>) -> Self {
+        Self { bytes, member_id }
     }
 
-    /// Serialized key package bytes.
+    /// TLS-serialized key package bytes.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
 
-    /// Identity bytes of the key package's owner, extracted from the
-    /// MLS credential at construction time.
-    pub fn identity(&self) -> &[u8] {
-        &self.identity
+    /// Member-id of the key package's owner, extracted from the MLS
+    /// credential at construction time.
+    pub fn member_id(&self) -> &[u8] {
+        &self.member_id
     }
 }
 
 /// Membership change as supplied to the steward's commit pipeline.
 ///
 /// One of three "membership change" shapes used in the codebase. They
-/// describe the same underlying intent at different boundaries:
+/// describe the same intent at different boundaries:
 ///
 /// | Shape | Where | Carries |
 /// |-------|-------|---------|
 /// | [`crate::protos::de_mls::messages::v1::ConversationUpdateRequest`] | consensus wire | wire payload, also covers governance kinds (emergency / election) |
-/// | [`MlsCommitInput`] | input to [`super::MlsService::create_commit_candidate`] | Add carries the full key package; Remove carries the target identity bytes |
-/// | [`MlsProposalOutput`] | output of MLS staging / decryption | identity-only, plus `Other` for proposal kinds we don't construct |
+/// | [`MlsCommitInput`] | input to [`super::MlsService::create_commit_candidate`] | Add carries the full key package; Remove carries the target member-id |
+/// | [`MlsProposalOutput`] | output of MLS staging / decryption | member-id-only for both Add and Remove |
 #[derive(Clone, Debug)]
 pub enum MlsCommitInput {
     /// Add a new member using their key package.
     Add(KeyPackageBytes),
-    /// Remove a member by their identity bytes.
+    /// Remove a member by their member-id.
     Remove(Vec<u8>),
 }
 
-/// Membership change as observed in a single MLS proposal — extracted by
-/// the MLS service from incoming proposals (standalone or commit-bundled).
-///
-/// See [`MlsCommitInput`] for the corresponding input shape and the
-/// boundary table.
+/// Membership change observed in a single MLS proposal — extracted from
+/// incoming proposals (standalone or commit-bundled). Carries the
+/// target's `member_id` bytes only; see [`MlsCommitInput`] for the
+/// input shape and the boundary table.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MlsProposalOutput {
-    /// Add a member — identity is read from the key package credential.
+    /// Add a member — member-id is read from the key package credential.
     Add(Vec<u8>),
-    /// Remove a member — identity of the removed member.
+    /// Remove a member — member-id of the removed member.
     Remove(Vec<u8>),
-    /// Any other proposal type (update, reinit, etc.) — we do not
-    /// construct these ourselves; receipt is logged for diagnostics.
-    Other(String),
 }
 
 /// Coarse-grained kind of an MLS wire message.
@@ -80,44 +75,45 @@ pub enum MlsMessageKind {
 #[derive(Clone, Debug)]
 pub enum DecryptResult {
     /// Application message decrypted successfully.
-    /// Contains `(message_bytes, sender_identity)`.
+    /// Contains `(message_bytes, sender member_id)`.
     Application(Vec<u8>, Vec<u8>),
     /// We were removed from the conversation.
-    /// Contains the authenticated sender identity.
+    /// Contains the authenticated sender member_id.
     Removed(Vec<u8>),
     /// Proposal stored (no action needed).
-    /// Contains `(sender_identity, action)`.
+    /// Contains `(sender member_id, action)`.
     ProposalStored(Vec<u8>, MlsProposalOutput),
     /// Message ignored (wrong conversation/epoch).
     Ignored,
 }
 
-/// Result of staging a remote candidate (proposal batch + commit).
-///
-/// Returned by `MlsService::stage_remote_commit`. The `Staged` variant
-/// carries the MLS-authenticated senders of every staged proposal and of
-/// the commit, plus the membership-change actions extracted from the
-/// commit. `Aborted` signals a benign rejection (stale epoch, wrong conversation,
-/// non-proposal in a proposal slot, non-commit in the commit slot) where
-/// no validated outcome can be produced — the caller must NOT treat it as
-/// a violation but should clean MLS state via `discard_staged_commit`.
+/// Outcome of staging a remote commit. `Staged` is the happy path;
+/// `Aborted` is a benign rejection (cleanup MLS state, no penalty);
+/// `BundleSenderMismatch` is a protocol violation (caller emits
+/// `BROKEN_COMMIT` evidence against `commit_sender`).
 #[derive(Clone, Debug)]
 pub enum StagedCandidateResult {
-    /// Candidate staged successfully. All identities are MLS-authenticated.
+    /// Candidate staged successfully. `commit_sender` is the
+    /// MLS-authenticated signer of the commit; the de-mls invariant
+    /// "all bundled proposals match the commit sender" was checked
+    /// during staging.
     Staged {
-        /// Identity bytes of the commit sender (MLS-authenticated).
         commit_sender: Vec<u8>,
-        /// Per-proposal sender identity, in input order. Caller cross-checks
-        /// these against the commit sender to detect bundles signed by
-        /// non-committers.
-        proposal_senders: Vec<Vec<u8>>,
         /// Whether this commit removes us from the conversation.
         self_removed: bool,
         /// Membership changes (Add/Remove) contained in the commit's proposals.
         actions: Vec<MlsProposalOutput>,
     },
-    /// Candidate was benign but not processable. Caller cleans MLS state.
+    /// Candidate was benign but not processable (stale epoch, wrong
+    /// group, non-proposal in proposal slot, non-commit in commit slot).
+    /// Caller cleans MLS state and drops the candidate without penalty.
     Aborted,
+    /// One or more bundled proposals weren't signed by the commit
+    /// sender. MLS itself allows commits to reference others'
+    /// proposals, but de-mls's protocol layer requires every bundled
+    /// proposal to come from the committer. Caller emits a
+    /// `BROKEN_COMMIT` violation against `commit_sender`.
+    BundleSenderMismatch { commit_sender: Vec<u8> },
 }
 
 /// Result of creating a commit candidate (not merged yet).
@@ -131,14 +127,17 @@ pub struct CommitCandidate {
     pub welcome: Option<Vec<u8>>,
 }
 
-/// Parse a JSON-serialized key package and extract the identity.
-///
-/// Returns `(key_package_bytes, identity)` where:
-/// - `key_package_bytes` is the original JSON bytes (passed through)
-/// - `identity` is the identity bytes from the leaf credential
-pub fn key_package_bytes_from_json(json_bytes: Vec<u8>) -> Result<(Vec<u8>, Vec<u8>), MlsError> {
-    let kp: MlsKeyPackage =
-        serde_json::from_slice(&json_bytes).map_err(MlsError::KeyPackageJson)?;
-    let identity = kp.leaf_node().credential().serialized_content().to_vec();
-    Ok((json_bytes, identity))
+/// Parse TLS-serialized key package bytes and extract the leaf-credential
+/// member_id. Returns `(key_package_bytes, member_id)` — the bytes are
+/// passed through unchanged so the caller can re-broadcast them on the
+/// wire without a second serialization pass.
+pub fn key_package_bytes_from_tls(bytes: Vec<u8>) -> Result<(Vec<u8>, Vec<u8>), MlsError> {
+    let (kp_in, _rest) =
+        KeyPackageIn::tls_deserialize_bytes(&bytes).map_err(MlsError::KeyPackageTls)?;
+    let member_id = kp_in
+        .unverified_credential()
+        .credential
+        .serialized_content()
+        .to_vec();
+    Ok((bytes, member_id))
 }

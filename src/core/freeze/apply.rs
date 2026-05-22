@@ -18,8 +18,8 @@ use crate::{
 /// Result of trying to apply one candidate. `Terminal` ends the round;
 /// `Drop` records a local score penalty and the caller tries the next.
 ///
-/// `committer` is the MLS-verified sender (incoming) or our own identity
-/// (local). Scoring keys off this so a forged wire claim cannot redirect
+/// `committer` is the MLS-verified sender (incoming) or our own member id.
+/// Scoring keys off this so a forged wire claim cannot redirect
 /// the `SuccessfulCommit` reward.
 enum CandidateOutcome {
     Terminal {
@@ -44,25 +44,25 @@ pub(super) fn apply_in_priority_order<M: MlsService, St: StewardListPlugin>(
     steward: &St,
     sorted: Vec<BufferedCommitCandidate>,
     ctx: &RoundContext,
-    self_identity: &[u8],
+    self_member_id: &[u8],
 ) -> Result<FreezeFinalizeResult, CoreError> {
     let mut score_ops: Vec<ScoreOp> = Vec::new();
     let mut own_commit_discarded = false;
-    let conversation_name = conversation.name().to_owned();
+    let conversation_id = conversation.name().to_owned();
 
     let mut remaining = sorted.into_iter();
     while let Some(chosen) = remaining.next() {
         let apply_result = if chosen.is_local_candidate {
             if own_commit_discarded {
                 tracing::debug!(
-                    conversation = %conversation_name,
+                    conversation = %conversation_id,
                     "own pending commit is discarded; skipping local candidate"
                 );
                 continue;
             }
             apply_local_candidate(conversation, mls, chosen, ctx)?
         } else {
-            if !own_commit_discarded && steward.is_steward(self_identity) {
+            if !own_commit_discarded && steward.is_steward(self_member_id) {
                 // A failure here leaves an old pending commit in MLS and
                 // would sabotage every subsequent staging attempt — bubble
                 // the error out of the round instead of pressing on.
@@ -81,11 +81,11 @@ pub(super) fn apply_in_priority_order<M: MlsService, St: StewardListPlugin>(
                 record_winner_scores(
                     &mut score_ops,
                     &committer,
-                    self_identity,
+                    self_member_id,
                     ctx,
                     remaining,
                     steward,
-                    &conversation_name,
+                    &conversation_id,
                 );
                 return Ok(FreezeFinalizeResult {
                     outcome,
@@ -111,36 +111,30 @@ pub(super) fn apply_in_priority_order<M: MlsService, St: StewardListPlugin>(
     })
 }
 
-/// Append the scoring side-effects of a winning commit:
-/// `SuccessfulCommit` on the committer, `CensorshipInactivity` on the
-/// absent named steward (if a backup won and we aren't that steward),
-/// and `HonestCommitAttempt` on each unpicked competitor whose
-/// wire-claimed identity sits on the steward list.
+/// Append the scoring side-effects of a winning commit.
 ///
 /// RFC §Commit Validation: unpicked competitors are honest under
 /// Δ-synchrony (same approved set, different MLS entropy) and MUST NOT
-/// be classified as misbehaviour. The steward-list check rejects forged
-/// credit claims from non-stewards.
+/// be classified as misbehaviour.
 fn record_winner_scores<St: StewardListPlugin>(
     score_ops: &mut Vec<ScoreOp>,
     committer: &[u8],
-    self_identity: &[u8],
+    self_member_id: &[u8],
     ctx: &RoundContext,
     losers: impl Iterator<Item = BufferedCommitCandidate>,
     steward: &St,
-    conversation_name: &str,
+    conversation_id: &str,
 ) {
     score_ops.push(ScoreOp {
         member_id: committer.to_vec(),
         event: ScoreEvent::SuccessfulCommit,
     });
 
-    // The walk in `live_epoch_steward_id` already filters out
-    // queued-removal targets, so a draining named steward never appears
-    // here as `expected`.
-    if let Some(expected) = ctx.live_epoch_steward_id.as_deref()
+    // `epoch_steward_id` was resolved through `steward_eligibility`, so
+    // `expected` can't be a queued-removal target — no extra guard needed.
+    if let Some(expected) = ctx.epoch_steward_id.as_deref()
         && expected != committer
-        && expected != self_identity
+        && expected != self_member_id
     {
         score_ops.push(ScoreOp {
             member_id: expected.to_vec(),
@@ -149,7 +143,7 @@ fn record_winner_scores<St: StewardListPlugin>(
     }
 
     for loser in losers {
-        let claimed = loser.candidate_msg.steward_identity;
+        let claimed = loser.candidate_msg.steward_member_id;
         if steward.is_steward(&claimed) {
             score_ops.push(ScoreOp {
                 member_id: claimed,
@@ -157,8 +151,8 @@ fn record_winner_scores<St: StewardListPlugin>(
             });
         } else {
             tracing::debug!(
-                conversation = %conversation_name,
-                "dropping HonestCommitAttempt: claimed identity not on steward list"
+                conversation = %conversation_id,
+                "dropping HonestCommitAttempt: claimed user not on steward list"
             );
         }
     }
@@ -175,18 +169,11 @@ fn apply_local_candidate<M: MlsService>(
     chosen: BufferedCommitCandidate,
     ctx: &RoundContext,
 ) -> Result<CandidateOutcome, CoreError> {
-    // Local candidate: we wrote the message, so the wire-claimed identity
-    // is our own and is trusted by definition.
-    let committer = chosen.candidate_msg.steward_identity.clone();
-
     mls.merge_own_commit()?;
 
     let committed_batch = record_applied_commit(conversation, chosen.commit_hash);
 
     // Build the welcome artifact only after merge.
-    // `conversation_sync_bytes` is populated at the app layer (which
-    // owns scoring + steward-list snapshot state) before the
-    // [`crate::core::SessionEvent::WelcomeReady`] event is emitted.
     let welcome = chosen.welcome_bytes.map(|welcome_bytes| MemberWelcome {
         welcome_bytes,
         conversation_sync_bytes: Vec::new(),
@@ -199,7 +186,7 @@ fn apply_local_candidate<M: MlsService>(
     };
     Ok(CandidateOutcome::Terminal {
         outcome: FreezeOutcome::Applied { result, welcome },
-        committer,
+        committer: chosen.candidate_msg.steward_member_id.clone(),
         committed_batch,
     })
 }
@@ -218,10 +205,10 @@ fn apply_incoming_candidate<M: MlsService, St: StewardListPlugin>(
     chosen: BufferedCommitCandidate,
     ctx: &RoundContext,
 ) -> Result<CandidateOutcome, CoreError> {
-    let conversation_name = conversation.name().to_owned();
+    let conversation_id = conversation.name().to_owned();
 
     let (commit_sender, self_removed, commit_actions) =
-        match stage_candidate(mls, &conversation_name, &chosen.candidate_msg, ctx)? {
+        match stage_candidate(mls, &conversation_id, &chosen.candidate_msg, ctx)? {
             StagingOutcome::Staged {
                 commit_sender,
                 self_removed,
@@ -232,7 +219,7 @@ fn apply_incoming_candidate<M: MlsService, St: StewardListPlugin>(
                 // loop will try the next candidate.
                 mls.discard_staged_commit()?;
                 return Ok(CandidateOutcome::Drop(ScoreOp {
-                    member_id: chosen.candidate_msg.steward_identity,
+                    member_id: chosen.candidate_msg.steward_member_id,
                     event: ScoreEvent::MisbehavingCommit,
                 }));
             }
@@ -309,56 +296,51 @@ enum StagingOutcome {
 /// via `discard_staged_commit` for `Abort` / `Violation`.
 fn stage_candidate<M>(
     mls: &mut M,
-    conversation_name: &str,
+    conversation_id: &str,
     candidate: &CommitCandidate,
     ctx: &RoundContext,
 ) -> Result<StagingOutcome, CoreError>
 where
     M: MlsService,
 {
-    let Ok(StagedCandidateResult::Staged {
-        commit_sender,
-        proposal_senders,
-        self_removed,
-        actions: commit_actions,
-    }) = mls
+    let staged_result = mls
         .stage_remote_commit(&candidate.mls_proposals, &candidate.commit_message)
         .inspect_err(|e| {
-            tracing::debug!(conversation = conversation_name, error = %e, "candidate failed to stage");
-        })
-    else {
-        return Ok(StagingOutcome::Abort);
+            tracing::debug!(conversation = conversation_id, error = %e, "candidate failed to stage");
+        });
+
+    let (commit_sender, self_removed, commit_actions) = match staged_result {
+        Ok(StagedCandidateResult::Staged {
+            commit_sender,
+            self_removed,
+            actions,
+        }) => (commit_sender, self_removed, actions),
+        Ok(StagedCandidateResult::BundleSenderMismatch { commit_sender }) => {
+            tracing::warn!(
+                conversation = conversation_id,
+                "violation: bundled proposals don't match the commit sender"
+            );
+            return Ok(StagingOutcome::Violation(ViolationEvidence::broken_commit(
+                commit_sender,
+                ctx.current_epoch,
+                "commit bundles proposals not signed by the committer",
+            )));
+        }
+        Ok(StagedCandidateResult::Aborted) | Err(_) => return Ok(StagingOutcome::Abort),
     };
 
-    // Wire-claimed `steward_identity` must match the MLS-verified
+    // Wire-claimed `steward_member_id` must match the MLS-verified
     // `commit_sender`; mismatch is a broken commit (RFC §Steward
     // violation list) and is attributed to the actual signer.
-    if candidate.steward_identity != commit_sender {
+    if candidate.steward_member_id != commit_sender {
         tracing::warn!(
-            conversation = conversation_name,
-            "violation: wire steward_identity doesn't match MLS commit_sender"
+            conversation = conversation_id,
+            "violation: wire steward_member_id doesn't match MLS commit_sender"
         );
         return Ok(StagingOutcome::Violation(ViolationEvidence::broken_commit(
             commit_sender,
             ctx.current_epoch,
-            "commit candidate's steward_identity doesn't match MLS commit sender",
-        )));
-    }
-
-    // Every bundled proposal must come from the committer — catches both
-    // "proposals signed by a third party" and "proposals don't all agree
-    // on a sender". Attribution always lands on the committer (RFC
-    // §Steward violation list: only the member who released the commit is
-    // accused).
-    if proposal_senders.iter().any(|s| s != &commit_sender) {
-        tracing::warn!(
-            conversation = conversation_name,
-            "violation: bundled proposals don't match the commit sender"
-        );
-        return Ok(StagingOutcome::Violation(ViolationEvidence::broken_commit(
-            commit_sender,
-            ctx.current_epoch,
-            "commit bundles proposals not signed by the committer",
+            "commit candidate's steward_member_id doesn't match MLS commit sender",
         )));
     }
 
@@ -374,7 +356,7 @@ where
 /// Check that a commit's MLS actions match the voted-approved set.
 /// `Some(evidence)` on mismatch.
 ///
-/// Compares both sides as sorted `(kind_tag, &identity)` projections —
+/// Compares both sides as sorted `(kind_tag, &member_id)` projections —
 /// no `MlsProposalOutput` allocation, no per-element clone.
 fn validate_commit_candidate(
     conversation: &Conversation,
@@ -408,23 +390,21 @@ fn validate_commit_candidate(
     )))
 }
 
-/// `(kind_tag, identity)` projection of an approved voting request.
+/// `(kind_tag, member_id)` projection of an approved voting request.
 /// Returns `None` for non-MLS payloads (emergency/election).
 fn action_projection_from_request(req: &ConversationUpdateRequest) -> Option<(u8, &[u8])> {
     match req.payload.as_ref()? {
-        Payload::MemberInvite(im) => Some((0, &im.identity)),
-        Payload::RemoveMember(rm) => Some((1, &rm.identity)),
+        Payload::MemberInvite(im) => Some((0, &im.member_id)),
+        Payload::RemoveMember(rm) => Some((1, &rm.member_id)),
         _ => None,
     }
 }
 
-/// `(kind_tag, identity)` projection of an MLS-staged action. `Other`
-/// gets a distinct tag so it never matches voted Add/Remove.
+/// `(kind_tag, member_id)` projection of an MLS-staged action.
 fn action_projection_from_mls(action: &MlsProposalOutput) -> (u8, &[u8]) {
     match action {
         MlsProposalOutput::Add(id) => (0, id),
         MlsProposalOutput::Remove(id) => (1, id),
-        MlsProposalOutput::Other(_) => (2, b""),
     }
 }
 

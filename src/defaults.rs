@@ -1,11 +1,4 @@
-//! Reference implementations of the library's plug-in traits.
-//!
-//! Gathered in one place so the trait surface (`core`, `mls_crypto`,
-//! `app`) is honestly the library's protocol contract and these are the
-//! batteries that ship alongside it. Production integrators normally
-//! swap one or more for their own implementations — durable storage,
-//! a different identity / consensus signer, custom scoring — and pull
-//! in only the defaults they actually want.
+//! Default implementations of the library's plug-in traits.
 //!
 //! Contents:
 //! - [`crate::defaults::MemoryDeMlsStorage`] — in-memory MLS keystore.
@@ -18,8 +11,7 @@
 //!   [`crate::defaults::DefaultStewardList`] — type aliases for the
 //!   default-bundle per-conversation plug-ins.
 //! - [`crate::defaults::DefaultConversationPluginsFactory`] —
-//!   `ConversationPluginsFactory` wired to the above (covers the
-//!   identity-bound `generate_key_package` entry as well).
+//!   `ConversationPluginsFactory` wired to the above.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};

@@ -18,14 +18,14 @@ use common::{
 
 #[test]
 fn test_process_inbound_welcome_already_joined_ignores() {
-    let conversation_name = "already-joined";
+    let conversation_id = "already-joined";
 
     let mut steward_handle = setup_steward(
-        conversation_name,
+        conversation_id,
         "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
     );
     let mut joiner = setup_joiner(
-        conversation_name,
+        conversation_id,
         "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
     );
 
@@ -38,7 +38,7 @@ fn test_process_inbound_welcome_already_joined_ignores() {
     // `handle.mls().is_some()` to skip wholesale; both safeguards land at
     // the same outcome.
     let mut joiner2 = setup_joiner(
-        conversation_name,
+        conversation_id,
         "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
     );
     let (welcome_bytes2, _) = steward_add_joiner(&mut steward_handle, &joiner2.kp_packet);
@@ -71,15 +71,15 @@ fn test_conversation_sync_propagates_divergent_per_conv_config() {
     const STEWARD_SN_MIN: usize = 2;
     const STEWARD_SN_MAX: usize = 8;
 
-    let conversation_name = "sync-divergent-config";
+    let conversation_id = "sync-divergent-config";
     let steward_hex = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
     let joiner_hex = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 
     let steward_protocol = StewardListConfig::new(STEWARD_SN_MIN, STEWARD_SN_MAX).unwrap();
     let mut steward_handle =
-        setup_steward_with_config(conversation_name, steward_hex, steward_protocol);
+        setup_steward_with_config(conversation_id, steward_hex, steward_protocol);
     let mut joiner =
-        setup_joiner_with_config(conversation_name, joiner_hex, default_steward_list_config());
+        setup_joiner_with_config(conversation_id, joiner_hex, default_steward_list_config());
 
     steward_handle.liveness_criteria_yes = STEWARD_LIVENESS_YES;
     steward_handle.pending_update_max_epochs = STEWARD_PENDING_MAX_EPOCHS;

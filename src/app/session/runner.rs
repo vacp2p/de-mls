@@ -13,7 +13,7 @@ use std::{
 use tracing::info;
 
 use crate::{
-    app::{PhaseTimer, UserError},
+    app::{PhaseTimer, SessionTick, UserError},
     core::{
         ConsensusPlugin, Conversation, ConversationConfig, ConversationHandle,
         ConversationPluginsFactory, ConversationState, ConversationStateMachine, PluginConsensus,
@@ -44,15 +44,15 @@ pub(crate) fn send_packet(
 /// path) and `on_incoming_proposal`; cancelled on manual vote or consensus
 /// resolution; fired by [`SessionRunner::tick_deadlines`].
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct AutoVoteEntry {
-    pub(crate) fire_at: Instant,
-    pub(crate) vote: bool,
+pub struct AutoVoteEntry {
+    pub fire_at: Instant,
+    pub vote: bool,
 }
 
 pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Conversation name. Identifies this session in the User registry and
     /// is used to construct scope keys for consensus operations.
-    pub(crate) conversation_name: String,
+    pub conversation_id: String,
     pub(crate) handle: ConversationHandle<CP>,
     /// Per-conversation consensus service. Owns this conversation's scope
     /// in the shared storage and a private event bus. Constructed at
@@ -69,28 +69,28 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// [`Self::tick_deadlines`]; each entry whose `fire_at` has passed
     /// gets a `cast_vote` and is removed from the map. Cancelled (removed)
     /// when a manual vote arrives or the consensus session resolves.
-    pub(crate) pending_auto_votes: HashMap<u32, AutoVoteEntry>,
+    pub pending_auto_votes: HashMap<u32, AutoVoteEntry>,
     /// Pending consensus-session timeouts: `proposal_id -> fire_at`.
     /// Registered when a proposal opens (own or incoming peer); fired by
     /// [`Self::tick_deadlines`] which calls
     /// `consensus.handle_consensus_timeout`. Removed when the session
     /// resolves naturally via `apply_consensus_outcome`.
-    pub(crate) pending_consensus_timeouts: HashMap<u32, Instant>,
+    pub pending_consensus_timeouts: HashMap<u32, Instant>,
     /// Synchronous outbound transport (cloned from `User`). Per-session
     /// methods reach this via [`Self::transport`] and route through
     /// [`send_packet`], a direct sync publish.
     transport: SharedDeliveryService,
-    /// Identity bytes derived from `User.identity.identity_bytes()` at
+    /// Identity bytes derived from `User.member_id.member_id_bytes()` at
     /// session construction. Stored as `Arc<[u8]>` so hot-path session
     /// code can clone the handle cheaply across lock-guard drops.
-    pub(crate) self_identity: Arc<[u8]>,
-    /// Display form derived from `User.identity.identity_display()` at
+    pub self_member_id: Arc<[u8]>,
+    /// Display form derived from `User.member_id.member_id_display()` at
     /// session construction. `Arc<str>` for the same reason as
-    /// `self_identity` — cheap clone across guard boundaries.
-    pub(crate) identity_display: Arc<str>,
+    /// `self_member_id` — cheap clone across guard boundaries.
+    pub member_id_display: Arc<str>,
     /// Per-User instance UUID (cloned from `User`). Tagged on every
     /// outbound packet for self-message filtering.
-    pub(crate) app_id: Arc<[u8]>,
+    pub app_id: Arc<[u8]>,
     /// Pending [`SessionEvent`]s waiting for a caller to drain. Interior
     /// `Mutex` so producer-side `emit_event` stays `&self`; consumers
     /// drain via [`Self::drain_events`] once per polling cycle.
@@ -103,7 +103,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// `handle.attach_mls`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        conversation_name: String,
+        conversation_id: String,
         conversation: Conversation,
         mls: Option<CP::Mls>,
         state_machine: ConversationStateMachine,
@@ -113,12 +113,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         steward_list: CP::StewardList,
         consensus: PluginConsensus<P>,
         transport: SharedDeliveryService,
-        self_identity: Arc<[u8]>,
-        identity_display: Arc<str>,
+        self_member_id: Arc<[u8]>,
+        member_id_display: Arc<str>,
         app_id: Arc<[u8]>,
     ) -> Self {
         Self {
-            conversation_name,
+            conversation_id,
             handle: ConversationHandle::new(
                 conversation,
                 mls,
@@ -132,8 +132,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             pending_auto_votes: HashMap::new(),
             pending_consensus_timeouts: HashMap::new(),
             transport,
-            self_identity,
-            identity_display,
+            self_member_id,
+            member_id_display,
             app_id,
             pending_events: Mutex::new(Vec::new()),
         }
@@ -160,10 +160,65 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         }
     }
 
-    /// Borrow the session's transport without taking the runner lock —
-    /// callers that need to send while holding the runner lock briefly can
-    /// clone this and pass it to [`send_packet`] after dropping the guard.
-    pub(crate) fn transport(&self) -> &SharedDeliveryService {
+    /// Smallest pending deadline relative to now, or `None` when nothing
+    /// is scheduled. Returns `Some(Duration::ZERO)` for an already-elapsed
+    /// deadline. Covers consensus-session timeouts, auto-vote timers, and
+    /// state-machine phase deadlines (Freezing window, PendingJoin
+    /// expiry, steward / recovery inactivity). Forward to an external
+    /// scheduler that calls [`crate::app::User::poll_session`] on fire;
+    /// extra/early wakeups are no-ops.
+    pub fn next_wakeup_in(&self) -> Option<Duration> {
+        let now = Instant::now();
+        let earliest = self
+            .pending_consensus_timeouts
+            .values()
+            .copied()
+            .chain(self.pending_auto_votes.values().map(|e| e.fire_at))
+            .chain(self.phase_deadline())
+            .min()?;
+        Some(earliest.saturating_duration_since(now))
+    }
+
+    /// State-driven phase-timer deadline, if one is currently active. The
+    /// session's polling paths (`poll_freeze_status`, `check_member_freeze`,
+    /// `check_pending_join`, and the inactivity check in
+    /// `check_steward_inactivity`) all gate on the phase timer; this
+    /// surfaces the same wall-clock target so an external scheduler can
+    /// wake us at the right time.
+    fn phase_deadline(&self) -> Option<Instant> {
+        let anchor = self.phase_timer.started_at()?;
+        let cfg = &self.handle.config;
+        match self.handle.current_state() {
+            ConversationState::Freezing => Some(anchor + cfg.freeze_duration),
+            ConversationState::PendingJoin => Some(anchor + cfg.commit_inactivity_duration * 3),
+            ConversationState::Working => {
+                if self.handle.conversation.approved_proposals_count() == 0 {
+                    return None;
+                }
+                let dur = if self.handle.is_in_recovery_mode() {
+                    cfg.recovery_inactivity_duration
+                } else {
+                    cfg.commit_inactivity_duration
+                };
+                Some(anchor + dur)
+            }
+            _ => None,
+        }
+    }
+
+    /// Snapshot the earliest deadline into a [`SessionTick`]. Public ops
+    /// returning `SessionTick` call this at the end of their happy path
+    /// so the caller gets a wakeup hint without a second accessor call.
+    pub(crate) fn tick(&self) -> SessionTick {
+        SessionTick {
+            next_wakeup_in: self.next_wakeup_in(),
+        }
+    }
+
+    /// Borrow the session's transport without taking the runner lock.
+    /// Cheap to clone the inner `Arc` and publish after dropping the
+    /// runner guard.
+    pub fn transport(&self) -> &SharedDeliveryService {
         &self.transport
     }
 
@@ -172,7 +227,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Register an auto-vote to fire `delay` from now with the given
     /// `vote` choice. Idempotent — re-registering for the same
     /// `proposal_id` replaces the existing entry.
-    pub(crate) fn register_auto_vote(&mut self, proposal_id: u32, delay: Duration, vote: bool) {
+    pub fn register_auto_vote(&mut self, proposal_id: u32, delay: Duration, vote: bool) {
         self.pending_auto_votes.insert(
             proposal_id,
             AutoVoteEntry {
@@ -185,19 +240,19 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Drop the pending auto-vote for `proposal_id` if any is registered.
     /// Called when a manual vote arrives (manual choice wins) or when the
     /// consensus session resolves (vote no longer meaningful).
-    pub(crate) fn cancel_auto_vote(&mut self, proposal_id: u32) {
+    pub fn cancel_auto_vote(&mut self, proposal_id: u32) {
         self.pending_auto_votes.remove(&proposal_id);
     }
 
     /// Drop every pending auto-vote on this runner. Called on conversation
     /// leave so no stale entries fire against a conversation we've left.
-    pub(crate) fn cancel_all_auto_votes(&mut self) {
+    pub fn cancel_all_auto_votes(&mut self) {
         self.pending_auto_votes.clear();
     }
 
     /// Register a consensus-session timeout. Fires `delay` from now via
     /// [`Self::tick_deadlines`]; removed naturally on consensus resolution.
-    pub(crate) fn register_consensus_timeout(&mut self, proposal_id: u32, delay: Duration) {
+    pub fn register_consensus_timeout(&mut self, proposal_id: u32, delay: Duration) {
         self.pending_consensus_timeouts
             .insert(proposal_id, Instant::now() + delay);
     }
@@ -206,7 +261,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// `apply_consensus_outcome` once the library reaches/fails consensus,
     /// so the timeout can't fire a stale `handle_consensus_timeout` against
     /// an already-resolved session.
-    pub(crate) fn unregister_consensus_timeout(&mut self, proposal_id: u32) {
+    pub fn unregister_consensus_timeout(&mut self, proposal_id: u32) {
         self.pending_consensus_timeouts.remove(&proposal_id);
     }
 
@@ -254,7 +309,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
     /// `true` once 3× `commit_inactivity_duration` has passed in
     /// `PendingJoin` without a welcome.
-    pub(crate) fn is_pending_join_expired(&self) -> bool {
+    pub fn is_pending_join_expired(&self) -> bool {
         self.handle.current_state() == ConversationState::PendingJoin
             && self
                 .phase_timer
@@ -262,7 +317,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     }
 
     /// `true` once the freeze window elapsed while in `Freezing`.
-    pub(crate) fn is_freeze_timed_out(&self) -> bool {
+    pub fn is_freeze_timed_out(&self) -> bool {
         self.handle.current_state() == ConversationState::Freezing
             && self
                 .phase_timer
@@ -335,7 +390,7 @@ mod tests {
             StubStewardList::member(),
             make_test_consensus_service(),
             Arc::new(Mutex::new(crate::test_fixtures::UnusedTransport)),
-            Arc::from(&b"test-identity"[..]),
+            Arc::from(&b"test-member-id"[..]),
             Arc::from("0xtest-display"),
             Arc::from(&[0u8; 16][..]),
         );
@@ -355,7 +410,7 @@ mod tests {
             StubStewardList::member(),
             make_test_consensus_service(),
             Arc::new(Mutex::new(crate::test_fixtures::UnusedTransport)),
-            Arc::from(&b"test-identity"[..]),
+            Arc::from(&b"test-member-id"[..]),
             Arc::from("0xtest-display"),
             Arc::from(&[0u8; 16][..]),
         )

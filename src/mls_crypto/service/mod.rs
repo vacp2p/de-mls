@@ -1,4 +1,4 @@
-//! OpenMLS-backed implementation of [`MlsService`].
+//! [`MlsService`] trait ([`api`]) and [`OpenMlsService`] OpenMLS backend.
 
 mod api;
 mod backend;

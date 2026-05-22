@@ -10,7 +10,7 @@ use std::time::Duration;
 use de_mls::app::{CreatorVote, SessionRunner};
 use de_mls::core::StewardListConfig;
 use de_mls::ds::OutboundPacket;
-use de_mls::identity::Identity;
+use de_mls::member_id::MemberId;
 use de_mls::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, RemoveMember, conversation_update_request,
 };
@@ -46,12 +46,12 @@ async fn steward_inactivity_fires_commit_candidate() {
     // Alice files a removal of Bob via the public surface. With bob's
     // auto-vote running on his consensus forwarder, the proposal resolves
     // YES and lands in alice's approved queue.
-    let bob_id = common::WalletIdentity::from_hex(&users[1].0.identity_string())
-        .identity_bytes()
+    let bob_id = common::WalletMemberId::from_hex(&users[1].0.member_id_string())
+        .member_id_bytes()
         .to_vec();
     let request = ConversationUpdateRequest {
         payload: Some(conversation_update_request::Payload::RemoveMember(
-            RemoveMember { identity: bob_id },
+            RemoveMember { member_id: bob_id },
         )),
     };
     SessionRunner::initiate_proposal(&alice_session, request, CreatorVote::Yes)

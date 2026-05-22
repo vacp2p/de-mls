@@ -1,14 +1,15 @@
 //! Per-conversation protocol-queue state: approved/voting proposal queues,
 //! freeze-round candidate buffer, pending-update buffer, urgent-commit
-//! target, ECP dedup. MLS crypto state, the operating mode, and the
-//! steward-list plug-in live alongside on `ConversationHandle`.
+//! target, ECP dedup.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+
+use indexmap::{IndexMap, IndexSet};
 
 use crate::{
     core::{
         conversation::util::{
-            is_auto_approved_entry, member_set, self_leave_proposal_id, target_identity_of,
+            is_auto_approved_entry, member_set, self_leave_proposal_id, target_member_id_of,
         },
         freeze::CommitHash,
         proposal_kind::ProposalKind,
@@ -53,10 +54,10 @@ pub(crate) struct FreezeRound {
     pub candidates: Vec<BufferedCommitCandidate>,
 }
 
-/// Result of [`Conversation::add_freeze_candidate`]. Each non-`Buffered`
-/// variant is a legitimate runtime state, not an error: the round may be
-/// past the buffer phase, the caller may be on a stale epoch, or the
-/// commit hash may already be buffered (peer race / retransmit).
+/// Outcome of [`Conversation::add_freeze_candidate`]. An enum rather than
+/// `Result<(), _>` because the non-success cases are well-defined
+/// protocol states (epoch race, retransmit, late offer) that callers
+/// handle differently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FreezeBufferOutcome {
     /// Candidate stored in the buffer for this epoch.
@@ -65,7 +66,6 @@ pub enum FreezeBufferOutcome {
     /// accepts candidates.
     SelectionLocked,
     /// The caller's `epoch` doesn't match the buffered round's epoch
-    /// (e.g. the local node hasn't merged the latest commit yet).
     StaleEpoch,
     /// A candidate with the same commit hash is already buffered.
     DuplicateHash,
@@ -74,12 +74,12 @@ pub enum FreezeBufferOutcome {
 /// Per-conversation protocol state. Stewards batch commits; members vote.
 /// Construct with [`Conversation::new`].
 pub struct Conversation {
-    conversation_name: String,
+    conversation_id: String,
     /// Proposals that passed consensus, waiting for steward to commit.
-    approved_proposals: HashMap<ProposalId, ConversationUpdateRequest>,
-    /// Insertion order of `approved_proposals` (FIFO). Library proposal
-    /// IDs are content-derived hashes, so sort-by-id is not temporal.
-    approved_order: Vec<ProposalId>,
+    /// `IndexMap` so insertion order (FIFO) is preserved without a side
+    /// vector — library proposal IDs are content-derived hashes, so
+    /// sort-by-id is not temporal.
+    approved_proposals: IndexMap<ProposalId, ConversationUpdateRequest>,
     /// Proposals waiting on consensus voting (created by this user).
     voting_proposals: HashMap<ProposalId, ConversationUpdateRequest>,
     /// Active emergency criteria proposals not yet finalized by consensus.
@@ -93,7 +93,6 @@ pub struct Conversation {
     freeze_round: Option<FreezeRound>,
     /// Buffer of membership updates (Add/Remove) that every member records so a
     /// future epoch steward can retry them if the current one fails to commit.
-    /// Keyed by target identity so duplicates don't stack.
     pending_updates: HashMap<Vec<u8>, PendingUpdate>,
     /// Bounded FIFO of proposal IDs with a locally-observed consensus outcome.
     /// Used by `apply_consensus_outcome` to drop library re-emissions and by
@@ -107,11 +106,10 @@ pub struct Conversation {
 }
 
 impl Conversation {
-    pub fn new(conversation_name: &str) -> Self {
+    pub fn new(conversation_id: &str) -> Self {
         Self {
-            conversation_name: conversation_name.to_string(),
-            approved_proposals: HashMap::new(),
-            approved_order: Vec::new(),
+            conversation_id: conversation_id.to_string(),
+            approved_proposals: IndexMap::new(),
             voting_proposals: HashMap::new(),
             active_emergency_ids: HashSet::new(),
             pending_removal_targets: HashSet::new(),
@@ -124,11 +122,11 @@ impl Conversation {
     }
 
     pub fn name(&self) -> &str {
-        &self.conversation_name
+        &self.conversation_id
     }
 
     pub fn name_bytes(&self) -> &[u8] {
-        self.conversation_name.as_bytes()
+        self.conversation_id.as_bytes()
     }
 
     /// Build the eligibility predicate that the steward plug-in's "live"
@@ -144,15 +142,15 @@ impl Conversation {
         move |candidate: &[u8]| !self.is_pending_removal(candidate) && mls_set.contains(candidate)
     }
 
-    /// True iff `approved_proposals` carries any `RemoveMember(identity)`,
+    /// True iff `approved_proposals` carries any `RemoveMember(member_id)`,
     /// regardless of source. Used by `steward_eligibility` to skip a member
     /// whose removal is queued — MLS forbids them from committing it
     /// themselves. Broader than [`Self::is_pending_self_leave`].
-    pub fn is_pending_removal(&self, identity: &[u8]) -> bool {
+    pub fn is_pending_removal(&self, member_id: &[u8]) -> bool {
         self.approved_proposals.values().any(|req| {
             matches!(
                 req.payload.as_ref(),
-                Some(conversation_update_request::Payload::RemoveMember(r)) if r.identity == identity
+                Some(conversation_update_request::Payload::RemoveMember(r)) if r.member_id == member_id
             )
         })
     }
@@ -168,13 +166,8 @@ impl Conversation {
         self.approved_proposals.len()
     }
 
-    pub fn approved_proposals(&self) -> &HashMap<ProposalId, ConversationUpdateRequest> {
+    pub fn approved_proposals(&self) -> &IndexMap<ProposalId, ConversationUpdateRequest> {
         &self.approved_proposals
-    }
-
-    /// Insertion order of `approved_proposals` (oldest first).
-    pub fn approved_order(&self) -> &[ProposalId] {
-        &self.approved_order
     }
 
     /// Move a proposal from the voting queue into the approved queue.
@@ -209,18 +202,16 @@ impl Conversation {
 
     /// Drop a single proposal from the approved queue without archiving.
     pub fn remove_approved_proposal(&mut self, proposal_id: ProposalId) {
-        if self.approved_proposals.remove(&proposal_id).is_some() {
-            self.approved_order.retain(|pid| *pid != proposal_id);
-        }
+        self.approved_proposals.shift_remove(&proposal_id);
     }
 
     /// Clear the approved-proposal queue and return the cleared batch in
     /// FIFO insertion order so callers can archive it for UI / diagnostic
     /// history. Returns an empty `Vec` when the queue was already empty.
     pub fn clear_approved_proposals(&mut self) -> Vec<ConversationUpdateRequest> {
-        self.approved_order
+        self.approved_proposals
             .drain(..)
-            .filter_map(|pid| self.approved_proposals.remove(&pid))
+            .map(|(_, req)| req)
             .collect()
     }
 
@@ -234,8 +225,6 @@ impl Conversation {
                 Some(conversation_update_request::Payload::RemoveMember(_))
             )
         });
-        self.approved_order
-            .retain(|pid| self.approved_proposals.contains_key(pid));
     }
 
     /// Drop every entry in the voting queue.
@@ -296,11 +285,9 @@ impl Conversation {
         self.approved_proposals.retain(|_pid, req| {
             !matches!(
                 req.payload.as_ref(),
-                Some(conversation_update_request::Payload::RemoveMember(r)) if r.identity == target
+                Some(conversation_update_request::Payload::RemoveMember(r)) if r.member_id == target
             )
         });
-        self.approved_order
-            .retain(|pid| self.approved_proposals.contains_key(pid));
     }
 
     /// Cheap idempotence check for auto-retry: don't submit a second election
@@ -361,7 +348,7 @@ impl Conversation {
 
     /// Insert a `ConversationUpdateRequest` into the pending-updates buffer.
     ///
-    /// Keyed by target identity — a second insertion for the same identity
+    /// Keyed by target user — a second insertion for the same user
     /// keeps the original `first_seen_epoch` so it can still expire on schedule.
     /// Returns `true` if this is a new entry, `false` if already buffered.
     pub fn buffer_pending_update(
@@ -369,10 +356,10 @@ impl Conversation {
         request: ConversationUpdateRequest,
         current_epoch: u64,
     ) -> bool {
-        let Some(identity) = target_identity_of(&request) else {
+        let Some(member_id) = target_member_id_of(&request) else {
             return false;
         };
-        let key = identity.to_vec();
+        let key = member_id.to_vec();
         if self.pending_updates.contains_key(&key) {
             return false;
         }
@@ -386,21 +373,21 @@ impl Conversation {
         true
     }
 
-    /// True if `identity` has a self-leave waiting for the next commit —
-    /// an approved `RemoveMember(identity)` under the deterministic
+    /// True if `member_id` has a self-leave waiting for the next commit —
+    /// an approved `RemoveMember(member_id)` under the deterministic
     /// self-leave ID. Used by live rotation to skip the leaver.
-    pub fn is_pending_self_leave(&self, identity: &[u8]) -> bool {
-        let pid = self_leave_proposal_id(identity);
+    pub fn is_pending_self_leave(&self, member_id: &[u8]) -> bool {
+        let pid = self_leave_proposal_id(member_id);
         self.approved_proposals
             .get(&pid)
             .is_some_and(|req| is_auto_approved_entry(pid, req))
     }
 
-    /// Drop a buffered update by target identity.
+    /// Drop a buffered update by target member_id.
     ///
     /// Returns `true` if an entry was removed.
-    pub fn remove_pending_update(&mut self, identity: &[u8]) -> bool {
-        self.pending_updates.remove(identity).is_some()
+    pub fn remove_pending_update(&mut self, member_id: &[u8]) -> bool {
+        self.pending_updates.remove(member_id).is_some()
     }
 
     /// Read-only access to the pending-updates buffer.
@@ -413,9 +400,9 @@ impl Conversation {
         self.pending_updates.len()
     }
 
-    /// Check whether a pending update exists for the given identity.
-    pub fn has_pending_update(&self, identity: &[u8]) -> bool {
-        self.pending_updates.contains_key(identity)
+    /// Check whether a pending update exists for the given member_id.
+    pub fn has_pending_update(&self, member_id: &[u8]) -> bool {
+        self.pending_updates.contains_key(member_id)
     }
 
     /// Drop entries whose `first_seen_epoch` is older than `current_epoch - max_age`.
@@ -445,17 +432,17 @@ impl Conversation {
     /// sweep to catch auto-approved entries that survived freeze failures.
     pub fn prune_pending_updates_for_members(&mut self, current_members: &[Vec<u8>]) {
         let in_conversation: HashSet<&Vec<u8>> = current_members.iter().collect();
-        self.pending_updates.retain(|identity, entry| {
+        self.pending_updates.retain(|member_id, entry| {
             let payload = match entry.request.payload.as_ref() {
                 Some(p) => p,
                 None => return false,
             };
             match payload {
                 conversation_update_request::Payload::MemberInvite(_) => {
-                    !in_conversation.contains(identity)
+                    !in_conversation.contains(&member_id)
                 }
                 conversation_update_request::Payload::RemoveMember(_) => {
-                    in_conversation.contains(identity)
+                    in_conversation.contains(&member_id)
                 }
                 _ => false,
             }
@@ -468,13 +455,11 @@ impl Conversation {
             }
             match req.payload.as_ref() {
                 Some(conversation_update_request::Payload::RemoveMember(r)) => {
-                    in_conversation.contains(&r.identity)
+                    in_conversation.contains(&r.member_id)
                 }
                 _ => true,
             }
         });
-        self.approved_order
-            .retain(|pid| self.approved_proposals.contains_key(pid));
     }
 
     // ─────────────────────────── Crate-internal ───────────────────────────
@@ -557,15 +542,10 @@ impl Conversation {
 
     // ─────────────────────────── Private ───────────────────────────
 
-    /// Re-inserting an existing id preserves the original position.
+    /// Re-inserting an existing id preserves the original position
+    /// (`IndexMap::insert` replaces in place, does not move to end).
     fn push_approved(&mut self, proposal_id: ProposalId, proposal: ConversationUpdateRequest) {
-        if self
-            .approved_proposals
-            .insert(proposal_id, proposal)
-            .is_none()
-        {
-            self.approved_order.push(proposal_id);
-        }
+        self.approved_proposals.insert(proposal_id, proposal);
     }
 
     fn build_freeze_round(&self, epoch: u64) -> FreezeRound {
@@ -594,16 +574,14 @@ const RESOLVED_PROPOSAL_CACHE_CAPACITY: usize = 256;
 /// plausible peer-lag window still finds its id cached.
 #[derive(Clone, Debug)]
 struct ResolvedProposalCache {
-    ids: HashSet<ProposalId>,
-    order: VecDeque<ProposalId>,
+    ids: IndexSet<ProposalId>,
     capacity: usize,
 }
 
 impl ResolvedProposalCache {
     fn new(capacity: usize) -> Self {
         Self {
-            ids: HashSet::new(),
-            order: VecDeque::with_capacity(capacity),
+            ids: IndexSet::with_capacity(capacity),
             capacity,
         }
     }
@@ -616,11 +594,8 @@ impl ResolvedProposalCache {
         if !self.ids.insert(id) {
             return;
         }
-        self.order.push_back(id);
-        while self.order.len() > self.capacity
-            && let Some(old) = self.order.pop_front()
-        {
-            self.ids.remove(&old);
+        while self.ids.len() > self.capacity {
+            self.ids.shift_remove_index(0);
         }
     }
 }
@@ -639,15 +614,15 @@ mod tests {
         ids.iter().map(|&id| member(id)).collect()
     }
 
-    fn insert_self_leave(conversation: &mut Conversation, identity: &[u8]) {
+    fn insert_self_leave(conversation: &mut Conversation, member_id: &[u8]) {
         let remove = ConversationUpdateRequest {
             payload: Some(conversation_update_request::Payload::RemoveMember(
                 RemoveMember {
-                    identity: identity.to_vec(),
+                    member_id: member_id.to_vec(),
                 },
             )),
         };
-        conversation.insert_approved_proposal(self_leave_proposal_id(identity), remove);
+        conversation.insert_approved_proposal(self_leave_proposal_id(member_id), remove);
     }
 
     #[test]
@@ -719,7 +694,7 @@ mod tests {
         let remove = ConversationUpdateRequest {
             payload: Some(conversation_update_request::Payload::RemoveMember(
                 RemoveMember {
-                    identity: target.to_vec(),
+                    member_id: target.to_vec(),
                 },
             )),
         };
@@ -741,7 +716,7 @@ mod tests {
             payload: Some(conversation_update_request::Payload::MemberInvite(
                 MemberInvite {
                     key_package_bytes: vec![0; 8],
-                    identity: member(99),
+                    member_id: member(99),
                 },
             )),
         };
@@ -758,23 +733,26 @@ mod tests {
 
     /// `approved_order` is FIFO regardless of proposal-id ordering.
     #[test]
-    fn test_approved_order_preserves_fifo_across_mutations() {
+    fn test_approved_proposals_preserve_fifo_across_mutations() {
         let mut conversation = Conversation::new("g");
 
         insert_remove_member(&mut conversation, &member(2), 500);
         insert_remove_member(&mut conversation, &member(3), 100);
         insert_remove_member(&mut conversation, &member(4), 300);
-        assert_eq!(conversation.approved_order(), &[500, 100, 300]);
+        let order: Vec<ProposalId> = conversation.approved_proposals().keys().copied().collect();
+        assert_eq!(order, vec![500, 100, 300]);
 
         conversation.remove_approved_proposal(100);
-        assert_eq!(conversation.approved_order(), &[500, 300]);
+        let order: Vec<ProposalId> = conversation.approved_proposals().keys().copied().collect();
+        assert_eq!(order, vec![500, 300]);
 
         // Re-inserting an existing id does not duplicate or reorder.
         insert_remove_member(&mut conversation, &member(2), 500);
-        assert_eq!(conversation.approved_order(), &[500, 300]);
+        let order: Vec<ProposalId> = conversation.approved_proposals().keys().copied().collect();
+        assert_eq!(order, vec![500, 300]);
 
         conversation.clear_approved_proposals();
-        assert!(conversation.approved_order().is_empty());
+        assert!(conversation.approved_proposals().is_empty());
     }
 
     #[test]
@@ -814,7 +792,7 @@ mod tests {
         let request = ConversationUpdateRequest {
             payload: Some(conversation_update_request::Payload::RemoveMember(
                 RemoveMember {
-                    identity: target.to_vec(),
+                    member_id: target.to_vec(),
                 },
             )),
         };

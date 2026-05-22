@@ -30,24 +30,24 @@ impl TopicFilter {
         Self::default()
     }
 
-    /// Register every subtopic of `conversation_name` as allowed.
-    pub fn add_many(&self, conversation_name: &str) -> Result<(), DeliveryServiceError> {
+    /// Register every subtopic of `conversation_id` as allowed.
+    pub fn add_many(&self, conversation_id: &str) -> Result<(), DeliveryServiceError> {
         let mut w = self
             .set
             .write()
             .map_err(|_| DeliveryServiceError::LockPoisoned("TopicFilter"))?;
         for sub in SUBTOPICS {
-            w.insert(TopicKey::new(conversation_name, sub));
+            w.insert(TopicKey::new(conversation_id, sub));
         }
         Ok(())
     }
 
-    /// Remove every entry for `conversation_name`.
-    pub fn remove_many(&self, conversation_name: &str) -> Result<(), DeliveryServiceError> {
+    /// Remove every entry for `conversation_id`.
+    pub fn remove_many(&self, conversation_id: &str) -> Result<(), DeliveryServiceError> {
         self.set
             .write()
             .map_err(|_| DeliveryServiceError::LockPoisoned("TopicFilter"))?
-            .retain(|x| x.conversation_id != conversation_name);
+            .retain(|x| x.conversation_id != conversation_id);
         Ok(())
     }
 

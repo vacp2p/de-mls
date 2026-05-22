@@ -1,8 +1,8 @@
 //! Test-side wallet identity adapter.
 //!
 //! Bridges an Ethereum `PrivateKeySigner` to the library's
-//! identity-agnostic interfaces: builds a [`WalletIdentity`] that
-//! implements [`de_mls::identity::Identity`] and constructs a [`User`]
+//! identity-agnostic interfaces: builds a [`WalletMemberId`] that
+//! implements [`de_mls::member_id::MemberId`] and constructs a [`User`]
 //! with the default plug-in bundle wired to an
 //! [`EthereumConsensusSigner`]. Production callers ship their own
 //! identity adapter — this lives under `tests/common/` only because the
@@ -21,18 +21,18 @@ use de_mls::defaults::{
     DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage,
 };
 use de_mls::ds::SharedDeliveryService;
-use de_mls::identity::Identity;
+use de_mls::member_id::MemberId;
 use de_mls::mls_crypto::MlsCredentials;
 
 /// Wallet-flavoured [`Identity`] used by integration tests. Holds the
 /// 20-byte Ethereum address bytes and its EIP-55 checksummed hex form.
 #[derive(Debug, Clone)]
-pub struct WalletIdentity {
+pub struct WalletMemberId {
     bytes: Vec<u8>,
     display: String,
 }
 
-impl WalletIdentity {
+impl WalletMemberId {
     /// Build from a parsed [`Address`].
     pub fn from_address(addr: Address) -> Self {
         Self {
@@ -48,12 +48,12 @@ impl WalletIdentity {
     }
 }
 
-impl Identity for WalletIdentity {
-    fn identity_bytes(&self) -> &[u8] {
+impl MemberId for WalletMemberId {
+    fn member_id_bytes(&self) -> &[u8] {
         &self.bytes
     }
 
-    fn identity_display(&self) -> &str {
+    fn member_id_display(&self) -> &str {
         &self.display
     }
 }
@@ -68,9 +68,9 @@ pub fn user_from_private_key(
     cfg: ConversationConfig,
 ) -> User<DefaultConsensusPlugin, DefaultConversationPluginsFactory> {
     let signer = PrivateKeySigner::from_str(private_key).expect("valid private key");
-    let identity = WalletIdentity::from_address(signer.address());
+    let member_id = WalletMemberId::from_address(signer.address());
 
-    let credentials = Arc::new(MlsCredentials::from_identity(&identity).expect("credentials"));
+    let credentials = Arc::new(MlsCredentials::from_member_id(&member_id).expect("credentials"));
     let storage = Arc::new(MemoryDeMlsStorage::new());
     let conversation_plugins = DefaultConversationPluginsFactory::new(storage, credentials);
 
@@ -85,5 +85,5 @@ pub fn user_from_private_key(
         default_steward_list_config: StewardListConfig::default(),
     };
 
-    User::new_with_plugins(Box::new(identity), plugins, transport)
+    User::new_with_plugins(Box::new(member_id), plugins, transport)
 }

@@ -22,27 +22,27 @@ message AppMessage {
 
 message BanRequest {
   bytes user_to_ban = 1;
-  string conversation_name = 2;
+  string conversation_id = 2;
 }
 
 message ConversationMessage {
   bytes message = 1;
   string sender = 2;
-  string conversation_name = 3;
+  string conversation_id = 3;
 }
 
 message CommitCandidate {
-  bytes conversation_name = 1;
+  bytes conversation_id = 1;
   repeated bytes mls_proposals = 2;
   bytes commit_message = 3;
-  bytes steward_identity = 4;
+  bytes steward_member_id = 4;
 }
 
 // Yes/No vote for a given proposal. Based on the result, the `Vote` will be created.
 message UserVote {
   uint32 proposal_id = 1;
   bool vote = 2;
-  string conversation_name = 3;
+  string conversation_id = 3;
 }
 
 // Proposal added message is sent to the UI when a new proposal is added to the conversation.
@@ -80,10 +80,10 @@ enum ViolationType {
 
 message ViolationEvidence {
   ViolationType violation_type = 1;
-  bytes target_member_id = 2;       // Malicious steward's identity
+  bytes target_member_id = 2;       // Malicious steward
   bytes evidence_payload = 3;       // Proof (mismatched hashes, timestamps, etc.)
   uint64 epoch = 4;                 // Epoch where violation occurred
-  bytes creator_member_id = 5;      // Identity of the proposal creator (for scoring)
+  bytes creator_member_id = 5;      // Creator's member_id for scoring
 }
 
 message EmergencyCriteriaProposal {
@@ -92,11 +92,11 @@ message EmergencyCriteriaProposal {
 
 message MemberInvite {
   bytes key_package_bytes = 1;
-  bytes identity = 2;
+  bytes member_id = 2;
 }
 
 message RemoveMember {
-  bytes identity = 1;
+  bytes member_id = 1;
 }
 
 message MemberWelcome {

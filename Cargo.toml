@@ -50,6 +50,7 @@ thiserror = "1.0.39"
 uuid = "1.11.0"
 
 tracing = "0.1.41"
+indexmap = "2.14.0"
 
 libc = { version = "0.2", optional = true }
 prost = "0.13.5"
@@ -57,9 +58,6 @@ hashgraph-like-consensus = "0.4.0"
 
 [dev-dependencies]
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "time"] }
-# Wallet-flavoured identity used by the integration test fixtures and the
-# desktop gateway. The library itself is identity-agnostic and has no
-# direct alloy dependency.
 alloy = { version = "1.0.37", default-features = false, features = [
     "signer-local",
 ] }
