@@ -12,6 +12,8 @@ use std::{
 
 use tracing::info;
 
+use hashgraph_like_consensus::events::ConsensusEventBus;
+
 use crate::{
     app::{PhaseTimer, SessionTick, UserError},
     core::{
@@ -21,6 +23,13 @@ use crate::{
     },
     ds::{OutboundPacket, SharedDeliveryService},
 };
+
+/// Receiver type the runner drains from `tick_deadlines`. Resolves to the
+/// `Receiver` associated type on the plugin's [`ConsensusEventBus`], which
+/// is bound to implement [`crate::core::SyncConsensusReceiver`].
+pub(crate) type ConsensusReceiver<P> = <<P as ConsensusPlugin>::EventBus as ConsensusEventBus<
+    <P as ConsensusPlugin>::Scope,
+>>::Receiver;
 
 /// Free helper that publishes a packet on the supplied transport. Pure sync —
 /// the caller's task does the publish directly. Multi-thread integrators
@@ -37,8 +46,6 @@ pub(crate) fn send_packet(
     Ok(())
 }
 
-/// Default capacity for a session's [`SessionEvent`] broadcast channel.
-/// Sized for bursty proposal sessions (proposals + votes + UI pushes in
 /// One pending auto-vote: cast `vote` for `proposal_id` once the wall-clock
 /// catches up to `fire_at`. Registered by `initiate_proposal` (Deferred
 /// path) and `on_incoming_proposal`; cancelled on manual vote or consensus
@@ -56,12 +63,14 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     pub(crate) handle: ConversationHandle<CP>,
     /// Per-conversation consensus service. Owns this conversation's scope
     /// in the shared storage and a private event bus. Constructed at
-    /// conversation creation by `User::build_consensus_service` and held
-    /// here so consensus calls hit the local service directly without
-    /// User-level lookup. `pub` so integrators can reach
-    /// `session.consensus.event_bus().subscribe()` for per-conv consensus
-    /// event forwarding.
+    /// conversation creation by `User::build_consensus_service`.
     pub consensus: PluginConsensus<P>,
+    /// Subscriber on `consensus.event_bus()`. Drained by
+    /// [`Self::tick_deadlines`], which dispatches each event through
+    /// `apply_consensus_outcome`. Subscribed in
+    /// [`crate::app::User::start_conversation`] before the runner is
+    /// registered.
+    pub(crate) consensus_rx: ConsensusReceiver<P>,
     /// Wall-clock anchor combined with `handle.state_machine` by
     /// coordinator methods.
     phase_timer: PhaseTimer,
@@ -100,7 +109,8 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Build a fresh runner. Creator path passes `Some(mls)`; joiner
     /// path passes `None` and attaches the MLS service later via
-    /// `handle.attach_mls`.
+    /// `handle.attach_mls`. `consensus_rx` is a subscriber on
+    /// `consensus.event_bus()`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         conversation_id: String,
@@ -112,6 +122,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         scoring: CP::Scoring,
         steward_list: CP::StewardList,
         consensus: PluginConsensus<P>,
+        consensus_rx: ConsensusReceiver<P>,
         transport: SharedDeliveryService,
         self_member_id: Arc<[u8]>,
         member_id_display: Arc<str>,
@@ -128,6 +139,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 steward_list,
             ),
             consensus,
+            consensus_rx,
             phase_timer,
             pending_auto_votes: HashMap::new(),
             pending_consensus_timeouts: HashMap::new(),
@@ -379,6 +391,7 @@ mod tests {
             commit_inactivity_duration: commit_inactivity,
             ..ConversationConfig::default()
         };
+        let (consensus, consensus_rx) = make_test_consensus_service();
         let mut runner = SessionRunner::new(
             "g".to_string(),
             Conversation::new("g"),
@@ -388,7 +401,8 @@ mod tests {
             config,
             StubScoring,
             StubStewardList::member(),
-            make_test_consensus_service(),
+            consensus,
+            consensus_rx,
             Arc::new(Mutex::new(crate::test_fixtures::UnusedTransport)),
             Arc::from(&b"test-member-id"[..]),
             Arc::from("0xtest-display"),
@@ -399,6 +413,7 @@ mod tests {
     }
 
     fn make_runner_working() -> SessionRunner<DefaultConsensusPlugin, StubPluginsFactory> {
+        let (consensus, consensus_rx) = make_test_consensus_service();
         SessionRunner::new(
             "g".to_string(),
             Conversation::new("g"),
@@ -408,7 +423,8 @@ mod tests {
             ConversationConfig::default(),
             StubScoring,
             StubStewardList::member(),
-            make_test_consensus_service(),
+            consensus,
+            consensus_rx,
             Arc::new(Mutex::new(crate::test_fixtures::UnusedTransport)),
             Arc::from(&b"test-member-id"[..]),
             Arc::from("0xtest-display"),
