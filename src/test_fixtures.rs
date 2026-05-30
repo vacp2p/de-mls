@@ -86,15 +86,21 @@ pub(crate) fn make_user_from_private_key(
     User::new_with_plugins(Box::new(member_id), plugins, transport)
 }
 
-/// Build a `PluginConsensus<DefaultConsensusPlugin>` with a random signer for
-/// tests that need a `SessionRunner` but never exercise consensus operations.
-pub(crate) fn make_test_consensus_service() -> PluginConsensus<DefaultConsensusPlugin> {
-    PluginConsensus::<DefaultConsensusPlugin>::new_with_components(
+/// Build a `PluginConsensus<DefaultConsensusPlugin>` paired with a
+/// subscribed receiver for [`crate::app::SessionRunner::new`].
+pub(crate) fn make_test_consensus_service() -> (
+    PluginConsensus<DefaultConsensusPlugin>,
+    crate::defaults::SyncEventReceiver<String>,
+) {
+    use hashgraph_like_consensus::events::ConsensusEventBus;
+    let service = PluginConsensus::<DefaultConsensusPlugin>::new_with_components(
         DefaultConsensusPlugin::new_storage(),
         DefaultConsensusPlugin::new_event_bus(),
         EthereumConsensusSigner::new(PrivateKeySigner::random()),
         10,
-    )
+    );
+    let rx = service.event_bus().subscribe();
+    (service, rx)
 }
 
 /// Transport stub for tests. `publish` is unreachable (tests should never

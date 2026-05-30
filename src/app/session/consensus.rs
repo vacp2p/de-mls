@@ -1,10 +1,10 @@
 //! Proposal submission + voting on `SessionRunner`.
 //!
-//! Outgoing proposals run as a background task: submit to consensus, register
-//! ownership, broadcast (bundled or unbundled per `creator_vote`), resolve on
-//! timeout. The spawn helpers take `Arc<RwLock<SessionRunner>>` so the task
-//! body can release the runner lock across `.await` points without holding
-//! it during the consensus timeout sleep.
+//! Outgoing proposals submit to consensus, register ownership, broadcast
+//! (bundled or unbundled per `creator_vote`), and resolve on timeout. The
+//! methods take `Arc<RwLock<SessionRunner>>` so the body can release the
+//! runner lock across `.await` points rather than holding it through a
+//! consensus call.
 
 use std::sync::{Arc, RwLock};
 
@@ -24,7 +24,7 @@ use crate::{
     },
     core::{
         ConsensusPlugin, ConversationPluginsFactory, ProposalKind, SessionEvent, StewardListPlugin,
-        self_leave_proposal_id, target_member_id_of,
+        SyncConsensusReceiver, self_leave_proposal_id, target_member_id_of,
     },
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
@@ -221,10 +221,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         Ok(())
     }
 
-    /// Walk pending deadlines and fire any whose `fire_at` has elapsed.
-    /// Call from the caller's polling loop. Drains entries synchronously
-    /// under a brief write guard, then awaits the async fire (consensus
-    /// call or vote cast + publish) without holding the lock.
+    /// Walk pending deadlines, fire any whose `fire_at` has elapsed, then
+    /// drain the consensus event bus and dispatch each event through
+    /// `apply_consensus_outcome`. Call from the caller's polling
+    /// loop.
     pub async fn tick_deadlines(arc: &Arc<RwLock<Self>>) -> Result<SessionTick, UserError> {
         let now = std::time::Instant::now();
         let (auto_votes_due, timeouts_due) = {
@@ -261,6 +261,24 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         }
         for proposal_id in timeouts_due {
             Self::resolve_on_timeout(arc, proposal_id).await;
+        }
+
+        loop {
+            // The bus is per-session and single-scope, so the scope on each
+            // event is always this conversation's — drained, not matched.
+            let next = {
+                let mut s = arc.write_or_err("session")?;
+                <_ as SyncConsensusReceiver<_>>::try_recv(&mut s.consensus_rx)
+            };
+            let Some((_scope, event)) = next else { break };
+            if let Err(e) = Self::apply_consensus_outcome(arc, event).await {
+                let conversation_id = arc.read_or_err("session")?.conversation_id.clone();
+                tracing::warn!(
+                    conversation = %conversation_id,
+                    error = %e,
+                    "apply_consensus_outcome failed"
+                );
+            }
         }
 
         Ok(arc.read_or_err("session")?.tick())
@@ -387,8 +405,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// shows, same path peers use).
     ///
     /// Ownership is stored *before* the vote is cast, so a single-voter
-    /// consensus transition can't race `is_owner=false` when the event
-    /// forwarder picks it up.
+    /// consensus transition can't race `is_owner=false` when the drain
+    /// loop in `tick_deadlines` picks it up.
     async fn register_new_proposal(
         arc: &Arc<RwLock<Self>>,
         np: NewProposal,

@@ -53,7 +53,7 @@ pub use crate::bootstrap::{
 /// `Arc<MemoryDeMlsStorage>` — so per-group services share one storage
 /// (the `Arc<S>: DeMlsStorage` blanket impl makes this work). MLS
 /// credentials live on `User` and are passed in at service construction.
-type UserRef =
+pub(crate) type UserRef =
     Arc<tokio::sync::RwLock<User<DefaultConsensusPlugin, DefaultConversationPluginsFactory>>>;
 
 /// Type alias for a per-conversation session reference obtained via
@@ -261,7 +261,6 @@ impl Gateway<WakuDeliveryService> {
         let topics = self.core().topics.clone();
         let epoch_history = self.epoch_history.clone();
         let user_for_loop = user.clone();
-        let gateway_for_consensus_spawn = user.clone();
 
         tokio::spawn(async move {
             let mut active_sessions: HashMap<String, Arc<GatewaySessionFanout>> = HashMap::new();
@@ -282,12 +281,9 @@ impl Gateway<WakuDeliveryService> {
                                 epoch_history: epoch_history.clone(),
                                 transport: transport.clone(),
                                 app_id: app_id_snapshot.clone(),
+                                user: user_for_loop.clone(),
                             });
-                            active_sessions.insert(name.clone(), fanout);
-                            GATEWAY.spawn_consensus_forwarder(
-                                gateway_for_consensus_spawn.clone(),
-                                name,
-                            );
+                            active_sessions.insert(name, fanout);
                         }
                         de_mls::core::ConversationLifecycle::Removed(name) => {
                             active_sessions.remove(&name);

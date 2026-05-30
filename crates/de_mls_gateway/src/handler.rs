@@ -17,8 +17,13 @@ use de_mls::{
     protos::de_mls::messages::v1::{AppMessage, ConversationMessage, app_message},
 };
 use de_mls_ui_protocol::v1::{AppEvent, format_conversation_request};
+use hashgraph_like_consensus::types::ConsensusEvent;
 
-use crate::{EpochHistoryStore, MAX_EPOCH_HISTORY, forwarder::display_batch, welcome_envelope};
+use crate::{
+    EpochHistoryStore, MAX_EPOCH_HISTORY, UserRef,
+    forwarder::{display_batch, push_consensus_state, push_member_scores},
+    welcome_envelope,
+};
 
 /// Fan-out target for [`SessionEvent`]s on a single conversation. Held as
 /// `Arc` because the spawned per-session subscriber task owns a clone.
@@ -33,6 +38,9 @@ pub(crate) struct GatewaySessionFanout {
     /// `app_id` of the local user — stamped on the outbound welcome
     /// packet so the steward's own gateway dedupes the echo.
     pub app_id: Vec<u8>,
+    /// User handle. The `ConsensusReached` arm refreshes epoch state and
+    /// member scores through it.
+    pub user: UserRef,
 }
 
 impl GatewaySessionFanout {
@@ -99,6 +107,30 @@ impl GatewaySessionFanout {
                     conversation_id: conversation_id.to_string(),
                     epochs: formatted,
                 });
+            }
+            SessionEvent::ConsensusReached {
+                proposal_id,
+                approved,
+                timestamp,
+            } => {
+                let event = if approved {
+                    ConsensusEvent::ConsensusReached {
+                        proposal_id,
+                        result: true,
+                        timestamp,
+                    }
+                } else {
+                    ConsensusEvent::ConsensusFailed {
+                        proposal_id,
+                        timestamp,
+                    }
+                };
+                let _ = self.evt_tx.unbounded_send(AppEvent::ProposalDecided(
+                    conversation_id.to_string(),
+                    event,
+                ));
+                push_consensus_state(&self.user, &self.evt_tx, conversation_id).await;
+                push_member_scores(&self.user, &self.evt_tx, conversation_id).await;
             }
             SessionEvent::WelcomeReady(welcome) => {
                 let bytes = welcome.welcome_bytes.len();

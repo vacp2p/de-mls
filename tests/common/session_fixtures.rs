@@ -18,7 +18,6 @@ use de_mls::ds::{
     DeliveryService, DeliveryServiceError, InboundPacket, OutboundPacket, SharedDeliveryService,
 };
 use prost::Message;
-use tokio::task::JoinHandle;
 
 use crate::common::wallet::user_from_private_key;
 
@@ -239,30 +238,6 @@ pub async fn route_welcomes(
     delivered
 }
 
-/// Mirror of `de_mls_gateway::Gateway::spawn_consensus_forwarder` — one
-/// task per session that subscribes to the session's private consensus
-/// event bus and drives `apply_consensus_outcome` on each event.
-///
-/// **Required for any test that exercises consensus.** Per the per-conv-
-/// consensus refactor, each `SessionRunner.consensus` owns a fresh private
-/// event bus (see `ConsensusContext::build_service`). The library emits
-/// `ConsensusReached` to that bus, but no code in `de-mls` itself consumes
-/// it — production has the gateway run this forwarder, tests must too.
-/// Without it, proposals reach consensus but never populate
-/// `approved_proposals`.
-///
-/// Task exits naturally when the bus is dropped (conversation removed
-/// from the registry).
-pub fn spawn_consensus_forwarder(session: SessionArc) -> JoinHandle<()> {
-    use hashgraph_like_consensus::events::ConsensusEventBus;
-    tokio::spawn(async move {
-        let mut rx = session.read().unwrap().consensus.event_bus().subscribe();
-        while let Ok((_conversation_id, event)) = rx.recv().await {
-            let _ = SessionRunner::apply_consensus_outcome(&session, event).await;
-        }
-    })
-}
-
 /// Default fast-timing config for SessionRunner-driven tests. All inactivity
 /// and consensus deadlines are sub-second so a polling loop converges in a
 /// handful of rounds. Override individual fields where the test needs
@@ -306,9 +281,6 @@ pub async fn poll_once(session: &SessionArc) {
 /// `retry_round` to 1, and every subsequent `check_member_freeze` call
 /// flips to the recovery-inactivity window instead of the commit one.
 ///
-/// One consensus forwarder is spawned per session — its `JoinHandle` is
-/// detached and the task lives for the duration of the test process.
-///
 /// Panics if convergence does not happen within `MAX_ROUNDS` rounds.
 pub async fn bootstrap_joined_conversation(
     keys: &[&str],
@@ -344,13 +316,6 @@ pub async fn bootstrap_joined_conversation(
                 .unwrap()
                 .expect("session registered"),
         );
-    }
-
-    // One forwarder per session — without this, consensus events fire
-    // but `approved_proposals` never populates. JoinHandles are detached;
-    // tasks live for the duration of the test process.
-    for s in &sessions {
-        std::mem::drop(spawn_consensus_forwarder(s.clone()));
     }
 
     // Joiners send KPs. Drain joiner transports, deliver to creator.

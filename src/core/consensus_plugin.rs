@@ -8,8 +8,17 @@
 
 use hashgraph_like_consensus::{
     events::ConsensusEventBus, scope::ConsensusScope, service::ConsensusService,
-    signing::ConsensusSignatureScheme, storage::ConsensusStorage,
+    signing::ConsensusSignatureScheme, storage::ConsensusStorage, types::ConsensusEvent,
 };
+
+/// Pull-side contract on an [`ConsensusEventBus`] receiver: non-blocking,
+/// returns `None` when the queue is empty.
+///
+/// `SessionRunner` holds one receiver per session and drains it from
+/// `tick_deadlines`.
+pub trait SyncConsensusReceiver<Scope: ConsensusScope>: Send + 'static {
+    fn try_recv(&mut self) -> Option<(Scope, ConsensusEvent)>;
+}
 
 /// User-level consensus backend bundle. Carries the four types the
 /// `hashgraph_like_consensus` service is parameterised by: the scope key
@@ -23,8 +32,12 @@ pub trait ConsensusPlugin: 'static {
     /// Proposal/vote persistence (default: `InMemoryConsensusStorage<String>`).
     type ConsensusStorage: ConsensusStorage<Self::Scope> + 'static;
 
-    /// Consensus-outcome delivery (default: `BroadcastEventBus<String>`).
-    type EventBus: ConsensusEventBus<Self::Scope> + 'static;
+    /// Consensus-outcome delivery (default:
+    /// [`crate::defaults::SyncEventBus<String>`]). The receiver implements
+    /// [`SyncConsensusReceiver`] so `SessionRunner` drains it from
+    /// `tick_deadlines`.
+    type EventBus: ConsensusEventBus<Self::Scope, Receiver: SyncConsensusReceiver<Self::Scope>>
+        + 'static;
 
     /// Signature scheme for authenticating votes (default:
     /// [`hashgraph_like_consensus::signing::EthereumConsensusSigner`]).

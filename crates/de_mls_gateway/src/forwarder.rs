@@ -1,13 +1,11 @@
 use std::sync::{Arc, atomic::Ordering};
 
 use de_mls::{
-    app::{SessionRunner, UserError},
-    ds::WakuDeliveryService,
+    app::UserError, ds::WakuDeliveryService,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo, encode_hex, format_conversation_request};
 use futures::channel::mpsc::UnboundedSender;
-use hashgraph_like_consensus::events::ConsensusEventBus;
 
 use crate::{CoreCtx, Gateway, SessionRef, UserRef};
 
@@ -144,52 +142,6 @@ pub(crate) async fn push_member_scores(
 }
 
 impl Gateway<WakuDeliveryService> {
-    /// Spawn a per-conversation consensus event forwarder. One task per
-    /// conversation; it subscribes to that conversation's private event bus
-    /// and exits naturally when the bus is dropped (conversation removed).
-    pub(crate) fn spawn_consensus_forwarder(&self, user: UserRef, conversation_id: String) {
-        let evt_tx = self.evt_tx.clone();
-        let user_for_sub = user.clone();
-        let cname_owned = conversation_id.clone();
-
-        tokio::spawn(async move {
-            let Ok(session_arc) = lookup_session(&user_for_sub, &cname_owned).await else {
-                tracing::warn!(
-                    conversation = %cname_owned,
-                    "consensus forwarder: no session (conversation already gone)"
-                );
-                return;
-            };
-            let mut rx = match session_arc.read() {
-                Ok(s) => s.consensus.event_bus().subscribe(),
-                Err(_) => {
-                    tracing::warn!(
-                        conversation = %cname_owned,
-                        "consensus forwarder: session lock poisoned at subscribe"
-                    );
-                    return;
-                }
-            };
-            tracing::info!("consensus forwarder started");
-            while let Ok((conversation_id, event)) = rx.recv().await {
-                // Forward to UI
-                let _ = evt_tx.unbounded_send(AppEvent::ProposalDecided(
-                    conversation_id.clone(),
-                    event.clone(),
-                ));
-
-                if let Err(e) = SessionRunner::apply_consensus_outcome(&session_arc, event).await {
-                    tracing::warn!(group = %conversation_id, error = %e, "apply_consensus_outcome failed");
-                }
-
-                // Push refreshed approved queue, epoch history, and member scores
-                push_consensus_state(&user, &evt_tx, &conversation_id).await;
-                push_member_scores(&user, &evt_tx, &conversation_id).await;
-            }
-            tracing::info!("consensus forwarder ended");
-        });
-    }
-
     /// Spawn the pubsub forwarder once, after first successful login.
     ///
     /// Receives inbound packets from the delivery service, passes them to

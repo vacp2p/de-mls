@@ -5,7 +5,8 @@
 //! All five handlers are associated functions taking
 //! `Arc<RwLock<SessionRunner>>` because they fan out into steward
 //! initiations (election, deadlock ECP, score removals, buffered-update
-//! drains), each of which spawns a background proposal lifecycle.
+//! drains), each of which opens a follow-up proposal that releases the
+//! runner lock across its `.await` points.
 
 use std::sync::{Arc, RwLock};
 
@@ -30,29 +31,32 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// apply the result to the conversation, and dispatch to the correct
     /// follow-up handler (election-accepted / election-rejected /
     /// emergency-scored).
-    pub async fn apply_consensus_outcome(
+    pub(crate) async fn apply_consensus_outcome(
         arc: &Arc<RwLock<Self>>,
         event: ConsensusEvent,
     ) -> Result<SessionTick, UserError> {
-        let (proposal_id, approved) = match &event {
+        let (proposal_id, approved, timestamp) = match &event {
             ConsensusEvent::ConsensusReached {
                 proposal_id,
                 result,
-                ..
-            } => (*proposal_id, *result),
-            ConsensusEvent::ConsensusFailed { proposal_id, .. } => (*proposal_id, false),
+                timestamp,
+            } => (*proposal_id, *result, *timestamp),
+            ConsensusEvent::ConsensusFailed {
+                proposal_id,
+                timestamp,
+            } => (*proposal_id, false, *timestamp),
         };
 
-        // Proposal resolved — any pending auto-vote timer for it is moot.
-        arc.write_or_err("session")?.cancel_auto_vote(proposal_id);
-
-        // Drop re-emissions from the consensus library (timeout-path race)
-        // so we don't re-apply state or double-fire UI events.
-        let already_applied = arc
-            .read_or_err("session")?
-            .handle
-            .conversation
-            .is_consensus_outcome_applied(proposal_id);
+        let already_applied = {
+            let mut s = arc.write_or_err("session")?;
+            // Proposal resolved — any pending auto-vote timer is now moot.
+            s.cancel_auto_vote(proposal_id);
+            // Drop re-emissions from the consensus library (timeout-path
+            // race) so we don't re-apply state or double-fire UI events.
+            s.handle
+                .conversation
+                .is_consensus_outcome_applied(proposal_id)
+        };
         if already_applied {
             let conv_name = arc.read_or_err("session")?.conversation_id.clone();
             tracing::debug!(
@@ -60,12 +64,19 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 proposal_id,
                 "duplicate consensus outcome dropped"
             );
-            return Ok(arc.read_or_err("session")?.tick());
+            return Self::current_tick(arc);
         }
 
-        // Fetch payload from the per-conversation consensus storage.
+        // Surface the decision before any effects so UI fanout sees it in
+        // the same polling cycle as the state change that follows; grab the
+        // payload-fetch handles under the same read guard.
         let (consensus, conversation_id) = {
             let s = arc.read_or_err("session")?;
+            s.emit_event(SessionEvent::ConsensusReached {
+                proposal_id,
+                approved,
+                timestamp,
+            });
             (s.consensus.clone(), s.conversation_id.clone())
         };
         let scope = P::Scope::from(conversation_id.clone());
@@ -93,7 +104,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             ConsensusApplyResult::NoAction => {}
             ConsensusApplyResult::ElectionAccepted(election) => {
                 Self::handle_election_accepted(arc, election).await?;
-                return Ok(arc.read_or_err("session")?.tick());
+                return Self::current_tick(arc);
             }
             ConsensusApplyResult::RecoveryModeOpened => {
                 arc.write_or_err("session")?.handle.enter_recovery_mode();
@@ -130,19 +141,34 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             Self::handle_emergency_scored(arc, proposal_id, &payload, &score_ops).await?;
         }
 
+        Self::current_tick(arc)
+    }
+
+    /// Latest [`SessionTick`] under a brief read guard. Terminal value of
+    /// every `apply_consensus_outcome` exit path.
+    fn current_tick(arc: &Arc<RwLock<Self>>) -> Result<SessionTick, UserError> {
         Ok(arc.read_or_err("session")?.tick())
     }
 
-    /// Bypass the inactivity timer and emit the resulting phase change.
-    /// Called by [`Self::apply_consensus_outcome`] for `UrgentRemoval` and
-    /// `RecoveryModeOpened` outcomes that need an immediate commit.
-    fn force_freezing_and_emit(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
-        let event = arc.write_or_err("session")?.force_freezing();
-        if let Some(event) = event {
+    /// Emit a [`SessionEvent::PhaseChange`] for `transition`, if a state
+    /// change occurred. Shared by the freeze / election / emergency paths.
+    fn emit_phase_change(
+        arc: &Arc<RwLock<Self>>,
+        transition: Option<ConversationState>,
+    ) -> Result<(), UserError> {
+        if let Some(state) = transition {
             arc.read_or_err("session")?
-                .emit_event(SessionEvent::PhaseChange(event));
+                .emit_event(SessionEvent::PhaseChange(state));
         }
         Ok(())
+    }
+
+    /// Bypass the inactivity timer and emit the resulting phase change.
+    /// Called by `apply_consensus_outcome` for `UrgentRemoval` and
+    /// `RecoveryModeOpened` outcomes that need an immediate commit.
+    fn force_freezing_and_emit(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
+        let transition = arc.write_or_err("session")?.force_freezing();
+        Self::emit_phase_change(arc, transition)
     }
 
     /// When the removal target is a current steward, fire a fresh election
@@ -217,10 +243,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 None
             }
         };
-        if let Some(event) = resumed_from_reelection {
-            arc.read_or_err("session")?
-                .emit_event(SessionEvent::PhaseChange(event));
-        }
+        Self::emit_phase_change(arc, resumed_from_reelection)?;
         {
             let s = arc.read_or_err("session")?;
             info!(
@@ -308,10 +331,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 None
             }
         };
-        if let Some(event) = resumed_event {
-            arc.read_or_err("session")?
-                .emit_event(SessionEvent::PhaseChange(event));
-        }
+        Self::emit_phase_change(arc, resumed_event)?;
 
         if let Err(e) = Self::check_and_initiate_score_removals(arc).await {
             let conv_name = arc.read_or_err("session")?.conversation_id.clone();

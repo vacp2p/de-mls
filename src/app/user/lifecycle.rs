@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, RwLock};
 
+use hashgraph_like_consensus::events::ConsensusEventBus;
 use tracing::info;
 
 use crate::{
@@ -95,6 +96,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             );
         }
         let consensus = self.build_consensus_service();
+        let consensus_rx = consensus.event_bus().subscribe();
         let session = Arc::new(RwLock::new(SessionRunner::new(
             conversation_id.to_string(),
             conversation,
@@ -105,6 +107,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             scoring,
             steward_list,
             consensus,
+            consensus_rx,
             Arc::clone(&self.transport),
             Arc::from(self.member_id.member_id_bytes()),
             Arc::from(self.member_id.member_id_display()),

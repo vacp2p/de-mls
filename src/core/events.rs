@@ -1,12 +1,12 @@
 //! I/O contract between the protocol layer and an integrator.
 //!
-//! Two channels:
+//! Two queues:
 //!
 //! - [`SessionEvent`] — fire-and-forget notifications about a single
-//!   conversation. Each [`crate::app::SessionRunner`] owns a broadcast sender;
-//!   integrators subscribe per session.
+//!   conversation. Each [`crate::app::SessionRunner`] holds a pending
+//!   buffer; integrators drain it once per polling cycle.
 //! - [`ConversationLifecycle`] — User-level create/remove notifications.
-//!   Integrators use this to discover new sessions and subscribe to them.
+//!   Integrators use this to discover new sessions and start draining them.
 //!
 //! Synchronous outbound transport is supplied by
 //! [`crate::ds::DeliveryService`], passed to `User` at construction and
@@ -55,6 +55,17 @@ pub enum SessionEvent {
     /// and the encrypted `ConversationSync` payload bundled for atomic
     /// delivery. The integrator owns delivery to each joiner.
     WelcomeReady(MemberWelcome),
+
+    /// A consensus session on this conversation resolved. Emitted before
+    /// the protocol effects (commit candidate, freeze, score apply, …)
+    /// run, so UI fanout sees the decision in the same polling cycle as
+    /// the state change that follows. `timestamp` is the upstream
+    /// consensus library's stamp on the bus event.
+    ConsensusReached {
+        proposal_id: u32,
+        approved: bool,
+        timestamp: u64,
+    },
 }
 
 /// User-level conversation lifecycle event. Appended to [`crate::app::User`]'s
