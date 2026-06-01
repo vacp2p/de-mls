@@ -201,16 +201,21 @@ pub async fn route_welcomes(
     use de_mls::core::SessionEvent;
     use de_mls::protos::de_mls::messages::v1::MemberWelcome;
 
-    let mut welcomes: Vec<MemberWelcome> = Vec::new();
-    for s in sessions {
+    // Pair each welcome with its emitter's app_id. The bundled sync is the
+    // welcomer's outbound packet, so the replayed `InboundPacket` must carry
+    // the welcomer's app_id — replaying it under the joiner's own app_id
+    // would trip `process_inbound_packet`'s echo-dedup and silently drop it.
+    let mut welcomes: Vec<(MemberWelcome, Vec<u8>)> = Vec::new();
+    for (i, s) in sessions.iter().enumerate() {
+        let welcomer_app_id = users[i].0.app_id().to_vec();
         for event in s.read().unwrap().drain_events() {
             if let SessionEvent::WelcomeReady(welcome) = event {
-                welcomes.push(welcome);
+                welcomes.push((welcome, welcomer_app_id.clone()));
             }
         }
     }
     let mut delivered = 0;
-    for welcome in welcomes {
+    for (welcome, welcomer_app_id) in welcomes {
         let conv_name = sessions
             .first()
             .map(|s| s.read().unwrap().conversation_id().to_string())
@@ -227,7 +232,7 @@ pub async fn route_welcomes(
                         welcome.conversation_sync_bytes.clone(),
                         de_mls::ds::APP_MSG_SUBTOPIC,
                         &conv_name,
-                        u.app_id().to_vec(),
+                        welcomer_app_id.clone(),
                         0,
                     );
                     let _ = u.process_inbound_packet(sync_pkt).await;
@@ -272,14 +277,16 @@ pub async fn poll_once(session: &SessionArc) {
 /// in [`ConversationState::Working`] AND no packets have flowed for
 /// `QUIET_THRESHOLD` consecutive polling rounds.
 ///
-/// The quiet-period exit matters: the InviteMember commit's
-/// `on_conversation_updated` handler fires
-/// `steward_list_housekeeping` → `initiate_steward_election` right as
-/// joiners reach Working. If bootstrap exits the instant joiners are
-/// Working, that election gets orphaned — its `consensus_timeout` fires
-/// without enough votes, `handle_election_rejected` bumps the creator's
-/// `retry_round` to 1, and every subsequent `check_member_freeze` call
-/// flips to the recovery-inactivity window instead of the commit one.
+/// The quiet-period exit matters when the group is large enough to need a
+/// voted steward election (`members > sn_max`): the InviteMember commit's
+/// `on_conversation_updated` handler fires `steward_list_housekeeping` →
+/// `initiate_steward_election` right as joiners reach Working. If bootstrap
+/// exits the instant joiners are Working, that election gets orphaned — its
+/// `consensus_timeout` fires without enough votes, `handle_election_rejected`
+/// bumps the creator's `retry_round` to 1, and every subsequent
+/// `check_member_freeze` call flips to the recovery-inactivity window instead
+/// of the commit one. Small groups (`members <= sn_max`) reconcile the list
+/// locally with no election, so they have nothing to orphan.
 ///
 /// Panics if convergence does not happen within `MAX_ROUNDS` rounds.
 pub async fn bootstrap_joined_conversation(
@@ -335,11 +342,12 @@ pub async fn bootstrap_joined_conversation(
 
     // Drive every session's polling and shuttle outbound packets until
     // every joiner is Working AND no packets have flowed for several
-    // consecutive rounds. The quiet-period check is important: the
-    // post-commit `steward_list_housekeeping` fires an election right
-    // as joiners reach Working; if we exit immediately the election
-    // gets orphaned (its consensus_timeout fires with no votes counted,
-    // and the next session-poll observes `retry_round = 1`).
+    // consecutive rounds. The quiet-period check matters for large groups:
+    // post-commit `steward_list_housekeeping` fires a voted election right
+    // as joiners reach Working; if we exit immediately the election gets
+    // orphaned (its consensus_timeout fires with no votes counted, and the
+    // next session-poll observes `retry_round = 1`). Small groups reconcile
+    // the list locally with no election.
     const QUIET_THRESHOLD: usize = 3;
     let mut quiet_rounds = 0;
     for round in 0..MAX_ROUNDS {

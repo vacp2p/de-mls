@@ -54,6 +54,15 @@ pub trait StewardListPlugin {
     /// `true` when `epoch` is outside `[election_epoch, election_epoch + len)`.
     fn is_exhausted(&self, epoch: u64) -> bool;
 
+    /// Whether a steward list over `member_count` members needs a *voted*
+    /// election. `false` while every member is a steward (`member_count <=
+    /// sn_max`): the list is then the full membership, fully determined and
+    /// regenerated deterministically with no consensus. `true` once the list
+    /// is a genuine subset, where peers must agree which members serve.
+    fn election_required(&self, member_count: usize) -> bool {
+        member_count > self.config().sn_max
+    }
+
     /// See [`StewardList::epoch_steward`].
     fn epoch_steward<F: Fn(&[u8]) -> bool>(&self, epoch: u64, eligible: F) -> Option<&[u8]>;
 
@@ -71,20 +80,13 @@ pub trait StewardListPlugin {
     fn election_proposer<F: Fn(&[u8]) -> bool>(&self, eligible: F) -> Option<&[u8]>;
 
     /// Build and install a list of size `sn`. `retry_round` seeds the SHA256 sort
-    /// and is stored on the list; use `0` for bootstrap / auto-fill.
+    /// and is stored on the list; use `0` for bootstrap and deterministic regen.
     fn install_list(
         &mut self,
         epoch: u64,
         candidate_pool: &[Vec<u8>],
         sn: usize,
         retry_round: u32,
-    ) -> Result<Vec<StewardListEvent>, CoreError>;
-
-    /// Re-install when `members.len() < sn_min` (everyone becomes a steward).
-    fn maybe_auto_fill(
-        &mut self,
-        epoch: u64,
-        members: &[Vec<u8>],
     ) -> Result<Vec<StewardListEvent>, CoreError>;
 
     /// `true` if `proposed` matches [`StewardList::validate`] for these parameters.
