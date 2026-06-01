@@ -165,11 +165,18 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     // delivers both atomically. The joiner replays the
                     // sync payload through `process_inbound_packet`
                     // after MLS attaches.
-                    welcome.conversation_sync_bytes = arc
-                        .write_or_err("session")?
-                        .build_conversation_sync_packet()?
-                        .map(|p| p.payload)
-                        .unwrap_or_default();
+                    //
+                    // Reconcile the list to the just-merged epoch first, so a
+                    // small group's sync carries the regenerated, joiner-
+                    // inclusive list rather than the pre-commit one. A large
+                    // group leaves the list for the post-commit election.
+                    welcome.conversation_sync_bytes = {
+                        let mut s = arc.write_or_err("session")?;
+                        let _ = s.reconcile_steward_list()?;
+                        s.build_conversation_sync_packet()?
+                            .map(|p| p.payload)
+                            .unwrap_or_default()
+                    };
                     arc.read_or_err("session")?
                         .emit_event(SessionEvent::WelcomeReady(welcome));
                 }

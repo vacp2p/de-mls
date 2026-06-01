@@ -26,6 +26,18 @@ use crate::{
     },
 };
 
+/// Outcome of reconciling the steward list to the current epoch — see
+/// [`SessionRunner::reconcile_steward_list`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StewardListReconcile {
+    /// List already covered the epoch, or a small group's list was
+    /// reinstalled deterministically. No consensus round needed.
+    Settled,
+    /// The group is large enough (`members > sn_max`) that the list is a
+    /// genuine subset peers must agree: the caller runs the voted election.
+    NeedsElection,
+}
+
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     // ── Public API ───────────────────────────────────────────────────
 
@@ -53,37 +65,52 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         }
     }
 
-    /// Post-epoch-advance sequence: (1) auto-fill if membership dropped
-    /// below `sn_min`, (2) kick off an election if the list is exhausted.
-    /// Election-initiate failures are logged, not surfaced — conversation
-    /// state may legitimately reject a new proposal right now.
+    /// Post-epoch-advance reconcile: bring the steward list to the new epoch.
+    /// Small groups regenerate locally (no consensus); only a large group,
+    /// whose list is a genuine subset, opens a voted election. Election-init
+    /// failures are logged, not surfaced — conversation state may legitimately
+    /// reject a new proposal right now.
     pub async fn steward_list_housekeeping(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
-        arc.write_or_err("session")?.try_auto_fill_steward_list()?;
-        if let Err(e) = Self::initiate_steward_election(arc, false).await {
+        let reconcile = arc.write_or_err("session")?.reconcile_steward_list()?;
+        if reconcile == StewardListReconcile::NeedsElection
+            && let Err(e) = Self::initiate_steward_election(arc, false).await
+        {
             let conv_name = arc.read_or_err("session")?.conversation_id.clone();
             info!(conversation = %conv_name, error = %e, "election initiation deferred");
         }
         Ok(())
     }
 
-    /// Regenerate the steward list at the current epoch against the current
-    /// MLS member set — same effect as a successful election. Intended for
-    /// tests and administrative tooling.
-    pub fn regenerate_steward_list(&mut self) -> Result<(), UserError> {
-        let mls = self.handle.expect_mls()?;
-        let current_epoch = mls.current_epoch()?;
-        let members = mls.members()?;
+    /// Reconcile the steward list to the current MLS epoch. No-op if the
+    /// installed list still covers this epoch. Otherwise the group size
+    /// decides: small (`members <= sn_max`, every member is a steward) →
+    /// install the deterministic list locally, no vote; large (`members >
+    /// sn_max`) → return [`StewardListReconcile::NeedsElection`] for the
+    /// caller to run a voted election. The local install is the same list a
+    /// successful election would yield: every node — the committer before it
+    /// builds the `ConversationSync`, and each peer on its own commit-merge —
+    /// computes the identical list.
+    pub(crate) fn reconcile_steward_list(&mut self) -> Result<StewardListReconcile, UserError> {
+        let (current_epoch, members) = {
+            let mls = self.handle.expect_mls()?;
+            (mls.current_epoch()?, mls.members()?)
+        };
+        if !self.handle.steward_list.is_exhausted(current_epoch) {
+            return Ok(StewardListReconcile::Settled);
+        }
+        if self.handle.steward_list.election_required(members.len()) {
+            return Ok(StewardListReconcile::NeedsElection);
+        }
         let sn = self
             .handle
             .steward_list
             .config()
             .compute_list_size(members.len());
-        // Test/admin regenerate — no election, no retry seed.
         let _events = self
             .handle
             .steward_list
             .install_list(current_epoch, &members, sn, 0)?;
-        Ok(())
+        Ok(StewardListReconcile::Settled)
     }
 
     /// Drop Add entries whose target is now a member and Remove entries
@@ -496,20 +523,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // Bundle YES — the proposer's observation that the deadlock is
         // real is their vote.
         Self::initiate_proposal(arc, request, CreatorVote::Yes).await?;
-        Ok(())
-    }
-
-    // ── Private ──────────────────────────────────────────────────────
-
-    /// Plug-in decides whether the current list still satisfies its
-    /// policy (the deterministic impl re-installs when membership drops
-    /// below `sn_min`). Coordinator just supplies `epoch` + `members`
-    /// and drains events.
-    fn try_auto_fill_steward_list(&mut self) -> Result<(), UserError> {
-        let mls = self.handle.expect_mls()?;
-        let epoch = mls.current_epoch()?;
-        let members = mls.members()?;
-        let _events = self.handle.steward_list.maybe_auto_fill(epoch, &members)?;
         Ok(())
     }
 }

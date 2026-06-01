@@ -232,8 +232,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     }
 
     /// A commit merged. Sync scoring + pending-update buffers, transition to
-    /// Working, and run steward housekeeping (auto-fill, election kick-off,
-    /// buffered-update drain). The commit author's `SuccessfulCommit`
+    /// Working, and run steward housekeeping (list reconcile, election
+    /// kick-off, buffered-update drain). The commit author's `SuccessfulCommit`
     /// reward is emitted by `finalize_freeze_round`, not here.
     async fn on_conversation_updated(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
         let mls_members = {

@@ -254,13 +254,6 @@ impl StewardListPlugin for StubStewardList {
     ) -> Result<Vec<StewardListEvent>, crate::core::CoreError> {
         unreachable!()
     }
-    fn maybe_auto_fill(
-        &mut self,
-        _: u64,
-        _: &[Vec<u8>],
-    ) -> Result<Vec<StewardListEvent>, crate::core::CoreError> {
-        unreachable!()
-    }
     fn validate_proposed(
         &self,
         _: &[Vec<u8>],
