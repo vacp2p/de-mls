@@ -18,8 +18,7 @@ use crate::{
     app::{ConversationState, LockExt, SessionRunner, SessionTick, UserError},
     core::{
         ConsensusApplyResult, ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin,
-        ProposalKind, ScoreOp, SessionEvent, StewardListPlugin, apply_consensus_result,
-        emergency_score_ops, target_member_id_of,
+        ScoreOp, SessionEvent, StewardListPlugin, apply_consensus_result, emergency_score_ops,
     },
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, conversation_update_request,
@@ -84,7 +83,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             .storage()
             .get_proposal(&scope, proposal_id)
             .await?;
-        let payload = proposal.payload;
+        // Decode once and thread the request through every downstream step.
+        let request = ConversationUpdateRequest::decode(proposal.payload.as_slice())?;
 
         // The inactivity timer is self-started by `check_steward_inactivity`
         // on the next poll — no explicit notification needed here.
@@ -97,7 +97,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             s.handle
                 .conversation
                 .mark_consensus_outcome_applied(proposal_id);
-            apply_consensus_result(&mut s.handle.conversation, proposal_id, approved, &payload)?
+            apply_consensus_result(&mut s.handle.conversation, proposal_id, approved, &request)?
         };
 
         match consensus_apply {
@@ -105,6 +105,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             ConsensusApplyResult::ElectionAccepted(election) => {
                 Self::handle_election_accepted(arc, election).await?;
                 return Self::current_tick(arc);
+            }
+            ConsensusApplyResult::ElectionRejected => {
+                Self::handle_election_rejected(arc).await?;
             }
             ConsensusApplyResult::RecoveryModeOpened => {
                 arc.write_or_err("session")?.handle.enter_recovery_mode();
@@ -117,13 +120,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             ConsensusApplyResult::QueuedRemoval { target } => {
                 Self::refresh_stewards_after_removal(arc, &target).await?;
             }
-        }
-
-        if !approved && let Ok(req) = ConversationUpdateRequest::decode(payload.as_slice()) {
-            if ProposalKind::of(&req).is_steward_election() {
-                Self::handle_election_rejected(arc).await?;
-            } else if let Some(target) = target_member_id_of(&req) {
-                let target = target.to_vec();
+            ConsensusApplyResult::RejectedMembership { target } => {
                 arc.write_or_err("session")?
                     .handle
                     .conversation
@@ -136,9 +133,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         arc.write_or_err("session")?
             .unregister_consensus_timeout(proposal_id);
 
-        let score_ops = emergency_score_ops(&payload, approved);
+        let score_ops = emergency_score_ops(&request, approved);
         if !score_ops.is_empty() {
-            Self::handle_emergency_scored(arc, proposal_id, &payload, &score_ops).await?;
+            Self::handle_emergency_scored(arc, proposal_id, &request, &score_ops).await?;
         }
 
         Self::current_tick(arc)
@@ -301,7 +298,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     async fn handle_emergency_scored(
         arc: &Arc<RwLock<Self>>,
         proposal_id: u32,
-        payload: &[u8],
+        request: &ConversationUpdateRequest,
         score_ops: &[ScoreOp],
     ) -> Result<(), UserError> {
         {
@@ -311,9 +308,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             // caller). The terminal `check_and_initiate_score_removals`
             // call covers it, so we only need to drop the events here.
             let _events = s.handle.scoring.apply_ops(score_ops);
-            if let Ok(req) = ConversationUpdateRequest::decode(payload)
-                && let Some(conversation_update_request::Payload::EmergencyCriteria(ec)) =
-                    &req.payload
+            if let Some(conversation_update_request::Payload::EmergencyCriteria(ec)) =
+                &request.payload
                 && let Some(ev) = &ec.evidence
             {
                 s.handle
