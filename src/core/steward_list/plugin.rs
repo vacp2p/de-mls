@@ -3,7 +3,8 @@
 use crate::core::error::CoreError;
 use crate::core::steward_list::list::{StewardList, StewardListConfig};
 
-/// Default steward-election retry ceiling before `Deadlock` escalation.
+/// Steward-election retries *after* the initial attempt, before `Deadlock`
+/// escalation. So `1` = two attempts (rounds 0 and 1) total.
 pub const DEFAULT_MAX_RETRIES: u32 = 1;
 
 /// Result of [`StewardListPlugin::propose_election`].

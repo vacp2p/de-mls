@@ -217,7 +217,9 @@ fn sorted_steward_indices(
             )
         })
         .collect();
-    scored.sort_by(|(a, _), (b, _)| a.cmp(b));
+    // Tie-break on member_id so a hash collision is still cross-peer total,
+    // not dependent on the caller's slice ordering.
+    scored.sort_by(|(a, ai), (b, bi)| a.cmp(b).then_with(|| member_ids[*ai].cmp(&member_ids[*bi])));
     scored.into_iter().map(|(_, i)| i).collect()
 }
 
@@ -338,6 +340,27 @@ mod tests {
         let list_b = StewardList::generate(0, b"conversation", &mems_b, 3, config, 0).unwrap();
 
         assert_eq!(list_a.members(), list_b.members());
+    }
+
+    /// At the small-group boundary (`members == sn_max`) the regenerated
+    /// list is the full membership: `compute_list_size` returns `sn_max` and
+    /// `generate` keeps every member (only reordered). This is the invariant
+    /// `reconcile_steward_list` relies on — the no-vote local regen yields
+    /// the same set a successful election would.
+    #[test]
+    fn test_regen_at_sn_max_is_full_membership() {
+        let config = StewardListConfig::new(2, 5).unwrap();
+        let mems = members(&[1, 2, 3, 4, 5]); // len == sn_max
+        let sn = config.compute_list_size(mems.len());
+        assert_eq!(sn, 5, "size at the sn_max boundary is sn_max");
+
+        let list = StewardList::generate(7, b"conv", &mems, sn, config, 0).unwrap();
+        let got: std::collections::HashSet<_> = list.members().iter().cloned().collect();
+        let want: std::collections::HashSet<_> = mems.iter().cloned().collect();
+        assert_eq!(
+            got, want,
+            "every member is a steward at the sn_max boundary"
+        );
     }
 
     #[test]
