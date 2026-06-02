@@ -51,13 +51,6 @@ pub enum FreezeOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CommitHash([u8; 32]);
 
-impl CommitHash {
-    /// Raw 32-byte hash.
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-}
-
 /// Canonical commit hash used for dedup of buffered/committed candidates.
 pub fn compute_commit_hash(commit_message: &[u8]) -> CommitHash {
     let mut hasher = Sha256::new();
@@ -115,7 +108,7 @@ pub fn buffer_commit_candidate<M: MlsService>(
     let epoch = mls.current_epoch()?;
 
     // Valid candidate — auto-start a round if there are approved proposals.
-    if !conversation.is_freeze_round() {
+    if !conversation.has_freeze_round() {
         if conversation.approved_proposals_count() == 0 {
             tracing::debug!(conversation = %conversation_id, "candidate ignored: no approved proposals");
             return Ok(ProcessResult::Noop(NoopReason::NoApprovedProposals));
@@ -158,14 +151,8 @@ pub fn buffer_commit_candidate<M: MlsService>(
     }
 }
 
-/// Pick and apply a buffered candidate for the active freeze round.
-///
-/// Three phases:
-/// 1. Snapshot the pre-merge round state (counts, epoch, recovery flag,
-///    live epoch steward).
-/// 2. Filter candidates by action count and rank them by RFC priority.
-/// 3. Apply in priority order, falling back on the next candidate when
-///    MLS staging rejects the current one.
+/// Snapshot round state, rank the buffered candidates by RFC priority, and
+/// apply best-first — falling back to the next when MLS staging rejects one.
 pub fn finalize_freeze_round<M: MlsService, St: StewardListPlugin>(
     conversation: &mut ConversationQueues,
     mls: &mut M,
@@ -176,15 +163,11 @@ pub fn finalize_freeze_round<M: MlsService, St: StewardListPlugin>(
 ) -> Result<FreezeFinalizeResult, CoreError> {
     let current_epoch = mls.current_epoch()?;
     let Some(candidates) = conversation.take_round_candidates(current_epoch) else {
-        // Drop any local pending commit so the next MLS encrypt
-        // doesn't trip on "pending proposal exists".
-        mls.discard_own_commit()?;
-        return Ok(FreezeFinalizeResult::default());
+        return discard_and_finish(mls);
     };
 
     if candidates.is_empty() {
-        mls.discard_own_commit()?;
-        return Ok(FreezeFinalizeResult::default());
+        return discard_and_finish(mls);
     }
 
     let ctx = RoundContext::snapshot(
@@ -198,11 +181,17 @@ pub fn finalize_freeze_round<M: MlsService, St: StewardListPlugin>(
     let sorted = rank_applicable_candidates(candidates, &ctx, allow_subset_candidates);
 
     if sorted.is_empty() {
-        mls.discard_own_commit()?;
-        return Ok(FreezeFinalizeResult::default());
+        return discard_and_finish(mls);
     }
 
     apply_in_priority_order(conversation, mls, steward, sorted, &ctx, self_member_id)
+}
+
+/// No candidate applied: drop any local pending commit (otherwise the next
+/// MLS encrypt trips on "pending proposal exists") and report a no-op.
+fn discard_and_finish<M: MlsService>(mls: &mut M) -> Result<FreezeFinalizeResult, CoreError> {
+    mls.discard_own_commit()?;
+    Ok(FreezeFinalizeResult::default())
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -273,11 +262,11 @@ pub(super) fn produces_mls_action(req: &ConversationUpdateRequest) -> bool {
 // SELECTION
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Filter candidates by action count (Phase 1) and sort survivors by the
-/// RFC priority comparator (Phase 2). Result is ordered best-first.
+/// Filter candidates whose action count matches the voted set, then sort
+/// survivors by the RFC priority comparator (best-first).
 ///
-/// Priority tiering uses the *live* epoch steward — eligibility-filtered
-/// in `RoundContext::snapshot`, so a draining or already-removed nominal
+/// Tiering uses the *live* epoch steward (eligibility-filtered in
+/// `RoundContext::snapshot`), so a draining or already-removed nominal
 /// steward never wins the tier.
 fn rank_applicable_candidates(
     candidates: Vec<BufferedCommitCandidate>,
@@ -370,7 +359,9 @@ mod tests {
             candidate_msg: CommitCandidate {
                 conversation_id: b"test-conversation".to_vec(),
                 mls_proposals: vec![vec![0xFF; 10]; actions_count],
-                commit_message: commit_hash.as_bytes().to_vec(),
+                // commit_message is irrelevant to priority ordering (which
+                // keys off mls_proposals/steward_member_id/commit_hash).
+                commit_message: vec![0u8; 32],
                 steward_member_id,
             },
             commit_hash,

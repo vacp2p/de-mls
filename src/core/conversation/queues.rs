@@ -371,7 +371,7 @@ impl ConversationQueues {
     }
 
     /// Whether a freeze round is currently open.
-    pub(crate) fn is_freeze_round(&self) -> bool {
+    pub(crate) fn has_freeze_round(&self) -> bool {
         self.freeze_round.is_some()
     }
 
