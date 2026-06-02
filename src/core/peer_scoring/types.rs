@@ -105,10 +105,6 @@ impl Default for ScoringConfig {
 pub enum PeerScoringEvent {
     /// Member's score moved from above-threshold to at-or-below threshold.
     ThresholdCrossedDown { member_id: Vec<u8>, score: i64 },
-    /// Member's score moved from at-or-below threshold back above it.
-    /// Reserved for future recovery-scoring use cases — coordinators
-    /// today drop these silently.
-    ThresholdCrossedUp { member_id: Vec<u8>, score: i64 },
 }
 
 /// Sparse snapshot of per-member scores for joiner bootstrap. Carries

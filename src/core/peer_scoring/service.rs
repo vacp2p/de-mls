@@ -58,8 +58,17 @@ impl<S: PeerScoreStorage> PeerScoringPlugin for PeerScoringService<S> {
         self.storage.remove(member_id);
     }
 
+    /// Apply an incremental delta to an already-tracked member. Unlike
+    /// `add_member` / `apply_snapshot`, this never creates an entry — a
+    /// stale op must not resurrect a removed member. The coordinator
+    /// `add_member`s first; a drop means roster and scores are out of sync.
     fn apply_op(&mut self, op: &ScoreOp) -> Vec<PeerScoringEvent> {
         let Some(current) = self.storage.get(&op.member_id) else {
+            tracing::debug!(
+                member = ?op.member_id,
+                event = ?op.event,
+                "score op dropped: member not tracked (add_member first)"
+            );
             return Vec::new();
         };
         let delta = self.score_delta(op.event);
@@ -137,7 +146,9 @@ impl<S: PeerScoreStorage> PeerScoringPlugin for PeerScoringService<S> {
 /// Compute the [`PeerScoringEvent`] for a transition from `prior` to
 /// `new_score`. `prior == None` (untracked) is treated as "above
 /// threshold" so a fresh entry landing at-or-below threshold emits a
-/// downward cross. Returns `None` when no cross occurred.
+/// downward cross. Only downward crosses are surfaced — upward recovery
+/// has no coordinator consumer. Returns `None` when no downward cross
+/// occurred.
 fn cross_event(
     member_id: &[u8],
     prior: Option<i64>,
@@ -148,11 +159,6 @@ fn cross_event(
     let now_below = new_score <= threshold;
     if was_above && now_below {
         Some(PeerScoringEvent::ThresholdCrossedDown {
-            member_id: member_id.to_vec(),
-            score: new_score,
-        })
-    } else if !was_above && new_score > threshold {
-        Some(PeerScoringEvent::ThresholdCrossedUp {
             member_id: member_id.to_vec(),
             score: new_score,
         })
@@ -288,11 +294,13 @@ mod tests {
         assert_eq!(svc.score_for(b"alice"), Some(30));
     }
 
+    /// Recovery back above threshold emits no event — only downward
+    /// crosses are surfaced (no coordinator consumes upward recovery).
     #[test]
-    fn apply_op_emits_threshold_crossed_up_on_recovery() {
+    fn apply_op_recovery_above_threshold_emits_nothing() {
         let mut svc = make_service();
         let _ = svc.add_member(b"alice");
-        // 100 → 50 → 0 (down), 0 → 20 (up via EmergencyYesCreator).
+        // 100 → 50 → 0 (down emitted at the 0 cross), 0 → 20 (recovery).
         for _ in 0..2 {
             let _ = svc.apply_op(&ScoreOp {
                 member_id: b"alice".to_vec(),
@@ -303,12 +311,9 @@ mod tests {
             member_id: b"alice".to_vec(),
             event: ScoreEvent::EmergencyYesCreator,
         });
-        assert_eq!(
-            events,
-            vec![PeerScoringEvent::ThresholdCrossedUp {
-                member_id: b"alice".to_vec(),
-                score: 20,
-            }]
+        assert!(
+            events.is_empty(),
+            "upward recovery cross is not surfaced, got {events:?}"
         );
     }
 
@@ -434,8 +439,10 @@ mod tests {
         );
     }
 
+    /// A snapshot moving a member back above threshold emits no event —
+    /// only downward crosses are surfaced.
     #[test]
-    fn apply_snapshot_emits_threshold_crossed_up_on_recovery() {
+    fn apply_snapshot_recovery_above_threshold_emits_nothing() {
         let mut svc = make_service();
         let _ = svc.add_member(b"alice");
         // First push alice below threshold.
@@ -446,12 +453,9 @@ mod tests {
         let events = svc.apply_snapshot(&ScoreSnapshot {
             diverged: vec![(b"alice".to_vec(), 50)],
         });
-        assert_eq!(
-            events,
-            vec![PeerScoringEvent::ThresholdCrossedUp {
-                member_id: b"alice".to_vec(),
-                score: 50,
-            }]
+        assert!(
+            events.is_empty(),
+            "upward recovery cross is not surfaced, got {events:?}"
         );
     }
 
