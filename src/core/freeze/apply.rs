@@ -168,7 +168,7 @@ fn apply_local_candidate<M: MlsService>(
 ) -> Result<CandidateOutcome, CoreError> {
     mls.merge_own_commit()?;
 
-    let committed_batch = record_applied_commit(conversation, chosen.commit_hash);
+    let committed_batch = finalize_committed_batch(conversation, chosen.commit_hash);
 
     // Build the welcome artifact only after merge.
     let welcome = chosen.welcome_bytes.map(|welcome_bytes| MemberWelcome {
@@ -241,7 +241,7 @@ fn apply_incoming_candidate<M: MlsService, St: StewardListPlugin>(
     }
 
     mls.merge_staged_commit()?;
-    let committed_batch = record_applied_commit(conversation, chosen.commit_hash);
+    let committed_batch = finalize_committed_batch(conversation, chosen.commit_hash);
 
     // Remote candidates never carry welcome bytes — only the author sends those.
     let result = if self_removed {
@@ -432,7 +432,7 @@ fn check_commit_sender_authorized<St: StewardListPlugin>(
 /// the commit was urgent-target-only and only the targeted entry was
 /// dropped). Caller surfaces the batch through `FreezeFinalizeResult` so
 /// the app layer can archive it for UI history.
-fn record_applied_commit(
+fn finalize_committed_batch(
     conversation: &mut ConversationQueues,
     commit_hash: CommitHash,
 ) -> Vec<ConversationUpdateRequest> {
