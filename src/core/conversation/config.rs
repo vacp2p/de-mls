@@ -54,9 +54,9 @@ pub struct ConversationConfig {
     /// How long a proposal stays active before expiring (RFC §Creating Voting Proposal).
     pub proposal_expiration: Duration,
     pub consensus_timeout: Duration,
-    /// Max age (in epochs) of a buffered membership update. If the epoch
-    /// steward fails to commit a buffered Add/Remove for this many
-    /// consecutive epochs, the entry is dropped.
+    /// Max age (in epochs) of a buffered membership update. An entry first
+    /// seen at epoch `E` is dropped once `current_epoch - E` exceeds this
+    /// value (so it survives epochs `E..=E + max_age` inclusive).
     pub pending_update_max_epochs: u32,
     /// Max steward-election retries within one MLS epoch before the app
     /// surfaces "reelection stuck". `0` disables retry entirely.
@@ -107,13 +107,26 @@ impl ConversationConfig {
     /// (`liveness_criteria_yes`, `pending_update_max_epochs`) are not in
     /// `TimingConfig` and stay untouched.
     pub fn apply_timing(&mut self, timing: &TimingConfig) {
-        self.commit_inactivity_duration =
-            Duration::from_millis(timing.commit_inactivity_duration_ms);
-        self.freeze_duration = Duration::from_millis(timing.freeze_duration_ms);
-        self.recovery_inactivity_duration =
-            Duration::from_millis(timing.recovery_inactivity_duration_ms);
-        self.proposal_expiration = Duration::from_millis(timing.proposal_expiration_ms);
-        self.consensus_timeout = Duration::from_millis(timing.consensus_timeout_ms);
+        // A zero wire duration would make its timer fire immediately (a
+        // malformed-sync DoS); treat zero as "unset" and keep the local value.
+        apply_nonzero_ms(
+            &mut self.commit_inactivity_duration,
+            timing.commit_inactivity_duration_ms,
+        );
+        apply_nonzero_ms(&mut self.freeze_duration, timing.freeze_duration_ms);
+        apply_nonzero_ms(
+            &mut self.recovery_inactivity_duration,
+            timing.recovery_inactivity_duration_ms,
+        );
+        apply_nonzero_ms(&mut self.proposal_expiration, timing.proposal_expiration_ms);
+        apply_nonzero_ms(&mut self.consensus_timeout, timing.consensus_timeout_ms);
+    }
+}
+
+/// Overwrite `field` with `wire_ms` unless it is zero (treated as "unset").
+fn apply_nonzero_ms(field: &mut Duration, wire_ms: u64) {
+    if wire_ms != 0 {
+        *field = Duration::from_millis(wire_ms);
     }
 }
 
@@ -162,6 +175,29 @@ mod tests {
         );
         assert_eq!(applied.proposal_expiration, Duration::from_millis(400));
         assert_eq!(applied.consensus_timeout, Duration::from_millis(500));
+    }
+
+    /// A zero wire duration is rejected as "unset"; the local value stays.
+    #[test]
+    fn apply_timing_ignores_zero_durations() {
+        let mut config = ConversationConfig {
+            consensus_timeout: Duration::from_secs(30),
+            commit_inactivity_duration: Duration::from_secs(60),
+            ..ConversationConfig::default()
+        };
+        let timing = TimingConfig {
+            consensus_timeout_ms: 0,
+            commit_inactivity_duration_ms: 0,
+            freeze_duration_ms: 250,
+            recovery_inactivity_duration_ms: 0,
+            proposal_expiration_ms: 0,
+        };
+        config.apply_timing(&timing);
+        // Zero fields keep their prior values.
+        assert_eq!(config.consensus_timeout, Duration::from_secs(30));
+        assert_eq!(config.commit_inactivity_duration, Duration::from_secs(60));
+        // Non-zero field is applied.
+        assert_eq!(config.freeze_duration, Duration::from_millis(250));
     }
 
     /// Steward-election proposals get the shorter `election_voting_delay`;
