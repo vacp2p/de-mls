@@ -17,9 +17,9 @@ use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use crate::{
     app::{ConsensusContext, ConversationConfig, User, UserPlugins},
     core::{
-        ConsensusPlugin, ConversationPluginsFactory, ElectionDecision, PeerScoringEvent,
-        PeerScoringPlugin, PluginConsensus, ScoreOp, ScoreSnapshot, ScoringConfig, StewardList,
-        StewardListConfig, StewardListEvent, StewardListPlugin,
+        ConsensusPlugin, ConversationPluginsFactory, ElectionDecision, PeerScoringPlugin,
+        PluginConsensus, ScoreOp, ScoreSnapshot, ScoringConfig, StewardList, StewardListConfig,
+        StewardListEvent, StewardListPlugin,
     },
     defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage},
     ds::{OutboundPacket, SharedDeliveryService},
@@ -287,16 +287,16 @@ impl StewardListPlugin for StubStewardList {
 pub(crate) struct StubScoring;
 
 impl PeerScoringPlugin for StubScoring {
-    fn add_member(&mut self, _: &[u8]) -> Vec<PeerScoringEvent> {
+    fn add_member(&mut self, _: &[u8]) -> bool {
         unreachable!()
     }
     fn remove_member(&mut self, _: &[u8]) {
         unreachable!()
     }
-    fn apply_op(&mut self, _: &ScoreOp) -> Vec<PeerScoringEvent> {
+    fn apply_op(&mut self, _: &ScoreOp) -> bool {
         unreachable!()
     }
-    fn apply_snapshot(&mut self, _: &ScoreSnapshot) -> Vec<PeerScoringEvent> {
+    fn apply_snapshot(&mut self, _: &ScoreSnapshot) -> bool {
         unreachable!()
     }
     fn snapshot(&self) -> ScoreSnapshot {
@@ -318,9 +318,6 @@ impl PeerScoringPlugin for StubScoring {
         unreachable!()
     }
     fn default_score(&self) -> i64 {
-        unreachable!()
-    }
-    fn set_default_score(&mut self, _: i64) {
         unreachable!()
     }
 }

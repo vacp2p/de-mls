@@ -314,8 +314,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             // Events from this apply chain into the score-removal pass
             // below (after `handle_emergency_scored` returns into its
             // caller). The terminal `check_and_initiate_score_removals`
-            // call covers it, so we only need to drop the events here.
-            let _events = s.conversation.scoring.apply_ops(score_ops);
+            // call covers it, so we drop the result here.
+            let _ = s.conversation.scoring.apply_ops(score_ops);
             if let Some(conversation_update_request::Payload::EmergencyCriteria(ec)) =
                 &request.payload
                 && let Some(ev) = &ec.evidence

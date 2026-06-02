@@ -82,9 +82,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         // Joiners get tracked at `JoinedConversation` time, once members are known.
         if is_creation {
             // Creator is self at `default_score`; under standard config
-            // (`default > threshold`) no cross event fires, so we drop
-            // the return value here.
-            let _events = scoring.add_member(&self_member_id_bytes);
+            // (`default > threshold`) no cross fires, so we drop the result.
+            let _ = scoring.add_member(&self_member_id_bytes);
         }
 
         let initial_state = state_machine.current_state();

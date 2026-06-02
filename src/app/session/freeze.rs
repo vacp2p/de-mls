@@ -21,18 +21,10 @@ use crate::{
     },
     core::{
         ConsensusPlugin, ConversationPluginsFactory, FreezeFinalizeResult, FreezeOutcome,
-        PeerScoringEvent, PeerScoringPlugin, ScoreEvent, ScoreOp, SessionEvent, StewardListPlugin,
+        PeerScoringPlugin, ScoreEvent, ScoreOp, SessionEvent, StewardListPlugin,
     },
     mls_crypto::MlsService,
 };
-
-/// `true` iff `events` contains at least one downward threshold cross.
-/// Used to chain into a score-removal pass after applying score ops.
-fn has_downward_cross(events: &[PeerScoringEvent]) -> bool {
-    events
-        .iter()
-        .any(|e| matches!(e, PeerScoringEvent::ThresholdCrossedDown { .. }))
-}
 
 /// What [`SessionRunner::check_pending_join`] hands back to its polling
 /// caller.
@@ -139,8 +131,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             // no ECP needed). A downward threshold cross schedules a
             // removal-init pass below, after the lock drops.
             let cross = if !result.score_ops.is_empty() {
-                let events = s.conversation.scoring.apply_ops(&result.score_ops);
-                has_downward_cross(&events)
+                s.conversation.scoring.apply_ops(&result.score_ops)
             } else {
                 false
             };
@@ -232,11 +223,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                             None => None,
                         };
                         let cross = if let Some(steward_id) = accuse_target {
-                            let events = s.conversation.scoring.apply_op(&ScoreOp {
+                            s.conversation.scoring.apply_op(&ScoreOp {
                                 member_id: steward_id,
                                 event: ScoreEvent::CensorshipInactivity,
-                            });
-                            has_downward_cross(&events)
+                            })
                         } else {
                             false
                         };

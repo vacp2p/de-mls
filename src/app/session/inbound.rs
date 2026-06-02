@@ -475,8 +475,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // scores and is the canonical actor for any below-threshold
         // member in this snapshot — they'll submit
         // `SCORE_BELOW_THRESHOLD` from their own event chain. Drop our
-        // events to avoid duplicate proposals from joiners.
-        let _events = self.conversation.scoring.apply_snapshot(&snapshot);
+        // result to avoid duplicate proposals from joiners.
+        let _ = self.conversation.scoring.apply_snapshot(&snapshot);
         self.conversation.config.liveness_criteria_yes = sync.liveness_criteria_yes;
         self.conversation.config.pending_update_max_epochs = sync.pending_update_max_epochs;
         if let Some(timing) = &sync.timing {

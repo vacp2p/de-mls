@@ -55,10 +55,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         let diff = scoring_member_diff(&scored, mls_members);
         for member_id in &diff.to_add {
             // Under the standard config (`default > threshold`) this
-            // returns no events; an exotic config could surface a fresh
-            // member as below-threshold, but the score-removal chain
-            // doesn't fire on membership-sync ticks today.
-            let _events = self.conversation.scoring.add_member(member_id);
+            // returns false; an exotic config could surface a fresh member
+            // as below-threshold, but the score-removal chain doesn't fire
+            // on membership-sync ticks today.
+            let _ = self.conversation.scoring.add_member(member_id);
         }
         for member_id in &diff.to_remove {
             self.conversation.scoring.remove_member(member_id);

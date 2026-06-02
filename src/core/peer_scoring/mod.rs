@@ -2,7 +2,7 @@
 //! and score-derivation helpers.
 //!
 //! Submodules:
-//! - [`types`] — `ScoreEvent`, `ScoreOp`, `ScoringConfig`, `PeerScoringEvent`,
+//! - [`types`] — `ScoreEvent`, `ScoreOp`, `ScoringConfig`,
 //!   `ScoreSnapshot`, `ScoringMemberDiff` + RFC defaults.
 //! - [`storage`] — `PeerScoreStorage` trait (concrete backends live in the
 //!   app layer).
@@ -22,6 +22,6 @@ pub use plugin::PeerScoringPlugin;
 pub use service::PeerScoringService;
 pub use storage::PeerScoreStorage;
 pub use types::{
-    DEFAULT_PEER_SCORE, DEFAULT_THRESHOLD_PEER_SCORE, PeerScoringEvent, ScoreEvent, ScoreOp,
-    ScoreSnapshot, ScoringConfig, ScoringMemberDiff, default_score_deltas,
+    DEFAULT_PEER_SCORE, DEFAULT_THRESHOLD_PEER_SCORE, ScoreEvent, ScoreOp, ScoreSnapshot,
+    ScoringConfig, ScoringMemberDiff, default_score_deltas,
 };
