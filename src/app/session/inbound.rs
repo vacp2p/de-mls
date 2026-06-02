@@ -145,7 +145,17 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         arc: &Arc<RwLock<Self>>,
         proposal: Proposal,
     ) -> Result<(), UserError> {
-        let decoded = ConversationUpdateRequest::decode(proposal.payload.as_slice()).ok();
+        let decoded = match ConversationUpdateRequest::decode(proposal.payload.as_slice()) {
+            Ok(req) => Some(req),
+            Err(e) => {
+                tracing::debug!(
+                    proposal_id = proposal.proposal_id,
+                    error = %e,
+                    "incoming proposal payload failed to decode; treated as opaque commit"
+                );
+                None
+            }
+        };
         if let Some(req) = decoded.as_ref() {
             let mut s = arc.write_or_err("session")?;
             let current_epoch = match s.handle.mls() {
@@ -318,7 +328,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // throughout the delete.
         let taken_mls = arc.write_or_err("session")?.handle.take_mls();
         if let Some(mut mls) = taken_mls {
-            mls.delete()?;
+            // The leave is already committed (`Leaving` emitted, MLS
+            // detached); a delete failure must log and continue, else the
+            // caller never reaches `LeaveRequested` and the entry leaks.
+            if let Err(e) = mls.delete() {
+                error!(error = %e, "self-leave: MLS storage delete failed; leaving anyway");
+            }
         }
         Ok(())
     }

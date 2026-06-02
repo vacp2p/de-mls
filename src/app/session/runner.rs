@@ -155,10 +155,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// polling cycle drains it via [`Self::drain_events`]. Stays `&self`
     /// thanks to the interior [`Mutex`], so the many session-coordinator
     /// methods that emit during a brief read guard don't need to escalate
-    /// to a write guard. Silent on poison — emit is fire-and-forget.
+    /// to a write guard. Fire-and-forget (no `Result`), but a poisoned
+    /// buffer is logged rather than silently dropped.
     pub(crate) fn emit_event(&self, event: SessionEvent) {
-        if let Ok(mut buf) = self.pending_events.lock() {
-            buf.push(event);
+        match self.pending_events.lock() {
+            Ok(mut buf) => buf.push(event),
+            Err(_) => {
+                tracing::error!(?event, "session-event buffer mutex poisoned; event dropped")
+            }
         }
     }
 
@@ -168,7 +172,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     pub fn drain_events(&self) -> Vec<SessionEvent> {
         match self.pending_events.lock() {
             Ok(mut buf) => std::mem::take(&mut *buf),
-            Err(_) => Vec::new(),
+            Err(_) => {
+                tracing::error!("session-event buffer mutex poisoned; UI fanout will miss events");
+                Vec::new()
+            }
         }
     }
 

@@ -91,7 +91,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     pub fn drain_lifecycle_events(&self) -> Vec<ConversationLifecycle> {
         match self.pending_lifecycle_events.lock() {
             Ok(mut buf) => std::mem::take(&mut *buf),
-            Err(_) => Vec::new(),
+            Err(_) => {
+                tracing::error!(
+                    "lifecycle-event buffer mutex poisoned; integrator will miss Created/Removed events"
+                );
+                Vec::new()
+            }
         }
     }
 
@@ -239,10 +244,17 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
         {
             let mut entry = entry_arc.write_or_err("session")?;
-            if entry.handle.mls().is_some() {
+            // Idempotency keys off the state machine, not MLS attachment:
+            // past `PendingJoin` means the join dispatch already finished.
+            // Still-`PendingJoin`-with-MLS is a join that failed after
+            // `attach_mls`; fall through to finish it. Re-attach only when
+            // absent — overwriting would drop the existing group state.
+            if entry.handle.current_state() != ConversationState::PendingJoin {
                 return Ok((conversation_id, entry.tick()));
             }
-            entry.handle.attach_mls(svc);
+            if entry.handle.mls().is_none() {
+                entry.handle.attach_mls(svc);
+            }
         }
         self.finish_dispatch(
             &conversation_id,
@@ -450,11 +462,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     }
 
     /// Append a [`ConversationLifecycle`] event to the pending-events buffer
-    /// for [`Self::drain_lifecycle_events`]. Silent on poison —
-    /// emit is fire-and-forget.
+    /// for [`Self::drain_lifecycle_events`]. Fire-and-forget (no `Result`),
+    /// but a poisoned buffer is logged rather than silently dropped.
     pub fn emit_lifecycle(&self, event: ConversationLifecycle) {
-        if let Ok(mut buf) = self.pending_lifecycle_events.lock() {
-            buf.push(event);
+        match self.pending_lifecycle_events.lock() {
+            Ok(mut buf) => buf.push(event),
+            Err(_) => tracing::error!(
+                ?event,
+                "lifecycle-event buffer mutex poisoned; event dropped"
+            ),
         }
     }
 

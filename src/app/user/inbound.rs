@@ -11,7 +11,7 @@
 use std::sync::{Arc, RwLock};
 
 use prost::Message;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::{
     app::{DispatchOutcome, LockExt, SessionRunner, SessionTick, User, UserError},
@@ -58,6 +58,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 let result = {
                     let mut entry = entry_arc.write_or_err("session")?;
                     if entry.handle.mls().is_none() {
+                        // PendingJoin: no MLS to decrypt with yet. Dropped,
+                        // not buffered — replay is a separate recovery track.
+                        debug!(
+                            conversation = conversation_id,
+                            "app-message dropped: MLS not attached (still PendingJoin)"
+                        );
                         return Ok(SessionTick::empty());
                     }
                     entry.handle.process_inbound(&packet.payload)?
@@ -81,18 +87,18 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// callers run when those signal "registry should be removed"
     /// (`DispatchOutcome::LeaveRequested` or `PendingJoinTick::Expired`).
     pub async fn finalize_self_leave(&self, conversation_id: &str) -> Result<(), UserError> {
-        // Cancel auto-vote timers before removing the registry entry —
-        // `cleanup_consensus_scope` finds the runner via `lookup_entry` and
-        // aborts its timers. If the entry is gone first, the lookup returns
-        // `None` and the timers leak (still scheduled, will fire against a
-        // conversation we've left).
-        self.cleanup_consensus_scope(conversation_id).await?;
+        // Clean up (and cancel timers) before removing the entry — the
+        // cleanup finds the runner via `lookup_entry`, so the entry must
+        // still exist. Eviction and `Removed` are unconditional: a
+        // scope-delete failure (timers already cancelled) must not strand a
+        // zombie. The cleanup error surfaces after the conversation is gone.
+        let cleanup = self.cleanup_consensus_scope(conversation_id).await;
         self.conversations
             .write()
             .map_err(|_| UserError::LockPoisoned("conversation registry"))?
             .remove(conversation_id);
         self.emit_lifecycle(ConversationLifecycle::Removed(conversation_id.to_string()));
-        Ok(())
+        cleanup
     }
 
     // ── Private ──────────────────────────────────────────────────────
