@@ -80,10 +80,6 @@ pub enum NoopReason {
     EmptyStewardMemberId,
     /// Candidate's wire kind doesn't match Proposal/Commit.
     WireKindMismatch,
-    /// Freeze round selection is locked — the buffer no longer accepts candidates.
-    SelectionLocked,
-    /// Caller's epoch doesn't match the buffered round's epoch.
-    StaleEpoch,
     /// Identical commit hash is already buffered for this round.
     DuplicateBufferedHash,
     /// Freeze-round buffer is full (one candidate per member already held).

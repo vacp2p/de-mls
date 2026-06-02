@@ -29,9 +29,9 @@ use std::sync::{
 
 use de_mls::app::build_key_package_packet;
 use de_mls::core::{
-    BufferedCommitCandidate, Conversation, CoreError, DeterministicStewardList, FreezeOutcome,
-    NoopReason, OperatingMode, PeerScoringService, ProcessResult, ProposalKind, ScoringConfig,
-    StewardListConfig, StewardListPlugin, compute_commit_hash, default_score_deltas,
+    BufferedCommitCandidate, ConversationQueues, CoreError, DeterministicStewardList,
+    FreezeOutcome, NoopReason, OperatingMode, PeerScoringService, ProcessResult, ProposalKind,
+    ScoringConfig, StewardListConfig, StewardListPlugin, compute_commit_hash, default_score_deltas,
     finalize_freeze_round, member_set, process_inbound,
 };
 use de_mls::defaults::{InMemoryPeerScoreStorage, MemoryDeMlsStorage};
@@ -57,16 +57,16 @@ pub const DEFAULT_SCORE: i64 = 100;
 
 // ─────────────────────────── Test-only protocol helper ───────────────────────────
 
-/// Test-side mirror of `ConversationHandle::create_commit_candidate`.
+/// Test-side mirror of `Conversation::create_commit_candidate`.
 ///
-/// Production callers go through `ConversationHandle::create_commit_candidate`,
+/// Production callers go through `Conversation::create_commit_candidate`,
 /// which pulls `group`, `mls`, and `steward` from `&mut self`. Tests
 /// keep these as separate fields on `StewardHandle` / `JoinerHandle`
 /// (no `state_machine` / `scoring`), so we can't use the entry method
 /// directly. This helper takes the same fields as parameters and runs
-/// identical logic. **Keep in sync with `ConversationHandle::create_commit_candidate`.**
+/// identical logic. **Keep in sync with `Conversation::create_commit_candidate`.**
 pub fn build_commit_candidate(
-    group: &mut Conversation,
+    group: &mut ConversationQueues,
     mls: &mut TestMls,
     steward_list: &DeterministicStewardList,
     in_recovery: bool,
@@ -208,7 +208,7 @@ pub fn setup_identity_storage(
 /// [`JoinerHandle::accept_welcome`]. APP_MSG_SUBTOPIC delegates to
 /// [`process_inbound`].
 pub fn process_inbound_compat(
-    group: &mut Conversation,
+    group: &mut ConversationQueues,
     mls: Option<&mut TestMls>,
     payload: &[u8],
     subtopic: &str,
@@ -229,7 +229,7 @@ pub fn process_inbound_compat(
         let Some(mls) = mls else {
             // App messages on a conversation with no MLS state are
             // silently ignored. Mirrors `SessionRunner::process_inbound_packet`,
-            // which gates app payloads on `handle.mls().is_some()`.
+            // which gates app payloads on `conversation.mls().is_some()`.
             return Ok(ProcessResult::Noop(NoopReason::UnknownAppMessage));
         };
         process_inbound(group, mls, payload)
@@ -240,12 +240,12 @@ pub fn process_inbound_compat(
     }
 }
 
-/// Test handle: bundles `Conversation`, the per-group MLS service, the
+/// Test conversation: bundles `Conversation`, the per-group MLS service, the
 /// steward-list plug-in, and the self identity. Tests access them as
 /// individual fields; `Deref<Target = Conversation>` keeps proposal-queue calls
-/// working unchanged (e.g. `handle.insert_approved_proposal(...)`).
+/// working unchanged (e.g. `conversation.insert_approved_proposal(...)`).
 pub struct StewardHandle {
-    pub group: Conversation,
+    pub group: ConversationQueues,
     pub mls: TestMls,
     pub steward_list: DeterministicStewardList,
     pub member_id: Vec<u8>,
@@ -260,7 +260,7 @@ impl StewardHandle {
         &self.member_id
     }
 
-    /// Test convenience: member-id bytes stored on the handle; matches
+    /// Test convenience: member-id bytes stored on the conversation; matches
     /// the value the User layer caches on `User::self_member_id`.
     pub fn self_member_id(&self) -> &[u8] {
         &self.member_id
@@ -268,14 +268,14 @@ impl StewardHandle {
 }
 
 impl std::ops::Deref for StewardHandle {
-    type Target = Conversation;
-    fn deref(&self) -> &Conversation {
+    type Target = ConversationQueues;
+    fn deref(&self) -> &ConversationQueues {
         &self.group
     }
 }
 
 impl std::ops::DerefMut for StewardHandle {
-    fn deref_mut(&mut self) -> &mut Conversation {
+    fn deref_mut(&mut self) -> &mut ConversationQueues {
         &mut self.group
     }
 }
@@ -297,7 +297,7 @@ pub fn setup_steward_with_config(
     )
     .unwrap();
     let member_id_bytes = member_id.member_id_bytes().to_vec();
-    let group = Conversation::new(conversation_id);
+    let group = ConversationQueues::new(conversation_id);
     let mut steward_list =
         DeterministicStewardList::empty(conversation_id.as_bytes().to_vec(), config);
     let _events = steward_list
@@ -314,7 +314,7 @@ pub fn setup_steward_with_config(
     }
 }
 
-/// Pre-join handle for a joiner: the joiner has no MLS service yet (they
+/// Pre-join conversation for a joiner: the joiner has no MLS service yet (they
 /// haven't accepted a welcome), so test code keeps `credentials` and
 /// `storage` to build one via [`OpenMlsService::new_from_welcome`] when a
 /// welcome arrives. KP generation uses the same storage/credentials pair.
@@ -322,7 +322,7 @@ pub struct JoinerHandle {
     pub member_id: Arc<WalletMemberId>,
     pub credentials: Arc<MlsCredentials>,
     pub storage: Arc<MemoryDeMlsStorage>,
-    pub group: Conversation,
+    pub group: ConversationQueues,
     pub mls: Option<TestMls>,
     pub steward_list: DeterministicStewardList,
     pub kp_packet: OutboundPacket,
@@ -332,7 +332,7 @@ pub struct JoinerHandle {
 }
 
 impl JoinerHandle {
-    /// Test convenience: identity bytes stored on the handle; matches the
+    /// Test convenience: identity bytes stored on the conversation; matches the
     /// value the User layer caches on `User::self_member_id`.
     pub fn self_member_id(&self) -> Vec<u8> {
         self.member_id.member_id_bytes().to_vec()
@@ -353,7 +353,7 @@ impl JoinerHandle {
     }
 
     /// Accept raw MLS welcome bytes (the kind `steward_add_joiner`
-    /// returns) and store the resulting MLS service on the handle.
+    /// returns) and store the resulting MLS service on the conversation.
     /// Panics if the welcome doesn't match this joiner's key package —
     /// a test setup bug.
     pub fn accept_welcome(&mut self, welcome_bytes: &[u8]) {
@@ -375,7 +375,7 @@ pub fn setup_joiner_with_config(
     config: StewardListConfig,
 ) -> JoinerHandle {
     let (member_id, credentials, storage) = setup_identity_storage(wallet_hex);
-    let group = Conversation::new(conversation_id);
+    let group = ConversationQueues::new(conversation_id);
     let steward_list = DeterministicStewardList::empty(conversation_id.as_bytes().to_vec(), config);
     let key_package =
         OpenMlsService::<Arc<MemoryDeMlsStorage>>::generate_key_package(&storage, &credentials)

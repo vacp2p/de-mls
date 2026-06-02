@@ -3,7 +3,7 @@
 //! `ProposalKind` is the canonical classifier for membership-vs-governance
 //! proposals. The ordinal order encodes RFC partial-freeze priority
 //! (Commit < StewardElection < Emergency), used by
-//! [`Conversation::partial_freeze_blocks`](crate::core::Conversation::partial_freeze_blocks).
+//! [`ConversationQueues::partial_freeze_blocks`](crate::core::ConversationQueues::partial_freeze_blocks).
 
 use crate::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, conversation_update_request::Payload,
@@ -103,7 +103,7 @@ mod tests {
     }
 
     /// RFC partial-freeze priority: Emergency > StewardElection > Commit.
-    /// [`Conversation::partial_freeze_blocks`] and any future cross-kind
+    /// [`ConversationQueues::partial_freeze_blocks`] and any future cross-kind
     /// priority check rely on this ordering.
     #[test]
     fn priority_ordering() {

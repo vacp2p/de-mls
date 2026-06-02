@@ -9,7 +9,7 @@
 //! [`crate::defaults::DefaultConsensusPlugin`] bundles in-memory backends for tests
 //! and simple deployments.
 //!
-//! Submodules: `conversation` (per-conversation state, handle, state machine,
+//! Submodules: `conversation` (per-conversation state, queues, state machine,
 //! config), `consensus` (pure consensus result application),
 //! `consensus_plugin` ([`crate::core::ConsensusPlugin`] +
 //! [`crate::defaults::DefaultConsensusPlugin`]), `conversation_plugins`
@@ -41,14 +41,14 @@ pub use freeze::{
 };
 pub use inbound::process_inbound;
 
-// ── Per-conversation types: state, handle, state machine, config ──
+// ── Per-conversation types: state, queues, state machine, config ──
 pub use conversation::{
-    BufferedCommitCandidate, Conversation, ConversationConfig, ConversationHandle,
+    BufferedCommitCandidate, Conversation, ConversationConfig, ConversationQueues,
     ConversationState, ConversationStateMachine, DEFAULT_COMMIT_INACTIVITY_DURATION,
     DEFAULT_CONSENSUS_TIMEOUT, DEFAULT_ELECTION_VOTING_DELAY, DEFAULT_LIVENESS_CRITERIA_YES,
     DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION,
     DEFAULT_RECOVERY_INACTIVITY_DURATION, DEFAULT_VOTING_DELAY, FreezeBufferOutcome, OperatingMode,
-    PendingUpdate, ProposalId, member_set, self_leave_proposal_id, target_member_id_of,
+    ProposalId, member_set, self_leave_proposal_id, target_member_id_of,
 };
 
 // ── Consensus result application (pure, synchronous) ──

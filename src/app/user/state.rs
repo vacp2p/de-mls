@@ -249,11 +249,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             // Still-`PendingJoin`-with-MLS is a join that failed after
             // `attach_mls`; fall through to finish it. Re-attach only when
             // absent — overwriting would drop the existing group state.
-            if entry.handle.current_state() != ConversationState::PendingJoin {
+            if entry.conversation.current_state() != ConversationState::PendingJoin {
                 return Ok((conversation_id, entry.tick()));
             }
-            if entry.handle.mls().is_none() {
-                entry.handle.attach_mls(svc);
+            if entry.conversation.mls().is_none() {
+                entry.conversation.attach_mls(svc);
             }
         }
         self.finish_dispatch(

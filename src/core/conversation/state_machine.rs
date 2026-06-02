@@ -1,19 +1,13 @@
 //! Per-conversation state machine.
-//!
-//! Holds the [`ConversationState`] enum and exposes named transition methods.
-//! The app layer wraps this with a timer-driven controller — see
-//! [`crate::app::PhaseTimer`].
 
 use std::fmt::Display;
 
-/// The lifecycle state of a per-conversation session. Transitions are driven
-/// by the app layer through the named methods on [`ConversationStateMachine`];
-/// timing rules live in [`crate::app::PhaseTimer`].
+/// Lifecycle state for a conversation session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConversationState {
     /// Joiner waiting for a welcome.
     PendingJoin,
-    /// Normal operation: members vote, the steward batches and commits.
+    /// Normal operation.
     Working,
     /// Members have stopped accepting new proposals; commit candidates
     /// are buffered for deterministic selection.
@@ -25,14 +19,13 @@ pub enum ConversationState {
     Reelection,
 }
 
-/// Authorization mode for a conversation, orthogonal to [`ConversationState`].
+/// Authorization mode for a conversation.
 ///
-/// `Normal` is the default: only steward-list members may produce
-/// commits. `Recovery` is set when an accepted Layer-3 Deadlock ECP
-/// relaxes the steward gate so any member may produce the next commit
-/// (RFC §Anti-Deadlock); cleared when a fresh election lands. Lives
-/// alongside `ConversationState` because it gates *who can act*, not *what
-/// phase the round is in*.
+/// - `Normal` is the default: only steward-list members may produce
+///   commits.
+/// - `Recovery` is set when an accepted Layer-3 Deadlock ECP relaxes the
+///   steward gate so any member may produce the next commit
+///   (RFC §Anti-Deadlock); cleared when a fresh election lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OperatingMode {
     #[default]
@@ -86,14 +79,9 @@ impl ConversationStateMachine {
         self.state = ConversationState::Working;
     }
 
-    pub fn start_freezing(&mut self) {
-        self.state = ConversationState::Freezing;
-    }
-
-    /// Transition to `Freezing` only from `Working` or `Reelection`
-    /// (RFC: bypass the inactivity timer for ECP-driven freezes).
-    /// Returns `true` on actual transition; `false` is a no-op.
-    pub fn force_freezing(&mut self) -> bool {
+    /// Transition to `Freezing`, allowed only from `Working` or
+    /// `Reelection`. Returns `true` on transition; `false` is a no-op.
+    pub fn start_freezing(&mut self) -> bool {
         match self.state {
             ConversationState::Working | ConversationState::Reelection => {
                 self.state = ConversationState::Freezing;
@@ -131,7 +119,7 @@ mod tests {
     #[test]
     fn named_transitions_set_state() {
         let mut sm = ConversationStateMachine::new_as_member();
-        sm.start_freezing();
+        assert!(sm.start_freezing());
         assert_eq!(sm.current_state(), ConversationState::Freezing);
         sm.start_selection();
         assert_eq!(sm.current_state(), ConversationState::Selection);
@@ -142,31 +130,33 @@ mod tests {
     }
 
     #[test]
-    fn force_freezing_from_working_transitions() {
+    fn start_freezing_from_working_transitions() {
         let mut sm = ConversationStateMachine::new_as_member();
-        assert!(sm.force_freezing());
+        assert!(sm.start_freezing());
         assert_eq!(sm.current_state(), ConversationState::Freezing);
     }
 
     #[test]
-    fn force_freezing_from_reelection_transitions() {
+    fn start_freezing_from_reelection_transitions() {
         let mut sm = ConversationStateMachine::new_as_member();
         sm.start_reelection();
-        assert!(sm.force_freezing());
+        assert!(sm.start_freezing());
         assert_eq!(sm.current_state(), ConversationState::Freezing);
     }
 
-    /// `force_freezing` is a no-op outside `Working`/`Reelection`.
+    /// `start_freezing` is a no-op outside `Working`/`Reelection`.
     #[test]
-    fn force_freezing_noop_outside_working_reelection() {
+    fn start_freezing_noop_outside_working_reelection() {
         for setup in [
-            |sm: &mut ConversationStateMachine| sm.start_freezing(),
+            |sm: &mut ConversationStateMachine| {
+                sm.start_freezing();
+            },
             |sm: &mut ConversationStateMachine| sm.start_selection(),
         ] {
             let mut sm = ConversationStateMachine::new_as_member();
             setup(&mut sm);
             let before = sm.current_state();
-            assert!(!sm.force_freezing());
+            assert!(!sm.start_freezing());
             assert_eq!(sm.current_state(), before);
         }
     }

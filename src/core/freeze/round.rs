@@ -7,7 +7,7 @@ use tracing::info;
 
 use crate::{
     core::{
-        Conversation, CoreError, FreezeBufferOutcome, NoopReason, ProcessResult, ScoreOp,
+        ConversationQueues, CoreError, FreezeBufferOutcome, NoopReason, ProcessResult, ScoreOp,
         StewardListPlugin, conversation::BufferedCommitCandidate,
         freeze::apply::apply_in_priority_order,
     },
@@ -69,7 +69,7 @@ pub fn compute_commit_hash(commit_message: &[u8]) -> CommitHash {
 /// valid MLS wire kinds, non-empty `steward_member_id`, and non-duplicate
 /// hash. No MLS state is mutated.
 pub fn buffer_commit_candidate<M: MlsService>(
-    conversation: &mut Conversation,
+    conversation: &mut ConversationQueues,
     mls: &mut M,
     candidate_msg: CommitCandidate,
 ) -> Result<ProcessResult, CoreError> {
@@ -78,7 +78,7 @@ pub fn buffer_commit_candidate<M: MlsService>(
     // Validate fully before touching freeze-round state: a dup/malformed
     // candidate must not open a round only to return Noop.
     let commit_hash = compute_commit_hash(&candidate_msg.commit_message);
-    if conversation.is_duplicate_commit_candidate(&commit_hash) {
+    if conversation.has_committed_hash(&commit_hash) {
         tracing::debug!(conversation = %conversation_id, "candidate ignored: already committed");
         return Ok(ProcessResult::Noop(NoopReason::AlreadyCommitted));
     }
@@ -115,12 +115,12 @@ pub fn buffer_commit_candidate<M: MlsService>(
     let epoch = mls.current_epoch()?;
 
     // Valid candidate — auto-start a round if there are approved proposals.
-    if conversation.freeze_round().is_none() {
+    if !conversation.is_freeze_round() {
         if conversation.approved_proposals_count() == 0 {
             tracing::debug!(conversation = %conversation_id, "candidate ignored: no approved proposals");
             return Ok(ProcessResult::Noop(NoopReason::NoApprovedProposals));
         }
-        conversation.ensure_freeze_round(epoch);
+        conversation.start_freeze_round(epoch);
     }
 
     let steward = candidate_msg.steward_member_id.clone();
@@ -148,10 +148,6 @@ pub fn buffer_commit_candidate<M: MlsService>(
             })
         }
         // Legitimate runtime states, not errors — drop quietly.
-        FreezeBufferOutcome::SelectionLocked => {
-            Ok(ProcessResult::Noop(NoopReason::SelectionLocked))
-        }
-        FreezeBufferOutcome::StaleEpoch => Ok(ProcessResult::Noop(NoopReason::StaleEpoch)),
         FreezeBufferOutcome::DuplicateHash => {
             Ok(ProcessResult::Noop(NoopReason::DuplicateBufferedHash))
         }
@@ -171,7 +167,7 @@ pub fn buffer_commit_candidate<M: MlsService>(
 /// 3. Apply in priority order, falling back on the next candidate when
 ///    MLS staging rejects the current one.
 pub fn finalize_freeze_round<M: MlsService, St: StewardListPlugin>(
-    conversation: &mut Conversation,
+    conversation: &mut ConversationQueues,
     mls: &mut M,
     steward: &St,
     in_recovery: bool,
@@ -179,8 +175,6 @@ pub fn finalize_freeze_round<M: MlsService, St: StewardListPlugin>(
     self_member_id: &[u8],
 ) -> Result<FreezeFinalizeResult, CoreError> {
     let current_epoch = mls.current_epoch()?;
-    conversation.lock_freeze_round_selection(current_epoch);
-
     let Some(candidates) = conversation.take_round_candidates(current_epoch) else {
         // Drop any local pending commit so the next MLS encrypt
         // doesn't trip on "pending proposal exists".
@@ -235,7 +229,7 @@ pub(super) struct RoundContext {
 
 impl RoundContext {
     fn snapshot<M: MlsService, St: StewardListPlugin>(
-        conversation: &Conversation,
+        conversation: &ConversationQueues,
         mls: &mut M,
         steward: &St,
         current_epoch: u64,
@@ -247,7 +241,7 @@ impl RoundContext {
             .values()
             .filter(|req| produces_mls_action(req))
             .count();
-        let self_remove_pending = conversation.is_pending_removal(self_member_id);
+        let self_remove_pending = conversation.has_approved_removal(self_member_id);
 
         let members = mls.members()?;
         let eligible = conversation.steward_eligibility(&members);

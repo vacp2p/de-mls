@@ -4,9 +4,9 @@
 
 use crate::{
     core::{
-        CommitHash, Conversation, CoreError, FreezeFinalizeResult, FreezeOutcome, ProcessResult,
-        ScoreEvent, ScoreOp, StewardListPlugin, conversation::BufferedCommitCandidate,
-        freeze::round::RoundContext,
+        CommitHash, ConversationQueues, CoreError, FreezeFinalizeResult, FreezeOutcome,
+        ProcessResult, ScoreEvent, ScoreOp, StewardListPlugin,
+        conversation::BufferedCommitCandidate, freeze::round::RoundContext,
     },
     mls_crypto::{MlsProposalOutput, MlsService, StagedCandidateResult},
     protos::de_mls::messages::v1::{
@@ -39,7 +39,7 @@ enum CandidateOutcome {
 /// first incoming attempt wipes our own pending commit, so a
 /// lower-priority local candidate afterwards has nothing to apply.
 pub(super) fn apply_in_priority_order<M: MlsService, St: StewardListPlugin>(
-    conversation: &mut Conversation,
+    conversation: &mut ConversationQueues,
     mls: &mut M,
     steward: &St,
     sorted: Vec<BufferedCommitCandidate>,
@@ -164,7 +164,7 @@ fn record_winner_scores<St: StewardListPlugin>(
 /// Validation happened at commit-creation time, so no re-staging is needed.
 /// Always returns `Terminal(Applied)` on a clean merge.
 fn apply_local_candidate<M: MlsService>(
-    conversation: &mut Conversation,
+    conversation: &mut ConversationQueues,
     mls: &mut M,
     chosen: BufferedCommitCandidate,
     ctx: &RoundContext,
@@ -199,7 +199,7 @@ fn apply_local_candidate<M: MlsService>(
 /// Caller must have discarded any own pending commit first — MLS allows
 /// only one per conversation at a time.
 fn apply_incoming_candidate<M: MlsService, St: StewardListPlugin>(
-    conversation: &mut Conversation,
+    conversation: &mut ConversationQueues,
     mls: &mut M,
     steward: &St,
     chosen: BufferedCommitCandidate,
@@ -359,7 +359,7 @@ where
 /// Compares both sides as sorted `(kind_tag, &member_id)` projections —
 /// no `MlsProposalOutput` allocation, no per-element clone.
 fn validate_commit_candidate(
-    conversation: &Conversation,
+    conversation: &ConversationQueues,
     sender_id: &[u8],
     mls_actions: &[MlsProposalOutput],
     ctx: &RoundContext,
@@ -416,7 +416,7 @@ fn action_projection_from_mls(action: &MlsProposalOutput) -> (u8, &[u8]) {
 /// §Anti-Deadlock: any member MAY commit to restore liveness; mirrors
 /// the relaxed gate in `create_commit_candidate`).
 fn check_commit_sender_authorized<St: StewardListPlugin>(
-    conversation: &Conversation,
+    conversation: &ConversationQueues,
     steward: &St,
     commit_sender: &[u8],
     ctx: &RoundContext,
@@ -449,16 +449,16 @@ fn check_commit_sender_authorized<St: StewardListPlugin>(
 /// dropped). Caller surfaces the batch through `FreezeFinalizeResult` so
 /// the app layer can archive it for UI history.
 fn record_applied_commit(
-    conversation: &mut Conversation,
+    conversation: &mut ConversationQueues,
     commit_hash: CommitHash,
 ) -> Vec<ConversationUpdateRequest> {
-    conversation.record_committed_batch(commit_hash);
+    conversation.insert_committed_hash(commit_hash);
     let snapshot = if let Some(target) = conversation.take_urgent_commit_target() {
         // Urgent commit: leave the rest of the queue for the next cycle.
         conversation.drop_approved_removals_for(&target);
         Vec::new()
     } else {
-        conversation.clear_approved_proposals()
+        conversation.drain_approved_proposals()
     };
     conversation.clear_freeze_round();
     snapshot

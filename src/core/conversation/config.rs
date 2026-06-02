@@ -1,7 +1,8 @@
-//! Per-conversation timing + protocol configuration with sensible defaults.
+//! Per-conversation timing and policy configuration.
 
 use std::time::Duration;
 
+use crate::app::DEFAULT_MAX_RETRIES;
 use crate::core::ProposalKind;
 use crate::protos::de_mls::messages::v1::TimingConfig;
 
@@ -34,9 +35,6 @@ pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
 
 pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
 
-/// Default `max_reelection_attempts`. See [`crate::core::DEFAULT_MAX_RETRIES`].
-pub use crate::core::DEFAULT_MAX_RETRIES;
-
 /// Per-conversation timing config. Plug-in domains (scoring, steward list)
 /// own their own configs on the respective plug-ins — see
 /// [`crate::core::ScoringConfig`] and [`crate::core::StewardListConfig`].
@@ -45,8 +43,9 @@ pub struct ConversationConfig {
     /// RFC §Inactivity Timer #1: how long the epoch steward has to commit
     /// approved proposals before honest members enter the freeze round.
     pub commit_inactivity_duration: Duration,
-    /// Freeze window before deterministic selection. Defaults to
-    /// `commit_inactivity_duration / 2`.
+    /// Freeze window before deterministic selection.
+    ///
+    /// Defaults to `commit_inactivity_duration / 2`.
     pub freeze_duration: Duration,
     /// RFC §Inactivity Timer #2: shorter inactivity window applied during
     /// Layer 2 / Layer 3 recovery so retries don't burn a full epoch.
@@ -104,11 +103,8 @@ impl ConversationConfig {
 
     /// Overwrite the duration fields from a wire [`TimingConfig`]. Used on
     /// the joiner side when applying `ConversationSync`. Non-timing fields
-    /// (`liveness_criteria_yes`, `pending_update_max_epochs`) are not in
-    /// `TimingConfig` and stay untouched.
+    /// (`liveness_criteria_yes`, `pending_update_max_epochs`) stay untouched.
     pub fn apply_timing(&mut self, timing: &TimingConfig) {
-        // A zero wire duration would make its timer fire immediately (a
-        // malformed-sync DoS); treat zero as "unset" and keep the local value.
         apply_nonzero_ms(
             &mut self.commit_inactivity_duration,
             timing.commit_inactivity_duration_ms,
@@ -123,7 +119,9 @@ impl ConversationConfig {
     }
 }
 
-/// Overwrite `field` with `wire_ms` unless it is zero (treated as "unset").
+/// Overwrite `field` with `wire_ms` unless it is zero.
+/// A zero wire duration would make its timer fire immediately (a
+/// malformed-sync DoS); treat zero as "unset" and keep the local value.
 fn apply_nonzero_ms(field: &mut Duration, wire_ms: u64) {
     if wire_ms != 0 {
         *field = Duration::from_millis(wire_ms);
@@ -148,9 +146,6 @@ impl From<&ConversationConfig> for TimingConfig {
 mod tests {
     use super::*;
 
-    /// `TimingConfig` ↔ `ConversationConfig` round-trip preserves all
-    /// five duration fields. Distinct values per field catch accidental
-    /// swaps in either direction.
     #[test]
     fn timing_config_round_trip() {
         let original = ConversationConfig {
@@ -177,7 +172,6 @@ mod tests {
         assert_eq!(applied.consensus_timeout, Duration::from_millis(500));
     }
 
-    /// A zero wire duration is rejected as "unset"; the local value stays.
     #[test]
     fn apply_timing_ignores_zero_durations() {
         let mut config = ConversationConfig {
@@ -200,8 +194,6 @@ mod tests {
         assert_eq!(config.freeze_duration, Duration::from_millis(250));
     }
 
-    /// Steward-election proposals get the shorter `election_voting_delay`;
-    /// other kinds get `voting_delay`.
     #[test]
     fn voting_delay_dispatch_on_proposal_kind() {
         let config = ConversationConfig {

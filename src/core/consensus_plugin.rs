@@ -44,10 +44,7 @@ pub trait ConsensusPlugin: 'static {
     /// All peers on a network must agree.
     type Signer: ConsensusSignatureScheme + Clone + 'static;
 
-    /// Build a fresh storage handle. Called once at `User` init; the handle
-    /// is cloned per conversation so all per-conv `ConsensusService` instances
-    /// share one underlying persistence (see upstream "per-scope service
-    /// composition" pattern).
+    /// Build a fresh storage.
     fn new_storage() -> Self::ConsensusStorage;
 
     /// Build a fresh event bus for one conversation. Each per-conv

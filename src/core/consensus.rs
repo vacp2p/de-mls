@@ -1,6 +1,6 @@
 //! Pure consensus result application.
 //!
-//! Updates a [`Conversation`]'s proposal queues in response to a consensus
+//! Updates a [`ConversationQueues`] in response to a consensus
 //! outcome. No I/O, no service calls. Score deltas for emergency outcomes
 //! are derived alongside in [`crate::core::emergency_score_ops`].
 //!
@@ -11,7 +11,7 @@
 use tracing::info;
 
 use crate::{
-    core::{Conversation, CoreError, target_member_id_of},
+    core::{ConversationQueues, CoreError, target_member_id_of},
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, RemoveMember, StewardElectionProposal, ViolationEvidence,
         ViolationType, conversation_update_request,
@@ -37,7 +37,7 @@ pub enum ConsensusApplyResult {
     /// A membership proposal (Add/Remove) was rejected. Caller drops the
     /// buffered pending-update for `target`.
     RejectedMembership { target: Vec<u8> },
-    /// Layer-3 `Deadlock` ECP accepted. Caller switches the handle's
+    /// Layer-3 `Deadlock` ECP accepted. Caller switches the conversation's
     /// [`crate::core::OperatingMode`] to `Recovery` (any-member commit) and
     /// bypasses the inactivity timer. Cleared on the next accepted election.
     RecoveryModeOpened,
@@ -77,7 +77,7 @@ pub enum ConsensusApplyResult {
 /// The caller decodes the payload once and passes the request in; this
 /// function never re-parses bytes.
 pub fn apply_consensus_result(
-    conversation: &mut Conversation,
+    conversation: &mut ConversationQueues,
     proposal_id: u32,
     approved: bool,
     request: &ConversationUpdateRequest,
@@ -116,10 +116,10 @@ pub fn apply_consensus_result(
     // MLS rejects a duplicate removal at commit time, so keep the first
     // entry and drop the second.
     if let Some(target) = &removal_target
-        && conversation.is_pending_removal(target)
+        && conversation.has_approved_removal(target)
     {
         if is_owner {
-            conversation.mark_proposal_as_rejected(proposal_id);
+            conversation.remove_voting_proposal(proposal_id);
         }
         info!(
             proposal_id,
@@ -154,7 +154,7 @@ pub fn apply_consensus_result(
             conversation.insert_approved_proposal(proposal_id, request.clone());
         }
     } else if is_owner {
-        conversation.mark_proposal_as_rejected(proposal_id);
+        conversation.remove_voting_proposal(proposal_id);
     }
 
     if let Some(ev) = evidence.as_ref() {
@@ -201,7 +201,7 @@ pub fn apply_consensus_result(
 /// back to the app for validation and install; NO drops the owner's
 /// voting-queue entry.
 fn apply_election_outcome(
-    conversation: &mut Conversation,
+    conversation: &mut ConversationQueues,
     proposal_id: u32,
     approved: bool,
     election: StewardElectionProposal,
@@ -221,7 +221,7 @@ fn apply_election_outcome(
         ConsensusApplyResult::ElectionAccepted(election)
     } else {
         if is_owner {
-            conversation.mark_proposal_as_rejected(proposal_id);
+            conversation.remove_voting_proposal(proposal_id);
         }
         info!(proposal_id, "steward election proposal rejected");
         ConsensusApplyResult::ElectionRejected
@@ -324,14 +324,14 @@ mod tests {
     #[test]
     fn election_yes_owner_returns_outcome_and_clears_queue() {
         let config = StewardListConfig::new(2, 5).unwrap();
-        let mut conversation = Conversation::new("test-conversation");
+        let mut conversation = ConversationQueues::new("test-conversation");
         let mems = members(&[1, 2, 3, 4, 5]);
         let sn = mems.len().min(config.sn_max);
         let list = StewardList::generate(10, b"test-conversation", &mems, sn, config, 0).unwrap();
         let request = election_request(list.members().to_vec(), 10);
 
         let proposal_id = 42;
-        conversation.store_voting_proposal(proposal_id, request.clone());
+        conversation.insert_voting_proposal(proposal_id, request.clone());
 
         let result =
             apply_consensus_result(&mut conversation, proposal_id, true, &request).unwrap();
@@ -348,11 +348,11 @@ mod tests {
     /// queue empty.
     #[test]
     fn election_no_returns_election_rejected() {
-        let mut conversation = Conversation::new("test-conversation");
+        let mut conversation = ConversationQueues::new("test-conversation");
         let request = election_request(vec![member(1), member(2)], 10);
 
         let proposal_id = 43;
-        conversation.store_voting_proposal(proposal_id, request.clone());
+        conversation.insert_voting_proposal(proposal_id, request.clone());
 
         let result =
             apply_consensus_result(&mut conversation, proposal_id, false, &request).unwrap();
@@ -365,7 +365,7 @@ mod tests {
     /// (non-owner path), and doesn't touch any proposal queues.
     #[test]
     fn election_yes_nonowner_returns_outcome_without_queue_side_effects() {
-        let mut conversation = Conversation::new("test-conversation");
+        let mut conversation = ConversationQueues::new("test-conversation");
         let request = election_request(vec![member(1), member(2), member(3)], 5);
 
         let proposal_id = 44;
@@ -392,7 +392,7 @@ mod tests {
     /// when an entry for the same target is already in `approved_proposals`.
     #[test]
     fn removal_deduped_when_target_already_pending() {
-        let mut conversation = Conversation::new("test-conversation");
+        let mut conversation = ConversationQueues::new("test-conversation");
         let target = member(7);
 
         // First removal — non-owner path inserts straight into approved.
@@ -425,7 +425,7 @@ mod tests {
     /// queue does not retain an outcome we deliberately discarded.
     #[test]
     fn removal_dedup_clears_owner_voting_entry() {
-        let mut conversation = Conversation::new("test-conversation");
+        let mut conversation = ConversationQueues::new("test-conversation");
         let target = member(7);
 
         // Pre-existing approved removal from an unrelated path.
@@ -436,7 +436,7 @@ mod tests {
         // This user submits their own removal and it passes consensus.
         let owner_id = 21;
         let owner_request = remove_request(target.clone());
-        conversation.store_voting_proposal(owner_id, owner_request.clone());
+        conversation.insert_voting_proposal(owner_id, owner_request.clone());
 
         let result =
             apply_consensus_result(&mut conversation, owner_id, true, &owner_request).unwrap();
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn ecp_score_below_threshold_yes_returns_urgent_removal() {
-        let mut conversation = Conversation::new("urgent-yes");
+        let mut conversation = ConversationQueues::new("urgent-yes");
         let target = member(7);
 
         let request = score_below_threshold_request(target.clone(), member(1));
@@ -487,7 +487,7 @@ mod tests {
 
     #[test]
     fn ecp_score_below_threshold_no_does_not_mark_urgent() {
-        let mut conversation = Conversation::new("urgent-no");
+        let mut conversation = ConversationQueues::new("urgent-no");
         let request = score_below_threshold_request(member(7), member(1));
 
         let result = apply_consensus_result(&mut conversation, 101, false, &request).unwrap();
@@ -506,7 +506,7 @@ mod tests {
 
     #[test]
     fn ecp_deadlock_yes_returns_recovery_mode_opened() {
-        let mut conversation = Conversation::new("deadlock-yes");
+        let mut conversation = ConversationQueues::new("deadlock-yes");
 
         let request = deadlock_request(member(1));
         let result = apply_consensus_result(&mut conversation, 200, true, &request).unwrap();
@@ -522,7 +522,7 @@ mod tests {
 
     #[test]
     fn ecp_deadlock_no_returns_no_action() {
-        let mut conversation = Conversation::new("deadlock-no");
+        let mut conversation = ConversationQueues::new("deadlock-no");
 
         let request = deadlock_request(member(1));
         let result = apply_consensus_result(&mut conversation, 201, false, &request).unwrap();
@@ -534,13 +534,13 @@ mod tests {
     /// enqueues into `approved_proposals` and produces no score ops.
     #[test]
     fn regular_remove_member_enqueues_without_score_ops() {
-        let mut conversation = Conversation::new("regular-yes");
+        let mut conversation = ConversationQueues::new("regular-yes");
         let target = member(7);
 
         let request = remove_request(target.clone());
 
         let proposal_id = 70;
-        conversation.store_voting_proposal(proposal_id, request.clone());
+        conversation.insert_voting_proposal(proposal_id, request.clone());
 
         apply_consensus_result(&mut conversation, proposal_id, true, &request).unwrap();
 
@@ -553,7 +553,7 @@ mod tests {
     /// threshold ECPs transform into a removal.
     #[test]
     fn regular_emergency_yes_does_not_queue_remove_member() {
-        let mut conversation = Conversation::new("no-transform");
+        let mut conversation = ConversationQueues::new("no-transform");
         let creator = member(1);
         let target = member(7);
 
@@ -563,7 +563,7 @@ mod tests {
             .unwrap();
 
         let proposal_id = 300;
-        conversation.store_voting_proposal(proposal_id, request.clone());
+        conversation.insert_voting_proposal(proposal_id, request.clone());
 
         apply_consensus_result(&mut conversation, proposal_id, true, &request).unwrap();
 

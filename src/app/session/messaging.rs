@@ -71,7 +71,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     ) -> Result<SessionTick, UserError> {
         let (transport, packet) = {
             let mut s = arc.write_or_err("session")?;
-            let state = s.handle.current_state();
+            let state = s.conversation.current_state();
             if matches!(
                 state,
                 ConversationState::PendingJoin
@@ -90,7 +90,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let app_id = Arc::clone(&s.app_id);
             let transport = Arc::clone(s.transport());
             let packet = s
-                .handle
+                .conversation
                 .expect_mls_mut()?
                 .build_message(&app_msg, &app_id)?;
             (transport, packet)
@@ -109,7 +109,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     ) -> Result<SessionTick, UserError> {
         {
             let s = arc.read_or_err("session")?;
-            let state = s.handle.current_state();
+            let state = s.conversation.current_state();
             if state != ConversationState::Working {
                 return Err(UserError::ConversationBlocked(state.to_string()));
             }

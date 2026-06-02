@@ -57,7 +57,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             APP_MSG_SUBTOPIC => {
                 let result = {
                     let mut entry = entry_arc.write_or_err("session")?;
-                    if entry.handle.mls().is_none() {
+                    if entry.conversation.mls().is_none() {
                         // PendingJoin: no MLS to decrypt with yet. Dropped,
                         // not buffered — replay is a separate recovery track.
                         debug!(
@@ -66,7 +66,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                         );
                         return Ok(SessionTick::empty());
                     }
-                    entry.handle.process_inbound(&packet.payload)?
+                    entry.conversation.process_inbound(&packet.payload)?
                 };
                 self.finish_dispatch(&conversation_id, &entry_arc, result)
                     .await?;
@@ -118,7 +118,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let already_member = {
             let entry = entry_arc.read_or_err("session")?;
             entry
-                .handle
+                .conversation
                 .mls()
                 .map(|m| m.is_member(&invite.member_id))
                 .unwrap_or(false)

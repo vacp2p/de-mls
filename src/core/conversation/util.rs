@@ -1,5 +1,4 @@
-//! Cross-cutting utilities used by Conversation, inbound dispatch, and
-//! the app layer. Pure functions — no state, no I/O.
+//! Cross-cutting utilities used by Conversation, inbound dispatch, and the app layer.
 
 use std::collections::HashSet;
 
@@ -18,10 +17,7 @@ pub fn self_leave_proposal_id(member_id: &[u8]) -> u32 {
 
 /// True iff the `(proposal_id, request)` pair is an auto-approved self-leave
 /// (identified by the deterministic ID signature).
-pub(crate) fn is_auto_approved_entry(
-    proposal_id: u32,
-    request: &ConversationUpdateRequest,
-) -> bool {
+pub fn is_auto_approved_entry(proposal_id: u32, request: &ConversationUpdateRequest) -> bool {
     match request.payload.as_ref() {
         Some(conversation_update_request::Payload::RemoveMember(r)) => {
             proposal_id == self_leave_proposal_id(&r.member_id)

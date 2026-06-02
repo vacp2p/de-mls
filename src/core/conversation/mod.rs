@@ -2,17 +2,18 @@
 //! state machine, and durable config.
 //!
 //! Layout:
-//! - [`conversation`] — the [`Conversation`] struct + protocol queues +
+//! - [`queues`] — the [`ConversationQueues`] struct + protocol queues +
 //!   dedup caches.
-//! - [`handle`] — [`ConversationHandle`] (data + protocol-function wrappers,
-//!   owned by the orchestrator).
+//! - [`conversation`] — [`Conversation`], the MLS-bound aggregate
+//!   (queues + MLS service + plug-ins + state machine), owned by the
+//!   orchestrator.
 //! - [`state_machine`] — passive state enum + named transitions.
 //! - [`config`] — durable timing/protocol config.
 
 mod config;
 #[allow(clippy::module_inception)]
 mod conversation;
-mod handle;
+mod queues;
 mod state_machine;
 mod util;
 
@@ -22,9 +23,7 @@ pub use config::{
     DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION,
     DEFAULT_RECOVERY_INACTIVITY_DURATION, DEFAULT_VOTING_DELAY,
 };
-pub use conversation::{
-    BufferedCommitCandidate, Conversation, FreezeBufferOutcome, PendingUpdate, ProposalId,
-};
-pub use handle::ConversationHandle;
+pub use conversation::Conversation;
+pub use queues::{BufferedCommitCandidate, ConversationQueues, FreezeBufferOutcome, ProposalId};
 pub use state_machine::{ConversationState, ConversationStateMachine, OperatingMode};
 pub use util::{member_set, self_leave_proposal_id, target_member_id_of};

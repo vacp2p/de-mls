@@ -1,5 +1,5 @@
 //! Crate-internal test fixtures: minimal trait impls for tests that need
-//! to construct a [`crate::core::ConversationHandle`] or [`crate::app::SessionRunner`]
+//! to construct a [`crate::core::Conversation`] or [`crate::app::SessionRunner`]
 //! without standing up real MLS / scoring / steward backends.
 //!
 //! Most methods are `unreachable!()` — tests should only exercise the
@@ -121,7 +121,7 @@ impl crate::ds::DeliveryService for UnusedTransport {
 }
 
 /// MLS service that errors on every operation. Lets tests construct a
-/// `ConversationHandle` whose early-return paths never invoke MLS.
+/// `Conversation` whose early-return paths never invoke MLS.
 pub(crate) struct UnusedMls;
 
 impl MlsService for UnusedMls {
@@ -326,7 +326,7 @@ impl PeerScoringPlugin for StubScoring {
 }
 
 /// Test plug-in bundle wiring the three stubs into the [`ConversationPluginsFactory`]
-/// trait so tests can construct [`crate::core::ConversationHandle`] and
+/// trait so tests can construct [`crate::core::Conversation`] and
 /// [`crate::app::SessionRunner`] under their single `<CP>` parameter. The
 /// factory methods are `unreachable!()` — tests build plug-in instances
 /// directly and hand them to the handle/runner constructors.

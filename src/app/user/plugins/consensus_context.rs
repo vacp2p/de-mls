@@ -1,6 +1,6 @@
 //! [`ConsensusContext`] — User-level consensus-plugin state.
 //!
-//! Holds the shared storage handle + signer once on the User; mints fresh
+//! Holds the shared storage + signer once on the User; mints fresh
 //! per-conversation [`PluginConsensus`] services on demand and tears down a
 //! conversation's scope on leave. Each per-conv service gets its own
 //! private event bus (per upstream "service shape" recommendation).
@@ -26,7 +26,7 @@ impl<P: ConsensusPlugin> ConsensusContext<P> {
     }
 
     /// Build a fresh per-conversation `ConsensusService`. Clones the shared
-    /// storage handle so all per-conv services share one underlying
+    /// storage so all per-conv services share one underlying
     /// persistence (scope-keyed); clones the signer; mints a fresh private
     /// event bus.
     pub fn build_service(&self) -> PluginConsensus<P> {

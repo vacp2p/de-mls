@@ -80,7 +80,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     (
                         s.consensus.clone(),
                         s.conversation_id.clone(),
-                        s.handle
+                        s.conversation
                             .conversation
                             .is_consensus_outcome_applied(proposal_id),
                     )
@@ -158,21 +158,21 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         };
         if let Some(req) = decoded.as_ref() {
             let mut s = arc.write_or_err("session")?;
-            let current_epoch = match s.handle.mls() {
+            let current_epoch = match s.conversation.mls() {
                 Some(mls) => mls.current_epoch()?,
                 None => 0,
             };
             match &req.payload {
                 Some(conversation_update_request::Payload::EmergencyCriteria(_)) => {
-                    s.handle
+                    s.conversation
                         .conversation
-                        .observe_emergency(proposal.proposal_id);
+                        .insert_emergency(proposal.proposal_id);
                 }
                 Some(conversation_update_request::Payload::MemberInvite(_))
                 | Some(conversation_update_request::Payload::RemoveMember(_)) => {
-                    s.handle
+                    s.conversation
                         .conversation
-                        .buffer_pending_update(req.clone(), current_epoch);
+                        .insert_pending_update(req.clone(), current_epoch);
                 }
                 _ => {}
             }
@@ -199,8 +199,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let (delay, vote) = {
                 let s = arc.read_or_err("session")?;
                 (
-                    s.handle.config.voting_delay_for(kind),
-                    s.handle.config.liveness_criteria_yes,
+                    s.conversation.config.voting_delay_for(kind),
+                    s.conversation.config.liveness_criteria_yes,
                 )
             };
             arc.write_or_err("session")?
@@ -224,7 +224,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             .into();
             let app_id = Arc::clone(&s.app_id);
             let conversation_id = s.conversation_id.clone();
-            let mls = s.handle.expect_mls_mut()?;
+            let mls = s.conversation.expect_mls_mut()?;
             let members = mls.members().unwrap_or_default();
             let packet = mls.build_message(&msg, &app_id)?;
             (packet, members, conversation_id)
@@ -248,7 +248,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     async fn on_conversation_updated(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
         let mls_members = {
             let s = arc.read_or_err("session")?;
-            match s.handle.mls() {
+            match s.conversation.mls() {
                 Some(mls) => mls.members().unwrap_or_default(),
                 None => Vec::new(),
             }
@@ -263,8 +263,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // so whatever retry cycle we were in belongs to the previous epoch.
         let working_event = {
             let mut s = arc.write_or_err("session")?;
-            s.handle.steward_list.reset_retry();
-            let state = s.handle.current_state();
+            s.conversation.steward_list.reset_retry();
+            let state = s.conversation.current_state();
             if matches!(
                 state,
                 ConversationState::Working
@@ -293,7 +293,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// list installs and closes the window.
     async fn maybe_close_recovery_window(arc: &Arc<RwLock<Self>>) {
         let in_recovery_mode = match arc.read_or_err("session") {
-            Ok(s) => s.handle.is_in_recovery_mode(),
+            Ok(s) => s.conversation.is_in_recovery_mode(),
             Err(e) => {
                 tracing::warn!(error = %e, "recovery window check skipped: session lock poisoned");
                 return;
@@ -326,7 +326,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // runs the storage I/O — otherwise the guard's `if let` scrutinee
         // lifetime would keep every other task on this session blocked
         // throughout the delete.
-        let taken_mls = arc.write_or_err("session")?.handle.take_mls();
+        let taken_mls = arc.write_or_err("session")?.conversation.take_mls();
         if let Some(mut mls) = taken_mls {
             // The leave is already committed (`Leaving` emitted, MLS
             // detached); a delete failure must log and continue, else the
@@ -354,18 +354,23 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         }
         let (event, outbound) = {
             let mut s = arc.write_or_err("session")?;
-            if s.handle.current_state() != ConversationState::Working {
+            if s.conversation.current_state() != ConversationState::Working {
                 return Ok(());
             }
 
-            let event = s.start_freezing();
-            let epoch = s.handle.expect_mls()?.current_epoch()?;
-            s.handle.conversation.ensure_freeze_round(epoch);
+            let Some(event) = s.start_freezing() else {
+                return Ok(());
+            };
+            let epoch = s.conversation.expect_mls()?.current_epoch()?;
+            s.conversation.conversation.start_freeze_round(epoch);
 
             let self_member_id = Arc::clone(&s.self_member_id);
             let app_id = Arc::clone(&s.app_id);
-            let outbound = if s.handle.steward_list.is_steward(&self_member_id) {
-                match s.handle.create_commit_candidate(&self_member_id, &app_id) {
+            let outbound = if s.conversation.steward_list.is_steward(&self_member_id) {
+                match s
+                    .conversation
+                    .create_commit_candidate(&self_member_id, &app_id)
+                {
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(
@@ -401,14 +406,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     ) -> Result<(), UserError> {
         let (members, current_epoch, local_default_peer_score, conversation_id) = {
             let s = arc.read_or_err("session")?;
-            if s.handle.steward_list.current_list().is_some() {
+            if s.conversation.steward_list.current_list().is_some() {
                 return Ok(());
             }
-            let mls = s.handle.expect_mls()?;
+            let mls = s.conversation.expect_mls()?;
             (
                 mls.members()?,
                 mls.current_epoch()?,
-                s.handle.scoring.default_score(),
+                s.conversation.scoring.default_score(),
                 s.conversation_id.clone(),
             )
         };
@@ -446,17 +451,19 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         protocol_config.allow_subset_candidates = sync.allow_subset_candidates;
 
         let sn = sync.steward_members.len();
-        self.handle.steward_list.set_config(protocol_config);
-        let _events = self.handle.steward_list.install_list(
+        self.conversation.steward_list.set_config(protocol_config);
+        let _events = self.conversation.steward_list.install_list(
             sync.election_epoch,
             &sync.steward_members,
             sn,
             sync.retry_round,
         )?;
-        self.handle
+        self.conversation
             .steward_list
             .set_max_retries(sync.max_reelection_attempts);
-        self.handle.scoring.set_threshold(sync.threshold_peer_score);
+        self.conversation
+            .scoring
+            .set_threshold(sync.threshold_peer_score);
         let snapshot = ScoreSnapshot {
             diverged: sync
                 .peer_scores
@@ -469,11 +476,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // member in this snapshot — they'll submit
         // `SCORE_BELOW_THRESHOLD` from their own event chain. Drop our
         // events to avoid duplicate proposals from joiners.
-        let _events = self.handle.scoring.apply_snapshot(&snapshot);
-        self.handle.config.liveness_criteria_yes = sync.liveness_criteria_yes;
-        self.handle.config.pending_update_max_epochs = sync.pending_update_max_epochs;
+        let _events = self.conversation.scoring.apply_snapshot(&snapshot);
+        self.conversation.config.liveness_criteria_yes = sync.liveness_criteria_yes;
+        self.conversation.config.pending_update_max_epochs = sync.pending_update_max_epochs;
         if let Some(timing) = &sync.timing {
-            self.handle.config.apply_timing(timing);
+            self.conversation.config.apply_timing(timing);
         }
         Ok(())
     }

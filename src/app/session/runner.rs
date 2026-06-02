@@ -1,5 +1,5 @@
 //! [`SessionRunner`] struct, constructor, and the state-machine + phase-timer
-//! coordinators that compose [`crate::core::ConversationHandle`] with
+//! coordinators that compose [`crate::core::Conversation`] with
 //! [`crate::app::PhaseTimer`] under one lock. Per-conversation method
 //! bodies (proposal submission, voting, inbound dispatch, etc.) live in
 //! sibling modules and extend `SessionRunner` via additional `impl` blocks.
@@ -17,8 +17,8 @@ use hashgraph_like_consensus::events::ConsensusEventBus;
 use crate::{
     app::{PhaseTimer, SessionTick, UserError},
     core::{
-        ConsensusPlugin, Conversation, ConversationConfig, ConversationHandle,
-        ConversationPluginsFactory, ConversationState, ConversationStateMachine, PluginConsensus,
+        ConsensusPlugin, Conversation, ConversationConfig, ConversationPluginsFactory,
+        ConversationQueues, ConversationState, ConversationStateMachine, PluginConsensus,
         SessionEvent,
     },
     ds::{OutboundPacket, SharedDeliveryService},
@@ -60,7 +60,7 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Conversation name. Identifies this session in the User registry and
     /// is used to construct scope keys for consensus operations.
     pub conversation_id: String,
-    pub(crate) handle: ConversationHandle<CP>,
+    pub(crate) conversation: Conversation<CP>,
     /// Per-conversation consensus service. Owns this conversation's scope
     /// in the shared storage and a private event bus. Constructed at
     /// conversation creation by `User::build_consensus_service`.
@@ -71,7 +71,7 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// [`crate::app::User::start_conversation`] before the runner is
     /// registered.
     pub(crate) consensus_rx: ConsensusReceiver<P>,
-    /// Wall-clock anchor combined with `handle.state_machine` by
+    /// Wall-clock anchor combined with `conversation.state_machine` by
     /// coordinator methods.
     phase_timer: PhaseTimer,
     /// Pending auto-votes by `proposal_id`. Walked by
@@ -90,8 +90,7 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// [`send_packet`], a direct sync publish.
     transport: SharedDeliveryService,
     /// Identity bytes derived from `User.member_id.member_id_bytes()` at
-    /// session construction. Stored as `Arc<[u8]>` so hot-path session
-    /// code can clone the handle cheaply across lock-guard drops.
+    /// session construction.
     pub self_member_id: Arc<[u8]>,
     /// Display form derived from `User.member_id.member_id_display()` at
     /// session construction. `Arc<str>` for the same reason as
@@ -109,12 +108,12 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Build a fresh runner. Creator path passes `Some(mls)`; joiner
     /// path passes `None` and attaches the MLS service later via
-    /// `handle.attach_mls`. `consensus_rx` is a subscriber on
+    /// `conversation.attach_mls`. `consensus_rx` is a subscriber on
     /// `consensus.event_bus()`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         conversation_id: String,
-        conversation: Conversation,
+        conversation: ConversationQueues,
         mls: Option<CP::Mls>,
         state_machine: ConversationStateMachine,
         phase_timer: PhaseTimer,
@@ -130,7 +129,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     ) -> Self {
         Self {
             conversation_id,
-            handle: ConversationHandle::new(
+            conversation: Conversation::new(
                 conversation,
                 mls,
                 state_machine,
@@ -206,15 +205,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// wake us at the right time.
     fn phase_deadline(&self) -> Option<Instant> {
         let anchor = self.phase_timer.started_at()?;
-        let cfg = &self.handle.config;
-        match self.handle.current_state() {
+        let cfg = &self.conversation.config;
+        match self.conversation.current_state() {
             ConversationState::Freezing => Some(anchor + cfg.freeze_duration),
             ConversationState::PendingJoin => Some(anchor + cfg.commit_inactivity_duration * 3),
             ConversationState::Working => {
-                if self.handle.conversation.approved_proposals_count() == 0 {
+                if self.conversation.conversation.approved_proposals_count() == 0 {
                     return None;
                 }
-                let dur = if self.handle.is_in_recovery_mode() {
+                let dur = if self.conversation.is_in_recovery_mode() {
                     cfg.recovery_inactivity_duration
                 } else {
                     cfg.commit_inactivity_duration
@@ -287,26 +286,19 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     // ── State-machine + phase-timer coordinators ────────────────────
 
     pub(crate) fn start_working(&mut self) -> ConversationState {
-        self.handle.state_machine.start_working();
+        self.conversation.state_machine.start_working();
         self.phase_timer.clear();
         info!(state = "Working", "state transition");
         ConversationState::Working
     }
 
-    pub(crate) fn start_freezing(&mut self) -> ConversationState {
-        self.handle.state_machine.start_freezing();
-        self.phase_timer.start();
-        info!(state = "Freezing", "state transition");
-        ConversationState::Freezing
-    }
-
-    /// Bypass the inactivity timer and enter Freezing immediately. Returns
-    /// `Some(Freezing)` on transition (only fires from Working or
-    /// Reelection); `None` from other states.
-    pub(crate) fn force_freezing(&mut self) -> Option<ConversationState> {
-        if self.handle.state_machine.force_freezing() {
+    /// Enter `Freezing` from `Working` or `Reelection`, starting the freeze
+    /// phase timer. Returns `Some(Freezing)` on transition; `None` (no-op)
+    /// from any other state.
+    pub(crate) fn start_freezing(&mut self) -> Option<ConversationState> {
+        if self.conversation.state_machine.start_freezing() {
             self.phase_timer.start();
-            info!(state = "Freezing", "state transition (forced)");
+            info!(state = "Freezing", "state transition");
             Some(ConversationState::Freezing)
         } else {
             None
@@ -314,13 +306,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     }
 
     pub(crate) fn start_selection(&mut self) -> ConversationState {
-        self.handle.state_machine.start_selection();
+        self.conversation.state_machine.start_selection();
         info!(state = "Selection", "state transition");
         ConversationState::Selection
     }
 
     pub(crate) fn start_reelection(&mut self) -> ConversationState {
-        self.handle.state_machine.start_reelection();
+        self.conversation.state_machine.start_reelection();
         self.phase_timer.clear();
         info!(state = "Reelection", "state transition");
         ConversationState::Reelection
@@ -329,18 +321,18 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// `true` once 3× `commit_inactivity_duration` has passed in
     /// `PendingJoin` without a welcome.
     pub fn is_pending_join_expired(&self) -> bool {
-        self.handle.current_state() == ConversationState::PendingJoin
+        self.conversation.current_state() == ConversationState::PendingJoin
             && self
                 .phase_timer
-                .elapsed_since_anchor(self.handle.config.commit_inactivity_duration * 3)
+                .elapsed_since_anchor(self.conversation.config.commit_inactivity_duration * 3)
     }
 
     /// `true` once the freeze window elapsed while in `Freezing`.
     pub fn is_freeze_timed_out(&self) -> bool {
-        self.handle.current_state() == ConversationState::Freezing
+        self.conversation.current_state() == ConversationState::Freezing
             && self
                 .phase_timer
-                .elapsed_since_anchor(self.handle.config.freeze_duration)
+                .elapsed_since_anchor(self.conversation.config.freeze_duration)
     }
 
     /// Drives the "steward waited too long to commit" transition into
@@ -353,7 +345,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         approved_proposals_count: usize,
         inactivity_duration: Duration,
     ) -> Option<ConversationState> {
-        if self.handle.current_state() != ConversationState::Working
+        if self.conversation.current_state() != ConversationState::Working
             || approved_proposals_count == 0
         {
             return None;
@@ -375,7 +367,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             approved = approved_proposals_count,
             "inactivity window elapsed, entering freeze"
         );
-        Some(self.start_freezing())
+        self.start_freezing()
     }
 }
 
@@ -385,7 +377,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::core::Conversation;
+    use crate::core::ConversationQueues;
     use crate::defaults::DefaultConsensusPlugin;
     use crate::test_fixtures::{
         StubPluginsFactory, StubScoring, StubStewardList, UnusedMls, make_test_consensus_service,
@@ -401,7 +393,7 @@ mod tests {
         let (consensus, consensus_rx) = make_test_consensus_service();
         let mut runner = SessionRunner::new(
             "g".to_string(),
-            Conversation::new("g"),
+            ConversationQueues::new("g"),
             Some(UnusedMls),
             ConversationStateMachine::new_as_pending_join(),
             PhaseTimer::new(),
@@ -423,7 +415,7 @@ mod tests {
         let (consensus, consensus_rx) = make_test_consensus_service();
         SessionRunner::new(
             "g".to_string(),
-            Conversation::new("g"),
+            ConversationQueues::new("g"),
             Some(UnusedMls),
             ConversationStateMachine::new_as_member(),
             PhaseTimer::new(),
@@ -490,7 +482,10 @@ mod tests {
     #[test]
     fn check_steward_inactivity_first_tick_anchors_and_returns_none() {
         let mut runner = make_runner_working();
-        assert_eq!(runner.handle.current_state(), ConversationState::Working);
+        assert_eq!(
+            runner.conversation.current_state(),
+            ConversationState::Working
+        );
         assert!(
             runner.phase_timer.started_at().is_none(),
             "fresh runner has no anchor"
@@ -505,7 +500,7 @@ mod tests {
             "anchor must be set after first tick"
         );
         assert_eq!(
-            runner.handle.current_state(),
+            runner.conversation.current_state(),
             ConversationState::Working,
             "state must stay Working until inactivity actually elapses"
         );
