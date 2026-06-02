@@ -216,7 +216,7 @@ impl StewardListPlugin for StubStewardList {
     fn election_epoch(&self) -> Option<u64> {
         None
     }
-    fn retry_round(&self) -> u32 {
+    fn next_retry_round(&self) -> u32 {
         0
     }
     fn max_retries(&self) -> u32 {

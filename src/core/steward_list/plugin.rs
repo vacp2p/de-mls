@@ -44,8 +44,10 @@ pub trait StewardListPlugin {
 
     fn election_epoch(&self) -> Option<u64>;
 
-    /// Live retry counter for the *next* election attempt (not the frozen list tag).
-    fn retry_round(&self) -> u32;
+    /// Round the *next* election attempt will use as its generation seed.
+    /// Distinct from [`StewardList::retry_round`] — the seed frozen into the
+    /// current list.
+    fn next_retry_round(&self) -> u32;
 
     fn max_retries(&self) -> u32;
     fn set_max_retries(&mut self, max: u32);

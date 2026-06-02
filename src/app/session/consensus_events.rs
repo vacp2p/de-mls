@@ -270,7 +270,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let mut s = arc.write_or_err("session")?;
             let _events = s.conversation.steward_list.bump_retry();
             (
-                s.conversation.steward_list.retry_round(),
+                s.conversation.steward_list.next_retry_round(),
                 s.conversation.steward_list.max_retries(),
             )
         };

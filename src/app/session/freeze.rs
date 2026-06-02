@@ -302,7 +302,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             // Recovery uses the shorter retry inactivity window so we don't
             // burn another full epoch waiting for a steward to commit.
             let in_recovery = s.conversation.is_in_recovery_mode()
-                || s.conversation.steward_list.retry_round() > 0;
+                || s.conversation.steward_list.next_retry_round() > 0;
             let inactivity = if in_recovery {
                 s.conversation.config.recovery_inactivity_duration
             } else {

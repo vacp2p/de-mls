@@ -10,7 +10,7 @@ pub struct DeterministicStewardList {
     list: Option<StewardList>,
     config: StewardListConfig,
     conversation_id: Vec<u8>,
-    retry_round: u32,
+    next_retry_round: u32,
     max_retries: u32,
 }
 
@@ -21,7 +21,7 @@ impl DeterministicStewardList {
             list: None,
             config,
             conversation_id: conversation_id.into(),
-            retry_round: 0,
+            next_retry_round: 0,
             max_retries: DEFAULT_MAX_RETRIES,
         }
     }
@@ -45,7 +45,7 @@ impl DeterministicStewardList {
             list: Some(list),
             config,
             conversation_id,
-            retry_round: 0,
+            next_retry_round: 0,
             max_retries: DEFAULT_MAX_RETRIES,
         })
     }
@@ -68,8 +68,8 @@ impl StewardListPlugin for DeterministicStewardList {
         self.list.as_ref().map(|l| l.election_epoch())
     }
 
-    fn retry_round(&self) -> u32 {
-        self.retry_round
+    fn next_retry_round(&self) -> u32 {
+        self.next_retry_round
     }
 
     fn max_retries(&self) -> u32 {
@@ -188,7 +188,7 @@ impl StewardListPlugin for DeterministicStewardList {
             ));
         }
 
-        let retry_round = self.retry_round();
+        let retry_round = self.next_retry_round();
         let sn = self.config.compute_list_size(candidate_pool.len());
         let list = StewardList::generate(
             epoch,
@@ -206,10 +206,10 @@ impl StewardListPlugin for DeterministicStewardList {
     }
 
     fn bump_retry(&mut self) -> Vec<StewardListEvent> {
-        self.retry_round = self.retry_round.saturating_add(1);
-        if self.retry_round > self.max_retries {
+        self.next_retry_round = self.next_retry_round.saturating_add(1);
+        if self.next_retry_round > self.max_retries {
             vec![StewardListEvent::RetryExhausted {
-                round: self.retry_round,
+                round: self.next_retry_round,
                 max: self.max_retries,
             }]
         } else {
@@ -218,7 +218,7 @@ impl StewardListPlugin for DeterministicStewardList {
     }
 
     fn reset_retry(&mut self) {
-        self.retry_round = 0;
+        self.next_retry_round = 0;
     }
 }
 
@@ -317,14 +317,14 @@ mod tests {
     fn bump_retry_emits_exhausted_after_max() {
         let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
         assert!(p.bump_retry().is_empty());
-        assert_eq!(p.retry_round(), 1);
+        assert_eq!(p.next_retry_round(), 1);
 
         let events = p.bump_retry();
         assert_eq!(
             events,
             vec![StewardListEvent::RetryExhausted { round: 2, max: 1 }]
         );
-        assert_eq!(p.retry_round(), 2);
+        assert_eq!(p.next_retry_round(), 2);
     }
 
     #[test]
@@ -332,9 +332,9 @@ mod tests {
         let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
         let _ = p.bump_retry();
         let _ = p.bump_retry();
-        assert_eq!(p.retry_round(), 2);
+        assert_eq!(p.next_retry_round(), 2);
         p.reset_retry();
-        assert_eq!(p.retry_round(), 0);
+        assert_eq!(p.next_retry_round(), 0);
     }
 
     #[test]

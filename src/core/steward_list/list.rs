@@ -7,24 +7,24 @@ use sha2::{Digest, Sha256};
 
 use crate::core::error::CoreError;
 
-/// Bounds and flags for steward list generation (RFC steward-list creation).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StewardListConfig {
-    /// Minimum list size; below this membership count, size equals member count.
     pub sn_min: usize,
     pub sn_max: usize,
     pub allow_subset_candidates: bool,
 }
 
 impl Default for StewardListConfig {
-    /// `sn_min = 1`, `sn_max = 2`. Override via [`crate::app::User::set_default_steward_list_config`].
     fn default() -> Self {
-        Self::new(1, 2).expect("1..=2 is always a valid StewardListConfig range")
+        Self {
+            sn_min: 1,
+            sn_max: 2,
+            allow_subset_candidates: false,
+        }
     }
 }
 
 impl StewardListConfig {
-    /// Errors if `sn_min < 1` or `sn_min > sn_max`.
     pub fn new(sn_min: usize, sn_max: usize) -> Result<Self, CoreError> {
         if sn_min < 1 || sn_min > sn_max {
             return Err(CoreError::InvalidConfigSize);
@@ -60,12 +60,10 @@ pub struct StewardList {
     members: Vec<Vec<u8>>,
     config: StewardListConfig,
     election_epoch: u64,
-    /// SHA256-sort seed frozen at install; not the plug-in live retry counter.
     retry_round: u32,
 }
 
 impl StewardList {
-    /// Errors on empty `member_ids` or invalid `sn`.
     pub fn generate(
         election_epoch: u64,
         conversation_id: &[u8],
@@ -181,7 +179,8 @@ impl StewardList {
         self.election_epoch
     }
 
-    /// Frozen SHA256-sort seed (carried in `ConversationSync`).
+    /// Retry round frozen into this list as its SHA256-sort seed (carried in
+    /// `ConversationSync`). Distinct from the plugin's live `next_retry_round`.
     pub fn retry_round(&self) -> u32 {
         self.retry_round
     }

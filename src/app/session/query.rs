@@ -27,7 +27,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             Some(mls) => mls.current_epoch()?,
             None => 0,
         };
-        Ok((epoch, self.conversation.steward_list.retry_round()))
+        Ok((epoch, self.conversation.steward_list.next_retry_round()))
     }
 
     /// Count of buffered pending membership updates. Used by tests and the UI
