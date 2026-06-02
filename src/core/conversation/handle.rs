@@ -112,8 +112,9 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
         self.mls.as_mut().ok_or(CoreError::MlsGroupNotInitialized)
     }
 
-    /// Attach an MLS service. Called by joiners after the welcome
-    /// arrives. Caller is responsible for not double-attaching.
+    /// Attach an MLS service (joiner, post-welcome). Overwrites, so the
+    /// caller must only attach when `mls().is_none()` — a double-attach
+    /// drops live group state.
     pub(crate) fn attach_mls(&mut self, mls: CP::Mls) {
         self.mls = Some(mls);
     }
@@ -176,6 +177,8 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
             });
         }
 
+        // Borrow `self.mls` directly so later `self.conversation` reads stay
+        // a disjoint borrow.
         let mls = self.mls.as_mut().ok_or(CoreError::MlsGroupNotInitialized)?;
 
         // Drop approved entries already reflected in conversation state (stale
@@ -244,6 +247,7 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
         // advance epoch ahead of the steward.
         let commit_hash = compute_commit_hash(&candidate.commit_message);
         let epoch = mls.current_epoch()?;
+        let max_candidates = mls.members()?.len();
         let outcome = self.conversation.add_freeze_candidate(
             BufferedCommitCandidate {
                 candidate_msg: candidate.clone(),
@@ -252,6 +256,7 @@ impl<CP: ConversationPluginsFactory> ConversationHandle<CP> {
                 welcome_bytes: welcome,
             },
             epoch,
+            max_candidates,
         );
         // Non-Buffered outcomes are legitimate runtime states (see
         // `FreezeBufferOutcome`), not errors — log at debug.

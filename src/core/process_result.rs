@@ -86,6 +86,8 @@ pub enum NoopReason {
     StaleEpoch,
     /// Identical commit hash is already buffered for this round.
     DuplicateBufferedHash,
+    /// Freeze-round buffer is full (one candidate per member already held).
+    CandidateBufferFull,
 }
 
 // ── ViolationEvidence constructors ────────────────────────────────

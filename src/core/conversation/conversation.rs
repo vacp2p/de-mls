@@ -35,6 +35,9 @@ pub struct PendingUpdate {
     pub first_seen_epoch: u64,
 }
 
+/// Recently-merged commit hashes kept for duplicate-candidate detection.
+/// Bounded so the dedup window can't grow without limit; well beyond the
+/// rebroadcast window.
 const MAX_COMMITTED_HASHES: usize = 10;
 
 /// A commit candidate buffered during freeze for later selection.
@@ -69,6 +72,8 @@ pub enum FreezeBufferOutcome {
     StaleEpoch,
     /// A candidate with the same commit hash is already buffered.
     DuplicateHash,
+    /// Buffer already holds one candidate per member; the rest are refused.
+    CapReached,
 }
 
 /// Per-conversation protocol state. Stewards batch commits; members vote.
@@ -307,10 +312,13 @@ impl Conversation {
     }
 
     /// Buffer a validated candidate for the active freeze round.
+    /// `max_candidates` caps the buffer at one-per-member; beyond that a
+    /// distinct candidate is spoofed/forked and refused.
     pub fn add_freeze_candidate(
         &mut self,
         candidate: BufferedCommitCandidate,
         epoch: u64,
+        max_candidates: usize,
     ) -> FreezeBufferOutcome {
         self.ensure_freeze_round(epoch);
         let Some(round) = self.freeze_round.as_mut() else {
@@ -330,6 +338,10 @@ impl Conversation {
             .any(|c| c.commit_hash == candidate.commit_hash)
         {
             return FreezeBufferOutcome::DuplicateHash;
+        }
+
+        if round.candidates.len() >= max_candidates {
+            return FreezeBufferOutcome::CapReached;
         }
 
         round.candidates.push(candidate);
@@ -433,18 +445,22 @@ impl Conversation {
     pub fn prune_pending_updates_for_members(&mut self, current_members: &[Vec<u8>]) {
         let in_conversation: HashSet<&Vec<u8>> = current_members.iter().collect();
         self.pending_updates.retain(|member_id, entry| {
-            let payload = match entry.request.payload.as_ref() {
-                Some(p) => p,
-                None => return false,
-            };
-            match payload {
-                conversation_update_request::Payload::MemberInvite(_) => {
+            match entry.request.payload.as_ref() {
+                Some(conversation_update_request::Payload::MemberInvite(_)) => {
                     !in_conversation.contains(&member_id)
                 }
-                conversation_update_request::Payload::RemoveMember(_) => {
+                Some(conversation_update_request::Payload::RemoveMember(_)) => {
                     in_conversation.contains(&member_id)
                 }
-                _ => false,
+                // Only Invite/Remove are ever buffered; anything else is a
+                // bug — surface it rather than drop silently.
+                other => {
+                    tracing::error!(
+                        ?other,
+                        "non-membership payload in pending_updates buffer (invariant violation)"
+                    );
+                    false
+                }
             }
         });
 
@@ -460,6 +476,11 @@ impl Conversation {
                 _ => true,
             }
         });
+
+        // Drop removal-dedup entries for targets no longer present: a leaked
+        // entry (ECP that never resolved) would otherwise block them forever.
+        self.pending_removal_targets
+            .retain(|target| in_conversation.contains(target));
     }
 
     // ─────────────────────────── Crate-internal ───────────────────────────
@@ -887,7 +908,6 @@ mod tests {
     fn below_threshold_target_queued_for_removal_is_not_re_proposed() {
         use crate::core::apply_consensus_result;
         use crate::protos::de_mls::messages::v1::ViolationEvidence;
-        use prost::Message;
 
         let mut conversation = Conversation::new("removal-no-duplicate");
         let creator = member(1);
@@ -896,12 +916,11 @@ mod tests {
         let evidence =
             ViolationEvidence::score_below_threshold(target.clone(), 0, 0).with_creator(creator);
         let request = evidence.into_update_request().unwrap();
-        let payload = request.encode_to_vec();
         let proposal_id = 300;
-        conversation.store_voting_proposal(proposal_id, request);
+        conversation.store_voting_proposal(proposal_id, request.clone());
         conversation.observe_pending_removal(target.clone());
 
-        apply_consensus_result(&mut conversation, proposal_id, true, &payload).unwrap();
+        apply_consensus_result(&mut conversation, proposal_id, true, &request).unwrap();
         // Mirror the coordinator: clear the in-flight ECP dedup on resolution.
         conversation.resolve_pending_removal(&target);
 

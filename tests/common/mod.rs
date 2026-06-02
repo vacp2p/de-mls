@@ -159,6 +159,7 @@ pub fn build_commit_candidate(
 
     let commit_hash = compute_commit_hash(&candidate.commit_message);
     let epoch = mls.current_epoch()?;
+    let max_candidates = mls.members()?.len();
     let _ = group.add_freeze_candidate(
         BufferedCommitCandidate {
             candidate_msg: candidate.clone(),
@@ -167,6 +168,7 @@ pub fn build_commit_candidate(
             welcome_bytes: welcome,
         },
         epoch,
+        max_candidates,
     );
 
     let candidate_msg: AppMessage = candidate.into();

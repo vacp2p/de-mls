@@ -75,17 +75,8 @@ pub fn buffer_commit_candidate<M: MlsService>(
 ) -> Result<ProcessResult, CoreError> {
     let conversation_id = conversation.name().to_owned();
 
-    // Auto-start a freeze round if we already have approved proposals —
-    // otherwise the candidate would be silently dropped.
-    if conversation.freeze_round().is_none() {
-        if conversation.approved_proposals_count() == 0 {
-            tracing::debug!(conversation = %conversation_id, "candidate ignored: no approved proposals");
-            return Ok(ProcessResult::Noop(NoopReason::NoApprovedProposals));
-        }
-        let epoch = mls.current_epoch()?;
-        conversation.ensure_freeze_round(epoch);
-    }
-
+    // Validate fully before touching freeze-round state: a dup/malformed
+    // candidate must not open a round only to return Noop.
     let commit_hash = compute_commit_hash(&candidate_msg.commit_message);
     if conversation.is_duplicate_commit_candidate(&commit_hash) {
         tracing::debug!(conversation = %conversation_id, "candidate ignored: already committed");
@@ -121,8 +112,19 @@ pub fn buffer_commit_candidate<M: MlsService>(
         return Ok(ProcessResult::Noop(NoopReason::WireKindMismatch));
     }
 
-    let steward = candidate_msg.steward_member_id.clone();
     let epoch = mls.current_epoch()?;
+
+    // Valid candidate — auto-start a round if there are approved proposals.
+    if conversation.freeze_round().is_none() {
+        if conversation.approved_proposals_count() == 0 {
+            tracing::debug!(conversation = %conversation_id, "candidate ignored: no approved proposals");
+            return Ok(ProcessResult::Noop(NoopReason::NoApprovedProposals));
+        }
+        conversation.ensure_freeze_round(epoch);
+    }
+
+    let steward = candidate_msg.steward_member_id.clone();
+    let max_candidates = mls.members()?.len();
     let outcome = conversation.add_freeze_candidate(
         BufferedCommitCandidate {
             candidate_msg,
@@ -131,6 +133,7 @@ pub fn buffer_commit_candidate<M: MlsService>(
             welcome_bytes: None,
         },
         epoch,
+        max_candidates,
     );
     match outcome {
         FreezeBufferOutcome::Buffered => {
@@ -151,6 +154,10 @@ pub fn buffer_commit_candidate<M: MlsService>(
         FreezeBufferOutcome::StaleEpoch => Ok(ProcessResult::Noop(NoopReason::StaleEpoch)),
         FreezeBufferOutcome::DuplicateHash => {
             Ok(ProcessResult::Noop(NoopReason::DuplicateBufferedHash))
+        }
+        FreezeBufferOutcome::CapReached => {
+            tracing::debug!(conversation = %conversation_id, "candidate ignored: buffer full");
+            Ok(ProcessResult::Noop(NoopReason::CandidateBufferFull))
         }
     }
 }
