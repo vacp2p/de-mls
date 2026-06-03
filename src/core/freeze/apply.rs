@@ -4,9 +4,9 @@
 
 use crate::{
     core::{
-        CommitHash, Conversation, CoreError, FreezeFinalizeResult, FreezeOutcome, ProcessResult,
-        ScoreEvent, ScoreOp, StewardListPlugin, conversation::BufferedCommitCandidate,
-        freeze::round::RoundContext,
+        CommitHash, ConversationQueues, CoreError, FreezeFinalizeResult, FreezeOutcome,
+        ProcessResult, ScoreEvent, ScoreOp, StewardListPlugin,
+        conversation::BufferedCommitCandidate, freeze::round::RoundContext,
     },
     mls_crypto::{MlsProposalOutput, MlsService, StagedCandidateResult},
     protos::de_mls::messages::v1::{
@@ -15,31 +15,29 @@ use crate::{
     },
 };
 
-/// Result of trying to apply one candidate. `Terminal` ends the round;
-/// `Drop` records a local score penalty and the caller tries the next.
+/// Outcome of applying one candidate. `Terminal` ends the round; `Drop`
+/// skips to the next, recording its penalty when the violation carries one.
 ///
-/// `committer` is the MLS-verified sender (incoming) or our own member id.
-/// Scoring keys off this so a forged wire claim cannot redirect
-/// the `SuccessfulCommit` reward.
+/// `committer` is the MLS-verified sender, never the wire claim — so a forged
+/// `steward_member_id` cannot redirect the `SuccessfulCommit` reward.
 enum CandidateOutcome {
     Terminal {
         outcome: FreezeOutcome,
         committer: Vec<u8>,
         committed_batch: Vec<ConversationUpdateRequest>,
     },
-    Drop(ScoreOp),
+    Drop(Option<ScoreOp>),
 }
 
-/// Walk `sorted` in priority order. Each rejected candidate adds a local
-/// score penalty; the first candidate that applies wins the round. No
-/// ECP is filed — RFC §Peer Scoring allows direct local scoring for
-/// observable violations.
+/// Walk `sorted` best-first; the first candidate that applies wins. Rejected
+/// candidates score a local penalty — no ECP (RFC §Peer Scoring allows direct
+/// local scoring for observable violations).
 ///
-/// `own_commit_discarded` enforces MLS's one-pending-commit rule: the
-/// first incoming attempt wipes our own pending commit, so a
-/// lower-priority local candidate afterwards has nothing to apply.
+/// `own_commit_discarded` enforces MLS's one-pending-commit rule: the first
+/// incoming attempt wipes our own pending commit, so a later lower-priority
+/// local candidate has nothing to apply.
 pub(super) fn apply_in_priority_order<M: MlsService, St: StewardListPlugin>(
-    conversation: &mut Conversation,
+    conversation: &mut ConversationQueues,
     mls: &mut M,
     steward: &St,
     sorted: Vec<BufferedCommitCandidate>,
@@ -93,7 +91,7 @@ pub(super) fn apply_in_priority_order<M: MlsService, St: StewardListPlugin>(
                     committed_batch,
                 });
             }
-            CandidateOutcome::Drop(op) => score_ops.push(op),
+            CandidateOutcome::Drop(op) => score_ops.extend(op),
         }
     }
 
@@ -160,18 +158,17 @@ fn record_winner_scores<St: StewardListPlugin>(
 
 // ─────────────────────────── Application Paths ───────────────────────────
 
-/// Merge our own commit and send the deferred welcomes we held back.
+/// Merge our own commit and surface the welcome we held back until merge.
 /// Validation happened at commit-creation time, so no re-staging is needed.
-/// Always returns `Terminal(Applied)` on a clean merge.
 fn apply_local_candidate<M: MlsService>(
-    conversation: &mut Conversation,
+    conversation: &mut ConversationQueues,
     mls: &mut M,
     chosen: BufferedCommitCandidate,
     ctx: &RoundContext,
 ) -> Result<CandidateOutcome, CoreError> {
     mls.merge_own_commit()?;
 
-    let committed_batch = record_applied_commit(conversation, chosen.commit_hash);
+    let committed_batch = finalize_committed_batch(conversation, chosen.commit_hash);
 
     // Build the welcome artifact only after merge.
     let welcome = chosen.welcome_bytes.map(|welcome_bytes| MemberWelcome {
@@ -192,14 +189,12 @@ fn apply_local_candidate<M: MlsService>(
 }
 
 /// Stage, validate, and merge a candidate authored by another steward.
-/// Returns `Terminal(Applied)` on a clean merge, or `Drop` with a score
-/// penalty if any check fails (MLS staging, sender mismatch,
-/// unauthorized sender, action-set mismatch).
+/// `Drop` (with penalty) on any failed check; `Terminal(Applied)` on merge.
 ///
 /// Caller must have discarded any own pending commit first — MLS allows
-/// only one per conversation at a time.
+/// only one per conversation.
 fn apply_incoming_candidate<M: MlsService, St: StewardListPlugin>(
-    conversation: &mut Conversation,
+    conversation: &mut ConversationQueues,
     mls: &mut M,
     steward: &St,
     chosen: BufferedCommitCandidate,
@@ -218,17 +213,14 @@ fn apply_incoming_candidate<M: MlsService, St: StewardListPlugin>(
                 // Wire-valid but MLS-invalid — penalize the author; the
                 // loop will try the next candidate.
                 mls.discard_staged_commit()?;
-                return Ok(CandidateOutcome::Drop(ScoreOp {
+                return Ok(CandidateOutcome::Drop(Some(ScoreOp {
                     member_id: chosen.candidate_msg.steward_member_id,
                     event: ScoreEvent::MisbehavingCommit,
-                }));
+                })));
             }
             StagingOutcome::Violation(v) => {
                 mls.discard_staged_commit()?;
-                return Ok(CandidateOutcome::Drop(
-                    v.target_score_op()
-                        .expect("staged-violation always has a target-side score"),
-                ));
+                return Ok(CandidateOutcome::Drop(v.target_score_op()));
             }
         };
 
@@ -237,11 +229,7 @@ fn apply_incoming_candidate<M: MlsService, St: StewardListPlugin>(
         check_commit_sender_authorized(conversation, steward, &commit_sender, ctx)
     {
         mls.discard_staged_commit()?;
-        return Ok(CandidateOutcome::Drop(
-            violation
-                .target_score_op()
-                .expect("locally-built violation always has a target-side score"),
-        ));
+        return Ok(CandidateOutcome::Drop(violation.target_score_op()));
     }
 
     // MLS actions must match the set we voted to approve.
@@ -249,15 +237,11 @@ fn apply_incoming_candidate<M: MlsService, St: StewardListPlugin>(
         validate_commit_candidate(conversation, &commit_sender, &commit_actions, ctx)?
     {
         mls.discard_staged_commit()?;
-        return Ok(CandidateOutcome::Drop(
-            violation
-                .target_score_op()
-                .expect("locally-built violation always has a target-side score"),
-        ));
+        return Ok(CandidateOutcome::Drop(violation.target_score_op()));
     }
 
     mls.merge_staged_commit()?;
-    let committed_batch = record_applied_commit(conversation, chosen.commit_hash);
+    let committed_batch = finalize_committed_batch(conversation, chosen.commit_hash);
 
     // Remote candidates never carry welcome bytes — only the author sends those.
     let result = if self_removed {
@@ -359,7 +343,7 @@ where
 /// Compares both sides as sorted `(kind_tag, &member_id)` projections —
 /// no `MlsProposalOutput` allocation, no per-element clone.
 fn validate_commit_candidate(
-    conversation: &Conversation,
+    conversation: &ConversationQueues,
     sender_id: &[u8],
     mls_actions: &[MlsProposalOutput],
     ctx: &RoundContext,
@@ -416,7 +400,7 @@ fn action_projection_from_mls(action: &MlsProposalOutput) -> (u8, &[u8]) {
 /// §Anti-Deadlock: any member MAY commit to restore liveness; mirrors
 /// the relaxed gate in `create_commit_candidate`).
 fn check_commit_sender_authorized<St: StewardListPlugin>(
-    conversation: &Conversation,
+    conversation: &ConversationQueues,
     steward: &St,
     commit_sender: &[u8],
     ctx: &RoundContext,
@@ -448,17 +432,17 @@ fn check_commit_sender_authorized<St: StewardListPlugin>(
 /// the commit was urgent-target-only and only the targeted entry was
 /// dropped). Caller surfaces the batch through `FreezeFinalizeResult` so
 /// the app layer can archive it for UI history.
-fn record_applied_commit(
-    conversation: &mut Conversation,
+fn finalize_committed_batch(
+    conversation: &mut ConversationQueues,
     commit_hash: CommitHash,
 ) -> Vec<ConversationUpdateRequest> {
-    conversation.record_committed_batch(commit_hash);
+    conversation.insert_committed_hash(commit_hash);
     let snapshot = if let Some(target) = conversation.take_urgent_commit_target() {
         // Urgent commit: leave the rest of the queue for the next cycle.
         conversation.drop_approved_removals_for(&target);
         Vec::new()
     } else {
-        conversation.clear_approved_proposals()
+        conversation.drain_approved_proposals()
     };
     conversation.clear_freeze_round();
     snapshot

@@ -1,4 +1,4 @@
-//! App-side per-conversation runner: wraps a [`crate::core::ConversationHandle`]
+//! App-side per-conversation runner: wraps a [`crate::core::Conversation`]
 //! together with a [`crate::app::PhaseTimer`] and the per-proposal auto-vote
 //! timer registry. Coordinator methods compose state-machine transitions
 //! with phase-timer anchors so callers update both in one call.

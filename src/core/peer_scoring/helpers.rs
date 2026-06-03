@@ -3,8 +3,6 @@
 
 use std::collections::HashSet;
 
-use prost::Message;
-
 use crate::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, ViolationEvidence, conversation_update_request::Payload,
 };
@@ -36,25 +34,22 @@ pub fn scoring_member_diff(scored: &[Vec<u8>], mls_members: &[Vec<u8>]) -> Scori
 /// - accepted target-bearing emergency → target penalty + creator reward.
 /// - accepted `SCORE_BELOW_THRESHOLD` or `DEADLOCK` → creator reward only.
 /// - rejected emergency → creator penalty.
-pub fn emergency_score_ops(payload: &[u8], approved: bool) -> Vec<ScoreOp> {
-    let Ok(req) = ConversationUpdateRequest::decode(payload) else {
+pub fn emergency_score_ops(request: &ConversationUpdateRequest, approved: bool) -> Vec<ScoreOp> {
+    let Some(Payload::EmergencyCriteria(ec)) = &request.payload else {
         return Vec::new();
     };
-    let Some(Payload::EmergencyCriteria(ec)) = req.payload else {
-        return Vec::new();
-    };
-    let Some(evidence) = ec.evidence else {
+    let Some(evidence) = &ec.evidence else {
         return Vec::new();
     };
 
     if approved {
-        let mut ops = vec![creator_reward(&evidence)];
+        let mut ops = vec![creator_reward(evidence)];
         if let Some(target_op) = evidence.target_score_op() {
             ops.push(target_op);
         }
         ops
     } else {
-        vec![creator_penalty(&evidence)]
+        vec![creator_penalty(evidence)]
     }
 }
 
@@ -77,7 +72,11 @@ mod tests {
     use super::*;
     use crate::protos::de_mls::messages::v1::{EmergencyCriteriaProposal, ViolationType};
 
-    fn ecp_payload(violation_type: i32, target: Vec<u8>, creator: Vec<u8>) -> Vec<u8> {
+    fn ecp_request(
+        violation_type: i32,
+        target: Vec<u8>,
+        creator: Vec<u8>,
+    ) -> ConversationUpdateRequest {
         let evidence = ViolationEvidence {
             violation_type,
             target_member_id: target,
@@ -85,19 +84,18 @@ mod tests {
             epoch: 0,
             creator_member_id: creator,
         };
-        let req = ConversationUpdateRequest {
+        ConversationUpdateRequest {
             payload: Some(Payload::EmergencyCriteria(EmergencyCriteriaProposal {
                 evidence: Some(evidence),
             })),
-        };
-        req.encode_to_vec()
+        }
     }
 
     /// Approved + target-mappable violation → creator reward + target penalty.
     #[test]
     fn approved_broken_commit_emits_reward_and_target_penalty() {
-        let payload = ecp_payload(ViolationType::BrokenCommit as i32, vec![0xAA], vec![0xBB]);
-        let ops = emergency_score_ops(&payload, true);
+        let req = ecp_request(ViolationType::BrokenCommit as i32, vec![0xAA], vec![0xBB]);
+        let ops = emergency_score_ops(&req, true);
         assert_eq!(ops.len(), 2);
         assert_eq!(ops[0].event, ScoreEvent::EmergencyYesCreator);
         assert_eq!(ops[0].member_id, vec![0xBB]);
@@ -108,8 +106,8 @@ mod tests {
     /// Approved + non-target violation (`Deadlock`) → creator reward only.
     #[test]
     fn approved_deadlock_emits_reward_only() {
-        let payload = ecp_payload(ViolationType::Deadlock as i32, Vec::new(), vec![0xBB]);
-        let ops = emergency_score_ops(&payload, true);
+        let req = ecp_request(ViolationType::Deadlock as i32, Vec::new(), vec![0xBB]);
+        let ops = emergency_score_ops(&req, true);
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].event, ScoreEvent::EmergencyYesCreator);
     }
@@ -118,12 +116,12 @@ mod tests {
     /// target-side score op (the target gets removed instead).
     #[test]
     fn approved_score_below_threshold_emits_reward_only() {
-        let payload = ecp_payload(
+        let req = ecp_request(
             ViolationType::ScoreBelowThreshold as i32,
             vec![0xAA],
             vec![0xBB],
         );
-        let ops = emergency_score_ops(&payload, true);
+        let ops = emergency_score_ops(&req, true);
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].event, ScoreEvent::EmergencyYesCreator);
     }
@@ -132,8 +130,8 @@ mod tests {
     /// drop the malformed target op silently.
     #[test]
     fn approved_unspecified_emits_reward_only() {
-        let payload = ecp_payload(0, vec![0xAA], vec![0xBB]);
-        let ops = emergency_score_ops(&payload, true);
+        let req = ecp_request(0, vec![0xAA], vec![0xBB]);
+        let ops = emergency_score_ops(&req, true);
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].event, ScoreEvent::EmergencyYesCreator);
     }
@@ -146,8 +144,8 @@ mod tests {
             ViolationType::Deadlock,
             ViolationType::ScoreBelowThreshold,
         ] {
-            let payload = ecp_payload(vt as i32, vec![0xAA], vec![0xBB]);
-            let ops = emergency_score_ops(&payload, false);
+            let req = ecp_request(vt as i32, vec![0xAA], vec![0xBB]);
+            let ops = emergency_score_ops(&req, false);
             assert_eq!(ops.len(), 1);
             assert_eq!(ops[0].event, ScoreEvent::EmergencyNoCreator);
             assert_eq!(ops[0].member_id, vec![0xBB]);

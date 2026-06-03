@@ -8,8 +8,8 @@ use tracing::info;
 use crate::{
     app::{ConversationState, LockExt, PhaseTimer, SessionRunner, User, UserError},
     core::{
-        ConsensusPlugin, Conversation, ConversationConfig, ConversationLifecycle,
-        ConversationPluginsFactory, ConversationStateMachine, PeerScoringPlugin, SessionEvent,
+        ConsensusPlugin, ConversationConfig, ConversationLifecycle, ConversationPluginsFactory,
+        ConversationQueues, ConversationStateMachine, PeerScoringPlugin, SessionEvent,
         StewardListPlugin,
     },
 };
@@ -50,11 +50,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 .plugins
                 .conversation_plugins
                 .create_mls(conversation_id.to_string())?;
-            let conversation = Conversation::new(conversation_id);
+            let conversation = ConversationQueues::new(conversation_id);
             let state_machine = ConversationStateMachine::new_as_member();
             (conversation, Some(mls), state_machine, PhaseTimer::new())
         } else {
-            let conversation = Conversation::new(conversation_id);
+            let conversation = ConversationQueues::new(conversation_id);
             let state_machine = ConversationStateMachine::new_as_pending_join();
             // Anchor the timer at "now" so `is_pending_join_expired` can
             // detect the 3× commit-inactivity timeout.
@@ -82,9 +82,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         // Joiners get tracked at `JoinedConversation` time, once members are known.
         if is_creation {
             // Creator is self at `default_score`; under standard config
-            // (`default > threshold`) no cross event fires, so we drop
-            // the return value here.
-            let _events = scoring.add_member(&self_member_id_bytes);
+            // (`default > threshold`) no cross fires, so we drop the result.
+            let _ = scoring.add_member(&self_member_id_bytes);
         }
 
         let initial_state = state_machine.current_state();
@@ -148,7 +147,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
 
-        let is_pending_join = entry_arc.read_or_err("session")?.handle.current_state()
+        let is_pending_join = entry_arc
+            .read_or_err("session")?
+            .conversation
+            .current_state()
             == ConversationState::PendingJoin;
         if is_pending_join {
             entry_arc

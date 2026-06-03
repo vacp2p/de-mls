@@ -89,28 +89,6 @@ impl Default for ScoringConfig {
     }
 }
 
-/// Event emitted by a [`super::PeerScoringPlugin`] when an apply call moves
-/// a member across the configured threshold. Plug-ins return events from
-/// every mutating call; the coordinator drains them at known safe
-/// points and turns them into protocol actions (e.g. submitting
-/// `SCORE_BELOW_THRESHOLD`). The `score` field carries the post-apply
-/// value at the time of the cross.
-///
-/// "Untracked → tracked" via [`super::PeerScoringPlugin::add_member`] or a
-/// [`super::PeerScoringPlugin::apply_snapshot`] entry counts as crossing
-/// from above for cross-detection — a fresh entry that lands at-or-below
-/// threshold emits `ThresholdCrossedDown`. Coordinators should treat
-/// the events the same regardless of source.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PeerScoringEvent {
-    /// Member's score moved from above-threshold to at-or-below threshold.
-    ThresholdCrossedDown { member_id: Vec<u8>, score: i64 },
-    /// Member's score moved from at-or-below threshold back above it.
-    /// Reserved for future recovery-scoring use cases — coordinators
-    /// today drop these silently.
-    ThresholdCrossedUp { member_id: Vec<u8>, score: i64 },
-}
-
 /// Sparse snapshot of per-member scores for joiner bootstrap. Carries
 /// only members whose score has diverged from `default_score`; the
 /// recipient initialises every member at default via membership sync

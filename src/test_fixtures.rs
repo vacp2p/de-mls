@@ -1,5 +1,5 @@
 //! Crate-internal test fixtures: minimal trait impls for tests that need
-//! to construct a [`crate::core::ConversationHandle`] or [`crate::app::SessionRunner`]
+//! to construct a [`crate::core::Conversation`] or [`crate::app::SessionRunner`]
 //! without standing up real MLS / scoring / steward backends.
 //!
 //! Most methods are `unreachable!()` — tests should only exercise the
@@ -17,9 +17,9 @@ use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use crate::{
     app::{ConsensusContext, ConversationConfig, User, UserPlugins},
     core::{
-        ConsensusPlugin, ConversationPluginsFactory, ElectionDecision, PeerScoringEvent,
-        PeerScoringPlugin, PluginConsensus, ScoreOp, ScoreSnapshot, ScoringConfig, StewardList,
-        StewardListConfig, StewardListEvent, StewardListPlugin,
+        ConsensusPlugin, ConversationPluginsFactory, ElectionDecision, PeerScoringPlugin,
+        PluginConsensus, ScoreOp, ScoreSnapshot, ScoringConfig, StewardList, StewardListConfig,
+        StewardListEvent, StewardListPlugin,
     },
     defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage},
     ds::{OutboundPacket, SharedDeliveryService},
@@ -121,7 +121,7 @@ impl crate::ds::DeliveryService for UnusedTransport {
 }
 
 /// MLS service that errors on every operation. Lets tests construct a
-/// `ConversationHandle` whose early-return paths never invoke MLS.
+/// `Conversation` whose early-return paths never invoke MLS.
 pub(crate) struct UnusedMls;
 
 impl MlsService for UnusedMls {
@@ -216,7 +216,7 @@ impl StewardListPlugin for StubStewardList {
     fn election_epoch(&self) -> Option<u64> {
         None
     }
-    fn retry_round(&self) -> u32 {
+    fn next_retry_round(&self) -> u32 {
         0
     }
     fn max_retries(&self) -> u32 {
@@ -287,16 +287,16 @@ impl StewardListPlugin for StubStewardList {
 pub(crate) struct StubScoring;
 
 impl PeerScoringPlugin for StubScoring {
-    fn add_member(&mut self, _: &[u8]) -> Vec<PeerScoringEvent> {
+    fn add_member(&mut self, _: &[u8]) -> bool {
         unreachable!()
     }
     fn remove_member(&mut self, _: &[u8]) {
         unreachable!()
     }
-    fn apply_op(&mut self, _: &ScoreOp) -> Vec<PeerScoringEvent> {
+    fn apply_op(&mut self, _: &ScoreOp) -> bool {
         unreachable!()
     }
-    fn apply_snapshot(&mut self, _: &ScoreSnapshot) -> Vec<PeerScoringEvent> {
+    fn apply_snapshot(&mut self, _: &ScoreSnapshot) -> bool {
         unreachable!()
     }
     fn snapshot(&self) -> ScoreSnapshot {
@@ -320,13 +320,10 @@ impl PeerScoringPlugin for StubScoring {
     fn default_score(&self) -> i64 {
         unreachable!()
     }
-    fn set_default_score(&mut self, _: i64) {
-        unreachable!()
-    }
 }
 
 /// Test plug-in bundle wiring the three stubs into the [`ConversationPluginsFactory`]
-/// trait so tests can construct [`crate::core::ConversationHandle`] and
+/// trait so tests can construct [`crate::core::Conversation`] and
 /// [`crate::app::SessionRunner`] under their single `<CP>` parameter. The
 /// factory methods are `unreachable!()` — tests build plug-in instances
 /// directly and hand them to the handle/runner constructors.

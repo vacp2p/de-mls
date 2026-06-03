@@ -1,7 +1,8 @@
-//! Per-conversation timing + protocol configuration with sensible defaults.
+//! Per-conversation timing and policy configuration.
 
 use std::time::Duration;
 
+use crate::app::DEFAULT_MAX_RETRIES;
 use crate::core::ProposalKind;
 use crate::protos::de_mls::messages::v1::TimingConfig;
 
@@ -34,9 +35,6 @@ pub const DEFAULT_LIVENESS_CRITERIA_YES: bool = true;
 
 pub const DEFAULT_PENDING_UPDATE_MAX_EPOCHS: u32 = 3;
 
-/// Default `max_reelection_attempts`. See [`crate::core::DEFAULT_MAX_RETRIES`].
-pub use crate::core::DEFAULT_MAX_RETRIES;
-
 /// Per-conversation timing config. Plug-in domains (scoring, steward list)
 /// own their own configs on the respective plug-ins — see
 /// [`crate::core::ScoringConfig`] and [`crate::core::StewardListConfig`].
@@ -45,8 +43,9 @@ pub struct ConversationConfig {
     /// RFC §Inactivity Timer #1: how long the epoch steward has to commit
     /// approved proposals before honest members enter the freeze round.
     pub commit_inactivity_duration: Duration,
-    /// Freeze window before deterministic selection. Defaults to
-    /// `commit_inactivity_duration / 2`.
+    /// Freeze window before deterministic selection.
+    ///
+    /// Defaults to `commit_inactivity_duration / 2`.
     pub freeze_duration: Duration,
     /// RFC §Inactivity Timer #2: shorter inactivity window applied during
     /// Layer 2 / Layer 3 recovery so retries don't burn a full epoch.
@@ -54,9 +53,9 @@ pub struct ConversationConfig {
     /// How long a proposal stays active before expiring (RFC §Creating Voting Proposal).
     pub proposal_expiration: Duration,
     pub consensus_timeout: Duration,
-    /// Max age (in epochs) of a buffered membership update. If the epoch
-    /// steward fails to commit a buffered Add/Remove for this many
-    /// consecutive epochs, the entry is dropped.
+    /// Max age (in epochs) of a buffered membership update. An entry first
+    /// seen at epoch `E` is dropped once `current_epoch - E` exceeds this
+    /// value (so it survives epochs `E..=E + max_age` inclusive).
     pub pending_update_max_epochs: u32,
     /// Max steward-election retries within one MLS epoch before the app
     /// surfaces "reelection stuck". `0` disables retry entirely.
@@ -104,16 +103,28 @@ impl ConversationConfig {
 
     /// Overwrite the duration fields from a wire [`TimingConfig`]. Used on
     /// the joiner side when applying `ConversationSync`. Non-timing fields
-    /// (`liveness_criteria_yes`, `pending_update_max_epochs`) are not in
-    /// `TimingConfig` and stay untouched.
+    /// (`liveness_criteria_yes`, `pending_update_max_epochs`) stay untouched.
     pub fn apply_timing(&mut self, timing: &TimingConfig) {
-        self.commit_inactivity_duration =
-            Duration::from_millis(timing.commit_inactivity_duration_ms);
-        self.freeze_duration = Duration::from_millis(timing.freeze_duration_ms);
-        self.recovery_inactivity_duration =
-            Duration::from_millis(timing.recovery_inactivity_duration_ms);
-        self.proposal_expiration = Duration::from_millis(timing.proposal_expiration_ms);
-        self.consensus_timeout = Duration::from_millis(timing.consensus_timeout_ms);
+        apply_nonzero_ms(
+            &mut self.commit_inactivity_duration,
+            timing.commit_inactivity_duration_ms,
+        );
+        apply_nonzero_ms(&mut self.freeze_duration, timing.freeze_duration_ms);
+        apply_nonzero_ms(
+            &mut self.recovery_inactivity_duration,
+            timing.recovery_inactivity_duration_ms,
+        );
+        apply_nonzero_ms(&mut self.proposal_expiration, timing.proposal_expiration_ms);
+        apply_nonzero_ms(&mut self.consensus_timeout, timing.consensus_timeout_ms);
+    }
+}
+
+/// Overwrite `field` with `wire_ms` unless it is zero.
+/// A zero wire duration would make its timer fire immediately (a
+/// malformed-sync DoS); treat zero as "unset" and keep the local value.
+fn apply_nonzero_ms(field: &mut Duration, wire_ms: u64) {
+    if wire_ms != 0 {
+        *field = Duration::from_millis(wire_ms);
     }
 }
 
@@ -135,9 +146,6 @@ impl From<&ConversationConfig> for TimingConfig {
 mod tests {
     use super::*;
 
-    /// `TimingConfig` ↔ `ConversationConfig` round-trip preserves all
-    /// five duration fields. Distinct values per field catch accidental
-    /// swaps in either direction.
     #[test]
     fn timing_config_round_trip() {
         let original = ConversationConfig {
@@ -164,8 +172,28 @@ mod tests {
         assert_eq!(applied.consensus_timeout, Duration::from_millis(500));
     }
 
-    /// Steward-election proposals get the shorter `election_voting_delay`;
-    /// other kinds get `voting_delay`.
+    #[test]
+    fn apply_timing_ignores_zero_durations() {
+        let mut config = ConversationConfig {
+            consensus_timeout: Duration::from_secs(30),
+            commit_inactivity_duration: Duration::from_secs(60),
+            ..ConversationConfig::default()
+        };
+        let timing = TimingConfig {
+            consensus_timeout_ms: 0,
+            commit_inactivity_duration_ms: 0,
+            freeze_duration_ms: 250,
+            recovery_inactivity_duration_ms: 0,
+            proposal_expiration_ms: 0,
+        };
+        config.apply_timing(&timing);
+        // Zero fields keep their prior values.
+        assert_eq!(config.consensus_timeout, Duration::from_secs(30));
+        assert_eq!(config.commit_inactivity_duration, Duration::from_secs(60));
+        // Non-zero field is applied.
+        assert_eq!(config.freeze_duration, Duration::from_millis(250));
+    }
+
     #[test]
     fn voting_delay_dispatch_on_proposal_kind() {
         let config = ConversationConfig {

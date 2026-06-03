@@ -11,7 +11,7 @@
 //! [`crate::core::ConversationStateMachine`] owns the per-conversation state
 //! enum (`PendingJoin → Working → Freezing → Selection → Reelection`);
 //! [`crate::app::PhaseTimer`] owns the wall-clock anchor;
-//! [`crate::app::SessionRunner`] composes a [`crate::core::ConversationHandle`]
+//! [`crate::app::SessionRunner`] composes a [`crate::core::Conversation`]
 //! with that timer through coordinator methods that update both atomically.
 //! State transitions return the new [`crate::core::ConversationState`]; the
 //! session-side dispatcher emits a `SessionEvent::PhaseChange` on each one.

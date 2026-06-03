@@ -132,10 +132,8 @@ fn test_duplicate_batch_returns_noop() {
         .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
         .expect("Expected batch proposals packet");
 
-    // Start freeze round so candidates get buffered
-    let epoch = joiner.mls.as_ref().unwrap().current_epoch().unwrap();
-    joiner.group.start_freeze_round(epoch);
-
+    // Joiner holds the approved proposal, so receiving the candidate opens
+    // the freeze round on its own (the production lazy-open path).
     // First receive: candidate buffered → CommitCandidateReceived
     let r1 = process_inbound_compat(
         &mut joiner.group,
@@ -283,9 +281,8 @@ fn test_commit_candidate_roundtrip_sender_identity() {
         .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
         .expect("Expected batch proposals packet");
 
-    // Start freeze round before receiving candidate
-    let epoch = joiner.mls.as_ref().unwrap().current_epoch().unwrap();
-    joiner.group.start_freeze_round(epoch);
+    // Joiner holds the approved proposal, so receiving the candidate opens
+    // the freeze round on its own (the production lazy-open path).
 
     // Joiner receives candidate — should buffer it
     let result = process_inbound_compat(
@@ -571,7 +568,8 @@ fn test_no_valid_candidate_triggers_no_candidate() {
         "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
     );
 
-    // Start freeze round with no candidates
+    // Open an empty round directly, as the app coordinator does on the
+    // Working→Freezing transition, then finalize with nothing buffered.
     group.insert_approved_proposal(1, ConversationUpdateRequest { payload: None });
     let epoch = group.mls.current_epoch().unwrap();
     group.start_freeze_round(epoch);

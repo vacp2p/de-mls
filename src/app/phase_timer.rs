@@ -2,8 +2,6 @@
 //!
 //! Holds the wall-clock anchor (`started_at`). Phase-anchor durations live
 //! in [`crate::core::ConversationConfig`] (single source of truth);
-//! [`crate::app::SessionRunner`] reads durations off the handle's config
-//! and passes them to this timer's elapsed-checks.
 
 use std::time::{Duration, Instant};
 

@@ -21,18 +21,10 @@ use crate::{
     },
     core::{
         ConsensusPlugin, ConversationPluginsFactory, FreezeFinalizeResult, FreezeOutcome,
-        PeerScoringEvent, PeerScoringPlugin, ScoreEvent, ScoreOp, SessionEvent, StewardListPlugin,
+        PeerScoringPlugin, ScoreEvent, ScoreOp, SessionEvent, StewardListPlugin,
     },
     mls_crypto::MlsService,
 };
-
-/// `true` iff `events` contains at least one downward threshold cross.
-/// Used to chain into a score-removal pass after applying score ops.
-fn has_downward_cross(events: &[PeerScoringEvent]) -> bool {
-    events
-        .iter()
-        .any(|e| matches!(e, PeerScoringEvent::ThresholdCrossedDown { .. }))
-}
 
 /// What [`SessionRunner::check_pending_join`] hands back to its polling
 /// caller.
@@ -57,7 +49,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         let (state, expired, conversation_id) = {
             let s = arc.read_or_err("session")?;
             (
-                s.handle.current_state(),
+                s.conversation.current_state(),
                 s.is_pending_join_expired(),
                 s.conversation_id.clone(),
             )
@@ -86,7 +78,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         let (has_proposals, selection_event) = {
             let mut s = arc.write_or_err("session")?;
 
-            let state = s.handle.current_state();
+            let state = s.conversation.current_state();
             if state != ConversationState::Freezing {
                 return Ok((FreezeTimeoutStatus::NotFreezing, DispatchOutcome::Done));
             }
@@ -94,16 +86,22 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             // Early selection: skip remaining freeze time if all expected
             // stewards have submitted candidates.
             let all_candidates_in =
-                s.handle.steward_list.current_list().is_some_and(|list| {
-                    s.handle.conversation.freeze_candidate_count() >= list.len()
-                });
+                s.conversation
+                    .steward_list
+                    .current_list()
+                    .is_some_and(|list| {
+                        s.conversation.conversation.freeze_candidate_count() >= list.len()
+                    });
 
             if !all_candidates_in && !s.is_freeze_timed_out() {
                 return Ok((FreezeTimeoutStatus::StillFreezing, DispatchOutcome::Done));
             }
 
             let event = s.start_selection();
-            (s.handle.conversation.approved_proposals_count() > 0, event)
+            (
+                s.conversation.conversation.approved_proposals_count() > 0,
+                event,
+            )
         };
 
         arc.read_or_err("session")?
@@ -111,11 +109,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
         let (mut finalize_result, downward_cross, conversation_id) = {
             let mut s = arc.write_or_err("session")?;
-            let allow_subset = s.handle.steward_list.config().allow_subset_candidates;
+            let allow_subset = s.conversation.steward_list.config().allow_subset_candidates;
             let self_member_id = Arc::clone(&s.self_member_id);
-            let result = if s.handle.mls().is_some() {
+            let result = if s.conversation.mls().is_some() {
                 match s
-                    .handle
+                    .conversation
                     .finalize_freeze_round(allow_subset, &self_member_id)
                 {
                     Ok(result) => result,
@@ -133,8 +131,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             // no ECP needed). A downward threshold cross schedules a
             // removal-init pass below, after the lock drops.
             let cross = if !result.score_ops.is_empty() {
-                let events = s.handle.scoring.apply_ops(&result.score_ops);
-                has_downward_cross(&events)
+                s.conversation.scoring.apply_ops(&result.score_ops)
             } else {
                 false
             };
@@ -210,13 +207,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                         // the same event independently; threshold-crossing
                         // removal still goes through SCORE_BELOW_THRESHOLD
                         // consensus in steward.rs.
-                        let accuse_target = match s.handle.mls() {
+                        let accuse_target = match s.conversation.mls() {
                             Some(mls) => {
                                 let violation_epoch = mls.current_epoch()?;
                                 let members = mls.members()?;
                                 let self_member_id: &[u8] = &s.self_member_id;
-                                let eligible = s.handle.conversation.steward_eligibility(&members);
-                                s.handle
+                                let eligible =
+                                    s.conversation.conversation.steward_eligibility(&members);
+                                s.conversation
                                     .steward_list
                                     .epoch_steward(violation_epoch, &eligible)
                                     .filter(|id| !id.is_empty() && *id != self_member_id)
@@ -225,18 +223,17 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                             None => None,
                         };
                         let cross = if let Some(steward_id) = accuse_target {
-                            let events = s.handle.scoring.apply_op(&ScoreOp {
+                            s.conversation.scoring.apply_op(&ScoreOp {
                                 member_id: steward_id,
                                 event: ScoreEvent::CensorshipInactivity,
-                            });
-                            has_downward_cross(&events)
+                            })
                         } else {
                             false
                         };
 
                         (event, cross)
                     } else {
-                        s.handle.conversation.clear_freeze_round();
+                        s.conversation.conversation.clear_freeze_round();
                         let event = s.start_working();
                         (event, false)
                     }
@@ -281,37 +278,40 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // check and (for stewards) build the outbound candidate.
         let (transitioned, transport, outbound) = {
             let mut s = arc.write_or_err("session")?;
-            let state = s.handle.current_state();
+            let state = s.conversation.current_state();
             if state == ConversationState::PendingJoin {
                 return Ok(false);
             }
 
-            let proposal_count = s.handle.conversation.approved_proposals_count();
+            let proposal_count = s.conversation.conversation.approved_proposals_count();
             // Hold the freeze while an election is in flight — committing on
             // the known-stale list would just produce a NoCandidate.
-            if s.handle.conversation.has_election_in_flight() {
+            if s.conversation.conversation.has_election_in_flight() {
                 return Ok(false);
             }
             // Recovery uses the shorter retry inactivity window so we don't
             // burn another full epoch waiting for a steward to commit.
-            let in_recovery =
-                s.handle.is_in_recovery_mode() || s.handle.steward_list.retry_round() > 0;
+            let in_recovery = s.conversation.is_in_recovery_mode()
+                || s.conversation.steward_list.next_retry_round() > 0;
             let inactivity = if in_recovery {
-                s.handle.config.recovery_inactivity_duration
+                s.conversation.config.recovery_inactivity_duration
             } else {
-                s.handle.config.commit_inactivity_duration
+                s.conversation.config.commit_inactivity_duration
             };
             let freeze_event = s.check_steward_inactivity(proposal_count, inactivity);
             let Some(event) = freeze_event else {
                 return Ok(false);
             };
-            let epoch = s.handle.expect_mls()?.current_epoch()?;
-            s.handle.conversation.ensure_freeze_round(epoch);
+            let epoch = s.conversation.expect_mls()?.current_epoch()?;
+            s.conversation.conversation.start_freeze_round(epoch);
 
             let self_member_id = Arc::clone(&s.self_member_id);
             let app_id = Arc::clone(&s.app_id);
-            let outbound = if s.handle.steward_list.is_steward(&self_member_id) {
-                match s.handle.create_commit_candidate(&self_member_id, &app_id) {
+            let outbound = if s.conversation.steward_list.is_steward(&self_member_id) {
+                match s
+                    .conversation
+                    .create_commit_candidate(&self_member_id, &app_id)
+                {
                     Ok(packets) => packets,
                     Err(e) => {
                         error!(

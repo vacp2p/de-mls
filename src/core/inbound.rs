@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 use crate::{
     core::{
-        conversation::Conversation,
+        conversation::ConversationQueues,
         error::CoreError,
         freeze::buffer_commit_candidate,
         process_result::{NoopReason, ProcessResult},
@@ -47,7 +47,7 @@ fn authorize_fast_path_proposal(proposal: &Proposal, mls_sender: &[u8]) -> bool 
 /// Process an inbound packet on the app subtopic and decide what action is
 /// needed. Welcome-subtopic packets are handled at the app layer.
 pub fn process_inbound<M: MlsService>(
-    conversation: &mut Conversation,
+    conversation: &mut ConversationQueues,
     mls: &mut M,
     payload: &[u8],
 ) -> Result<ProcessResult, CoreError> {

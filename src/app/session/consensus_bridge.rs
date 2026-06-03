@@ -42,7 +42,7 @@ pub(crate) struct ProposalParams {
 ///
 /// In both cases the caller must record ownership *before*
 /// casting, so a single-voter consensus transition can't fire before
-/// [`crate::core::Conversation::is_owner_of_proposal`] is true.
+/// [`crate::core::ConversationQueues::is_owner_of_proposal`] is true.
 pub(crate) async fn submit_proposal<P: ConsensusPlugin>(
     conversation_id: &str,
     request: &ConversationUpdateRequest,
@@ -131,7 +131,7 @@ pub(crate) async fn forward_incoming_proposal<P: ConsensusPlugin>(
 /// Forward a peer's vote into the local consensus service.
 ///
 /// `outcome_applied_locally` is the result of
-/// `Conversation::is_consensus_outcome_applied(vote.proposal_id)` computed
+/// `ConversationQueues::is_consensus_outcome_applied(vote.proposal_id)` computed
 /// by the caller — passed in eagerly so this helper doesn't have to borrow
 /// the conversation across the consensus `.await`. It's only consulted on
 /// the `SessionNotFound` branch.

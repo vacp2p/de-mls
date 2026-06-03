@@ -7,24 +7,24 @@ use sha2::{Digest, Sha256};
 
 use crate::core::error::CoreError;
 
-/// Bounds and flags for steward list generation (RFC steward-list creation).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StewardListConfig {
-    /// Minimum list size; below this membership count, size equals member count.
     pub sn_min: usize,
     pub sn_max: usize,
     pub allow_subset_candidates: bool,
 }
 
 impl Default for StewardListConfig {
-    /// `sn_min = 1`, `sn_max = 2`. Override via [`crate::app::User::set_default_steward_list_config`].
     fn default() -> Self {
-        Self::new(1, 2).expect("1..=2 is always a valid StewardListConfig range")
+        Self {
+            sn_min: 1,
+            sn_max: 2,
+            allow_subset_candidates: false,
+        }
     }
 }
 
 impl StewardListConfig {
-    /// Errors if `sn_min < 1` or `sn_min > sn_max`.
     pub fn new(sn_min: usize, sn_max: usize) -> Result<Self, CoreError> {
         if sn_min < 1 || sn_min > sn_max {
             return Err(CoreError::InvalidConfigSize);
@@ -60,12 +60,10 @@ pub struct StewardList {
     members: Vec<Vec<u8>>,
     config: StewardListConfig,
     election_epoch: u64,
-    /// SHA256-sort seed frozen at install; not the plug-in live retry counter.
     retry_round: u32,
 }
 
 impl StewardList {
-    /// Errors on empty `member_ids` or invalid `sn`.
     pub fn generate(
         election_epoch: u64,
         conversation_id: &[u8],
@@ -181,7 +179,8 @@ impl StewardList {
         self.election_epoch
     }
 
-    /// Frozen SHA256-sort seed (carried in `ConversationSync`).
+    /// Retry round frozen into this list as its SHA256-sort seed (carried in
+    /// `ConversationSync`). Distinct from the plugin's live `next_retry_round`.
     pub fn retry_round(&self) -> u32 {
         self.retry_round
     }
@@ -217,7 +216,9 @@ fn sorted_steward_indices(
             )
         })
         .collect();
-    scored.sort_by(|(a, _), (b, _)| a.cmp(b));
+    // Tie-break on member_id so a hash collision is still cross-peer total,
+    // not dependent on the caller's slice ordering.
+    scored.sort_by(|(a, ai), (b, bi)| a.cmp(b).then_with(|| member_ids[*ai].cmp(&member_ids[*bi])));
     scored.into_iter().map(|(_, i)| i).collect()
 }
 
@@ -338,6 +339,27 @@ mod tests {
         let list_b = StewardList::generate(0, b"conversation", &mems_b, 3, config, 0).unwrap();
 
         assert_eq!(list_a.members(), list_b.members());
+    }
+
+    /// At the small-group boundary (`members == sn_max`) the regenerated
+    /// list is the full membership: `compute_list_size` returns `sn_max` and
+    /// `generate` keeps every member (only reordered). This is the invariant
+    /// `reconcile_steward_list` relies on — the no-vote local regen yields
+    /// the same set a successful election would.
+    #[test]
+    fn test_regen_at_sn_max_is_full_membership() {
+        let config = StewardListConfig::new(2, 5).unwrap();
+        let mems = members(&[1, 2, 3, 4, 5]); // len == sn_max
+        let sn = config.compute_list_size(mems.len());
+        assert_eq!(sn, 5, "size at the sn_max boundary is sn_max");
+
+        let list = StewardList::generate(7, b"conv", &mems, sn, config, 0).unwrap();
+        let got: std::collections::HashSet<_> = list.members().iter().cloned().collect();
+        let want: std::collections::HashSet<_> = mems.iter().cloned().collect();
+        assert_eq!(
+            got, want,
+            "every member is a steward at the sn_max boundary"
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ pub struct UserPlugins<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Builds per-conversation plug-in instances (MLS service, scoring,
     /// steward list) and generate key packages for joiners.
     pub conversation_plugins: CP,
-    /// Consensus-plugin state. Owns the shared storage handle + signer
+    /// Consensus-plugin state. Owns the shared storage + signer
     /// and mints per-conv services on demand.
     pub consensus: ConsensusContext<P>,
     /// Seed config copied into newly-created `SessionRunner`s.
