@@ -17,9 +17,9 @@ use hashgraph_like_consensus::events::ConsensusEventBus;
 use crate::{
     app::{PhaseTimer, SessionTick, UserError},
     core::{
-        ConsensusPlugin, Conversation, ConversationConfig, ConversationPluginsFactory,
-        ConversationQueues, ConversationState, ConversationStateMachine, PluginConsensus,
-        SessionEvent,
+        ConsensusPlugin, ConsensusServiceFor, Conversation, ConversationConfig,
+        ConversationPluginsFactory, ConversationQueues, ConversationState,
+        ConversationStateMachine, SessionEvent,
     },
     ds::{OutboundPacket, SharedDeliveryService},
 };
@@ -64,7 +64,7 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Per-conversation consensus service. Owns this conversation's scope
     /// in the shared storage and a private event bus. Constructed at
     /// conversation creation by `User::build_consensus_service`.
-    pub consensus: PluginConsensus<P>,
+    pub consensus: ConsensusServiceFor<P>,
     /// Subscriber on `consensus.event_bus()`. Drained by
     /// [`Self::tick_deadlines`], which dispatches each event through
     /// `apply_consensus_outcome`. Subscribed in
@@ -120,7 +120,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         config: ConversationConfig,
         scoring: CP::Scoring,
         steward_list: CP::StewardList,
-        consensus: PluginConsensus<P>,
+        consensus: ConsensusServiceFor<P>,
         consensus_rx: ConsensusReceiver<P>,
         transport: SharedDeliveryService,
         self_member_id: Arc<[u8]>,

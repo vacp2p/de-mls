@@ -17,8 +17,8 @@ use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use crate::{
     app::{ConsensusContext, ConversationConfig, User, UserPlugins},
     core::{
-        ConsensusPlugin, ConversationPluginsFactory, ElectionDecision, PeerScoringPlugin,
-        PluginConsensus, ScoreOp, ScoreSnapshot, ScoringConfig, StewardList, StewardListConfig,
+        ConsensusPlugin, ConsensusServiceFor, ConversationPluginsFactory, ElectionDecision,
+        PeerScoringPlugin, ScoreOp, ScoreSnapshot, ScoringConfig, StewardList, StewardListConfig,
         StewardListEvent, StewardListPlugin,
     },
     defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage},
@@ -86,14 +86,14 @@ pub(crate) fn make_user_from_private_key(
     User::new_with_plugins(Box::new(member_id), plugins, transport)
 }
 
-/// Build a `PluginConsensus<DefaultConsensusPlugin>` paired with a
+/// Build a `ConsensusServiceFor<DefaultConsensusPlugin>` paired with a
 /// subscribed receiver for [`crate::app::SessionRunner::new`].
 pub(crate) fn make_test_consensus_service() -> (
-    PluginConsensus<DefaultConsensusPlugin>,
+    ConsensusServiceFor<DefaultConsensusPlugin>,
     crate::defaults::SyncEventReceiver<String>,
 ) {
     use hashgraph_like_consensus::events::ConsensusEventBus;
-    let service = PluginConsensus::<DefaultConsensusPlugin>::new_with_components(
+    let service = ConsensusServiceFor::<DefaultConsensusPlugin>::new_with_components(
         DefaultConsensusPlugin::new_storage(),
         DefaultConsensusPlugin::new_event_bus(),
         EthereumConsensusSigner::new(PrivateKeySigner::random()),

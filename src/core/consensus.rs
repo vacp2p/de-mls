@@ -1,12 +1,6 @@
 //! Pure consensus result application.
 //!
-//! Updates a [`ConversationQueues`] in response to a consensus
-//! outcome. No I/O, no service calls. Score deltas for emergency outcomes
-//! are derived alongside in [`crate::core::emergency_score_ops`].
-//!
-//! App-layer helpers that wire consensus events to the UI and transport
-//! (`submit_proposal`, `cast_vote`, `relay_incoming_proposal`,
-//! `forward_incoming_vote`) live in `crate::app::consensus_bridge`.
+//! Updates a [`ConversationQueues`] in response to a consensus outcome.
 
 use tracing::info;
 
@@ -19,11 +13,7 @@ use crate::{
 };
 
 /// Outcome of applying a consensus result to a conversation. Each variant
-/// encodes exactly the follow-up the app caller must perform — no
-/// independent boolean flags.
-///
-/// Score deltas for emergency outcomes are derived separately by
-/// [`crate::core::emergency_score_ops`].
+/// encodes exactly the follow-up the app caller must perform
 #[derive(Debug, Clone)]
 pub enum ConsensusApplyResult {
     /// Nothing for the caller to do. The contract is "no follow-up", not

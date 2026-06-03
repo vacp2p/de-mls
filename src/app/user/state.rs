@@ -14,7 +14,7 @@ use crate::{
         UserPlugins,
     },
     core::{
-        ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, PluginConsensus,
+        ConsensusPlugin, ConsensusServiceFor, ConversationLifecycle, ConversationPluginsFactory,
         ScoringConfig, SessionEvent, StewardListConfig,
     },
     ds::SharedDeliveryService,
@@ -476,7 +476,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
     /// Build a fresh per-conversation `ConsensusService` via the User's
     /// `ConsensusContext`.
-    pub fn build_consensus_service(&self) -> PluginConsensus<P> {
+    pub fn build_consensus_service(&self) -> ConsensusServiceFor<P> {
         self.plugins.consensus.build_service()
     }
 

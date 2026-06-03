@@ -157,8 +157,9 @@ impl<Scope: ConsensusScope> SyncConsensusReceiver<Scope> for SyncEventReceiver<S
 // Default consensus plug-in
 // ═══════════════════════════════════════════════════════════════════
 
-/// In-memory consensus plug-in suitable for tests and simple deployments.
-/// The [`ConsensusPlugin`] trait itself is defined in [`crate::core`].
+/// In-memory consensus backend for tests and simple deployments.
+///
+/// Implements [`crate::core::ConsensusPlugin`].
 pub struct DefaultConsensusPlugin;
 
 impl ConsensusPlugin for DefaultConsensusPlugin {

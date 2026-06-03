@@ -16,7 +16,7 @@ use tracing::info;
 
 use crate::{
     app::error::UserError,
-    core::{ConsensusPlugin, CoreError, PluginConsensus, self_leave_proposal_id},
+    core::{ConsensusPlugin, ConsensusServiceFor, CoreError, self_leave_proposal_id},
     protos::de_mls::messages::v1::{
         AppMessage, ConversationUpdateRequest, RemoveMember, conversation_update_request,
     },
@@ -47,7 +47,7 @@ pub(crate) async fn submit_proposal<P: ConsensusPlugin>(
     conversation_id: &str,
     request: &ConversationUpdateRequest,
     creator_id: &[u8],
-    consensus: &PluginConsensus<P>,
+    consensus: &ConsensusServiceFor<P>,
     params: ProposalParams,
 ) -> Result<(u32, AppMessage), CoreError> {
     let create_request = CreateProposalRequest::new(
@@ -95,7 +95,7 @@ pub(crate) async fn cast_vote<P>(
     conversation_id: &str,
     proposal_id: u32,
     vote: bool,
-    consensus: &PluginConsensus<P>,
+    consensus: &ConsensusServiceFor<P>,
 ) -> Result<AppMessage, UserError>
 where
     P: ConsensusPlugin,
@@ -119,7 +119,7 @@ where
 pub(crate) async fn forward_incoming_proposal<P: ConsensusPlugin>(
     conversation_id: &str,
     proposal: Proposal,
-    consensus: &PluginConsensus<P>,
+    consensus: &ConsensusServiceFor<P>,
 ) -> Result<(), UserError> {
     let scope = P::Scope::from(conversation_id.to_string());
     consensus
@@ -148,7 +148,7 @@ pub(crate) async fn forward_incoming_proposal<P: ConsensusPlugin>(
 pub(crate) async fn forward_incoming_vote<P: ConsensusPlugin>(
     conversation_id: &str,
     vote: Vote,
-    consensus: &PluginConsensus<P>,
+    consensus: &ConsensusServiceFor<P>,
     outcome_applied_locally: bool,
 ) -> Result<(), CoreError> {
     let proposal_id = vote.proposal_id;
@@ -197,7 +197,7 @@ pub(crate) async fn forward_incoming_vote<P: ConsensusPlugin>(
 pub(crate) async fn submit_self_leave_proposal<P>(
     conversation_id: &str,
     self_member_id: &[u8],
-    consensus: &PluginConsensus<P>,
+    consensus: &ConsensusServiceFor<P>,
     params: ProposalParams,
 ) -> Result<Option<(u32, AppMessage)>, UserError>
 where
