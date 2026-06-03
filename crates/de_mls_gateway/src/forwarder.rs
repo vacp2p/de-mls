@@ -184,7 +184,7 @@ impl Gateway<WakuDeliveryService> {
                 if pkt.subtopic == de_mls::ds::WELCOME_SUBTOPIC
                     && let Some(mw) = crate::welcome_envelope::decode(&pkt.payload)
                 {
-                    let accepted = user.write().await.accept_welcome(&mw.welcome_bytes).await;
+                    let accepted = user.write().await.accept_welcome(&mw.welcome_bytes);
                     match accepted {
                         Ok(_) if !mw.conversation_sync_bytes.is_empty() => {
                             // Replay the bundled ConversationSync
@@ -199,8 +199,7 @@ impl Gateway<WakuDeliveryService> {
                                 pkt.app_id.clone(),
                                 pkt.timestamp,
                             );
-                            if let Err(e) = user.read().await.process_inbound_packet(sync_pkt).await
-                            {
+                            if let Err(e) = user.read().await.process_inbound_packet(sync_pkt) {
                                 tracing::warn!(
                                     group = %conversation_id,
                                     error = %e,
@@ -220,7 +219,7 @@ impl Gateway<WakuDeliveryService> {
                     continue;
                 }
 
-                if let Err(e) = user.read().await.process_inbound_packet(pkt).await {
+                if let Err(e) = user.read().await.process_inbound_packet(pkt) {
                     tracing::error!(group = %conversation_id, error = %e, "process_inbound_packet failed");
                 }
 

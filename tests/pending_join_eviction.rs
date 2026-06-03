@@ -31,7 +31,7 @@ async fn pending_join_expires_evicts_entry_and_broadcasts_removal() {
 
     // Alice joins a conversation no one else is in — no welcome will ever
     // arrive. The session sits in PendingJoin.
-    alice.start_conversation(group, false).await.unwrap();
+    alice.start_conversation(group, false).unwrap();
     assert!(
         alice
             .list_conversations()
@@ -63,7 +63,7 @@ async fn pending_join_expires_evicts_entry_and_broadcasts_removal() {
     );
 
     // Cleanup pathway: caller follows up with finalize_self_leave.
-    alice.finalize_self_leave(group).await.unwrap();
+    alice.finalize_self_leave(group).unwrap();
 
     // Registry entry is gone.
     assert!(

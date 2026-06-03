@@ -158,7 +158,7 @@ pub fn to_inbound(p: &OutboundPacket) -> InboundPacket {
     )
 }
 
-/// Sleep 100 ms — recovery_cascade.rs convention for letting an async
+/// Sleep 100 ms — recovery_cascade.rs convention for letting an
 /// poll loop catch up after a single round of state changes.
 pub async fn settle() {
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -171,17 +171,17 @@ pub async fn settle_for(d: Duration) {
 
 /// Deliver one packet to a single user. Returns the raw `process_inbound_packet`
 /// result so the caller can assert success or error.
-pub async fn deliver(user: &TestUser, p: &OutboundPacket) {
-    let _ = user.process_inbound_packet(to_inbound(p)).await;
+pub fn deliver(user: &TestUser, p: &OutboundPacket) {
+    let _ = user.process_inbound_packet(to_inbound(p));
 }
 
 /// Deliver each packet to every receiver. Errors are swallowed (mirrors
 /// pubsub-style relay where a delivery failure on one node doesn't stop
 /// the relay).
-pub async fn broadcast(packets: &[OutboundPacket], receivers: &[&TestUser]) {
+pub fn broadcast(packets: &[OutboundPacket], receivers: &[&TestUser]) {
     for p in packets {
         for r in receivers {
-            let _ = r.process_inbound_packet(to_inbound(p)).await;
+            let _ = r.process_inbound_packet(to_inbound(p));
         }
     }
 }
@@ -194,10 +194,7 @@ pub async fn broadcast(packets: &[OutboundPacket], receivers: &[&TestUser]) {
 /// once per polling round, BEFORE relaying packets — same-round
 /// app-msg packets (e.g. the post-commit steward election proposal)
 /// need the joiner's MLS attached first.
-pub async fn route_welcomes(
-    sessions: &[SessionArc],
-    users: &mut [(TestUser, TransportHandle)],
-) -> usize {
+pub fn route_welcomes(sessions: &[SessionArc], users: &mut [(TestUser, TransportHandle)]) -> usize {
     use de_mls::core::SessionEvent;
     use de_mls::protos::de_mls::messages::v1::MemberWelcome;
 
@@ -225,7 +222,7 @@ pub async fn route_welcomes(
             // `accept_welcome` surfaces as `Err(WelcomeNotForUs)`) for
             // anyone the welcome doesn't address. Only the targeted
             // joiner attaches MLS and gets the bundled sync replayed.
-            if u.accept_welcome(&welcome.welcome_bytes).await.is_ok() {
+            if u.accept_welcome(&welcome.welcome_bytes).is_ok() {
                 delivered += 1;
                 if !welcome.conversation_sync_bytes.is_empty() {
                     let sync_pkt = de_mls::ds::InboundPacket::new(
@@ -235,7 +232,7 @@ pub async fn route_welcomes(
                         welcomer_app_id.clone(),
                         0,
                     );
-                    let _ = u.process_inbound_packet(sync_pkt).await;
+                    let _ = u.process_inbound_packet(sync_pkt);
                 }
             }
         }
@@ -263,10 +260,10 @@ pub fn fast_test_config() -> ConversationConfig {
 /// One polling cycle on a session: drive freeze status, member-freeze
 /// check, and (for joiners) the pending-join tick. Mirrors the production
 /// `group_polling_loop` body in `de_mls_gateway::group`.
-pub async fn poll_once(session: &SessionArc) {
-    let _ = SessionRunner::tick_deadlines(session).await;
-    let _ = SessionRunner::poll_freeze_status(session).await;
-    let _ = SessionRunner::check_member_freeze(session).await;
+pub fn poll_once(session: &SessionArc) {
+    let _ = SessionRunner::tick_deadlines(session);
+    let _ = SessionRunner::poll_freeze_status(session);
+    let _ = SessionRunner::check_member_freeze(session);
     let _ = SessionRunner::check_pending_join(session);
 }
 
@@ -308,11 +305,9 @@ pub async fn bootstrap_joined_conversation(
     users[0]
         .0
         .start_conversation(conversation, true)
-        .await
         .expect("creator start");
     for (u, _) in users.iter_mut().skip(1) {
         u.start_conversation(conversation, false)
-            .await
             .expect("joiner start");
     }
 
@@ -328,16 +323,14 @@ pub async fn bootstrap_joined_conversation(
     // Joiners send KPs. Drain joiner transports, deliver to creator.
     for i in 1..users.len() {
         let kp = users[i].0.generate_key_package().expect("kp");
-        SessionRunner::send_key_package(&sessions[i], kp)
-            .await
-            .expect("send kp");
+        SessionRunner::send_key_package(&sessions[i], kp).expect("send kp");
     }
     let mut kp_packets = Vec::new();
     for (_, h) in users.iter().skip(1) {
         kp_packets.extend(h.lock().unwrap().drain_packets());
     }
     for p in &kp_packets {
-        let _ = users[0].0.process_inbound_packet(to_inbound(p)).await;
+        let _ = users[0].0.process_inbound_packet(to_inbound(p));
     }
 
     // Drive every session's polling and shuttle outbound packets until
@@ -353,7 +346,7 @@ pub async fn bootstrap_joined_conversation(
     for round in 0..MAX_ROUNDS {
         tokio::time::sleep(Duration::from_millis(60)).await;
         for s in &sessions {
-            poll_once(s).await;
+            poll_once(s);
         }
 
         // Welcomes never traverse the test transport: the steward emits
@@ -361,7 +354,7 @@ pub async fn bootstrap_joined_conversation(
         // its joiner BEFORE relaying packets — same-round app-msg
         // traffic (the post-commit steward election proposal) needs
         // the joiner's MLS attached first.
-        let delivered_welcome = route_welcomes(&sessions, &mut users).await > 0;
+        let delivered_welcome = route_welcomes(&sessions, &mut users) > 0;
 
         let mut packets = Vec::new();
         for (_, h) in &users {
@@ -371,7 +364,7 @@ pub async fn bootstrap_joined_conversation(
         // dedups echoes of our own messages via `app_id`.
         for p in &packets {
             for (u, _) in &users {
-                let _ = u.process_inbound_packet(to_inbound(p)).await;
+                let _ = u.process_inbound_packet(to_inbound(p));
             }
         }
 

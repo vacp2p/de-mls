@@ -16,15 +16,14 @@ const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f
 // The whole point of this test is to hold one session's guard while
 // driving work on another — the await-holding-lock the lint flags is the
 // exact thing under assertion.
-#[allow(clippy::await_holding_lock)]
-#[tokio::test]
-async fn write_lock_on_one_session_does_not_block_others() {
+#[test]
+fn write_lock_on_one_session_does_not_block_others() {
     let cfg: ConversationConfig = fast_test_config();
     let steward_cfg = StewardListConfig::new(1, 5).unwrap();
     let (mut alice, _tx) = make_user(ALICE, cfg, steward_cfg);
 
-    alice.start_conversation("conv-a", true).await.unwrap();
-    alice.start_conversation("conv-b", true).await.unwrap();
+    alice.start_conversation("conv-a", true).unwrap();
+    alice.start_conversation("conv-b", true).unwrap();
 
     let session_a = alice.lookup_entry("conv-a").unwrap().unwrap();
     let session_b = alice.lookup_entry("conv-b").unwrap().unwrap();
@@ -61,7 +60,6 @@ async fn write_lock_on_one_session_does_not_block_others() {
     // composes with the outer isolation check without holding any guard
     // across an await.
     SessionRunner::check_member_freeze(&session_b)
-        .await
         .expect("check_member_freeze on conv-b must succeed");
 
     drop(a_guard);
@@ -69,6 +67,5 @@ async fn write_lock_on_one_session_does_not_block_others() {
     // After releasing, conv-a is also accessible — and the same static
     // entry point works against either Arc.
     SessionRunner::check_member_freeze(&session_a)
-        .await
         .expect("conv-a check_member_freeze must succeed");
 }

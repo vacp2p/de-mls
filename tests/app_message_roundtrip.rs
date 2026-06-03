@@ -28,15 +28,13 @@ async fn chat_message_delivered_to_peer_as_app_message_event() {
     let alice_session = users[0].0.lookup_entry("chat").unwrap().unwrap();
     let bob_session = users[1].0.lookup_entry("chat").unwrap().unwrap();
 
-    SessionRunner::send_app_message(&alice_session, b"Hello from alice".to_vec())
-        .await
-        .unwrap();
+    SessionRunner::send_app_message(&alice_session, b"Hello from alice".to_vec()).unwrap();
 
     // Relay alice's outbound to bob.
     settle_for(Duration::from_millis(40)).await;
     let packets = users[0].1.lock().unwrap().drain_packets();
     for p in packets {
-        let _ = users[1].0.process_inbound_packet(to_inbound(&p)).await;
+        let _ = users[1].0.process_inbound_packet(to_inbound(&p));
     }
 
     let chat = bob_session

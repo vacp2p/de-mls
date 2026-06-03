@@ -56,9 +56,7 @@ async fn freeze_cycle_emits_phase_events_in_order() {
             },
         )),
     };
-    SessionRunner::initiate_proposal(&alice_session, remove_request, CreatorVote::Yes)
-        .await
-        .unwrap();
+    SessionRunner::initiate_proposal(&alice_session, remove_request, CreatorVote::Yes).unwrap();
 
     // Drive polling + packet relay until both sessions are back in
     // Working (bob will actually exit the conversation, so we check
@@ -67,15 +65,15 @@ async fn freeze_cycle_emits_phase_events_in_order() {
     let mut saw_freezing = false;
     for _ in 0..40 {
         settle_for(Duration::from_millis(40)).await;
-        poll_once(&alice_session).await;
-        poll_once(&bob_session).await;
+        poll_once(&alice_session);
+        poll_once(&bob_session);
 
         let mut packets = Vec::new();
         packets.extend(alice_tx.lock().unwrap().drain_packets());
         packets.extend(bob_tx.lock().unwrap().drain_packets());
         for p in &packets {
-            let _ = users[0].0.process_inbound_packet(to_inbound(p)).await;
-            let _ = users[1].0.process_inbound_packet(to_inbound(p)).await;
+            let _ = users[0].0.process_inbound_packet(to_inbound(p));
+            let _ = users[1].0.process_inbound_packet(to_inbound(p));
         }
 
         alice_phases.extend(drain_phase_log(&alice_session));
@@ -87,7 +85,7 @@ async fn freeze_cycle_emits_phase_events_in_order() {
         if saw_freezing && alice_state == ConversationState::Working && packets.is_empty() {
             // Pump one more round to catch trailing events.
             settle_for(Duration::from_millis(40)).await;
-            poll_once(&alice_session).await;
+            poll_once(&alice_session);
             alice_phases.extend(drain_phase_log(&alice_session));
             break;
         }

@@ -57,7 +57,7 @@ async fn relay_all(users: &[(TestUser, TransportHandle)]) {
     }
     for p in &packets {
         for (u, _) in users {
-            let _ = u.process_inbound_packet(to_inbound(p)).await;
+            let _ = u.process_inbound_packet(to_inbound(p));
         }
     }
 }
@@ -102,7 +102,7 @@ async fn small_group_regenerates_locally_no_election() {
     for _ in 0..20 {
         settle_for(Duration::from_millis(40)).await;
         for s in [&alice_session, &bob_session] {
-            poll_once(s).await;
+            poll_once(s);
         }
         relay_all(&users).await;
     }

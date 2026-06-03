@@ -65,23 +65,21 @@ async fn silent_steward_drives_observer_to_reelection() {
             },
         )),
     };
-    SessionRunner::initiate_proposal(&observer_session, request, CreatorVote::Yes)
-        .await
-        .unwrap();
+    SessionRunner::initiate_proposal(&observer_session, request, CreatorVote::Yes).unwrap();
 
     // Phase 1: pump packets normally until both sides have approved=1.
     let mut consensus_reached = false;
     for _ in 0..20 {
         settle_for(Duration::from_millis(40)).await;
-        poll_once(&alice_session).await;
-        poll_once(&bob_session).await;
+        poll_once(&alice_session);
+        poll_once(&bob_session);
         let packets = users[0].1.lock().unwrap().drain_packets();
         for p in packets {
-            let _ = users[1].0.process_inbound_packet(to_inbound(&p)).await;
+            let _ = users[1].0.process_inbound_packet(to_inbound(&p));
         }
         let packets = users[1].1.lock().unwrap().drain_packets();
         for p in packets {
-            let _ = users[0].0.process_inbound_packet(to_inbound(&p)).await;
+            let _ = users[0].0.process_inbound_packet(to_inbound(&p));
         }
         let observer_approved = observer_session
             .read()
@@ -102,18 +100,15 @@ async fn silent_steward_drives_observer_to_reelection() {
     let mut entered_reelection = false;
     for _ in 0..20 {
         settle_for(Duration::from_millis(40)).await;
-        poll_once(&observer_session).await;
-        poll_once(&alice_session).await; // keep the steward polling, just discard its packets
-        poll_once(&bob_session).await;
+        poll_once(&observer_session);
+        poll_once(&alice_session); // keep the steward polling, just discard its packets
+        poll_once(&bob_session);
 
         // Discard everything the steward emits, deliver everything else.
         let _ = steward_tx.lock().unwrap().drain_packets();
         let packets = observer_tx.lock().unwrap().drain_packets();
         for p in packets {
-            let _ = users[steward_idx]
-                .0
-                .process_inbound_packet(to_inbound(&p))
-                .await;
+            let _ = users[steward_idx].0.process_inbound_packet(to_inbound(&p));
         }
 
         let observer_state = observer_session.read().unwrap().get_conversation_state();

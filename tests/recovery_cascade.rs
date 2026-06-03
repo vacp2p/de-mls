@@ -101,10 +101,10 @@ async fn concurrent_joins_leave_joiners_with_empty_buffer() {
     let (mut dave, dh) = make(DAVE_KEY, cfg.clone(), steward_cfg.clone());
 
     // Step 1: alice creates the group. Bob/Charlie/Dave register as joiners.
-    alice.start_conversation(group, true).await.unwrap();
-    bob.start_conversation(group, false).await.unwrap();
-    charlie.start_conversation(group, false).await.unwrap();
-    dave.start_conversation(group, false).await.unwrap();
+    alice.start_conversation(group, true).unwrap();
+    bob.start_conversation(group, false).unwrap();
+    charlie.start_conversation(group, false).unwrap();
+    dave.start_conversation(group, false).unwrap();
 
     // Step 2: All three joiners send KPs nearly simultaneously. Before the
     // buffer-hygiene fix, each joiner would buffer the others' KPs observed
@@ -112,7 +112,7 @@ async fn concurrent_joins_leave_joiners_with_empty_buffer() {
     for u in [&bob, &charlie, &dave] {
         let kp = u.generate_key_package().unwrap();
         let session = u.lookup_entry(group).unwrap().unwrap();
-        SessionRunner::send_key_package(&session, kp).await.unwrap();
+        SessionRunner::send_key_package(&session, kp).unwrap();
     }
 
     // Step 3: Broadcast every KP packet to every participant (mocks pubsub).
@@ -122,10 +122,10 @@ async fn concurrent_joins_leave_joiners_with_empty_buffer() {
         all_kp_packets.extend(h.lock().unwrap().drain_packets());
     }
     for p in &all_kp_packets {
-        let _ = alice.process_inbound_packet(to_in(p)).await;
-        let _ = bob.process_inbound_packet(to_in(p)).await;
-        let _ = charlie.process_inbound_packet(to_in(p)).await;
-        let _ = dave.process_inbound_packet(to_in(p)).await;
+        let _ = alice.process_inbound_packet(to_in(p));
+        let _ = bob.process_inbound_packet(to_in(p));
+        let _ = charlie.process_inbound_packet(to_in(p));
+        let _ = dave.process_inbound_packet(to_in(p));
     }
     settle().await;
 

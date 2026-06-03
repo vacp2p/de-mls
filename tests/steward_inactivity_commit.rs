@@ -54,9 +54,7 @@ async fn steward_inactivity_fires_commit_candidate() {
             RemoveMember { member_id: bob_id },
         )),
     };
-    SessionRunner::initiate_proposal(&alice_session, request, CreatorVote::Yes)
-        .await
-        .unwrap();
+    SessionRunner::initiate_proposal(&alice_session, request, CreatorVote::Yes).unwrap();
 
     // Drive polling + packet relay. Accumulate alice's outbound so we can
     // verify a `CommitCandidate` packet appears — without any explicit
@@ -64,16 +62,16 @@ async fn steward_inactivity_fires_commit_candidate() {
     let mut alice_outbound: Vec<OutboundPacket> = Vec::new();
     for _ in 0..30 {
         settle_for(Duration::from_millis(40)).await;
-        poll_once(&alice_session).await;
-        poll_once(&bob_session).await;
+        poll_once(&alice_session);
+        poll_once(&bob_session);
 
         let new_alice = alice_tx.lock().unwrap().drain_packets();
         let new_bob = bob_tx.lock().unwrap().drain_packets();
         for p in &new_alice {
-            let _ = users[1].0.process_inbound_packet(to_inbound(p)).await;
+            let _ = users[1].0.process_inbound_packet(to_inbound(p));
         }
         for p in &new_bob {
-            let _ = users[0].0.process_inbound_packet(to_inbound(p)).await;
+            let _ = users[0].0.process_inbound_packet(to_inbound(p));
         }
         alice_outbound.extend(new_alice);
 

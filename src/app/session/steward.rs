@@ -70,10 +70,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// whose list is a genuine subset, opens a voted election. Election-init
     /// failures are logged, not surfaced — conversation state may legitimately
     /// reject a new proposal right now.
-    pub async fn steward_list_housekeeping(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
+    pub fn steward_list_housekeeping(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
         let reconcile = arc.write_or_err("session")?.reconcile_steward_list()?;
         if reconcile == StewardListReconcile::NeedsElection
-            && let Err(e) = Self::initiate_steward_election(arc, false).await
+            && let Err(e) = Self::initiate_steward_election(arc, false)
         {
             let conv_name = arc.read_or_err("session")?.conversation_id.clone();
             info!(conversation = %conv_name, error = %e, "election initiation deferred");
@@ -167,7 +167,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// On epoch advance, the new live epoch steward drains the pending-update
     /// buffer into voting proposals. Skips entries already covered by the
     /// current voting/approved queues so we don't double-propose.
-    pub async fn process_buffered_updates(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
+    pub fn process_buffered_updates(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
         let (current_epoch, to_propose, conversation_id): (
             u64,
             Vec<ConversationUpdateRequest>,
@@ -232,7 +232,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // Buffered updates inherit the same banner path as fresh
         // steward-auto-propose — the steward still decides per proposal.
         for request in to_propose {
-            if let Err(e) = Self::initiate_proposal(arc, request, CreatorVote::Deferred).await {
+            if let Err(e) = Self::initiate_proposal(arc, request, CreatorVote::Deferred) {
                 info!(
                     conversation = %conversation_id,
                     error = %e,
@@ -324,9 +324,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Steward-only: file `ScoreBelowThreshold` ECPs for any member whose
     /// score fell at or below the removal threshold. Skips self and any
     /// target already covered by a pending removal.
-    pub async fn check_and_initiate_score_removals(
-        arc: &Arc<RwLock<Self>>,
-    ) -> Result<(), UserError> {
+    pub fn check_and_initiate_score_removals(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
         // Reactive entry: callers chain into this after a scoring apply
         // emitted a downward cross, so we expect at least one tracked
         // member to be at-or-below threshold. The scan is the source of
@@ -388,7 +386,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             // SCORE_BELOW_THRESHOLD is self-executing: threshold crossed ⇒
             // member must be removed. The steward's vote is YES by
             // protocol, so we bundle it at submit and skip the banner.
-            if let Err(e) = Self::initiate_proposal(arc, request, CreatorVote::Yes).await {
+            if let Err(e) = Self::initiate_proposal(arc, request, CreatorVote::Yes) {
                 arc.write_or_err("session")?
                     .conversation
                     .conversation
@@ -416,7 +414,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// already in `approved_proposals` thanks to
     /// [`crate::core::apply_consensus_result`], so `has_approved_removal`
     /// catches them without an explicit exclude.
-    pub async fn initiate_steward_election(
+    pub fn initiate_steward_election(
         arc: &Arc<RwLock<Self>>,
         recovery: bool,
     ) -> Result<(), UserError> {
@@ -498,7 +496,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
         // Elections are conversation-wide decisions — broadcast unbundled
         // so the responsible proposer still votes via the banner.
-        Self::initiate_proposal(arc, request, CreatorVote::Deferred).await?;
+        Self::initiate_proposal(arc, request, CreatorVote::Deferred)?;
 
         Ok(())
     }
@@ -506,7 +504,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Layer 3 escalation: file a `Deadlock` ECP after re-election retries
     /// exhaust. Only the deterministic responsible proposer submits;
     /// others no-op. On YES the ECP opens `recovery_mode`.
-    pub async fn initiate_deadlock_ecp(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
+    pub fn initiate_deadlock_ecp(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
         let (is_authorized, self_id, epoch, conversation_id) = {
             let s = arc.read_or_err("session")?;
             let mls = s.conversation.expect_mls()?;
@@ -548,7 +546,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
         // Bundle YES — the proposer's observation that the deadlock is
         // real is their vote.
-        Self::initiate_proposal(arc, request, CreatorVote::Yes).await?;
+        Self::initiate_proposal(arc, request, CreatorVote::Yes)?;
         Ok(())
     }
 }

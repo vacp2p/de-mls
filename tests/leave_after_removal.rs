@@ -61,9 +61,7 @@ async fn removed_member_emits_leaving_and_is_evicted() {
             },
         )),
     };
-    SessionRunner::initiate_proposal(&steward_session, request, CreatorVote::Yes)
-        .await
-        .unwrap();
+    SessionRunner::initiate_proposal(&steward_session, request, CreatorVote::Yes).unwrap();
 
     // Drive packet relay + polling until the target is evicted from its
     // User registry. Mirrors the gateway's polling loop: when
@@ -74,17 +72,17 @@ async fn removed_member_emits_leaving_and_is_evicted() {
         settle_for(Duration::from_millis(40)).await;
         for (i, (u, _)) in users.iter().enumerate() {
             if let Some(s) = u.lookup_entry("leave").unwrap() {
-                let _ = SessionRunner::tick_deadlines(&s).await;
+                let _ = SessionRunner::tick_deadlines(&s);
                 if i == target_idx
                     && matches!(
-                        SessionRunner::poll_freeze_status(&s).await,
+                        SessionRunner::poll_freeze_status(&s),
                         Ok((_, DispatchOutcome::LeaveRequested))
                     )
                 {
-                    u.finalize_self_leave("leave").await.unwrap();
+                    u.finalize_self_leave("leave").unwrap();
                 } else {
-                    let _ = SessionRunner::poll_freeze_status(&s).await;
-                    let _ = SessionRunner::check_member_freeze(&s).await;
+                    let _ = SessionRunner::poll_freeze_status(&s);
+                    let _ = SessionRunner::check_member_freeze(&s);
                 }
             }
         }
@@ -94,7 +92,7 @@ async fn removed_member_emits_leaving_and_is_evicted() {
         }
         for p in &packets {
             for (u, _) in &users {
-                let _ = u.process_inbound_packet(to_inbound(p)).await;
+                let _ = u.process_inbound_packet(to_inbound(p));
             }
         }
         if users[target_idx].0.lookup_entry("leave").unwrap().is_none() {
