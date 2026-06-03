@@ -113,17 +113,6 @@ impl ViolationEvidence {
         }
     }
 
-    /// Steward didn't commit within the threshold duration.
-    pub fn censorship_inactivity(target: Vec<u8>, epoch: u64) -> Self {
-        Self {
-            violation_type: ViolationType::CensorshipInactivity as i32,
-            target_member_id: target,
-            evidence_payload: Vec::new(),
-            epoch,
-            creator_member_id: Vec::new(),
-        }
-    }
-
     /// Member's peer score dropped to or below the removal threshold.
     pub fn score_below_threshold(target: Vec<u8>, epoch: u64, current_score: i64) -> Self {
         Self {
