@@ -105,6 +105,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             )?
         };
 
+        // A commit candidate may have arrived before this approval landed (a
+        // peer steward can reach consensus and broadcast the commit before we
+        // apply our own vote). Now that the approved queue is populated, replay
+        // any stashed candidate so the freeze round picks it up instead of
+        // starting empty and forcing a needless reelection.
+        arc.write_or_err("session")?
+            .conversation
+            .replay_early_candidates()?;
+
         match consensus_apply {
             ConsensusApplyResult::NoAction => {}
             ConsensusApplyResult::ElectionAccepted(election) => {

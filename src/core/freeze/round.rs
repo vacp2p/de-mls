@@ -106,18 +106,24 @@ pub fn buffer_commit_candidate<M: MlsService>(
     }
 
     let epoch = mls.current_epoch()?;
+    let max_candidates = mls.members()?.len();
 
     // Valid candidate — auto-start a round if there are approved proposals.
     if !conversation.has_freeze_round() {
         if conversation.approved_proposals_count() == 0 {
-            tracing::debug!(conversation = %conversation_id, "candidate ignored: no approved proposals");
-            return Ok(ProcessResult::Noop(NoopReason::NoApprovedProposals));
+            // The proposal isn't locally approved yet — the consensus outcome
+            // is still in flight (a peer steward can reach consensus and
+            // broadcast this commit before we apply our own vote). Stash for
+            // replay once approval lands rather than dropping; otherwise we'd
+            // never apply the commit and would fall an epoch behind.
+            tracing::debug!(conversation = %conversation_id, "candidate stashed: proposal not yet approved");
+            conversation.stash_early_candidate(epoch, candidate_msg, max_candidates);
+            return Ok(ProcessResult::Noop(NoopReason::CandidateStashedEarly));
         }
         conversation.start_freeze_round(epoch);
     }
 
     let steward = candidate_msg.steward_member_id.clone();
-    let max_candidates = mls.members()?.len();
     let outcome = conversation.add_freeze_candidate(
         BufferedCommitCandidate {
             candidate_msg,
@@ -150,6 +156,21 @@ pub fn buffer_commit_candidate<M: MlsService>(
             Ok(ProcessResult::Noop(NoopReason::CandidateBufferFull))
         }
     }
+}
+
+/// Re-buffer any commit candidates stashed before their proposal was locally
+/// approved. Call after a consensus outcome populates the approved queue: a
+/// candidate that lost the race against its own approval is now buffered into
+/// the freeze round and applied normally. No-op when nothing is stashed.
+pub fn replay_early_candidates<M: MlsService>(
+    conversation: &mut ConversationQueues,
+    mls: &mut M,
+) -> Result<(), CoreError> {
+    let epoch = mls.current_epoch()?;
+    for candidate in conversation.take_early_candidates(epoch) {
+        buffer_commit_candidate(conversation, mls, candidate)?;
+    }
+    Ok(())
 }
 
 /// Snapshot round state, rank the buffered candidates by RFC priority, and

@@ -10,6 +10,7 @@ use crate::{
         ConversationQueues, ConversationState, ConversationStateMachine, CoreError,
         FreezeBufferOutcome, FreezeFinalizeResult, OperatingMode, ProcessResult, ProposalKind,
         StewardListPlugin, compute_commit_hash, finalize_freeze_round, member_set, process_inbound,
+        replay_early_candidates,
     },
     ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     mls_crypto::{
@@ -297,6 +298,16 @@ impl<CP: ConversationPluginsFactory> Conversation<CP> {
             allow_subset_candidates,
             self_member_id,
         )
+    }
+
+    /// Re-buffer commit candidates stashed before their proposal was locally
+    /// approved. Call after applying a consensus outcome. No-op when MLS isn't
+    /// attached or nothing is stashed.
+    pub(crate) fn replay_early_candidates(&mut self) -> Result<(), CoreError> {
+        let Some(mls) = self.mls.as_mut() else {
+            return Ok(());
+        };
+        replay_early_candidates(&mut self.conversation, mls)
     }
 
     /// Process an inbound app-subtopic payload. Errors with

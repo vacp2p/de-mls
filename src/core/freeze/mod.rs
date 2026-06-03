@@ -10,5 +10,5 @@ mod round;
 
 pub use round::{
     CommitHash, FreezeFinalizeResult, FreezeOutcome, buffer_commit_candidate, compute_commit_hash,
-    finalize_freeze_round,
+    finalize_freeze_round, replay_early_candidates,
 };

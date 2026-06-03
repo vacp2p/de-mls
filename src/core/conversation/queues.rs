@@ -114,6 +114,13 @@ pub struct ConversationQueues {
     /// `RemoveMember(target)` entry; other approvals wait so they don't
     /// dilute the fast-removal intent.
     urgent_commit_target: Option<Vec<u8>>,
+    /// Commit candidates that arrived before the local node approved their
+    /// proposal (consensus outcome still in flight). Held here instead of
+    /// dropped so they can be replayed once approval lands — otherwise a
+    /// proposer whose steward reaches consensus first would miss the commit
+    /// and fall an epoch behind. Epoch-tagged; stale-epoch entries are
+    /// discarded on the next stash/take.
+    early_candidates: Vec<(u64, CommitCandidate)>,
 }
 
 impl ConversationQueues {
@@ -129,6 +136,7 @@ impl ConversationQueues {
             pending_updates: HashMap::new(),
             resolved_proposals: ResolvedProposalCache::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
             urgent_commit_target: None,
+            early_candidates: Vec::new(),
         }
     }
 
@@ -372,6 +380,33 @@ impl ConversationQueues {
             .as_ref()
             .map(|r| r.candidates.len())
             .unwrap_or(0)
+    }
+
+    // ──────────────────────── Early (pre-approval) Candidates ────────────────────────
+
+    /// Stash a commit candidate that arrived before its proposal was locally
+    /// approved. Deduped by commit message and capped at `max`. Entries tagged
+    /// with a different epoch are dropped — the node has moved on.
+    pub fn stash_early_candidate(&mut self, epoch: u64, candidate: CommitCandidate, max: usize) {
+        self.early_candidates.retain(|(e, _)| *e == epoch);
+        let duplicate = self
+            .early_candidates
+            .iter()
+            .any(|(_, c)| c.commit_message == candidate.commit_message);
+        if duplicate || self.early_candidates.len() >= max {
+            return;
+        }
+        self.early_candidates.push((epoch, candidate));
+    }
+
+    /// Remove and return stashed candidates for `epoch`, discarding any tagged
+    /// with a different (stale) epoch. Clears the stash.
+    pub fn take_early_candidates(&mut self, epoch: u64) -> Vec<CommitCandidate> {
+        std::mem::take(&mut self.early_candidates)
+            .into_iter()
+            .filter(|(e, _)| *e == epoch)
+            .map(|(_, c)| c)
+            .collect()
     }
 
     /// Whether a freeze round is currently open.
