@@ -188,6 +188,9 @@ impl<CP: ConversationPluginsFactory> Conversation<CP> {
         let k_max = mls.commit_batch_max();
         let approved = self.conversation.approved_proposals();
         let mut updates = Vec::with_capacity(approved.len().min(k_max));
+        // Joiners admitted by this batch, in Add order. Travels with the
+        // welcome so any holder can address delivery.
+        let mut joiner_identities = Vec::new();
         for (_pid, proposal) in approved.iter().take(k_max) {
             match proposal.payload.as_ref() {
                 Some(Payload::MemberInvite(im)) => {
@@ -201,6 +204,7 @@ impl<CP: ConversationPluginsFactory> Conversation<CP> {
                         im.key_package_bytes.clone(),
                         im.member_id.clone(),
                     )));
+                    joiner_identities.push(im.member_id.clone());
                 }
                 Some(Payload::RemoveMember(rm)) => {
                     if let Some(target) = urgent_target.as_deref()
@@ -245,6 +249,7 @@ impl<CP: ConversationPluginsFactory> Conversation<CP> {
                 commit_hash,
                 is_local_candidate: true,
                 welcome_bytes: welcome,
+                joiner_identities,
             },
             epoch,
             max_candidates,

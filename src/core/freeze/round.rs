@@ -124,6 +124,7 @@ pub fn buffer_commit_candidate<M: MlsService>(
             commit_hash,
             is_local_candidate: false,
             welcome_bytes: None,
+            joiner_identities: Vec::new(),
         },
         epoch,
         max_candidates,
@@ -367,6 +368,7 @@ mod tests {
             commit_hash,
             is_local_candidate: false,
             welcome_bytes: None,
+            joiner_identities: Vec::new(),
         }
     }
 

@@ -46,6 +46,10 @@ pub struct BufferedCommitCandidate {
     pub commit_hash: CommitHash,
     pub is_local_candidate: bool,
     pub welcome_bytes: Option<Vec<u8>>,
+    /// Member ids admitted by this commit's welcome (one per Add). Set only
+    /// on the local candidate, where `welcome_bytes` is held; empty on remote
+    /// candidates, which never carry a welcome.
+    pub joiner_identities: Vec<Vec<u8>>,
 }
 
 /// Outcome of [`ConversationQueues::add_freeze_candidate`]. An enum rather than

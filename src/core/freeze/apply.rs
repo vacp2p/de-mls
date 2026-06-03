@@ -171,9 +171,11 @@ fn apply_local_candidate<M: MlsService>(
     let committed_batch = finalize_committed_batch(conversation, chosen.commit_hash);
 
     // Build the welcome artifact only after merge.
+    let joiner_identities = chosen.joiner_identities;
     let welcome = chosen.welcome_bytes.map(|welcome_bytes| MemberWelcome {
         welcome_bytes,
         conversation_sync_bytes: Vec::new(),
+        joiner_identities,
     });
 
     let result = if ctx.self_remove_pending {

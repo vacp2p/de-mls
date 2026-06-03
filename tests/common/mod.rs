@@ -111,6 +111,7 @@ pub fn build_commit_candidate(
     let k_max = mls.commit_batch_max();
     let approved = group.approved_proposals();
     let mut updates = Vec::with_capacity(approved.len().min(k_max));
+    let mut joiner_identities = Vec::new();
     for (_pid, proposal) in approved.iter().take(k_max) {
         match proposal.payload.as_ref() {
             Some(conversation_update_request::Payload::MemberInvite(im)) => {
@@ -124,6 +125,7 @@ pub fn build_commit_candidate(
                     im.key_package_bytes.clone(),
                     im.member_id.clone(),
                 )));
+                joiner_identities.push(im.member_id.clone());
             }
             Some(conversation_update_request::Payload::RemoveMember(rm)) => {
                 if let Some(target) = urgent_target.as_deref()
@@ -166,6 +168,7 @@ pub fn build_commit_candidate(
             commit_hash,
             is_local_candidate: true,
             welcome_bytes: welcome,
+            joiner_identities,
         },
         epoch,
         max_candidates,
