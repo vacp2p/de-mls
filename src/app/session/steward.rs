@@ -98,10 +98,21 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         if !self.conversation.steward_list.is_exhausted(current_epoch) {
             return Ok(StewardListReconcile::Settled);
         }
+        // Trigger a voted election only when *settled* members exceed sn_max. A
+        // member added by this epoch's commit may not have attached MLS yet, so
+        // electing on their account would fire a vote they'd miss, diverging the
+        // steward list. The deterministic local install below is computed
+        // identically by every node, so it can safely include just-joined
+        // members (they receive the same list via ConversationSync).
+        let settled_count = self
+            .conversation
+            .conversation
+            .settled_members(&members, current_epoch)
+            .len();
         if self
             .conversation
             .steward_list
-            .election_required(members.len())
+            .election_required(settled_count)
         {
             return Ok(StewardListReconcile::NeedsElection);
         }
@@ -422,11 +433,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 return Ok(());
             }
 
-            // Build the candidate pool: MLS members minus queued
+            // Build the candidate pool: settled MLS members minus queued
             // removals (recovery only — non-recovery elections trust the
-            // current MLS roster).
+            // current MLS roster). Unsettled (just-joined) members are excluded
+            // — they may not have attached MLS and can't serve as stewards yet.
             let candidate_pool: Vec<Vec<u8>> = mls_members
                 .iter()
+                .filter(|m| s.conversation.conversation.is_settled(m, epoch))
                 .filter(|m| !(recovery && s.conversation.conversation.has_approved_removal(m)))
                 .cloned()
                 .collect();

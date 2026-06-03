@@ -168,7 +168,8 @@ fn apply_local_candidate<M: MlsService>(
 ) -> Result<CandidateOutcome, CoreError> {
     mls.merge_own_commit()?;
 
-    let committed_batch = finalize_committed_batch(conversation, chosen.commit_hash);
+    let committed_batch =
+        finalize_committed_batch(conversation, chosen.commit_hash, mls.current_epoch()?);
 
     // Build the welcome artifact only after merge.
     let joiner_identities = chosen.joiner_identities;
@@ -243,7 +244,8 @@ fn apply_incoming_candidate<M: MlsService, St: StewardListPlugin>(
     }
 
     mls.merge_staged_commit()?;
-    let committed_batch = finalize_committed_batch(conversation, chosen.commit_hash);
+    let committed_batch =
+        finalize_committed_batch(conversation, chosen.commit_hash, mls.current_epoch()?);
 
     // Remote candidates never carry welcome bytes — only the author sends those.
     let result = if self_removed {
@@ -437,6 +439,7 @@ fn check_commit_sender_authorized<St: StewardListPlugin>(
 fn finalize_committed_batch(
     conversation: &mut ConversationQueues,
     commit_hash: CommitHash,
+    current_epoch: u64,
 ) -> Vec<ConversationUpdateRequest> {
     conversation.insert_committed_hash(commit_hash);
     let snapshot = if let Some(target) = conversation.take_urgent_commit_target() {
@@ -446,6 +449,9 @@ fn finalize_committed_batch(
     } else {
         conversation.drain_approved_proposals()
     };
+    // Stamp join epochs for members this commit added, so the next reconcile
+    // doesn't count them toward an election they can't yet participate in.
+    conversation.note_member_joins(&snapshot, current_epoch);
     conversation.clear_freeze_round();
     snapshot
 }

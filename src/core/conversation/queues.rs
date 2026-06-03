@@ -121,6 +121,13 @@ pub struct ConversationQueues {
     /// and fall an epoch behind. Epoch-tagged; stale-epoch entries are
     /// discarded on the next stash/take.
     early_candidates: Vec<(u64, CommitCandidate)>,
+    /// MLS epoch at which each member was first added. A member is "settled"
+    /// once the epoch has advanced past their join — until then they aren't
+    /// counted toward the `> sn_max` election trigger or chosen as a steward,
+    /// since a just-joined member may not have attached MLS yet. Recorded on
+    /// every commit-merge from that commit's Add set, so all nodes that apply
+    /// the commit agree on who joined when.
+    member_join_epoch: HashMap<Vec<u8>, u64>,
 }
 
 impl ConversationQueues {
@@ -137,6 +144,7 @@ impl ConversationQueues {
             resolved_proposals: ResolvedProposalCache::new(RESOLVED_PROPOSAL_CACHE_CAPACITY),
             urgent_commit_target: None,
             early_candidates: Vec::new(),
+            member_join_epoch: HashMap::new(),
         }
     }
 
@@ -156,6 +164,43 @@ impl ConversationQueues {
     pub fn steward_eligibility(&self, mls_members: &[Vec<u8>]) -> impl Fn(&[u8]) -> bool {
         let mls_set = member_set(mls_members);
         move |candidate: &[u8]| !self.has_approved_removal(candidate) && mls_set.contains(candidate)
+    }
+
+    // ─────────────────────────── Settled membership ───────────────────────────
+
+    /// Record the join epoch of each member added by a just-merged commit.
+    /// Idempotent: an existing entry is never overwritten, so a member's join
+    /// epoch is the first time we saw them added.
+    pub fn note_member_joins(&mut self, batch: &[ConversationUpdateRequest], epoch: u64) {
+        for req in batch {
+            if let Some(conversation_update_request::Payload::MemberInvite(im)) =
+                req.payload.as_ref()
+            {
+                self.member_join_epoch
+                    .entry(im.member_id.clone())
+                    .or_insert(epoch);
+            }
+        }
+    }
+
+    /// A member is settled once the epoch has advanced past their join. An
+    /// unknown member (joined before we started tracking, e.g. the creator) is
+    /// treated as settled.
+    pub fn is_settled(&self, member_id: &[u8], current_epoch: u64) -> bool {
+        self.member_join_epoch
+            .get(member_id)
+            .is_none_or(|&join_epoch| join_epoch < current_epoch)
+    }
+
+    /// Members eligible to act as stewards this epoch: present and settled.
+    /// Excludes members added by the current epoch's commit, who may not have
+    /// attached MLS yet.
+    pub fn settled_members(&self, members: &[Vec<u8>], current_epoch: u64) -> Vec<Vec<u8>> {
+        members
+            .iter()
+            .filter(|m| self.is_settled(m, current_epoch))
+            .cloned()
+            .collect()
     }
 
     // ─────────────────────────── Approved Proposals ───────────────────────────
@@ -511,6 +556,8 @@ impl ConversationQueues {
     /// sweep to catch auto-approved entries that survived freeze failures.
     pub fn prune_pending_updates_for_members(&mut self, current_members: &[Vec<u8>]) {
         let in_conversation: HashSet<&Vec<u8>> = current_members.iter().collect();
+        self.member_join_epoch
+            .retain(|member_id, _| in_conversation.contains(member_id));
         self.pending_updates.retain(|member_id, entry| {
             match entry.request.payload.as_ref() {
                 Some(conversation_update_request::Payload::MemberInvite(_)) => {
