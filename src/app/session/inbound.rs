@@ -350,7 +350,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         }
         let (event, outbound) = {
             let mut s = arc.write_or_err("session")?;
-            if s.conversation.current_state() != ConversationState::Working {
+            // A valid commit landing supersedes a pending reelection: a member
+            // that gave up waiting (Reelection) must still apply the steward's
+            // commit, not ignore it. `start_freezing` is allowed from both
+            // Working and Reelection; the buffered candidate is finalized on
+            // the next poll.
+            let state = s.conversation.current_state();
+            if state != ConversationState::Working && state != ConversationState::Reelection {
                 return Ok(());
             }
 
