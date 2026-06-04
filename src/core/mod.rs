@@ -76,7 +76,7 @@ pub use steward_list::{
 };
 
 // ── Consensus plug-in trait ──
-pub use consensus_plugin::{ConsensusPlugin, PluginConsensus, SyncConsensusReceiver};
+pub use consensus_plugin::{ConsensusPlugin, ConsensusServiceFor, SyncConsensusReceiver};
 
 // ── Per-conversation plug-in bundle ──
 pub use conversation_plugins::ConversationPluginsFactory;

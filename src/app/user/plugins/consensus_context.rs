@@ -1,13 +1,13 @@
 //! [`ConsensusContext`] — User-level consensus-plugin state.
 //!
 //! Holds the shared storage + signer once on the User; mints fresh
-//! per-conversation [`PluginConsensus`] services on demand and tears down a
+//! per-conversation [`ConsensusServiceFor`] services on demand and tears down a
 //! conversation's scope on leave. Each per-conv service gets its own
 //! private event bus (per upstream "service shape" recommendation).
 
 use hashgraph_like_consensus::storage::ConsensusStorage;
 
-use crate::core::{ConsensusPlugin, PluginConsensus};
+use crate::core::{ConsensusPlugin, ConsensusServiceFor};
 
 pub struct ConsensusContext<P: ConsensusPlugin> {
     storage: P::ConsensusStorage,
@@ -29,8 +29,8 @@ impl<P: ConsensusPlugin> ConsensusContext<P> {
     /// storage so all per-conv services share one underlying
     /// persistence (scope-keyed); clones the signer; mints a fresh private
     /// event bus.
-    pub fn build_service(&self) -> PluginConsensus<P> {
-        PluginConsensus::<P>::new_with_components(
+    pub fn build_service(&self) -> ConsensusServiceFor<P> {
+        ConsensusServiceFor::<P>::new_with_components(
             self.storage.clone(),
             P::new_event_bus(),
             self.signer.clone(),
