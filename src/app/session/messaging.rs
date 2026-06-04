@@ -45,7 +45,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     ///
     /// Takes `&Arc<RwLock<Self>>` so the runner lock is released before
     /// awaiting on the transport.
-    pub async fn send_key_package(
+    pub fn send_key_package(
         arc: &Arc<RwLock<Self>>,
         key_package: KeyPackageBytes,
     ) -> Result<SessionTick, UserError> {
@@ -65,7 +65,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     ///
     /// Takes `&Arc<RwLock<Self>>` so the runner lock is released before
     /// awaiting on the transport.
-    pub async fn send_app_message(
+    pub fn send_app_message(
         arc: &Arc<RwLock<Self>>,
         message: Vec<u8>,
     ) -> Result<SessionTick, UserError> {
@@ -103,7 +103,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// The requester's click means "I want this person removed" → the
     /// creator's vote is bundled as YES at submit; no banner is shown to
     /// the requester.
-    pub async fn process_ban_request(
+    pub fn process_ban_request(
         arc: &Arc<RwLock<Self>>,
         ban_request: BanRequest,
     ) -> Result<SessionTick, UserError> {
@@ -125,8 +125,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 )),
             },
             CreatorVote::Yes,
-        )
-        .await?;
+        )?;
 
         Ok(arc.read_or_err("session")?.tick())
     }

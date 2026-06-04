@@ -40,11 +40,11 @@ impl<P: ConsensusPlugin> ConsensusContext<P> {
 
     /// Drop a conversation's scope from the shared consensus storage.
     /// Called on conversation leave.
-    pub async fn delete_scope(
+    pub fn delete_scope(
         &self,
         scope: &P::Scope,
     ) -> Result<(), hashgraph_like_consensus::error::ConsensusError> {
-        self.storage.delete_scope(scope).await
+        self.storage.delete_scope(scope)
     }
 }
 

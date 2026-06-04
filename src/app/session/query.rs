@@ -34,13 +34,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// to verify buffer hygiene (e.g., that a joiner's buffer is empty right
     /// after they receive the welcome).
     pub fn get_pending_update_count(&self) -> usize {
-        self.conversation.conversation.pending_update_count()
+        self.conversation.queues.pending_update_count()
     }
 
     /// Freeze round progress: `(received, expected)`. Returns `(0, 0)` if not
     /// in freeze or no steward list is known.
     pub fn get_freeze_candidate_count(&self) -> (usize, usize) {
-        let received = self.conversation.conversation.freeze_candidate_count();
+        let received = self.conversation.queues.freeze_candidate_count();
         let expected = self
             .conversation
             .steward_list
@@ -80,7 +80,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         let members = self.conversation.expect_mls()?.members()?;
         Ok(members
             .into_iter()
-            .filter(|id| self.conversation.conversation.is_pending_self_leave(id))
+            .filter(|id| self.conversation.queues.is_pending_self_leave(id))
             .collect())
     }
 
@@ -91,7 +91,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         let epoch = mls.current_epoch()?;
         let members = mls.members()?;
 
-        let eligible = self.conversation.conversation.steward_eligibility(&members);
+        let eligible = self.conversation.queues.steward_eligibility(&members);
         let (live_epoch, live_backup) = self
             .conversation
             .steward_list
@@ -127,7 +127,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
     pub fn get_approved_proposals_for_current_epoch(&self) -> Vec<ConversationUpdateRequest> {
         self.conversation
-            .conversation
+            .queues
             .approved_proposals()
             .values()
             .cloned()

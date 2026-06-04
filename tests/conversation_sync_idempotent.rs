@@ -51,7 +51,7 @@ async fn second_conversation_sync_is_a_no_op() {
         .expect("steward must produce a sync packet");
 
     bob_tx.lock().unwrap().drain_packets();
-    deliver(&users[1].0, &sync_packet).await;
+    deliver(&users[1].0, &sync_packet);
     let bob_outbound_after = bob_tx.lock().unwrap().drain_packets();
     let roles_after = bob_session.read().unwrap().get_member_roles().unwrap();
     let scores_after = bob_session.read().unwrap().get_member_scores();

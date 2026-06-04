@@ -13,4 +13,4 @@ mod plugin;
 
 pub use deterministic::DeterministicStewardList;
 pub use list::{StewardList, StewardListConfig};
-pub use plugin::{DEFAULT_MAX_RETRIES, ElectionDecision, StewardListEvent, StewardListPlugin};
+pub use plugin::{DEFAULT_MAX_RETRIES, ElectionDecision, StewardListPlugin};

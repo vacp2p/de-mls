@@ -84,6 +84,9 @@ pub enum NoopReason {
     DuplicateBufferedHash,
     /// Freeze-round buffer is full (one candidate per member already held).
     CandidateBufferFull,
+    /// Candidate arrived before its proposal was locally approved (consensus
+    /// outcome still in flight). Stashed for replay once approval lands.
+    CandidateStashedEarly,
 }
 
 // ── ViolationEvidence constructors ────────────────────────────────

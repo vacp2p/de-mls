@@ -118,7 +118,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`SessionRunner::send_app_message`]. Errors with
     /// `ConversationNotFound` if the conversation has been removed, or
     /// `ConversationBlocked` if the session is gating chat traffic.
-    pub async fn send_app_message(
+    pub fn send_app_message(
         &self,
         conversation_id: &str,
         message: Vec<u8>,
@@ -126,13 +126,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::send_app_message(&entry, message).await
+        SessionRunner::send_app_message(&entry, message)
     }
 
     /// Broadcast `key_package` on `conversation_id`'s welcome subtopic
     /// so existing members can propose adding us. Thin wrapper over
     /// [`SessionRunner::send_key_package`].
-    pub async fn send_key_package(
+    pub fn send_key_package(
         &self,
         conversation_id: &str,
         key_package: KeyPackageBytes,
@@ -140,16 +140,16 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::send_key_package(&entry, key_package).await
+        SessionRunner::send_key_package(&entry, key_package)
     }
 
     /// Walk pending deadlines on `conversation_id`. Thin wrapper over
     /// [`SessionRunner::tick_deadlines`].
-    pub async fn tick_deadlines(&self, conversation_id: &str) -> Result<SessionTick, UserError> {
+    pub fn tick_deadlines(&self, conversation_id: &str) -> Result<SessionTick, UserError> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::tick_deadlines(&entry).await
+        SessionRunner::tick_deadlines(&entry)
     }
 
     /// Advance every per-conversation polling path: deadlines (auto-votes
@@ -161,13 +161,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// transition the session is currently expecting. Drained events
     /// (e.g. `Leaving` on `PendingJoin` expiry) are read separately via
     /// [`Self::drain_events`].
-    pub async fn poll_session(&self, conversation_id: &str) -> Result<SessionTick, UserError> {
+    pub fn poll_session(&self, conversation_id: &str) -> Result<SessionTick, UserError> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::tick_deadlines(&entry).await?;
-        SessionRunner::poll_freeze_status(&entry).await?;
-        SessionRunner::check_member_freeze(&entry).await?;
+        SessionRunner::tick_deadlines(&entry)?;
+        SessionRunner::poll_freeze_status(&entry)?;
+        SessionRunner::check_member_freeze(&entry)?;
         SessionRunner::check_pending_join(&entry)?;
         Ok(entry.read_or_err("session")?.tick())
     }
@@ -197,7 +197,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Add; the resulting welcome arrives via
     /// [`crate::core::SessionEvent::WelcomeReady`] for the integrator to
     /// deliver out of band.
-    pub async fn add_member(
+    pub fn add_member(
         &self,
         conversation_id: &str,
         key_package_bytes: &[u8],
@@ -215,7 +215,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 },
             )),
         };
-        SessionRunner::initiate_proposal(&entry, request, CreatorVote::Yes).await?;
+        SessionRunner::initiate_proposal(&entry, request, CreatorVote::Yes)?;
         Ok(entry.read_or_err("session")?.tick())
     }
 
@@ -224,7 +224,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// through the integrator's transport). Returns the joined
     /// conversation name, or [`UserError::WelcomeNotForUs`] if the
     /// welcome doesn't address this user's key package.
-    pub async fn accept_welcome(
+    pub fn accept_welcome(
         &mut self,
         welcome_bytes: &[u8],
     ) -> Result<(String, SessionTick), UserError> {
@@ -236,7 +236,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let conversation_id = svc.conversation_id().to_string();
 
         if self.lookup_entry(&conversation_id)?.is_none() {
-            self.start_conversation(&conversation_id, false).await?;
+            self.start_conversation(&conversation_id, false)?;
         }
         let entry_arc = self
             .lookup_entry(&conversation_id)?
@@ -260,8 +260,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             &conversation_id,
             &entry_arc,
             crate::core::ProcessResult::JoinedConversation(conversation_id.clone()),
-        )
-        .await?;
+        )?;
         let tick = entry_arc.read_or_err("session")?.tick();
         Ok((conversation_id, tick))
     }
@@ -271,7 +270,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Cast the local member's manual vote on `proposal_id`. Cancels any
     /// pending auto-vote so the manual choice wins. Thin wrapper over
     /// [`SessionRunner::process_user_vote`].
-    pub async fn process_user_vote(
+    pub fn process_user_vote(
         &self,
         conversation_id: &str,
         proposal_id: u32,
@@ -280,14 +279,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::process_user_vote(&entry, proposal_id, vote).await?;
+        SessionRunner::process_user_vote(&entry, proposal_id, vote)?;
         Ok(entry.read_or_err("session")?.tick())
     }
 
     /// Open a `RemoveMember` consensus round targeting
     /// `ban_request.user_to_ban`. The local vote is bundled YES at submit.
     /// Thin wrapper over [`SessionRunner::process_ban_request`].
-    pub async fn process_ban_request(
+    pub fn process_ban_request(
         &self,
         conversation_id: &str,
         ban_request: BanRequest,
@@ -295,7 +294,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::process_ban_request(&entry, ban_request).await
+        SessionRunner::process_ban_request(&entry, ban_request)
     }
 
     /// Submit `request` as a fresh consensus proposal with
@@ -303,7 +302,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`Self::add_member`] / [`Self::process_ban_request`]; use those
     /// for membership changes. Thin wrapper over
     /// [`SessionRunner::initiate_proposal`].
-    pub async fn initiate_proposal(
+    pub fn initiate_proposal(
         &self,
         conversation_id: &str,
         request: ConversationUpdateRequest,
@@ -312,7 +311,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::initiate_proposal(&entry, request, creator_vote).await?;
+        SessionRunner::initiate_proposal(&entry, request, creator_vote)?;
         Ok(entry.read_or_err("session")?.tick())
     }
 
@@ -321,14 +320,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`SessionEvent::Leaving`] and the caller follows up with
     /// [`Self::finalize_self_leave`]. Thin wrapper over
     /// [`SessionRunner::initiate_self_leave`].
-    pub async fn initiate_self_leave(
-        &self,
-        conversation_id: &str,
-    ) -> Result<SessionTick, UserError> {
+    pub fn initiate_self_leave(&self, conversation_id: &str) -> Result<SessionTick, UserError> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::initiate_self_leave(&entry).await?;
+        SessionRunner::initiate_self_leave(&entry)?;
         Ok(entry.read_or_err("session")?.tick())
     }
 
@@ -483,7 +479,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Drop this conversation's consensus scope from the shared storage and
     /// clear every auto-vote registered for it. Called on leave and
     /// pending-join timeout.
-    pub async fn cleanup_consensus_scope(&self, conversation_id: &str) -> Result<(), UserError> {
+    pub fn cleanup_consensus_scope(&self, conversation_id: &str) -> Result<(), UserError> {
         if let Some(entry_arc) = self.lookup_entry(conversation_id)? {
             entry_arc
                 .write()
@@ -491,7 +487,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 .cancel_all_auto_votes();
         }
         let scope = P::Scope::from(conversation_id.to_string());
-        self.plugins.consensus.delete_scope(&scope).await?;
+        self.plugins.consensus.delete_scope(&scope)?;
         Ok(())
     }
 

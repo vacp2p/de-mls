@@ -15,7 +15,7 @@ use crate::{
 };
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
-    pub async fn start_conversation(
+    pub fn start_conversation(
         &mut self,
         conversation_id: &str,
         is_creation: bool,
@@ -25,11 +25,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             is_creation,
             self.plugins.default_conversation_config.clone(),
         )
-        .await
     }
 
     /// Like [`Self::start_conversation`] but with a per-conversation config override.
-    pub async fn start_conversation_with_config(
+    pub fn start_conversation_with_config(
         &mut self,
         conversation_id: &str,
         is_creation: bool,
@@ -71,8 +70,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         // Creator path: bootstrap the list with self as sole steward at
         // epoch 0. Joiner path leaves the plug-in empty until `ConversationSync`.
         if is_creation {
-            let _events =
-                steward_list.install_list(0, std::slice::from_ref(&self_member_id_bytes), 1, 0)?;
+            steward_list.install_list(0, std::slice::from_ref(&self_member_id_bytes), 1, 0)?;
         }
 
         let mut scoring = self
@@ -140,7 +138,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// consensus session with the leaver's YES bundled at submit. We stay
     /// active until the next steward commit merges the removal; on that
     /// commit `ProcessResult::LeaveConversation` fires.
-    pub async fn leave_conversation(&mut self, conversation_id: &str) -> Result<(), UserError> {
+    pub fn leave_conversation(&mut self, conversation_id: &str) -> Result<(), UserError> {
         info!(conversation = conversation_id, "leaving conversation");
 
         let entry_arc = self
@@ -158,7 +156,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 .emit_event(SessionEvent::Leaving);
             // Cancel auto-vote timers before removing the registry entry —
             // see `finalize_self_leave` for the rationale.
-            self.cleanup_consensus_scope(conversation_id).await?;
+            self.cleanup_consensus_scope(conversation_id)?;
             self.conversations
                 .write()
                 .map_err(|_| UserError::LockPoisoned("conversation registry"))?
@@ -167,6 +165,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             return Ok(());
         }
 
-        SessionRunner::initiate_self_leave(&entry_arc).await
+        SessionRunner::initiate_self_leave(&entry_arc)
     }
 }

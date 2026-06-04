@@ -33,10 +33,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// dedup, name-based routing, and the welcome subtopic's plug-in-
     /// factory access. App-message packets are handed off to the session
     /// for MLS processing and dispatch.
-    pub async fn process_inbound_packet(
-        &self,
-        packet: InboundPacket,
-    ) -> Result<SessionTick, UserError> {
+    pub fn process_inbound_packet(&self, packet: InboundPacket) -> Result<SessionTick, UserError> {
         let conversation_id = packet.conversation_id.clone();
 
         // Echo dedup: drop our own messages received back from pub/sub.
@@ -50,8 +47,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
         match packet.subtopic.as_str() {
             WELCOME_SUBTOPIC => {
-                self.process_key_package_broadcast(&conversation_id, &packet.payload, &entry_arc)
-                    .await?;
+                self.process_key_package_broadcast(&conversation_id, &packet.payload, &entry_arc)?;
                 Ok(entry_arc.read_or_err("session")?.tick())
             }
             APP_MSG_SUBTOPIC => {
@@ -68,8 +64,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                     }
                     entry.conversation.process_inbound(&packet.payload)?
                 };
-                self.finish_dispatch(&conversation_id, &entry_arc, result)
-                    .await?;
+                self.finish_dispatch(&conversation_id, &entry_arc, result)?;
                 Ok(entry_arc.read_or_err("session")?.tick())
             }
             other => Err(UserError::Core(CoreError::InvalidSubtopic(
@@ -86,13 +81,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`SessionRunner::check_pending_join`]; this method is the cleanup
     /// callers run when those signal "registry should be removed"
     /// (`DispatchOutcome::LeaveRequested` or `PendingJoinTick::Expired`).
-    pub async fn finalize_self_leave(&self, conversation_id: &str) -> Result<(), UserError> {
+    pub fn finalize_self_leave(&self, conversation_id: &str) -> Result<(), UserError> {
         // Clean up (and cancel timers) before removing the entry — the
         // cleanup finds the runner via `lookup_entry`, so the entry must
         // still exist. Eviction and `Removed` are unconditional: a
         // scope-delete failure (timers already cancelled) must not strand a
         // zombie. The cleanup error surfaces after the conversation is gone.
-        let cleanup = self.cleanup_consensus_scope(conversation_id).await;
+        let cleanup = self.cleanup_consensus_scope(conversation_id);
         self.conversations
             .write()
             .map_err(|_| UserError::LockPoisoned("conversation registry"))?
@@ -107,7 +102,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// holder isn't already a member, promote it to a `MemberInvite`
     /// membership-change request. Raw MLS welcomes do not flow here —
     /// they enter through [`User::accept_welcome`].
-    async fn process_key_package_broadcast(
+    fn process_key_package_broadcast(
         &self,
         conversation_id: &str,
         payload: &[u8],
@@ -141,20 +136,20 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let gur = ConversationUpdateRequest {
             payload: Some(conversation_update_request::Payload::MemberInvite(invite)),
         };
-        SessionRunner::handle_incoming_update_request(entry_arc, gur).await
+        SessionRunner::handle_incoming_update_request(entry_arc, gur)
     }
 
     /// Drive the session-side dispatcher and finish lifecycle work on the
     /// User side when the session signals `LeaveRequested`.
-    pub(crate) async fn finish_dispatch(
+    pub(crate) fn finish_dispatch(
         &self,
         conversation_id: &str,
         entry_arc: &Arc<RwLock<SessionRunner<P, CP>>>,
         result: ProcessResult,
     ) -> Result<(), UserError> {
-        let outcome = SessionRunner::dispatch_inbound_result(entry_arc, result).await?;
+        let outcome = SessionRunner::dispatch_inbound_result(entry_arc, result)?;
         if matches!(outcome, DispatchOutcome::LeaveRequested) {
-            self.finalize_self_leave(conversation_id).await?;
+            self.finalize_self_leave(conversation_id)?;
         }
         Ok(())
     }
@@ -192,11 +187,11 @@ mod tests {
     /// Self-leave must drop the pending auto-vote registry — otherwise
     /// the next `tick_deadlines` would fire against a conversation
     /// we've left.
-    #[tokio::test]
-    async fn finalize_self_leave_clears_pending_auto_votes() {
+    #[test]
+    fn finalize_self_leave_clears_pending_auto_votes() {
         let transport: SharedDeliveryService = Arc::new(Mutex::new(NullTransport));
         let mut user = make_user_from_private_key(ALICE_KEY, transport);
-        user.start_conversation("test-conv", true).await.unwrap();
+        user.start_conversation("test-conv", true).unwrap();
 
         let session = user
             .lookup_entry("test-conv")
@@ -214,7 +209,7 @@ mod tests {
             "auto-vote must be registered before self-leave"
         );
 
-        user.finalize_self_leave("test-conv").await.unwrap();
+        user.finalize_self_leave("test-conv").unwrap();
 
         // Session entry is gone from the registry, so the conversation's
         // pending auto-votes can no longer fire from a poll cycle on this

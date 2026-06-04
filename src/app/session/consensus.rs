@@ -3,7 +3,7 @@
 //! Outgoing proposals submit to consensus, register ownership, broadcast
 //! (bundled or unbundled per `creator_vote`), and resolve on timeout. The
 //! methods take `Arc<RwLock<SessionRunner>>` so the body can release the
-//! runner lock across `.await` points rather than holding it through a
+//! runner lock across `` points rather than holding it through a
 //! consensus call.
 
 use std::sync::{Arc, RwLock};
@@ -92,7 +92,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// [`Self::tick_deadlines`] once the deadline elapses.
     ///
     /// `creator_vote` — see [`CreatorVote`] for wire shape and local UI behavior.
-    pub async fn initiate_proposal(
+    pub fn initiate_proposal(
         arc: &Arc<RwLock<Self>>,
         request: ConversationUpdateRequest,
         creator_vote: CreatorVote,
@@ -107,8 +107,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 kind,
                 creator_vote,
             },
-        )
-        .await?;
+        )?;
         Ok(())
     }
 
@@ -116,7 +115,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// `RemoveMember`): buffer it so every member has a durable record, then
     /// promote it to a voting proposal if this node is the current epoch
     /// steward and the conversation accepts new proposals.
-    pub async fn handle_incoming_update_request(
+    pub fn handle_incoming_update_request(
         arc: &Arc<RwLock<Self>>,
         request: ConversationUpdateRequest,
     ) -> Result<(), UserError> {
@@ -142,7 +141,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
             let inserted = s
                 .conversation
-                .conversation
+                .queues
                 .insert_pending_update(request.clone(), current_epoch);
 
             // Only the epoch steward proposes immediately. The buffer
@@ -150,7 +149,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let self_member_id = Arc::clone(&s.self_member_id);
             let eligible = s
                 .conversation
-                .conversation
+                .queues
                 .steward_eligibility(&members_for_rotation);
             let is_es = s
                 .conversation
@@ -158,7 +157,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 .epoch_steward(current_epoch, &eligible)
                 .is_some_and(|es| es == &*self_member_id);
             let state = s.conversation.current_state();
-            let total = s.conversation.conversation.pending_update_count();
+            let total = s.conversation.queues.pending_update_count();
             let should = is_es && state == ConversationState::Working;
             let name = s.conversation_id.clone();
             (inserted, is_es, state, total, should, name)
@@ -181,7 +180,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             // let the banner drive the steward's vote like any other member.
             // `check_proposal_allowed` may still reject (active emergency
             // etc.) — leave the entry in the buffer for next rotation.
-            if let Err(e) = Self::initiate_proposal(arc, request, CreatorVote::Deferred).await {
+            if let Err(e) = Self::initiate_proposal(arc, request, CreatorVote::Deferred) {
                 info!(conversation = %conversation_id, error = %e, "proposal deferred");
             }
         }
@@ -191,7 +190,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Cast a manual vote on behalf of the local member. Blocked in
     /// `Freezing` and `Selection`; cancels any pending auto-vote so the
     /// manual choice wins.
-    pub async fn process_user_vote(
+    pub fn process_user_vote(
         arc: &Arc<RwLock<Self>>,
         proposal_id: u32,
         vote: bool,
@@ -208,7 +207,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // Manual vote takes precedence over the pending auto-vote timer.
         arc.write_or_err("session")?.cancel_auto_vote(proposal_id);
 
-        let app_message = cast_vote::<P>(&conversation_id, proposal_id, vote, &consensus).await?;
+        let app_message = cast_vote::<P>(&conversation_id, proposal_id, vote, &consensus)?;
         let packet = {
             let mut s = arc.write_or_err("session")?;
             let app_id = Arc::clone(&s.app_id);
@@ -225,7 +224,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// drain the consensus event bus and dispatch each event through
     /// `apply_consensus_outcome`. Call from the caller's polling
     /// loop.
-    pub async fn tick_deadlines(arc: &Arc<RwLock<Self>>) -> Result<SessionTick, UserError> {
+    pub fn tick_deadlines(arc: &Arc<RwLock<Self>>) -> Result<SessionTick, UserError> {
         let now = std::time::Instant::now();
         let (auto_votes_due, timeouts_due) = {
             let mut s = arc.write_or_err("session")?;
@@ -251,7 +250,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         };
 
         for (proposal_id, vote) in auto_votes_due {
-            if let Err(e) = Self::cast_auto_vote(arc, proposal_id, vote).await {
+            if let Err(e) = Self::cast_auto_vote(arc, proposal_id, vote) {
                 tracing::debug!(
                     proposal_id,
                     error = %e,
@@ -260,7 +259,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             }
         }
         for proposal_id in timeouts_due {
-            Self::resolve_on_timeout(arc, proposal_id).await;
+            Self::resolve_on_timeout(arc, proposal_id);
         }
 
         loop {
@@ -271,7 +270,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 <_ as SyncConsensusReceiver<_>>::try_recv(&mut s.consensus_rx)
             };
             let Some((_scope, event)) = next else { break };
-            if let Err(e) = Self::apply_consensus_outcome(arc, event).await {
+            if let Err(e) = Self::apply_consensus_outcome(arc, event) {
                 let conversation_id = arc.read_or_err("session")?.conversation_id.clone();
                 tracing::warn!(
                     conversation = %conversation_id,
@@ -293,15 +292,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// after a successful submit short-circuits on the local pending-leave
     /// check, and a retransmit dedupes inside the consensus library via
     /// the deterministic [`self_leave_proposal_id`].
-    pub async fn initiate_self_leave(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
+    pub fn initiate_self_leave(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
         let self_member_id = Arc::clone(&arc.read_or_err("session")?.self_member_id);
 
         let (already_pending, conversation_id) = {
             let s = arc.read_or_err("session")?;
             (
-                s.conversation
-                    .conversation
-                    .is_pending_self_leave(&self_member_id),
+                s.conversation.queues.is_pending_self_leave(&self_member_id),
                 s.conversation_id.clone(),
             )
         };
@@ -329,7 +326,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         let (consensus, proposal_expiration, consensus_timeout) = {
             let mut s = arc.write_or_err("session")?;
             s.conversation
-                .conversation
+                .queues
                 .insert_voting_proposal(proposal_id, request);
             (
                 s.consensus.clone(),
@@ -348,8 +345,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 consensus_timeout,
                 liveness_criteria_yes: true,
             },
-        )
-        .await?;
+        )?;
 
         // Dedup (`ProposalAlreadyExist`) — another submit is already driving
         // this proposal_id. Our voting entry resolves on that session.
@@ -381,7 +377,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 if !kind.is_emergency() && !kind.is_steward_election() {
                     return Err(UserError::ConversationBlocked(state.to_string()));
                 }
-                if self.conversation.conversation.partial_freeze_blocks(kind) {
+                if self.conversation.queues.partial_freeze_blocks(kind) {
                     return Err(UserError::PartialFreeze);
                 }
             }
@@ -389,7 +385,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 return Err(UserError::ConversationBlocked(state.to_string()));
             }
             _ => {
-                if self.conversation.conversation.partial_freeze_blocks(kind) {
+                if self.conversation.queues.partial_freeze_blocks(kind) {
                     return Err(UserError::PartialFreeze);
                 }
             }
@@ -409,10 +405,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Ownership is stored *before* the vote is cast, so a single-voter
     /// consensus transition can't race `is_owner=false` when the drain
     /// loop in `tick_deadlines` picks it up.
-    async fn register_new_proposal(
-        arc: &Arc<RwLock<Self>>,
-        np: NewProposal,
-    ) -> Result<u32, UserError> {
+    fn register_new_proposal(arc: &Arc<RwLock<Self>>, np: NewProposal) -> Result<u32, UserError> {
         let NewProposal {
             request,
             expected_voters,
@@ -452,16 +445,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 consensus_timeout,
                 liveness_criteria_yes,
             },
-        )
-        .await?;
+        )?;
 
         {
             let mut s = arc.write_or_err("session")?;
             s.conversation
-                .conversation
+                .queues
                 .insert_voting_proposal(proposal_id, request.clone());
             if kind.is_emergency() {
-                s.conversation.conversation.insert_emergency(proposal_id);
+                s.conversation.queues.insert_emergency(proposal_id);
             }
             // Register the consensus timeout deadline. The caller's polling
             // loop fires `resolve_on_timeout` via `tick_deadlines` once the
@@ -478,9 +470,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 // `cast_vote` helper sends Vote-only messages, which would
                 // leave peers without the proposal.
                 let scope = P::Scope::from(conversation_id.clone());
-                let proposal = consensus
-                    .cast_vote_and_get_proposal(&scope, proposal_id, true)
-                    .await?;
+                let proposal = consensus.cast_vote_and_get_proposal(&scope, proposal_id, true)?;
                 info!(
                     conversation = %conversation_id,
                     proposal_id,
@@ -542,7 +532,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// as the proposal is in our resolved-proposals cache — we downgrade the
     /// log accordingly and warn only for truly unknown IDs (indicates a logic
     /// bug, not a race).
-    async fn resolve_on_timeout(arc: &Arc<RwLock<Self>>, proposal_id: u32) {
+    fn resolve_on_timeout(arc: &Arc<RwLock<Self>>, proposal_id: u32) {
         let (consensus, conversation_id) = match arc.read_or_err("session") {
             Ok(s) => (s.consensus.clone(), s.conversation_id.clone()),
             Err(e) => {
@@ -554,23 +544,19 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         let still_active = consensus
             .storage()
             .get_active_proposals(&scope)
-            .await
             .map(|active| active.iter().any(|p| p.proposal_id == proposal_id))
             .unwrap_or(false);
         if !still_active {
             return;
         }
-        match consensus
-            .handle_consensus_timeout(&scope, proposal_id)
-            .await
-        {
+        match consensus.handle_consensus_timeout(&scope, proposal_id) {
             Ok(_) => {}
             Err(ConsensusError::SessionNotFound) | Err(ConsensusError::SessionNotActive) => {
                 let resolved_locally = arc
                     .read_or_err("session")
                     .map(|s| {
                         s.conversation
-                            .conversation
+                            .queues
                             .is_consensus_outcome_applied(proposal_id)
                     })
                     .unwrap_or(false);
@@ -596,7 +582,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
     /// Cast the auto-vote on behalf of the local member. Same broadcast
     /// path as a manual vote — the library sees the two identically.
-    async fn cast_auto_vote(
+    fn cast_auto_vote(
         arc: &Arc<RwLock<Self>>,
         proposal_id: u32,
         vote: bool,
@@ -605,7 +591,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let s = arc.read_or_err("session")?;
             (s.consensus.clone(), s.conversation_id.clone())
         };
-        let app_message = cast_vote::<P>(&conversation_id, proposal_id, vote, &consensus).await?;
+        let app_message = cast_vote::<P>(&conversation_id, proposal_id, vote, &consensus)?;
         let packet = {
             let mut s = arc.write_or_err("session")?;
             let app_id = Arc::clone(&s.app_id);

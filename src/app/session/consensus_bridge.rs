@@ -43,7 +43,7 @@ pub(crate) struct ProposalParams {
 /// In both cases the caller must record ownership *before*
 /// casting, so a single-voter consensus transition can't fire before
 /// [`crate::core::ConversationQueues::is_owner_of_proposal`] is true.
-pub(crate) async fn submit_proposal<P: ConsensusPlugin>(
+pub(crate) fn submit_proposal<P: ConsensusPlugin>(
     conversation_id: &str,
     request: &ConversationUpdateRequest,
     creator_id: &[u8],
@@ -60,13 +60,11 @@ pub(crate) async fn submit_proposal<P: ConsensusPlugin>(
     )?;
 
     let scope = P::Scope::from(conversation_id.to_string());
-    let proposal = consensus
-        .create_proposal_with_config(
-            &scope,
-            create_request,
-            Some(ConsensusConfig::gossipsub().with_timeout(params.consensus_timeout)?),
-        )
-        .await?;
+    let proposal = consensus.create_proposal_with_config(
+        &scope,
+        create_request,
+        Some(ConsensusConfig::gossipsub().with_timeout(params.consensus_timeout)?),
+    )?;
 
     info!(
         conversation = conversation_id,
@@ -91,7 +89,7 @@ pub(crate) async fn submit_proposal<P: ConsensusPlugin>(
 /// `consensus.cast_vote_and_get_proposal` directly rather than this
 /// helper, because that is the only legitimate case for broadcasting
 /// proposal + vote atomically in a single wire message.
-pub(crate) async fn cast_vote<P>(
+pub(crate) fn cast_vote<P>(
     conversation_id: &str,
     proposal_id: u32,
     vote: bool,
@@ -108,7 +106,7 @@ where
         proposal_id, choice, "vote cast"
     );
 
-    let vote_msg = consensus.cast_vote(&scope, proposal_id, vote).await?;
+    let vote_msg = consensus.cast_vote(&scope, proposal_id, vote)?;
     Ok(vote_msg.into())
 }
 
@@ -116,15 +114,13 @@ where
 /// decides whether to emit a banner event — for fast-path proposals
 /// (`expected_voters_count == 1`) the session resolves on arrival, so
 /// there's nothing to vote on.
-pub(crate) async fn forward_incoming_proposal<P: ConsensusPlugin>(
+pub(crate) fn forward_incoming_proposal<P: ConsensusPlugin>(
     conversation_id: &str,
     proposal: Proposal,
     consensus: &ConsensusServiceFor<P>,
 ) -> Result<(), UserError> {
     let scope = P::Scope::from(conversation_id.to_string());
-    consensus
-        .process_incoming_proposal(&scope, proposal)
-        .await?;
+    consensus.process_incoming_proposal(&scope, proposal)?;
     Ok(())
 }
 
@@ -133,7 +129,7 @@ pub(crate) async fn forward_incoming_proposal<P: ConsensusPlugin>(
 /// `outcome_applied_locally` is the result of
 /// `ConversationQueues::is_consensus_outcome_applied(vote.proposal_id)` computed
 /// by the caller — passed in eagerly so this helper doesn't have to borrow
-/// the conversation across the consensus `.await`. It's only consulted on
+/// the conversation across the consensus-service call. It's only consulted on
 /// the `SessionNotFound` branch.
 ///
 /// Late-arrival classification:
@@ -145,7 +141,7 @@ pub(crate) async fn forward_incoming_proposal<P: ConsensusPlugin>(
 ///   Warn-log, swallow the error so inbound dispatch keeps draining.
 ///
 /// Other consensus errors propagate.
-pub(crate) async fn forward_incoming_vote<P: ConsensusPlugin>(
+pub(crate) fn forward_incoming_vote<P: ConsensusPlugin>(
     conversation_id: &str,
     vote: Vote,
     consensus: &ConsensusServiceFor<P>,
@@ -153,7 +149,7 @@ pub(crate) async fn forward_incoming_vote<P: ConsensusPlugin>(
 ) -> Result<(), CoreError> {
     let proposal_id = vote.proposal_id;
     let scope = P::Scope::from(conversation_id.to_string());
-    match consensus.process_incoming_vote(&scope, vote).await {
+    match consensus.process_incoming_vote(&scope, vote) {
         Ok(()) => Ok(()),
         Err(ConsensusError::SessionNotActive) => {
             tracing::debug!(
@@ -194,7 +190,7 @@ pub(crate) async fn forward_incoming_vote<P: ConsensusPlugin>(
 ///
 /// `Ok(Some(_))` — newly opened; caller broadcasts the `AppMessage`.
 /// `Ok(None)` — already in flight (e.g. double-click); no broadcast.
-pub(crate) async fn submit_self_leave_proposal<P>(
+pub(crate) fn submit_self_leave_proposal<P>(
     conversation_id: &str,
     self_member_id: &[u8],
     consensus: &ConsensusServiceFor<P>,
@@ -232,14 +228,11 @@ where
         liveness_criteria_yes: params.liveness_criteria_yes,
     };
 
-    let yes_vote = build_vote(&proposal, true, consensus.signer()).await?;
+    let yes_vote = build_vote(&proposal, true, consensus.signer())?;
     proposal.votes.push(yes_vote);
 
     let scope = P::Scope::from(conversation_id.to_string());
-    match consensus
-        .process_incoming_proposal(&scope, proposal.clone())
-        .await
-    {
+    match consensus.process_incoming_proposal(&scope, proposal.clone()) {
         Ok(()) => {
             info!(
                 conversation = conversation_id,

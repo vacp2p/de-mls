@@ -6,7 +6,7 @@
 //! `Arc<RwLock<SessionRunner>>` because they fan out into steward
 //! initiations (election, deadlock ECP, score removals, buffered-update
 //! drains), each of which opens a follow-up proposal that releases the
-//! runner lock across its `.await` points.
+//! runner lock across its `` points.
 
 use std::sync::{Arc, RwLock};
 
@@ -30,7 +30,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// apply the result to the conversation, and dispatch to the correct
     /// follow-up handler (election-accepted / election-rejected /
     /// emergency-scored).
-    pub(crate) async fn apply_consensus_outcome(
+    pub(crate) fn apply_consensus_outcome(
         arc: &Arc<RwLock<Self>>,
         event: ConsensusEvent,
     ) -> Result<SessionTick, UserError> {
@@ -53,7 +53,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             // Drop re-emissions from the consensus library (timeout-path
             // race) so we don't re-apply state or double-fire UI events.
             s.conversation
-                .conversation
+                .queues
                 .is_consensus_outcome_applied(proposal_id)
         };
         if already_applied {
@@ -79,10 +79,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             (s.consensus.clone(), s.conversation_id.clone())
         };
         let scope = P::Scope::from(conversation_id.clone());
-        let proposal = consensus
-            .storage()
-            .get_proposal(&scope, proposal_id)
-            .await?;
+        let proposal = consensus.storage().get_proposal(&scope, proposal_id)?;
         // Decode once and thread the request through every downstream step.
         let request = ConversationUpdateRequest::decode(proposal.payload.as_slice())?;
 
@@ -95,24 +92,28 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 proposal_id, approved, "consensus reached"
             );
             s.conversation
-                .conversation
+                .queues
                 .mark_consensus_outcome_applied(proposal_id);
-            apply_consensus_result(
-                &mut s.conversation.conversation,
-                proposal_id,
-                approved,
-                &request,
-            )?
+            apply_consensus_result(&mut s.conversation.queues, proposal_id, approved, &request)?
         };
+
+        // A commit candidate may have arrived before this approval landed (a
+        // peer steward can reach consensus and broadcast the commit before we
+        // apply our own vote). Now that the approved queue is populated, replay
+        // any stashed candidate so the freeze round picks it up instead of
+        // starting empty and forcing a needless reelection.
+        arc.write_or_err("session")?
+            .conversation
+            .replay_early_candidates()?;
 
         match consensus_apply {
             ConsensusApplyResult::NoAction => {}
             ConsensusApplyResult::ElectionAccepted(election) => {
-                Self::handle_election_accepted(arc, election).await?;
+                Self::handle_election_accepted(arc, election)?;
                 return Self::current_tick(arc);
             }
             ConsensusApplyResult::ElectionRejected => {
-                Self::handle_election_rejected(arc).await?;
+                Self::handle_election_rejected(arc)?;
             }
             ConsensusApplyResult::RecoveryModeOpened => {
                 arc.write_or_err("session")?
@@ -122,15 +123,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             }
             ConsensusApplyResult::UrgentRemoval { target } => {
                 Self::start_freezing_and_emit(arc)?;
-                Self::refresh_stewards_after_removal(arc, &target).await?;
+                Self::refresh_stewards_after_removal(arc, &target)?;
             }
             ConsensusApplyResult::QueuedRemoval { target } => {
-                Self::refresh_stewards_after_removal(arc, &target).await?;
+                Self::refresh_stewards_after_removal(arc, &target)?;
             }
             ConsensusApplyResult::RejectedMembership { target } => {
                 arc.write_or_err("session")?
                     .conversation
-                    .conversation
+                    .queues
                     .remove_pending_update(&target);
             }
         }
@@ -142,7 +143,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
         let score_ops = emergency_score_ops(&request, approved);
         if !score_ops.is_empty() {
-            Self::handle_emergency_scored(arc, proposal_id, &request, &score_ops).await?;
+            Self::handle_emergency_scored(arc, proposal_id, &request, &score_ops)?;
         }
 
         Self::current_tick(arc)
@@ -178,7 +179,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
     /// When the removal target is a current steward, fire a fresh election
     /// in parallel so the next epoch keeps a healthy ES + BS.
-    async fn refresh_stewards_after_removal(
+    fn refresh_stewards_after_removal(
         arc: &Arc<RwLock<Self>>,
         target: &[u8],
     ) -> Result<(), UserError> {
@@ -190,7 +191,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         if !target_was_steward {
             return Ok(());
         }
-        if let Err(e) = Self::initiate_steward_election(arc, true).await {
+        if let Err(e) = Self::initiate_steward_election(arc, true) {
             let conv_name = arc.read_or_err("session")?.conversation_id.clone();
             info!(
                 conversation = %conv_name,
@@ -204,7 +205,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Accepted election: validate, install the new list, exit Reelection
     /// if we were in it, close any open recovery window, and drain
     /// buffered updates so the fresh epoch steward picks them up.
-    async fn handle_election_accepted(
+    fn handle_election_accepted(
         arc: &Arc<RwLock<Self>>,
         election: StewardElectionProposal,
     ) -> Result<(), UserError> {
@@ -232,7 +233,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
         let resumed_from_reelection = {
             let mut s = arc.write_or_err("session")?;
-            let _events = s.conversation.steward_list.install_list(
+            s.conversation.steward_list.install_list(
                 election.election_epoch,
                 &election.proposed_stewards,
                 election.proposed_stewards.len(),
@@ -260,15 +261,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             );
         }
 
-        Self::process_buffered_updates(arc).await
+        Self::process_buffered_updates(arc)
     }
 
     /// Rejected election: bump the retry round and retry under the max
     /// (idempotent), or escalate to a `Deadlock` ECP once exhausted.
-    async fn handle_election_rejected(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
+    fn handle_election_rejected(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
         let (round, max) = {
             let mut s = arc.write_or_err("session")?;
-            let _events = s.conversation.steward_list.bump_retry();
+            s.conversation.steward_list.bump_retry();
             (
                 s.conversation.steward_list.next_retry_round(),
                 s.conversation.steward_list.max_retries(),
@@ -280,7 +281,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 conversation = %conversation_id,
                 round, max, "election retries exhausted; escalating to Layer 3"
             );
-            if let Err(e) = Self::initiate_deadlock_ecp(arc).await {
+            if let Err(e) = Self::initiate_deadlock_ecp(arc) {
                 error!(conversation = %conversation_id, error = %e, "Deadlock ECP filing failed");
                 arc.read_or_err("session")?.emit_event(SessionEvent::Error {
                     operation: "Reelection stuck".to_string(),
@@ -293,7 +294,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             conversation = %conversation_id,
             round, max, "steward election rejected, retrying"
         );
-        if let Err(e) = Self::initiate_steward_election(arc, true).await {
+        if let Err(e) = Self::initiate_steward_election(arc, true) {
             info!(conversation = %conversation_id, error = %e, "election retry deferred");
         }
         Ok(())
@@ -303,7 +304,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// pending-removal / pending-ECP buffers, lift the partial freeze (and
     /// exit Reelection if we landed there), then check for new
     /// below-threshold removals.
-    async fn handle_emergency_scored(
+    fn handle_emergency_scored(
         arc: &Arc<RwLock<Self>>,
         proposal_id: u32,
         request: &ConversationUpdateRequest,
@@ -321,14 +322,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 && let Some(ev) = &ec.evidence
             {
                 s.conversation
-                    .conversation
+                    .queues
                     .remove_pending_removal(&ev.target_member_id);
             }
         }
 
         let resumed_event = {
             let mut s = arc.write_or_err("session")?;
-            s.conversation.conversation.remove_emergency(proposal_id);
+            s.conversation.queues.remove_emergency(proposal_id);
             if s.conversation.current_state() == ConversationState::Reelection {
                 Some(s.start_working())
             } else {
@@ -337,7 +338,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         };
         Self::emit_phase_change(arc, resumed_event)?;
 
-        if let Err(e) = Self::check_and_initiate_score_removals(arc).await {
+        if let Err(e) = Self::check_and_initiate_score_removals(arc) {
             let conv_name = arc.read_or_err("session")?.conversation_id.clone();
             error!(conversation = %conv_name, error = %e, "score-removal check failed");
         }

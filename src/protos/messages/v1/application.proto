@@ -102,6 +102,10 @@ message RemoveMember {
 message MemberWelcome {
   bytes welcome_bytes = 1;
   bytes conversation_sync_bytes = 2;
+  // Member ids of the joiners this welcome admits (one per Add in the
+  // commit). Lets the committing steward — or any later holder — address
+  // delivery without out-of-band invite tracking.
+  repeated bytes joiner_identities = 3;
 }
 
 message ConversationSync {

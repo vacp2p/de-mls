@@ -69,9 +69,7 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
             },
         )),
     };
-    SessionRunner::initiate_proposal(&steward_session, request, CreatorVote::Yes)
-        .await
-        .unwrap();
+    SessionRunner::initiate_proposal(&steward_session, request, CreatorVote::Yes).unwrap();
 
     let mut target_evicted = false;
     for _ in 0..30 {
@@ -94,14 +92,11 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
     users[target_idx]
         .0
         .start_conversation("rejoin", false)
-        .await
         .unwrap();
 
     let new_session = users[target_idx].0.lookup_entry("rejoin").unwrap().unwrap();
     let kp = users[target_idx].0.generate_key_package().unwrap();
-    SessionRunner::send_key_package(&new_session, kp)
-        .await
-        .unwrap();
+    SessionRunner::send_key_package(&new_session, kp).unwrap();
 
     let mut rejoined = false;
     for _ in 0..30 {
@@ -152,13 +147,13 @@ async fn drive_one_round(
     let mut sessions = Vec::with_capacity(users.len());
     for (i, (u, _)) in users.iter().enumerate() {
         if let Some(s) = u.lookup_entry("rejoin").unwrap() {
-            let _ = SessionRunner::tick_deadlines(&s).await;
-            let pfs = SessionRunner::poll_freeze_status(&s).await;
+            let _ = SessionRunner::tick_deadlines(&s);
+            let pfs = SessionRunner::poll_freeze_status(&s);
             if i == target_idx && matches!(pfs, Ok((_, DispatchOutcome::LeaveRequested))) {
-                u.finalize_self_leave("rejoin").await.unwrap();
+                u.finalize_self_leave("rejoin").unwrap();
                 continue;
             }
-            let _ = SessionRunner::check_member_freeze(&s).await;
+            let _ = SessionRunner::check_member_freeze(&s);
             let _ = SessionRunner::check_pending_join(&s).unwrap();
             sessions.push(s);
         }
@@ -166,14 +161,14 @@ async fn drive_one_round(
     // Route the steward's WelcomeReady event to the rejoining target
     // before relaying packets — ConversationSync emitted in the same
     // round needs the target's MLS attached first.
-    route_welcomes(&sessions, users).await;
+    route_welcomes(&sessions, users);
     let mut packets = Vec::new();
     for (_, h) in users.iter() {
         packets.extend(h.lock().unwrap().drain_packets());
     }
     for p in &packets {
         for (u, _) in users.iter() {
-            let _ = u.process_inbound_packet(to_inbound(p)).await;
+            let _ = u.process_inbound_packet(to_inbound(p));
         }
     }
 }

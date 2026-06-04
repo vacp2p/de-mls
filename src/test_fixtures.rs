@@ -19,7 +19,7 @@ use crate::{
     core::{
         ConsensusPlugin, ConsensusServiceFor, ConversationPluginsFactory, ElectionDecision,
         PeerScoringPlugin, ScoreOp, ScoreSnapshot, ScoringConfig, StewardList, StewardListConfig,
-        StewardListEvent, StewardListPlugin,
+        StewardListPlugin,
     },
     defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage},
     ds::{OutboundPacket, SharedDeliveryService},
@@ -251,7 +251,7 @@ impl StewardListPlugin for StubStewardList {
         _: &[Vec<u8>],
         _: usize,
         _: u32,
-    ) -> Result<Vec<StewardListEvent>, crate::core::CoreError> {
+    ) -> Result<(), crate::core::CoreError> {
         unreachable!()
     }
     fn validate_proposed(
@@ -273,7 +273,7 @@ impl StewardListPlugin for StubStewardList {
     ) -> Result<ElectionDecision, crate::core::CoreError> {
         unreachable!()
     }
-    fn bump_retry(&mut self) -> Vec<StewardListEvent> {
+    fn bump_retry(&mut self) {
         unreachable!()
     }
     fn reset_retry(&mut self) {

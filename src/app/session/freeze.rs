@@ -72,7 +72,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// freeze status. The [`DispatchOutcome`] is `LeaveRequested` if the
     /// applied commit ejected the local member — the caller drives the
     /// User-side registry teardown.
-    pub async fn poll_freeze_status(
+    pub fn poll_freeze_status(
         arc: &Arc<RwLock<Self>>,
     ) -> Result<(FreezeTimeoutStatus, DispatchOutcome), UserError> {
         let (has_proposals, selection_event) = {
@@ -85,23 +85,18 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
             // Early selection: skip remaining freeze time if all expected
             // stewards have submitted candidates.
-            let all_candidates_in =
-                s.conversation
-                    .steward_list
-                    .current_list()
-                    .is_some_and(|list| {
-                        s.conversation.conversation.freeze_candidate_count() >= list.len()
-                    });
+            let all_candidates_in = s
+                .conversation
+                .steward_list
+                .current_list()
+                .is_some_and(|list| s.conversation.queues.freeze_candidate_count() >= list.len());
 
             if !all_candidates_in && !s.is_freeze_timed_out() {
                 return Ok((FreezeTimeoutStatus::StillFreezing, DispatchOutcome::Done));
             }
 
             let event = s.start_selection();
-            (
-                s.conversation.conversation.approved_proposals_count() > 0,
-                event,
-            )
+            (s.conversation.queues.approved_proposals_count() > 0, event)
         };
 
         arc.read_or_err("session")?
@@ -147,10 +142,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
         // Lock split is intentional: `check_and_initiate_score_removals`
         // re-acquires the runner write lock and calls `initiate_proposal`,
-        // which `.await`s on the consensus service. Holding the runner
+        // which ``s on the consensus service. Holding the runner
         // lock across that await would block other operations on this
         // conversation, so we drop the lock above before chaining.
-        if downward_cross && let Err(e) = Self::check_and_initiate_score_removals(arc).await {
+        if downward_cross && let Err(e) = Self::check_and_initiate_score_removals(arc) {
             error!(conversation = %conversation_id, error = %e, "score-removal check failed (freeze finalize)");
         }
 
@@ -178,7 +173,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                         .emit_event(SessionEvent::WelcomeReady(welcome));
                 }
 
-                let outcome = match Self::dispatch_inbound_result(arc, result).await {
+                let outcome = match Self::dispatch_inbound_result(arc, result) {
                     Ok(o) => o,
                     Err(e) => {
                         error!(conversation = %conversation_id, error = %e, "finalize result dispatch failed");
@@ -212,8 +207,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                                 let violation_epoch = mls.current_epoch()?;
                                 let members = mls.members()?;
                                 let self_member_id: &[u8] = &s.self_member_id;
-                                let eligible =
-                                    s.conversation.conversation.steward_eligibility(&members);
+                                let eligible = s.conversation.queues.steward_eligibility(&members);
                                 s.conversation
                                     .steward_list
                                     .epoch_steward(violation_epoch, &eligible)
@@ -233,14 +227,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
                         (event, cross)
                     } else {
-                        s.conversation.conversation.clear_freeze_round();
+                        s.conversation.queues.clear_freeze_round();
                         let event = s.start_working();
                         (event, false)
                     }
                 };
 
-                if downward_cross && let Err(e) = Self::check_and_initiate_score_removals(arc).await
-                {
+                if downward_cross && let Err(e) = Self::check_and_initiate_score_removals(arc) {
                     error!(conversation = %conversation_id, error = %e, "score-removal check failed (freeze timeout)");
                 }
 
@@ -250,9 +243,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
                 // Layer 2 recovery: regenerate the steward list. Only the
                 // responsible proposer's call actually submits.
-                if entered_reelection
-                    && let Err(e) = Self::initiate_steward_election(arc, true).await
-                {
+                if entered_reelection && let Err(e) = Self::initiate_steward_election(arc, true) {
                     info!(conversation = %conversation_id, error = %e, "recovery election deferred");
                 }
             }
@@ -273,7 +264,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     ///
     /// Takes `&Arc<RwLock<Self>>` so the runner lock is released before
     /// awaiting on the transport for the steward's own candidate send.
-    pub async fn check_member_freeze(arc: &Arc<RwLock<Self>>) -> Result<bool, UserError> {
+    pub fn check_member_freeze(arc: &Arc<RwLock<Self>>) -> Result<bool, UserError> {
         // Sync phase: under the runner write lock, run the inactivity
         // check and (for stewards) build the outbound candidate.
         let (transitioned, transport, outbound) = {
@@ -283,10 +274,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 return Ok(false);
             }
 
-            let proposal_count = s.conversation.conversation.approved_proposals_count();
+            let proposal_count = s.conversation.queues.approved_proposals_count();
             // Hold the freeze while an election is in flight — committing on
             // the known-stale list would just produce a NoCandidate.
-            if s.conversation.conversation.has_election_in_flight() {
+            if s.conversation.queues.has_election_in_flight() {
                 return Ok(false);
             }
             // Recovery uses the shorter retry inactivity window so we don't
@@ -303,7 +294,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 return Ok(false);
             };
             let epoch = s.conversation.expect_mls()?.current_epoch()?;
-            s.conversation.conversation.start_freeze_round(epoch);
+            s.conversation.queues.start_freeze_round(epoch);
 
             let self_member_id = Arc::clone(&s.self_member_id);
             let app_id = Arc::clone(&s.app_id);

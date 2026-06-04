@@ -38,6 +38,7 @@ mod steward_list;
 // ── Core conversation operations ──
 pub use freeze::{
     CommitHash, FreezeFinalizeResult, FreezeOutcome, compute_commit_hash, finalize_freeze_round,
+    replay_early_candidates,
 };
 pub use inbound::process_inbound;
 
@@ -71,7 +72,7 @@ pub use proposal_kind::ProposalKind;
 // ── Steward list ──
 pub use steward_list::{
     DEFAULT_MAX_RETRIES, DeterministicStewardList, ElectionDecision, StewardList,
-    StewardListConfig, StewardListEvent, StewardListPlugin,
+    StewardListConfig, StewardListPlugin,
 };
 
 // ── Consensus plug-in trait ──
