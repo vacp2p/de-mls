@@ -19,7 +19,7 @@ use crate::{
     core::{
         ConsensusPlugin, ConsensusServiceFor, ConversationPluginsFactory, ElectionDecision,
         PeerScoringPlugin, ScoreOp, ScoreSnapshot, ScoringConfig, StewardList, StewardListConfig,
-        StewardListEvent, StewardListPlugin,
+        StewardListPlugin,
     },
     defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage},
     ds::{OutboundPacket, SharedDeliveryService},
