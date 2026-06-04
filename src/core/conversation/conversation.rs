@@ -25,7 +25,7 @@ use crate::{
 /// state, the MLS service, plug-ins, state machine, durable config, and
 /// operating mode behind one type parameter.
 pub struct Conversation<CP: ConversationPluginsFactory> {
-    pub conversation: ConversationQueues,
+    pub queues: ConversationQueues,
     /// Per-conversation MLS service. `None` for joiners in `PendingJoin` who
     /// haven't accepted a welcome yet; once attached via
     /// [`Self::attach_mls`] it stays `Some` for the conversation's lifetime.
@@ -46,7 +46,7 @@ impl<CP: ConversationPluginsFactory> Conversation<CP> {
     /// Build a fresh conversation. Creator path passes `Some(mls)`; joiner
     /// path passes `None` and attaches later via [`Self::attach_mls`].
     pub(crate) fn new(
-        conversation: ConversationQueues,
+        queues: ConversationQueues,
         mls: Option<CP::Mls>,
         state_machine: ConversationStateMachine,
         config: ConversationConfig,
@@ -54,7 +54,7 @@ impl<CP: ConversationPluginsFactory> Conversation<CP> {
         steward_list: CP::StewardList,
     ) -> Self {
         Self {
-            conversation,
+            queues,
             mls,
             state_machine,
             config,
@@ -138,16 +138,16 @@ impl<CP: ConversationPluginsFactory> Conversation<CP> {
             return Err(CoreError::NotASteward);
         }
 
-        if self.conversation.approved_proposals().is_empty() {
+        if self.queues.approved_proposals().is_empty() {
             return Err(CoreError::NoProposals);
         }
 
         // MLS forbids committing one's own removal. If the approved batch contains
         // RemoveMember(self), skip local candidate creation — another steward will
         // commit the batch (including this node's removal) once they enter freeze.
-        if self.conversation.has_approved_removal(self_member_id) {
+        if self.queues.has_approved_removal(self_member_id) {
             info!(
-                conversation = self.conversation.name(),
+                conversation = self.queues.name(),
                 "commit candidate skipped: approved batch contains self-remove"
             );
             return Ok(None);
@@ -156,7 +156,7 @@ impl<CP: ConversationPluginsFactory> Conversation<CP> {
         // Governance proposals (emergency, election) are consensus-only and must
         // not be in the approved queue at batch creation time.
         let non_mls_ids: Vec<u32> = self
-            .conversation
+            .queues
             .approved_proposals()
             .iter()
             .filter(|(_, req)| ProposalKind::of(req).is_governance())
@@ -182,12 +182,12 @@ impl<CP: ConversationPluginsFactory> Conversation<CP> {
 
         // Urgent (ECP-driven) freeze: restrict the batch to just the target's
         // RemoveMember. See `ConversationQueues::urgent_commit_target`.
-        let urgent_target = self.conversation.urgent_commit_target().map(|t| t.to_vec());
+        let urgent_target = self.queues.urgent_commit_target().map(|t| t.to_vec());
 
         // Iterate in insertion order (FIFO): library proposal IDs are
         // content-derived hashes, so sort-by-id is not temporal.
         let k_max = mls.commit_batch_max();
-        let approved = self.conversation.approved_proposals();
+        let approved = self.queues.approved_proposals();
         let mut updates = Vec::with_capacity(approved.len().min(k_max));
         // Joiners admitted by this batch, in Add order. Travels with the
         // welcome so any holder can address delivery.
@@ -233,7 +233,7 @@ impl<CP: ConversationPluginsFactory> Conversation<CP> {
         } = mls.create_commit_candidate(&updates)?;
 
         let candidate = CommitCandidate {
-            conversation_id: self.conversation.name_bytes().to_vec(),
+            conversation_id: self.queues.name_bytes().to_vec(),
             mls_proposals,
             commit_message: commit,
             steward_member_id: self_member_id.to_vec(),
@@ -244,7 +244,7 @@ impl<CP: ConversationPluginsFactory> Conversation<CP> {
         let commit_hash = compute_commit_hash(&candidate.commit_message);
         let epoch = mls.current_epoch()?;
         let max_candidates = mls.members()?.len();
-        let outcome = self.conversation.add_freeze_candidate(
+        let outcome = self.queues.add_freeze_candidate(
             BufferedCommitCandidate {
                 candidate_msg: candidate.clone(),
                 commit_hash,
@@ -259,7 +259,7 @@ impl<CP: ConversationPluginsFactory> Conversation<CP> {
         // `FreezeBufferOutcome`), not errors — log at debug.
         if !matches!(outcome, FreezeBufferOutcome::Buffered) {
             tracing::debug!(
-                conversation = self.conversation.name(),
+                conversation = self.queues.name(),
                 epoch,
                 ?outcome,
                 "local commit candidate not buffered",
@@ -267,7 +267,7 @@ impl<CP: ConversationPluginsFactory> Conversation<CP> {
         }
 
         info!(
-            conversation = self.conversation.name(),
+            conversation = self.queues.name(),
             epoch,
             proposals = updates.len(),
             "commit candidate created"
@@ -277,7 +277,7 @@ impl<CP: ConversationPluginsFactory> Conversation<CP> {
         Ok(Some(OutboundPacket::new(
             candidate_msg.encode_to_vec(),
             APP_MSG_SUBTOPIC,
-            self.conversation.name(),
+            self.queues.name(),
             app_id,
         )))
     }
@@ -291,7 +291,7 @@ impl<CP: ConversationPluginsFactory> Conversation<CP> {
         let in_recovery = self.operating_mode == OperatingMode::Recovery;
         let mls = self.mls.as_mut().ok_or(CoreError::MlsGroupNotInitialized)?;
         finalize_freeze_round(
-            &mut self.conversation,
+            &mut self.queues,
             mls,
             &self.steward_list,
             in_recovery,
@@ -307,7 +307,7 @@ impl<CP: ConversationPluginsFactory> Conversation<CP> {
         let Some(mls) = self.mls.as_mut() else {
             return Ok(());
         };
-        replay_early_candidates(&mut self.conversation, mls)
+        replay_early_candidates(&mut self.queues, mls)
     }
 
     /// Process an inbound app-subtopic payload. Errors with
@@ -315,7 +315,7 @@ impl<CP: ConversationPluginsFactory> Conversation<CP> {
     /// attached — caller should check `mls().is_some()` first.
     pub(crate) fn process_inbound(&mut self, payload: &[u8]) -> Result<ProcessResult, CoreError> {
         let mls = self.mls.as_mut().ok_or(CoreError::MlsGroupNotInitialized)?;
-        process_inbound(&mut self.conversation, mls, payload)
+        process_inbound(&mut self.queues, mls, payload)
     }
 }
 
@@ -366,9 +366,7 @@ mod tests {
             .with_creator(vec![0x01])
             .into_update_request()
             .unwrap();
-        conversation
-            .conversation
-            .insert_approved_proposal(50, emergency);
+        conversation.queues.insert_approved_proposal(50, emergency);
 
         let err = conversation
             .create_commit_candidate(b"me", b"app")

@@ -303,7 +303,7 @@ pub fn setup_steward_with_config(
     let group = ConversationQueues::new(conversation_id);
     let mut steward_list =
         DeterministicStewardList::empty(conversation_id.as_bytes().to_vec(), config);
-    let _events = steward_list
+    steward_list
         .install_list(0, std::slice::from_ref(&member_id_bytes), 1, 0)
         .expect("bootstrap list install");
     StewardHandle {

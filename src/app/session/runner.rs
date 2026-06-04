@@ -210,7 +210,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             ConversationState::Freezing => Some(anchor + cfg.freeze_duration),
             ConversationState::PendingJoin => Some(anchor + cfg.commit_inactivity_duration * 3),
             ConversationState::Working => {
-                if self.conversation.conversation.approved_proposals_count() == 0 {
+                if self.conversation.queues.approved_proposals_count() == 0 {
                     return None;
                 }
                 let dur = if self.conversation.is_in_recovery_mode() {

@@ -141,7 +141,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
             let inserted = s
                 .conversation
-                .conversation
+                .queues
                 .insert_pending_update(request.clone(), current_epoch);
 
             // Only the epoch steward proposes immediately. The buffer
@@ -149,7 +149,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             let self_member_id = Arc::clone(&s.self_member_id);
             let eligible = s
                 .conversation
-                .conversation
+                .queues
                 .steward_eligibility(&members_for_rotation);
             let is_es = s
                 .conversation
@@ -157,7 +157,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 .epoch_steward(current_epoch, &eligible)
                 .is_some_and(|es| es == &*self_member_id);
             let state = s.conversation.current_state();
-            let total = s.conversation.conversation.pending_update_count();
+            let total = s.conversation.queues.pending_update_count();
             let should = is_es && state == ConversationState::Working;
             let name = s.conversation_id.clone();
             (inserted, is_es, state, total, should, name)
@@ -298,9 +298,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         let (already_pending, conversation_id) = {
             let s = arc.read_or_err("session")?;
             (
-                s.conversation
-                    .conversation
-                    .is_pending_self_leave(&self_member_id),
+                s.conversation.queues.is_pending_self_leave(&self_member_id),
                 s.conversation_id.clone(),
             )
         };
@@ -328,7 +326,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         let (consensus, proposal_expiration, consensus_timeout) = {
             let mut s = arc.write_or_err("session")?;
             s.conversation
-                .conversation
+                .queues
                 .insert_voting_proposal(proposal_id, request);
             (
                 s.consensus.clone(),
@@ -379,7 +377,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 if !kind.is_emergency() && !kind.is_steward_election() {
                     return Err(UserError::ConversationBlocked(state.to_string()));
                 }
-                if self.conversation.conversation.partial_freeze_blocks(kind) {
+                if self.conversation.queues.partial_freeze_blocks(kind) {
                     return Err(UserError::PartialFreeze);
                 }
             }
@@ -387,7 +385,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 return Err(UserError::ConversationBlocked(state.to_string()));
             }
             _ => {
-                if self.conversation.conversation.partial_freeze_blocks(kind) {
+                if self.conversation.queues.partial_freeze_blocks(kind) {
                     return Err(UserError::PartialFreeze);
                 }
             }
@@ -452,10 +450,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         {
             let mut s = arc.write_or_err("session")?;
             s.conversation
-                .conversation
+                .queues
                 .insert_voting_proposal(proposal_id, request.clone());
             if kind.is_emergency() {
-                s.conversation.conversation.insert_emergency(proposal_id);
+                s.conversation.queues.insert_emergency(proposal_id);
             }
             // Register the consensus timeout deadline. The caller's polling
             // loop fires `resolve_on_timeout` via `tick_deadlines` once the
@@ -558,7 +556,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     .read_or_err("session")
                     .map(|s| {
                         s.conversation
-                            .conversation
+                            .queues
                             .is_consensus_outcome_applied(proposal_id)
                     })
                     .unwrap_or(false);

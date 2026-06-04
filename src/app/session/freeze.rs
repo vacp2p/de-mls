@@ -85,23 +85,18 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
             // Early selection: skip remaining freeze time if all expected
             // stewards have submitted candidates.
-            let all_candidates_in =
-                s.conversation
-                    .steward_list
-                    .current_list()
-                    .is_some_and(|list| {
-                        s.conversation.conversation.freeze_candidate_count() >= list.len()
-                    });
+            let all_candidates_in = s
+                .conversation
+                .steward_list
+                .current_list()
+                .is_some_and(|list| s.conversation.queues.freeze_candidate_count() >= list.len());
 
             if !all_candidates_in && !s.is_freeze_timed_out() {
                 return Ok((FreezeTimeoutStatus::StillFreezing, DispatchOutcome::Done));
             }
 
             let event = s.start_selection();
-            (
-                s.conversation.conversation.approved_proposals_count() > 0,
-                event,
-            )
+            (s.conversation.queues.approved_proposals_count() > 0, event)
         };
 
         arc.read_or_err("session")?
@@ -212,8 +207,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                                 let violation_epoch = mls.current_epoch()?;
                                 let members = mls.members()?;
                                 let self_member_id: &[u8] = &s.self_member_id;
-                                let eligible =
-                                    s.conversation.conversation.steward_eligibility(&members);
+                                let eligible = s.conversation.queues.steward_eligibility(&members);
                                 s.conversation
                                     .steward_list
                                     .epoch_steward(violation_epoch, &eligible)
@@ -233,7 +227,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
                         (event, cross)
                     } else {
-                        s.conversation.conversation.clear_freeze_round();
+                        s.conversation.queues.clear_freeze_round();
                         let event = s.start_working();
                         (event, false)
                     }
@@ -280,10 +274,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 return Ok(false);
             }
 
-            let proposal_count = s.conversation.conversation.approved_proposals_count();
+            let proposal_count = s.conversation.queues.approved_proposals_count();
             // Hold the freeze while an election is in flight — committing on
             // the known-stale list would just produce a NoCandidate.
-            if s.conversation.conversation.has_election_in_flight() {
+            if s.conversation.queues.has_election_in_flight() {
                 return Ok(false);
             }
             // Recovery uses the shorter retry inactivity window so we don't
@@ -300,7 +294,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 return Ok(false);
             };
             let epoch = s.conversation.expect_mls()?.current_epoch()?;
-            s.conversation.conversation.start_freeze_round(epoch);
+            s.conversation.queues.start_freeze_round(epoch);
 
             let self_member_id = Arc::clone(&s.self_member_id);
             let app_id = Arc::clone(&s.app_id);

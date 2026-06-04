@@ -81,7 +81,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                         s.consensus.clone(),
                         s.conversation_id.clone(),
                         s.conversation
-                            .conversation
+                            .queues
                             .is_consensus_outcome_applied(proposal_id),
                     )
                 };
@@ -160,14 +160,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             };
             match &req.payload {
                 Some(conversation_update_request::Payload::EmergencyCriteria(_)) => {
-                    s.conversation
-                        .conversation
-                        .insert_emergency(proposal.proposal_id);
+                    s.conversation.queues.insert_emergency(proposal.proposal_id);
                 }
                 Some(conversation_update_request::Payload::MemberInvite(_))
                 | Some(conversation_update_request::Payload::RemoveMember(_)) => {
                     s.conversation
-                        .conversation
+                        .queues
                         .insert_pending_update(req.clone(), current_epoch);
                 }
                 _ => {}
@@ -350,11 +348,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         }
         let (event, outbound) = {
             let mut s = arc.write_or_err("session")?;
-            // A valid commit landing supersedes a pending reelection: a member
-            // that gave up waiting (Reelection) must still apply the steward's
-            // commit, not ignore it. `start_freezing` is allowed from both
-            // Working and Reelection; the buffered candidate is finalized on
-            // the next poll.
             let state = s.conversation.current_state();
             if state != ConversationState::Working && state != ConversationState::Reelection {
                 return Ok(());
@@ -364,7 +357,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 return Ok(());
             };
             let epoch = s.conversation.expect_mls()?.current_epoch()?;
-            s.conversation.conversation.start_freeze_round(epoch);
+            s.conversation.queues.start_freeze_round(epoch);
 
             let self_member_id = Arc::clone(&s.self_member_id);
             let app_id = Arc::clone(&s.app_id);
@@ -454,7 +447,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
         let sn = sync.steward_members.len();
         self.conversation.steward_list.set_config(protocol_config);
-        let _events = self.conversation.steward_list.install_list(
+        self.conversation.steward_list.install_list(
             sync.election_epoch,
             &sync.steward_members,
             sn,

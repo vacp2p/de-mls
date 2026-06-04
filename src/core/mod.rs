@@ -72,7 +72,7 @@ pub use proposal_kind::ProposalKind;
 // ── Steward list ──
 pub use steward_list::{
     DEFAULT_MAX_RETRIES, DeterministicStewardList, ElectionDecision, StewardList,
-    StewardListConfig, StewardListEvent, StewardListPlugin,
+    StewardListConfig, StewardListPlugin,
 };
 
 // ── Consensus plug-in trait ──

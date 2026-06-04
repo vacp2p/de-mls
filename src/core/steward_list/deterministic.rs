@@ -1,8 +1,8 @@
 //! [`DeterministicStewardList`] — SHA256-sorted [`super::StewardListPlugin`] impl.
 
 use crate::core::{
-    DEFAULT_MAX_RETRIES, ElectionDecision, StewardList, StewardListConfig, StewardListEvent,
-    StewardListPlugin, error::CoreError,
+    DEFAULT_MAX_RETRIES, ElectionDecision, StewardList, StewardListConfig, StewardListPlugin,
+    error::CoreError,
 };
 
 #[derive(Debug)]
@@ -130,7 +130,7 @@ impl StewardListPlugin for DeterministicStewardList {
         candidate_pool: &[Vec<u8>],
         sn: usize,
         retry_round: u32,
-    ) -> Result<Vec<StewardListEvent>, CoreError> {
+    ) -> Result<(), CoreError> {
         let list = StewardList::generate(
             epoch,
             &self.conversation_id,
@@ -139,13 +139,8 @@ impl StewardListPlugin for DeterministicStewardList {
             self.config.clone(),
             retry_round,
         )?;
-        let len = list.len();
         self.list = Some(list);
-        Ok(vec![StewardListEvent::ListInstalled {
-            epoch,
-            retry_round,
-            len,
-        }])
+        Ok(())
     }
 
     fn validate_proposed(
@@ -205,16 +200,8 @@ impl StewardListPlugin for DeterministicStewardList {
         })
     }
 
-    fn bump_retry(&mut self) -> Vec<StewardListEvent> {
+    fn bump_retry(&mut self) {
         self.next_retry_round = self.next_retry_round.saturating_add(1);
-        if self.next_retry_round > self.max_retries {
-            vec![StewardListEvent::RetryExhausted {
-                round: self.next_retry_round,
-                max: self.max_retries,
-            }]
-        } else {
-            Vec::new()
-        }
     }
 
     fn reset_retry(&mut self) {
@@ -259,18 +246,10 @@ mod tests {
     }
 
     #[test]
-    fn install_emits_list_installed_event() {
+    fn install_sets_current_list() {
         let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
         let mems = members(&[1, 2, 3]);
-        let events = p.install_list(0, &mems, 3, 0).unwrap();
-        assert_eq!(
-            events,
-            vec![StewardListEvent::ListInstalled {
-                epoch: 0,
-                retry_round: 0,
-                len: 3,
-            }]
-        );
+        p.install_list(0, &mems, 3, 0).unwrap();
         assert_eq!(p.current_list().unwrap().len(), 3);
         assert_eq!(p.election_epoch(), Some(0));
     }
@@ -279,7 +258,7 @@ mod tests {
     fn epoch_steward_filters_by_eligibility() {
         let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
         let mems = members(&[1, 2, 3]);
-        let _ = p.install_list(0, &mems, 3, 0).unwrap();
+        p.install_list(0, &mems, 3, 0).unwrap();
 
         let nominal = p.epoch_steward(0, |_: &[u8]| true).unwrap().to_vec();
         let next = p
@@ -294,7 +273,7 @@ mod tests {
         let mut p =
             DeterministicStewardList::empty(b"g".to_vec(), StewardListConfig::new(3, 3).unwrap());
         let mems = members(&[1, 2, 3]);
-        let _ = p.install_list(0, &mems, 3, 0).unwrap();
+        p.install_list(0, &mems, 3, 0).unwrap();
 
         let (e, b) = p.epoch_and_backup(0, |_: &[u8]| true);
         assert!(e.is_some() && b.is_some());
@@ -305,7 +284,7 @@ mod tests {
     fn backup_is_none_when_only_one_eligible() {
         let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
         let mems = members(&[1, 2, 3]);
-        let _ = p.install_list(0, &mems, 3, 0).unwrap();
+        p.install_list(0, &mems, 3, 0).unwrap();
 
         let survivor = mems[0].clone();
         let (e, b) = p.epoch_and_backup(0, |c: &[u8]| c == survivor.as_slice());
@@ -314,24 +293,27 @@ mod tests {
     }
 
     #[test]
-    fn bump_retry_emits_exhausted_after_max() {
+    fn bump_retry_increments_round_past_max() {
+        // Exhaustion is detected by the caller comparing next_retry_round()
+        // against max_retries() (config default = 1).
         let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
-        assert!(p.bump_retry().is_empty());
+        p.bump_retry();
         assert_eq!(p.next_retry_round(), 1);
+        assert!(p.next_retry_round() <= p.max_retries());
 
-        let events = p.bump_retry();
-        assert_eq!(
-            events,
-            vec![StewardListEvent::RetryExhausted { round: 2, max: 1 }]
-        );
+        p.bump_retry();
         assert_eq!(p.next_retry_round(), 2);
+        assert!(
+            p.next_retry_round() > p.max_retries(),
+            "round 2 exceeds max 1"
+        );
     }
 
     #[test]
     fn reset_retry_clears_round() {
         let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
-        let _ = p.bump_retry();
-        let _ = p.bump_retry();
+        p.bump_retry();
+        p.bump_retry();
         assert_eq!(p.next_retry_round(), 2);
         p.reset_retry();
         assert_eq!(p.next_retry_round(), 0);
@@ -341,7 +323,7 @@ mod tests {
     fn validate_proposed_against_self_derived_list() {
         let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
         let mems = members(&[1, 2, 3]);
-        let _ = p.install_list(0, &mems, 3, 0).unwrap();
+        p.install_list(0, &mems, 3, 0).unwrap();
         let proposed = p.current_list().unwrap().members().to_vec();
         assert!(p.validate_proposed(&proposed, 0, &mems, 0).unwrap());
     }
@@ -350,7 +332,7 @@ mod tests {
     fn validate_proposed_rejects_tampered_order() {
         let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
         let mems = members(&[1, 2, 3]);
-        let _ = p.install_list(0, &mems, 3, 0).unwrap();
+        p.install_list(0, &mems, 3, 0).unwrap();
         let mut tampered = p.current_list().unwrap().members().to_vec();
         tampered.swap(0, 1);
         assert!(!p.validate_proposed(&tampered, 0, &mems, 0).unwrap());
@@ -360,7 +342,7 @@ mod tests {
     fn steward_members_returns_filtered_roster() {
         let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
         let mems = members(&[1, 2, 3]);
-        let _ = p.install_list(0, &mems, 3, 0).unwrap();
+        p.install_list(0, &mems, 3, 0).unwrap();
         let dropped = mems[0].clone();
         let filtered = p.steward_members(|c: &[u8]| c != dropped.as_slice());
         assert_eq!(filtered.len(), 2);
@@ -374,12 +356,13 @@ mod tests {
         assert_eq!(p.max_retries(), 3);
 
         for _ in 0..3 {
-            assert!(p.bump_retry().is_empty());
+            p.bump_retry();
+            assert!(p.next_retry_round() <= p.max_retries());
         }
-        let events = p.bump_retry();
-        assert_eq!(
-            events,
-            vec![StewardListEvent::RetryExhausted { round: 4, max: 3 }]
+        p.bump_retry();
+        assert!(
+            p.next_retry_round() > p.max_retries(),
+            "round 4 exceeds max 3"
         );
     }
 
@@ -388,7 +371,7 @@ mod tests {
         let mut p =
             DeterministicStewardList::empty(b"g".to_vec(), StewardListConfig::new(3, 3).unwrap());
         let mems = members(&[1, 2, 3]);
-        let _ = p.install_list(0, &mems, 3, 0).unwrap();
+        p.install_list(0, &mems, 3, 0).unwrap();
 
         let proposer = p.election_proposer(|_: &[u8]| true).unwrap().to_vec();
         let next = p

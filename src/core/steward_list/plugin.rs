@@ -1,4 +1,4 @@
-//! [`StewardListPlugin`] trait, events, and election vocabulary.
+//! [`StewardListPlugin`] trait and election vocabulary.
 
 use crate::core::error::CoreError;
 use crate::core::steward_list::list::{StewardList, StewardListConfig};
@@ -16,19 +16,6 @@ pub enum ElectionDecision {
         election_epoch: u64,
         retry_round: u32,
     },
-}
-
-/// Side effect from a plug-in mutator; drained by the coordinator.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StewardListEvent {
-    /// New list installed — broadcast `ConversationSync`.
-    ListInstalled {
-        epoch: u64,
-        retry_round: u32,
-        len: usize,
-    },
-    /// `bump_retry` exceeded [`StewardListPlugin::max_retries`] — escalate to `Deadlock` ECP.
-    RetryExhausted { round: u32, max: u32 },
 }
 
 /// Per-conversation steward roster. Eligibility flows in via `Fn(&[u8]) -> bool`
@@ -90,7 +77,7 @@ pub trait StewardListPlugin {
         candidate_pool: &[Vec<u8>],
         sn: usize,
         retry_round: u32,
-    ) -> Result<Vec<StewardListEvent>, CoreError>;
+    ) -> Result<(), CoreError>;
 
     /// `true` if `proposed` matches [`StewardList::validate`] for these parameters.
     fn validate_proposed(
@@ -111,8 +98,9 @@ pub trait StewardListPlugin {
         recovery: bool,
     ) -> Result<ElectionDecision, CoreError>;
 
-    /// Increment retry round; may emit [`StewardListEvent::RetryExhausted`].
-    fn bump_retry(&mut self) -> Vec<StewardListEvent>;
+    /// Increment the retry round. Exhaustion is detected by the caller via
+    /// [`Self::next_retry_round`] vs [`Self::max_retries`].
+    fn bump_retry(&mut self);
 
     fn reset_retry(&mut self);
 }

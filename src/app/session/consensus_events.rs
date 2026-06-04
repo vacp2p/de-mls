@@ -53,7 +53,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             // Drop re-emissions from the consensus library (timeout-path
             // race) so we don't re-apply state or double-fire UI events.
             s.conversation
-                .conversation
+                .queues
                 .is_consensus_outcome_applied(proposal_id)
         };
         if already_applied {
@@ -92,14 +92,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 proposal_id, approved, "consensus reached"
             );
             s.conversation
-                .conversation
+                .queues
                 .mark_consensus_outcome_applied(proposal_id);
-            apply_consensus_result(
-                &mut s.conversation.conversation,
-                proposal_id,
-                approved,
-                &request,
-            )?
+            apply_consensus_result(&mut s.conversation.queues, proposal_id, approved, &request)?
         };
 
         // A commit candidate may have arrived before this approval landed (a
@@ -136,7 +131,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             ConsensusApplyResult::RejectedMembership { target } => {
                 arc.write_or_err("session")?
                     .conversation
-                    .conversation
+                    .queues
                     .remove_pending_update(&target);
             }
         }
@@ -238,7 +233,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
         let resumed_from_reelection = {
             let mut s = arc.write_or_err("session")?;
-            let _events = s.conversation.steward_list.install_list(
+            s.conversation.steward_list.install_list(
                 election.election_epoch,
                 &election.proposed_stewards,
                 election.proposed_stewards.len(),
@@ -274,7 +269,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     fn handle_election_rejected(arc: &Arc<RwLock<Self>>) -> Result<(), UserError> {
         let (round, max) = {
             let mut s = arc.write_or_err("session")?;
-            let _events = s.conversation.steward_list.bump_retry();
+            s.conversation.steward_list.bump_retry();
             (
                 s.conversation.steward_list.next_retry_round(),
                 s.conversation.steward_list.max_retries(),
@@ -327,14 +322,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 && let Some(ev) = &ec.evidence
             {
                 s.conversation
-                    .conversation
+                    .queues
                     .remove_pending_removal(&ev.target_member_id);
             }
         }
 
         let resumed_event = {
             let mut s = arc.write_or_err("session")?;
-            s.conversation.conversation.remove_emergency(proposal_id);
+            s.conversation.queues.remove_emergency(proposal_id);
             if s.conversation.current_state() == ConversationState::Reelection {
                 Some(s.start_working())
             } else {

@@ -70,8 +70,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         // Creator path: bootstrap the list with self as sole steward at
         // epoch 0. Joiner path leaves the plug-in empty until `ConversationSync`.
         if is_creation {
-            let _events =
-                steward_list.install_list(0, std::slice::from_ref(&self_member_id_bytes), 1, 0)?;
+            steward_list.install_list(0, std::slice::from_ref(&self_member_id_bytes), 1, 0)?;
         }
 
         let mut scoring = self
