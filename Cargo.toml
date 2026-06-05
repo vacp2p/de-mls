@@ -53,7 +53,7 @@ tracing = "0.1.41"
 indexmap = "2.14.0"
 
 libc = { version = "0.2", optional = true }
-prost = "0.13.5"
+prost = "0.14"
 hashgraph-like-consensus = "0.5.0"
 
 [dev-dependencies]
@@ -63,7 +63,7 @@ alloy = { version = "1.0.37", default-features = false, features = [
 ] }
 
 [build-dependencies]
-prost-build = "0.13.5"
+prost-build = "0.14"
 
 [profile]
 
