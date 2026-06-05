@@ -19,8 +19,8 @@ const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 const CHARLIE: &str = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
 
-#[tokio::test]
-async fn evicted_member_can_rejoin_at_higher_epoch() {
+#[test]
+fn evicted_member_can_rejoin_at_higher_epoch() {
     // sn_max = 2 → 2 of 3 are stewards; target the non-steward so the
     // removal commit isn't a self-remove.
     let mut users = bootstrap_joined_conversation(
@@ -28,8 +28,7 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
         "rejoin",
         fast_test_config(),
         StewardListConfig::new(1, 2).unwrap(),
-    )
-    .await;
+    );
 
     let mut target_idx = None;
     for (i, (u, _)) in users.iter().enumerate() {
@@ -73,7 +72,7 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
 
     let mut target_evicted = false;
     for _ in 0..30 {
-        drive_one_round(&mut users, target_idx).await;
+        drive_one_round(&mut users, target_idx);
         if users[target_idx]
             .0
             .lookup_entry("rejoin")
@@ -100,7 +99,7 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
 
     let mut rejoined = false;
     for _ in 0..30 {
-        drive_one_round(&mut users, target_idx).await;
+        drive_one_round(&mut users, target_idx);
         let s = users[target_idx].0.lookup_entry("rejoin").unwrap().unwrap();
         if s.read().unwrap().get_conversation_state() == ConversationState::Working {
             rejoined = true;
@@ -136,14 +135,14 @@ async fn evicted_member_can_rejoin_at_higher_epoch() {
     );
 }
 
-async fn drive_one_round(
+fn drive_one_round(
     users: &mut [(
         common::session_fixtures::TestUser,
         common::session_fixtures::TransportHandle,
     )],
     target_idx: usize,
 ) {
-    settle_for(Duration::from_millis(40)).await;
+    settle_for(Duration::from_millis(40));
     let mut sessions = Vec::with_capacity(users.len());
     for (i, (u, _)) in users.iter().enumerate() {
         if let Some(s) = u.lookup_entry("rejoin").unwrap() {

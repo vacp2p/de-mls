@@ -22,15 +22,14 @@ use common::session_fixtures::{
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
-#[tokio::test]
-async fn freeze_cycle_emits_phase_events_in_order() {
+#[test]
+fn freeze_cycle_emits_phase_events_in_order() {
     let users = bootstrap_joined_conversation(
         &[ALICE, BOB],
         "c3",
         fast_test_config(),
         StewardListConfig::new(1, 5).unwrap(),
-    )
-    .await;
+    );
 
     let alice_session = users[0].0.lookup_entry("c3").unwrap().unwrap();
     let bob_session = users[1].0.lookup_entry("c3").unwrap().unwrap();
@@ -64,7 +63,7 @@ async fn freeze_cycle_emits_phase_events_in_order() {
     let mut alice_phases: Vec<PhaseEntry> = Vec::new();
     let mut saw_freezing = false;
     for _ in 0..40 {
-        settle_for(Duration::from_millis(40)).await;
+        settle_for(Duration::from_millis(40));
         poll_once(&alice_session);
         poll_once(&bob_session);
 
@@ -84,7 +83,7 @@ async fn freeze_cycle_emits_phase_events_in_order() {
         }
         if saw_freezing && alice_state == ConversationState::Working && packets.is_empty() {
             // Pump one more round to catch trailing events.
-            settle_for(Duration::from_millis(40)).await;
+            settle_for(Duration::from_millis(40));
             poll_once(&alice_session);
             alice_phases.extend(drain_phase_log(&alice_session));
             break;

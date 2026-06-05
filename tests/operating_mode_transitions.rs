@@ -23,15 +23,14 @@ use common::session_fixtures::{
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
-#[tokio::test]
-async fn deadlock_ecp_opens_recovery_and_force_freezes() {
+#[test]
+fn deadlock_ecp_opens_recovery_and_force_freezes() {
     let users = bootstrap_joined_conversation(
         &[ALICE, BOB],
         "b5",
         fast_test_config(),
         StewardListConfig::new(2, 2).unwrap(),
-    )
-    .await;
+    );
 
     let alice_session = users[0].0.lookup_entry("b5").unwrap().unwrap();
     let bob_session = users[1].0.lookup_entry("b5").unwrap().unwrap();
@@ -58,7 +57,7 @@ async fn deadlock_ecp_opens_recovery_and_force_freezes() {
     let mut alice_saw_freezing = false;
     let mut bob_saw_freezing = false;
     for _ in 0..30 {
-        settle_for(Duration::from_millis(40)).await;
+        settle_for(Duration::from_millis(40));
         poll_once(&alice_session);
         poll_once(&bob_session);
         let packets = alice_tx.lock().unwrap().drain_packets();

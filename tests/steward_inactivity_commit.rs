@@ -23,15 +23,14 @@ use common::session_fixtures::{
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
-#[tokio::test]
-async fn steward_inactivity_fires_commit_candidate() {
+#[test]
+fn steward_inactivity_fires_commit_candidate() {
     let users = bootstrap_joined_conversation(
         &[ALICE, BOB],
         "b1",
         fast_test_config(),
         StewardListConfig::new(1, 5).unwrap(),
-    )
-    .await;
+    );
 
     let alice_session = users[0].0.lookup_entry("b1").unwrap().unwrap();
     let bob_session = users[1].0.lookup_entry("b1").unwrap().unwrap();
@@ -61,7 +60,7 @@ async fn steward_inactivity_fires_commit_candidate() {
     // `create_commit_candidate` call from the test.
     let mut alice_outbound: Vec<OutboundPacket> = Vec::new();
     for _ in 0..30 {
-        settle_for(Duration::from_millis(40)).await;
+        settle_for(Duration::from_millis(40));
         poll_once(&alice_session);
         poll_once(&bob_session);
 

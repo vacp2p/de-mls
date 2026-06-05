@@ -13,15 +13,14 @@ use common::session_fixtures::{bootstrap_joined_conversation, deliver, fast_test
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
-#[tokio::test]
-async fn second_conversation_sync_is_a_no_op() {
+#[test]
+fn second_conversation_sync_is_a_no_op() {
     let users = bootstrap_joined_conversation(
         &[ALICE, BOB],
         "c2",
         fast_test_config(),
         StewardListConfig::new(1, 3).unwrap(),
-    )
-    .await;
+    );
 
     let alice_session = users[0].0.lookup_entry("c2").unwrap().unwrap();
     let bob_session = users[1].0.lookup_entry("c2").unwrap().unwrap();

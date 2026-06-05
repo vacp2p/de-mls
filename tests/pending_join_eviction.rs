@@ -7,7 +7,7 @@
 //! [`User::finalize_self_leave`] to drop the registry entry and broadcast
 //! removal. This test asserts the full cleanup pathway end-to-end.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use de_mls::app::{ConversationConfig, PendingJoinTick, SessionRunner};
 use de_mls::core::{ConversationLifecycle, SessionEvent, StewardListConfig};
@@ -17,8 +17,8 @@ use common::session_fixtures::{SessionArc, make_user, settle_for};
 
 const ALICE_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
-#[tokio::test]
-async fn pending_join_expires_evicts_entry_and_broadcasts_removal() {
+#[test]
+fn pending_join_expires_evicts_entry_and_broadcasts_removal() {
     let group = "ghost-group";
     let inactivity = Duration::from_millis(80);
     let cfg = ConversationConfig {
@@ -46,7 +46,7 @@ async fn pending_join_expires_evicts_entry_and_broadcasts_removal() {
 
     // Poll until expiry. The first tick after start anchors the timer; we
     // need ≥ 3× inactivity to fire `Expired`.
-    let outcome = await_pending_join_outcome(&session, inactivity).await;
+    let outcome = await_pending_join_outcome(&session, inactivity);
     assert_eq!(
         outcome,
         PendingJoinTick::Expired,
@@ -88,17 +88,17 @@ async fn pending_join_expires_evicts_entry_and_broadcasts_removal() {
     );
 }
 
-async fn await_pending_join_outcome(session: &SessionArc, inactivity: Duration) -> PendingJoinTick {
+fn await_pending_join_outcome(session: &SessionArc, inactivity: Duration) -> PendingJoinTick {
     // Allow up to 6× inactivity so the test isn't fragile on slow CI.
-    let deadline = tokio::time::Instant::now() + inactivity * 6;
+    let deadline = Instant::now() + inactivity * 6;
     loop {
         let tick = SessionRunner::check_pending_join(session).unwrap();
         if tick != PendingJoinTick::StillPending {
             return tick;
         }
-        if tokio::time::Instant::now() >= deadline {
+        if Instant::now() >= deadline {
             return tick;
         }
-        settle_for(inactivity / 4).await;
+        settle_for(inactivity / 4);
     }
 }

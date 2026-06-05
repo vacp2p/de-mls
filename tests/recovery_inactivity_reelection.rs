@@ -24,8 +24,8 @@ use common::session_fixtures::{
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
-#[tokio::test]
-async fn silent_steward_drives_observer_to_reelection() {
+#[test]
+fn silent_steward_drives_observer_to_reelection() {
     // `sn_max = 1` → exactly one steward at any epoch. The non-steward
     // member is the "observer" that exercises the Reelection path.
     let users = bootstrap_joined_conversation(
@@ -33,8 +33,7 @@ async fn silent_steward_drives_observer_to_reelection() {
         "b2",
         fast_test_config(),
         StewardListConfig::new(1, 1).unwrap(),
-    )
-    .await;
+    );
 
     let alice_session = users[0].0.lookup_entry("b2").unwrap().unwrap();
     let bob_session = users[1].0.lookup_entry("b2").unwrap().unwrap();
@@ -70,7 +69,7 @@ async fn silent_steward_drives_observer_to_reelection() {
     // Phase 1: pump packets normally until both sides have approved=1.
     let mut consensus_reached = false;
     for _ in 0..20 {
-        settle_for(Duration::from_millis(40)).await;
+        settle_for(Duration::from_millis(40));
         poll_once(&alice_session);
         poll_once(&bob_session);
         let packets = users[0].1.lock().unwrap().drain_packets();
@@ -99,7 +98,7 @@ async fn silent_steward_drives_observer_to_reelection() {
     // start_reelection.
     let mut entered_reelection = false;
     for _ in 0..20 {
-        settle_for(Duration::from_millis(40)).await;
+        settle_for(Duration::from_millis(40));
         poll_once(&observer_session);
         poll_once(&alice_session); // keep the steward polling, just discard its packets
         poll_once(&bob_session);

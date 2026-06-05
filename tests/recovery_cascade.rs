@@ -7,6 +7,7 @@
 mod common;
 
 use std::sync::{Arc, Mutex};
+use std::thread::sleep;
 use std::time::Duration;
 
 use de_mls::app::{ConversationConfig, SessionRunner, User};
@@ -71,8 +72,8 @@ fn to_in(p: &OutboundPacket) -> InboundPacket {
     )
 }
 
-async fn settle() {
-    tokio::time::sleep(Duration::from_millis(100)).await;
+fn settle() {
+    sleep(Duration::from_millis(100));
 }
 
 /// Reproduces the concurrent-join pattern from the real-UI logs:
@@ -85,8 +86,8 @@ async fn settle() {
 /// `Working` state, and when rotation elected them as steward later they'd
 /// re-propose invites for members already in the group → MLS rejects the
 /// batch with "Duplicate signature key".
-#[tokio::test]
-async fn concurrent_joins_leave_joiners_with_empty_buffer() {
+#[test]
+fn concurrent_joins_leave_joiners_with_empty_buffer() {
     let group = "recovery-test";
     let cfg = ConversationConfig {
         commit_inactivity_duration: Duration::from_millis(50),
@@ -127,7 +128,7 @@ async fn concurrent_joins_leave_joiners_with_empty_buffer() {
         let _ = charlie.process_inbound_packet(to_in(p));
         let _ = dave.process_inbound_packet(to_in(p));
     }
-    settle().await;
+    settle();
 
     // Regression guard: PendingJoin members must have empty pending_updates
     // buffers. Alice (steward) has the KPs in her buffer until she commits.
