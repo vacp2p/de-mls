@@ -20,8 +20,8 @@ const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 const CHARLIE: &str = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
 
-#[tokio::test]
-async fn removed_member_emits_leaving_and_is_evicted() {
+#[test]
+fn removed_member_emits_leaving_and_is_evicted() {
     // sn_max = 2 → 2 of 3 members are stewards, exactly one isn't.
     // Target the non-steward so the commit isn't a self-remove (which
     // MLS rejects mid-freeze and would keep them stuck in Reelection).
@@ -30,8 +30,7 @@ async fn removed_member_emits_leaving_and_is_evicted() {
         "leave",
         fast_test_config(),
         StewardListConfig::new(1, 2).unwrap(),
-    )
-    .await;
+    );
 
     // Find the non-steward.
     let mut target_idx = None;
@@ -69,7 +68,7 @@ async fn removed_member_emits_leaving_and_is_evicted() {
     // caller is responsible for running `User::finalize_self_leave`.
     let mut target_evicted = false;
     for _ in 0..30 {
-        settle_for(Duration::from_millis(40)).await;
+        settle_for(Duration::from_millis(40));
         for (i, (u, _)) in users.iter().enumerate() {
             if let Some(s) = u.lookup_entry("leave").unwrap() {
                 let _ = SessionRunner::tick_deadlines(&s);

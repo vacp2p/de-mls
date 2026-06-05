@@ -19,7 +19,7 @@ const CHARLIE: &str = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804c
 
 /// Drain every transport and feed each packet to every user, mirroring the
 /// gateway relay. Echo-dedup drops a user's own packets.
-async fn relay_all(users: &[(TestUser, TransportHandle)]) {
+fn relay_all(users: &[(TestUser, TransportHandle)]) {
     let mut packets = Vec::new();
     for (_, h) in users {
         packets.extend(h.lock().unwrap().drain_packets());
@@ -33,7 +33,7 @@ async fn relay_all(users: &[(TestUser, TransportHandle)]) {
 
 /// Poll past every deadline, then assert stability: a committer exists, no
 /// election fired (`retry_round == 0`), every member stays `Working`.
-async fn assert_stable_no_election(
+fn assert_stable_no_election(
     users: &[(TestUser, TransportHandle)],
     conversation: &str,
     sessions: &[(&str, &SessionArc)],
@@ -44,11 +44,11 @@ async fn assert_stable_no_election(
     );
 
     for _ in 0..20 {
-        settle_for(Duration::from_millis(40)).await;
+        settle_for(Duration::from_millis(40));
         for (_, s) in sessions {
             poll_once(s);
         }
-        relay_all(users).await;
+        relay_all(users);
     }
 
     for (label, s) in sessions {
@@ -65,23 +65,22 @@ async fn assert_stable_no_election(
     }
 }
 
-#[tokio::test]
-async fn small_group_reconciles_locally_no_election() {
+#[test]
+fn small_group_reconciles_locally_no_election() {
     // n = 2, sn_max = 3 → list fits; reconciled locally, no vote.
     let users = bootstrap_joined_conversation(
         &[ALICE, BOB],
         "sg",
         fast_test_config(),
         StewardListConfig::new(1, 3).unwrap(),
-    )
-    .await;
+    );
     let alice = users[0].0.lookup_entry("sg").unwrap().unwrap();
     let bob = users[1].0.lookup_entry("sg").unwrap().unwrap();
-    assert_stable_no_election(&users, "sg", &[("alice", &alice), ("bob", &bob)]).await;
+    assert_stable_no_election(&users, "sg", &[("alice", &alice), ("bob", &bob)]);
 }
 
-#[tokio::test]
-async fn members_over_sn_max_do_not_elect_until_settled() {
+#[test]
+fn members_over_sn_max_do_not_elect_until_settled() {
     // n = 3, sn_max = 2 → more members than sn_max, but the joiners aren't
     // settled yet, so settled members still fit: no premature election.
     let users = bootstrap_joined_conversation(
@@ -89,8 +88,7 @@ async fn members_over_sn_max_do_not_elect_until_settled() {
         "lg",
         fast_test_config(),
         StewardListConfig::new(1, 2).unwrap(),
-    )
-    .await;
+    );
     let s: Vec<SessionArc> = (0..3)
         .map(|i| users[i].0.lookup_entry("lg").unwrap().unwrap())
         .collect();
@@ -98,6 +96,5 @@ async fn members_over_sn_max_do_not_elect_until_settled() {
         &users,
         "lg",
         &[("alice", &s[0]), ("bob", &s[1]), ("charlie", &s[2])],
-    )
-    .await;
+    );
 }

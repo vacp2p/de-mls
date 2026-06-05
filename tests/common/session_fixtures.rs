@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 use std::sync::{Arc, Mutex, RwLock};
+use std::thread::sleep;
 use std::time::Duration;
 
 use de_mls::app::{ConversationConfig, SessionRunner, User};
@@ -160,13 +161,13 @@ pub fn to_inbound(p: &OutboundPacket) -> InboundPacket {
 
 /// Sleep 100 ms — recovery_cascade.rs convention for letting an
 /// poll loop catch up after a single round of state changes.
-pub async fn settle() {
-    tokio::time::sleep(Duration::from_millis(100)).await;
+pub fn settle() {
+    sleep(Duration::from_millis(100));
 }
 
 /// Sleep `d` — explicit timing for inactivity-window tests.
-pub async fn settle_for(d: Duration) {
-    tokio::time::sleep(d).await;
+pub fn settle_for(d: Duration) {
+    sleep(d);
 }
 
 /// Deliver one packet to a single user. Returns the raw `process_inbound_packet`
@@ -286,7 +287,7 @@ pub fn poll_once(session: &SessionArc) {
 /// locally with no election, so they have nothing to orphan.
 ///
 /// Panics if convergence does not happen within `MAX_ROUNDS` rounds.
-pub async fn bootstrap_joined_conversation(
+pub fn bootstrap_joined_conversation(
     keys: &[&str],
     conversation: &str,
     cfg: ConversationConfig,
@@ -344,7 +345,7 @@ pub async fn bootstrap_joined_conversation(
     const QUIET_THRESHOLD: usize = 3;
     let mut quiet_rounds = 0;
     for round in 0..MAX_ROUNDS {
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        sleep(Duration::from_millis(60));
         for s in &sessions {
             poll_once(s);
         }

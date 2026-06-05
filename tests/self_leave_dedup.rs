@@ -13,8 +13,8 @@ use common::session_fixtures::make_user;
 
 const ALICE_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
-#[tokio::test]
-async fn double_leave_does_not_re_propose() {
+#[test]
+fn double_leave_does_not_re_propose() {
     let cfg = ConversationConfig::default();
     let steward_cfg = StewardListConfig::new(1, 5).unwrap();
     let (mut alice, h) = make_user(ALICE_KEY, cfg, steward_cfg);
