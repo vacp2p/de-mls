@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use de_mls::app::{CreatorVote, SessionRunner};
+use de_mls::app::CreatorVote;
 use de_mls::core::{ConversationState, StewardListConfig};
 use de_mls::member_id::MemberId;
 use de_mls::protos::de_mls::messages::v1::{
@@ -64,7 +64,11 @@ fn silent_steward_drives_observer_to_reelection() {
             },
         )),
     };
-    SessionRunner::initiate_proposal(&observer_session, request, CreatorVote::Yes).unwrap();
+    observer_session
+        .write()
+        .unwrap()
+        .initiate_proposal(request, CreatorVote::Yes)
+        .unwrap();
 
     // Phase 1: pump packets normally until both sides have approved=1.
     let mut consensus_reached = false;

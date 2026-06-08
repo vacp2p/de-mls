@@ -136,7 +136,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let gur = ConversationUpdateRequest {
             payload: Some(conversation_update_request::Payload::MemberInvite(invite)),
         };
-        SessionRunner::handle_incoming_update_request(entry_arc, gur)
+        entry_arc
+            .write_or_err("session")?
+            .handle_incoming_update_request(gur)
     }
 
     /// Drive the session-side dispatcher and finish lifecycle work on the
@@ -147,7 +149,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         entry_arc: &Arc<RwLock<SessionRunner<P, CP>>>,
         result: ProcessResult,
     ) -> Result<(), UserError> {
-        let outcome = SessionRunner::dispatch_inbound_result(entry_arc, result)?;
+        let outcome = entry_arc
+            .write_or_err("session")?
+            .dispatch_inbound_result(result)?;
         if matches!(outcome, DispatchOutcome::LeaveRequested) {
             self.finalize_self_leave(conversation_id)?;
         }

@@ -3,7 +3,7 @@ use std::str::FromStr;
 use alloy::primitives::Address;
 
 use de_mls::{
-    app::{DispatchOutcome, FreezeTimeoutStatus, PendingJoinTick, SessionRunner, UserError},
+    app::{DispatchOutcome, FreezeTimeoutStatus, PendingJoinTick, UserError},
     ds::WakuDeliveryService,
     protos::de_mls::messages::v1::BanRequest,
 };
@@ -73,7 +73,10 @@ impl Gateway<WakuDeliveryService> {
         core.topics.add_many(&conversation_id)?;
         let key_package = user_ref.read().await.generate_key_package()?;
         let session = lookup_session(&user_ref, &conversation_id).await?;
-        SessionRunner::send_key_package(&session, key_package)?;
+        session
+            .read()
+            .map_err(|_| UserError::LockPoisoned("session"))?
+            .send_key_package(key_package)?;
         tracing::info!(group = %conversation_id, "key package sent");
 
         // Phase 1 (PendingJoin): Poll every 5s until joined or timed out
@@ -88,10 +91,14 @@ impl Gateway<WakuDeliveryService> {
                 let Ok(session) = lookup_session(&user_clone, &group_name_clone).await else {
                     break false;
                 };
-                let tick = match SessionRunner::check_pending_join(&session) {
-                    Ok(t) => t,
-                    Err(e) => {
+                let tick = match session.read().map(|s| s.check_pending_join()) {
+                    Ok(Ok(t)) => t,
+                    Ok(Err(e)) => {
                         tracing::warn!(group = %group_name_clone, error = %e, "check_pending_join failed");
+                        break false;
+                    }
+                    Err(_) => {
+                        tracing::warn!(group = %group_name_clone, "check_pending_join skipped: session lock poisoned");
                         break false;
                     }
                 };
@@ -155,14 +162,22 @@ impl Gateway<WakuDeliveryService> {
                 tracing::warn!(group = %conversation_id, "polling loop: session gone");
                 break;
             };
-            if let Err(e) = SessionRunner::tick_deadlines(&session) {
+            let tick_result = session
+                .write()
+                .map_err(|_| UserError::LockPoisoned("session"))
+                .and_then(|mut s| s.tick_deadlines());
+            if let Err(e) = tick_result {
                 if is_polling_fatal(&e) {
                     tracing::warn!(group = %conversation_id, error = %e, "polling loop exiting (tick_deadlines)");
                     break;
                 }
                 tracing::warn!(group = %conversation_id, error = %e, "tick_deadlines failed");
             }
-            let freeze_outcome = match SessionRunner::poll_freeze_status(&session) {
+            let freeze_outcome = match session
+                .write()
+                .map_err(|_| UserError::LockPoisoned("session"))
+                .and_then(|mut s| s.poll_freeze_status())
+            {
                 Ok(o) => o,
                 Err(e) => {
                     if is_polling_fatal(&e) {
@@ -181,7 +196,11 @@ impl Gateway<WakuDeliveryService> {
             }
             match freeze_status {
                 FreezeTimeoutStatus::NotFreezing => {
-                    match SessionRunner::check_member_freeze(&session) {
+                    match session
+                        .write()
+                        .map_err(|_| UserError::LockPoisoned("session"))
+                        .and_then(|mut s| s.check_member_freeze())
+                    {
                         Ok(true) => { /* entered Freezing (+ created candidate if steward) */ }
                         Ok(false) => {}
                         Err(e) => {
@@ -233,7 +252,10 @@ impl Gateway<WakuDeliveryService> {
     ) -> anyhow::Result<()> {
         let user_ref = self.user()?;
         let session = lookup_session(&user_ref, &conversation_id).await?;
-        SessionRunner::send_app_message(&session, message.into_bytes())?;
+        session
+            .write()
+            .map_err(|_| UserError::LockPoisoned("session"))?
+            .send_app_message(message.into_bytes())?;
         tracing::debug!(group = %conversation_id, "app message sent");
         Ok(())
     }
@@ -253,7 +275,10 @@ impl Gateway<WakuDeliveryService> {
             conversation_id: conversation_id.clone(),
         };
 
-        SessionRunner::process_ban_request(&session, ban_request)?;
+        session
+            .write()
+            .map_err(|_| UserError::LockPoisoned("session"))?
+            .process_ban_request(ban_request)?;
 
         Ok(())
     }
@@ -266,7 +291,10 @@ impl Gateway<WakuDeliveryService> {
     ) -> anyhow::Result<()> {
         let user_ref = self.user()?;
         let session = lookup_session(&user_ref, &conversation_id).await?;
-        SessionRunner::process_user_vote(&session, proposal_id, vote)?;
+        session
+            .write()
+            .map_err(|_| UserError::LockPoisoned("session"))?
+            .process_user_vote(proposal_id, vote)?;
         Ok(())
     }
 

@@ -165,6 +165,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             return Ok(());
         }
 
-        SessionRunner::initiate_self_leave(&entry_arc)
+        entry_arc.write_or_err("session")?.initiate_self_leave()
     }
 }

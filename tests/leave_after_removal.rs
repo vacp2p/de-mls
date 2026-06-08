@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use de_mls::app::{CreatorVote, DispatchOutcome, SessionRunner};
+use de_mls::app::{CreatorVote, DispatchOutcome};
 use de_mls::core::{SessionEvent, StewardListConfig};
 use de_mls::member_id::MemberId;
 use de_mls::protos::de_mls::messages::v1::{
@@ -60,7 +60,11 @@ fn removed_member_emits_leaving_and_is_evicted() {
             },
         )),
     };
-    SessionRunner::initiate_proposal(&steward_session, request, CreatorVote::Yes).unwrap();
+    steward_session
+        .write()
+        .unwrap()
+        .initiate_proposal(request, CreatorVote::Yes)
+        .unwrap();
 
     // Drive packet relay + polling until the target is evicted from its
     // User registry. Mirrors the gateway's polling loop: when
@@ -71,17 +75,17 @@ fn removed_member_emits_leaving_and_is_evicted() {
         settle_for(Duration::from_millis(40));
         for (i, (u, _)) in users.iter().enumerate() {
             if let Some(s) = u.lookup_entry("leave").unwrap() {
-                let _ = SessionRunner::tick_deadlines(&s);
+                let _ = s.write().unwrap().tick_deadlines();
                 if i == target_idx
                     && matches!(
-                        SessionRunner::poll_freeze_status(&s),
+                        s.write().unwrap().poll_freeze_status(),
                         Ok((_, DispatchOutcome::LeaveRequested))
                     )
                 {
                     u.finalize_self_leave("leave").unwrap();
                 } else {
-                    let _ = SessionRunner::poll_freeze_status(&s);
-                    let _ = SessionRunner::check_member_freeze(&s);
+                    let _ = s.write().unwrap().poll_freeze_status();
+                    let _ = s.write().unwrap().check_member_freeze();
                 }
             }
         }

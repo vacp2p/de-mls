@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use de_mls::app::{CreatorVote, SessionRunner};
+use de_mls::app::CreatorVote;
 use de_mls::core::StewardListConfig;
 use de_mls::ds::OutboundPacket;
 use de_mls::member_id::MemberId;
@@ -53,7 +53,11 @@ fn steward_inactivity_fires_commit_candidate() {
             RemoveMember { member_id: bob_id },
         )),
     };
-    SessionRunner::initiate_proposal(&alice_session, request, CreatorVote::Yes).unwrap();
+    alice_session
+        .write()
+        .unwrap()
+        .initiate_proposal(request, CreatorVote::Yes)
+        .unwrap();
 
     // Drive polling + packet relay. Accumulate alice's outbound so we can
     // verify a `CommitCandidate` packet appears — without any explicit

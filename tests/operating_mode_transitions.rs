@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use de_mls::app::{CreatorVote, SessionRunner};
+use de_mls::app::CreatorVote;
 use de_mls::core::{ConversationState, SessionEvent, StewardListConfig};
 use de_mls::protos::de_mls::messages::v1::ViolationEvidence;
 
@@ -52,7 +52,11 @@ fn deadlock_ecp_opens_recovery_and_force_freezes() {
         .with_creator(b"alice-creator".to_vec())
         .into_update_request()
         .unwrap();
-    SessionRunner::initiate_proposal(&alice_session, request, CreatorVote::Yes).unwrap();
+    alice_session
+        .write()
+        .unwrap()
+        .initiate_proposal(request, CreatorVote::Yes)
+        .unwrap();
 
     let mut alice_saw_freezing = false;
     let mut bob_saw_freezing = false;

@@ -5,7 +5,7 @@
 //! block reads or writes on any other session, nor block the outer
 //! registry read path that `lookup_entry` walks.
 
-use de_mls::app::{ConversationConfig, SessionRunner};
+use de_mls::app::ConversationConfig;
 use de_mls::core::StewardListConfig;
 
 mod common;
@@ -14,8 +14,8 @@ use common::session_fixtures::{fast_test_config, make_user};
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
 // The whole point of this test is to hold one session's guard while
-// driving work on another — the await-holding-lock the lint flags is the
-// exact thing under assertion.
+// driving work on another — per-conversation lock isolation is the exact
+// thing under assertion.
 #[test]
 fn write_lock_on_one_session_does_not_block_others() {
     let cfg: ConversationConfig = fast_test_config();
@@ -50,22 +50,27 @@ fn write_lock_on_one_session_does_not_block_others() {
         let _b_guard = session_b
             .try_write()
             .expect("write on conv-b must not wait on conv-a's lock");
-        // Guard is dropped at the end of this block, before the await
-        // below — `check_member_freeze` takes the Arc and locks itself.
+        // Guard is dropped at the end of this block, before the
+        // `check_member_freeze` call below acquires its own write guard.
     }
 
     // Drive a session-level operation to prove the lock is actually
     // usable for real work, not just acquirable. `check_member_freeze`
-    // is a static method that takes the Arc and locks internally, so it
-    // composes with the outer isolation check without holding any guard
-    // across an await.
-    SessionRunner::check_member_freeze(&session_b)
+    // takes `&mut self`, so the caller holds the conv-b write guard for
+    // the call — independent of conv-a's still-held guard.
+    session_b
+        .write()
+        .unwrap()
+        .check_member_freeze()
         .expect("check_member_freeze on conv-b must succeed");
 
     drop(a_guard);
 
-    // After releasing, conv-a is also accessible — and the same static
-    // entry point works against either Arc.
-    SessionRunner::check_member_freeze(&session_a)
+    // After releasing, conv-a is also accessible — the same entry point
+    // works against either session.
+    session_a
+        .write()
+        .unwrap()
+        .check_member_freeze()
         .expect("conv-a check_member_freeze must succeed");
 }

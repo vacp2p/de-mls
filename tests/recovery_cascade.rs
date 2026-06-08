@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::Duration;
 
-use de_mls::app::{ConversationConfig, SessionRunner, User};
+use de_mls::app::{ConversationConfig, User};
 use de_mls::core::StewardListConfig;
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory};
 use de_mls::ds::{
@@ -113,7 +113,7 @@ fn concurrent_joins_leave_joiners_with_empty_buffer() {
     for u in [&bob, &charlie, &dave] {
         let kp = u.generate_key_package().unwrap();
         let session = u.lookup_entry(group).unwrap().unwrap();
-        SessionRunner::send_key_package(&session, kp).unwrap();
+        session.read().unwrap().send_key_package(kp).unwrap();
     }
 
     // Step 3: Broadcast every KP packet to every participant (mocks pubsub).

@@ -10,13 +10,13 @@
 //! the freeze fires `LeaveConversation`. Same handshake as
 //! [`SessionRunner::dispatch_inbound_result`].
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use tracing::{error, info};
 
 use crate::{
     app::{
-        ConversationState, DispatchOutcome, FreezeTimeoutStatus, LockExt, SessionRunner, UserError,
+        ConversationState, DispatchOutcome, FreezeTimeoutStatus, SessionRunner, UserError,
         session::runner::send_packet,
     },
     core::{
@@ -45,24 +45,16 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Polling check for `PendingJoin`. Returns [`PendingJoinTick::Expired`]
     /// after emitting `SessionEvent::Leaving` once the pending-join window
     /// elapses; the caller handles registry-side cleanup.
-    pub fn check_pending_join(arc: &Arc<RwLock<Self>>) -> Result<PendingJoinTick, UserError> {
-        let (state, expired, conversation_id) = {
-            let s = arc.read_or_err("session")?;
-            (
-                s.conversation.current_state(),
-                s.is_pending_join_expired(),
-                s.conversation_id.clone(),
-            )
-        };
+    pub fn check_pending_join(&self) -> Result<PendingJoinTick, UserError> {
+        let state = self.conversation.current_state();
         if state != ConversationState::PendingJoin {
             return Ok(PendingJoinTick::NotPending);
         }
-        if !expired {
+        if !self.is_pending_join_expired() {
             return Ok(PendingJoinTick::StillPending);
         }
-        info!(conversation = %conversation_id, "pending join timed out");
-        arc.read_or_err("session")?
-            .emit_event(SessionEvent::Leaving);
+        info!(conversation = %self.conversation_id, "pending join timed out");
+        self.emit_event(SessionEvent::Leaving);
         Ok(PendingJoinTick::Expired)
     }
 
@@ -73,79 +65,71 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// applied commit ejected the local member — the caller drives the
     /// User-side registry teardown.
     pub fn poll_freeze_status(
-        arc: &Arc<RwLock<Self>>,
+        &mut self,
     ) -> Result<(FreezeTimeoutStatus, DispatchOutcome), UserError> {
-        let (has_proposals, selection_event) = {
-            let mut s = arc.write_or_err("session")?;
+        let state = self.conversation.current_state();
+        if state != ConversationState::Freezing {
+            return Ok((FreezeTimeoutStatus::NotFreezing, DispatchOutcome::Done));
+        }
 
-            let state = s.conversation.current_state();
-            if state != ConversationState::Freezing {
-                return Ok((FreezeTimeoutStatus::NotFreezing, DispatchOutcome::Done));
-            }
+        // Early selection: skip remaining freeze time if all expected
+        // stewards have submitted candidates.
+        let all_candidates_in = self
+            .conversation
+            .steward_list
+            .current_list()
+            .is_some_and(|list| self.conversation.queues.freeze_candidate_count() >= list.len());
 
-            // Early selection: skip remaining freeze time if all expected
-            // stewards have submitted candidates.
-            let all_candidates_in = s
+        if !all_candidates_in && !self.is_freeze_timed_out() {
+            return Ok((FreezeTimeoutStatus::StillFreezing, DispatchOutcome::Done));
+        }
+
+        let selection_event = self.start_selection();
+        let has_proposals = self.conversation.queues.approved_proposals_count() > 0;
+        self.emit_event(SessionEvent::PhaseChange(selection_event));
+
+        let conversation_id = self.conversation_id.clone();
+        let allow_subset = self
+            .conversation
+            .steward_list
+            .config()
+            .allow_subset_candidates;
+        let self_member_id = Arc::clone(&self.self_member_id);
+        let mut finalize_result = if self.conversation.mls().is_some() {
+            match self
                 .conversation
-                .steward_list
-                .current_list()
-                .is_some_and(|list| s.conversation.queues.freeze_candidate_count() >= list.len());
-
-            if !all_candidates_in && !s.is_freeze_timed_out() {
-                return Ok((FreezeTimeoutStatus::StillFreezing, DispatchOutcome::Done));
-            }
-
-            let event = s.start_selection();
-            (s.conversation.queues.approved_proposals_count() > 0, event)
-        };
-
-        arc.read_or_err("session")?
-            .emit_event(SessionEvent::PhaseChange(selection_event));
-
-        let (mut finalize_result, downward_cross, conversation_id) = {
-            let mut s = arc.write_or_err("session")?;
-            let allow_subset = s.conversation.steward_list.config().allow_subset_candidates;
-            let self_member_id = Arc::clone(&s.self_member_id);
-            let result = if s.conversation.mls().is_some() {
-                match s
-                    .conversation
-                    .finalize_freeze_round(allow_subset, &self_member_id)
-                {
-                    Ok(result) => result,
-                    Err(e) => {
-                        error!(conversation = %s.conversation_id, error = %e, "freeze finalize failed");
-                        FreezeFinalizeResult::default()
-                    }
+                .finalize_freeze_round(allow_subset, &self_member_id)
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    error!(conversation = %conversation_id, error = %e, "freeze finalize failed");
+                    FreezeFinalizeResult::default()
                 }
-            } else {
-                FreezeFinalizeResult::default()
-            };
-            // Apply locally-observed score events before releasing the
-            // runner lock. These come from dropped candidates in the
-            // phase-3 loop (RFC §Peer Scoring: direct local observation,
-            // no ECP needed). A downward threshold cross schedules a
-            // removal-init pass below, after the lock drops.
-            let cross = if !result.score_ops.is_empty() {
-                s.conversation.scoring.apply_ops(&result.score_ops)
-            } else {
-                false
-            };
-            (result, cross, s.conversation_id.clone())
+            }
+        } else {
+            FreezeFinalizeResult::default()
+        };
+        // Apply locally-observed score events. These come from dropped
+        // candidates in the phase-3 loop (RFC §Peer Scoring: direct local
+        // observation, no ECP needed). A downward threshold cross schedules
+        // a removal-init pass below.
+        let downward_cross = if !finalize_result.score_ops.is_empty() {
+            self.conversation
+                .scoring
+                .apply_ops(&finalize_result.score_ops)
+        } else {
+            false
         };
 
         if !finalize_result.committed_batch.is_empty() {
-            arc.read_or_err("session")?
-                .emit_event(SessionEvent::CommitApplied(std::mem::take(
-                    &mut finalize_result.committed_batch,
-                )));
+            self.emit_event(SessionEvent::CommitApplied(std::mem::take(
+                &mut finalize_result.committed_batch,
+            )));
         }
 
-        // Lock split is intentional: `check_and_initiate_score_removals`
-        // re-acquires the runner write lock and calls `initiate_proposal`,
-        // which ``s on the consensus service. Holding the runner
-        // lock across that await would block other operations on this
-        // conversation, so we drop the lock above before chaining.
-        if downward_cross && let Err(e) = Self::check_and_initiate_score_removals(arc) {
+        // `check_and_initiate_score_removals` calls `initiate_proposal`. A
+        // downward threshold cross during finalize schedules a removal pass.
+        if downward_cross && let Err(e) = self.check_and_initiate_score_removals() {
             error!(conversation = %conversation_id, error = %e, "score-removal check failed (freeze finalize)");
         }
 
@@ -163,17 +147,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     // inclusive list rather than the pre-commit one. A large
                     // group leaves the list for the post-commit election.
                     welcome.conversation_sync_bytes = {
-                        let mut s = arc.write_or_err("session")?;
-                        let _ = s.reconcile_steward_list()?;
-                        s.build_conversation_sync_packet()?
+                        let _ = self.reconcile_steward_list()?;
+                        self.build_conversation_sync_packet()?
                             .map(|p| p.payload)
                             .unwrap_or_default()
                     };
-                    arc.read_or_err("session")?
-                        .emit_event(SessionEvent::WelcomeReady(welcome));
+                    self.emit_event(SessionEvent::WelcomeReady(welcome));
                 }
 
-                let outcome = match Self::dispatch_inbound_result(arc, result) {
+                let outcome = match self.dispatch_inbound_result(result) {
                     Ok(o) => o,
                     Err(e) => {
                         error!(conversation = %conversation_id, error = %e, "finalize result dispatch failed");
@@ -188,62 +170,57 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 // other than ourselves. Self-penalties are skipped — the
                 // node that failed to commit observes its own state directly
                 // and doesn't need to record a ScoreOp against itself.
-                let (transition_event, downward_cross) = {
-                    let mut s = arc.write_or_err("session")?;
+                let (transition_event, downward_cross) = if has_proposals {
+                    // Approved batch (and in-flight votes) survive so
+                    // the recovered steward commits the same proposals
+                    // once the next election lands.
+                    let event = self.start_reelection();
 
-                    if has_proposals {
-                        // Approved batch (and in-flight votes) survive so
-                        // the recovered steward commits the same proposals
-                        // once the next election lands.
-                        let event = s.start_reelection();
-
-                        // Local observation → direct peer-score penalty,
-                        // no ECP round-trip. Each honest member records
-                        // the same event independently; threshold-crossing
-                        // removal still goes through SCORE_BELOW_THRESHOLD
-                        // consensus in steward.rs.
-                        let accuse_target = match s.conversation.mls() {
-                            Some(mls) => {
-                                let violation_epoch = mls.current_epoch()?;
-                                let members = mls.members()?;
-                                let self_member_id: &[u8] = &s.self_member_id;
-                                let eligible = s.conversation.queues.steward_eligibility(&members);
-                                s.conversation
-                                    .steward_list
-                                    .epoch_steward(violation_epoch, &eligible)
-                                    .filter(|id| !id.is_empty() && *id != self_member_id)
-                                    .map(|id| id.to_vec())
-                            }
-                            None => None,
-                        };
-                        let cross = if let Some(steward_id) = accuse_target {
-                            s.conversation.scoring.apply_op(&ScoreOp {
-                                member_id: steward_id,
-                                event: ScoreEvent::CensorshipInactivity,
-                            })
-                        } else {
-                            false
-                        };
-
-                        (event, cross)
+                    // Local observation → direct peer-score penalty,
+                    // no ECP round-trip. Each honest member records
+                    // the same event independently; threshold-crossing
+                    // removal still goes through SCORE_BELOW_THRESHOLD
+                    // consensus in steward.rs.
+                    let accuse_target = match self.conversation.mls() {
+                        Some(mls) => {
+                            let violation_epoch = mls.current_epoch()?;
+                            let members = mls.members()?;
+                            let self_member_id: &[u8] = &self.self_member_id;
+                            let eligible = self.conversation.queues.steward_eligibility(&members);
+                            self.conversation
+                                .steward_list
+                                .epoch_steward(violation_epoch, &eligible)
+                                .filter(|id| !id.is_empty() && *id != self_member_id)
+                                .map(|id| id.to_vec())
+                        }
+                        None => None,
+                    };
+                    let cross = if let Some(steward_id) = accuse_target {
+                        self.conversation.scoring.apply_op(&ScoreOp {
+                            member_id: steward_id,
+                            event: ScoreEvent::CensorshipInactivity,
+                        })
                     } else {
-                        s.conversation.queues.clear_freeze_round();
-                        let event = s.start_working();
-                        (event, false)
-                    }
+                        false
+                    };
+
+                    (event, cross)
+                } else {
+                    self.conversation.queues.clear_freeze_round();
+                    let event = self.start_working();
+                    (event, false)
                 };
 
-                if downward_cross && let Err(e) = Self::check_and_initiate_score_removals(arc) {
+                if downward_cross && let Err(e) = self.check_and_initiate_score_removals() {
                     error!(conversation = %conversation_id, error = %e, "score-removal check failed (freeze timeout)");
                 }
 
                 let entered_reelection = transition_event == ConversationState::Reelection;
-                arc.read_or_err("session")?
-                    .emit_event(SessionEvent::PhaseChange(transition_event));
+                self.emit_event(SessionEvent::PhaseChange(transition_event));
 
                 // Layer 2 recovery: regenerate the steward list. Only the
                 // responsible proposer's call actually submits.
-                if entered_reelection && let Err(e) = Self::initiate_steward_election(arc, true) {
+                if entered_reelection && let Err(e) = self.initiate_steward_election(true) {
                     info!(conversation = %conversation_id, error = %e, "recovery election deferred");
                 }
             }
@@ -258,80 +235,70 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Drive the steward-inactivity check. Returns `true` exactly on the
     /// tick that transitions into Freezing; `false` while still waiting,
     /// outside Working, or when there's no approved work. Stewards build
-    /// their own commit candidate under the same lock; candidate-build
-    /// failure is logged and the freeze transition proceeds (peers'
-    /// candidates still get processed).
-    ///
-    /// Takes `&Arc<RwLock<Self>>` so the runner lock is released before
-    /// awaiting on the transport for the steward's own candidate send.
-    pub fn check_member_freeze(arc: &Arc<RwLock<Self>>) -> Result<bool, UserError> {
-        // Sync phase: under the runner write lock, run the inactivity
-        // check and (for stewards) build the outbound candidate.
-        let (transitioned, transport, outbound) = {
-            let mut s = arc.write_or_err("session")?;
-            let state = s.conversation.current_state();
-            if state == ConversationState::PendingJoin {
-                return Ok(false);
-            }
-
-            let proposal_count = s.conversation.queues.approved_proposals_count();
-            // Hold the freeze while an election is in flight — committing on
-            // the known-stale list would just produce a NoCandidate.
-            if s.conversation.queues.has_election_in_flight() {
-                return Ok(false);
-            }
-            // Recovery uses the shorter retry inactivity window so we don't
-            // burn another full epoch waiting for a steward to commit.
-            let in_recovery = s.conversation.is_in_recovery_mode()
-                || s.conversation.steward_list.next_retry_round() > 0;
-            let inactivity = if in_recovery {
-                s.conversation.config.recovery_inactivity_duration
-            } else {
-                s.conversation.config.commit_inactivity_duration
-            };
-            let freeze_event = s.check_steward_inactivity(proposal_count, inactivity);
-            let Some(event) = freeze_event else {
-                return Ok(false);
-            };
-            let epoch = s.conversation.expect_mls()?.current_epoch()?;
-            s.conversation.queues.start_freeze_round(epoch);
-
-            let self_member_id = Arc::clone(&s.self_member_id);
-            let app_id = Arc::clone(&s.app_id);
-            let outbound = if s.conversation.steward_list.is_steward(&self_member_id) {
-                match s
-                    .conversation
-                    .create_commit_candidate(&self_member_id, &app_id)
-                {
-                    Ok(packets) => packets,
-                    Err(e) => {
-                        error!(
-                            conversation = %s.conversation_id,
-                            error = %e,
-                            "commit candidate build failed"
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-
-            info!(
-                conversation = %s.conversation_id,
-                approved = proposal_count,
-                "steward inactivity transition"
-            );
-
-            s.emit_event(SessionEvent::PhaseChange(event));
-            (true, Arc::clone(s.transport()), outbound)
-        };
-
-        // Async phase: release the lock before awaiting the transport.
-        if let Some(message) = outbound {
-            send_packet(&transport, message)?;
+    /// their own commit candidate too; candidate-build failure is logged
+    /// and the freeze transition proceeds (peers' candidates still get
+    /// processed).
+    pub fn check_member_freeze(&mut self) -> Result<bool, UserError> {
+        let state = self.conversation.current_state();
+        if state == ConversationState::PendingJoin {
+            return Ok(false);
         }
 
-        Ok(transitioned)
+        let proposal_count = self.conversation.queues.approved_proposals_count();
+        // Hold the freeze while an election is in flight — committing on
+        // the known-stale list would just produce a NoCandidate.
+        if self.conversation.queues.has_election_in_flight() {
+            return Ok(false);
+        }
+        // Recovery uses the shorter retry inactivity window so we don't
+        // burn another full epoch waiting for a steward to commit.
+        let in_recovery = self.conversation.is_in_recovery_mode()
+            || self.conversation.steward_list.next_retry_round() > 0;
+        let inactivity = if in_recovery {
+            self.conversation.config.recovery_inactivity_duration
+        } else {
+            self.conversation.config.commit_inactivity_duration
+        };
+        let freeze_event = self.check_steward_inactivity(proposal_count, inactivity);
+        let Some(event) = freeze_event else {
+            return Ok(false);
+        };
+        let epoch = self.conversation.expect_mls()?.current_epoch()?;
+        self.conversation.queues.start_freeze_round(epoch);
+
+        let self_member_id = Arc::clone(&self.self_member_id);
+        let app_id = Arc::clone(&self.app_id);
+        let outbound = if self.conversation.steward_list.is_steward(&self_member_id) {
+            match self
+                .conversation
+                .create_commit_candidate(&self_member_id, &app_id)
+            {
+                Ok(packets) => packets,
+                Err(e) => {
+                    error!(
+                        conversation = %self.conversation_id,
+                        error = %e,
+                        "commit candidate build failed"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        info!(
+            conversation = %self.conversation_id,
+            approved = proposal_count,
+            "steward inactivity transition"
+        );
+
+        self.emit_event(SessionEvent::PhaseChange(event));
+
+        if let Some(message) = outbound {
+            send_packet(self.transport(), message)?;
+        }
+
+        Ok(true)
     }
 }
