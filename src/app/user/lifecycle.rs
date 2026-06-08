@@ -2,15 +2,13 @@
 
 use std::sync::{Arc, RwLock};
 
-use hashgraph_like_consensus::events::ConsensusEventBus;
 use tracing::info;
 
 use crate::{
-    app::{ConversationState, LockExt, PhaseTimer, SessionRunner, User, UserError},
+    app::{ConversationDeps, ConversationState, LockExt, SessionRunner, User, UserError},
     core::{
         ConsensusPlugin, ConversationConfig, ConversationLifecycle, ConversationPluginsFactory,
-        ConversationQueues, ConversationStateMachine, PeerScoringPlugin, SessionEvent,
-        StewardListPlugin,
+        SessionEvent,
     },
 };
 
@@ -43,73 +41,22 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             return Err(UserError::ConversationAlreadyExists);
         }
 
-        let self_member_id_bytes = self.self_member_id().to_vec();
-        let (conversation, mls_opt, state_machine, phase_timer) = if is_creation {
-            let mls = self
-                .plugins
-                .conversation_plugins
-                .create_mls(conversation_id.to_string())?;
-            let conversation = ConversationQueues::new(conversation_id);
-            let state_machine = ConversationStateMachine::new_as_member();
-            (conversation, Some(mls), state_machine, PhaseTimer::new())
-        } else {
-            let conversation = ConversationQueues::new(conversation_id);
-            let state_machine = ConversationStateMachine::new_as_pending_join();
-            // Anchor the timer at "now" so `is_pending_join_expired` can
-            // detect the 3× commit-inactivity timeout.
-            let mut phase_timer = PhaseTimer::new();
-            phase_timer.start();
-            (conversation, None, state_machine, phase_timer)
-        };
-
-        let mut steward_list = self.plugins.conversation_plugins.make_steward_list(
-            conversation_id.as_bytes(),
-            self.plugins.default_steward_list_config.clone(),
-        );
-        steward_list.set_max_retries(config.max_reelection_attempts);
-        // Creator path: bootstrap the list with self as sole steward at
-        // epoch 0. Joiner path leaves the plug-in empty until `ConversationSync`.
-        if is_creation {
-            steward_list.install_list(0, std::slice::from_ref(&self_member_id_bytes), 1, 0)?;
-        }
-
-        let mut scoring = self
-            .plugins
-            .conversation_plugins
-            .make_scoring(&self.plugins.default_scoring_config);
-        // Joiners get tracked at `JoinedConversation` time, once members are known.
-        if is_creation {
-            // Creator is self at `default_score`; under standard config
-            // (`default > threshold`) no cross fires, so we drop the result.
-            let _ = scoring.add_member(&self_member_id_bytes);
-        }
-
-        let initial_state = state_machine.current_state();
-        if initial_state == ConversationState::PendingJoin {
-            info!(
-                conversation = conversation_id,
-                timeout_s = config.commit_inactivity_duration.as_secs() * 3,
-                "pending join, awaiting welcome"
-            );
-        }
-        let consensus = self.build_consensus_service();
-        let consensus_rx = consensus.event_bus().subscribe();
-        let session = Arc::new(RwLock::new(SessionRunner::new(
-            conversation_id.to_string(),
-            conversation,
-            mls_opt,
-            state_machine,
-            phase_timer,
+        let deps = ConversationDeps {
+            plugins: &self.plugins.conversation_plugins,
+            consensus: &self.plugins.consensus,
+            identity: self.member_id.as_ref(),
+            transport: Arc::clone(&self.transport),
+            app_id: Arc::from(self.app_id.as_slice()),
             config,
-            scoring,
-            steward_list,
-            consensus,
-            consensus_rx,
-            Arc::clone(&self.transport),
-            Arc::from(self.member_id.member_id_bytes()),
-            Arc::from(self.member_id.member_id_display()),
-            Arc::from(self.app_id.as_slice()),
-        )));
+            scoring_config: self.plugins.default_scoring_config.clone(),
+            steward_list_config: self.plugins.default_steward_list_config.clone(),
+        };
+        let runner = if is_creation {
+            SessionRunner::create(conversation_id, deps)?
+        } else {
+            SessionRunner::join(conversation_id, deps)?
+        };
+        let session = Arc::new(RwLock::new(runner));
         {
             let mut conversations = self
                 .conversations
@@ -118,16 +65,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             if conversations.contains_key(conversation_id) {
                 return Err(UserError::ConversationAlreadyExists);
             }
-            conversations.insert(conversation_id.to_string(), Arc::clone(&session));
+            conversations.insert(conversation_id.to_string(), session);
         }
 
-        // Record the lifecycle event first so integrators draining
-        // [`User::drain_lifecycle_events`] see `Created` before any
-        // per-session event emitted below.
+        // The runner already buffered its opening `PhaseChange`; record the
+        // lifecycle event so integrators draining
+        // [`User::drain_lifecycle_events`] discover the session.
         self.emit_lifecycle(ConversationLifecycle::Created(conversation_id.to_string()));
-        session
-            .read_or_err("session")?
-            .emit_event(SessionEvent::PhaseChange(initial_state));
 
         Ok(())
     }

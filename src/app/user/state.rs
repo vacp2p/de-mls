@@ -14,8 +14,8 @@ use crate::{
         UserPlugins,
     },
     core::{
-        ConsensusPlugin, ConsensusServiceFor, ConversationLifecycle, ConversationPluginsFactory,
-        ScoringConfig, SessionEvent, StewardListConfig,
+        ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, ScoringConfig,
+        SessionEvent, StewardListConfig,
     },
     ds::SharedDeliveryService,
     member_id::MemberId,
@@ -476,12 +476,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 "lifecycle-event buffer mutex poisoned; event dropped"
             ),
         }
-    }
-
-    /// Build a fresh per-conversation `ConsensusService` via the User's
-    /// `ConsensusContext`.
-    pub fn build_consensus_service(&self) -> ConsensusServiceFor<P> {
-        self.plugins.consensus.build_service()
     }
 
     /// Drop this conversation's consensus scope from the shared storage and

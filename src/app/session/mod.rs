@@ -11,6 +11,7 @@
 mod consensus;
 mod consensus_bridge;
 mod consensus_events;
+mod construct;
 mod freeze;
 mod inbound;
 mod lock;
@@ -21,6 +22,7 @@ mod steward;
 mod tick;
 
 pub use consensus::CreatorVote;
+pub use construct::ConversationDeps;
 pub use freeze::PendingJoinTick;
 pub use inbound::DispatchOutcome;
 pub(crate) use lock::LockExt;
