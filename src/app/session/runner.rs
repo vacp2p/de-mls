@@ -62,14 +62,13 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     pub conversation_id: String,
     pub(crate) conversation: Conversation<CP>,
     /// Per-conversation consensus service. Owns this conversation's scope
-    /// in the shared storage and a private event bus. Constructed at
-    /// conversation creation by `User::build_consensus_service`.
+    /// in the shared storage and a private event bus. Minted from the
+    /// [`crate::app::ConversationDeps`] consensus context at construction.
     pub consensus: ConsensusServiceFor<P>,
     /// Subscriber on `consensus.event_bus()`. Drained by
     /// [`Self::tick_deadlines`], which dispatches each event through
-    /// `apply_consensus_outcome`. Subscribed in
-    /// [`crate::app::User::start_conversation`] before the runner is
-    /// registered.
+    /// `apply_consensus_outcome`. Subscribed when the runner is built in
+    /// [`SessionRunner::create`] / [`SessionRunner::join`].
     pub(crate) consensus_rx: ConsensusReceiver<P>,
     /// Wall-clock anchor combined with `conversation.state_machine` by
     /// coordinator methods.
