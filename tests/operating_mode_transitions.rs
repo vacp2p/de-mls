@@ -17,7 +17,8 @@ use de_mls::protos::de_mls::messages::v1::ViolationEvidence;
 
 mod common;
 use common::session_fixtures::{
-    bootstrap_joined_conversation, fast_test_config, poll_once, settle_for, to_inbound,
+    bootstrap_joined_conversation, fast_test_config, flush_session, poll_once, settle_for,
+    to_inbound,
 };
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -64,6 +65,8 @@ fn deadlock_ecp_opens_recovery_and_force_freezes() {
         settle_for(Duration::from_millis(40));
         poll_once(&alice_session);
         poll_once(&bob_session);
+        flush_session(&alice_session, &alice_tx);
+        flush_session(&bob_session, &bob_tx);
         let packets = alice_tx.lock().unwrap().drain_packets();
         for p in packets {
             let _ = users[1].0.process_inbound_packet(to_inbound(&p));

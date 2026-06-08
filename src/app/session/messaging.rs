@@ -6,10 +6,7 @@ use std::sync::Arc;
 use prost::Message;
 
 use crate::{
-    app::{
-        ConversationState, CreatorVote, SessionRunner, SessionTick, UserError,
-        session::runner::send_packet,
-    },
+    app::{ConversationState, CreatorVote, SessionRunner, SessionTick, UserError},
     core::{ConsensusPlugin, ConversationPluginsFactory},
     ds::{OutboundPacket, WELCOME_SUBTOPIC},
     mls_crypto::{KeyPackageBytes, MlsService},
@@ -44,7 +41,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// the steward can invite us.
     pub fn send_key_package(&self, key_package: KeyPackageBytes) -> Result<SessionTick, UserError> {
         let packet = build_key_package_packet(&self.conversation_id, key_package, &self.app_id);
-        send_packet(self.transport(), packet)?;
+        self.enqueue_outbound(packet);
         Ok(self.tick())
     }
 
@@ -74,7 +71,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             .conversation
             .expect_mls_mut()?
             .build_message(&app_msg, &app_id)?;
-        send_packet(self.transport(), packet)?;
+        self.enqueue_outbound(packet);
         Ok(self.tick())
     }
 

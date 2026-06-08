@@ -15,10 +15,7 @@ use std::sync::Arc;
 use tracing::{error, info};
 
 use crate::{
-    app::{
-        ConversationState, DispatchOutcome, FreezeTimeoutStatus, SessionRunner, UserError,
-        session::runner::send_packet,
-    },
+    app::{ConversationState, DispatchOutcome, FreezeTimeoutStatus, SessionRunner, UserError},
     core::{
         ConsensusPlugin, ConversationPluginsFactory, FreezeFinalizeResult, FreezeOutcome,
         PeerScoringPlugin, ScoreEvent, ScoreOp, SessionEvent, StewardListPlugin,
@@ -296,7 +293,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         self.emit_event(SessionEvent::PhaseChange(event));
 
         if let Some(message) = outbound {
-            send_packet(self.transport(), message)?;
+            self.enqueue_outbound(message);
         }
 
         Ok(true)

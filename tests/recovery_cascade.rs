@@ -116,6 +116,15 @@ fn concurrent_joins_leave_joiners_with_empty_buffer() {
         session.read().unwrap().send_key_package(kp).unwrap();
     }
 
+    // The session is pull-only: drain each joiner's buffered outbound (the
+    // KP it just produced) into its transport handle so the relay sees it.
+    for (u, h) in [(&bob, &bh), (&charlie, &ch), (&dave, &dh)] {
+        let session = u.lookup_entry(group).unwrap().unwrap();
+        for pkt in session.read().unwrap().drain_outbound() {
+            h.lock().unwrap().publish(pkt).unwrap();
+        }
+    }
+
     // Step 3: Broadcast every KP packet to every participant (mocks pubsub).
     // Each joiner receives its own KP + the others'. Alice receives all three.
     let mut all_kp_packets = vec![];

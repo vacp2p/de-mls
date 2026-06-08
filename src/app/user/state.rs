@@ -40,9 +40,9 @@ pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Per-instance UUID embedded in every outbound packet. Inbound packets
     /// carrying our `app_id` are self-echoes and silently dropped.
     pub(crate) app_id: Vec<u8>,
-    /// Synchronous outbound transport. Cloned into each `SessionRunner` at
-    /// construction. Stored behind a `Mutex` because the trait takes
-    /// `&mut self`.
+    /// Synchronous outbound transport. The sessions are pull-only and never
+    /// send; [`Self::flush`] drains a session's buffered outbound and
+    /// publishes it here. Behind a `Mutex` because the trait takes `&mut self`.
     pub(crate) transport: SharedDeliveryService,
     /// All User-level plugin state: the per-conversation factory, the
     /// consensus context, the key-package provider, and the three default
@@ -126,7 +126,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        entry.write_or_err("session")?.send_app_message(message)
+        let tick = entry.write_or_err("session")?.send_app_message(message)?;
+        self.flush(&entry)?;
+        Ok(tick)
     }
 
     /// Broadcast `key_package` on `conversation_id`'s welcome subtopic
@@ -140,7 +142,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        entry.read_or_err("session")?.send_key_package(key_package)
+        let tick = entry
+            .read_or_err("session")?
+            .send_key_package(key_package)?;
+        self.flush(&entry)?;
+        Ok(tick)
     }
 
     /// Walk pending deadlines on `conversation_id`. Thin wrapper over
@@ -149,7 +155,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        entry.write_or_err("session")?.tick_deadlines()
+        let tick = entry.write_or_err("session")?.tick_deadlines()?;
+        self.flush(&entry)?;
+        Ok(tick)
     }
 
     /// Advance every per-conversation polling path: deadlines (auto-votes
@@ -169,6 +177,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         entry.write_or_err("session")?.poll_freeze_status()?;
         entry.write_or_err("session")?.check_member_freeze()?;
         entry.read_or_err("session")?.check_pending_join()?;
+        self.flush(&entry)?;
         Ok(entry.read_or_err("session")?.tick())
     }
 
@@ -218,6 +227,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         entry
             .write_or_err("session")?
             .initiate_proposal(request, CreatorVote::Yes)?;
+        self.flush(&entry)?;
         Ok(entry.read_or_err("session")?.tick())
     }
 
@@ -263,6 +273,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             &entry_arc,
             crate::core::ProcessResult::JoinedConversation(conversation_id.clone()),
         )?;
+        self.flush(&entry_arc)?;
         let tick = entry_arc.read_or_err("session")?.tick();
         Ok((conversation_id, tick))
     }
@@ -284,6 +295,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         entry
             .write_or_err("session")?
             .process_user_vote(proposal_id, vote)?;
+        self.flush(&entry)?;
         Ok(entry.read_or_err("session")?.tick())
     }
 
@@ -298,9 +310,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        entry
+        let tick = entry
             .write_or_err("session")?
-            .process_ban_request(ban_request)
+            .process_ban_request(ban_request)?;
+        self.flush(&entry)?;
+        Ok(tick)
     }
 
     /// Submit `request` as a fresh consensus proposal with
@@ -320,6 +334,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         entry
             .write_or_err("session")?
             .initiate_proposal(request, creator_vote)?;
+        self.flush(&entry)?;
         Ok(entry.read_or_err("session")?.tick())
     }
 
@@ -333,6 +348,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         entry.write_or_err("session")?.initiate_self_leave()?;
+        self.flush(&entry)?;
         Ok(entry.read_or_err("session")?.tick())
     }
 
@@ -476,6 +492,26 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 "lifecycle-event buffer mutex poisoned; event dropped"
             ),
         }
+    }
+
+    /// Publish a session's buffered outbound on the User's transport. The
+    /// session is pull-only — it buffers packets and never sends; this is the
+    /// User's push-adapter so its callers keep their send-on-op behaviour.
+    /// (When `User` moves out of the library, the integrator drains and
+    /// publishes directly instead.)
+    pub(crate) fn flush(&self, entry: &SessionEntry<P, CP>) -> Result<(), UserError> {
+        let packets = entry.read_or_err("session")?.drain_outbound();
+        if packets.is_empty() {
+            return Ok(());
+        }
+        let mut transport = self
+            .transport
+            .lock()
+            .map_err(|_| UserError::LockPoisoned("transport"))?;
+        for packet in packets {
+            transport.publish(packet)?;
+        }
+        Ok(())
     }
 
     /// Drop this conversation's consensus scope from the shared storage and

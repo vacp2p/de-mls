@@ -268,6 +268,33 @@ pub fn poll_once(session: &SessionArc) {
     let _ = session.read().unwrap().check_pending_join();
 }
 
+/// Flush a session's pull-buffered outbound into its user's transport handle
+/// so the relay (which drains the handle) picks it up. The session is
+/// pull-only — direct session calls in tests buffer here instead of sending;
+/// this stands in for the integrator's drain-and-publish.
+pub fn flush_session(session: &SessionArc, transport: &TransportHandle) {
+    let packets = session.read().unwrap().drain_outbound();
+    let mut t = transport.lock().unwrap();
+    for pkt in packets {
+        t.publish(pkt).expect("capture publish");
+    }
+}
+
+/// Flush every conversation's pull-buffered outbound on `user` into its
+/// transport handle. Uniform stand-in for the integrator's drain — relay
+/// loops call this for each user before draining the handles, regardless of
+/// how many sessions the user holds.
+pub fn flush_user(user: &TestUser, transport: &TransportHandle) {
+    let mut t = transport.lock().unwrap();
+    for name in user.list_conversations().unwrap_or_default() {
+        if let Ok(Some(session)) = user.lookup_entry(&name) {
+            for pkt in session.read().unwrap().drain_outbound() {
+                t.publish(pkt).expect("capture publish");
+            }
+        }
+    }
+}
+
 /// Bring up a conversation with `keys[0]` as the creator and the rest as
 /// joiners. Drives the full join cycle: each joiner sends a KP, the
 /// creator promotes them to InviteMember proposals, consensus resolves,
@@ -329,6 +356,7 @@ pub fn bootstrap_joined_conversation(
             .unwrap()
             .send_key_package(kp)
             .expect("send kp");
+        flush_session(&sessions[i], &users[i].1);
     }
     let mut kp_packets = Vec::new();
     for (_, h) in users.iter().skip(1) {
@@ -352,6 +380,9 @@ pub fn bootstrap_joined_conversation(
         sleep(Duration::from_millis(60));
         for s in &sessions {
             poll_once(s);
+        }
+        for (i, (_, h)) in users.iter().enumerate() {
+            flush_session(&sessions[i], h);
         }
 
         // Welcomes never traverse the test transport: the steward emits

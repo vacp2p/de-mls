@@ -15,13 +15,13 @@ use tracing::info;
 use hashgraph_like_consensus::events::ConsensusEventBus;
 
 use crate::{
-    app::{PhaseTimer, SessionTick, UserError},
+    app::{PhaseTimer, SessionTick},
     core::{
         ConsensusPlugin, ConsensusServiceFor, Conversation, ConversationConfig,
         ConversationPluginsFactory, ConversationQueues, ConversationState,
         ConversationStateMachine, SessionEvent,
     },
-    ds::{OutboundPacket, SharedDeliveryService},
+    ds::OutboundPacket,
 };
 
 /// Receiver type the runner drains from `tick_deadlines`. Resolves to the
@@ -30,21 +30,6 @@ use crate::{
 pub(crate) type ConsensusReceiver<P> = <<P as ConsensusPlugin>::EventBus as ConsensusEventBus<
     <P as ConsensusPlugin>::Scope,
 >>::Receiver;
-
-/// Free helper that publishes a packet on the supplied transport. Pure sync —
-/// the caller's task does the publish directly. Multi-thread integrators
-/// that want the publish off-runtime can wrap the call site in
-/// `spawn_blocking` themselves.
-pub(crate) fn send_packet(
-    transport: &SharedDeliveryService,
-    packet: OutboundPacket,
-) -> Result<(), UserError> {
-    transport
-        .lock()
-        .map_err(|_| UserError::LockPoisoned("transport"))?
-        .publish(packet)?;
-    Ok(())
-}
 
 /// One pending auto-vote: cast `vote` for `proposal_id` once the wall-clock
 /// catches up to `fire_at`. Registered by `initiate_proposal` (Deferred
@@ -84,10 +69,6 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// `consensus.handle_consensus_timeout`. Removed when the session
     /// resolves naturally via `apply_consensus_outcome`.
     pub pending_consensus_timeouts: HashMap<u32, Instant>,
-    /// Synchronous outbound transport (cloned from `User`). Per-session
-    /// methods reach this via [`Self::transport`] and route through
-    /// [`send_packet`], a direct sync publish.
-    transport: SharedDeliveryService,
     /// Identity bytes derived from `User.member_id.member_id_bytes()` at
     /// session construction.
     pub self_member_id: Arc<[u8]>,
@@ -102,6 +83,11 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// `Mutex` so producer-side `emit_event` stays `&self`; consumers
     /// drain via [`Self::drain_events`] once per polling cycle.
     pending_events: Mutex<Vec<SessionEvent>>,
+    /// Outbound packets the conversation produced, waiting for the
+    /// integrator to publish. The session never sends — it buffers here and
+    /// the caller drains via [`Self::drain_outbound`] once per cycle. Interior
+    /// `Mutex` so producer-side `enqueue_outbound` stays `&self`.
+    pending_outbound: Mutex<Vec<OutboundPacket>>,
 }
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
@@ -121,7 +107,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         steward_list: CP::StewardList,
         consensus: ConsensusServiceFor<P>,
         consensus_rx: ConsensusReceiver<P>,
-        transport: SharedDeliveryService,
         self_member_id: Arc<[u8]>,
         member_id_display: Arc<str>,
         app_id: Arc<[u8]>,
@@ -141,11 +126,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             phase_timer,
             pending_auto_votes: HashMap::new(),
             pending_consensus_timeouts: HashMap::new(),
-            transport,
             self_member_id,
             member_id_display,
             app_id,
             pending_events: Mutex::new(Vec::new()),
+            pending_outbound: Mutex::new(Vec::new()),
         }
     }
 
@@ -232,11 +217,31 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         }
     }
 
-    /// Borrow the session's transport without taking the runner lock.
-    /// Cheap to clone the inner `Arc` and publish after dropping the
-    /// runner guard.
-    pub fn transport(&self) -> &SharedDeliveryService {
-        &self.transport
+    /// Buffer an outbound packet for the integrator to publish. Stays
+    /// `&self` thanks to the interior `Mutex`, so send sites in `&self`
+    /// methods don't escalate to a write guard. The session never sends —
+    /// the caller drains via [`Self::drain_outbound`] and routes each packet.
+    pub(crate) fn enqueue_outbound(&self, packet: OutboundPacket) {
+        match self.pending_outbound.lock() {
+            Ok(mut buf) => buf.push(packet),
+            Err(_) => {
+                tracing::error!("outbound buffer mutex poisoned; packet dropped")
+            }
+        }
+    }
+
+    /// Drain every buffered outbound packet accumulated since the last call,
+    /// in insertion order. The integrator invokes this once per cycle (after
+    /// `poll` / `handle_inbound` / an intent) and publishes each packet on
+    /// its own transport.
+    pub fn drain_outbound(&self) -> Vec<OutboundPacket> {
+        match self.pending_outbound.lock() {
+            Ok(mut buf) => std::mem::take(&mut *buf),
+            Err(_) => {
+                tracing::error!("outbound buffer mutex poisoned; integrator will miss packets");
+                Vec::new()
+            }
+        }
     }
 
     // ── Pending deadlines (auto-votes + consensus timeouts) ─────────
@@ -372,7 +377,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
     use std::time::Instant;
 
     use super::*;
@@ -401,7 +405,6 @@ mod tests {
             StubStewardList::member(),
             consensus,
             consensus_rx,
-            Arc::new(Mutex::new(crate::test_fixtures::UnusedTransport)),
             Arc::from(&b"test-member-id"[..]),
             Arc::from("0xtest-display"),
             Arc::from(&[0u8; 16][..]),
@@ -423,7 +426,6 @@ mod tests {
             StubStewardList::member(),
             consensus,
             consensus_rx,
-            Arc::new(Mutex::new(crate::test_fixtures::UnusedTransport)),
             Arc::from(&b"test-member-id"[..]),
             Arc::from("0xtest-display"),
             Arc::from(&[0u8; 16][..]),

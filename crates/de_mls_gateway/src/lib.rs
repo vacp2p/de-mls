@@ -310,6 +310,29 @@ impl Gateway<WakuDeliveryService> {
                     for event in events {
                         fanout.handle(name, event).await;
                     }
+
+                    // Publish any outbound the session buffered. The session is
+                    // pull-only — it never sends. `User`-driven ops already
+                    // flushed their own outbound; this catches packets produced
+                    // by direct session calls in the polling / handler paths
+                    // (commit candidates, auto-votes, …).
+                    let outbound = match session.read() {
+                        Ok(g) => g.drain_outbound(),
+                        Err(_) => Vec::new(),
+                    };
+                    if !outbound.is_empty()
+                        && let Ok(mut t) = transport.lock()
+                    {
+                        for pkt in outbound {
+                            if let Err(e) = t.publish(pkt) {
+                                tracing::warn!(
+                                    conversation = %name,
+                                    error = %e,
+                                    "outbound publish failed"
+                                );
+                            }
+                        }
+                    }
                 }
             }
         });

@@ -12,11 +12,8 @@ use tracing::info;
 use crate::{
     app::{
         ConversationState, SessionRunner, SessionTick, UserError,
-        session::{
-            consensus_bridge::{
-                ProposalParams, cast_vote, submit_proposal, submit_self_leave_proposal,
-            },
-            runner::send_packet,
+        session::consensus_bridge::{
+            ProposalParams, cast_vote, submit_proposal, submit_self_leave_proposal,
         },
     },
     core::{
@@ -196,7 +193,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             .conversation
             .expect_mls_mut()?
             .build_message(&app_message, &app_id)?;
-        send_packet(self.transport(), packet)?;
+        self.enqueue_outbound(packet);
         Ok(())
     }
 
@@ -325,7 +322,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             .conversation
             .expect_mls_mut()?
             .build_message(&app_msg, &app_id)?;
-        send_packet(self.transport(), packet)?;
+        self.enqueue_outbound(packet);
         Ok(())
     }
 
@@ -431,7 +428,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     .conversation
                     .expect_mls_mut()?
                     .build_message(&outbound, &app_id)?;
-                send_packet(self.transport(), packet)?;
+                self.enqueue_outbound(packet);
                 // Creator already voted — populate history cache, no banner.
                 self.emit_event(SessionEvent::OwnProposalSubmitted {
                     proposal_id,
@@ -447,7 +444,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     .conversation
                     .expect_mls_mut()?
                     .build_message(&unbundled, &app_id)?;
-                send_packet(self.transport(), packet)?;
+                self.enqueue_outbound(packet);
                 let banner =
                     build_vote_banner_event(&conversation_id, proposal_id, request.encode_to_vec());
                 self.emit_event(SessionEvent::AppMessage(banner));
@@ -518,7 +515,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             .conversation
             .expect_mls_mut()?
             .build_message(&app_message, &app_id)?;
-        send_packet(self.transport(), packet)?;
+        self.enqueue_outbound(packet);
         Ok(())
     }
 }

@@ -103,23 +103,6 @@ pub(crate) fn make_test_consensus_service() -> (
     (service, rx)
 }
 
-/// Transport stub for tests. `publish` is unreachable (tests should never
-/// push outbound) and `subscribe` is a no-op.
-#[derive(Debug)]
-pub(crate) struct UnusedTransport;
-
-impl crate::ds::DeliveryService for UnusedTransport {
-    type Error = crate::ds::DeliveryServiceError;
-
-    fn publish(&mut self, _: crate::ds::OutboundPacket) -> Result<(), Self::Error> {
-        unreachable!("UnusedTransport::publish called")
-    }
-
-    fn subscribe(&mut self, _delivery_address: &str) -> Result<(), Self::Error> {
-        Ok(())
-    }
-}
-
 /// MLS service that errors on every operation. Lets tests construct a
 /// `Conversation` whose early-return paths never invoke MLS.
 pub(crate) struct UnusedMls;

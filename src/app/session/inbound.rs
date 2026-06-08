@@ -23,7 +23,6 @@ use crate::{
         session::{
             consensus::build_vote_banner_event,
             consensus_bridge::{forward_incoming_proposal, forward_incoming_vote},
-            runner::send_packet,
         },
     },
     core::{
@@ -204,7 +203,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         let mls = self.conversation.expect_mls_mut()?;
         let mls_members = mls.members().unwrap_or_default();
         let packet = mls.build_message(&msg, &app_id)?;
-        send_packet(self.transport(), packet)?;
+        self.enqueue_outbound(packet);
         self.sync_scoring_members(&mls_members);
 
         let event = self.start_working();
@@ -327,7 +326,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
         self.emit_event(SessionEvent::PhaseChange(event));
         if let Some(message) = outbound {
-            send_packet(self.transport(), message)?;
+            self.enqueue_outbound(message);
         }
         Ok(())
     }

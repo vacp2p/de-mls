@@ -8,7 +8,7 @@ use de_mls::protos::de_mls::messages::v1::app_message;
 
 mod common;
 use common::session_fixtures::{
-    bootstrap_joined_conversation, fast_test_config, settle_for, to_inbound,
+    bootstrap_joined_conversation, fast_test_config, flush_user, settle_for, to_inbound,
 };
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -34,6 +34,7 @@ fn chat_message_delivered_to_peer_as_app_message_event() {
 
     // Relay alice's outbound to bob.
     settle_for(Duration::from_millis(40));
+    flush_user(&users[0].0, &users[0].1);
     let packets = users[0].1.lock().unwrap().drain_packets();
     for p in packets {
         let _ = users[1].0.process_inbound_packet(to_inbound(&p));

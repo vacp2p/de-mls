@@ -48,6 +48,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         match packet.subtopic.as_str() {
             WELCOME_SUBTOPIC => {
                 self.process_key_package_broadcast(&conversation_id, &packet.payload, &entry_arc)?;
+                self.flush(&entry_arc)?;
                 Ok(entry_arc.read_or_err("session")?.tick())
             }
             APP_MSG_SUBTOPIC => {
@@ -65,6 +66,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                     entry.conversation.process_inbound(&packet.payload)?
                 };
                 self.finish_dispatch(&conversation_id, &entry_arc, result)?;
+                self.flush(&entry_arc)?;
                 Ok(entry_arc.read_or_err("session")?.tick())
             }
             other => Err(UserError::Core(CoreError::InvalidSubtopic(
