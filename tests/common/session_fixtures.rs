@@ -262,10 +262,10 @@ pub fn fast_test_config() -> ConversationConfig {
 /// check, and (for joiners) the pending-join tick. Mirrors the production
 /// `group_polling_loop` body in `de_mls_gateway::group`.
 pub fn poll_once(session: &SessionArc) {
-    let _ = SessionRunner::tick_deadlines(session);
-    let _ = SessionRunner::poll_freeze_status(session);
-    let _ = SessionRunner::check_member_freeze(session);
-    let _ = SessionRunner::check_pending_join(session);
+    let _ = session.write().unwrap().tick_deadlines();
+    let _ = session.write().unwrap().poll_freeze_status();
+    let _ = session.write().unwrap().check_member_freeze();
+    let _ = session.read().unwrap().check_pending_join();
 }
 
 /// Bring up a conversation with `keys[0]` as the creator and the rest as
@@ -324,7 +324,11 @@ pub fn bootstrap_joined_conversation(
     // Joiners send KPs. Drain joiner transports, deliver to creator.
     for i in 1..users.len() {
         let kp = users[i].0.generate_key_package().expect("kp");
-        SessionRunner::send_key_package(&sessions[i], kp).expect("send kp");
+        sessions[i]
+            .read()
+            .unwrap()
+            .send_key_package(kp)
+            .expect("send kp");
     }
     let mut kp_packets = Vec::new();
     for (_, h) in users.iter().skip(1) {

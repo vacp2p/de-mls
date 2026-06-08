@@ -1,13 +1,13 @@
 //! Send operations on `SessionRunner`: key packages, app messages, and
 //! ban requests.
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use prost::Message;
 
 use crate::{
     app::{
-        ConversationState, CreatorVote, LockExt, SessionRunner, SessionTick, UserError,
+        ConversationState, CreatorVote, SessionRunner, SessionTick, UserError,
         session::runner::send_packet,
     },
     core::{ConsensusPlugin, ConversationPluginsFactory},
@@ -42,61 +42,40 @@ pub fn build_key_package_packet(
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Broadcast `key_package` on this conversation's welcome subtopic so
     /// the steward can invite us.
-    ///
-    /// Takes `&Arc<RwLock<Self>>` so the runner lock is released before
-    /// awaiting on the transport.
-    pub fn send_key_package(
-        arc: &Arc<RwLock<Self>>,
-        key_package: KeyPackageBytes,
-    ) -> Result<SessionTick, UserError> {
-        let (transport, packet) = {
-            let s = arc.read_or_err("session")?;
-            let packet = build_key_package_packet(&s.conversation_id, key_package, &s.app_id);
-            (Arc::clone(s.transport()), packet)
-        };
-        send_packet(&transport, packet)?;
-        Ok(arc.read_or_err("session")?.tick())
+    pub fn send_key_package(&self, key_package: KeyPackageBytes) -> Result<SessionTick, UserError> {
+        let packet = build_key_package_packet(&self.conversation_id, key_package, &self.app_id);
+        send_packet(self.transport(), packet)?;
+        Ok(self.tick())
     }
 
     /// Send a chat message. Blocked in `PendingJoin` (no keys yet),
     /// `Freezing`, and `Selection` (epoch rotation in flight — the message
     /// might not decrypt on peers who have already merged the next commit).
     /// Governance traffic has its own gate (`check_proposal_allowed`).
-    ///
-    /// Takes `&Arc<RwLock<Self>>` so the runner lock is released before
-    /// awaiting on the transport.
-    pub fn send_app_message(
-        arc: &Arc<RwLock<Self>>,
-        message: Vec<u8>,
-    ) -> Result<SessionTick, UserError> {
-        let (transport, packet) = {
-            let mut s = arc.write_or_err("session")?;
-            let state = s.conversation.current_state();
-            if matches!(
-                state,
-                ConversationState::PendingJoin
-                    | ConversationState::Freezing
-                    | ConversationState::Selection
-            ) {
-                return Err(UserError::ConversationBlocked(state.to_string()));
-            }
+    pub fn send_app_message(&mut self, message: Vec<u8>) -> Result<SessionTick, UserError> {
+        let state = self.conversation.current_state();
+        if matches!(
+            state,
+            ConversationState::PendingJoin
+                | ConversationState::Freezing
+                | ConversationState::Selection
+        ) {
+            return Err(UserError::ConversationBlocked(state.to_string()));
+        }
 
-            let app_msg: AppMessage = ConversationMessage {
-                message,
-                sender: s.member_id_display.to_string(),
-                conversation_id: s.conversation_id.clone(),
-            }
-            .into();
-            let app_id = Arc::clone(&s.app_id);
-            let transport = Arc::clone(s.transport());
-            let packet = s
-                .conversation
-                .expect_mls_mut()?
-                .build_message(&app_msg, &app_id)?;
-            (transport, packet)
-        };
-        send_packet(&transport, packet)?;
-        Ok(arc.read_or_err("session")?.tick())
+        let app_msg: AppMessage = ConversationMessage {
+            message,
+            sender: self.member_id_display.to_string(),
+            conversation_id: self.conversation_id.clone(),
+        }
+        .into();
+        let app_id = Arc::clone(&self.app_id);
+        let packet = self
+            .conversation
+            .expect_mls_mut()?
+            .build_message(&app_msg, &app_id)?;
+        send_packet(self.transport(), packet)?;
+        Ok(self.tick())
     }
 
     /// Start a `RemoveMember` consensus round targeting `ban_request.user_to_ban`.
@@ -104,19 +83,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// creator's vote is bundled as YES at submit; no banner is shown to
     /// the requester.
     pub fn process_ban_request(
-        arc: &Arc<RwLock<Self>>,
+        &mut self,
         ban_request: BanRequest,
     ) -> Result<SessionTick, UserError> {
-        {
-            let s = arc.read_or_err("session")?;
-            let state = s.conversation.current_state();
-            if state != ConversationState::Working {
-                return Err(UserError::ConversationBlocked(state.to_string()));
-            }
+        let state = self.conversation.current_state();
+        if state != ConversationState::Working {
+            return Err(UserError::ConversationBlocked(state.to_string()));
         }
 
-        Self::initiate_proposal(
-            arc,
+        self.initiate_proposal(
             ConversationUpdateRequest {
                 payload: Some(conversation_update_request::Payload::RemoveMember(
                     RemoveMember {
@@ -127,6 +102,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             CreatorVote::Yes,
         )?;
 
-        Ok(arc.read_or_err("session")?.tick())
+        Ok(self.tick())
     }
 }

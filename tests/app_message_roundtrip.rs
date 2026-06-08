@@ -3,7 +3,6 @@
 
 use std::time::Duration;
 
-use de_mls::app::SessionRunner;
 use de_mls::core::{SessionEvent, StewardListConfig};
 use de_mls::protos::de_mls::messages::v1::app_message;
 
@@ -27,7 +26,11 @@ fn chat_message_delivered_to_peer_as_app_message_event() {
     let alice_session = users[0].0.lookup_entry("chat").unwrap().unwrap();
     let bob_session = users[1].0.lookup_entry("chat").unwrap().unwrap();
 
-    SessionRunner::send_app_message(&alice_session, b"Hello from alice".to_vec()).unwrap();
+    alice_session
+        .write()
+        .unwrap()
+        .send_app_message(b"Hello from alice".to_vec())
+        .unwrap();
 
     // Relay alice's outbound to bob.
     settle_for(Duration::from_millis(40));

@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use de_mls::app::{CreatorVote, SessionRunner};
+use de_mls::app::CreatorVote;
 use de_mls::core::{ConversationState, SessionEvent, StewardListConfig};
 use de_mls::member_id::MemberId;
 use de_mls::protos::de_mls::messages::v1::{
@@ -55,7 +55,11 @@ fn freeze_cycle_emits_phase_events_in_order() {
             },
         )),
     };
-    SessionRunner::initiate_proposal(&alice_session, remove_request, CreatorVote::Yes).unwrap();
+    alice_session
+        .write()
+        .unwrap()
+        .initiate_proposal(remove_request, CreatorVote::Yes)
+        .unwrap();
 
     // Drive polling + packet relay until both sessions are back in
     // Working (bob will actually exit the conversation, so we check

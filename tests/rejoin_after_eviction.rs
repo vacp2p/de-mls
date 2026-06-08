@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use de_mls::app::{CreatorVote, DispatchOutcome, SessionRunner};
+use de_mls::app::{CreatorVote, DispatchOutcome};
 use de_mls::core::{ConversationState, StewardListConfig};
 use de_mls::member_id::MemberId;
 use de_mls::protos::de_mls::messages::v1::{
@@ -68,7 +68,11 @@ fn evicted_member_can_rejoin_at_higher_epoch() {
             },
         )),
     };
-    SessionRunner::initiate_proposal(&steward_session, request, CreatorVote::Yes).unwrap();
+    steward_session
+        .write()
+        .unwrap()
+        .initiate_proposal(request, CreatorVote::Yes)
+        .unwrap();
 
     let mut target_evicted = false;
     for _ in 0..30 {
@@ -95,7 +99,7 @@ fn evicted_member_can_rejoin_at_higher_epoch() {
 
     let new_session = users[target_idx].0.lookup_entry("rejoin").unwrap().unwrap();
     let kp = users[target_idx].0.generate_key_package().unwrap();
-    SessionRunner::send_key_package(&new_session, kp).unwrap();
+    new_session.read().unwrap().send_key_package(kp).unwrap();
 
     let mut rejoined = false;
     for _ in 0..30 {
@@ -146,14 +150,14 @@ fn drive_one_round(
     let mut sessions = Vec::with_capacity(users.len());
     for (i, (u, _)) in users.iter().enumerate() {
         if let Some(s) = u.lookup_entry("rejoin").unwrap() {
-            let _ = SessionRunner::tick_deadlines(&s);
-            let pfs = SessionRunner::poll_freeze_status(&s);
+            let _ = s.write().unwrap().tick_deadlines();
+            let pfs = s.write().unwrap().poll_freeze_status();
             if i == target_idx && matches!(pfs, Ok((_, DispatchOutcome::LeaveRequested))) {
                 u.finalize_self_leave("rejoin").unwrap();
                 continue;
             }
-            let _ = SessionRunner::check_member_freeze(&s);
-            let _ = SessionRunner::check_pending_join(&s).unwrap();
+            let _ = s.write().unwrap().check_member_freeze();
+            let _ = s.read().unwrap().check_pending_join().unwrap();
             sessions.push(s);
         }
     }

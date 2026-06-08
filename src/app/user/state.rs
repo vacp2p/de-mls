@@ -126,7 +126,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::send_app_message(&entry, message)
+        entry.write_or_err("session")?.send_app_message(message)
     }
 
     /// Broadcast `key_package` on `conversation_id`'s welcome subtopic
@@ -140,7 +140,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::send_key_package(&entry, key_package)
+        entry.read_or_err("session")?.send_key_package(key_package)
     }
 
     /// Walk pending deadlines on `conversation_id`. Thin wrapper over
@@ -149,7 +149,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::tick_deadlines(&entry)
+        entry.write_or_err("session")?.tick_deadlines()
     }
 
     /// Advance every per-conversation polling path: deadlines (auto-votes
@@ -165,10 +165,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::tick_deadlines(&entry)?;
-        SessionRunner::poll_freeze_status(&entry)?;
-        SessionRunner::check_member_freeze(&entry)?;
-        SessionRunner::check_pending_join(&entry)?;
+        entry.write_or_err("session")?.tick_deadlines()?;
+        entry.write_or_err("session")?.poll_freeze_status()?;
+        entry.write_or_err("session")?.check_member_freeze()?;
+        entry.read_or_err("session")?.check_pending_join()?;
         Ok(entry.read_or_err("session")?.tick())
     }
 
@@ -215,7 +215,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 },
             )),
         };
-        SessionRunner::initiate_proposal(&entry, request, CreatorVote::Yes)?;
+        entry
+            .write_or_err("session")?
+            .initiate_proposal(request, CreatorVote::Yes)?;
         Ok(entry.read_or_err("session")?.tick())
     }
 
@@ -279,7 +281,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::process_user_vote(&entry, proposal_id, vote)?;
+        entry
+            .write_or_err("session")?
+            .process_user_vote(proposal_id, vote)?;
         Ok(entry.read_or_err("session")?.tick())
     }
 
@@ -294,7 +298,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::process_ban_request(&entry, ban_request)
+        entry
+            .write_or_err("session")?
+            .process_ban_request(ban_request)
     }
 
     /// Submit `request` as a fresh consensus proposal with
@@ -311,7 +317,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::initiate_proposal(&entry, request, creator_vote)?;
+        entry
+            .write_or_err("session")?
+            .initiate_proposal(request, creator_vote)?;
         Ok(entry.read_or_err("session")?.tick())
     }
 
@@ -324,7 +332,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        SessionRunner::initiate_self_leave(&entry)?;
+        entry.write_or_err("session")?.initiate_self_leave()?;
         Ok(entry.read_or_err("session")?.tick())
     }
 

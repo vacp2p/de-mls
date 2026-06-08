@@ -9,7 +9,7 @@
 
 use std::time::{Duration, Instant};
 
-use de_mls::app::{ConversationConfig, PendingJoinTick, SessionRunner};
+use de_mls::app::{ConversationConfig, PendingJoinTick};
 use de_mls::core::{ConversationLifecycle, SessionEvent, StewardListConfig};
 
 mod common;
@@ -92,7 +92,7 @@ fn await_pending_join_outcome(session: &SessionArc, inactivity: Duration) -> Pen
     // Allow up to 6× inactivity so the test isn't fragile on slow CI.
     let deadline = Instant::now() + inactivity * 6;
     loop {
-        let tick = SessionRunner::check_pending_join(session).unwrap();
+        let tick = session.read().unwrap().check_pending_join().unwrap();
         if tick != PendingJoinTick::StillPending {
             return tick;
         }
