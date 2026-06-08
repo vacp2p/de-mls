@@ -22,7 +22,6 @@
 use openmls::prelude::Ciphersuite;
 
 use crate::{
-    ds::OutboundPacket,
     mls_crypto::{
         CommitCandidate, DecryptResult, MlsCommitInput, MlsError, MlsMessageKind,
         StagedCandidateResult,
@@ -136,14 +135,10 @@ pub trait MlsService {
     /// MLS wire bytes.
     fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, MlsError>;
 
-    /// Encode and encrypt `app_msg` and wrap the result as an
-    /// [`OutboundPacket`] on the application subtopic. The convenience
-    /// path most senders use.
-    fn build_message(
-        &mut self,
-        app_msg: &AppMessage,
-        app_id: &[u8],
-    ) -> Result<OutboundPacket, MlsError>;
+    /// Encode and encrypt `app_msg`, returning the raw payload bytes. The
+    /// session wraps these into an [`Outbound`](crate::app::Outbound); the
+    /// convenience path most senders use.
+    fn build_message(&mut self, app_msg: &AppMessage) -> Result<Vec<u8>, MlsError>;
 
     /// Strict app-subtopic decrypt: accepts only `Application` messages,
     /// silently ignoring anything else (including proposals and commits).

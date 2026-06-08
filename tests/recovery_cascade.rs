@@ -10,16 +10,16 @@ use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::Duration;
 
-use de_mls::app::{ConversationConfig, User};
+use de_mls::app::{ConversationConfig, Inbound, User};
 use de_mls::core::StewardListConfig;
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory};
 use de_mls::ds::{
-    DeliveryService, DeliveryServiceError, InboundPacket, OutboundPacket, SharedDeliveryService,
+    DeliveryService, DeliveryServiceError, OutboundPacket, SharedDeliveryService, WELCOME_SUBTOPIC,
 };
 
 /// Test-only transport: captures every outbound packet for later inspection
 /// instead of sending it. `subscribe` is a no-op — tests deliver inbound
-/// by calling `process_inbound_packet` directly.
+/// by routing captured packets into the user's inbound entry directly.
 #[derive(Debug, Default)]
 struct H {
     packets: Vec<OutboundPacket>,
@@ -62,14 +62,17 @@ fn make(key: &str, cfg: ConversationConfig, steward_cfg: StewardListConfig) -> (
     (u, h)
 }
 
-fn to_in(p: &OutboundPacket) -> InboundPacket {
-    InboundPacket::new(
-        p.payload.clone(),
-        &p.subtopic,
-        &p.conversation_id,
-        p.app_id.clone(),
-        0,
-    )
+fn route(user: &TU, p: &OutboundPacket) {
+    let inbound = Inbound {
+        conversation_id: p.conversation_id.clone(),
+        sender: p.app_id.clone(),
+        payload: p.payload.clone(),
+    };
+    let _ = if p.subtopic == WELCOME_SUBTOPIC {
+        user.receive_key_package(inbound)
+    } else {
+        user.handle_inbound(inbound)
+    };
 }
 
 fn settle() {
@@ -107,22 +110,12 @@ fn concurrent_joins_leave_joiners_with_empty_buffer() {
     charlie.start_conversation(group, false).unwrap();
     dave.start_conversation(group, false).unwrap();
 
-    // Step 2: All three joiners send KPs nearly simultaneously. Before the
-    // buffer-hygiene fix, each joiner would buffer the others' KPs observed
-    // on the broadcast welcome subtopic.
+    // Step 2: All three joiners announce KPs nearly simultaneously.
+    // Key-package send is user-level and publishes straight to the user's
+    // transport handle.
     for u in [&bob, &charlie, &dave] {
         let kp = u.generate_key_package().unwrap();
-        let session = u.lookup_entry(group).unwrap().unwrap();
-        session.read().unwrap().send_key_package(kp).unwrap();
-    }
-
-    // The session is pull-only: drain each joiner's buffered outbound (the
-    // KP it just produced) into its transport handle so the relay sees it.
-    for (u, h) in [(&bob, &bh), (&charlie, &ch), (&dave, &dh)] {
-        let session = u.lookup_entry(group).unwrap().unwrap();
-        for pkt in session.read().unwrap().drain_outbound() {
-            h.lock().unwrap().publish(pkt).unwrap();
-        }
+        u.send_key_package(group, kp).unwrap();
     }
 
     // Step 3: Broadcast every KP packet to every participant (mocks pubsub).
@@ -132,10 +125,10 @@ fn concurrent_joins_leave_joiners_with_empty_buffer() {
         all_kp_packets.extend(h.lock().unwrap().drain_packets());
     }
     for p in &all_kp_packets {
-        let _ = alice.process_inbound_packet(to_in(p));
-        let _ = bob.process_inbound_packet(to_in(p));
-        let _ = charlie.process_inbound_packet(to_in(p));
-        let _ = dave.process_inbound_packet(to_in(p));
+        route(&alice, p);
+        route(&bob, p);
+        route(&charlie, p);
+        route(&dave, p);
     }
     settle();
 

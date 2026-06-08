@@ -12,11 +12,11 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread::sleep;
 use std::time::Duration;
 
-use de_mls::app::{ConversationConfig, SessionRunner, User};
+use de_mls::app::{ConversationConfig, Inbound, SessionRunner, User};
 use de_mls::core::StewardListConfig;
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory};
 use de_mls::ds::{
-    DeliveryService, DeliveryServiceError, InboundPacket, OutboundPacket, SharedDeliveryService,
+    DeliveryService, DeliveryServiceError, OutboundPacket, SharedDeliveryService, WELCOME_SUBTOPIC,
 };
 use prost::Message;
 
@@ -147,16 +147,20 @@ pub fn make_user(
     (user, transport)
 }
 
-/// Convert an outbound packet (captured from one transport) into an
-/// inbound packet ready to feed into another User's `process_inbound_packet`.
-pub fn to_inbound(p: &OutboundPacket) -> InboundPacket {
-    InboundPacket::new(
-        p.payload.clone(),
-        &p.subtopic,
-        &p.conversation_id,
-        p.app_id.clone(),
-        0,
-    )
+/// Route a captured outbound packet into another User's inbound entry,
+/// mimicking the integrator: the welcome channel carries a key-package
+/// announcement, every other channel carries conversation traffic.
+fn route_inbound(user: &TestUser, p: &OutboundPacket) {
+    let inbound = Inbound {
+        conversation_id: p.conversation_id.clone(),
+        sender: p.app_id.clone(),
+        payload: p.payload.clone(),
+    };
+    let _ = if p.subtopic == WELCOME_SUBTOPIC {
+        user.receive_key_package(inbound)
+    } else {
+        user.handle_inbound(inbound)
+    };
 }
 
 /// Sleep 100 ms — recovery_cascade.rs convention for letting an
@@ -170,10 +174,9 @@ pub fn settle_for(d: Duration) {
     sleep(d);
 }
 
-/// Deliver one packet to a single user. Returns the raw `process_inbound_packet`
-/// result so the caller can assert success or error.
+/// Deliver one packet to a single user, routed by its channel.
 pub fn deliver(user: &TestUser, p: &OutboundPacket) {
-    let _ = user.process_inbound_packet(to_inbound(p));
+    route_inbound(user, p);
 }
 
 /// Deliver each packet to every receiver. Errors are swallowed (mirrors
@@ -182,7 +185,7 @@ pub fn deliver(user: &TestUser, p: &OutboundPacket) {
 pub fn broadcast(packets: &[OutboundPacket], receivers: &[&TestUser]) {
     for p in packets {
         for r in receivers {
-            let _ = r.process_inbound_packet(to_inbound(p));
+            route_inbound(r, p);
         }
     }
 }
@@ -200,9 +203,9 @@ pub fn route_welcomes(sessions: &[SessionArc], users: &mut [(TestUser, Transport
     use de_mls::protos::de_mls::messages::v1::MemberWelcome;
 
     // Pair each welcome with its emitter's app_id. The bundled sync is the
-    // welcomer's outbound packet, so the replayed `InboundPacket` must carry
-    // the welcomer's app_id — replaying it under the joiner's own app_id
-    // would trip `process_inbound_packet`'s echo-dedup and silently drop it.
+    // welcomer's outbound packet, so the replayed `Inbound` must carry the
+    // welcomer's app_id — replaying it under the joiner's own app_id would
+    // trip `handle_inbound`'s echo-dedup and silently drop it.
     let mut welcomes: Vec<(MemberWelcome, Vec<u8>)> = Vec::new();
     for (i, s) in sessions.iter().enumerate() {
         let welcomer_app_id = users[i].0.app_id().to_vec();
@@ -226,14 +229,11 @@ pub fn route_welcomes(sessions: &[SessionArc], users: &mut [(TestUser, Transport
             if u.accept_welcome(&welcome.welcome_bytes).is_ok() {
                 delivered += 1;
                 if !welcome.conversation_sync_bytes.is_empty() {
-                    let sync_pkt = de_mls::ds::InboundPacket::new(
-                        welcome.conversation_sync_bytes.clone(),
-                        de_mls::ds::APP_MSG_SUBTOPIC,
-                        &conv_name,
-                        welcomer_app_id.clone(),
-                        0,
-                    );
-                    let _ = u.process_inbound_packet(sync_pkt);
+                    let _ = u.handle_inbound(Inbound {
+                        conversation_id: conv_name.clone(),
+                        sender: welcomer_app_id.clone(),
+                        payload: welcome.conversation_sync_bytes.clone(),
+                    });
                 }
             }
         }
@@ -273,10 +273,10 @@ pub fn poll_once(session: &SessionArc) {
 /// pull-only — direct session calls in tests buffer here instead of sending;
 /// this stands in for the integrator's drain-and-publish.
 pub fn flush_session(session: &SessionArc, transport: &TransportHandle) {
-    let packets = session.read().unwrap().drain_outbound();
+    let outbound = session.read().unwrap().drain_outbound();
     let mut t = transport.lock().unwrap();
-    for pkt in packets {
-        t.publish(pkt).expect("capture publish");
+    for out in outbound {
+        t.publish(out.into()).expect("capture publish");
     }
 }
 
@@ -288,8 +288,8 @@ pub fn flush_user(user: &TestUser, transport: &TransportHandle) {
     let mut t = transport.lock().unwrap();
     for name in user.list_conversations().unwrap_or_default() {
         if let Ok(Some(session)) = user.lookup_entry(&name) {
-            for pkt in session.read().unwrap().drain_outbound() {
-                t.publish(pkt).expect("capture publish");
+            for out in session.read().unwrap().drain_outbound() {
+                t.publish(out.into()).expect("capture publish");
             }
         }
     }
@@ -348,22 +348,19 @@ pub fn bootstrap_joined_conversation(
         );
     }
 
-    // Joiners send KPs. Drain joiner transports, deliver to creator.
-    for i in 1..users.len() {
-        let kp = users[i].0.generate_key_package().expect("kp");
-        sessions[i]
-            .read()
-            .unwrap()
-            .send_key_package(kp)
-            .expect("send kp");
-        flush_session(&sessions[i], &users[i].1);
+    // Joiners announce KPs. Key-package send is user-level and publishes
+    // straight to the user's transport. Drain joiner transports, deliver to
+    // creator.
+    for (u, _) in users.iter().skip(1) {
+        let kp = u.generate_key_package().expect("kp");
+        u.send_key_package(conversation, kp).expect("send kp");
     }
     let mut kp_packets = Vec::new();
     for (_, h) in users.iter().skip(1) {
         kp_packets.extend(h.lock().unwrap().drain_packets());
     }
     for p in &kp_packets {
-        let _ = users[0].0.process_inbound_packet(to_inbound(p));
+        route_inbound(&users[0].0, p);
     }
 
     // Drive every session's polling and shuttle outbound packets until
@@ -396,11 +393,11 @@ pub fn bootstrap_joined_conversation(
         for (_, h) in &users {
             packets.extend(h.lock().unwrap().drain_packets());
         }
-        // Deliver each packet to every user. `process_inbound_packet`
-        // dedups echoes of our own messages via `app_id`.
+        // Deliver each packet to every user. Inbound dedups echoes of our
+        // own messages via `app_id`.
         for p in &packets {
             for (u, _) in &users {
-                let _ = u.process_inbound_packet(to_inbound(p));
+                route_inbound(u, p);
             }
         }
 

@@ -1,7 +1,8 @@
 use std::sync::{Arc, atomic::Ordering};
 
 use de_mls::{
-    app::UserError, ds::WakuDeliveryService,
+    app::{Inbound, UserError},
+    ds::WakuDeliveryService,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo, encode_hex, format_conversation_request};
@@ -180,26 +181,24 @@ impl Gateway<WakuDeliveryService> {
                 }
 
                 let conversation_id = pkt.conversation_id.clone();
+                let is_welcome_channel = pkt.subtopic == de_mls::ds::WELCOME_SUBTOPIC;
 
-                if pkt.subtopic == de_mls::ds::WELCOME_SUBTOPIC
+                if is_welcome_channel
                     && let Some(mw) = crate::welcome_envelope::decode(&pkt.payload)
                 {
                     let accepted = user.write().await.accept_welcome(&mw.welcome_bytes);
                     match accepted {
                         Ok(_) if !mw.conversation_sync_bytes.is_empty() => {
-                            // Replay the bundled ConversationSync
-                            // through the standard inbound path now
-                            // that MLS is attached — the sync payload
-                            // is an MLS-encrypted app message
+                            // Replay the bundled ConversationSync through the
+                            // standard inbound path now that MLS is attached —
+                            // the sync payload is an MLS-encrypted app message
                             // addressed to the new epoch.
-                            let sync_pkt = de_mls::ds::InboundPacket::new(
-                                mw.conversation_sync_bytes,
-                                de_mls::ds::APP_MSG_SUBTOPIC,
-                                &pkt.conversation_id,
-                                pkt.app_id.clone(),
-                                pkt.timestamp,
-                            );
-                            if let Err(e) = user.read().await.process_inbound_packet(sync_pkt) {
+                            let sync_inbound = Inbound {
+                                conversation_id: pkt.conversation_id.clone(),
+                                sender: pkt.app_id.clone(),
+                                payload: mw.conversation_sync_bytes,
+                            };
+                            if let Err(e) = user.read().await.handle_inbound(sync_inbound) {
                                 tracing::warn!(
                                     group = %conversation_id,
                                     error = %e,
@@ -219,8 +218,21 @@ impl Gateway<WakuDeliveryService> {
                     continue;
                 }
 
-                if let Err(e) = user.read().await.process_inbound_packet(pkt) {
-                    tracing::error!(group = %conversation_id, error = %e, "process_inbound_packet failed");
+                // Route by the integrator's own channel knowledge: the welcome
+                // channel carries a joiner's key-package announcement; every
+                // other channel carries conversation traffic.
+                let inbound = Inbound {
+                    conversation_id: pkt.conversation_id.clone(),
+                    sender: pkt.app_id,
+                    payload: pkt.payload,
+                };
+                let result = if is_welcome_channel {
+                    user.read().await.receive_key_package(inbound)
+                } else {
+                    user.read().await.handle_inbound(inbound)
+                };
+                if let Err(e) = result {
+                    tracing::error!(group = %conversation_id, error = %e, "inbound handling failed");
                 }
 
                 // Push refreshed approved queue + epoch history + members.

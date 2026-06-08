@@ -1,4 +1,4 @@
-//! Application message roundtrip through `SessionRunner::send_app_message`
+//! Application message roundtrip through `SessionRunner::push_message`
 //! and `SessionRunner::dispatch_inbound_result` → `SessionEvent::AppMessage`.
 
 use std::time::Duration;
@@ -8,7 +8,7 @@ use de_mls::protos::de_mls::messages::v1::app_message;
 
 mod common;
 use common::session_fixtures::{
-    bootstrap_joined_conversation, fast_test_config, flush_user, settle_for, to_inbound,
+    bootstrap_joined_conversation, deliver, fast_test_config, flush_user, settle_for,
 };
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -29,7 +29,7 @@ fn chat_message_delivered_to_peer_as_app_message_event() {
     alice_session
         .write()
         .unwrap()
-        .send_app_message(b"Hello from alice".to_vec())
+        .push_message(b"Hello from alice".to_vec())
         .unwrap();
 
     // Relay alice's outbound to bob.
@@ -37,7 +37,7 @@ fn chat_message_delivered_to_peer_as_app_message_event() {
     flush_user(&users[0].0, &users[0].1);
     let packets = users[0].1.lock().unwrap().drain_packets();
     for p in packets {
-        let _ = users[1].0.process_inbound_packet(to_inbound(&p));
+        deliver(&users[1].0, &p);
     }
 
     let chat = bob_session

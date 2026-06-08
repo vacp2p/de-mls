@@ -18,7 +18,7 @@ use de_mls::protos::de_mls::messages::v1::{
 
 mod common;
 use common::session_fixtures::{
-    bootstrap_joined_conversation, fast_test_config, flush_user, poll_once, settle_for, to_inbound,
+    bootstrap_joined_conversation, deliver, fast_test_config, flush_user, poll_once, settle_for,
 };
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -81,11 +81,11 @@ fn silent_steward_drives_observer_to_reelection() {
         }
         let packets = users[0].1.lock().unwrap().drain_packets();
         for p in packets {
-            let _ = users[1].0.process_inbound_packet(to_inbound(&p));
+            deliver(&users[1].0, &p);
         }
         let packets = users[1].1.lock().unwrap().drain_packets();
         for p in packets {
-            let _ = users[0].0.process_inbound_packet(to_inbound(&p));
+            deliver(&users[0].0, &p);
         }
         let observer_approved = observer_session
             .read()
@@ -117,7 +117,7 @@ fn silent_steward_drives_observer_to_reelection() {
         let _ = steward_tx.lock().unwrap().drain_packets();
         let packets = observer_tx.lock().unwrap().drain_packets();
         for p in packets {
-            let _ = users[steward_idx].0.process_inbound_packet(to_inbound(&p));
+            deliver(&users[steward_idx].0, &p);
         }
 
         let observer_state = observer_session.read().unwrap().get_conversation_state();

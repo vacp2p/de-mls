@@ -323,8 +323,8 @@ impl Gateway<WakuDeliveryService> {
                     if !outbound.is_empty()
                         && let Ok(mut t) = transport.lock()
                     {
-                        for pkt in outbound {
-                            if let Err(e) = t.publish(pkt) {
+                        for out in outbound {
+                            if let Err(e) = t.publish(out.into()) {
                                 tracing::warn!(
                                     conversation = %name,
                                     error = %e,

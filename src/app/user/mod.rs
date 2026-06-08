@@ -11,16 +11,19 @@
 //! - [`lifecycle`] — `start_conversation`, `leave_conversation` (registry CUD).
 //! - [`registry`] — `lookup_entry`, `list_conversations`,
 //!   `subscribe_conversations`.
-//! - [`inbound`] — `process_inbound_packet`, welcome-subtopic handler,
+//! - [`inbound`] — `handle_inbound` / `receive_key_package` entry points,
 //!   `finalize_self_leave` (registry-side completion of `LeaveConversation`).
 //! - [`plugins`] — `UserPlugins<P, CP>` bundle + `ConsensusContext<P>`.
 //!   Reference per-conversation plug-in impls live in [`crate::defaults`].
 
 mod inbound;
 mod lifecycle;
+mod lock;
 mod plugins;
 mod registry;
 mod state;
 
+pub use inbound::Inbound;
+pub(crate) use lock::LockExt;
 pub use plugins::{ConsensusContext, UserPlugins};
 pub use state::{SessionEntry, User};

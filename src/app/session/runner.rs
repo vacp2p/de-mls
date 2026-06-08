@@ -15,13 +15,12 @@ use tracing::info;
 use hashgraph_like_consensus::events::ConsensusEventBus;
 
 use crate::{
-    app::{PhaseTimer, SessionTick},
+    app::{Outbound, PhaseTimer, SessionTick},
     core::{
         ConsensusPlugin, ConsensusServiceFor, Conversation, ConversationConfig,
         ConversationPluginsFactory, ConversationQueues, ConversationState,
         ConversationStateMachine, SessionEvent,
     },
-    ds::OutboundPacket,
 };
 
 /// Receiver type the runner drains from `tick_deadlines`. Resolves to the
@@ -83,11 +82,11 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// `Mutex` so producer-side `emit_event` stays `&self`; consumers
     /// drain via [`Self::drain_events`] once per polling cycle.
     pending_events: Mutex<Vec<SessionEvent>>,
-    /// Outbound packets the conversation produced, waiting for the
-    /// integrator to publish. The session never sends — it buffers here and
-    /// the caller drains via [`Self::drain_outbound`] once per cycle. Interior
-    /// `Mutex` so producer-side `enqueue_outbound` stays `&self`.
-    pending_outbound: Mutex<Vec<OutboundPacket>>,
+    /// Outbound the conversation produced, waiting for the integrator to
+    /// publish. The session never sends — it buffers here and the caller
+    /// drains via [`Self::drain_outbound`] once per cycle. Interior `Mutex`
+    /// so producer-side `broadcast` stays `&self`.
+    pending_outbound: Mutex<Vec<Outbound>>,
 }
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
@@ -217,28 +216,34 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         }
     }
 
-    /// Buffer an outbound packet for the integrator to publish. Stays
-    /// `&self` thanks to the interior `Mutex`, so send sites in `&self`
-    /// methods don't escalate to a write guard. The session never sends —
-    /// the caller drains via [`Self::drain_outbound`] and routes each packet.
-    pub(crate) fn enqueue_outbound(&self, packet: OutboundPacket) {
+    /// Buffer encrypted conversation traffic (chat, votes, sync, commit
+    /// candidates) as an [`Outbound`], stamped with this conversation and the
+    /// local sender. Stays `&self` thanks to the interior `Mutex`, so send
+    /// sites in `&self` methods don't escalate to a write guard. The session
+    /// never sends — the caller drains via [`Self::drain_outbound`].
+    pub(crate) fn broadcast(&self, payload: Vec<u8>) {
+        let out = Outbound {
+            conversation_id: self.conversation_id.clone(),
+            sender: self.app_id.to_vec(),
+            payload,
+        };
         match self.pending_outbound.lock() {
-            Ok(mut buf) => buf.push(packet),
+            Ok(mut buf) => buf.push(out),
             Err(_) => {
-                tracing::error!("outbound buffer mutex poisoned; packet dropped")
+                tracing::error!("outbound buffer mutex poisoned; item dropped")
             }
         }
     }
 
-    /// Drain every buffered outbound packet accumulated since the last call,
+    /// Drain every buffered [`Outbound`] accumulated since the last call,
     /// in insertion order. The integrator invokes this once per cycle (after
-    /// `poll` / `handle_inbound` / an intent) and publishes each packet on
-    /// its own transport.
-    pub fn drain_outbound(&self) -> Vec<OutboundPacket> {
+    /// `poll` / `handle_inbound` / an intent) and maps each item onto its
+    /// own transport.
+    pub fn drain_outbound(&self) -> Vec<Outbound> {
         match self.pending_outbound.lock() {
             Ok(mut buf) => std::mem::take(&mut *buf),
             Err(_) => {
-                tracing::error!("outbound buffer mutex poisoned; integrator will miss packets");
+                tracing::error!("outbound buffer mutex poisoned; integrator will miss outbound");
                 Vec::new()
             }
         }

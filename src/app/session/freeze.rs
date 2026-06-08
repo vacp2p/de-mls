@@ -136,8 +136,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     // Bundle ConversationSync (steward list + timing +
                     // scores) into the welcome event so the integrator
                     // delivers both atomically. The joiner replays the
-                    // sync payload through `process_inbound_packet`
-                    // after MLS attaches.
+                    // sync payload through `handle_inbound` after MLS
+                    // attaches.
                     //
                     // Reconcile the list to the just-merged epoch first, so a
                     // small group's sync carries the regenerated, joiner-
@@ -145,9 +145,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     // group leaves the list for the post-commit election.
                     welcome.conversation_sync_bytes = {
                         let _ = self.reconcile_steward_list()?;
-                        self.build_conversation_sync_packet()?
-                            .map(|p| p.payload)
-                            .unwrap_or_default()
+                        self.build_conversation_sync_payload()?.unwrap_or_default()
                     };
                     self.emit_event(SessionEvent::WelcomeReady(welcome));
                 }
@@ -264,13 +262,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         self.conversation.queues.start_freeze_round(epoch);
 
         let self_member_id = Arc::clone(&self.self_member_id);
-        let app_id = Arc::clone(&self.app_id);
         let outbound = if self.conversation.steward_list.is_steward(&self_member_id) {
-            match self
-                .conversation
-                .create_commit_candidate(&self_member_id, &app_id)
-            {
-                Ok(packets) => packets,
+            match self.conversation.create_commit_candidate(&self_member_id) {
+                Ok(payload) => payload,
                 Err(e) => {
                     error!(
                         conversation = %self.conversation_id,
@@ -292,8 +286,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
         self.emit_event(SessionEvent::PhaseChange(event));
 
-        if let Some(message) = outbound {
-            self.enqueue_outbound(message);
+        if let Some(payload) = outbound {
+            self.broadcast(payload);
         }
 
         Ok(true)

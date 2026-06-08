@@ -8,16 +8,18 @@ use std::{
     time::Duration,
 };
 
+use prost::Message;
+
 use crate::{
     app::{
         ConversationState, CreatorVote, LockExt, MemberRole, SessionRunner, SessionTick, UserError,
         UserPlugins,
     },
     core::{
-        ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, ScoringConfig,
-        SessionEvent, StewardListConfig,
+        ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory,
+        ProcessResult::JoinedConversation, ScoringConfig, SessionEvent, StewardListConfig,
     },
-    ds::SharedDeliveryService,
+    ds::{OutboundPacket, SharedDeliveryService},
     member_id::MemberId,
     mls_crypto::{KeyPackageBytes, MlsError, MlsService, key_package_bytes_from_tls},
     protos::de_mls::messages::v1::{
@@ -71,9 +73,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         self.member_id.member_id_bytes()
     }
 
-    /// Per-instance `app_id` embedded in every outbound packet. Inbound
-    /// packets carrying this `app_id` are self-echoes and are dropped
-    /// by [`Self::process_inbound_packet`].
+    /// Per-instance `app_id` stamped on every outbound. Inbound carrying
+    /// this `app_id` is a self-echo and is dropped by
+    /// [`Self::handle_inbound`] / [`Self::receive_key_package`].
     pub fn app_id(&self) -> &[u8] {
         &self.app_id
     }
@@ -115,10 +117,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     }
 
     /// Send a chat message on `conversation_id`. Thin wrapper over
-    /// [`SessionRunner::send_app_message`]. Errors with
+    /// [`SessionRunner::push_message`]. Errors with
     /// `ConversationNotFound` if the conversation has been removed, or
     /// `ConversationBlocked` if the session is gating chat traffic.
-    pub fn send_app_message(
+    pub fn push_message(
         &self,
         conversation_id: &str,
         message: Vec<u8>,
@@ -126,27 +128,32 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        let tick = entry.write_or_err("session")?.send_app_message(message)?;
+        let tick = entry.write_or_err("session")?.push_message(message)?;
         self.flush(&entry)?;
         Ok(tick)
     }
 
-    /// Broadcast `key_package` on `conversation_id`'s welcome subtopic
-    /// so existing members can propose adding us. Thin wrapper over
-    /// [`SessionRunner::send_key_package`].
+    /// Announce `key_package` on `conversation_id` so existing members can
+    /// propose adding us. Key-package creation is a user-level concern — the
+    /// conversation knows nothing about how a key package is built — so this
+    /// builds the announcement and publishes it straight to the transport,
+    /// bypassing the session entirely.
     pub fn send_key_package(
         &self,
         conversation_id: &str,
         key_package: KeyPackageBytes,
-    ) -> Result<SessionTick, UserError> {
-        let entry = self
-            .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
-        let tick = entry
-            .read_or_err("session")?
-            .send_key_package(key_package)?;
-        self.flush(&entry)?;
-        Ok(tick)
+    ) -> Result<(), UserError> {
+        let invite = MemberInvite {
+            key_package_bytes: key_package.as_bytes().to_vec(),
+            member_id: key_package.member_id().to_vec(),
+        };
+        let packet =
+            OutboundPacket::key_package(conversation_id, &self.app_id, invite.encode_to_vec());
+        self.transport
+            .lock()
+            .map_err(|_| UserError::LockPoisoned("transport"))?
+            .publish(packet)?;
+        Ok(())
     }
 
     /// Walk pending deadlines on `conversation_id`. Thin wrapper over
@@ -268,11 +275,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 entry.conversation.attach_mls(svc);
             }
         }
-        self.finish_dispatch(
-            &conversation_id,
-            &entry_arc,
-            crate::core::ProcessResult::JoinedConversation(conversation_id.clone()),
-        )?;
+        self.finish_dispatch(&conversation_id, &entry_arc, JoinedConversation())?;
         self.flush(&entry_arc)?;
         let tick = entry_arc.read_or_err("session")?.tick();
         Ok((conversation_id, tick))
@@ -500,16 +503,16 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// (When `User` moves out of the library, the integrator drains and
     /// publishes directly instead.)
     pub(crate) fn flush(&self, entry: &SessionEntry<P, CP>) -> Result<(), UserError> {
-        let packets = entry.read_or_err("session")?.drain_outbound();
-        if packets.is_empty() {
+        let outbound = entry.read_or_err("session")?.drain_outbound();
+        if outbound.is_empty() {
             return Ok(());
         }
         let mut transport = self
             .transport
             .lock()
             .map_err(|_| UserError::LockPoisoned("transport"))?;
-        for packet in packets {
-            transport.publish(packet)?;
+        for out in outbound {
+            transport.publish(out.into())?;
         }
         Ok(())
     }

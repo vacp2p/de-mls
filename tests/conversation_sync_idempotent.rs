@@ -6,6 +6,7 @@
 
 use de_mls::app::MemberRole;
 use de_mls::core::StewardListConfig;
+use de_mls::ds::OutboundPacket;
 
 mod common;
 use common::session_fixtures::{bootstrap_joined_conversation, deliver, fast_test_config};
@@ -38,16 +39,17 @@ fn second_conversation_sync_is_a_no_op() {
     );
     let scores_before = bob_session.read().unwrap().get_member_scores();
 
-    // Alice builds a fresh ConversationSync packet from the current
-    // snapshot. The library returns the packet directly; this test
-    // delivers it to bob as a second sync (the first landed during
-    // bootstrap).
-    let sync_packet = alice_session
+    // Alice builds a fresh ConversationSync payload from the current
+    // snapshot. The library returns the payload directly; this test wraps
+    // it as a broadcast and delivers it to bob as a second sync (the first
+    // landed during bootstrap).
+    let sync_payload = alice_session
         .write()
         .unwrap()
-        .build_conversation_sync_packet()
+        .build_conversation_sync_payload()
         .unwrap()
-        .expect("steward must produce a sync packet");
+        .expect("steward must produce a sync payload");
+    let sync_packet = OutboundPacket::broadcast("c2", users[0].0.app_id(), sync_payload);
 
     bob_tx.lock().unwrap().drain_packets();
     deliver(&users[1].0, &sync_packet);

@@ -1,78 +1,81 @@
-//! User-side inbound entry point.
+//! User-side inbound entry points.
 //!
-//! `process_inbound_packet` owns echo dedup + name routing.
-//! `WELCOME_SUBTOPIC` packets carry [`MemberInvite`] — a peer
-//! broadcasting their own key package so existing members can propose
-//! adding them. App-message packets are handed off to
-//! [`SessionRunner::dispatch_inbound_result`] for MLS processing and
-//! per-conversation dispatch. Raw MLS welcomes never traverse the wire
-//! here — they enter the library through [`User::accept_welcome`].
+//! de-mls carries no transport subtopic: the integrator routes its own
+//! channels here. Conversation traffic (chat / vote / commit / sync — the
+//! envelope self-identifies) goes to [`User::handle_inbound`]; a joiner's
+//! key-package announcement goes to [`User::receive_key_package`]. Both own
+//! echo dedup and name-based routing to a session. Raw MLS welcomes never
+//! traverse these — they enter the library through [`User::accept_welcome`].
 
 use std::sync::{Arc, RwLock};
 
-use prost::Message;
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::{
     app::{DispatchOutcome, LockExt, SessionRunner, SessionTick, User, UserError},
-    core::{
-        ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, CoreError,
-        ProcessResult,
-    },
-    ds::{APP_MSG_SUBTOPIC, InboundPacket, WELCOME_SUBTOPIC},
-    mls_crypto::MlsService,
-    protos::de_mls::messages::v1::{
-        ConversationUpdateRequest, MemberInvite, conversation_update_request,
-    },
+    core::{ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, ProcessResult},
 };
+
+/// A payload delivered from the network into the library, addressed to a
+/// conversation. The integrator builds this from its own wire format and
+/// routes it by its own channel knowledge — de-mls assigns no transport
+/// subtopic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inbound {
+    pub conversation_id: String,
+    /// Sender's application instance id, used for echo dedup.
+    pub sender: Vec<u8>,
+    pub payload: Vec<u8>,
+}
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     // ── Public API ───────────────────────────────────────────────────
 
-    /// Process an inbound packet. The User-level entry point owns echo
-    /// dedup, name-based routing, and the welcome subtopic's plug-in-
-    /// factory access. App-message packets are handed off to the session
-    /// for MLS processing and dispatch.
-    pub fn process_inbound_packet(&self, packet: InboundPacket) -> Result<SessionTick, UserError> {
-        let conversation_id = packet.conversation_id.clone();
-
-        // Echo dedup: drop our own messages received back from pub/sub.
-        if packet.app_id.as_slice() == &*self.app_id {
+    /// Ingest conversation traffic (chat / vote / commit / sync). The
+    /// envelope self-identifies its kind, so no subtopic is needed; the
+    /// payload is decrypted and dispatched on the addressed session. Drops
+    /// self-echoes and packets for a conversation not yet MLS-attached
+    /// (`PendingJoin`).
+    pub fn handle_inbound(&self, inbound: Inbound) -> Result<SessionTick, UserError> {
+        if inbound.sender == self.app_id {
             return Ok(SessionTick::empty());
         }
-
         let entry_arc = self
-            .lookup_entry(&conversation_id)?
+            .lookup_entry(&inbound.conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
+        let result = {
+            let mut entry = entry_arc.write_or_err("session")?;
+            if entry.conversation.mls().is_none() {
+                // PendingJoin: no MLS to decrypt with yet. Dropped, not
+                // buffered — replay is a separate recovery track.
+                debug!(
+                    conversation = inbound.conversation_id,
+                    "inbound dropped: MLS not attached (still PendingJoin)"
+                );
+                return Ok(SessionTick::empty());
+            }
+            entry.conversation.process_inbound(&inbound.payload)?
+        };
+        self.finish_dispatch(&inbound.conversation_id, &entry_arc, result)?;
+        self.flush(&entry_arc)?;
+        Ok(entry_arc.read_or_err("session")?.tick())
+    }
 
-        match packet.subtopic.as_str() {
-            WELCOME_SUBTOPIC => {
-                self.process_key_package_broadcast(&conversation_id, &packet.payload, &entry_arc)?;
-                self.flush(&entry_arc)?;
-                Ok(entry_arc.read_or_err("session")?.tick())
-            }
-            APP_MSG_SUBTOPIC => {
-                let result = {
-                    let mut entry = entry_arc.write_or_err("session")?;
-                    if entry.conversation.mls().is_none() {
-                        // PendingJoin: no MLS to decrypt with yet. Dropped,
-                        // not buffered — replay is a separate recovery track.
-                        debug!(
-                            conversation = conversation_id,
-                            "app-message dropped: MLS not attached (still PendingJoin)"
-                        );
-                        return Ok(SessionTick::empty());
-                    }
-                    entry.conversation.process_inbound(&packet.payload)?
-                };
-                self.finish_dispatch(&conversation_id, &entry_arc, result)?;
-                self.flush(&entry_arc)?;
-                Ok(entry_arc.read_or_err("session")?.tick())
-            }
-            other => Err(UserError::Core(CoreError::InvalidSubtopic(
-                other.to_string(),
-            ))),
+    /// Ingest a joiner's key-package announcement. The decision to admit the
+    /// holder is a conversation decision, delegated to
+    /// [`SessionRunner::receive_key_package`].
+    pub fn receive_key_package(&self, inbound: Inbound) -> Result<SessionTick, UserError> {
+        if inbound.sender == self.app_id {
+            return Ok(SessionTick::empty());
         }
+        let entry_arc = self
+            .lookup_entry(&inbound.conversation_id)?
+            .ok_or(UserError::ConversationNotFound)?;
+        entry_arc
+            .write_or_err("session")?
+            .receive_key_package(&inbound.payload)?;
+        self.flush(&entry_arc)?;
+        Ok(entry_arc.read_or_err("session")?.tick())
     }
 
     /// User-side completion of `LeaveConversation`: drop the entry from
@@ -99,49 +102,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     }
 
     // ── Private ──────────────────────────────────────────────────────
-
-    /// Decode a key-package broadcast off `WELCOME_SUBTOPIC` and, if the
-    /// holder isn't already a member, promote it to a `MemberInvite`
-    /// membership-change request. Raw MLS welcomes do not flow here —
-    /// they enter through [`User::accept_welcome`].
-    fn process_key_package_broadcast(
-        &self,
-        conversation_id: &str,
-        payload: &[u8],
-        entry_arc: &Arc<RwLock<SessionRunner<P, CP>>>,
-    ) -> Result<(), UserError> {
-        let invite = MemberInvite::decode(payload)?;
-
-        let already_member = {
-            let entry = entry_arc.read_or_err("session")?;
-            entry
-                .conversation
-                .mls()
-                .map(|m| m.is_member(&invite.member_id))
-                .unwrap_or(false)
-        };
-        if already_member {
-            info!(
-                conversation = conversation_id,
-                member = ?invite.member_id,
-                "key package skipped: already a member"
-            );
-            return Ok(());
-        }
-
-        info!(
-            conversation = conversation_id,
-            member = ?invite.member_id,
-            "key package received"
-        );
-
-        let gur = ConversationUpdateRequest {
-            payload: Some(conversation_update_request::Payload::MemberInvite(invite)),
-        };
-        entry_arc
-            .write_or_err("session")?
-            .handle_incoming_update_request(gur)
-    }
 
     /// Drive the session-side dispatcher and finish lifecycle work on the
     /// User side when the session signals `LeaveRequested`.

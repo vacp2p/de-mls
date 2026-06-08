@@ -55,7 +55,7 @@
 //! user.start_conversation("de-mls-test", true).await?;
 //!
 //! // Send a message.
-//! user.send_app_message("de-mls-test", b"Hello, world!".to_vec()).await?;
+//! user.push_message("de-mls-test", b"Hello, world!".to_vec()).await?;
 //!
 //! // Drain lifecycle + per-session events on your polling cycle.
 //! for event in user.drain_lifecycle_events() { /* … */ }

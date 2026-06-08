@@ -22,7 +22,7 @@ use crate::{
         StewardListPlugin,
     },
     defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage},
-    ds::{OutboundPacket, SharedDeliveryService},
+    ds::SharedDeliveryService,
     member_id::MemberId,
     mls_crypto::{
         CommitCandidate, DecryptResult, MlsCommitInput, MlsCredentials, MlsError, MlsMessageKind,
@@ -151,7 +151,7 @@ impl MlsService for UnusedMls {
     fn encrypt(&mut self, _: &[u8]) -> Result<Vec<u8>, MlsError> {
         unreachable!()
     }
-    fn build_message(&mut self, _: &AppMessage, _: &[u8]) -> Result<OutboundPacket, MlsError> {
+    fn build_message(&mut self, _: &AppMessage) -> Result<Vec<u8>, MlsError> {
         unreachable!()
     }
     fn decrypt_application_only(&mut self, _: &[u8]) -> Result<DecryptResult, MlsError> {

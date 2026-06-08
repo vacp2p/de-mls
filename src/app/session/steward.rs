@@ -207,7 +207,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             "promoting buffered updates to proposals"
         );
 
-        // Buffered updates inherit the same banner path as fresh
+        // Buffered updates inherit the same vote request path as fresh
         // steward-auto-propose — the steward still decides per proposal.
         for request in to_propose {
             if let Err(e) = self.initiate_proposal(request, CreatorVote::Deferred) {
@@ -221,16 +221,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         Ok(())
     }
 
-    /// Build an encrypted `ConversationSync` packet from the current
+    /// Build an encrypted `ConversationSync` payload from the current
     /// steward list + protocol config + peer scores + timing snapshot.
     /// Returns `Ok(None)` when there's no steward list yet. The caller
-    /// owns publish: hand the packet to the transport for a
-    /// re-broadcast, or feed the payload into another channel. The
-    /// post-commit join path bundles the same payload into
-    /// [`crate::core::SessionEvent::WelcomeReady`].
-    pub fn build_conversation_sync_packet(
-        &mut self,
-    ) -> Result<Option<crate::ds::OutboundPacket>, UserError> {
+    /// owns delivery: broadcast it as an [`Outbound`](crate::app::Outbound)
+    /// or feed it into another channel. The post-commit join path bundles
+    /// the same payload into [`crate::core::SessionEvent::WelcomeReady`].
+    pub fn build_conversation_sync_payload(&mut self) -> Result<Option<Vec<u8>>, UserError> {
         // Sparse snapshot — only members whose score has diverged
         // from `default_score`. Joiners init every member at default
         // via membership sync before applying the snapshot, so
@@ -288,11 +285,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         };
 
         let app_msg: AppMessage = sync.into();
-        let app_id = Arc::clone(&self.app_id);
         Ok(Some(
             self.conversation
                 .expect_mls_mut()?
-                .build_message(&app_msg, &app_id)?,
+                .build_message(&app_msg)?,
         ))
     }
 
@@ -356,7 +352,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             );
             // SCORE_BELOW_THRESHOLD is self-executing: threshold crossed ⇒
             // member must be removed. The steward's vote is YES by
-            // protocol, so we bundle it at submit and skip the banner.
+            // protocol, so we bundle it at submit and skip the vote request.
             if let Err(e) = self.initiate_proposal(request, CreatorVote::Yes) {
                 self.conversation.queues.remove_pending_removal(&target_id);
                 error!(
@@ -459,7 +455,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         );
 
         // Elections are conversation-wide decisions — broadcast unbundled
-        // so the responsible proposer still votes via the banner.
+        // so the responsible proposer still votes via the vote request.
         self.initiate_proposal(request, CreatorVote::Deferred)?;
 
         Ok(())

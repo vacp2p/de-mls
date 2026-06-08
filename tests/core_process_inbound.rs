@@ -119,15 +119,12 @@ fn test_conversation_sync_propagates_divergent_per_conv_config() {
         pending_update_max_epochs: steward_handle.pending_update_max_epochs,
     };
     let app_msg: AppMessage = sync.clone().into();
-    let sync_packet = steward_handle
-        .mls
-        .build_message(&app_msg, b"test-app-id")
-        .unwrap();
+    let sync_payload = steward_handle.mls.build_message(&app_msg).unwrap();
 
     let result = process_inbound_compat(
         &mut joiner.group,
         joiner.mls.as_mut(),
-        &sync_packet.payload,
+        &sync_payload,
         APP_MSG_SUBTOPIC,
     )
     .unwrap();

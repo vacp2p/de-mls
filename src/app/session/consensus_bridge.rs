@@ -111,7 +111,7 @@ where
 }
 
 /// Forward a peer's proposal into the local consensus service. The caller
-/// decides whether to emit a banner event — for fast-path proposals
+/// decides whether to emit a vote request event — for fast-path proposals
 /// (`expected_voters_count == 1`) the session resolves on arrival, so
 /// there's nothing to vote on.
 pub(crate) fn forward_incoming_proposal<P: ConsensusPlugin>(

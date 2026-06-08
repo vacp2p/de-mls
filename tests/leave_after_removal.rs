@@ -13,7 +13,7 @@ use de_mls::protos::de_mls::messages::v1::{
 
 mod common;
 use common::session_fixtures::{
-    bootstrap_joined_conversation, fast_test_config, flush_user, settle_for, to_inbound,
+    bootstrap_joined_conversation, deliver, fast_test_config, flush_user, settle_for,
 };
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -98,7 +98,7 @@ fn removed_member_emits_leaving_and_is_evicted() {
         }
         for p in &packets {
             for (u, _) in &users {
-                let _ = u.process_inbound_packet(to_inbound(p));
+                deliver(u, p);
             }
         }
         if users[target_idx].0.lookup_entry("leave").unwrap().is_none() {

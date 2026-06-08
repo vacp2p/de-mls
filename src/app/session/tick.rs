@@ -26,11 +26,11 @@ use std::time::Duration;
 ///   is when the local auto-vote casts or the consensus session times out.
 ///   Informally, "wait until we vote, then the steward commits."
 /// - **Lifecycle / poll ops** — [`User::accept_welcome`],
-///   [`User::process_inbound_packet`], [`User::poll_session`],
+///   [`User::handle_inbound`], [`User::poll_session`],
 ///   [`User::tick_deadlines`]: the tick is the earliest of *all* currently
 ///   armed deadlines (commit-inactivity, freeze, recovery-inactivity,
 ///   `PendingJoin` expiry) after this op re-derived them.
-/// - **Pure sends** — [`User::send_app_message`], [`User::send_key_package`]:
+/// - **Pure sends** — [`User::push_message`], [`User::send_key_package`]:
 ///   nothing time-based is started, so the tick is usually `None`.
 ///
 /// [`User::initiate_proposal`]: crate::app::User::initiate_proposal
@@ -39,10 +39,10 @@ use std::time::Duration;
 /// [`User::process_user_vote`]: crate::app::User::process_user_vote
 /// [`User::initiate_self_leave`]: crate::app::User::initiate_self_leave
 /// [`User::accept_welcome`]: crate::app::User::accept_welcome
-/// [`User::process_inbound_packet`]: crate::app::User::process_inbound_packet
+/// [`User::handle_inbound`]: crate::app::User::handle_inbound
 /// [`User::poll_session`]: crate::app::User::poll_session
 /// [`User::tick_deadlines`]: crate::app::User::tick_deadlines
-/// [`User::send_app_message`]: crate::app::User::send_app_message
+/// [`User::push_message`]: crate::app::User::push_message
 /// [`User::send_key_package`]: crate::app::User::send_key_package
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SessionTick {
