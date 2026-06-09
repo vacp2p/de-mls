@@ -28,9 +28,6 @@ pub enum CoreError {
     #[error("Invalid conversation update request")]
     InvalidConversationUpdateRequest,
 
-    #[error("Invalid subtopic: {0}")]
-    InvalidSubtopic(String),
-
     #[error("Empty members list")]
     EmptyMembersList,
 

@@ -1,9 +1,8 @@
 //! Wire envelope for gateway-published welcomes on the welcome
 //! subtopic. Wraps a `MemberWelcome` so the receiver can tell it apart
-//! from a bare `MemberInvite` published by the library's
-//! `send_key_package` — envelope decode succeeds for welcomes; raw
-//! `MemberInvite` bytes fall through (the receiver forwards them
-//! untouched to `User::process_inbound_packet`).
+//! from a bare `MemberInvite` published by `User::send_key_package` —
+//! envelope decode succeeds for welcomes; raw `MemberInvite` bytes fall
+//! through (the receiver routes them to `User::receive_key_package`).
 //!
 //! Defined here rather than in `de_mls` because welcome delivery is the
 //! integrator's responsibility, not the protocol's.

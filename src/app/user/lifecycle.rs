@@ -45,7 +45,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             plugins: &self.plugins.conversation_plugins,
             consensus: &self.plugins.consensus,
             identity: self.member_id.as_ref(),
-            transport: Arc::clone(&self.transport),
             app_id: Arc::from(self.app_id.as_slice()),
             config,
             scoring_config: self.plugins.default_scoring_config.clone(),
@@ -109,6 +108,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             return Ok(());
         }
 
-        entry_arc.write_or_err("session")?.initiate_self_leave()
+        entry_arc.write_or_err("session")?.initiate_self_leave()?;
+        self.flush(&entry_arc)?;
+        Ok(())
     }
 }

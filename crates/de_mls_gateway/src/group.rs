@@ -72,11 +72,10 @@ impl Gateway<WakuDeliveryService> {
             .start_conversation(&conversation_id, false)?;
         core.topics.add_many(&conversation_id)?;
         let key_package = user_ref.read().await.generate_key_package()?;
-        let session = lookup_session(&user_ref, &conversation_id).await?;
-        session
+        user_ref
             .read()
-            .map_err(|_| UserError::LockPoisoned("session"))?
-            .send_key_package(key_package)?;
+            .await
+            .send_key_package(&conversation_id, key_package)?;
         tracing::info!(group = %conversation_id, "key package sent");
 
         // Phase 1 (PendingJoin): Poll every 5s until joined or timed out
@@ -255,7 +254,7 @@ impl Gateway<WakuDeliveryService> {
         session
             .write()
             .map_err(|_| UserError::LockPoisoned("session"))?
-            .send_app_message(message.into_bytes())?;
+            .push_message(message.into_bytes())?;
         tracing::debug!(group = %conversation_id, "app message sent");
         Ok(())
     }

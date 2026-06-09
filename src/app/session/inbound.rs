@@ -20,11 +20,7 @@ use tracing::{error, info};
 use crate::{
     app::{
         ConversationState, SessionRunner, UserError,
-        session::{
-            consensus::build_vote_banner_event,
-            consensus_bridge::{forward_incoming_proposal, forward_incoming_vote},
-            runner::send_packet,
-        },
+        session::consensus_bridge::{forward_incoming_proposal, forward_incoming_vote},
     },
     core::{
         ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin, ProcessResult,
@@ -33,8 +29,8 @@ use crate::{
     },
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
-        AppMessage, ConversationMessage, ConversationSync, ConversationUpdateRequest, TimingConfig,
-        conversation_update_request,
+        AppMessage, ConversationMessage, ConversationSync, ConversationUpdateRequest, MemberInvite,
+        TimingConfig, conversation_update_request,
     },
 };
 
@@ -53,11 +49,41 @@ pub enum DispatchOutcome {
 }
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
+    /// Ingest a joiner's key-package announcement (a [`MemberInvite`]): if the
+    /// holder isn't already a member, promote it to a membership-change
+    /// request the epoch steward can propose. Key-package *creation* is a
+    /// user-level concern, but deciding whether to admit the holder is a
+    /// conversation decision, so it lives here. The integrator routes its
+    /// key-package channel to this entry via `User::receive_key_package`.
+    pub fn receive_key_package(&mut self, payload: &[u8]) -> Result<(), UserError> {
+        let invite = MemberInvite::decode(payload)?;
+        let already_member = self
+            .conversation
+            .mls()
+            .map(|m| m.is_member(&invite.member_id))
+            .unwrap_or(false);
+        if already_member {
+            info!(
+                conversation = %self.conversation_id,
+                member = ?invite.member_id,
+                "key package skipped: already a member"
+            );
+            return Ok(());
+        }
+        info!(
+            conversation = %self.conversation_id,
+            member = ?invite.member_id,
+            "key package received"
+        );
+        self.handle_incoming_update_request(ConversationUpdateRequest {
+            payload: Some(conversation_update_request::Payload::MemberInvite(invite)),
+        })
+    }
+
     /// Dispatch a single [`ProcessResult`] to its branch handler. Called
-    /// by `User::process_inbound_packet` after the MLS-side
-    /// `process_inbound` returns a result, and by other call sites that
-    /// produce a `ProcessResult` (e.g. the welcome-side
-    /// `JoinedConversation`).
+    /// by `User::handle_inbound` after the MLS-side `process_inbound`
+    /// returns a result, and by other call sites that produce a
+    /// `ProcessResult` (e.g. the welcome-side `JoinedConversation`).
     pub(crate) fn dispatch_inbound_result(
         &mut self,
         result: ProcessResult,
@@ -86,10 +112,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 self.handle_incoming_update_request(*request)?;
                 Ok(DispatchOutcome::Done)
             }
-            ProcessResult::JoinedConversation(_name) => {
-                // `name` is always this conversation's name — `process_inbound`
-                // emits it via the local MLS service. Use the session's own
-                // `conversation_id` rather than the parameter.
+            ProcessResult::JoinedConversation() => {
                 self.on_joined_conversation()?;
                 Ok(DispatchOutcome::Done)
             }
@@ -167,20 +190,26 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         }
         let proposal_id = proposal.proposal_id;
         let expected_voters = proposal.expected_voters_count;
-        let payload = proposal.payload.clone();
         let kind = decoded
             .as_ref()
             .map(ProposalKind::of)
             .unwrap_or(ProposalKind::Commit);
-        let consensus = self.consensus.clone();
+
         let conversation_id = self.conversation_id.clone();
-        forward_incoming_proposal::<P>(&conversation_id, proposal, &consensus)?;
-        // Skip the banner + auto-vote for fast-path proposals: the
+        forward_incoming_proposal::<P>(&conversation_id, proposal, &self.consensus.clone())?;
+        // Skip the vote request + auto-vote for fast-path proposals: the
         // creator's bundled YES already resolved the session, so peers have
         // nothing to vote on.
         if expected_voters > 1 {
-            let banner = build_vote_banner_event(&conversation_id, proposal_id, payload);
-            self.emit_event(SessionEvent::AppMessage(banner));
+            // A votable peer proposal always decodes as a
+            // `ConversationUpdateRequest`; an opaque payload can't be
+            // surfaced for a vote, so only the auto-vote drives it.
+            if let Some(request) = decoded {
+                self.emit_event(SessionEvent::VoteRequested {
+                    proposal_id,
+                    request,
+                });
+            }
             let delay = self.conversation.config.voting_delay_for(kind);
             let vote = self.conversation.config.liveness_criteria_yes;
             self.register_auto_vote(proposal_id, delay, vote);
@@ -199,12 +228,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             conversation_id: self.conversation_id.clone(),
         }
         .into();
-        let app_id = Arc::clone(&self.app_id);
         let conversation_id = self.conversation_id.clone();
         let mls = self.conversation.expect_mls_mut()?;
         let mls_members = mls.members().unwrap_or_default();
-        let packet = mls.build_message(&msg, &app_id)?;
-        send_packet(self.transport(), packet)?;
+        let payload = mls.build_message(&msg)?;
+        self.broadcast(payload);
         self.sync_scoring_members(&mls_members);
 
         let event = self.start_working();
@@ -305,13 +333,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         self.conversation.queues.start_freeze_round(epoch);
 
         let self_member_id = Arc::clone(&self.self_member_id);
-        let app_id = Arc::clone(&self.app_id);
         let outbound = if self.conversation.steward_list.is_steward(&self_member_id) {
-            match self
-                .conversation
-                .create_commit_candidate(&self_member_id, &app_id)
-            {
-                Ok(packets) => packets,
+            match self.conversation.create_commit_candidate(&self_member_id) {
+                Ok(payload) => payload,
                 Err(e) => {
                     error!(
                         conversation = %self.conversation_id,
@@ -326,8 +350,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         };
 
         self.emit_event(SessionEvent::PhaseChange(event));
-        if let Some(message) = outbound {
-            send_packet(self.transport(), message)?;
+        if let Some(payload) = outbound {
+            self.broadcast(payload);
         }
         Ok(())
     }

@@ -27,7 +27,6 @@ use std::sync::{
     atomic::{AtomicU32, Ordering},
 };
 
-use de_mls::app::build_key_package_packet;
 use de_mls::core::{
     BufferedCommitCandidate, ConversationQueues, CoreError, DeterministicStewardList,
     FreezeOutcome, NoopReason, OperatingMode, PeerScoringService, ProcessResult, ProposalKind,
@@ -237,9 +236,7 @@ pub fn process_inbound_compat(
         };
         process_inbound(group, mls, payload)
     } else {
-        Err(de_mls::core::CoreError::InvalidSubtopic(
-            subtopic.to_string(),
-        ))
+        panic!("process_inbound_compat called with unknown subtopic: {subtopic}")
     }
 }
 
@@ -383,7 +380,12 @@ pub fn setup_joiner_with_config(
     let key_package =
         OpenMlsService::<Arc<MemoryDeMlsStorage>>::generate_key_package(&storage, &credentials)
             .unwrap();
-    let kp_packet = build_key_package_packet(conversation_id, key_package, b"test-app-id");
+    let invite = MemberInvite {
+        key_package_bytes: key_package.as_bytes().to_vec(),
+        member_id: key_package.member_id().to_vec(),
+    };
+    let kp_packet =
+        OutboundPacket::key_package(conversation_id, b"test-app-id", invite.encode_to_vec());
     JoinerHandle {
         member_id,
         credentials,

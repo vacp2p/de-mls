@@ -17,21 +17,18 @@ use de_mls::core::{ScoringConfig, SessionEvent, StewardListConfig};
 use de_mls::defaults::{
     DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage,
 };
-use de_mls::ds::SharedDeliveryService;
 use de_mls::mls_crypto::MlsCredentials;
 
-use common::session_fixtures::CapturingTransport;
 use common::wallet::WalletMemberId;
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
 /// The shared, conversation-agnostic state an integrator keeps once: the
-/// plug-in factory, the consensus context, the identity, and a transport.
+/// plug-in factory, the consensus context, and the identity.
 struct Integrator {
     plugins: DefaultConversationPluginsFactory,
     consensus: ConsensusContext<DefaultConsensusPlugin>,
     member_id: WalletMemberId,
-    transport: SharedDeliveryService,
 }
 
 impl Integrator {
@@ -44,12 +41,10 @@ impl Integrator {
         let plugins = DefaultConversationPluginsFactory::new(storage, credentials);
         let consensus =
             ConsensusContext::<DefaultConsensusPlugin>::new(EthereumConsensusSigner::new(signer));
-        let transport: SharedDeliveryService = CapturingTransport::new();
         Self {
             plugins,
             consensus,
             member_id,
-            transport,
         }
     }
 
@@ -61,7 +56,6 @@ impl Integrator {
             plugins: &self.plugins,
             consensus: &self.consensus,
             identity: &self.member_id,
-            transport: Arc::clone(&self.transport),
             app_id: Arc::from(&[0u8; 16][..]),
             config: de_mls::app::ConversationConfig::default(),
             scoring_config: ScoringConfig::default(),

@@ -21,7 +21,6 @@ use crate::{
         ConversationStateMachine, PeerScoringPlugin, ScoringConfig, SessionEvent,
         StewardListConfig, StewardListPlugin,
     },
-    ds::SharedDeliveryService,
     member_id::MemberId,
 };
 
@@ -40,8 +39,6 @@ pub struct ConversationDeps<'a, P: ConsensusPlugin, CP: ConversationPluginsFacto
     /// Local participant identity; the constructor snapshots its bytes
     /// and display form onto the runner.
     pub identity: &'a dyn MemberId,
-    /// Outbound transport, shared with the integrator's other conversations.
-    pub transport: SharedDeliveryService,
     /// Per-instance UUID stamped on every outbound packet for echo dedup.
     pub app_id: Arc<[u8]>,
     /// Durable per-conversation protocol config.
@@ -136,7 +133,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             steward_list,
             consensus,
             consensus_rx,
-            deps.transport,
             Arc::from(deps.identity.member_id_bytes()),
             Arc::from(deps.identity.member_id_display()),
             deps.app_id,

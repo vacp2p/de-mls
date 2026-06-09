@@ -3,7 +3,7 @@
 //!
 //! Integrate by constructing a [`crate::app::User`] with your
 //! `SessionEvent` / `ConversationLifecycle`, then drive it from a transport
-//! receive loop ([`crate::app::User::process_inbound_packet`]) and a
+//! receive loop ([`crate::app::User::handle_inbound`]) and a
 //! periodic poll on each conversation's
 //! [`crate::app::SessionRunner::check_member_freeze`] and
 //! [`crate::app::SessionRunner::poll_freeze_status`].
@@ -35,9 +35,9 @@ pub use crate::core::{
 pub use display::{MemberRole, MessageType, message_types};
 pub use error::UserError;
 pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer};
-pub(crate) use session::LockExt;
 pub use session::{
-    ConversationDeps, CreatorVote, DispatchOutcome, PendingJoinTick, SessionRunner, SessionTick,
-    build_key_package_packet,
+    ConversationDeps, CreatorVote, DispatchOutcome, Outbound, PendingJoinTick, SessionRunner,
+    SessionTick,
 };
-pub use user::{ConsensusContext, SessionEntry, User, UserPlugins};
+pub(crate) use user::LockExt;
+pub use user::{ConsensusContext, Inbound, SessionEntry, User, UserPlugins};

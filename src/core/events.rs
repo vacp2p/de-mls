@@ -44,6 +44,15 @@ pub enum SessionEvent {
         request: ConversationUpdateRequest,
     },
 
+    /// A peer's consensus proposal needs the local user's vote. The
+    /// integrator surfaces a vote affordance however it wishes; an auto-vote
+    /// fires after the configured delay if no manual vote arrives. Peer-side
+    /// mirror of [`Self::OwnProposalSubmitted`].
+    VoteRequested {
+        proposal_id: u32,
+        request: ConversationUpdateRequest,
+    },
+
     /// A freeze round merged a commit; `batch` is the set of approved
     /// proposals that landed in this commit (in insertion order).
     CommitApplied(Vec<ConversationUpdateRequest>),

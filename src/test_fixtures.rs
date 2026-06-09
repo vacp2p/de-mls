@@ -22,7 +22,7 @@ use crate::{
         StewardListPlugin,
     },
     defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage},
-    ds::{OutboundPacket, SharedDeliveryService},
+    ds::SharedDeliveryService,
     member_id::MemberId,
     mls_crypto::{
         CommitCandidate, DecryptResult, MlsCommitInput, MlsCredentials, MlsError, MlsMessageKind,
@@ -103,23 +103,6 @@ pub(crate) fn make_test_consensus_service() -> (
     (service, rx)
 }
 
-/// Transport stub for tests. `publish` is unreachable (tests should never
-/// push outbound) and `subscribe` is a no-op.
-#[derive(Debug)]
-pub(crate) struct UnusedTransport;
-
-impl crate::ds::DeliveryService for UnusedTransport {
-    type Error = crate::ds::DeliveryServiceError;
-
-    fn publish(&mut self, _: crate::ds::OutboundPacket) -> Result<(), Self::Error> {
-        unreachable!("UnusedTransport::publish called")
-    }
-
-    fn subscribe(&mut self, _delivery_address: &str) -> Result<(), Self::Error> {
-        Ok(())
-    }
-}
-
 /// MLS service that errors on every operation. Lets tests construct a
 /// `Conversation` whose early-return paths never invoke MLS.
 pub(crate) struct UnusedMls;
@@ -168,7 +151,7 @@ impl MlsService for UnusedMls {
     fn encrypt(&mut self, _: &[u8]) -> Result<Vec<u8>, MlsError> {
         unreachable!()
     }
-    fn build_message(&mut self, _: &AppMessage, _: &[u8]) -> Result<OutboundPacket, MlsError> {
+    fn build_message(&mut self, _: &AppMessage) -> Result<Vec<u8>, MlsError> {
         unreachable!()
     }
     fn decrypt_application_only(&mut self, _: &[u8]) -> Result<DecryptResult, MlsError> {

@@ -6,17 +6,13 @@
 use std::sync::Arc;
 
 use hashgraph_like_consensus::{error::ConsensusError, storage::ConsensusStorage};
-use prost::Message;
 use tracing::info;
 
 use crate::{
     app::{
         ConversationState, SessionRunner, SessionTick, UserError,
-        session::{
-            consensus_bridge::{
-                ProposalParams, cast_vote, submit_proposal, submit_self_leave_proposal,
-            },
-            runner::send_packet,
+        session::consensus_bridge::{
+            ProposalParams, cast_vote, submit_proposal, submit_self_leave_proposal,
         },
     },
     core::{
@@ -25,8 +21,7 @@ use crate::{
     },
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
-        AppMessage, ConversationUpdateRequest, RemoveMember, VotePayload,
-        conversation_update_request,
+        AppMessage, ConversationUpdateRequest, RemoveMember, conversation_update_request,
     },
 };
 
@@ -36,10 +31,10 @@ use crate::{
 pub enum CreatorVote {
     /// Creator commits YES at submit. Vote is bundled with the proposal
     /// in one atomic wire message; local UI gets `OwnProposalSubmitted`
-    /// (no banner). Used for unambiguous actions: ban-button click,
+    /// (no vote request). Used for unambiguous actions: ban-button click,
     /// self-executing protocol moves (`SCORE_BELOW_THRESHOLD`, `Deadlock`).
     Yes,
-    /// Creator hasn't decided. Broadcast unbundled; local UI banners
+    /// Creator hasn't decided. Broadcast unbundled; local UI vote requests
     /// alongside the auto-vote timer (`liveness_criteria_yes` after
     /// `voting_delay_for`). Used for steward auto-propose paths where
     /// the steward still exercises judgement.
@@ -52,27 +47,6 @@ struct NewProposal {
     expected_voters: u32,
     kind: ProposalKind,
     creator_vote: CreatorVote,
-}
-
-/// Build the `AppMessage` carrying a `VotePayload` for banner display in
-/// the local UI. Used both by the creator's `Deferred` submit path
-/// (own proposal) and by peers receiving an unbundled `Proposal` over the
-/// wire — both render the same banner.
-pub(crate) fn build_vote_banner_event(
-    conversation_id: &str,
-    proposal_id: u32,
-    payload: Vec<u8>,
-) -> AppMessage {
-    VotePayload {
-        conversation_id: conversation_id.to_string(),
-        proposal_id,
-        payload,
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-    }
-    .into()
 }
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
@@ -166,7 +140,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         if should_propose {
             // Steward auto-propose: the steward forwards peer intent and
             // still holds a judgement call, so we broadcast unbundled and
-            // let the banner drive the steward's vote like any other member.
+            // let the vote request drive the steward's vote like any other member.
             // `check_proposal_allowed` may still reject (active emergency
             // etc.) — leave the entry in the buffer for next rotation.
             if let Err(e) = self.initiate_proposal(request, CreatorVote::Deferred) {
@@ -191,12 +165,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         self.cancel_auto_vote(proposal_id);
 
         let app_message = cast_vote::<P>(&conversation_id, proposal_id, vote, &consensus)?;
-        let app_id = Arc::clone(&self.app_id);
-        let packet = self
+        let payload = self
             .conversation
             .expect_mls_mut()?
-            .build_message(&app_message, &app_id)?;
-        send_packet(self.transport(), packet)?;
+            .build_message(&app_message)?;
+        self.broadcast(payload);
         Ok(())
     }
 
@@ -320,12 +293,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             return Ok(());
         };
 
-        let app_id = Arc::clone(&self.app_id);
-        let packet = self
+        let payload = self
             .conversation
             .expect_mls_mut()?
-            .build_message(&app_msg, &app_id)?;
-        send_packet(self.transport(), packet)?;
+            .build_message(&app_msg)?;
+        self.broadcast(payload);
         Ok(())
     }
 
@@ -361,10 +333,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
     /// Open the consensus session, record ownership, then either bundle
     /// the creator's vote or broadcast unbundled depending on
-    /// `creator_vote`. Always notifies our own UI — via
-    /// `OwnProposalSubmitted` when bundled (no banner, history cache
-    /// only) or via `AppMessage(VotePayload)` when unbundled (banner
-    /// shows, same path peers use).
+    /// `creator_vote`. Always notifies the integrator — via
+    /// `OwnProposalSubmitted` when bundled (history only, no vote
+    /// affordance) or via `VoteRequested` when unbundled (same event peers
+    /// receive for the proposal).
     ///
     /// Ownership is stored *before* the vote is cast, so a single-voter
     /// consensus transition can't race `is_owner=false` when the drain
@@ -426,31 +398,30 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     "YES vote cast (bundled at submit)"
                 );
                 let outbound: AppMessage = proposal.into();
-                let app_id = Arc::clone(&self.app_id);
-                let packet = self
+                let payload = self
                     .conversation
                     .expect_mls_mut()?
-                    .build_message(&outbound, &app_id)?;
-                send_packet(self.transport(), packet)?;
-                // Creator already voted — populate history cache, no banner.
+                    .build_message(&outbound)?;
+                self.broadcast(payload);
+                // Creator already voted — populate history cache, no vote request.
                 self.emit_event(SessionEvent::OwnProposalSubmitted {
                     proposal_id,
                     request,
                 });
             }
             CreatorVote::Deferred => {
-                // Unbundled path: broadcast the proposal alone. Show the
-                // creator the banner like peers and start their own
-                // auto-vote timer; peers run their own timers locally.
-                let app_id = Arc::clone(&self.app_id);
-                let packet = self
+                // Unbundled path: broadcast the proposal alone. Surface the
+                // vote request to the creator like any peer and start their
+                // own auto-vote timer; peers run their own timers locally.
+                let payload = self
                     .conversation
                     .expect_mls_mut()?
-                    .build_message(&unbundled, &app_id)?;
-                send_packet(self.transport(), packet)?;
-                let banner =
-                    build_vote_banner_event(&conversation_id, proposal_id, request.encode_to_vec());
-                self.emit_event(SessionEvent::AppMessage(banner));
+                    .build_message(&unbundled)?;
+                self.broadcast(payload);
+                self.emit_event(SessionEvent::VoteRequested {
+                    proposal_id,
+                    request,
+                });
                 self.register_auto_vote(proposal_id, voting_delay, liveness_criteria_yes);
             }
         }
@@ -513,12 +484,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         let consensus = self.consensus.clone();
         let conversation_id = self.conversation_id.clone();
         let app_message = cast_vote::<P>(&conversation_id, proposal_id, vote, &consensus)?;
-        let app_id = Arc::clone(&self.app_id);
-        let packet = self
+        let payload = self
             .conversation
             .expect_mls_mut()?
-            .build_message(&app_message, &app_id)?;
-        send_packet(self.transport(), packet)?;
+            .build_message(&app_message)?;
+        self.broadcast(payload);
         Ok(())
     }
 }

@@ -9,8 +9,8 @@ use de_mls::core::{ConversationState, StewardListConfig};
 
 mod common;
 use common::session_fixtures::{
-    SessionArc, TestUser, TransportHandle, bootstrap_joined_conversation, fast_test_config,
-    poll_once, settle_for, to_inbound,
+    SessionArc, TestUser, TransportHandle, bootstrap_joined_conversation, deliver,
+    fast_test_config, flush_user, poll_once, settle_for,
 };
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -20,13 +20,16 @@ const CHARLIE: &str = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804c
 /// Drain every transport and feed each packet to every user, mirroring the
 /// gateway relay. Echo-dedup drops a user's own packets.
 fn relay_all(users: &[(TestUser, TransportHandle)]) {
+    for (u, h) in users {
+        flush_user(u, h);
+    }
     let mut packets = Vec::new();
     for (_, h) in users {
         packets.extend(h.lock().unwrap().drain_packets());
     }
     for p in &packets {
         for (u, _) in users {
-            let _ = u.process_inbound_packet(to_inbound(p));
+            deliver(u, p);
         }
     }
 }

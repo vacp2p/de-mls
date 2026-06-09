@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::ds::DeliveryServiceError;
+use crate::ds::{APP_MSG_SUBTOPIC, DeliveryServiceError, WELCOME_SUBTOPIC};
 
 /// A transport-agnostic packet that should be sent to the network.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +25,19 @@ impl OutboundPacket {
             conversation_id: conversation_id.to_string(),
             app_id: app_id.to_vec(),
         }
+    }
+
+    /// Conversation broadcast traffic (chat, votes, sync, commit candidates).
+    /// Owns the application-message subtopic so callers carry no subtopic
+    /// knowledge.
+    pub fn broadcast(conversation_id: &str, sender: &[u8], payload: Vec<u8>) -> Self {
+        Self::new(payload, APP_MSG_SUBTOPIC, conversation_id, sender)
+    }
+
+    /// A joiner's key-package announcement, routed on the welcome subtopic so
+    /// existing members can propose the joiner for an Add.
+    pub fn key_package(conversation_id: &str, sender: &[u8], payload: Vec<u8>) -> Self {
+        Self::new(payload, WELCOME_SUBTOPIC, conversation_id, sender)
     }
 
     /// Address this packet is delivered to.

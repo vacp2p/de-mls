@@ -7,14 +7,18 @@
 //! variants on the UI pipe — also maintaining the per-group
 //! `epoch_history` cache used by the History tab.
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use futures::channel::mpsc::UnboundedSender;
+use prost::Message;
 
 use de_mls::{
     core::SessionEvent,
     ds::{OutboundPacket, SharedDeliveryService, TopicFilter, WELCOME_SUBTOPIC},
-    protos::de_mls::messages::v1::{AppMessage, ConversationMessage, app_message},
+    protos::de_mls::messages::v1::{AppMessage, ConversationMessage, VotePayload, app_message},
 };
 use de_mls_ui_protocol::v1::{AppEvent, format_conversation_request};
 use hashgraph_like_consensus::types::ConsensusEvent;
@@ -83,6 +87,29 @@ impl GatewaySessionFanout {
                     action,
                     address,
                 });
+            }
+            SessionEvent::VoteRequested {
+                proposal_id,
+                request,
+            } => {
+                // The library carries only the proposal + decoded request; the
+                // gateway stamps a UI timestamp and packs the wire `VotePayload`
+                // the desktop UI's vote affordance consumes.
+                let vp = VotePayload {
+                    conversation_id: conversation_id.to_string(),
+                    proposal_id,
+                    payload: request.encode_to_vec(),
+                    timestamp: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                };
+                let _ = self.evt_tx.unbounded_send(AppEvent::VoteRequested(vp));
+                let _ = self
+                    .evt_tx
+                    .unbounded_send(AppEvent::CurrentEpochProposalsCleared {
+                        conversation_id: conversation_id.to_string(),
+                    });
             }
             SessionEvent::PhaseChange(state) => {
                 let _ = self.evt_tx.unbounded_send(AppEvent::GroupStateChanged {
@@ -176,18 +203,6 @@ pub fn forward_app_message(
     app_msg: AppMessage,
 ) -> anyhow::Result<()> {
     match &app_msg.payload {
-        Some(app_message::Payload::VotePayload(vp)) => evt_tx
-            .unbounded_send(AppEvent::VoteRequested(vp.clone()))
-            .map_err(|e| anyhow::anyhow!("error sending vote requested event: {e}"))
-            .and_then(|_| {
-                evt_tx
-                    .unbounded_send(AppEvent::CurrentEpochProposalsCleared {
-                        conversation_id: vp.conversation_id.clone(),
-                    })
-                    .map_err(|e| {
-                        anyhow::anyhow!("error sending clear current epoch proposals event: {e}")
-                    })
-            }),
         Some(app_message::Payload::ConversationMessage(cm)) => {
             let msg = cm.clone();
             evt_tx
@@ -196,7 +211,8 @@ pub fn forward_app_message(
         }
         // Other variants (BanRequest, KeyPackage, Proposal, Vote, CommitCandidate,
         // ConversationSync, ProposalAdded, UserVote) are protocol-internal —
-        // not surfaced to the UI as chat-style messages.
+        // not surfaced to the UI as chat-style messages. Vote requests arrive
+        // as a dedicated `SessionEvent::VoteRequested`, not as an AppMessage.
         Some(_) => Ok(()),
         None => Err(anyhow::anyhow!("AppMessage payload missing")),
     }

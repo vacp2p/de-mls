@@ -16,7 +16,7 @@ use de_mls::protos::de_mls::messages::v1::{
 
 mod common;
 use common::session_fixtures::{
-    bootstrap_joined_conversation, fast_test_config, poll_once, settle_for, to_inbound,
+    bootstrap_joined_conversation, deliver, fast_test_config, flush_session, poll_once, settle_for,
 };
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -70,13 +70,15 @@ fn freeze_cycle_emits_phase_events_in_order() {
         settle_for(Duration::from_millis(40));
         poll_once(&alice_session);
         poll_once(&bob_session);
+        flush_session(&alice_session, &alice_tx);
+        flush_session(&bob_session, &bob_tx);
 
         let mut packets = Vec::new();
         packets.extend(alice_tx.lock().unwrap().drain_packets());
         packets.extend(bob_tx.lock().unwrap().drain_packets());
         for p in &packets {
-            let _ = users[0].0.process_inbound_packet(to_inbound(p));
-            let _ = users[1].0.process_inbound_packet(to_inbound(p));
+            deliver(&users[0].0, p);
+            deliver(&users[1].0, p);
         }
 
         alice_phases.extend(drain_phase_log(&alice_session));
