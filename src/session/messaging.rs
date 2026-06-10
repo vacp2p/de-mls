@@ -1,15 +1,17 @@
-//! Send operations on `SessionRunner`: app messages and ban requests.
-//! Key-package announcement is a user-level concern (the conversation knows
-//! nothing about how a key package is built) and lives on `User`.
+//! Send operations on `SessionRunner`: app messages, ban requests, and
+//! member-add proposals.
 //!
-//! Also defines [`Outbound`] — the conversation's I/O-agnostic product.
+//! Also defines [`Outbound`] — the conversation's I/O-agnostic product, and
+//! [`build_key_package_announcement`] — the encoding helper for KP broadcasts.
+
+use prost::Message as _;
 
 use crate::{
     core::{ConsensusPlugin, ConversationPluginsFactory},
-    mls_crypto::MlsService,
+    mls_crypto::{KeyPackageBytes, MlsService, key_package_bytes_from_tls},
     protos::de_mls::messages::v1::{
-        AppMessage, BanRequest, ConversationMessage, ConversationUpdateRequest, RemoveMember,
-        conversation_update_request,
+        AppMessage, BanRequest, ConversationMessage, ConversationUpdateRequest, MemberInvite,
+        RemoveMember, conversation_update_request,
     },
     session::{ConversationState, CreatorVote, SessionError, SessionRunner, SessionTick},
 };
@@ -61,6 +63,31 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         Ok(self.tick())
     }
 
+    /// Start a `MemberInvite` consensus round for the given TLS-encoded key
+    /// package. Parses the key package, extracts the member id, and submits a
+    /// proposal with a bundled YES vote. The resulting welcome fires as
+    /// [`crate::core::SessionEvent::WelcomeReady`] for the integrator to
+    /// deliver out of band.
+    pub fn add_member(&mut self, key_package_bytes: &[u8]) -> Result<SessionTick, SessionError> {
+        let state = self.conversation.current_state();
+        if state != ConversationState::Working {
+            return Err(SessionError::ConversationBlocked(state.to_string()));
+        }
+        let (kp_bytes, member_id) = key_package_bytes_from_tls(key_package_bytes.to_vec())?;
+        self.initiate_proposal(
+            ConversationUpdateRequest {
+                payload: Some(conversation_update_request::Payload::MemberInvite(
+                    MemberInvite {
+                        key_package_bytes: kp_bytes,
+                        member_id,
+                    },
+                )),
+            },
+            CreatorVote::Yes,
+        )?;
+        Ok(self.tick())
+    }
+
     /// Start a `RemoveMember` consensus round targeting `ban_request.user_to_ban`.
     /// The requester's click means "I want this person removed" → the
     /// creator's vote is bundled as YES at submit; no vote request is shown to
@@ -87,4 +114,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
         Ok(self.tick())
     }
+}
+
+/// Encode a key package into the wire format used for KP announcements.
+/// Returns the prost-encoded `MemberInvite` bytes ready for broadcast on the
+/// welcome subtopic.
+pub fn build_key_package_announcement(key_package: &KeyPackageBytes) -> Vec<u8> {
+    MemberInvite {
+        key_package_bytes: key_package.as_bytes().to_vec(),
+        member_id: key_package.member_id().to_vec(),
+    }
+    .encode_to_vec()
 }

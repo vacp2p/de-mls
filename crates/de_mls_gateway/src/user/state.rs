@@ -8,18 +8,14 @@ use std::{
     time::Duration,
 };
 
-use prost::Message;
-
 use de_mls::{
     core::{
         ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, ScoringConfig,
         SessionEvent, StewardListConfig,
     },
     member_id::MemberId,
-    mls_crypto::{KeyPackageBytes, MlsError, MlsService, key_package_bytes_from_tls},
-    protos::de_mls::messages::v1::{
-        BanRequest, ConversationUpdateRequest, MemberInvite, conversation_update_request,
-    },
+    mls_crypto::{KeyPackageBytes, MlsError, MlsService},
+    protos::de_mls::messages::v1::{BanRequest, ConversationUpdateRequest},
     session::{
         ConversationState, CreatorVote, MemberRole, SessionError, SessionRunner, SessionTick,
     },
@@ -144,12 +140,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         conversation_id: &str,
         key_package: KeyPackageBytes,
     ) -> Result<(), SessionError> {
-        let invite = MemberInvite {
-            key_package_bytes: key_package.as_bytes().to_vec(),
-            member_id: key_package.member_id().to_vec(),
-        };
-        let packet =
-            OutboundPacket::key_package(conversation_id, &self.app_id, invite.encode_to_vec());
+        let payload = de_mls::session::build_key_package_announcement(&key_package);
+        let packet = OutboundPacket::key_package(conversation_id, &self.app_id, payload);
         self.transport
             .lock()
             .map_err(|_| SessionError::LockPoisoned("transport"))?
@@ -223,21 +215,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(SessionError::ConversationNotFound)?;
-        let (key_package_bytes, member_id) =
-            key_package_bytes_from_tls(key_package_bytes.to_vec())?;
-        let request = ConversationUpdateRequest {
-            payload: Some(conversation_update_request::Payload::MemberInvite(
-                MemberInvite {
-                    key_package_bytes,
-                    member_id,
-                },
-            )),
-        };
-        entry
+        let tick = entry
             .write_or_err("session")?
-            .initiate_proposal(request, CreatorVote::Yes)?;
+            .add_member(key_package_bytes)?;
         self.flush(&entry)?;
-        Ok(entry.read_or_err("session")?.tick())
+        Ok(tick)
     }
 
     /// Ingest a raw MLS welcome blob delivered out of band (e.g. the

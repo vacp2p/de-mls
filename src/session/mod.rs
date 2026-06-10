@@ -52,7 +52,7 @@ pub use display::{MemberRole, MessageType, message_types};
 pub use error::SessionError;
 pub use freeze::PendingJoinTick;
 pub use inbound::DispatchOutcome;
-pub use messaging::Outbound;
+pub use messaging::{Outbound, build_key_package_announcement};
 pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer};
 pub use runner::LeaveOutcome;
 pub use runner::SessionRunner;
