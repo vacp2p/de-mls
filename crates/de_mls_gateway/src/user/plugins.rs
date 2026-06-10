@@ -1,13 +1,16 @@
-//! [`UserPlugins`] — bundle of all User-level plugin state on one struct
-//! so the `User` definition surfaces registry, transport at
-//! top level and groups plugin concerns here.
+//! User-level plugin bundle.
+//!
+//! [`UserPlugins`] holds all User-level plugin state: the per-conversation
+//! factory, the consensus context ([`de_mls::session::ConsensusContext`]), and
+//! the three default configs cloned into new sessions. Grouping these here
+//! keeps the `User` definition surfacing registry + transport at top level.
 
 use de_mls::{
-    app::ConsensusContext,
     core::{
         ConsensusPlugin, ConversationConfig, ConversationPluginsFactory, ScoringConfig,
         StewardListConfig,
     },
+    session::ConsensusContext,
 };
 
 /// Bundle of all User-level plugin state. One factory plus its three
