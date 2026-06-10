@@ -3,14 +3,14 @@
 //! Two queues:
 //!
 //! - [`SessionEvent`] — fire-and-forget notifications about a single
-//!   conversation. Each [`crate::app::SessionRunner`] holds a pending
+//!   conversation. Each [`crate::session::SessionRunner`] holds a pending
 //!   buffer; integrators drain it once per polling cycle.
 //! - [`ConversationLifecycle`] — User-level create/remove notifications.
 //!   Integrators use this to discover new sessions and start draining them.
 //!
-//! Synchronous outbound transport is supplied by
-//! [`crate::ds::DeliveryService`], passed to `User` at construction and
-//! cloned into each session.
+//! The library carries no transport: it buffers `Outbound` and consumes
+//! inbound payloads. The integrator owns delivery (see the `de-mls-ds`
+//! crate's `DeliveryService` for the reference transport).
 
 use crate::{
     core::ConversationState,
@@ -19,7 +19,7 @@ use crate::{
 
 /// Per-conversation notification. Sessions append these to their pending
 /// buffer; integrators drain via
-/// [`crate::app::SessionRunner::drain_events`] once per polling cycle. All
+/// [`crate::session::SessionRunner::drain_events`] once per polling cycle. All
 /// variants are fire-and-forget — no failure path back to the session.
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
@@ -77,9 +77,9 @@ pub enum SessionEvent {
     },
 }
 
-/// User-level conversation lifecycle event. Appended to [`crate::app::User`]'s
+/// User-level conversation lifecycle event. Appended to `User`'s
 /// pending buffer; integrators drain via
-/// [`crate::app::User::drain_lifecycle_events`] once per polling cycle and
+/// `User::drain_lifecycle_events` once per polling cycle and
 /// use `Created` as the trigger to begin draining per-session
 /// [`SessionEvent`]s.
 #[derive(Debug, Clone)]

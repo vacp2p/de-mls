@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "apps/de_mls_desktop_ui",
+    "crates/de_mls_ds",
     "crates/de_mls_gateway",
     "crates/de_mls_ui_protocol",
     "crates/ui_bridge",
@@ -10,30 +11,25 @@ members = [
 name = "de-mls"
 version = "3.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 description = "Decentralized MLS — end-to-end encrypted group messaging with consensus-based membership management over gossipsub-like networks"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/vacp2p/de-mls"
 homepage = "https://github.com/vacp2p/de-mls"
 documentation = "https://docs.rs/de-mls"
 readme = "README.md"
-keywords = ["mls", "e2ee", "decentralized", "consensus", "group-messaging"]
+keywords = ["mls", "decentralized", "consensus", "group-messaging"]
 categories = ["cryptography", "network-programming"]
 exclude = [
     "logos-messaging-nim/",
     "libs/",
     "apps/",
     "crates/",
-    "examples/",
     "tests/",
     ".github/",
     ".cargo/",
     "Makefile",
 ]
-
-[features]
-default = []
-waku = ["base64", "libc"]
 
 [dependencies]
 openmls = "0.8.1"
@@ -41,10 +37,6 @@ openmls_basic_credential = "0.5.0"
 openmls_rust_crypto = "0.5.1"
 openmls_traits = "0.5.0"
 
-base64 = { version = "0.22", optional = true }
-libc = { version = "0.2", optional = true }
-
-serde_json = "1.0.150"
 sha2 = "0.11.0"
 thiserror = "2.0.18"
 uuid = "1.23.2"
@@ -58,6 +50,8 @@ hashgraph-like-consensus = "0.5.1"
 alloy = { version = "2.0.5", default-features = false, features = [
     "signer-local",
 ] }
+# Reference transport layer. A dev-only dependency
+de-mls-ds = { path = "crates/de_mls_ds" }
 
 [build-dependencies]
 prost-build = "0.14"

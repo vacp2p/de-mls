@@ -1,8 +1,8 @@
 //! Gateway-side fan-out from per-session [`SessionEvent`]s to the UI event pipe.
 //!
 //! [`crate::Gateway`] runs one polling task per logged-in user. Each tick
-//! drains [`de_mls::app::User::drain_lifecycle_events`] for `Created` /
-//! `Removed`, then drains [`de_mls::app::SessionRunner::drain_events`] on
+//! drains [`crate::user::User::drain_lifecycle_events`] for `Created` /
+//! `Removed`, then drains [`de_mls::session::SessionRunner::drain_events`] on
 //! every active session and dispatches the [`SessionEvent`]s to `AppEvent`
 //! variants on the UI pipe — also maintaining the per-group
 //! `epoch_history` cache used by the History tab.
@@ -17,9 +17,9 @@ use prost::Message;
 
 use de_mls::{
     core::SessionEvent,
-    ds::{OutboundPacket, SharedDeliveryService, TopicFilter, WELCOME_SUBTOPIC},
     protos::de_mls::messages::v1::{AppMessage, ConversationMessage, VotePayload, app_message},
 };
+use de_mls_ds::{OutboundPacket, SharedDeliveryService, TopicFilter, WELCOME_SUBTOPIC};
 use de_mls_ui_protocol::v1::{AppEvent, format_conversation_request};
 use hashgraph_like_consensus::types::ConsensusEvent;
 

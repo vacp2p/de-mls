@@ -52,10 +52,10 @@ pub fn process_inbound<M: MlsService>(
     payload: &[u8],
 ) -> Result<ProcessResult, CoreError> {
     // 1. Try plaintext CommitCandidate (sent as plaintext AppMessage)
-    if let Ok(app_message) = AppMessage::decode(payload) {
-        if let Some(app_message::Payload::CommitCandidate(candidate)) = app_message.payload {
-            return buffer_commit_candidate(conversation, mls, candidate);
-        }
+    if let Ok(app_message) = AppMessage::decode(payload)
+        && let Some(app_message::Payload::CommitCandidate(candidate)) = app_message.payload
+    {
+        return buffer_commit_candidate(conversation, mls, candidate);
     }
 
     // 2. MLS-encrypted app messages only — use decrypt_application_only.

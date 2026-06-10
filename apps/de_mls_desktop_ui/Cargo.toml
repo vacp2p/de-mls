@@ -8,7 +8,7 @@ publish = false
 de-mls-ui-protocol = { path = "../../crates/de_mls_ui_protocol" }
 de-mls-gateway = { path = "../../crates/de_mls_gateway" }
 ui-bridge = { path = "../../crates/ui_bridge" }
-de-mls = { path = "../../", features = ["waku"] }
+de-mls = { path = "../../" }
 
 dioxus = { version = "0.6.3", features = ["signals", "router", "desktop"] }
 dioxus-desktop = "0.6.3"

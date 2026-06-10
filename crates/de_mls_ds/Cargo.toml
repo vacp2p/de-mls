@@ -1,0 +1,19 @@
+[package]
+name = "de-mls-ds"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Delivery-service / transport layer for de-mls: the DeliveryService trait, wire packets, and a reference Waku implementation."
+
+[features]
+default = []
+waku = ["base64", "libc", "serde_json"]
+
+[dependencies]
+de-mls = { path = "../../" }
+thiserror = "2.0"
+tracing = "0.1.44"
+
+base64 = { version = "0.22", optional = true }
+libc = { version = "0.2", optional = true }
+serde_json = { version = "1.0.150", optional = true }

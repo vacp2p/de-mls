@@ -11,7 +11,7 @@
 //! └───────────────────────────────┬─────────────────────────────────────┘
 //!                                 │
 //!                        ┌────────┴────────┐
-//!                        │      app        │
+//!                        │    session      │
 //!                        │ (reference impl,│
 //!                        │   optional)     │
 //!                        └────────┬────────┘
@@ -28,9 +28,12 @@
 //!
 //! - **[`core`]** - Protocol implementation (message processing, consensus integration)
 //! - **[`mls_crypto`]** - MLS cryptographic operations (OpenMLS wrapper)
-//! - **[`ds`]** - Delivery service abstraction (Waku transport)
-//! - **[`app`]** - Reference application layer (multi-conversation management, state machine)
+//! - **[`session`]** - Reference session layer (per-conversation `SessionRunner`, state machine)
 //! - **[`protos`]** - Protobuf message definitions
+//!
+//! The library carries no transport. The reference delivery service (the
+//! `DeliveryService` trait + Waku implementation) lives in the `de-mls-ds`
+//! crate, and the reference integrator (`User`) in `de-mls-gateway`.
 //!
 //! ## Getting Started
 //!
@@ -39,37 +42,33 @@
 //! - Core operations (start conversation, join, send messages)
 //! - The `ProcessResult` matching flow
 //!
-//! If you want a ready-to-use solution, see [`app::User`] which provides complete
-//! conversation management with state machine and epoch handling.
+//! The library exposes the per-conversation [`session::SessionRunner`] handle.
+//! It carries no transport: it buffers outbound and consumes inbound
+//! payloads, and the integrator owns routing. A ready-to-use reference
+//! integrator (the multi-conversation `User` with registry + routing +
+//! lifecycle over a transport) lives in the `de-mls-gateway` crate.
 //!
 //! ## Quick Example
 //!
 //! ```ignore
-//! use de_mls::app::User;
+//! use de_mls::session::{ConversationDeps, SessionRunner};
 //!
-//! // Build a user from your own `MemberId` impl plus the default plug-in
-//! // bundle.
-//! let mut user = User::new_with_plugins(&member_id, plugins, transport);
+//! // Build a per-conversation session from injected deps (plug-in factory,
+//! // consensus context, identity).
+//! let mut session = SessionRunner::create("de-mls-test", deps)?;
 //!
-//! // Start a conversation (as steward).
-//! user.start_conversation("de-mls-test", true).await?;
+//! // Send a chat message — buffered, never auto-sent.
+//! session.push_message(b"Hello, world!".to_vec())?;
 //!
-//! // Send a message.
-//! user.push_message("de-mls-test", b"Hello, world!".to_vec()).await?;
-//!
-//! // Drain lifecycle + per-session events on your polling cycle.
-//! for event in user.drain_lifecycle_events() { /* … */ }
+//! // Drain outbound and publish it on your own transport.
+//! for out in session.drain_outbound() { /* publish */ }
 //! ```
 
 /// Protocol implementation.
 pub mod core;
 
-/// Reference application layer.
-pub mod app;
-
-/// Delivery service: transport-agnostic messaging.
-/// Enable the **`waku`** feature for the Waku relay implementation.
-pub mod ds;
+/// Reference session layer.
+pub mod session;
 
 /// MLS cryptographic operations: OpenMLS wrapper for encryption/decryption.
 pub mod mls_crypto;

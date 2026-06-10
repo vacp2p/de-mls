@@ -4,9 +4,9 @@
 //! joiner that hasn't yet installed a steward list.
 
 use de_mls::core::{ProcessResult, StewardListConfig, StewardListPlugin};
-use de_mls::ds::APP_MSG_SUBTOPIC;
 use de_mls::mls_crypto::MlsService;
 use de_mls::protos::de_mls::messages::v1::AppMessage;
+use de_mls_ds::APP_MSG_SUBTOPIC;
 
 mod common;
 use common::{

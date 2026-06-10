@@ -7,7 +7,8 @@
 
 use std::sync::Arc;
 
-use de_mls::{ds::WakuDeliveryService, protos::de_mls::messages::v1::ConversationMessage};
+use de_mls::protos::de_mls::messages::v1::ConversationMessage;
+use de_mls_ds::WakuDeliveryService;
 use de_mls_gateway::{CoreCtx, GATEWAY, init_core};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 use futures::{
