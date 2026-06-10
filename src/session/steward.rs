@@ -1,5 +1,5 @@
-//! Post-epoch-advance steward housekeeping on `SessionRunner`: list
-//! generation/election, pending-update drain, scoring sync, conversation-sync
+//! Steward housekeeping on `SessionRunner`: list generation/election,
+//! pending-update buffering and drain, scoring sync, conversation-sync
 //! broadcast.
 
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use crate::{
         AppMessage, ConversationSync, ConversationUpdateRequest, PeerScore,
         StewardElectionProposal, TimingConfig, ViolationEvidence, conversation_update_request,
     },
-    session::{CreatorVote, SessionError, SessionRunner},
+    session::{ConversationState, CreatorVote, SessionError, SessionRunner},
 };
 
 /// Outcome of reconciling the steward list to the current epoch — see
@@ -106,6 +106,69 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             .steward_list
             .install_list(current_epoch, &settled, sn, 0)?;
         Ok(StewardListReconcile::Settled)
+    }
+
+    /// Handle an incoming membership update (KP-derived `MemberInvite` or
+    /// `RemoveMember`): buffer it so every member has a durable record, then
+    /// promote it to a voting proposal if this node is the current epoch
+    /// steward and the conversation accepts new proposals.
+    pub(crate) fn handle_incoming_update_request(
+        &mut self,
+        request: ConversationUpdateRequest,
+    ) -> Result<(), SessionError> {
+        let state = self.conversation.current_state();
+        if state == ConversationState::PendingJoin {
+            return Ok(());
+        }
+        // Defensive — core only emits membership changes here.
+        if target_member_id_of(&request).is_none() {
+            return Ok(());
+        }
+        // No MLS outside PendingJoin (e.g. Leaving teardown): buffer only,
+        // with no epoch or steward context.
+        let (members, current_epoch) = match self.conversation.mls() {
+            Some(mls) => (mls.members()?, mls.current_epoch()?),
+            None => (Vec::new(), 0),
+        };
+
+        let inserted = self
+            .conversation
+            .queues
+            .insert_pending_update(request.clone(), current_epoch);
+
+        // Only the epoch steward proposes immediately. The buffer
+        // survives freeze rounds so a later steward can retry.
+        let is_epoch_steward = {
+            let eligible = self.conversation.queues.steward_eligibility(&members);
+            self.conversation
+                .steward_list
+                .epoch_steward(current_epoch, &eligible)
+                .is_some_and(|es| es == &*self.self_member_id)
+        };
+        let should_propose = is_epoch_steward && state == ConversationState::Working;
+
+        info!(
+            conversation = %self.conversation_id,
+            epoch = current_epoch,
+            inserted,
+            buffer_total = self.conversation.queues.pending_update_count(),
+            is_epoch_steward,
+            state = %state,
+            propose = should_propose,
+            "update request buffered"
+        );
+
+        if should_propose {
+            // Steward auto-propose: the steward forwards peer intent and
+            // still holds a judgement call, so we broadcast unbundled and
+            // let the vote request drive the steward's vote like any other member.
+            // `check_proposal_allowed` may still reject (active emergency
+            // etc.) — leave the entry in the buffer for next rotation.
+            if let Err(e) = self.initiate_proposal(request, CreatorVote::Deferred) {
+                info!(conversation = %self.conversation_id, error = %e, "proposal deferred");
+            }
+        }
+        Ok(())
     }
 
     /// Drop Add entries whose target is now a member and Remove entries
@@ -437,15 +500,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         };
 
         let stewards_len = proposed_stewards.len();
-        let request = ConversationUpdateRequest {
-            payload: Some(conversation_update_request::Payload::StewardElection(
-                StewardElectionProposal {
-                    proposed_stewards,
-                    election_epoch,
-                    retry_round,
-                },
-            )),
-        };
+        let request = ConversationUpdateRequest::steward_election(StewardElectionProposal {
+            proposed_stewards,
+            election_epoch,
+            retry_round,
+        });
 
         info!(
             conversation = %conversation_id,

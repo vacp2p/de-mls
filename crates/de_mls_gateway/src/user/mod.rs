@@ -18,9 +18,11 @@
 //!   `finalize_self_leave` (registry-side completion of `LeaveConversation`).
 //! - `error` — [`UserError`], the registry-level error wrapping the
 //!   library's `SessionError`.
-//! - `plugins` — `UserPlugins<P, CP>` bundle wrapping the library's
-//!   [`de_mls::session::ConsensusContext`].
+//! - `consensus` — [`ConsensusContext`], the shared consensus storage +
+//!   signer that mints each conversation's service.
+//! - `plugins` — `UserPlugins<P, CP>` bundle.
 
+mod consensus;
 mod error;
 mod inbound;
 mod lifecycle;
@@ -29,6 +31,7 @@ mod plugins;
 mod registry;
 mod state;
 
+pub use consensus::ConsensusContext;
 pub use error::UserError;
 pub use inbound::Inbound;
 pub(crate) use lock::LockExt;

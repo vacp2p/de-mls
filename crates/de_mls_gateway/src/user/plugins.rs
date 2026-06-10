@@ -1,17 +1,16 @@
 //! User-level plugin bundle.
 //!
 //! [`UserPlugins`] holds all User-level plugin state: the per-conversation
-//! factory, the consensus context ([`de_mls::session::ConsensusContext`]), and
-//! the three default configs cloned into new sessions. Grouping these here
-//! keeps the `User` definition surfacing registry + transport at top level.
+//! factory, the [`ConsensusContext`], and the three default configs cloned
+//! into new sessions. Grouping these here keeps the `User` definition
+//! surfacing registry + transport at top level.
 
-use de_mls::{
-    core::{
-        ConsensusPlugin, ConversationConfig, ConversationPluginsFactory, ScoringConfig,
-        StewardListConfig,
-    },
-    session::ConsensusContext,
+use de_mls::core::{
+    ConsensusPlugin, ConversationConfig, ConversationPluginsFactory, ScoringConfig,
+    StewardListConfig,
 };
+
+use crate::user::ConsensusContext;
 
 /// Bundle of all User-level plugin state. One factory plus its three
 /// seed configs, owned outright.

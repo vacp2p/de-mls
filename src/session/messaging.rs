@@ -4,14 +4,13 @@
 //! Also defines [`Outbound`] — the conversation's I/O-agnostic product, and
 //! [`build_key_package_announcement`] — the encoding helper for KP broadcasts.
 
-use prost::Message as _;
+use prost::Message;
 
 use crate::{
     core::{ConsensusPlugin, ConversationPluginsFactory},
     mls_crypto::{KeyPackageBytes, MlsService, key_package_bytes_from_tls},
     protos::de_mls::messages::v1::{
-        AppMessage, ConversationMessage, ConversationUpdateRequest, MemberInvite, RemoveMember,
-        conversation_update_request,
+        AppMessage, ConversationMessage, ConversationUpdateRequest, MemberInvite,
     },
     session::{ConversationState, CreatorVote, SessionError, SessionRunner},
 };
@@ -75,14 +74,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         }
         let (kp_bytes, member_id) = key_package_bytes_from_tls(key_package_bytes.to_vec())?;
         self.initiate_proposal(
-            ConversationUpdateRequest {
-                payload: Some(conversation_update_request::Payload::MemberInvite(
-                    MemberInvite {
-                        key_package_bytes: kp_bytes,
-                        member_id,
-                    },
-                )),
-            },
+            ConversationUpdateRequest::member_invite(MemberInvite {
+                key_package_bytes: kp_bytes,
+                member_id,
+            }),
             CreatorVote::Yes,
         )?;
         Ok(())
@@ -98,13 +93,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         }
 
         self.initiate_proposal(
-            ConversationUpdateRequest {
-                payload: Some(conversation_update_request::Payload::RemoveMember(
-                    RemoveMember {
-                        member_id: member_id.to_vec(),
-                    },
-                )),
-            },
+            ConversationUpdateRequest::remove_member(member_id.to_vec()),
             CreatorVote::Yes,
         )?;
 

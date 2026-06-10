@@ -10,9 +10,8 @@ use crate::{
     core::{CoreError, ScoreEvent, ScoreOp},
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, CommitCandidate, ConversationMessage, ConversationSync,
-        ConversationUpdateRequest, EmergencyCriteriaProposal, Outcome, ProposalAdded, RemoveMember,
-        UserVote, ViolationEvidence, ViolationType, VotePayload, app_message,
-        conversation_update_request,
+        ConversationUpdateRequest, EmergencyCriteriaProposal, Outcome, ProposalAdded, UserVote,
+        ViolationEvidence, ViolationType, VotePayload, app_message, conversation_update_request,
     },
 };
 
@@ -238,15 +237,11 @@ impl TryFrom<AppMessage> for ProcessResult {
             Some(app_message::Payload::Vote(vote)) => {
                 Ok(ProcessResult::Vote(Box::new(vote.clone())))
             }
-            Some(app_message::Payload::BanRequest(ban_request)) => Ok(
-                ProcessResult::MembershipChangeReceived(Box::new(ConversationUpdateRequest {
-                    payload: Some(conversation_update_request::Payload::RemoveMember(
-                        RemoveMember {
-                            member_id: ban_request.user_to_ban.clone(),
-                        },
-                    )),
-                })),
-            ),
+            Some(app_message::Payload::BanRequest(ban_request)) => {
+                Ok(ProcessResult::MembershipChangeReceived(Box::new(
+                    ConversationUpdateRequest::remove_member(ban_request.user_to_ban.clone()),
+                )))
+            }
             Some(app_message::Payload::ConversationSync(sync)) => Ok(
                 ProcessResult::ConversationSyncReceived(Box::new(sync.clone())),
             ),

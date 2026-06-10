@@ -668,7 +668,7 @@ impl ResolvedProposalCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protos::de_mls::messages::v1::{MemberInvite, RemoveMember};
+    use crate::protos::de_mls::messages::v1::MemberInvite;
 
     fn member(id: u8) -> Vec<u8> {
         vec![id; 20]
@@ -679,13 +679,7 @@ mod tests {
     }
 
     fn insert_self_leave(conversation: &mut ConversationQueues, member_id: &[u8]) {
-        let remove = ConversationUpdateRequest {
-            payload: Some(conversation_update_request::Payload::RemoveMember(
-                RemoveMember {
-                    member_id: member_id.to_vec(),
-                },
-            )),
-        };
+        let remove = ConversationUpdateRequest::remove_member(member_id.to_vec());
         conversation.insert_approved_proposal(self_leave_proposal_id(member_id), remove);
     }
 
@@ -755,13 +749,7 @@ mod tests {
         target: &[u8],
         proposal_id: ProposalId,
     ) {
-        let remove = ConversationUpdateRequest {
-            payload: Some(conversation_update_request::Payload::RemoveMember(
-                RemoveMember {
-                    member_id: target.to_vec(),
-                },
-            )),
-        };
+        let remove = ConversationUpdateRequest::remove_member(target.to_vec());
         conversation.insert_approved_proposal(proposal_id, remove);
     }
 
@@ -776,14 +764,10 @@ mod tests {
         let add_id: ProposalId = 0x5555_6666;
         insert_remove_member(&mut conversation, &member(2), ban_id);
         insert_remove_member(&mut conversation, &member(3), ecp_id);
-        let add = ConversationUpdateRequest {
-            payload: Some(conversation_update_request::Payload::MemberInvite(
-                MemberInvite {
-                    key_package_bytes: vec![0; 8],
-                    member_id: member(99),
-                },
-            )),
-        };
+        let add = ConversationUpdateRequest::member_invite(MemberInvite {
+            key_package_bytes: vec![0; 8],
+            member_id: member(99),
+        });
         conversation.insert_approved_proposal(add_id, add);
         assert_eq!(conversation.approved_proposals_count(), 3);
 
@@ -853,13 +837,7 @@ mod tests {
     }
 
     fn buffer_remove_at(conversation: &mut ConversationQueues, target: &[u8], epoch: u64) {
-        let request = ConversationUpdateRequest {
-            payload: Some(conversation_update_request::Payload::RemoveMember(
-                RemoveMember {
-                    member_id: target.to_vec(),
-                },
-            )),
-        };
+        let request = ConversationUpdateRequest::remove_member(target.to_vec());
         assert!(conversation.insert_pending_update(request, epoch));
     }
 

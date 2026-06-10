@@ -45,13 +45,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     pub fn poll(&mut self) -> PollOutcome {
         let mut leave_requested = false;
 
-        if let Err(e) = self.tick_deadlines() {
-            warn!(
-                conversation = %self.conversation_id,
-                error = %e,
-                "tick_deadlines error in poll"
-            );
-        }
+        self.tick_deadlines();
 
         match self.advance_freeze() {
             Ok(DispatchOutcome::LeaveRequested) => leave_requested = true,

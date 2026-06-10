@@ -2,12 +2,11 @@
 //! bundle — no `User` required.
 //!
 //! [`ConversationDeps`] gathers everything a single conversation needs:
-//! the shared plug-in factory and consensus context (borrowed — one set
-//! serves every conversation an integrator runs), the identity, the
-//! transport, and the per-conversation config. [`SessionRunner::create`]
-//! and [`SessionRunner::join`] consume one bundle and return a runner ready
-//! to drop into a registry. `User` is now a thin caller of these; an
-//! integrator can build conversations the same way without it.
+//! the shared plug-in factory (borrowed — one serves every conversation an
+//! integrator runs), a ready consensus service, the identity, and the
+//! per-conversation configs. [`SessionRunner::create`] and
+//! [`SessionRunner::join`] consume one bundle and return a runner ready to
+//! drop into a registry.
 
 use std::sync::Arc;
 
@@ -16,26 +15,27 @@ use tracing::info;
 
 use crate::{
     core::{
-        ConsensusPlugin, ConversationConfig, ConversationPluginsFactory, ConversationQueues,
-        ConversationStateMachine, PeerScoringPlugin, ScoringConfig, SessionEvent,
-        StewardListConfig, StewardListPlugin,
+        ConsensusPlugin, ConsensusServiceFor, ConversationConfig, ConversationPluginsFactory,
+        ConversationQueues, ConversationStateMachine, PeerScoringPlugin, ScoringConfig,
+        SessionEvent, StewardListConfig, StewardListPlugin,
     },
     member_id::MemberId,
-    session::{ConsensusContext, ConversationState, PhaseTimer, SessionError, SessionRunner},
+    session::{ConversationState, PhaseTimer, SessionError, SessionRunner},
 };
 
 /// Everything one conversation needs to come into being.
 ///
-/// The plug-in factory and consensus context are borrowed: an integrator
-/// holds one of each and serves every conversation from them. The identity
-/// is borrowed too — the constructor snapshots its bytes/display. The rest
-/// is owned and cheap (Arc handles + small configs), built fresh per
-/// conversation since `config` varies.
+/// The plug-in factory is borrowed (one serves every conversation an
+/// integrator runs) and the identity is borrowed too — the constructor
+/// snapshots its bytes/display. The consensus service is owned: each
+/// conversation gets its own, and how services share storage is the
+/// integrator's wiring (see the gateway's `ConsensusContext`).
 pub struct ConversationDeps<'a, P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Builds the per-conversation MLS / scoring / steward plug-ins.
     pub plugins: &'a CP,
-    /// Mints this conversation's consensus service from shared storage.
-    pub consensus: &'a ConsensusContext<P>,
+    /// This conversation's consensus service, ready to use. The runner
+    /// subscribes to its event bus at construction.
+    pub consensus: ConsensusServiceFor<P>,
     /// Local participant identity; the constructor snapshots its bytes
     /// and display form onto the runner.
     pub identity: &'a dyn MemberId,
@@ -126,7 +126,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             );
         }
 
-        let consensus = deps.consensus.build_service();
+        let consensus = deps.consensus;
         let consensus_rx = consensus.event_bus().subscribe();
         let runner = SessionRunner::new(
             conversation_id.to_string(),

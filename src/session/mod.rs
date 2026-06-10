@@ -41,7 +41,7 @@ pub use crate::core::{
     DEFAULT_PEER_SCORE, DEFAULT_PROPOSAL_EXPIRATION, DEFAULT_RECOVERY_INACTIVITY_DURATION,
     DEFAULT_THRESHOLD_PEER_SCORE, DEFAULT_VOTING_DELAY,
 };
-pub use consensus::{ConsensusContext, CreatorVote};
+pub use consensus::CreatorVote;
 pub use construct::ConversationDeps;
 pub use display::{MemberRole, MessageType, message_types};
 pub use error::SessionError;

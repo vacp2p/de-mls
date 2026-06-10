@@ -42,7 +42,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
         let deps = ConversationDeps {
             plugins: &self.plugins.conversation_plugins,
-            consensus: &self.plugins.consensus,
+            consensus: self.plugins.consensus.build_service(),
             identity: self.member_id.as_ref(),
             app_id: Arc::from(self.app_id.as_slice()),
             config,

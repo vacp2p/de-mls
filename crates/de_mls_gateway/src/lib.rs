@@ -29,12 +29,12 @@ use de_mls::{
     member_id::MemberId,
     mls_crypto::MlsCredentials,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
-    session::{ConsensusContext, ConversationConfig},
+    session::ConversationConfig,
 };
 use de_mls_ds::{DeliveryService, SharedDeliveryService, WakuDeliveryService};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 
-use crate::user::{SessionEntry, User, UserPlugins};
+use crate::user::{ConsensusContext, SessionEntry, User, UserPlugins};
 use futures::{
     StreamExt,
     channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded},

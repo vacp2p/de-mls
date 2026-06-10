@@ -7,8 +7,8 @@ use tracing::info;
 use crate::{
     core::{ConversationQueues, CoreError, target_member_id_of},
     protos::de_mls::messages::v1::{
-        ConversationUpdateRequest, RemoveMember, StewardElectionProposal, ViolationEvidence,
-        ViolationType, conversation_update_request,
+        ConversationUpdateRequest, StewardElectionProposal, ViolationEvidence, ViolationType,
+        conversation_update_request,
     },
 };
 
@@ -246,13 +246,7 @@ fn is_deadlock(evidence: &ViolationEvidence) -> bool {
 
 /// Build a `RemoveMember` `ConversationUpdateRequest` for the target in score-below-threshold evidence.
 fn removal_request_for(evidence: &ViolationEvidence) -> ConversationUpdateRequest {
-    ConversationUpdateRequest {
-        payload: Some(conversation_update_request::Payload::RemoveMember(
-            RemoveMember {
-                member_id: evidence.target_member_id.clone(),
-            },
-        )),
-    }
+    ConversationUpdateRequest::remove_member(evidence.target_member_id.clone())
 }
 
 /// Identity this approval would queue for removal in `approved_proposals`,
@@ -285,9 +279,7 @@ fn pending_removal_target(
 mod tests {
     use super::*;
     use crate::core::steward_list::{StewardList, StewardListConfig};
-    use crate::protos::de_mls::messages::v1::{
-        ConversationUpdateRequest, StewardElectionProposal, conversation_update_request,
-    };
+    use crate::protos::de_mls::messages::v1::{ConversationUpdateRequest, StewardElectionProposal};
 
     fn member(id: u8) -> Vec<u8> {
         vec![id; 20]
@@ -298,15 +290,11 @@ mod tests {
     }
 
     fn election_request(stewards: Vec<Vec<u8>>, epoch: u64) -> ConversationUpdateRequest {
-        ConversationUpdateRequest {
-            payload: Some(conversation_update_request::Payload::StewardElection(
-                StewardElectionProposal {
-                    proposed_stewards: stewards,
-                    election_epoch: epoch,
-                    retry_round: 0,
-                },
-            )),
-        }
+        ConversationUpdateRequest::steward_election(StewardElectionProposal {
+            proposed_stewards: stewards,
+            election_epoch: epoch,
+            retry_round: 0,
+        })
     }
 
     /// YES on an election the local node owns returns the accepted proposal
@@ -371,11 +359,7 @@ mod tests {
     }
 
     fn remove_request(target: Vec<u8>) -> ConversationUpdateRequest {
-        ConversationUpdateRequest {
-            payload: Some(conversation_update_request::Payload::RemoveMember(
-                RemoveMember { member_id: target },
-            )),
-        }
+        ConversationUpdateRequest::remove_member(target)
     }
 
     /// A second `RemoveMember(target)` arriving via consensus is dropped

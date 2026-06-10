@@ -6,9 +6,7 @@ use std::time::Duration;
 
 use de_mls::core::{SessionEvent, StewardListConfig};
 use de_mls::member_id::MemberId;
-use de_mls::protos::de_mls::messages::v1::{
-    ConversationUpdateRequest, RemoveMember, conversation_update_request,
-};
+use de_mls::protos::de_mls::messages::v1::ConversationUpdateRequest;
 use de_mls::session::CreatorVote;
 
 mod common;
@@ -53,13 +51,7 @@ fn removed_member_emits_leaving_and_is_evicted() {
     let target_id = common::WalletMemberId::from_hex(&users[target_idx].0.member_id_string())
         .member_id_bytes()
         .to_vec();
-    let request = ConversationUpdateRequest {
-        payload: Some(conversation_update_request::Payload::RemoveMember(
-            RemoveMember {
-                member_id: target_id,
-            },
-        )),
-    };
+    let request = ConversationUpdateRequest::remove_member(target_id);
     steward_session
         .write()
         .unwrap()

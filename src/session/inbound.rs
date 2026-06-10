@@ -25,8 +25,7 @@ use crate::{
         TimingConfig, conversation_update_request,
     },
     session::{
-        ConversationState, SessionError, SessionRunner,
-        consensus::bridge::{forward_incoming_proposal, forward_incoming_vote},
+        ConversationState, SessionError, SessionRunner, consensus::bridge::forward_incoming_vote,
     },
 };
 
@@ -145,14 +144,16 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::Vote(vote) => {
-                let proposal_id = vote.proposal_id;
-                let consensus = self.consensus.clone();
-                let conversation_id = self.conversation_id.clone();
                 let outcome_applied = self
                     .conversation
                     .queues
-                    .is_consensus_outcome_applied(proposal_id);
-                forward_incoming_vote::<P>(&conversation_id, *vote, &consensus, outcome_applied)?;
+                    .is_consensus_outcome_applied(vote.proposal_id);
+                forward_incoming_vote::<P>(
+                    &self.conversation_id,
+                    *vote,
+                    &self.consensus,
+                    outcome_applied,
+                )?;
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::MembershipChangeReceived(request) => {
@@ -242,8 +243,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             .map(ProposalKind::of)
             .unwrap_or(ProposalKind::Commit);
 
-        let conversation_id = self.conversation_id.clone();
-        forward_incoming_proposal::<P>(&conversation_id, proposal, &self.consensus.clone())?;
+        let scope = P::Scope::from(self.conversation_id.clone());
+        self.consensus.process_incoming_proposal(&scope, proposal)?;
         // Skip the vote request + auto-vote for fast-path proposals: the
         // creator's bundled YES already resolved the session, so peers have
         // nothing to vote on.

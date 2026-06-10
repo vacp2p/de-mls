@@ -1,8 +1,8 @@
 //! Step 1 proof: a `SessionRunner` can be built and queried straight from a
 //! `ConversationDeps` bundle, with no `User` in the picture. The integrator
-//! holds one plug-in factory + consensus context and constructs each
-//! conversation from them — exactly what `User` does internally, here done
-//! by hand.
+//! holds one plug-in factory plus shared consensus storage + signer, and
+//! mints each conversation's consensus service from them — exactly what
+//! `User` does internally, here done by hand.
 
 mod common;
 
@@ -12,22 +12,25 @@ use std::sync::Arc;
 use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 
-use de_mls::core::{ScoringConfig, SessionEvent, StewardListConfig};
+use de_mls::core::{
+    ConsensusPlugin, ConsensusServiceFor, ScoringConfig, SessionEvent, StewardListConfig,
+};
 use de_mls::defaults::{
     DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage,
 };
 use de_mls::mls_crypto::MlsCredentials;
-use de_mls::session::{ConsensusContext, ConversationDeps, ConversationState, SessionRunner};
+use de_mls::session::{ConversationDeps, ConversationState, SessionRunner};
 
 use common::wallet::WalletMemberId;
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
 /// The shared, conversation-agnostic state an integrator keeps once: the
-/// plug-in factory, the consensus context, and the identity.
+/// plug-in factory, the consensus storage + signer, and the identity.
 struct Integrator {
     plugins: DefaultConversationPluginsFactory,
-    consensus: ConsensusContext<DefaultConsensusPlugin>,
+    consensus_storage: <DefaultConsensusPlugin as ConsensusPlugin>::ConsensusStorage,
+    consensus_signer: <DefaultConsensusPlugin as ConsensusPlugin>::Signer,
     member_id: WalletMemberId,
 }
 
@@ -39,22 +42,29 @@ impl Integrator {
             Arc::new(MlsCredentials::from_member_id(&member_id).expect("credentials"));
         let storage = Arc::new(MemoryDeMlsStorage::new());
         let plugins = DefaultConversationPluginsFactory::new(storage, credentials);
-        let consensus =
-            ConsensusContext::<DefaultConsensusPlugin>::new(EthereumConsensusSigner::new(signer));
         Self {
             plugins,
-            consensus,
+            consensus_storage: DefaultConsensusPlugin::new_storage(),
+            consensus_signer: EthereumConsensusSigner::new(signer),
             member_id,
         }
     }
 
-    /// Fresh per-conversation deps drawn from the shared state.
+    /// Fresh per-conversation deps drawn from the shared state. The
+    /// consensus service clones the shared storage (scope-keyed) and gets
+    /// its own private event bus.
     fn deps(
         &self,
     ) -> ConversationDeps<'_, DefaultConsensusPlugin, DefaultConversationPluginsFactory> {
+        let consensus = ConsensusServiceFor::<DefaultConsensusPlugin>::new_with_components(
+            self.consensus_storage.clone(),
+            DefaultConsensusPlugin::new_event_bus(),
+            self.consensus_signer.clone(),
+            10,
+        );
         ConversationDeps {
             plugins: &self.plugins,
-            consensus: &self.consensus,
+            consensus,
             identity: &self.member_id,
             app_id: Arc::from(&[0u8; 16][..]),
             config: de_mls::session::ConversationConfig::default(),
