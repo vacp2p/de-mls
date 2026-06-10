@@ -1,16 +1,14 @@
-//! Read-only queries over a conversation's state (UI and diagnostics).
-//! Callers reach these via `User::lookup_entry`; the registry-wide
-//! `list_conversations` getter lives on `User`.
+//! Read-only queries over a conversation's state.
 
 use crate::{
     core::{ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin, StewardListPlugin},
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
-    session::{ConversationState, MemberRole, SessionRunner, UserError},
+    session::{ConversationState, MemberRole, SessionError, SessionRunner},
 };
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
-    pub fn get_conversation_state(&self) -> ConversationState {
+    pub fn conversation_state(&self) -> ConversationState {
         self.conversation.current_state()
     }
 
@@ -19,10 +17,26 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         &self.conversation_id
     }
 
+    /// Identity bytes of the local member in this conversation.
+    pub fn member_id_bytes(&self) -> &[u8] {
+        &self.self_member_id
+    }
+
+    /// Display form of the local member id.
+    pub fn member_id_display(&self) -> &str {
+        &self.member_id_display
+    }
+
+    /// App id this session tags on outbound packets and uses for self-echo
+    /// filtering in [`SessionRunner::process_inbound`].
+    pub fn app_id(&self) -> &[u8] {
+        &self.app_id
+    }
+
     /// Current MLS epoch + reelection retry round. `(0, 0)` when the
     /// conversation has no MLS state yet (pending join). Intended for UI
     /// status display.
-    pub fn get_epoch_and_retry(&self) -> Result<(u64, u32), UserError> {
+    pub fn epoch_and_retry(&self) -> Result<(u64, u32), SessionError> {
         let epoch = match self.conversation.mls() {
             Some(mls) => mls.current_epoch()?,
             None => 0,
@@ -33,13 +47,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Count of buffered pending membership updates. Used by tests and the UI
     /// to verify buffer hygiene (e.g., that a joiner's buffer is empty right
     /// after they receive the welcome).
-    pub fn get_pending_update_count(&self) -> usize {
+    pub fn pending_update_count(&self) -> usize {
         self.conversation.queues.pending_update_count()
     }
 
     /// Freeze round progress: `(received, expected)`. Returns `(0, 0)` if not
     /// in freeze or no steward list is known.
-    pub fn get_freeze_candidate_count(&self) -> (usize, usize) {
+    pub fn freeze_candidate_count(&self) -> (usize, usize) {
         let received = self.conversation.queues.freeze_candidate_count();
         let expected = self
             .conversation
@@ -50,7 +64,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         (received, expected)
     }
 
-    pub fn is_steward_for_self(&self) -> bool {
+    pub fn is_steward(&self) -> bool {
         self.conversation
             .steward_list
             .is_steward(&self.self_member_id)
@@ -59,24 +73,24 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Identity bytes of every current member of this conversation, as
     /// reported by MLS. Returns an empty vec when the local user has no
     /// MLS state yet (pending join).
-    pub fn get_conversation_members(&self) -> Result<Vec<Vec<u8>>, UserError> {
+    pub fn members(&self) -> Result<Vec<Vec<u8>>, SessionError> {
         match self.conversation.mls() {
             Some(mls) => Ok(mls.members()?),
             None => Ok(Vec::new()),
         }
     }
 
-    pub fn get_member_scores(&self) -> Vec<(Vec<u8>, i64)> {
+    pub fn member_scores(&self) -> Vec<(Vec<u8>, i64)> {
         self.conversation.scoring.all_members_with_scores()
     }
 
-    pub fn get_member_score(&self, member_id: &[u8]) -> Option<i64> {
+    pub fn member_score(&self, member_id: &[u8]) -> Option<i64> {
         self.conversation.scoring.score_for(member_id)
     }
 
     /// Identities that have an in-flight self-leave request. Used by the UI
     /// to render a "pending leave" indicator.
-    pub fn get_pending_leave_member_ids(&self) -> Result<Vec<Vec<u8>>, UserError> {
+    pub fn pending_leave_member_ids(&self) -> Result<Vec<Vec<u8>>, SessionError> {
         let members = self.conversation.expect_mls()?.members()?;
         Ok(members
             .into_iter()
@@ -86,7 +100,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
     /// Steward role for each member. Uses live rotation so removed or
     /// pending-leave stewards are skipped in role display.
-    pub fn get_member_roles(&self) -> Result<Vec<(Vec<u8>, MemberRole)>, UserError> {
+    pub fn member_roles(&self) -> Result<Vec<(Vec<u8>, MemberRole)>, SessionError> {
         let mls = self.conversation.expect_mls()?;
         let epoch = mls.current_epoch()?;
         let members = mls.members()?;
@@ -125,7 +139,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         Ok(roles)
     }
 
-    pub fn get_approved_proposals_for_current_epoch(&self) -> Vec<ConversationUpdateRequest> {
+    pub fn approved_proposals_for_current_epoch(&self) -> Vec<ConversationUpdateRequest> {
         self.conversation
             .queues
             .approved_proposals()

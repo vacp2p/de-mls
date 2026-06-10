@@ -195,11 +195,15 @@ pub fn broadcast(packets: &[OutboundPacket], receivers: &[&TestUser]) {
 /// route each welcome to the matching joiner via
 /// [`TestUser::accept_welcome`], then replay the bundled
 /// `conversation_sync_bytes` through `process_inbound_packet`. Returns
-/// the number of welcomes that were successfully accepted. Call this
-/// once per polling round, BEFORE relaying packets — same-round
-/// app-msg packets (e.g. the post-commit steward election proposal)
-/// need the joiner's MLS attached first.
-pub fn route_welcomes(sessions: &[SessionArc], users: &mut [(TestUser, TransportHandle)]) -> usize {
+/// `(delivered_count, sync_bytes_captured)` — the second element holds every
+/// non-empty `conversation_sync_bytes` from delivered welcomes, in order. Call
+/// this once per polling round, BEFORE relaying packets — same-round app-msg
+/// packets (e.g. the post-commit steward election proposal) need the joiner's
+/// MLS attached first.
+pub fn route_welcomes(
+    sessions: &[SessionArc],
+    users: &mut [(TestUser, TransportHandle)],
+) -> (usize, Vec<Vec<u8>>) {
     use de_mls::core::SessionEvent;
     use de_mls::protos::de_mls::messages::v1::MemberWelcome;
 
@@ -217,6 +221,7 @@ pub fn route_welcomes(sessions: &[SessionArc], users: &mut [(TestUser, Transport
         }
     }
     let mut delivered = 0;
+    let mut sync_bytes_out = Vec::new();
     for (welcome, welcomer_app_id) in welcomes {
         let conv_name = sessions
             .first()
@@ -230,6 +235,7 @@ pub fn route_welcomes(sessions: &[SessionArc], users: &mut [(TestUser, Transport
             if u.accept_welcome(&welcome.welcome_bytes).is_ok() {
                 delivered += 1;
                 if !welcome.conversation_sync_bytes.is_empty() {
+                    sync_bytes_out.push(welcome.conversation_sync_bytes.clone());
                     let _ = u.handle_inbound(Inbound {
                         conversation_id: conv_name.clone(),
                         sender: welcomer_app_id.clone(),
@@ -239,7 +245,7 @@ pub fn route_welcomes(sessions: &[SessionArc], users: &mut [(TestUser, Transport
             }
         }
     }
-    delivered
+    (delivered, sync_bytes_out)
 }
 
 /// Default fast-timing config for SessionRunner-driven tests. All inactivity
@@ -259,14 +265,11 @@ pub fn fast_test_config() -> ConversationConfig {
     }
 }
 
-/// One polling cycle on a session: drive freeze status, member-freeze
-/// check, and (for joiners) the pending-join tick. Mirrors the production
-/// `group_polling_loop` body in `de_mls_gateway::group`.
+/// One polling cycle on a session: tick deadlines, advance freeze state,
+/// check member-freeze inactivity, and check pending-join expiry. Mirrors the
+/// production `group_polling_loop` body in `de_mls_gateway::group`.
 pub fn poll_once(session: &SessionArc) {
-    let _ = session.write().unwrap().tick_deadlines();
-    let _ = session.write().unwrap().poll_freeze_status();
-    let _ = session.write().unwrap().check_member_freeze();
-    let _ = session.read().unwrap().check_pending_join();
+    let _ = session.write().unwrap().poll();
 }
 
 /// Flush a session's pull-buffered outbound into its user's transport handle
@@ -310,7 +313,7 @@ pub fn flush_user(user: &TestUser, transport: &TransportHandle) {
 /// exits the instant joiners are Working, that election gets orphaned — its
 /// `consensus_timeout` fires without enough votes, `handle_election_rejected`
 /// bumps the creator's `retry_round` to 1, and every subsequent
-/// `check_member_freeze` call flips to the recovery-inactivity window instead
+/// inactivity check in `poll` flips to the recovery-inactivity window instead
 /// of the commit one. Small groups (`members <= sn_max`) reconcile the list
 /// locally with no election, so they have nothing to orphan.
 ///
@@ -388,7 +391,8 @@ pub fn bootstrap_joined_conversation(
         // its joiner BEFORE relaying packets — same-round app-msg
         // traffic (the post-commit steward election proposal) needs
         // the joiner's MLS attached first.
-        let delivered_welcome = route_welcomes(&sessions, &mut users) > 0;
+        let (welcome_count, _) = route_welcomes(&sessions, &mut users);
+        let delivered_welcome = welcome_count > 0;
 
         let mut packets = Vec::new();
         for (_, h) in &users {
@@ -404,7 +408,7 @@ pub fn bootstrap_joined_conversation(
 
         let mut all_working = true;
         for s in sessions.iter().skip(1) {
-            if s.read().unwrap().get_conversation_state() != ConversationState::Working {
+            if s.read().unwrap().conversation_state() != ConversationState::Working {
                 all_working = false;
                 break;
             }

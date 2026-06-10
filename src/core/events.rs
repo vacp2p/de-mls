@@ -1,12 +1,8 @@
 //! I/O contract between the protocol layer and an integrator.
 //!
-//! Two queues:
-//!
-//! - [`SessionEvent`] — fire-and-forget notifications about a single
-//!   conversation. Each [`crate::session::SessionRunner`] holds a pending
-//!   buffer; integrators drain it once per polling cycle.
-//! - [`ConversationLifecycle`] — User-level create/remove notifications.
-//!   Integrators use this to discover new sessions and start draining them.
+//! [`SessionEvent`] — fire-and-forget notifications about a single
+//! conversation. Each [`crate::session::SessionRunner`] holds a pending
+//! buffer; integrators drain it once per polling cycle.
 //!
 //! The library carries no transport: it buffers `Outbound` and consumes
 //! inbound payloads. The integrator owns delivery (see the `de-mls-ds`
@@ -27,9 +23,9 @@ pub enum SessionEvent {
     /// notification, ban request, …).
     AppMessage(AppMessage),
 
-    /// The user is out of this conversation (self-leave commit merged, or
-    /// someone else removed us). The session entry is about to be removed
-    /// from `User`'s registry.
+    /// The local member is out of this conversation (self-leave commit
+    /// merged, or removed by a steward). The integrator should remove the
+    /// registry entry and clean up the consensus scope.
     Leaving,
 
     /// A background operation (e.g., vote submission) failed. UI may surface;
@@ -75,20 +71,11 @@ pub enum SessionEvent {
         approved: bool,
         timestamp: u64,
     },
-}
 
-/// User-level conversation lifecycle event. Appended to `User`'s
-/// pending buffer; integrators drain via
-/// `User::drain_lifecycle_events` once per polling cycle and
-/// use `Created` as the trigger to begin draining per-session
-/// [`SessionEvent`]s.
-#[derive(Debug, Clone)]
-pub enum ConversationLifecycle {
-    /// A new conversation entry has been registered. The session is in the
-    /// registry; the integrator can look it up and `subscribe()` to its
-    /// per-session events.
-    Created(String),
-
-    /// A conversation entry has been removed from the registry.
-    Removed(String),
+    /// Freeze-round candidate progress changed: `received` stewards have
+    /// submitted candidates out of `expected`. Emitted by `poll()` when in
+    /// `Freezing` and the count changed since the previous emission. The
+    /// integrator can surface this as a progress indicator without polling
+    /// `freeze_candidate_count()`.
+    FreezeProgress { received: usize, expected: usize },
 }

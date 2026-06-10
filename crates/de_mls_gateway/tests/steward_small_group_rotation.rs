@@ -42,7 +42,7 @@ fn assert_stable_no_election(
     sessions: &[(&str, &SessionArc)],
 ) {
     assert!(
-        sessions[0].1.read().unwrap().is_steward_for_self(),
+        sessions[0].1.read().unwrap().is_steward(),
         "creator must be a steward (a committer must always exist)"
     );
 
@@ -55,13 +55,13 @@ fn assert_stable_no_election(
     }
 
     for (label, s) in sessions {
-        let (_, retry) = s.read().unwrap().get_epoch_and_retry().unwrap();
+        let (_, retry) = s.read().unwrap().epoch_and_retry().unwrap();
         assert_eq!(
             retry, 0,
             "{label} retry_round must stay 0 — no election fires for unsettled members ({conversation})"
         );
         assert_eq!(
-            s.read().unwrap().get_conversation_state(),
+            s.read().unwrap().conversation_state(),
             ConversationState::Working,
             "{label} must stay Working ({conversation})"
         );

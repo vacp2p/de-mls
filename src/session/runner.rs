@@ -20,8 +20,19 @@ use crate::{
         ConversationPluginsFactory, ConversationQueues, ConversationState,
         ConversationStateMachine, SessionEvent,
     },
-    session::{Outbound, PhaseTimer, SessionTick},
+    session::{Outbound, PhaseTimer, SessionError},
 };
+
+/// Outcome of [`SessionRunner::leave`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaveOutcome {
+    /// `PendingJoin` path: local teardown complete. The integrator must remove
+    /// the registry entry and clean up the consensus scope.
+    TornDown,
+    /// Active-session path: a self-leave consensus round has been opened. The
+    /// session stays active until the next steward commit merges the removal.
+    LeaveInitiated,
+}
 
 /// Receiver type the runner drains from `tick_deadlines`. Resolves to the
 /// `Receiver` associated type on the plugin's [`ConsensusEventBus`], which
@@ -41,16 +52,17 @@ pub struct AutoVoteEntry {
 }
 
 pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
-    /// Conversation name. Identifies this session in the User registry and
-    /// is used to construct scope keys for consensus operations.
-    pub conversation_id: String,
+    /// Conversation name. Identifies this session in the integrator's
+    /// registry and is used to construct scope keys for consensus operations.
+    /// Read via [`SessionRunner::conversation_id`].
+    pub(crate) conversation_id: String,
     pub(crate) conversation: Conversation<CP>,
     /// Per-conversation consensus service. Owns this conversation's scope
     /// in the shared storage and a private event bus. Minted from the
     /// [`crate::session::ConversationDeps`] consensus context at construction.
-    pub consensus: ConsensusServiceFor<P>,
+    pub(crate) consensus: ConsensusServiceFor<P>,
     /// Subscriber on `consensus.event_bus()`. Drained by
-    /// [`Self::tick_deadlines`], which dispatches each event through
+    /// `tick_deadlines`, which dispatches each event through
     /// `apply_consensus_outcome`. Subscribed when the runner is built in
     /// [`SessionRunner::create`] / [`SessionRunner::join`].
     pub(crate) consensus_rx: ConsensusReceiver<P>,
@@ -58,26 +70,27 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// coordinator methods.
     phase_timer: PhaseTimer,
     /// Pending auto-votes by `proposal_id`. Walked by
-    /// [`Self::tick_deadlines`]; each entry whose `fire_at` has passed
+    /// `tick_deadlines`; each entry whose `fire_at` has passed
     /// gets a `cast_vote` and is removed from the map. Cancelled (removed)
     /// when a manual vote arrives or the consensus session resolves.
-    pub pending_auto_votes: HashMap<u32, AutoVoteEntry>,
+    pub(crate) pending_auto_votes: HashMap<u32, AutoVoteEntry>,
     /// Pending consensus-session timeouts: `proposal_id -> fire_at`.
     /// Registered when a proposal opens (own or incoming peer); fired by
-    /// [`Self::tick_deadlines`] which calls
-    /// `consensus.handle_consensus_timeout`. Removed when the session
-    /// resolves naturally via `apply_consensus_outcome`.
-    pub pending_consensus_timeouts: HashMap<u32, Instant>,
-    /// Identity bytes derived from `User.member_id.member_id_bytes()` at
-    /// session construction.
-    pub self_member_id: Arc<[u8]>,
-    /// Display form derived from `User.member_id.member_id_display()` at
-    /// session construction. `Arc<str>` for the same reason as
-    /// `self_member_id` — cheap clone across guard boundaries.
-    pub member_id_display: Arc<str>,
-    /// Per-User instance UUID (cloned from `User`). Tagged on every
-    /// outbound packet for self-message filtering.
-    pub app_id: Arc<[u8]>,
+    /// `tick_deadlines` which calls `consensus.handle_consensus_timeout`.
+    /// Removed when the session resolves naturally via `apply_consensus_outcome`.
+    pub(crate) pending_consensus_timeouts: HashMap<u32, Instant>,
+    /// Identity bytes of the local member, derived from the integrator's
+    /// [`crate::member_id::MemberId`] at session construction. Read via
+    /// [`SessionRunner::member_id_bytes`].
+    pub(crate) self_member_id: Arc<[u8]>,
+    /// Display form of the local member id, derived at session construction.
+    /// `Arc<str>` for the same reason as `self_member_id` — cheap clone
+    /// across guard boundaries. Read via [`SessionRunner::member_id_display`].
+    pub(crate) member_id_display: Arc<str>,
+    /// Per-instance app id supplied at construction. Tagged on every
+    /// outbound packet and used for self-echo filtering in
+    /// [`SessionRunner::process_inbound`]. Read via [`SessionRunner::app_id`].
+    pub(crate) app_id: Arc<[u8]>,
     /// Pending [`SessionEvent`]s waiting for a caller to drain. Interior
     /// `Mutex` so producer-side `emit_event` stays `&self`; consumers
     /// drain via [`Self::drain_events`] once per polling cycle.
@@ -87,6 +100,12 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// drains via [`Self::drain_outbound`] once per cycle. Interior `Mutex`
     /// so producer-side `broadcast` stays `&self`.
     pending_outbound: Mutex<Vec<Outbound>>,
+    /// Last freeze-progress snapshot emitted as `SessionEvent::FreezeProgress`.
+    /// `poll()` compares the current `(received, expected)` against this and
+    /// emits a new event only when the count changes, avoiding repeated events
+    /// on consecutive polling ticks that observe the same progress. Reset to
+    /// `None` when the conversation leaves `Freezing`.
+    pub(crate) last_freeze_progress: Option<(usize, usize)>,
 }
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
@@ -130,6 +149,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             app_id,
             pending_events: Mutex::new(Vec::new()),
             pending_outbound: Mutex::new(Vec::new()),
+            last_freeze_progress: None,
         }
     }
 
@@ -139,7 +159,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// methods that emit during a brief read guard don't need to escalate
     /// to a write guard. Fire-and-forget (no `Result`), but a poisoned
     /// buffer is logged rather than silently dropped.
-    pub fn emit_event(&self, event: SessionEvent) {
+    pub(crate) fn emit_event(&self, event: SessionEvent) {
         match self.pending_events.lock() {
             Ok(mut buf) => buf.push(event),
             Err(_) => {
@@ -166,7 +186,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// deadline. Covers consensus-session timeouts, auto-vote timers, and
     /// state-machine phase deadlines (Freezing window, PendingJoin
     /// expiry, steward / recovery inactivity). Forward to an external
-    /// scheduler that calls `User::poll_session` on fire;
+    /// scheduler that calls `poll()` on fire;
     /// extra/early wakeups are no-ops.
     pub fn next_wakeup_in(&self) -> Option<Duration> {
         let now = Instant::now();
@@ -181,8 +201,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     }
 
     /// State-driven phase-timer deadline, if one is currently active. The
-    /// session's polling paths (`poll_freeze_status`, `check_member_freeze`,
-    /// `check_pending_join`, and the inactivity check in
+    /// session's polling paths (the freeze and pending-join steps in
+    /// `poll`, and the inactivity check in
     /// `check_steward_inactivity`) all gate on the phase timer; this
     /// surfaces the same wall-clock target so an external scheduler can
     /// wake us at the right time.
@@ -204,15 +224,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 Some(anchor + dur)
             }
             _ => None,
-        }
-    }
-
-    /// Snapshot the earliest deadline into a [`SessionTick`]. Public ops
-    /// returning `SessionTick` call this at the end of their happy path
-    /// so the caller gets a wakeup hint without a second accessor call.
-    pub fn tick(&self) -> SessionTick {
-        SessionTick {
-            next_wakeup_in: self.next_wakeup_in(),
         }
     }
 
@@ -254,7 +265,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Register an auto-vote to fire `delay` from now with the given
     /// `vote` choice. Idempotent — re-registering for the same
     /// `proposal_id` replaces the existing entry.
-    pub fn register_auto_vote(&mut self, proposal_id: u32, delay: Duration, vote: bool) {
+    pub(crate) fn register_auto_vote(&mut self, proposal_id: u32, delay: Duration, vote: bool) {
         self.pending_auto_votes.insert(
             proposal_id,
             AutoVoteEntry {
@@ -267,19 +278,36 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Drop the pending auto-vote for `proposal_id` if any is registered.
     /// Called when a manual vote arrives (manual choice wins) or when the
     /// consensus session resolves (vote no longer meaningful).
-    pub fn cancel_auto_vote(&mut self, proposal_id: u32) {
+    pub(crate) fn cancel_auto_vote(&mut self, proposal_id: u32) {
         self.pending_auto_votes.remove(&proposal_id);
     }
 
-    /// Drop every pending auto-vote on this runner. Called on conversation
-    /// leave so no stale entries fire against a conversation we've left.
-    pub fn cancel_all_auto_votes(&mut self) {
+    /// Drop every pending auto-vote on this runner. Called on every path that
+    /// emits `Leaving` so no stale entries fire against a conversation we've
+    /// left.
+    pub(crate) fn cancel_all_auto_votes(&mut self) {
         self.pending_auto_votes.clear();
     }
 
+    /// Leave this conversation. In `PendingJoin` (no MLS yet), does local
+    /// teardown — emits `Leaving`, cancels timers — and returns
+    /// [`LeaveOutcome::TornDown`]; the integrator must then remove the registry
+    /// entry and clean up the consensus scope. In all other states, opens a
+    /// self-leave consensus round and returns [`LeaveOutcome::LeaveInitiated`];
+    /// the leave completes when the next steward commit merges the removal.
+    pub fn leave(&mut self) -> Result<LeaveOutcome, SessionError> {
+        if self.conversation.current_state() == ConversationState::PendingJoin {
+            self.emit_event(SessionEvent::Leaving);
+            self.cancel_all_auto_votes();
+            return Ok(LeaveOutcome::TornDown);
+        }
+        self.initiate_self_leave()?;
+        Ok(LeaveOutcome::LeaveInitiated)
+    }
+
     /// Register a consensus-session timeout. Fires `delay` from now via
-    /// [`Self::tick_deadlines`]; removed naturally on consensus resolution.
-    pub fn register_consensus_timeout(&mut self, proposal_id: u32, delay: Duration) {
+    /// `tick_deadlines`; removed naturally on consensus resolution.
+    pub(crate) fn register_consensus_timeout(&mut self, proposal_id: u32, delay: Duration) {
         self.pending_consensus_timeouts
             .insert(proposal_id, Instant::now() + delay);
     }
@@ -288,7 +316,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// `apply_consensus_outcome` once the library reaches/fails consensus,
     /// so the timeout can't fire a stale `handle_consensus_timeout` against
     /// an already-resolved session.
-    pub fn unregister_consensus_timeout(&mut self, proposal_id: u32) {
+    pub(crate) fn unregister_consensus_timeout(&mut self, proposal_id: u32) {
         self.pending_consensus_timeouts.remove(&proposal_id);
     }
 
@@ -329,7 +357,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
     /// `true` once 3× `commit_inactivity_duration` has passed in
     /// `PendingJoin` without a welcome.
-    pub fn is_pending_join_expired(&self) -> bool {
+    pub(crate) fn is_pending_join_expired(&self) -> bool {
         self.conversation.current_state() == ConversationState::PendingJoin
             && self
                 .phase_timer
@@ -337,7 +365,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     }
 
     /// `true` once the freeze window elapsed while in `Freezing`.
-    pub fn is_freeze_timed_out(&self) -> bool {
+    pub(crate) fn is_freeze_timed_out(&self) -> bool {
         self.conversation.current_state() == ConversationState::Freezing
             && self
                 .phase_timer

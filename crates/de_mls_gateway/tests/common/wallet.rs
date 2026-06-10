@@ -21,8 +21,9 @@ use de_mls::defaults::{
 };
 use de_mls::member_id::MemberId;
 use de_mls::mls_crypto::MlsCredentials;
-use de_mls::session::{ConsensusContext, ConversationConfig};
+use de_mls::session::ConversationConfig;
 use de_mls_ds::SharedDeliveryService;
+use de_mls_gateway::user::ConsensusContext;
 use de_mls_gateway::user::{User, UserPlugins};
 
 /// Wallet-flavoured [`Identity`] used by integration tests. Holds the

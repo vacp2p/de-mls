@@ -3,20 +3,16 @@
 //! de-mls carries no transport subtopic: the integrator routes its own
 //! channels here. Conversation traffic (chat / vote / commit / sync — the
 //! envelope self-identifies) goes to [`User::handle_inbound`]; a joiner's
-//! key-package announcement goes to [`User::receive_key_package`]. Both own
-//! echo dedup and name-based routing to a session. Raw MLS welcomes never
-//! traverse these — they enter the library through [`User::accept_welcome`].
-
-use std::sync::{Arc, RwLock};
-
-use tracing::debug;
+//! key-package announcement goes to [`User::receive_key_package`]. Both
+//! delegate dedup and dispatch decisions to the runner. Raw MLS welcomes
+//! enter through [`User::accept_welcome`].
 
 use de_mls::{
-    core::{ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, ProcessResult},
-    session::{DispatchOutcome, SessionRunner, SessionTick, UserError},
+    core::{ConsensusPlugin, ConversationPluginsFactory},
+    session::DispatchOutcome,
 };
 
-use crate::user::{LockExt, User};
+use crate::user::{ConversationLifecycle, LockExt, User, UserError};
 
 /// A payload delivered from the network into the library, addressed to a
 /// conversation. The integrator builds this from its own wire format and
@@ -33,67 +29,56 @@ pub struct Inbound {
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     // ── Public API ───────────────────────────────────────────────────
 
-    /// Ingest conversation traffic (chat / vote / commit / sync). The
-    /// envelope self-identifies its kind, so no subtopic is needed; the
-    /// payload is decrypted and dispatched on the addressed session. Drops
-    /// self-echoes and packets for a conversation not yet MLS-attached
-    /// (`PendingJoin`).
-    pub fn handle_inbound(&self, inbound: Inbound) -> Result<SessionTick, UserError> {
+    /// Ingest conversation traffic (chat / vote / commit / sync). Self-echoes
+    /// are dropped before the registry lookup — our own packets can still
+    /// arrive for a conversation we just left, and must not surface as
+    /// `ConversationNotFound`. The runner dedups again for direct integrators.
+    /// On `LeaveRequested` the session has completed its protocol-side
+    /// teardown; this method finalises the User-side registry cleanup.
+    pub fn handle_inbound(&self, inbound: Inbound) -> Result<(), UserError> {
         if inbound.sender == self.app_id {
-            return Ok(SessionTick::empty());
+            return Ok(());
         }
         let entry_arc = self
             .lookup_entry(&inbound.conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        let result = {
-            let mut entry = entry_arc.write_or_err("session")?;
-            if !entry.has_mls() {
-                // PendingJoin: no MLS to decrypt with yet. Dropped, not
-                // buffered — replay is a separate recovery track.
-                debug!(
-                    conversation = inbound.conversation_id,
-                    "inbound dropped: MLS not attached (still PendingJoin)"
-                );
-                return Ok(SessionTick::empty());
-            }
-            entry.process_inbound(&inbound.payload)?
-        };
-        self.finish_dispatch(&inbound.conversation_id, &entry_arc, result)?;
+        let outcome = entry_arc
+            .write_or_err("session")?
+            .process_inbound(&inbound.sender, &inbound.payload)?;
+        if matches!(outcome, DispatchOutcome::LeaveRequested) {
+            self.finalize_self_leave(&inbound.conversation_id)?;
+        }
         self.flush(&entry_arc)?;
-        Ok(entry_arc.read_or_err("session")?.tick())
+        Ok(())
     }
 
-    /// Ingest a joiner's key-package announcement. The decision to admit the
-    /// holder is a conversation decision, delegated to
-    /// [`SessionRunner::receive_key_package`].
-    pub fn receive_key_package(&self, inbound: Inbound) -> Result<SessionTick, UserError> {
+    /// Ingest a joiner's key-package announcement. Self-echoes are dropped
+    /// before the registry lookup (same rationale as [`Self::handle_inbound`]);
+    /// admission decisions are handled inside the runner.
+    pub fn receive_key_package(&self, inbound: Inbound) -> Result<(), UserError> {
         if inbound.sender == self.app_id {
-            return Ok(SessionTick::empty());
+            return Ok(());
         }
         let entry_arc = self
             .lookup_entry(&inbound.conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         entry_arc
             .write_or_err("session")?
-            .receive_key_package(&inbound.payload)?;
+            .receive_key_package(&inbound.sender, &inbound.payload)?;
         self.flush(&entry_arc)?;
-        Ok(entry_arc.read_or_err("session")?.tick())
+        Ok(())
     }
 
     /// User-side completion of `LeaveConversation`: drop the entry from
     /// the registry, clean up the consensus scope, and broadcast removal.
-    /// The session-side teardown (emit `Leaving`, delete MLS state) runs
-    /// inside `SessionRunner::dispatch_inbound_result` /
-    /// [`SessionRunner::poll_freeze_status`] /
-    /// [`SessionRunner::check_pending_join`]; this method is the cleanup
-    /// callers run when those signal "registry should be removed"
-    /// (`DispatchOutcome::LeaveRequested` or `PendingJoinTick::Expired`).
+    /// The session-side teardown (emit `Leaving`, cancel timers, delete MLS
+    /// state) runs inside the runner before this is called; this method is
+    /// the cleanup callers run when the runner signals it has finished.
     pub fn finalize_self_leave(&self, conversation_id: &str) -> Result<(), UserError> {
-        // Clean up (and cancel timers) before removing the entry — the
-        // cleanup finds the runner via `lookup_entry`, so the entry must
-        // still exist. Eviction and `Removed` are unconditional: a
-        // scope-delete failure (timers already cancelled) must not strand a
-        // zombie. The cleanup error surfaces after the conversation is gone.
+        // Scope cleanup before registry remove — the cleanup finds the runner
+        // via lookup_entry, so the entry must still exist. Eviction and
+        // `Removed` are unconditional: a scope-delete failure must not strand
+        // a zombie.
         let cleanup = self.cleanup_consensus_scope(conversation_id);
         self.conversations
             .write()
@@ -101,24 +86,5 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .remove(conversation_id);
         self.emit_lifecycle(ConversationLifecycle::Removed(conversation_id.to_string()));
         cleanup
-    }
-
-    // ── Private ──────────────────────────────────────────────────────
-
-    /// Drive the session-side dispatcher and finish lifecycle work on the
-    /// User side when the session signals `LeaveRequested`.
-    pub(crate) fn finish_dispatch(
-        &self,
-        conversation_id: &str,
-        entry_arc: &Arc<RwLock<SessionRunner<P, CP>>>,
-        result: ProcessResult,
-    ) -> Result<(), UserError> {
-        let outcome = entry_arc
-            .write_or_err("session")?
-            .dispatch_inbound_result(result)?;
-        if matches!(outcome, DispatchOutcome::LeaveRequested) {
-            self.finalize_self_leave(conversation_id)?;
-        }
-        Ok(())
     }
 }

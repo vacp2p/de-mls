@@ -2,15 +2,16 @@
 //!
 //! A user calls `start_conversation(..., false)` (joiner intent) for a
 //! conversation that has no creator on the network. After `3 ×
-//! commit_inactivity_duration` the polling tick returns
-//! [`PendingJoinTick::Expired`]; the caller then runs
-//! [`User::finalize_self_leave`] to drop the registry entry and broadcast
-//! removal. This test asserts the full cleanup pathway end-to-end.
+//! commit_inactivity_duration` the polling cycle sets `leave_requested`;
+//! the caller then runs [`User::finalize_self_leave`] to drop the registry
+//! entry and broadcast removal. This test asserts the full cleanup pathway
+//! end-to-end.
 
 use std::time::{Duration, Instant};
 
-use de_mls::core::{ConversationLifecycle, SessionEvent, StewardListConfig};
-use de_mls::session::{ConversationConfig, PendingJoinTick};
+use de_mls::core::{SessionEvent, StewardListConfig};
+use de_mls::session::ConversationConfig;
+use de_mls_gateway::user::ConversationLifecycle;
 
 mod common;
 use common::session_fixtures::{SessionArc, make_user, settle_for};
@@ -45,15 +46,14 @@ fn pending_join_expires_evicts_entry_and_broadcasts_removal() {
         .expect("session registered");
 
     // Poll until expiry. The first tick after start anchors the timer; we
-    // need ≥ 3× inactivity to fire `Expired`.
-    let outcome = await_pending_join_outcome(&session, inactivity);
-    assert_eq!(
-        outcome,
-        PendingJoinTick::Expired,
-        "polling must surface Expired once 3× inactivity has passed"
+    // need ≥ 3× inactivity to fire the expiry.
+    let leave_requested = await_leave_requested(&session, inactivity);
+    assert!(
+        leave_requested,
+        "polling must signal leave_requested once 3× inactivity has passed"
     );
 
-    // The session must have emitted Leaving before returning Expired.
+    // The session must have emitted Leaving before returning leave_requested.
     let session_events = session.read().unwrap().drain_events();
     assert!(
         session_events
@@ -88,16 +88,16 @@ fn pending_join_expires_evicts_entry_and_broadcasts_removal() {
     );
 }
 
-fn await_pending_join_outcome(session: &SessionArc, inactivity: Duration) -> PendingJoinTick {
+fn await_leave_requested(session: &SessionArc, inactivity: Duration) -> bool {
     // Allow up to 6× inactivity so the test isn't fragile on slow CI.
     let deadline = Instant::now() + inactivity * 6;
     loop {
-        let tick = session.read().unwrap().check_pending_join().unwrap();
-        if tick != PendingJoinTick::StillPending {
-            return tick;
+        let outcome = session.write().unwrap().poll();
+        if outcome.leave_requested {
+            return true;
         }
         if Instant::now() >= deadline {
-            return tick;
+            return false;
         }
         settle_for(inactivity / 4);
     }

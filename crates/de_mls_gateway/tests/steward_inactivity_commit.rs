@@ -39,7 +39,7 @@ fn steward_inactivity_fires_commit_candidate() {
     let bob_tx = users[1].1.clone();
 
     assert!(
-        alice_session.read().unwrap().is_steward_for_self(),
+        alice_session.read().unwrap().is_steward(),
         "creator must be steward after bootstrap"
     );
 

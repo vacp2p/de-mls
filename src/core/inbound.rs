@@ -114,21 +114,13 @@ pub fn process_inbound<M: MlsService>(
 mod tests {
     use super::*;
     use crate::core::conversation::self_leave_proposal_id;
-    use crate::protos::de_mls::messages::v1::RemoveMember;
 
     fn member(id: u8) -> Vec<u8> {
         vec![id; 20]
     }
 
     fn remove_payload(member_id: &[u8]) -> Vec<u8> {
-        ConversationUpdateRequest {
-            payload: Some(conversation_update_request::Payload::RemoveMember(
-                RemoveMember {
-                    member_id: member_id.to_vec(),
-                },
-            )),
-        }
-        .encode_to_vec()
+        ConversationUpdateRequest::remove_member(member_id.to_vec()).encode_to_vec()
     }
 
     fn proposal_for_self_remove(sender: &[u8], expected_voters: u32) -> Proposal {

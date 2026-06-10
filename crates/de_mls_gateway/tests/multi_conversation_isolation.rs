@@ -51,26 +51,18 @@ fn write_lock_on_one_session_does_not_block_others() {
             .try_write()
             .expect("write on conv-b must not wait on conv-a's lock");
         // Guard is dropped at the end of this block, before the
-        // `check_member_freeze` call below acquires its own write guard.
+        // `poll` call below acquires its own write guard.
     }
 
     // Drive a session-level operation to prove the lock is actually
-    // usable for real work, not just acquirable. `check_member_freeze`
-    // takes `&mut self`, so the caller holds the conv-b write guard for
-    // the call — independent of conv-a's still-held guard.
-    session_b
-        .write()
-        .unwrap()
-        .check_member_freeze()
-        .expect("check_member_freeze on conv-b must succeed");
+    // usable for real work, not just acquirable. `poll` takes `&mut self`,
+    // so the caller holds the conv-b write guard for the call — independent
+    // of conv-a's still-held guard.
+    session_b.write().unwrap().poll();
 
     drop(a_guard);
 
     // After releasing, conv-a is also accessible — the same entry point
     // works against either session.
-    session_a
-        .write()
-        .unwrap()
-        .check_member_freeze()
-        .expect("conv-a check_member_freeze must succeed");
+    session_a.write().unwrap().poll();
 }

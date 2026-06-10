@@ -1,18 +1,14 @@
-//! Timer polls for pending-join expiry, freeze timeout, and steward inactivity.
+//! Unified per-cycle polling entry point for [`crate::session::SessionRunner`].
 //!
-//! `check_pending_join` returns a [`PendingJoinTick`] so a polling caller can
-//! distinguish "still pending" / "now joined" / "timed out". On `Expired`
-//! the session has already emitted `Leaving`; the caller drives the
-//! User-side cleanup via `User::finalize_self_leave`.
-//!
-//! `poll_freeze_status` returns the freeze-tick status alongside a
-//! [`DispatchOutcome`] for the rare case where a commit applied during
-//! the freeze fires `LeaveConversation`. Same handshake as
-//! [`SessionRunner::dispatch_inbound_result`].
+//! [`SessionRunner::poll`] drives all time-based session paths in one call:
+//! consensus-deadline ticks, freeze progression, steward-inactivity freeze
+//! entry, and pending-join expiry. The sub-steps are private to this module —
+//! the integrator calls `poll()` once per wakeup cycle and reacts to the
+//! returned [`PollOutcome`].
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::{
     core::{
@@ -20,53 +16,94 @@ use crate::{
         PeerScoringPlugin, ScoreEvent, ScoreOp, SessionEvent, StewardListPlugin,
     },
     mls_crypto::MlsService,
-    session::{ConversationState, DispatchOutcome, FreezeTimeoutStatus, SessionRunner, UserError},
+    session::{ConversationState, DispatchOutcome, SessionError, SessionRunner},
 };
 
-/// What [`SessionRunner::check_pending_join`] hands back to its polling
-/// caller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PendingJoinTick {
-    /// Still in `PendingJoin`; caller should keep polling.
-    StillPending,
-    /// No longer in `PendingJoin` (joined or otherwise transitioned).
-    NotPending,
-    /// Pending-join window elapsed without a welcome. The session has
-    /// emitted `Leaving`; the caller must follow up with
-    /// `User::finalize_self_leave` to drop the entry from
-    /// the registry and broadcast removal.
-    Expired,
+/// Summary returned by [`SessionRunner::poll`] after one polling pass.
+#[derive(Debug, Clone)]
+pub struct PollOutcome {
+    /// Earliest deadline still pending after this pass. Forward to an
+    /// external scheduler as the next wakeup hint.
+    pub next_wakeup_in: Option<Duration>,
+    /// `true` if this session should be torn down: either a `PendingJoin`
+    /// expiry or a commit that ejected the local member. The integrator
+    /// must remove the registry entry and clean up the consensus scope
+    /// before its next polling cycle.
+    pub leave_requested: bool,
 }
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
-    /// Polling check for `PendingJoin`. Returns [`PendingJoinTick::Expired`]
-    /// after emitting `SessionEvent::Leaving` once the pending-join window
-    /// elapses; the caller handles registry-side cleanup.
-    pub fn check_pending_join(&self) -> Result<PendingJoinTick, UserError> {
-        let state = self.conversation.current_state();
-        if state != ConversationState::PendingJoin {
-            return Ok(PendingJoinTick::NotPending);
+    /// Drive one polling cycle: tick consensus deadlines, advance freeze
+    /// state, check steward inactivity, and check pending-join expiry.
+    ///
+    /// Best-effort: each step runs regardless of whether the previous one
+    /// failed; step errors are transient (a step that can't act this cycle
+    /// retries on the next) and are logged rather than surfaced.
+    ///
+    /// Returns [`PollOutcome::leave_requested`] when the session is ready
+    /// to be torn down; the integrator finalizes the leave.
+    pub fn poll(&mut self) -> PollOutcome {
+        let mut leave_requested = false;
+
+        self.tick_deadlines();
+
+        match self.advance_freeze() {
+            Ok(DispatchOutcome::LeaveRequested) => leave_requested = true,
+            Ok(_) => {}
+            Err(e) => warn!(
+                conversation = %self.conversation_id,
+                error = %e,
+                "advance_freeze error in poll"
+            ),
+        }
+
+        if let Err(e) = self.start_freeze_on_inactivity() {
+            warn!(
+                conversation = %self.conversation_id,
+                error = %e,
+                "inactivity-freeze error in poll"
+            );
+        }
+
+        if self.check_pending_join() {
+            leave_requested = true;
+        }
+
+        PollOutcome {
+            next_wakeup_in: self.next_wakeup_in(),
+            leave_requested,
+        }
+    }
+
+    /// Polling check for `PendingJoin`: returns `true` once the pending-join
+    /// window elapses without a welcome. By then the session has emitted
+    /// `SessionEvent::Leaving` and cancelled its timers; the integrator
+    /// handles registry-side cleanup.
+    fn check_pending_join(&mut self) -> bool {
+        if self.conversation.current_state() != ConversationState::PendingJoin {
+            return false;
         }
         if !self.is_pending_join_expired() {
-            return Ok(PendingJoinTick::StillPending);
+            return false;
         }
         info!(conversation = %self.conversation_id, "pending join timed out");
         self.emit_event(SessionEvent::Leaving);
-        Ok(PendingJoinTick::Expired)
+        self.cancel_all_auto_votes();
+        true
     }
 
-    /// Poll tick for `Freezing`: drives Freezing → Selection once candidates
-    /// are all in or the freeze window elapses, then finalises, dispatches
-    /// the resulting [`crate::core::ProcessResult`], and returns the
-    /// freeze status. The [`DispatchOutcome`] is `LeaveRequested` if the
-    /// applied commit ejected the local member — the caller drives the
-    /// User-side registry teardown.
-    pub fn poll_freeze_status(
-        &mut self,
-    ) -> Result<(FreezeTimeoutStatus, DispatchOutcome), UserError> {
+    /// Drive the freeze phase forward. While `Freezing`, emits
+    /// [`SessionEvent::FreezeProgress`] as candidates arrive; once all
+    /// expected candidates are in or the freeze window elapses, transitions
+    /// to `Selection`, finalises the round, and dispatches the resulting
+    /// [`crate::core::ProcessResult`]. Returns
+    /// [`DispatchOutcome::LeaveRequested`] if the applied commit ejected the
+    /// local member — `poll()` surfaces that as `leave_requested`.
+    fn advance_freeze(&mut self) -> Result<DispatchOutcome, SessionError> {
         let state = self.conversation.current_state();
         if state != ConversationState::Freezing {
-            return Ok((FreezeTimeoutStatus::NotFreezing, DispatchOutcome::Done));
+            self.last_freeze_progress = None;
+            return Ok(DispatchOutcome::Done);
         }
 
         // Early selection: skip remaining freeze time if all expected
@@ -78,8 +115,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             .is_some_and(|list| self.conversation.queues.freeze_candidate_count() >= list.len());
 
         if !all_candidates_in && !self.is_freeze_timed_out() {
-            return Ok((FreezeTimeoutStatus::StillFreezing, DispatchOutcome::Done));
+            // Still freezing — surface candidate progress when it changes.
+            let (received, expected) = self.freeze_candidate_count();
+            if self.last_freeze_progress != Some((received, expected)) {
+                self.last_freeze_progress = Some((received, expected));
+                self.emit_event(SessionEvent::FreezeProgress { received, expected });
+            }
+            return Ok(DispatchOutcome::Done);
         }
+        self.last_freeze_progress = None;
 
         let selection_event = self.start_selection();
         let has_proposals = self.conversation.queues.approved_proposals_count() > 0;
@@ -157,7 +201,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                         DispatchOutcome::Done
                     }
                 };
-                return Ok((FreezeTimeoutStatus::Applied, outcome));
+                Ok(outcome)
             }
             FreezeOutcome::NoCandidate => {
                 // `accuse_target` is `Some` only when we had approved proposals
@@ -218,32 +262,28 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 if entered_reelection && let Err(e) = self.initiate_steward_election(true) {
                     info!(conversation = %conversation_id, error = %e, "recovery election deferred");
                 }
+
+                Ok(DispatchOutcome::Done)
             }
         }
-
-        Ok((
-            FreezeTimeoutStatus::TimedOut { has_proposals },
-            DispatchOutcome::Done,
-        ))
     }
 
-    /// Drive the steward-inactivity check. Returns `true` exactly on the
-    /// tick that transitions into Freezing; `false` while still waiting,
-    /// outside Working, or when there's no approved work. Stewards build
-    /// their own commit candidate too; candidate-build failure is logged
-    /// and the freeze transition proceeds (peers' candidates still get
-    /// processed).
-    pub fn check_member_freeze(&mut self) -> Result<bool, UserError> {
-        let state = self.conversation.current_state();
-        if state == ConversationState::PendingJoin {
-            return Ok(false);
+    /// Steward-inactivity freeze entry: once the inactivity timer fires with
+    /// approved work pending, start the freeze round and transition into
+    /// `Freezing`. Stewards build their own commit candidate too;
+    /// candidate-build failure is logged and the freeze transition proceeds
+    /// (peers' candidates still get processed). No-ops outside `Working`
+    /// (via `check_steward_inactivity`) and while an election is in flight.
+    fn start_freeze_on_inactivity(&mut self) -> Result<(), SessionError> {
+        if self.conversation.current_state() == ConversationState::PendingJoin {
+            return Ok(());
         }
 
         let proposal_count = self.conversation.queues.approved_proposals_count();
         // Hold the freeze while an election is in flight — committing on
         // the known-stale list would just produce a NoCandidate.
         if self.conversation.queues.has_election_in_flight() {
-            return Ok(false);
+            return Ok(());
         }
         // Recovery uses the shorter retry inactivity window so we don't
         // burn another full epoch waiting for a steward to commit.
@@ -254,9 +294,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         } else {
             self.conversation.config.commit_inactivity_duration
         };
-        let freeze_event = self.check_steward_inactivity(proposal_count, inactivity);
-        let Some(event) = freeze_event else {
-            return Ok(false);
+        let Some(event) = self.check_steward_inactivity(proposal_count, inactivity) else {
+            return Ok(());
         };
         let epoch = self.conversation.expect_mls()?.current_epoch()?;
         self.conversation.queues.start_freeze_round(epoch);
@@ -290,6 +329,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             self.broadcast(payload);
         }
 
-        Ok(true)
+        Ok(())
     }
 }

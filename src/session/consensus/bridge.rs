@@ -1,6 +1,7 @@
-//! App-layer adapters over the consensus service: proposal submission,
-//! vote casting, and inbound forwarding for peer messages. These helpers
-//! shape how consensus events surface in the UI and on the transport;
+//! Stateless adapters between session intents and the consensus library.
+//!
+//! Every function here talks only to the consensus service, never to
+//! session state; callers encrypt and broadcast any returned wire message.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -16,14 +17,11 @@ use tracing::info;
 
 use crate::{
     core::{ConsensusPlugin, ConsensusServiceFor, CoreError, self_leave_proposal_id},
-    protos::de_mls::messages::v1::{
-        AppMessage, ConversationUpdateRequest, RemoveMember, conversation_update_request,
-    },
-    session::error::UserError,
+    protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest},
+    session::error::SessionError,
 };
 
-/// Consensus-session parameters that come from `ConversationConfig`. Grouped so
-/// [`submit_proposal`]'s argument list stays readable.
+/// Per-proposal consensus-session parameters.
 pub(crate) struct ProposalParams {
     pub expected_voters: u32,
     pub proposal_expiration: Duration,
@@ -31,18 +29,8 @@ pub(crate) struct ProposalParams {
     pub liveness_criteria_yes: bool,
 }
 
-/// Open a consensus session for `request`; return its `proposal_id` and the
-/// unbundled `Proposal` wire message.
-///
-/// No vote is cast here. The caller decides whether to:
-/// - bundle their vote by calling [`cast_vote`] (owner path returns the
-///   proposal with the creator's vote attached), or
-/// - broadcast the unbundled message as-is and let the creator vote later
-///   like any other member.
-///
-/// In both cases the caller must record ownership *before*
-/// casting, so a single-voter consensus transition can't fire before
-/// [`crate::core::ConversationQueues::is_owner_of_proposal`] is true.
+/// Open a consensus session for `ConversationUpdateRequest`; returns the new `proposal_id`
+/// and the unbundled `Proposal` wire message.
 pub(crate) fn submit_proposal<P: ConsensusPlugin>(
     conversation_id: &str,
     request: &ConversationUpdateRequest,
@@ -77,24 +65,13 @@ pub(crate) fn submit_proposal<P: ConsensusPlugin>(
     Ok((proposal_id, proposal.into()))
 }
 
-/// Cast a vote and return the Vote-only `AppMessage` to broadcast.
-///
-/// Always returns a `Vote` wire message — never a full `Proposal`. Every
-/// peer already has the proposal registered in their session (either from
-/// the unbundled broadcast or from a bundled-at-submit proposal — both
-/// land before anyone votes). Re-broadcasting the full proposal would be
-/// rejected peer-side as [`ConsensusError::ProposalAlreadyExist`], dropping the vote.
-///
-/// The bundled-at-submit path in `register_new_proposal` calls
-/// `consensus.cast_vote_and_get_proposal` directly rather than this
-/// helper, because that is the only legitimate case for broadcasting
-/// proposal + vote atomically in a single wire message.
+/// Cast our vote in the local session; returns the Vote-only wire message.
 pub(crate) fn cast_vote<P>(
     conversation_id: &str,
     proposal_id: u32,
     vote: bool,
     consensus: &ConsensusServiceFor<P>,
-) -> Result<AppMessage, UserError>
+) -> Result<AppMessage, SessionError>
 where
     P: ConsensusPlugin,
 {
@@ -110,37 +87,10 @@ where
     Ok(vote_msg.into())
 }
 
-/// Forward a peer's proposal into the local consensus service. The caller
-/// decides whether to emit a vote request event — for fast-path proposals
-/// (`expected_voters_count == 1`) the session resolves on arrival, so
-/// there's nothing to vote on.
-pub(crate) fn forward_incoming_proposal<P: ConsensusPlugin>(
-    conversation_id: &str,
-    proposal: Proposal,
-    consensus: &ConsensusServiceFor<P>,
-) -> Result<(), UserError> {
-    let scope = P::Scope::from(conversation_id.to_string());
-    consensus.process_incoming_proposal(&scope, proposal)?;
-    Ok(())
-}
-
-/// Forward a peer's vote into the local consensus service.
+/// Feed a peer's vote into the local consensus session.
 ///
-/// `outcome_applied_locally` is the result of
-/// `ConversationQueues::is_consensus_outcome_applied(vote.proposal_id)` computed
-/// by the caller — passed in eagerly so this helper doesn't have to borrow
-/// the conversation across the consensus-service call. It's only consulted on
-/// the `SessionNotFound` branch.
-///
-/// Late-arrival classification:
-/// - `SessionNotActive` — session exists but already resolved. Benign, debug.
-/// - `SessionNotFound` with `outcome_applied_locally = true` — session
-///   was trimmed after local resolution. Benign, debug.
-/// - `SessionNotFound` with `outcome_applied_locally = false` — we never
-///   saw this proposal. Suspicious (spurious packet or lost proposal).
-///   Warn-log, swallow the error so inbound dispatch keeps draining.
-///
-/// Other consensus errors propagate.
+/// Late arrivals are swallowed (logged, `Ok`) so inbound dispatch keeps
+/// draining.
 pub(crate) fn forward_incoming_vote<P: ConsensusPlugin>(
     conversation_id: &str,
     vote: Vote,
@@ -179,39 +129,25 @@ pub(crate) fn forward_incoming_vote<P: ConsensusPlugin>(
     }
 }
 
-/// Open a self-leave consensus session: `expected_voters_count = 1` with
-/// the leaver's YES bundled, so it resolves synchronously and the normal
-/// `apply_consensus_outcome` path commits `RemoveMember(self)`.
+/// Open a self-leave session: a hand-crafted `Proposal` carrying the
+/// deterministic [`self_leave_proposal_id`] and the leaver's signed YES,
+/// so the single-voter session resolves on arrival.
 ///
-/// Unlike [`submit_proposal`], the `Proposal` is hand-crafted to carry
-/// `self_leave_proposal_id(member_id)`. Every node derives the same id, so a
-/// retransmitted self-leave dedupes via `ProposalAlreadyExist` and lands in
-/// every `approved_proposals` under the same key.
-///
-/// `Ok(Some(_))` — newly opened; caller broadcasts the `AppMessage`.
-/// `Ok(None)` — already in flight (e.g. double-click); no broadcast.
+/// The fixed id makes retransmits collide as `ProposalAlreadyExist`,
+/// returned as `Ok(None)` — nothing to broadcast.
 pub(crate) fn submit_self_leave_proposal<P>(
     conversation_id: &str,
     self_member_id: &[u8],
     consensus: &ConsensusServiceFor<P>,
     params: ProposalParams,
-) -> Result<Option<(u32, AppMessage)>, UserError>
+) -> Result<Option<(u32, AppMessage)>, SessionError>
 where
     P: ConsensusPlugin,
 {
-    let request = ConversationUpdateRequest {
-        payload: Some(conversation_update_request::Payload::RemoveMember(
-            RemoveMember {
-                member_id: self_member_id.to_vec(),
-            },
-        )),
-    };
+    let request = ConversationUpdateRequest::remove_member(self_member_id.to_vec());
     let payload = request.encode_to_vec();
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(CoreError::from)?
-        .as_secs();
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let expiration = now.saturating_add(params.proposal_expiration.as_secs());
 
     let proposal_id = self_leave_proposal_id(self_member_id);

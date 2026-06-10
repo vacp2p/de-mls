@@ -58,7 +58,7 @@
 //! let mut session = SessionRunner::create("de-mls-test", deps)?;
 //!
 //! // Send a chat message — buffered, never auto-sent.
-//! session.push_message(b"Hello, world!".to_vec())?;
+//! session.send_message(b"Hello, world!".to_vec())?;
 //!
 //! // Drain outbound and publish it on your own transport.
 //! for out in session.drain_outbound() { /* publish */ }
@@ -86,21 +86,4 @@ pub mod defaults;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 
-/// Protobuf message definitions.
-pub mod protos {
-    /// Re-exported consensus protocol messages.
-    pub mod hashgraph_like_consensus {
-        pub mod v1 {
-            pub use ::hashgraph_like_consensus::protos::consensus::v1::*;
-        }
-    }
-
-    /// DE-MLS application-level messages.
-    pub mod de_mls {
-        pub mod messages {
-            pub mod v1 {
-                include!(concat!(env!("OUT_DIR"), "/de_mls.messages.v1.rs"));
-            }
-        }
-    }
-}
+pub mod protos;

@@ -137,7 +137,7 @@ fn concurrent_joins_leave_joiners_with_empty_buffer() {
     // buffers. Alice (steward) has the KPs in her buffer until she commits.
     for (name, user) in [("bob", &bob), ("charlie", &charlie), ("dave", &dave)] {
         let session = user.lookup_entry(group).unwrap().unwrap();
-        let count = session.read().unwrap().get_pending_update_count();
+        let count = session.read().unwrap().pending_update_count();
         assert_eq!(
             count, 0,
             "{name} in PendingJoin must not buffer broadcast KPs"

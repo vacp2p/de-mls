@@ -1,10 +1,4 @@
-//! Consensus-event dispatch on `SessionRunner`. Triggered when the
-//! hashgraph-like-consensus service reaches or fails consensus on a
-//! proposal; compare with `inbound.rs` (transport-delivered packets).
-//!
-//! The handlers fan out into steward initiations (election, deadlock ECP,
-//! score removals, buffered-update drains), each of which opens a follow-up
-//! proposal.
+//! Applying resolved consensus outcomes to the conversation.
 
 use hashgraph_like_consensus::{storage::ConsensusStorage, types::ConsensusEvent};
 use prost::Message;
@@ -18,18 +12,17 @@ use crate::{
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, conversation_update_request,
     },
-    session::{ConversationState, SessionRunner, SessionTick, UserError},
+    session::{ConversationState, SessionError, SessionRunner},
 };
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
-    /// Entry point from the consensus event bus: decode the proposal,
-    /// apply the result to the conversation, and dispatch to the correct
-    /// follow-up handler (election-accepted / election-rejected /
-    /// emergency-scored).
+    /// Apply one resolved outcome: surface the decision to the integrator,
+    /// apply the queue effects, then run whatever follow-up the result
+    /// calls for (election install/retry, freeze entry, emergency scoring).
     pub(crate) fn apply_consensus_outcome(
         &mut self,
         event: ConsensusEvent,
-    ) -> Result<SessionTick, UserError> {
+    ) -> Result<(), SessionError> {
         let (proposal_id, approved, timestamp) = match &event {
             ConsensusEvent::ConsensusReached {
                 proposal_id,
@@ -42,10 +35,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             } => (*proposal_id, false, *timestamp),
         };
 
-        // Proposal resolved — any pending auto-vote timer is now moot.
+        // Any outcome moots both pending deadlines for this proposal.
         self.cancel_auto_vote(proposal_id);
-        // Drop re-emissions from the consensus library (timeout-path
-        // race) so we don't re-apply state or double-fire UI events.
+        self.unregister_consensus_timeout(proposal_id);
         let already_applied = self
             .conversation
             .queues
@@ -56,27 +48,24 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 proposal_id,
                 "duplicate consensus outcome dropped"
             );
-            return self.current_tick();
+            return Ok(());
         }
 
-        // Surface the decision before any effects so UI fanout sees it in
-        // the same polling cycle as the state change that follows.
+        // Emitted before any effects, so the integrator sees the decision
+        // in the same polling cycle as the state changes it triggers.
         self.emit_event(SessionEvent::ConsensusReached {
             proposal_id,
             approved,
             timestamp,
         });
-        let consensus = self.consensus.clone();
-        let conversation_id = self.conversation_id.clone();
-        let scope = P::Scope::from(conversation_id.clone());
-        let proposal = consensus.storage().get_proposal(&scope, proposal_id)?;
-        // Decode once and thread the request through every downstream step.
+        let scope = P::Scope::from(self.conversation_id.clone());
+        let proposal = self.consensus.storage().get_proposal(&scope, proposal_id)?;
         let request = ConversationUpdateRequest::decode(proposal.payload.as_slice())?;
 
-        // The inactivity timer is self-started by `check_steward_inactivity`
-        // on the next poll — no explicit notification needed here.
+        // Nothing arms the inactivity timer here — the next poll's
+        // inactivity check self-starts it once it sees approved work.
         info!(
-            conversation = %conversation_id,
+            conversation = %self.conversation_id,
             proposal_id, approved, "consensus reached"
         );
         self.conversation
@@ -89,28 +78,27 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             &request,
         )?;
 
-        // A commit candidate may have arrived before this approval landed (a
-        // peer steward can reach consensus and broadcast the commit before we
-        // apply our own vote). Now that the approved queue is populated, replay
-        // any stashed candidate so the freeze round picks it up instead of
-        // starting empty and forcing a needless reelection.
+        // A peer steward can reach consensus and broadcast its commit
+        // candidate before our own outcome lands. Now that the approved
+        // queue is populated, replay any stashed candidate so the freeze
+        // round starts with it instead of empty (which would force a
+        // needless reelection).
         self.conversation.replay_early_candidates()?;
 
         match consensus_apply {
             ConsensusApplyResult::NoAction => {}
             ConsensusApplyResult::ElectionAccepted(election) => {
                 self.handle_election_accepted(election)?;
-                return self.current_tick();
             }
             ConsensusApplyResult::ElectionRejected => {
                 self.handle_election_rejected()?;
             }
             ConsensusApplyResult::RecoveryModeOpened => {
                 self.conversation.enter_recovery_mode();
-                self.start_freezing_and_emit()?;
+                self.start_freezing_and_emit();
             }
             ConsensusApplyResult::UrgentRemoval { target } => {
-                self.start_freezing_and_emit()?;
+                self.start_freezing_and_emit();
                 self.refresh_stewards_after_removal(&target)?;
             }
             ConsensusApplyResult::QueuedRemoval { target } => {
@@ -121,45 +109,34 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             }
         }
 
-        // Consensus has settled — drop the deadline so tick_deadlines
-        // doesn't fire a stale handle_consensus_timeout.
-        self.unregister_consensus_timeout(proposal_id);
-
+        // Empty for everything but emergency-criteria payloads.
         let score_ops = emergency_score_ops(&request, approved);
         if !score_ops.is_empty() {
             self.handle_emergency_scored(proposal_id, &request, &score_ops)?;
         }
 
-        self.current_tick()
-    }
-
-    /// Latest [`SessionTick`]. Terminal value of every
-    /// `apply_consensus_outcome` exit path.
-    fn current_tick(&self) -> Result<SessionTick, UserError> {
-        Ok(self.tick())
-    }
-
-    /// Emit a [`SessionEvent::PhaseChange`] for `transition`, if a state
-    /// change occurred. Shared by the freeze / election / emergency paths.
-    fn emit_phase_change(&self, transition: Option<ConversationState>) -> Result<(), UserError> {
-        if let Some(state) = transition {
-            self.emit_event(SessionEvent::PhaseChange(state));
-        }
         Ok(())
     }
 
-    /// Enter Freezing immediately (bypassing the inactivity timer) and emit
-    /// the resulting phase change. Called by `apply_consensus_outcome` for
-    /// `UrgentRemoval` and `RecoveryModeOpened` outcomes that need an
-    /// immediate commit.
-    fn start_freezing_and_emit(&mut self) -> Result<(), UserError> {
-        let transition = self.start_freezing();
-        self.emit_phase_change(transition)
+    /// Emit a [`SessionEvent::PhaseChange`] if a transition occurred.
+    fn emit_phase_change(&self, transition: Option<ConversationState>) {
+        if let Some(state) = transition {
+            self.emit_event(SessionEvent::PhaseChange(state));
+        }
     }
 
-    /// When the removal target is a current steward, fire a fresh election
-    /// in parallel so the next epoch keeps a healthy ES + BS.
-    fn refresh_stewards_after_removal(&mut self, target: &[u8]) -> Result<(), UserError> {
+    /// Enter `Freezing` now, bypassing the inactivity timer — for outcomes
+    /// that need a commit immediately rather than on the next timeout.
+    fn start_freezing_and_emit(&mut self) {
+        let transition = self.start_freezing();
+        self.emit_phase_change(transition);
+    }
+
+    /// A removal that hits a current steward triggers a fresh election so
+    /// the next epoch still has a live epoch + backup steward. Election
+    /// rejection here is deferred, not fatal — the list heals on a later
+    /// reconcile.
+    fn refresh_stewards_after_removal(&mut self, target: &[u8]) -> Result<(), SessionError> {
         if !self.conversation.steward_list.is_steward(target) {
             return Ok(());
         }
@@ -173,17 +150,16 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         Ok(())
     }
 
-    /// Accepted election: validate, install the new list, exit Reelection
-    /// if we were in it, close any open recovery window, and drain
-    /// buffered updates so the fresh epoch steward picks them up.
+    /// Validate and install an accepted steward list, close any recovery
+    /// window, resume from `Reelection` if that's where we were, and drain
+    /// buffered updates so the fresh epoch steward proposes them.
     fn handle_election_accepted(
         &mut self,
         election: StewardElectionProposal,
-    ) -> Result<(), UserError> {
+    ) -> Result<(), SessionError> {
         self.conversation.expect_mls()?;
-        // Election proposals carry the candidate pool implicitly:
-        // `proposed_stewards` is the full set the proposer sorted, so
-        // `candidate_pool == proposed_stewards` for validation.
+        // The proposal carries no separate candidate pool: `proposed_stewards`
+        // is the full set the proposer sorted.
         let is_valid = self.conversation.steward_list.validate_proposed(
             &election.proposed_stewards,
             election.election_epoch,
@@ -204,9 +180,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             election.proposed_stewards.len(),
             election.retry_round,
         )?;
-        // `retry_round` stays > 0 until the next successful commit so
-        // the immediate post-election inactivity check uses the
-        // short retry window.
+        // `retry_round` stays > 0 until the next successful commit, so the
+        // post-election inactivity check keeps the short recovery window.
         self.conversation.exit_recovery_mode();
         let resumed_from_reelection =
             if self.conversation.current_state() == ConversationState::Reelection {
@@ -214,7 +189,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             } else {
                 None
             };
-        self.emit_phase_change(resumed_from_reelection)?;
+        self.emit_phase_change(resumed_from_reelection);
         info!(
             conversation = %self.conversation_id,
             epoch = election.election_epoch,
@@ -226,20 +201,19 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         self.process_buffered_updates()
     }
 
-    /// Rejected election: bump the retry round and retry under the max
-    /// (idempotent), or escalate to a `Deadlock` ECP once exhausted.
-    fn handle_election_rejected(&mut self) -> Result<(), UserError> {
+    /// Bump the retry round and re-run the election, or escalate to a
+    /// `Deadlock` emergency proposal once retries are exhausted.
+    fn handle_election_rejected(&mut self) -> Result<(), SessionError> {
         self.conversation.steward_list.bump_retry();
         let round = self.conversation.steward_list.next_retry_round();
         let max = self.conversation.steward_list.max_retries();
-        let conversation_id = self.conversation_id.clone();
         if round > max {
             info!(
-                conversation = %conversation_id,
+                conversation = %self.conversation_id,
                 round, max, "election retries exhausted; escalating to Layer 3"
             );
             if let Err(e) = self.initiate_deadlock_ecp() {
-                error!(conversation = %conversation_id, error = %e, "Deadlock ECP filing failed");
+                error!(conversation = %self.conversation_id, error = %e, "Deadlock ECP filing failed");
                 self.emit_event(SessionEvent::Error {
                     operation: "Reelection stuck".to_string(),
                     message: e.to_string(),
@@ -248,28 +222,28 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             return Ok(());
         }
         info!(
-            conversation = %conversation_id,
+            conversation = %self.conversation_id,
             round, max, "steward election rejected, retrying"
         );
         if let Err(e) = self.initiate_steward_election(true) {
-            info!(conversation = %conversation_id, error = %e, "election retry deferred");
+            info!(conversation = %self.conversation_id, error = %e, "election retry deferred");
         }
         Ok(())
     }
 
-    /// Emergency proposal resolved: apply score ops, clear the
-    /// pending-removal / pending-ECP buffers, lift the partial freeze (and
-    /// exit Reelection if we landed there), then check for new
-    /// below-threshold removals.
+    /// Emergency proposal resolved: apply the score ops, clear the
+    /// pending-removal buffer, lift the partial freeze (removing it from
+    /// the emergency set), and resume from `Reelection` if the emergency
+    /// put us there. Ends with a below-threshold sweep — the score ops may
+    /// have pushed someone over the removal line.
     fn handle_emergency_scored(
         &mut self,
         proposal_id: u32,
         request: &ConversationUpdateRequest,
         score_ops: &[ScoreOp],
-    ) -> Result<(), UserError> {
-        // Events from this apply chain into the score-removal pass
-        // below. The terminal `check_and_initiate_score_removals`
-        // call covers it, so we drop the result here.
+    ) -> Result<(), SessionError> {
+        // The threshold-cross flag is dropped: the terminal
+        // `check_and_initiate_score_removals` sweep below covers it.
         let _ = self.conversation.scoring.apply_ops(score_ops);
         if let Some(conversation_update_request::Payload::EmergencyCriteria(ec)) = &request.payload
             && let Some(ev) = &ec.evidence
@@ -285,7 +259,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         } else {
             None
         };
-        self.emit_phase_change(resumed_event)?;
+        self.emit_phase_change(resumed_event);
 
         if let Err(e) = self.check_and_initiate_score_removals() {
             error!(conversation = %self.conversation_id, error = %e, "score-removal check failed");

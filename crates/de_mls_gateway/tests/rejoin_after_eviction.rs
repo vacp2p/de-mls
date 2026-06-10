@@ -5,10 +5,8 @@ use std::time::Duration;
 
 use de_mls::core::{ConversationState, StewardListConfig};
 use de_mls::member_id::MemberId;
-use de_mls::protos::de_mls::messages::v1::{
-    ConversationUpdateRequest, RemoveMember, conversation_update_request,
-};
-use de_mls::session::{CreatorVote, DispatchOutcome};
+use de_mls::protos::de_mls::messages::v1::ConversationUpdateRequest;
+use de_mls::session::CreatorVote;
 
 mod common;
 use common::session_fixtures::{
@@ -34,7 +32,7 @@ fn evicted_member_can_rejoin_at_higher_epoch() {
     let mut target_idx = None;
     for (i, (u, _)) in users.iter().enumerate() {
         let s = u.lookup_entry("rejoin").unwrap().unwrap();
-        if !s.read().unwrap().is_steward_for_self() {
+        if !s.read().unwrap().is_steward() {
             target_idx = Some(i);
             break;
         }
@@ -51,24 +49,13 @@ fn evicted_member_can_rejoin_at_higher_epoch() {
         .lookup_entry("rejoin")
         .unwrap()
         .unwrap();
-    let pre_remove_epoch = steward_session
-        .read()
-        .unwrap()
-        .get_epoch_and_retry()
-        .unwrap()
-        .0;
+    let pre_remove_epoch = steward_session.read().unwrap().epoch_and_retry().unwrap().0;
 
     // Phase 1: removal.
     let target_id = common::WalletMemberId::from_hex(&users[target_idx].0.member_id_string())
         .member_id_bytes()
         .to_vec();
-    let request = ConversationUpdateRequest {
-        payload: Some(conversation_update_request::Payload::RemoveMember(
-            RemoveMember {
-                member_id: target_id.clone(),
-            },
-        )),
-    };
+    let request = ConversationUpdateRequest::remove_member(target_id.clone());
     steward_session
         .write()
         .unwrap()
@@ -101,11 +88,16 @@ fn evicted_member_can_rejoin_at_higher_epoch() {
     let kp = users[target_idx].0.generate_key_package().unwrap();
     users[target_idx].0.send_key_package("rejoin", kp).unwrap();
 
+    // Phase 2 uses a different drive variant: the target is in PendingJoin
+    // and must NOT be evicted even if the pending-join window elapses —
+    // it just needs more time for the welcome to arrive. Only non-target
+    // sessions get eviction logic.
     let mut rejoined = false;
     for _ in 0..30 {
-        drive_one_round(&mut users, target_idx);
-        let s = users[target_idx].0.lookup_entry("rejoin").unwrap().unwrap();
-        if s.read().unwrap().get_conversation_state() == ConversationState::Working {
+        drive_one_round_no_target_eviction(&mut users, target_idx);
+        if let Some(s) = users[target_idx].0.lookup_entry("rejoin").unwrap()
+            && s.read().unwrap().conversation_state() == ConversationState::Working
+        {
             rejoined = true;
             break;
         }
@@ -119,7 +111,7 @@ fn evicted_member_can_rejoin_at_higher_epoch() {
         .unwrap()
         .read()
         .unwrap()
-        .get_epoch_and_retry()
+        .epoch_and_retry()
         .unwrap()
         .0;
     assert!(
@@ -128,11 +120,7 @@ fn evicted_member_can_rejoin_at_higher_epoch() {
     );
 
     // Steward sees the rejoined identity back in the member set.
-    let steward_members = steward_session
-        .read()
-        .unwrap()
-        .get_conversation_members()
-        .unwrap();
+    let steward_members = steward_session.read().unwrap().members().unwrap();
     assert!(
         steward_members.iter().any(|m| m == &target_id),
         "steward must see the rejoined identity in its member list, got {steward_members:?}"
@@ -150,20 +138,54 @@ fn drive_one_round(
     let mut sessions = Vec::with_capacity(users.len());
     for (i, (u, _)) in users.iter().enumerate() {
         if let Some(s) = u.lookup_entry("rejoin").unwrap() {
-            let _ = s.write().unwrap().tick_deadlines();
-            let pfs = s.write().unwrap().poll_freeze_status();
-            if i == target_idx && matches!(pfs, Ok((_, DispatchOutcome::LeaveRequested))) {
+            let outcome = s.write().unwrap().poll();
+            if i == target_idx && outcome.leave_requested {
                 u.finalize_self_leave("rejoin").unwrap();
                 continue;
             }
-            let _ = s.write().unwrap().check_member_freeze();
-            let _ = s.read().unwrap().check_pending_join().unwrap();
             sessions.push(s);
         }
     }
     // Route the steward's WelcomeReady event to the rejoining target
     // before relaying packets — ConversationSync emitted in the same
     // round needs the target's MLS attached first.
+    route_welcomes(&sessions, users);
+    for (u, h) in users.iter() {
+        flush_user(u, h);
+    }
+    let mut packets = Vec::new();
+    for (_, h) in users.iter() {
+        packets.extend(h.lock().unwrap().drain_packets());
+    }
+    for p in &packets {
+        for (u, _) in users.iter() {
+            deliver(u, p);
+        }
+    }
+}
+
+/// Like `drive_one_round` but never evicts the target — used in the rejoin
+/// phase where the target is `PendingJoin` and must wait for the welcome even
+/// if the pending-join expiry fires.
+fn drive_one_round_no_target_eviction(
+    users: &mut [(
+        common::session_fixtures::TestUser,
+        common::session_fixtures::TransportHandle,
+    )],
+    target_idx: usize,
+) {
+    settle_for(Duration::from_millis(40));
+    let mut sessions = Vec::with_capacity(users.len());
+    for (i, (u, _)) in users.iter().enumerate() {
+        if let Some(s) = u.lookup_entry("rejoin").unwrap() {
+            let outcome = s.write().unwrap().poll();
+            if i != target_idx && outcome.leave_requested {
+                u.finalize_self_leave("rejoin").unwrap();
+                continue;
+            }
+            sessions.push(s);
+        }
+    }
     route_welcomes(&sessions, users);
     for (u, h) in users.iter() {
         flush_user(u, h);

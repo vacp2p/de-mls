@@ -1,4 +1,4 @@
-//! Application message roundtrip through `SessionRunner::push_message`
+//! Application message roundtrip through `SessionRunner::send_message`
 //! and `SessionRunner::dispatch_inbound_result` → `SessionEvent::AppMessage`.
 
 use std::time::Duration;
@@ -29,7 +29,7 @@ fn chat_message_delivered_to_peer_as_app_message_event() {
     alice_session
         .write()
         .unwrap()
-        .push_message(b"Hello from alice".to_vec())
+        .send_message(b"Hello from alice".to_vec())
         .unwrap();
 
     // Relay alice's outbound to bob.

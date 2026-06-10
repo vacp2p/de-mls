@@ -16,9 +16,14 @@
 //! - `registry` — `lookup_entry`, `list_conversations`.
 //! - `inbound` — `handle_inbound` / `receive_key_package` entry points,
 //!   `finalize_self_leave` (registry-side completion of `LeaveConversation`).
-//! - `plugins` — `UserPlugins<P, CP>` bundle wrapping the library's
-//!   [`de_mls::session::ConsensusContext`].
+//! - `error` — [`UserError`], the registry-level error wrapping the
+//!   library's `SessionError`.
+//! - `consensus` — [`ConsensusContext`], the shared consensus storage +
+//!   signer that mints each conversation's service.
+//! - `plugins` — `UserPlugins<P, CP>` bundle.
 
+mod consensus;
+mod error;
 mod inbound;
 mod lifecycle;
 mod lock;
@@ -26,7 +31,9 @@ mod plugins;
 mod registry;
 mod state;
 
+pub use consensus::ConsensusContext;
+pub use error::UserError;
 pub use inbound::Inbound;
 pub(crate) use lock::LockExt;
 pub use plugins::UserPlugins;
-pub use state::{SessionEntry, User};
+pub use state::{ConversationLifecycle, SessionEntry, User};
