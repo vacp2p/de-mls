@@ -21,7 +21,7 @@ use crate::{
         StewardListConfig, StewardListPlugin,
     },
     member_id::MemberId,
-    session::{ConsensusContext, ConversationState, PhaseTimer, SessionRunner, SessionError},
+    session::{ConsensusContext, ConversationState, PhaseTimer, SessionError, SessionRunner},
 };
 
 /// Everything one conversation needs to come into being.
@@ -53,14 +53,20 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Build a runner for a brand-new conversation we create and steward.
     /// Starts in `Working` with the local member installed as sole steward
     /// at epoch 0.
-    pub fn create(conversation_id: &str, deps: ConversationDeps<P, CP>) -> Result<Self, SessionError> {
+    pub fn create(
+        conversation_id: &str,
+        deps: ConversationDeps<P, CP>,
+    ) -> Result<Self, SessionError> {
         Self::build(conversation_id, deps, true)
     }
 
     /// Build a runner that joins an existing conversation. Starts in
     /// `PendingJoin` with no MLS state; the steward list and scoring fill in
     /// once the welcome and `ConversationSync` arrive.
-    pub fn join(conversation_id: &str, deps: ConversationDeps<P, CP>) -> Result<Self, SessionError> {
+    pub fn join(
+        conversation_id: &str,
+        deps: ConversationDeps<P, CP>,
+    ) -> Result<Self, SessionError> {
         Self::build(conversation_id, deps, false)
     }
 

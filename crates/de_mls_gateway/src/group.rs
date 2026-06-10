@@ -70,7 +70,7 @@ impl Gateway<WakuDeliveryService> {
                 let Ok(session) = lookup_session(&user_clone, &group_name_clone).await else {
                     break false;
                 };
-                let tick = match session.read().map(|s| s.check_pending_join()) {
+                let tick = match session.write().map(|mut s| s.check_pending_join()) {
                     Ok(Ok(t)) => t,
                     Ok(Err(e)) => {
                         tracing::warn!(group = %group_name_clone, error = %e, "check_pending_join failed");

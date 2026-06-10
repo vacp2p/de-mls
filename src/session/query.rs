@@ -6,7 +6,7 @@ use crate::{
     core::{ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin, StewardListPlugin},
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
-    session::{ConversationState, MemberRole, SessionRunner, SessionError},
+    session::{ConversationState, MemberRole, SessionError, SessionRunner},
 };
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {

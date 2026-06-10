@@ -157,7 +157,7 @@ fn drive_one_round(
                 continue;
             }
             let _ = s.write().unwrap().check_member_freeze();
-            let _ = s.read().unwrap().check_pending_join().unwrap();
+            let _ = s.write().unwrap().check_pending_join().unwrap();
             sessions.push(s);
         }
     }

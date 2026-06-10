@@ -18,7 +18,7 @@ use crate::{
         AppMessage, ConversationUpdateRequest, RemoveMember, conversation_update_request,
     },
     session::{
-        ConversationState, SessionRunner, SessionTick, SessionError,
+        ConversationState, SessionError, SessionRunner, SessionTick,
         consensus_bridge::{
             ProposalParams, cast_vote, submit_proposal, submit_self_leave_proposal,
         },
@@ -239,7 +239,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// after a successful submit short-circuits on the local pending-leave
     /// check, and a retransmit dedupes inside the consensus library via
     /// the deterministic [`self_leave_proposal_id`].
-    pub fn initiate_self_leave(&mut self) -> Result<(), SessionError> {
+    pub(crate) fn initiate_self_leave(&mut self) -> Result<(), SessionError> {
         let self_member_id = Arc::clone(&self.self_member_id);
         let conversation_id = self.conversation_id.clone();
 

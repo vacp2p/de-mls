@@ -266,7 +266,7 @@ pub fn poll_once(session: &SessionArc) {
     let _ = session.write().unwrap().tick_deadlines();
     let _ = session.write().unwrap().poll_freeze_status();
     let _ = session.write().unwrap().check_member_freeze();
-    let _ = session.read().unwrap().check_pending_join();
+    let _ = session.write().unwrap().check_pending_join();
 }
 
 /// Flush a session's pull-buffered outbound into its user's transport handle

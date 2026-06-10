@@ -92,7 +92,7 @@ fn await_pending_join_outcome(session: &SessionArc, inactivity: Duration) -> Pen
     // Allow up to 6× inactivity so the test isn't fragile on slow CI.
     let deadline = Instant::now() + inactivity * 6;
     loop {
-        let tick = session.read().unwrap().check_pending_join().unwrap();
+        let tick = session.write().unwrap().check_pending_join().unwrap();
         if tick != PendingJoinTick::StillPending {
             return tick;
         }

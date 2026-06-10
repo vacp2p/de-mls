@@ -20,7 +20,9 @@ use crate::{
         PeerScoringPlugin, ScoreEvent, ScoreOp, SessionEvent, StewardListPlugin,
     },
     mls_crypto::MlsService,
-    session::{ConversationState, DispatchOutcome, FreezeTimeoutStatus, SessionRunner, SessionError},
+    session::{
+        ConversationState, DispatchOutcome, FreezeTimeoutStatus, SessionError, SessionRunner,
+    },
 };
 
 /// What [`SessionRunner::check_pending_join`] hands back to its polling
@@ -40,9 +42,9 @@ pub enum PendingJoinTick {
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Polling check for `PendingJoin`. Returns [`PendingJoinTick::Expired`]
-    /// after emitting `SessionEvent::Leaving` once the pending-join window
-    /// elapses; the caller handles registry-side cleanup.
-    pub fn check_pending_join(&self) -> Result<PendingJoinTick, SessionError> {
+    /// after emitting `SessionEvent::Leaving` and cancelling timers once the
+    /// pending-join window elapses; the caller handles registry-side cleanup.
+    pub fn check_pending_join(&mut self) -> Result<PendingJoinTick, SessionError> {
         let state = self.conversation.current_state();
         if state != ConversationState::PendingJoin {
             return Ok(PendingJoinTick::NotPending);
@@ -52,6 +54,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         }
         info!(conversation = %self.conversation_id, "pending join timed out");
         self.emit_event(SessionEvent::Leaving);
+        self.cancel_all_auto_votes();
         Ok(PendingJoinTick::Expired)
     }
 

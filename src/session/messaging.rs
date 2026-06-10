@@ -11,7 +11,7 @@ use crate::{
         AppMessage, BanRequest, ConversationMessage, ConversationUpdateRequest, RemoveMember,
         conversation_update_request,
     },
-    session::{ConversationState, CreatorVote, SessionRunner, SessionTick, SessionError},
+    session::{ConversationState, CreatorVote, SessionError, SessionRunner, SessionTick},
 };
 
 /// A payload the conversation produced for the integrator to broadcast,

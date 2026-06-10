@@ -54,5 +54,6 @@ pub use freeze::PendingJoinTick;
 pub use inbound::DispatchOutcome;
 pub use messaging::Outbound;
 pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer};
+pub use runner::LeaveOutcome;
 pub use runner::SessionRunner;
 pub use tick::SessionTick;

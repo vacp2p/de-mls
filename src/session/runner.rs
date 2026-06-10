@@ -20,8 +20,19 @@ use crate::{
         ConversationPluginsFactory, ConversationQueues, ConversationState,
         ConversationStateMachine, SessionEvent,
     },
-    session::{Outbound, PhaseTimer, SessionTick},
+    session::{Outbound, PhaseTimer, SessionError, SessionTick},
 };
+
+/// Outcome of [`SessionRunner::leave`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaveOutcome {
+    /// `PendingJoin` path: local teardown complete. The integrator must remove
+    /// the registry entry and clean up the consensus scope.
+    TornDown,
+    /// Active-session path: a self-leave consensus round has been opened. The
+    /// session stays active until the next steward commit merges the removal.
+    LeaveInitiated,
+}
 
 /// Receiver type the runner drains from `tick_deadlines`. Resolves to the
 /// `Receiver` associated type on the plugin's [`ConsensusEventBus`], which
@@ -139,7 +150,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// methods that emit during a brief read guard don't need to escalate
     /// to a write guard. Fire-and-forget (no `Result`), but a poisoned
     /// buffer is logged rather than silently dropped.
-    pub fn emit_event(&self, event: SessionEvent) {
+    pub(crate) fn emit_event(&self, event: SessionEvent) {
         match self.pending_events.lock() {
             Ok(mut buf) => buf.push(event),
             Err(_) => {
@@ -271,10 +282,27 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         self.pending_auto_votes.remove(&proposal_id);
     }
 
-    /// Drop every pending auto-vote on this runner. Called on conversation
-    /// leave so no stale entries fire against a conversation we've left.
-    pub fn cancel_all_auto_votes(&mut self) {
+    /// Drop every pending auto-vote on this runner. Called on every path that
+    /// emits `Leaving` so no stale entries fire against a conversation we've
+    /// left.
+    pub(crate) fn cancel_all_auto_votes(&mut self) {
         self.pending_auto_votes.clear();
+    }
+
+    /// Leave this conversation. In `PendingJoin` (no MLS yet), does local
+    /// teardown — emits `Leaving`, cancels timers — and returns
+    /// [`LeaveOutcome::TornDown`]; the integrator must then remove the registry
+    /// entry and clean up the consensus scope. In all other states, opens a
+    /// self-leave consensus round and returns [`LeaveOutcome::LeaveInitiated`];
+    /// the leave completes when the next steward commit merges the removal.
+    pub fn leave(&mut self) -> Result<LeaveOutcome, SessionError> {
+        if self.conversation.current_state() == ConversationState::PendingJoin {
+            self.emit_event(SessionEvent::Leaving);
+            self.cancel_all_auto_votes();
+            return Ok(LeaveOutcome::TornDown);
+        }
+        self.initiate_self_leave()?;
+        Ok(LeaveOutcome::LeaveInitiated)
     }
 
     /// Register a consensus-session timeout. Fires `delay` from now via

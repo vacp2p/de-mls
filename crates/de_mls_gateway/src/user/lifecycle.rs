@@ -7,9 +7,8 @@ use tracing::info;
 use de_mls::{
     core::{
         ConsensusPlugin, ConversationConfig, ConversationLifecycle, ConversationPluginsFactory,
-        SessionEvent,
     },
-    session::{ConversationDeps, ConversationState, SessionRunner, SessionError},
+    session::{ConversationDeps, LeaveOutcome, SessionError, SessionRunner},
 };
 
 use crate::user::{LockExt, User};
@@ -77,12 +76,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         Ok(())
     }
 
-    /// Leave the conversation. `PendingJoin` short-circuits to local
-    /// teardown (no MLS state yet). Otherwise delegates the protocol work
-    /// to the session-side `initiate_self_leave` — opens a self-leave
-    /// consensus session with the leaver's YES bundled at submit. We stay
-    /// active until the next steward commit merges the removal; on that
-    /// commit `ProcessResult::LeaveConversation` fires.
+    /// Leave the conversation. Delegates to [`SessionRunner::leave`]: in
+    /// `PendingJoin` the runner tears down locally and returns `TornDown`;
+    /// otherwise it opens a self-leave consensus round and returns
+    /// `LeaveInitiated`. On `TornDown` this method finalises the User-side
+    /// registry cleanup via `finalize_self_leave`.
     pub fn leave_conversation(&mut self, conversation_id: &str) -> Result<(), SessionError> {
         info!(conversation = conversation_id, "leaving conversation");
 
@@ -90,25 +88,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .lookup_entry(conversation_id)?
             .ok_or(SessionError::ConversationNotFound)?;
 
-        let is_pending_join = entry_arc.read_or_err("session")?.get_conversation_state()
-            == ConversationState::PendingJoin;
-        if is_pending_join {
-            entry_arc
-                .read_or_err("session")?
-                .emit_event(SessionEvent::Leaving);
-            // Cancel auto-vote timers before removing the registry entry —
-            // see `finalize_self_leave` for the rationale.
-            self.cleanup_consensus_scope(conversation_id)?;
-            self.conversations
-                .write()
-                .map_err(|_| SessionError::LockPoisoned("conversation registry"))?
-                .remove(conversation_id);
-            self.emit_lifecycle(ConversationLifecycle::Removed(conversation_id.to_string()));
-            return Ok(());
+        let outcome = entry_arc.write_or_err("session")?.leave()?;
+        match outcome {
+            LeaveOutcome::TornDown => {
+                self.finalize_self_leave(conversation_id)?;
+            }
+            LeaveOutcome::LeaveInitiated => {
+                self.flush(&entry_arc)?;
+            }
         }
-
-        entry_arc.write_or_err("session")?.initiate_self_leave()?;
-        self.flush(&entry_arc)?;
         Ok(())
     }
 }

@@ -18,7 +18,7 @@ use crate::{
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, conversation_update_request,
     },
-    session::{ConversationState, SessionRunner, SessionTick, SessionError},
+    session::{ConversationState, SessionError, SessionRunner, SessionTick},
 };
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {

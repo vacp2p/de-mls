@@ -12,15 +12,17 @@ use prost::Message;
 
 use de_mls::{
     core::{
-        ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory,
-        ProcessResult::JoinedConversation, ScoringConfig, SessionEvent, StewardListConfig,
+        ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, ScoringConfig,
+        SessionEvent, StewardListConfig,
     },
     member_id::MemberId,
     mls_crypto::{KeyPackageBytes, MlsError, MlsService, key_package_bytes_from_tls},
     protos::de_mls::messages::v1::{
         BanRequest, ConversationUpdateRequest, MemberInvite, conversation_update_request,
     },
-    session::{ConversationState, CreatorVote, MemberRole, SessionRunner, SessionTick, SessionError},
+    session::{
+        ConversationState, CreatorVote, MemberRole, SessionError, SessionRunner, SessionTick,
+    },
 };
 use de_mls_ds::{OutboundPacket, SharedDeliveryService};
 
@@ -183,7 +185,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         entry.write_or_err("session")?.tick_deadlines()?;
         entry.write_or_err("session")?.poll_freeze_status()?;
         entry.write_or_err("session")?.check_member_freeze()?;
-        entry.read_or_err("session")?.check_pending_join()?;
+        entry.write_or_err("session")?.check_pending_join()?;
         self.flush(&entry)?;
         Ok(entry.read_or_err("session")?.tick())
     }
@@ -261,21 +263,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .lookup_entry(&conversation_id)?
             .ok_or(SessionError::ConversationNotFound)?;
 
-        {
-            let mut entry = entry_arc.write_or_err("session")?;
-            // Idempotency keys off the state machine, not MLS attachment:
-            // past `PendingJoin` means the join dispatch already finished.
-            // Still-`PendingJoin`-with-MLS is a join that failed after
-            // `attach_mls`; fall through to finish it. Re-attach only when
-            // absent — overwriting would drop the existing group state.
-            if entry.get_conversation_state() != ConversationState::PendingJoin {
-                return Ok((conversation_id, entry.tick()));
-            }
-            if !entry.has_mls() {
-                entry.attach_mls(svc);
-            }
-        }
-        self.finish_dispatch(&conversation_id, &entry_arc, JoinedConversation())?;
+        entry_arc.write_or_err("session")?.complete_join(svc)?;
         self.flush(&entry_arc)?;
         let tick = entry_arc.read_or_err("session")?.tick();
         Ok((conversation_id, tick))
@@ -337,20 +325,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         entry
             .write_or_err("session")?
             .initiate_proposal(request, creator_vote)?;
-        self.flush(&entry)?;
-        Ok(entry.read_or_err("session")?.tick())
-    }
-
-    /// Open a self-leave consensus round for the local member. The
-    /// resulting commit ejects us; the session emits
-    /// [`SessionEvent::Leaving`] and the caller follows up with
-    /// [`Self::finalize_self_leave`]. Thin wrapper over
-    /// [`SessionRunner::initiate_self_leave`].
-    pub fn initiate_self_leave(&self, conversation_id: &str) -> Result<SessionTick, SessionError> {
-        let entry = self
-            .lookup_entry(conversation_id)?
-            .ok_or(SessionError::ConversationNotFound)?;
-        entry.write_or_err("session")?.initiate_self_leave()?;
         self.flush(&entry)?;
         Ok(entry.read_or_err("session")?.tick())
     }
@@ -519,16 +493,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         Ok(())
     }
 
-    /// Drop this conversation's consensus scope from the shared storage and
-    /// clear every auto-vote registered for it. Called on leave and
-    /// pending-join timeout.
+    /// Drop this conversation's consensus scope from the shared storage.
+    /// Called on leave (after the runner has already cancelled its own
+    /// auto-votes) and pending-join timeout.
     pub fn cleanup_consensus_scope(&self, conversation_id: &str) -> Result<(), SessionError> {
-        if let Some(entry_arc) = self.lookup_entry(conversation_id)? {
-            entry_arc
-                .write()
-                .map_err(|_| SessionError::LockPoisoned("session"))?
-                .cancel_all_auto_votes();
-        }
         let scope = P::Scope::from(conversation_id.to_string());
         self.plugins.consensus.delete_scope(&scope)?;
         Ok(())

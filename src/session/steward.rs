@@ -16,7 +16,7 @@ use crate::{
         AppMessage, ConversationSync, ConversationUpdateRequest, PeerScore,
         StewardElectionProposal, TimingConfig, ViolationEvidence, conversation_update_request,
     },
-    session::{CreatorVote, SessionRunner, SessionError},
+    session::{CreatorVote, SessionError, SessionRunner},
 };
 
 /// Outcome of reconciling the steward list to the current epoch — see
