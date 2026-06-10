@@ -2,7 +2,7 @@
 
 use de_mls::{
     core::{ConsensusPlugin, ConversationPluginsFactory},
-    session::UserError,
+    session::SessionError,
 };
 
 use crate::user::{SessionEntry, User};
@@ -15,21 +15,21 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     pub fn lookup_entry(
         &self,
         conversation_id: &str,
-    ) -> Result<Option<SessionEntry<P, CP>>, UserError> {
+    ) -> Result<Option<SessionEntry<P, CP>>, SessionError> {
         Ok(self
             .conversations
             .read()
-            .map_err(|_| UserError::LockPoisoned("conversation registry"))?
+            .map_err(|_| SessionError::LockPoisoned("conversation registry"))?
             .get(conversation_id)
             .cloned())
     }
 
     /// Names of every conversation registered on this `User`.
-    pub fn list_conversations(&self) -> Result<Vec<String>, UserError> {
+    pub fn list_conversations(&self) -> Result<Vec<String>, SessionError> {
         Ok(self
             .conversations
             .read()
-            .map_err(|_| UserError::LockPoisoned("conversation registry"))?
+            .map_err(|_| SessionError::LockPoisoned("conversation registry"))?
             .keys()
             .cloned()
             .collect())

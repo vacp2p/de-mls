@@ -4,7 +4,7 @@ use alloy::primitives::Address;
 
 use de_mls::{
     protos::de_mls::messages::v1::BanRequest,
-    session::{DispatchOutcome, FreezeTimeoutStatus, PendingJoinTick, UserError},
+    session::{DispatchOutcome, FreezeTimeoutStatus, PendingJoinTick, SessionError},
 };
 use de_mls_ds::WakuDeliveryService;
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
@@ -14,28 +14,8 @@ use crate::{
     forwarder::{display_batch, load_member_info, lookup_session},
 };
 
-/// True when a [`UserError`] surfaced during the polling loop should end
-/// the loop. Exhaustive match per variant so a newly-added [`UserError`]
-/// variant forces an explicit decision at compile time. Fatal variants
-/// mean "the conversation is gone, stop polling"; non-fatal variants are
-/// transient and the loop continues.
-fn is_polling_fatal(err: &UserError) -> bool {
-    match err {
-        // Conversation-level terminal states.
-        UserError::ConversationNotFound | UserError::AlreadyLeaving => true,
-        // Lock poisoning means the session is corrupted — no recovery.
-        UserError::LockPoisoned(_) => true,
-        UserError::ConversationAlreadyExists
-        | UserError::ConversationBlocked(_)
-        | UserError::PartialFreeze
-        | UserError::Transport(_)
-        | UserError::Core(_)
-        | UserError::Consensus(_)
-        | UserError::Message(_)
-        | UserError::SystemTime(_)
-        | UserError::Mls(_)
-        | UserError::WelcomeNotForUs => false,
-    }
+fn is_polling_fatal(err: &SessionError) -> bool {
+    err.is_fatal()
 }
 
 impl Gateway<WakuDeliveryService> {
@@ -163,7 +143,7 @@ impl Gateway<WakuDeliveryService> {
             };
             let tick_result = session
                 .write()
-                .map_err(|_| UserError::LockPoisoned("session"))
+                .map_err(|_| SessionError::LockPoisoned("session"))
                 .and_then(|mut s| s.tick_deadlines());
             if let Err(e) = tick_result {
                 if is_polling_fatal(&e) {
@@ -174,7 +154,7 @@ impl Gateway<WakuDeliveryService> {
             }
             let freeze_outcome = match session
                 .write()
-                .map_err(|_| UserError::LockPoisoned("session"))
+                .map_err(|_| SessionError::LockPoisoned("session"))
                 .and_then(|mut s| s.poll_freeze_status())
             {
                 Ok(o) => o,
@@ -197,7 +177,7 @@ impl Gateway<WakuDeliveryService> {
                 FreezeTimeoutStatus::NotFreezing => {
                     match session
                         .write()
-                        .map_err(|_| UserError::LockPoisoned("session"))
+                        .map_err(|_| SessionError::LockPoisoned("session"))
                         .and_then(|mut s| s.check_member_freeze())
                     {
                         Ok(true) => { /* entered Freezing (+ created candidate if steward) */ }
@@ -253,7 +233,7 @@ impl Gateway<WakuDeliveryService> {
         let session = lookup_session(&user_ref, &conversation_id).await?;
         session
             .write()
-            .map_err(|_| UserError::LockPoisoned("session"))?
+            .map_err(|_| SessionError::LockPoisoned("session"))?
             .push_message(message.into_bytes())?;
         tracing::debug!(group = %conversation_id, "app message sent");
         Ok(())
@@ -276,7 +256,7 @@ impl Gateway<WakuDeliveryService> {
 
         session
             .write()
-            .map_err(|_| UserError::LockPoisoned("session"))?
+            .map_err(|_| SessionError::LockPoisoned("session"))?
             .process_ban_request(ban_request)?;
 
         Ok(())
@@ -292,7 +272,7 @@ impl Gateway<WakuDeliveryService> {
         let session = lookup_session(&user_ref, &conversation_id).await?;
         session
             .write()
-            .map_err(|_| UserError::LockPoisoned("session"))?
+            .map_err(|_| SessionError::LockPoisoned("session"))?
             .process_user_vote(proposal_id, vote)?;
         Ok(())
     }
@@ -322,7 +302,7 @@ impl Gateway<WakuDeliveryService> {
         let session = lookup_session(&user_ref, &conversation_id).await?;
         let is_steward = session
             .read()
-            .map_err(|_| UserError::LockPoisoned("session"))?
+            .map_err(|_| SessionError::LockPoisoned("session"))?
             .is_steward_for_self();
         Ok(is_steward)
     }
@@ -332,7 +312,7 @@ impl Gateway<WakuDeliveryService> {
         let session = lookup_session(&user_ref, &conversation_id).await?;
         let state = session
             .read()
-            .map_err(|_| UserError::LockPoisoned("session"))?
+            .map_err(|_| SessionError::LockPoisoned("session"))?
             .get_conversation_state();
         Ok(state.to_string())
     }
@@ -346,7 +326,7 @@ impl Gateway<WakuDeliveryService> {
         let session = lookup_session(&user_ref, &conversation_id).await?;
         let proposals = session
             .read()
-            .map_err(|_| UserError::LockPoisoned("session"))?
+            .map_err(|_| SessionError::LockPoisoned("session"))?
             .get_approved_proposals_for_current_epoch();
         Ok(display_batch(&proposals))
     }

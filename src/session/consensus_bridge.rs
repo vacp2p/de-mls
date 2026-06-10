@@ -19,7 +19,7 @@ use crate::{
     protos::de_mls::messages::v1::{
         AppMessage, ConversationUpdateRequest, RemoveMember, conversation_update_request,
     },
-    session::error::UserError,
+    session::error::SessionError,
 };
 
 /// Consensus-session parameters that come from `ConversationConfig`. Grouped so
@@ -94,7 +94,7 @@ pub(crate) fn cast_vote<P>(
     proposal_id: u32,
     vote: bool,
     consensus: &ConsensusServiceFor<P>,
-) -> Result<AppMessage, UserError>
+) -> Result<AppMessage, SessionError>
 where
     P: ConsensusPlugin,
 {
@@ -118,7 +118,7 @@ pub(crate) fn forward_incoming_proposal<P: ConsensusPlugin>(
     conversation_id: &str,
     proposal: Proposal,
     consensus: &ConsensusServiceFor<P>,
-) -> Result<(), UserError> {
+) -> Result<(), SessionError> {
     let scope = P::Scope::from(conversation_id.to_string());
     consensus.process_incoming_proposal(&scope, proposal)?;
     Ok(())
@@ -195,7 +195,7 @@ pub(crate) fn submit_self_leave_proposal<P>(
     self_member_id: &[u8],
     consensus: &ConsensusServiceFor<P>,
     params: ProposalParams,
-) -> Result<Option<(u32, AppMessage)>, UserError>
+) -> Result<Option<(u32, AppMessage)>, SessionError>
 where
     P: ConsensusPlugin,
 {

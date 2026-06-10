@@ -1,6 +1,6 @@
 use std::sync::{Arc, atomic::Ordering};
 
-use de_mls::{protos::de_mls::messages::v1::ConversationUpdateRequest, session::UserError};
+use de_mls::{protos::de_mls::messages::v1::ConversationUpdateRequest, session::SessionError};
 use de_mls_ds::WakuDeliveryService;
 
 use crate::user::Inbound;
@@ -15,11 +15,11 @@ use crate::{CoreCtx, Gateway, SessionRef, UserRef};
 pub(crate) async fn lookup_session(
     user: &UserRef,
     conversation_id: &str,
-) -> Result<SessionRef, UserError> {
+) -> Result<SessionRef, SessionError> {
     user.read()
         .await
         .lookup_entry(conversation_id)?
-        .ok_or(UserError::ConversationNotFound)
+        .ok_or(SessionError::ConversationNotFound)
 }
 
 /// Render a batch of approved proposals as `(action, member_id)` pairs,
@@ -41,7 +41,7 @@ pub(crate) async fn load_member_info(
     let session = lookup_session(user, conversation_id).await?;
     let runner = session
         .read()
-        .map_err(|_| UserError::LockPoisoned("session"))?;
+        .map_err(|_| SessionError::LockPoisoned("session"))?;
     let member_bytes = runner.get_conversation_members()?;
     let scores = runner.get_member_scores();
     let roles = runner.get_member_roles().unwrap_or_default();

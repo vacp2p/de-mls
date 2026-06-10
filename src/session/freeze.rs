@@ -20,7 +20,7 @@ use crate::{
         PeerScoringPlugin, ScoreEvent, ScoreOp, SessionEvent, StewardListPlugin,
     },
     mls_crypto::MlsService,
-    session::{ConversationState, DispatchOutcome, FreezeTimeoutStatus, SessionRunner, UserError},
+    session::{ConversationState, DispatchOutcome, FreezeTimeoutStatus, SessionRunner, SessionError},
 };
 
 /// What [`SessionRunner::check_pending_join`] hands back to its polling
@@ -42,7 +42,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Polling check for `PendingJoin`. Returns [`PendingJoinTick::Expired`]
     /// after emitting `SessionEvent::Leaving` once the pending-join window
     /// elapses; the caller handles registry-side cleanup.
-    pub fn check_pending_join(&self) -> Result<PendingJoinTick, UserError> {
+    pub fn check_pending_join(&self) -> Result<PendingJoinTick, SessionError> {
         let state = self.conversation.current_state();
         if state != ConversationState::PendingJoin {
             return Ok(PendingJoinTick::NotPending);
@@ -63,7 +63,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// User-side registry teardown.
     pub fn poll_freeze_status(
         &mut self,
-    ) -> Result<(FreezeTimeoutStatus, DispatchOutcome), UserError> {
+    ) -> Result<(FreezeTimeoutStatus, DispatchOutcome), SessionError> {
         let state = self.conversation.current_state();
         if state != ConversationState::Freezing {
             return Ok((FreezeTimeoutStatus::NotFreezing, DispatchOutcome::Done));
@@ -233,7 +233,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// their own commit candidate too; candidate-build failure is logged
     /// and the freeze transition proceeds (peers' candidates still get
     /// processed).
-    pub fn check_member_freeze(&mut self) -> Result<bool, UserError> {
+    pub fn check_member_freeze(&mut self) -> Result<bool, SessionError> {
         let state = self.conversation.current_state();
         if state == ConversationState::PendingJoin {
             return Ok(false);

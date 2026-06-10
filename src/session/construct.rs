@@ -21,7 +21,7 @@ use crate::{
         StewardListConfig, StewardListPlugin,
     },
     member_id::MemberId,
-    session::{ConsensusContext, ConversationState, PhaseTimer, SessionRunner, UserError},
+    session::{ConsensusContext, ConversationState, PhaseTimer, SessionRunner, SessionError},
 };
 
 /// Everything one conversation needs to come into being.
@@ -53,14 +53,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Build a runner for a brand-new conversation we create and steward.
     /// Starts in `Working` with the local member installed as sole steward
     /// at epoch 0.
-    pub fn create(conversation_id: &str, deps: ConversationDeps<P, CP>) -> Result<Self, UserError> {
+    pub fn create(conversation_id: &str, deps: ConversationDeps<P, CP>) -> Result<Self, SessionError> {
         Self::build(conversation_id, deps, true)
     }
 
     /// Build a runner that joins an existing conversation. Starts in
     /// `PendingJoin` with no MLS state; the steward list and scoring fill in
     /// once the welcome and `ConversationSync` arrive.
-    pub fn join(conversation_id: &str, deps: ConversationDeps<P, CP>) -> Result<Self, UserError> {
+    pub fn join(conversation_id: &str, deps: ConversationDeps<P, CP>) -> Result<Self, SessionError> {
         Self::build(conversation_id, deps, false)
     }
 
@@ -69,7 +69,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         conversation_id: &str,
         deps: ConversationDeps<P, CP>,
         is_creation: bool,
-    ) -> Result<Self, UserError> {
+    ) -> Result<Self, SessionError> {
         let self_member_id_bytes = deps.identity.member_id_bytes().to_vec();
 
         let (queues, mls_opt, state_machine, phase_timer) = if is_creation {

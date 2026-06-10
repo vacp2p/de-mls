@@ -9,7 +9,7 @@ use de_mls::{
         ConsensusPlugin, ConversationConfig, ConversationLifecycle, ConversationPluginsFactory,
         SessionEvent,
     },
-    session::{ConversationDeps, ConversationState, SessionRunner, UserError},
+    session::{ConversationDeps, ConversationState, SessionRunner, SessionError},
 };
 
 use crate::user::{LockExt, User};
@@ -19,7 +19,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         &mut self,
         conversation_id: &str,
         is_creation: bool,
-    ) -> Result<(), UserError> {
+    ) -> Result<(), SessionError> {
         self.start_conversation_with_config(
             conversation_id,
             is_creation,
@@ -33,14 +33,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         conversation_id: &str,
         is_creation: bool,
         config: ConversationConfig,
-    ) -> Result<(), UserError> {
+    ) -> Result<(), SessionError> {
         if self
             .conversations
             .read()
-            .map_err(|_| UserError::LockPoisoned("conversation registry"))?
+            .map_err(|_| SessionError::LockPoisoned("conversation registry"))?
             .contains_key(conversation_id)
         {
-            return Err(UserError::ConversationAlreadyExists);
+            return Err(SessionError::ConversationAlreadyExists);
         }
 
         let deps = ConversationDeps {
@@ -62,9 +62,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             let mut conversations = self
                 .conversations
                 .write()
-                .map_err(|_| UserError::LockPoisoned("conversation registry"))?;
+                .map_err(|_| SessionError::LockPoisoned("conversation registry"))?;
             if conversations.contains_key(conversation_id) {
-                return Err(UserError::ConversationAlreadyExists);
+                return Err(SessionError::ConversationAlreadyExists);
             }
             conversations.insert(conversation_id.to_string(), session);
         }
@@ -83,12 +83,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// consensus session with the leaver's YES bundled at submit. We stay
     /// active until the next steward commit merges the removal; on that
     /// commit `ProcessResult::LeaveConversation` fires.
-    pub fn leave_conversation(&mut self, conversation_id: &str) -> Result<(), UserError> {
+    pub fn leave_conversation(&mut self, conversation_id: &str) -> Result<(), SessionError> {
         info!(conversation = conversation_id, "leaving conversation");
 
         let entry_arc = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
 
         let is_pending_join = entry_arc.read_or_err("session")?.get_conversation_state()
             == ConversationState::PendingJoin;
@@ -101,7 +101,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             self.cleanup_consensus_scope(conversation_id)?;
             self.conversations
                 .write()
-                .map_err(|_| UserError::LockPoisoned("conversation registry"))?
+                .map_err(|_| SessionError::LockPoisoned("conversation registry"))?
                 .remove(conversation_id);
             self.emit_lifecycle(ConversationLifecycle::Removed(conversation_id.to_string()));
             return Ok(());

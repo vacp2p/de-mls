@@ -20,7 +20,7 @@ use de_mls::{
     protos::de_mls::messages::v1::{
         BanRequest, ConversationUpdateRequest, MemberInvite, conversation_update_request,
     },
-    session::{ConversationState, CreatorVote, MemberRole, SessionRunner, SessionTick, UserError},
+    session::{ConversationState, CreatorVote, MemberRole, SessionRunner, SessionTick, SessionError},
 };
 use de_mls_ds::{OutboundPacket, SharedDeliveryService};
 
@@ -123,10 +123,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         &self,
         conversation_id: &str,
         message: Vec<u8>,
-    ) -> Result<SessionTick, UserError> {
+    ) -> Result<SessionTick, SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         let tick = entry.write_or_err("session")?.push_message(message)?;
         self.flush(&entry)?;
         Ok(tick)
@@ -141,7 +141,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         &self,
         conversation_id: &str,
         key_package: KeyPackageBytes,
-    ) -> Result<(), UserError> {
+    ) -> Result<(), SessionError> {
         let invite = MemberInvite {
             key_package_bytes: key_package.as_bytes().to_vec(),
             member_id: key_package.member_id().to_vec(),
@@ -150,18 +150,18 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             OutboundPacket::key_package(conversation_id, &self.app_id, invite.encode_to_vec());
         self.transport
             .lock()
-            .map_err(|_| UserError::LockPoisoned("transport"))?
+            .map_err(|_| SessionError::LockPoisoned("transport"))?
             .publish(packet)
-            .map_err(|e| UserError::Transport(e.to_string()))?;
+            .map_err(|e| SessionError::Transport(e.to_string()))?;
         Ok(())
     }
 
     /// Walk pending deadlines on `conversation_id`. Thin wrapper over
     /// [`SessionRunner::tick_deadlines`].
-    pub fn tick_deadlines(&self, conversation_id: &str) -> Result<SessionTick, UserError> {
+    pub fn tick_deadlines(&self, conversation_id: &str) -> Result<SessionTick, SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         let tick = entry.write_or_err("session")?.tick_deadlines()?;
         self.flush(&entry)?;
         Ok(tick)
@@ -176,10 +176,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// transition the session is currently expecting. Drained events
     /// (e.g. `Leaving` on `PendingJoin` expiry) are read separately via
     /// [`Self::drain_events`].
-    pub fn poll_session(&self, conversation_id: &str) -> Result<SessionTick, UserError> {
+    pub fn poll_session(&self, conversation_id: &str) -> Result<SessionTick, SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         entry.write_or_err("session")?.tick_deadlines()?;
         entry.write_or_err("session")?.poll_freeze_status()?;
         entry.write_or_err("session")?.check_member_freeze()?;
@@ -190,20 +190,20 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
     /// Drain pending [`SessionEvent`]s for `conversation_id`. Thin
     /// wrapper over [`SessionRunner::drain_events`].
-    pub fn drain_events(&self, conversation_id: &str) -> Result<Vec<SessionEvent>, UserError> {
+    pub fn drain_events(&self, conversation_id: &str) -> Result<Vec<SessionEvent>, SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         Ok(entry.read_or_err("session")?.drain_events())
     }
 
     /// Earliest pending deadline on `conversation_id` relative to now,
     /// `None` if nothing is scheduled. Mirrors
     /// [`SessionRunner::next_wakeup_in`].
-    pub fn next_wakeup_in(&self, conversation_id: &str) -> Result<Option<Duration>, UserError> {
+    pub fn next_wakeup_in(&self, conversation_id: &str) -> Result<Option<Duration>, SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         Ok(entry.read_or_err("session")?.next_wakeup_in())
     }
 
@@ -217,10 +217,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         &self,
         conversation_id: &str,
         key_package_bytes: &[u8],
-    ) -> Result<SessionTick, UserError> {
+    ) -> Result<SessionTick, SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         let (key_package_bytes, member_id) =
             key_package_bytes_from_tls(key_package_bytes.to_vec())?;
         let request = ConversationUpdateRequest {
@@ -241,17 +241,17 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Ingest a raw MLS welcome blob delivered out of band (e.g. the
     /// inviter's [`de_mls::core::SessionEvent::WelcomeReady`] routed
     /// through the integrator's transport). Returns the joined
-    /// conversation name, or [`UserError::WelcomeNotForUs`] if the
+    /// conversation name, or [`SessionError::WelcomeNotForUs`] if the
     /// welcome doesn't address this user's key package.
     pub fn accept_welcome(
         &mut self,
         welcome_bytes: &[u8],
-    ) -> Result<(String, SessionTick), UserError> {
+    ) -> Result<(String, SessionTick), SessionError> {
         let svc = self
             .plugins
             .conversation_plugins
             .welcome_mls(welcome_bytes)?
-            .ok_or(UserError::WelcomeNotForUs)?;
+            .ok_or(SessionError::WelcomeNotForUs)?;
         let conversation_id = svc.conversation_id().to_string();
 
         if self.lookup_entry(&conversation_id)?.is_none() {
@@ -259,7 +259,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         }
         let entry_arc = self
             .lookup_entry(&conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
 
         {
             let mut entry = entry_arc.write_or_err("session")?;
@@ -291,10 +291,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         conversation_id: &str,
         proposal_id: u32,
         vote: bool,
-    ) -> Result<SessionTick, UserError> {
+    ) -> Result<SessionTick, SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         entry
             .write_or_err("session")?
             .process_user_vote(proposal_id, vote)?;
@@ -309,10 +309,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         &self,
         conversation_id: &str,
         ban_request: BanRequest,
-    ) -> Result<SessionTick, UserError> {
+    ) -> Result<SessionTick, SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         let tick = entry
             .write_or_err("session")?
             .process_ban_request(ban_request)?;
@@ -330,10 +330,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         conversation_id: &str,
         request: ConversationUpdateRequest,
         creator_vote: CreatorVote,
-    ) -> Result<SessionTick, UserError> {
+    ) -> Result<SessionTick, SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         entry
             .write_or_err("session")?
             .initiate_proposal(request, creator_vote)?;
@@ -346,10 +346,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`SessionEvent::Leaving`] and the caller follows up with
     /// [`Self::finalize_self_leave`]. Thin wrapper over
     /// [`SessionRunner::initiate_self_leave`].
-    pub fn initiate_self_leave(&self, conversation_id: &str) -> Result<SessionTick, UserError> {
+    pub fn initiate_self_leave(&self, conversation_id: &str) -> Result<SessionTick, SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         entry.write_or_err("session")?.initiate_self_leave()?;
         self.flush(&entry)?;
         Ok(entry.read_or_err("session")?.tick())
@@ -362,49 +362,49 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     pub fn get_conversation_state(
         &self,
         conversation_id: &str,
-    ) -> Result<ConversationState, UserError> {
+    ) -> Result<ConversationState, SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         Ok(entry.read_or_err("session")?.get_conversation_state())
     }
 
     /// `true` if the local user is on the current steward list for
     /// `conversation_id`. Mirrors [`SessionRunner::is_steward_for_self`].
-    pub fn is_steward(&self, conversation_id: &str) -> Result<bool, UserError> {
+    pub fn is_steward(&self, conversation_id: &str) -> Result<bool, SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         Ok(entry.read_or_err("session")?.is_steward_for_self())
     }
 
     /// MLS epoch + reelection retry round for `conversation_id`. `(0, 0)`
     /// before MLS is attached. Mirrors
     /// [`SessionRunner::get_epoch_and_retry`].
-    pub fn get_epoch_and_retry(&self, conversation_id: &str) -> Result<(u64, u32), UserError> {
+    pub fn get_epoch_and_retry(&self, conversation_id: &str) -> Result<(u64, u32), SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         entry.read_or_err("session")?.get_epoch_and_retry()
     }
 
     pub fn get_conversation_members(
         &self,
         conversation_id: &str,
-    ) -> Result<Vec<Vec<u8>>, UserError> {
+    ) -> Result<Vec<Vec<u8>>, SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         entry.read_or_err("session")?.get_conversation_members()
     }
 
     pub fn get_member_scores(
         &self,
         conversation_id: &str,
-    ) -> Result<Vec<(Vec<u8>, i64)>, UserError> {
+    ) -> Result<Vec<(Vec<u8>, i64)>, SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         Ok(entry.read_or_err("session")?.get_member_scores())
     }
 
@@ -412,20 +412,20 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         &self,
         conversation_id: &str,
         member_id: &[u8],
-    ) -> Result<Option<i64>, UserError> {
+    ) -> Result<Option<i64>, SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         Ok(entry.read_or_err("session")?.get_member_score(member_id))
     }
 
     pub fn get_member_roles(
         &self,
         conversation_id: &str,
-    ) -> Result<Vec<(Vec<u8>, MemberRole)>, UserError> {
+    ) -> Result<Vec<(Vec<u8>, MemberRole)>, SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         entry.read_or_err("session")?.get_member_roles()
     }
 
@@ -434,19 +434,19 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     pub fn get_pending_leave_member_ids(
         &self,
         conversation_id: &str,
-    ) -> Result<Vec<Vec<u8>>, UserError> {
+    ) -> Result<Vec<Vec<u8>>, SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         entry.read_or_err("session")?.get_pending_leave_member_ids()
     }
 
     /// Buffered pending membership-update count. Mirrors
     /// [`SessionRunner::get_pending_update_count`].
-    pub fn get_pending_update_count(&self, conversation_id: &str) -> Result<usize, UserError> {
+    pub fn get_pending_update_count(&self, conversation_id: &str) -> Result<usize, SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         Ok(entry.read_or_err("session")?.get_pending_update_count())
     }
 
@@ -455,10 +455,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     pub fn get_freeze_candidate_count(
         &self,
         conversation_id: &str,
-    ) -> Result<(usize, usize), UserError> {
+    ) -> Result<(usize, usize), SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         Ok(entry.read_or_err("session")?.get_freeze_candidate_count())
     }
 
@@ -467,10 +467,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     pub fn get_approved_proposals_for_current_epoch(
         &self,
         conversation_id: &str,
-    ) -> Result<Vec<ConversationUpdateRequest>, UserError> {
+    ) -> Result<Vec<ConversationUpdateRequest>, SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         Ok(entry
             .read_or_err("session")?
             .get_approved_proposals_for_current_epoch())
@@ -502,7 +502,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// User's push-adapter so its callers keep their send-on-op behaviour.
     /// (When `User` moves out of the library, the integrator drains and
     /// publishes directly instead.)
-    pub(crate) fn flush(&self, entry: &SessionEntry<P, CP>) -> Result<(), UserError> {
+    pub(crate) fn flush(&self, entry: &SessionEntry<P, CP>) -> Result<(), SessionError> {
         let outbound = entry.read_or_err("session")?.drain_outbound();
         if outbound.is_empty() {
             return Ok(());
@@ -510,11 +510,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let mut transport = self
             .transport
             .lock()
-            .map_err(|_| UserError::LockPoisoned("transport"))?;
+            .map_err(|_| SessionError::LockPoisoned("transport"))?;
         for out in outbound {
             transport
                 .publish(out.into())
-                .map_err(|e| UserError::Transport(e.to_string()))?;
+                .map_err(|e| SessionError::Transport(e.to_string()))?;
         }
         Ok(())
     }
@@ -522,11 +522,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Drop this conversation's consensus scope from the shared storage and
     /// clear every auto-vote registered for it. Called on leave and
     /// pending-join timeout.
-    pub fn cleanup_consensus_scope(&self, conversation_id: &str) -> Result<(), UserError> {
+    pub fn cleanup_consensus_scope(&self, conversation_id: &str) -> Result<(), SessionError> {
         if let Some(entry_arc) = self.lookup_entry(conversation_id)? {
             entry_arc
                 .write()
-                .map_err(|_| UserError::LockPoisoned("session"))?
+                .map_err(|_| SessionError::LockPoisoned("session"))?
                 .cancel_all_auto_votes();
         }
         let scope = P::Scope::from(conversation_id.to_string());

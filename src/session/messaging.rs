@@ -11,7 +11,7 @@ use crate::{
         AppMessage, BanRequest, ConversationMessage, ConversationUpdateRequest, RemoveMember,
         conversation_update_request,
     },
-    session::{ConversationState, CreatorVote, SessionRunner, SessionTick, UserError},
+    session::{ConversationState, CreatorVote, SessionRunner, SessionTick, SessionError},
 };
 
 /// A payload the conversation produced for the integrator to broadcast,
@@ -36,7 +36,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// yet), `Freezing`, and `Selection` (epoch rotation in flight — the
     /// message might not decrypt on peers who already merged the next
     /// commit). Governance traffic has its own gate (`check_proposal_allowed`).
-    pub fn push_message(&mut self, message: Vec<u8>) -> Result<SessionTick, UserError> {
+    pub fn push_message(&mut self, message: Vec<u8>) -> Result<SessionTick, SessionError> {
         let state = self.conversation.current_state();
         if matches!(
             state,
@@ -44,7 +44,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 | ConversationState::Freezing
                 | ConversationState::Selection
         ) {
-            return Err(UserError::ConversationBlocked(state.to_string()));
+            return Err(SessionError::ConversationBlocked(state.to_string()));
         }
 
         let app_msg: AppMessage = ConversationMessage {
@@ -68,10 +68,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     pub fn process_ban_request(
         &mut self,
         ban_request: BanRequest,
-    ) -> Result<SessionTick, UserError> {
+    ) -> Result<SessionTick, SessionError> {
         let state = self.conversation.current_state();
         if state != ConversationState::Working {
-            return Err(UserError::ConversationBlocked(state.to_string()));
+            return Err(SessionError::ConversationBlocked(state.to_string()));
         }
 
         self.initiate_proposal(

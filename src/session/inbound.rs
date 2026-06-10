@@ -29,7 +29,7 @@ use crate::{
         TimingConfig, conversation_update_request,
     },
     session::{
-        ConversationState, SessionRunner, UserError,
+        ConversationState, SessionRunner, SessionError,
         consensus_bridge::{forward_incoming_proposal, forward_incoming_vote},
     },
 };
@@ -55,7 +55,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// user-level concern, but deciding whether to admit the holder is a
     /// conversation decision, so it lives here. The integrator routes its
     /// key-package channel to this entry via `User::receive_key_package`.
-    pub fn receive_key_package(&mut self, payload: &[u8]) -> Result<(), UserError> {
+    pub fn receive_key_package(&mut self, payload: &[u8]) -> Result<(), SessionError> {
         let invite = MemberInvite::decode(payload)?;
         let already_member = self
             .conversation
@@ -84,7 +84,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// [`ProcessResult`] the integrator then hands to
     /// [`Self::dispatch_inbound_result`]. The envelope self-identifies its
     /// kind (chat / vote / commit / sync) — no subtopic needed.
-    pub fn process_inbound(&mut self, payload: &[u8]) -> Result<ProcessResult, UserError> {
+    pub fn process_inbound(&mut self, payload: &[u8]) -> Result<ProcessResult, SessionError> {
         Ok(self.conversation.process_inbound(payload)?)
     }
 
@@ -106,7 +106,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     pub fn dispatch_inbound_result(
         &mut self,
         result: ProcessResult,
-    ) -> Result<DispatchOutcome, UserError> {
+    ) -> Result<DispatchOutcome, SessionError> {
         match result {
             ProcessResult::AppMessage(msg) => {
                 self.emit_event(SessionEvent::AppMessage(*msg));
@@ -175,7 +175,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// blocked. We don't drop today — the RFC's Δ-synchrony assumption keeps
     /// divergence windows small. Consensus-service-level priority gating is
     /// tracked as a backlog item in `docs/ROADMAP.md`.
-    fn on_incoming_proposal(&mut self, proposal: Proposal) -> Result<(), UserError> {
+    fn on_incoming_proposal(&mut self, proposal: Proposal) -> Result<(), SessionError> {
         let decoded = match ConversationUpdateRequest::decode(proposal.payload.as_slice()) {
             Ok(req) => Some(req),
             Err(e) => {
@@ -239,7 +239,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// We just joined via welcome. Broadcast a system "joined" chat
     /// message, seed scoring with the current member set, and
     /// transition to Working.
-    fn on_joined_conversation(&mut self) -> Result<(), UserError> {
+    fn on_joined_conversation(&mut self) -> Result<(), SessionError> {
         let msg: AppMessage = ConversationMessage {
             message: format!("User {} joined the conversation", self.member_id_display)
                 .into_bytes(),
@@ -264,7 +264,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Working, and run steward housekeeping (list reconcile, election
     /// kick-off, buffered-update drain). The commit author's `SuccessfulCommit`
     /// reward is emitted by `finalize_freeze_round`, not here.
-    fn on_conversation_updated(&mut self) -> Result<(), UserError> {
+    fn on_conversation_updated(&mut self) -> Result<(), SessionError> {
         let mls_members = match self.conversation.mls() {
             Some(mls) => mls.members().unwrap_or_default(),
             None => Vec::new(),
@@ -318,7 +318,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// the session's bus and delete the local MLS state. The User-side
     /// caller drops the entry from the registry and broadcasts
     /// `ConversationLifecycle::Removed`.
-    fn prepare_self_leave(&mut self) -> Result<(), UserError> {
+    fn prepare_self_leave(&mut self) -> Result<(), SessionError> {
         self.emit_event(SessionEvent::Leaving);
         let taken_mls = self.conversation.take_mls();
         if let Some(mut mls) = taken_mls {
@@ -334,7 +334,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
     /// Peer broadcast a commit candidate. If we were in Working, enter
     /// Freezing and — if we're a steward — build our own candidate too.
-    fn on_commit_candidate_received(&mut self, steward: &[u8]) -> Result<(), UserError> {
+    fn on_commit_candidate_received(&mut self, steward: &[u8]) -> Result<(), SessionError> {
         tracing::debug!(
             conversation = %self.conversation_id,
             steward = ?steward,
@@ -379,7 +379,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// list. Validates the proposed list against the members it carries
     /// (not the full MLS set — the list may have been generated before we
     /// existed), then applies list + protocol flags + timing + peer scores.
-    fn on_conversation_sync(&mut self, sync: ConversationSync) -> Result<(), UserError> {
+    fn on_conversation_sync(&mut self, sync: ConversationSync) -> Result<(), SessionError> {
         if self.conversation.steward_list.current_list().is_some() {
             return Ok(());
         }
@@ -416,7 +416,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     fn apply_conversation_sync_to_entry(
         &mut self,
         sync: &ConversationSync,
-    ) -> Result<(), UserError> {
+    ) -> Result<(), SessionError> {
         let mut protocol_config =
             StewardListConfig::new(sync.sn_min as usize, sync.sn_max as usize)?;
         protocol_config.allow_subset_candidates = sync.allow_subset_candidates;
@@ -474,7 +474,7 @@ fn validate_conversation_sync(
     current_epoch: u64,
     members: &[Vec<u8>],
     local_default_peer_score: i64,
-) -> Result<bool, UserError> {
+) -> Result<bool, SessionError> {
     if sync.election_epoch > current_epoch {
         info!(
             conversation = conversation_id,

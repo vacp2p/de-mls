@@ -95,7 +95,7 @@ pub trait DeliveryService: Debug + 'static {
 }
 
 /// Trait-object shape used internally — pinned `Error` so dyn-dispatch
-/// is object-safe and `UserError::Transport(#[from] DeliveryServiceError)`
+/// is object-safe and `SessionError::Transport(#[from] DeliveryServiceError)`
 /// resolves.
 pub type SharedDeliveryService =
     Arc<Mutex<dyn DeliveryService<Error = DeliveryServiceError> + Send>>;

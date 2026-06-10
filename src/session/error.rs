@@ -1,4 +1,4 @@
-//! Error type for the app layer.
+//! Error type for the session layer.
 
 use std::time::SystemTimeError;
 
@@ -6,9 +6,9 @@ use hashgraph_like_consensus::error::ConsensusError;
 
 use crate::{core::CoreError, mls_crypto::MlsError};
 
-/// Errors from User operations.
+/// Errors from session operations.
 #[derive(Debug, thiserror::Error)]
-pub enum UserError {
+pub enum SessionError {
     #[error("Conversation already exists")]
     ConversationAlreadyExists,
 
@@ -49,4 +49,26 @@ pub enum UserError {
 
     #[error("Lock poisoned: {0}")]
     LockPoisoned(&'static str),
+}
+
+impl SessionError {
+    /// Returns `true` for errors that indicate the conversation is gone or
+    /// the session state is irrecoverable. A polling loop should stop on
+    /// fatal errors; non-fatal errors are transient and the loop continues.
+    pub fn is_fatal(&self) -> bool {
+        match self {
+            SessionError::ConversationNotFound | SessionError::AlreadyLeaving => true,
+            SessionError::LockPoisoned(_) => true,
+            SessionError::ConversationAlreadyExists
+            | SessionError::ConversationBlocked(_)
+            | SessionError::PartialFreeze
+            | SessionError::Transport(_)
+            | SessionError::Core(_)
+            | SessionError::Consensus(_)
+            | SessionError::Message(_)
+            | SessionError::SystemTime(_)
+            | SessionError::Mls(_)
+            | SessionError::WelcomeNotForUs => false,
+        }
+    }
 }

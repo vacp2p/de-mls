@@ -18,7 +18,7 @@ use crate::{
         AppMessage, ConversationUpdateRequest, RemoveMember, conversation_update_request,
     },
     session::{
-        ConversationState, SessionRunner, SessionTick, UserError,
+        ConversationState, SessionRunner, SessionTick, SessionError,
         consensus_bridge::{
             ProposalParams, cast_vote, submit_proposal, submit_self_leave_proposal,
         },
@@ -67,7 +67,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         &mut self,
         request: ConversationUpdateRequest,
         creator_vote: CreatorVote,
-    ) -> Result<(), UserError> {
+    ) -> Result<(), SessionError> {
         let kind = ProposalKind::of(&request);
         let expected_voters = self.check_proposal_allowed(kind)?;
         self.register_new_proposal(NewProposal {
@@ -86,7 +86,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     pub fn handle_incoming_update_request(
         &mut self,
         request: ConversationUpdateRequest,
-    ) -> Result<(), UserError> {
+    ) -> Result<(), SessionError> {
         let (pending_join, members_for_rotation, current_epoch) = {
             let pending = self.conversation.current_state() == ConversationState::PendingJoin;
             match (pending, self.conversation.mls()) {
@@ -153,10 +153,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Cast a manual vote on behalf of the local member. Blocked in
     /// `Freezing` and `Selection`; cancels any pending auto-vote so the
     /// manual choice wins.
-    pub fn process_user_vote(&mut self, proposal_id: u32, vote: bool) -> Result<(), UserError> {
+    pub fn process_user_vote(&mut self, proposal_id: u32, vote: bool) -> Result<(), SessionError> {
         let state = self.conversation.current_state();
         if state == ConversationState::Freezing || state == ConversationState::Selection {
-            return Err(UserError::ConversationBlocked(state.to_string()));
+            return Err(SessionError::ConversationBlocked(state.to_string()));
         }
         let consensus = self.consensus.clone();
         let conversation_id = self.conversation_id.clone();
@@ -176,7 +176,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Walk pending deadlines, fire any whose `fire_at` has elapsed, then
     /// drain the consensus event bus and dispatch each event through
     /// `apply_consensus_outcome`. Call from the caller's polling loop.
-    pub fn tick_deadlines(&mut self) -> Result<SessionTick, UserError> {
+    pub fn tick_deadlines(&mut self) -> Result<SessionTick, SessionError> {
         let now = std::time::Instant::now();
         let auto_votes_due: Vec<(u32, bool)> = self
             .pending_auto_votes
@@ -239,7 +239,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// after a successful submit short-circuits on the local pending-leave
     /// check, and a retransmit dedupes inside the consensus library via
     /// the deterministic [`self_leave_proposal_id`].
-    pub fn initiate_self_leave(&mut self) -> Result<(), UserError> {
+    pub fn initiate_self_leave(&mut self) -> Result<(), SessionError> {
         let self_member_id = Arc::clone(&self.self_member_id);
         let conversation_id = self.conversation_id.clone();
 
@@ -305,24 +305,24 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
     /// Check that the conversation state allows creating a proposal of this
     /// kind and return the expected voter count.
-    fn check_proposal_allowed(&self, kind: ProposalKind) -> Result<u32, UserError> {
+    fn check_proposal_allowed(&self, kind: ProposalKind) -> Result<u32, SessionError> {
         let state = self.conversation.current_state();
 
         match state {
             ConversationState::Reelection => {
                 if !kind.is_emergency() && !kind.is_steward_election() {
-                    return Err(UserError::ConversationBlocked(state.to_string()));
+                    return Err(SessionError::ConversationBlocked(state.to_string()));
                 }
                 if self.conversation.queues.partial_freeze_blocks(kind) {
-                    return Err(UserError::PartialFreeze);
+                    return Err(SessionError::PartialFreeze);
                 }
             }
             ConversationState::Freezing | ConversationState::Selection => {
-                return Err(UserError::ConversationBlocked(state.to_string()));
+                return Err(SessionError::ConversationBlocked(state.to_string()));
             }
             _ => {
                 if self.conversation.queues.partial_freeze_blocks(kind) {
-                    return Err(UserError::PartialFreeze);
+                    return Err(SessionError::PartialFreeze);
                 }
             }
         }
@@ -341,7 +341,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Ownership is stored *before* the vote is cast, so a single-voter
     /// consensus transition can't race `is_owner=false` when the drain
     /// loop in `tick_deadlines` picks it up.
-    fn register_new_proposal(&mut self, np: NewProposal) -> Result<u32, UserError> {
+    fn register_new_proposal(&mut self, np: NewProposal) -> Result<u32, SessionError> {
         let NewProposal {
             request,
             expected_voters,
@@ -480,7 +480,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
     /// Cast the auto-vote on behalf of the local member. Same broadcast
     /// path as a manual vote — the library sees the two identically.
-    fn cast_auto_vote(&mut self, proposal_id: u32, vote: bool) -> Result<(), UserError> {
+    fn cast_auto_vote(&mut self, proposal_id: u32, vote: bool) -> Result<(), SessionError> {
         let consensus = self.consensus.clone();
         let conversation_id = self.conversation_id.clone();
         let app_message = cast_vote::<P>(&conversation_id, proposal_id, vote, &consensus)?;

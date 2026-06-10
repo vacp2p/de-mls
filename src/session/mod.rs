@@ -49,7 +49,7 @@ pub use consensus::CreatorVote;
 pub use consensus_context::ConsensusContext;
 pub use construct::ConversationDeps;
 pub use display::{MemberRole, MessageType, message_types};
-pub use error::UserError;
+pub use error::SessionError;
 pub use freeze::PendingJoinTick;
 pub use inbound::DispatchOutcome;
 pub use messaging::Outbound;

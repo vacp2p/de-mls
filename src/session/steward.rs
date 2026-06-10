@@ -16,7 +16,7 @@ use crate::{
         AppMessage, ConversationSync, ConversationUpdateRequest, PeerScore,
         StewardElectionProposal, TimingConfig, ViolationEvidence, conversation_update_request,
     },
-    session::{CreatorVote, SessionRunner, UserError},
+    session::{CreatorVote, SessionRunner, SessionError},
 };
 
 /// Outcome of reconciling the steward list to the current epoch — see
@@ -61,7 +61,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Reconcile the list after an epoch advance, opening a voted election when
     /// it's needed. Election-init failures are logged, not surfaced — the
     /// conversation may legitimately reject a new proposal right now.
-    pub fn steward_list_housekeeping(&mut self) -> Result<(), UserError> {
+    pub fn steward_list_housekeeping(&mut self) -> Result<(), SessionError> {
         let reconcile = self.reconcile_steward_list()?;
         if reconcile == StewardListReconcile::NeedsElection
             && let Err(e) = self.initiate_steward_election(false)
@@ -76,7 +76,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// installs them locally (deterministic, no vote); `> sn_max` returns
     /// [`StewardListReconcile::NeedsElection`]. Every node computes the same
     /// local list, so they agree without a round.
-    pub(crate) fn reconcile_steward_list(&mut self) -> Result<StewardListReconcile, UserError> {
+    pub(crate) fn reconcile_steward_list(&mut self) -> Result<StewardListReconcile, SessionError> {
         let (current_epoch, members) = {
             let mls = self.conversation.expect_mls()?;
             (mls.current_epoch()?, mls.members()?)
@@ -111,7 +111,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Drop Add entries whose target is now a member and Remove entries
     /// whose target is now gone, then expire entries older than
     /// `pending_update_max_epochs`.
-    pub fn prune_pending_updates_after_commit(&mut self) -> Result<(), UserError> {
+    pub fn prune_pending_updates_after_commit(&mut self) -> Result<(), SessionError> {
         let (current_epoch, members, max_age) = {
             let Some(mls) = self.conversation.mls() else {
                 return Ok(());
@@ -147,7 +147,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// On epoch advance, the new live epoch steward drains the pending-update
     /// buffer into voting proposals. Skips entries already covered by the
     /// current voting/approved queues so we don't double-propose.
-    pub fn process_buffered_updates(&mut self) -> Result<(), UserError> {
+    pub fn process_buffered_updates(&mut self) -> Result<(), SessionError> {
         let (current_epoch, to_propose, conversation_id): (
             u64,
             Vec<ConversationUpdateRequest>,
@@ -227,7 +227,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// owns delivery: broadcast it as an [`Outbound`](crate::session::Outbound)
     /// or feed it into another channel. The post-commit join path bundles
     /// the same payload into [`crate::core::SessionEvent::WelcomeReady`].
-    pub fn build_conversation_sync_payload(&mut self) -> Result<Option<Vec<u8>>, UserError> {
+    pub fn build_conversation_sync_payload(&mut self) -> Result<Option<Vec<u8>>, SessionError> {
         // Sparse snapshot — only members whose score has diverged
         // from `default_score`. Joiners init every member at default
         // via membership sync before applying the snapshot, so
@@ -295,7 +295,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Steward-only: file `ScoreBelowThreshold` ECPs for any member whose
     /// score fell at or below the removal threshold. Skips self and any
     /// target already covered by a pending removal.
-    pub fn check_and_initiate_score_removals(&mut self) -> Result<(), UserError> {
+    pub fn check_and_initiate_score_removals(&mut self) -> Result<(), SessionError> {
         // Reactive entry: callers chain into this after a scoring apply
         // emitted a downward cross, so we expect at least one tracked
         // member to be at-or-below threshold. The scan is the source of
@@ -378,7 +378,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// already in `approved_proposals` thanks to
     /// [`crate::core::apply_consensus_result`], so `has_approved_removal`
     /// catches them without an explicit exclude.
-    pub fn initiate_steward_election(&mut self, recovery: bool) -> Result<(), UserError> {
+    pub fn initiate_steward_election(&mut self, recovery: bool) -> Result<(), SessionError> {
         let (proposed_stewards, election_epoch, retry_round, conversation_id) = {
             let mls = self.conversation.expect_mls()?;
             let epoch = mls.current_epoch()?;
@@ -464,7 +464,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Layer 3 escalation: file a `Deadlock` ECP after re-election retries
     /// exhaust. Only the deterministic responsible proposer submits;
     /// others no-op. On YES the ECP opens `recovery_mode`.
-    pub fn initiate_deadlock_ecp(&mut self) -> Result<(), UserError> {
+    pub fn initiate_deadlock_ecp(&mut self) -> Result<(), SessionError> {
         let (is_authorized, self_id, epoch, conversation_id) = {
             let mls = self.conversation.expect_mls()?;
             let mls_members = mls.members()?;

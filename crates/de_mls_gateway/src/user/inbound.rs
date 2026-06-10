@@ -13,7 +13,7 @@ use tracing::debug;
 
 use de_mls::{
     core::{ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, ProcessResult},
-    session::{DispatchOutcome, SessionRunner, SessionTick, UserError},
+    session::{DispatchOutcome, SessionRunner, SessionTick, SessionError},
 };
 
 use crate::user::{LockExt, User};
@@ -38,13 +38,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// payload is decrypted and dispatched on the addressed session. Drops
     /// self-echoes and packets for a conversation not yet MLS-attached
     /// (`PendingJoin`).
-    pub fn handle_inbound(&self, inbound: Inbound) -> Result<SessionTick, UserError> {
+    pub fn handle_inbound(&self, inbound: Inbound) -> Result<SessionTick, SessionError> {
         if inbound.sender == self.app_id {
             return Ok(SessionTick::empty());
         }
         let entry_arc = self
             .lookup_entry(&inbound.conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         let result = {
             let mut entry = entry_arc.write_or_err("session")?;
             if !entry.has_mls() {
@@ -66,13 +66,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Ingest a joiner's key-package announcement. The decision to admit the
     /// holder is a conversation decision, delegated to
     /// [`SessionRunner::receive_key_package`].
-    pub fn receive_key_package(&self, inbound: Inbound) -> Result<SessionTick, UserError> {
+    pub fn receive_key_package(&self, inbound: Inbound) -> Result<SessionTick, SessionError> {
         if inbound.sender == self.app_id {
             return Ok(SessionTick::empty());
         }
         let entry_arc = self
             .lookup_entry(&inbound.conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
+            .ok_or(SessionError::ConversationNotFound)?;
         entry_arc
             .write_or_err("session")?
             .receive_key_package(&inbound.payload)?;
@@ -88,7 +88,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`SessionRunner::check_pending_join`]; this method is the cleanup
     /// callers run when those signal "registry should be removed"
     /// (`DispatchOutcome::LeaveRequested` or `PendingJoinTick::Expired`).
-    pub fn finalize_self_leave(&self, conversation_id: &str) -> Result<(), UserError> {
+    pub fn finalize_self_leave(&self, conversation_id: &str) -> Result<(), SessionError> {
         // Clean up (and cancel timers) before removing the entry — the
         // cleanup finds the runner via `lookup_entry`, so the entry must
         // still exist. Eviction and `Removed` are unconditional: a
@@ -97,7 +97,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let cleanup = self.cleanup_consensus_scope(conversation_id);
         self.conversations
             .write()
-            .map_err(|_| UserError::LockPoisoned("conversation registry"))?
+            .map_err(|_| SessionError::LockPoisoned("conversation registry"))?
             .remove(conversation_id);
         self.emit_lifecycle(ConversationLifecycle::Removed(conversation_id.to_string()));
         cleanup
@@ -112,7 +112,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         conversation_id: &str,
         entry_arc: &Arc<RwLock<SessionRunner<P, CP>>>,
         result: ProcessResult,
-    ) -> Result<(), UserError> {
+    ) -> Result<(), SessionError> {
         let outcome = entry_arc
             .write_or_err("session")?
             .dispatch_inbound_result(result)?;

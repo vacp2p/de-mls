@@ -18,7 +18,7 @@ use crate::{
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, conversation_update_request,
     },
-    session::{ConversationState, SessionRunner, SessionTick, UserError},
+    session::{ConversationState, SessionRunner, SessionTick, SessionError},
 };
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
@@ -29,7 +29,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     pub(crate) fn apply_consensus_outcome(
         &mut self,
         event: ConsensusEvent,
-    ) -> Result<SessionTick, UserError> {
+    ) -> Result<SessionTick, SessionError> {
         let (proposal_id, approved, timestamp) = match &event {
             ConsensusEvent::ConsensusReached {
                 proposal_id,
@@ -135,13 +135,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
     /// Latest [`SessionTick`]. Terminal value of every
     /// `apply_consensus_outcome` exit path.
-    fn current_tick(&self) -> Result<SessionTick, UserError> {
+    fn current_tick(&self) -> Result<SessionTick, SessionError> {
         Ok(self.tick())
     }
 
     /// Emit a [`SessionEvent::PhaseChange`] for `transition`, if a state
     /// change occurred. Shared by the freeze / election / emergency paths.
-    fn emit_phase_change(&self, transition: Option<ConversationState>) -> Result<(), UserError> {
+    fn emit_phase_change(&self, transition: Option<ConversationState>) -> Result<(), SessionError> {
         if let Some(state) = transition {
             self.emit_event(SessionEvent::PhaseChange(state));
         }
@@ -152,14 +152,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// the resulting phase change. Called by `apply_consensus_outcome` for
     /// `UrgentRemoval` and `RecoveryModeOpened` outcomes that need an
     /// immediate commit.
-    fn start_freezing_and_emit(&mut self) -> Result<(), UserError> {
+    fn start_freezing_and_emit(&mut self) -> Result<(), SessionError> {
         let transition = self.start_freezing();
         self.emit_phase_change(transition)
     }
 
     /// When the removal target is a current steward, fire a fresh election
     /// in parallel so the next epoch keeps a healthy ES + BS.
-    fn refresh_stewards_after_removal(&mut self, target: &[u8]) -> Result<(), UserError> {
+    fn refresh_stewards_after_removal(&mut self, target: &[u8]) -> Result<(), SessionError> {
         if !self.conversation.steward_list.is_steward(target) {
             return Ok(());
         }
@@ -179,7 +179,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     fn handle_election_accepted(
         &mut self,
         election: StewardElectionProposal,
-    ) -> Result<(), UserError> {
+    ) -> Result<(), SessionError> {
         self.conversation.expect_mls()?;
         // Election proposals carry the candidate pool implicitly:
         // `proposed_stewards` is the full set the proposer sorted, so
@@ -228,7 +228,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
     /// Rejected election: bump the retry round and retry under the max
     /// (idempotent), or escalate to a `Deadlock` ECP once exhausted.
-    fn handle_election_rejected(&mut self) -> Result<(), UserError> {
+    fn handle_election_rejected(&mut self) -> Result<(), SessionError> {
         self.conversation.steward_list.bump_retry();
         let round = self.conversation.steward_list.next_retry_round();
         let max = self.conversation.steward_list.max_retries();
@@ -266,7 +266,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         proposal_id: u32,
         request: &ConversationUpdateRequest,
         score_ops: &[ScoreOp],
-    ) -> Result<(), UserError> {
+    ) -> Result<(), SessionError> {
         // Events from this apply chain into the score-removal pass
         // below. The terminal `check_and_initiate_score_removals`
         // call covers it, so we drop the result here.
