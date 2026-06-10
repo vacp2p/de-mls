@@ -60,7 +60,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// the creator's vote (bundled YES) or registers an auto-vote
     /// (Deferred), and records a `consensus_timeout` deadline. The
     /// caller's polling loop fires `handle_consensus_timeout` via
-    /// [`Self::tick_deadlines`] once the deadline elapses.
+    /// `tick_deadlines` once the deadline elapses.
     ///
     /// `creator_vote` — see [`CreatorVote`] for wire shape and local UI behavior.
     pub fn initiate_proposal(
@@ -175,8 +175,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
     /// Walk pending deadlines, fire any whose `fire_at` has elapsed, then
     /// drain the consensus event bus and dispatch each event through
-    /// `apply_consensus_outcome`. Call from the caller's polling loop.
-    pub fn tick_deadlines(&mut self) -> Result<SessionTick, SessionError> {
+    /// `apply_consensus_outcome`. Called by `poll()`.
+    pub(crate) fn tick_deadlines(&mut self) -> Result<SessionTick, SessionError> {
         let now = std::time::Instant::now();
         let auto_votes_due: Vec<(u32, bool)> = self
             .pending_auto_votes

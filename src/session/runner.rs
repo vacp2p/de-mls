@@ -61,7 +61,7 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// [`crate::session::ConversationDeps`] consensus context at construction.
     pub consensus: ConsensusServiceFor<P>,
     /// Subscriber on `consensus.event_bus()`. Drained by
-    /// [`Self::tick_deadlines`], which dispatches each event through
+    /// `tick_deadlines`, which dispatches each event through
     /// `apply_consensus_outcome`. Subscribed when the runner is built in
     /// [`SessionRunner::create`] / [`SessionRunner::join`].
     pub(crate) consensus_rx: ConsensusReceiver<P>,
@@ -69,15 +69,14 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// coordinator methods.
     phase_timer: PhaseTimer,
     /// Pending auto-votes by `proposal_id`. Walked by
-    /// [`Self::tick_deadlines`]; each entry whose `fire_at` has passed
+    /// `tick_deadlines`; each entry whose `fire_at` has passed
     /// gets a `cast_vote` and is removed from the map. Cancelled (removed)
     /// when a manual vote arrives or the consensus session resolves.
     pub pending_auto_votes: HashMap<u32, AutoVoteEntry>,
     /// Pending consensus-session timeouts: `proposal_id -> fire_at`.
     /// Registered when a proposal opens (own or incoming peer); fired by
-    /// [`Self::tick_deadlines`] which calls
-    /// `consensus.handle_consensus_timeout`. Removed when the session
-    /// resolves naturally via `apply_consensus_outcome`.
+    /// `tick_deadlines` which calls `consensus.handle_consensus_timeout`.
+    /// Removed when the session resolves naturally via `apply_consensus_outcome`.
     pub pending_consensus_timeouts: HashMap<u32, Instant>,
     /// Identity bytes derived from `User.member_id.member_id_bytes()` at
     /// session construction.
@@ -98,6 +97,12 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// drains via [`Self::drain_outbound`] once per cycle. Interior `Mutex`
     /// so producer-side `broadcast` stays `&self`.
     pending_outbound: Mutex<Vec<Outbound>>,
+    /// Last freeze-progress snapshot emitted as `SessionEvent::FreezeProgress`.
+    /// `poll()` compares the current `(received, expected)` against this and
+    /// emits a new event only when the count changes, avoiding repeated events
+    /// on consecutive polling ticks that observe the same progress. Reset to
+    /// `None` when the conversation leaves `Freezing`.
+    pub(crate) last_freeze_progress: Option<(usize, usize)>,
 }
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
@@ -141,6 +146,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             app_id,
             pending_events: Mutex::new(Vec::new()),
             pending_outbound: Mutex::new(Vec::new()),
+            last_freeze_progress: None,
         }
     }
 
@@ -218,10 +224,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         }
     }
 
-    /// Snapshot the earliest deadline into a [`SessionTick`]. Public ops
-    /// returning `SessionTick` call this at the end of their happy path
-    /// so the caller gets a wakeup hint without a second accessor call.
-    pub fn tick(&self) -> SessionTick {
+    /// Snapshot the earliest deadline into a [`SessionTick`]. Called at the
+    /// end of session operations that need to return a wakeup hint.
+    pub(crate) fn tick(&self) -> SessionTick {
         SessionTick {
             next_wakeup_in: self.next_wakeup_in(),
         }
@@ -306,7 +311,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     }
 
     /// Register a consensus-session timeout. Fires `delay` from now via
-    /// [`Self::tick_deadlines`]; removed naturally on consensus resolution.
+    /// `tick_deadlines`; removed naturally on consensus resolution.
     pub fn register_consensus_timeout(&mut self, proposal_id: u32, delay: Duration) {
         self.pending_consensus_timeouts
             .insert(proposal_id, Instant::now() + delay);

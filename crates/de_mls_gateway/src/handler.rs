@@ -159,6 +159,13 @@ impl GatewaySessionFanout {
                 push_consensus_state(&self.user, &self.evt_tx, conversation_id).await;
                 push_member_scores(&self.user, &self.evt_tx, conversation_id).await;
             }
+            SessionEvent::FreezeProgress { received, expected } => {
+                let _ = self.evt_tx.unbounded_send(AppEvent::FreezeCandidates {
+                    conversation_id: conversation_id.to_string(),
+                    received,
+                    expected,
+                });
+            }
             SessionEvent::WelcomeReady(welcome) => {
                 let bytes = welcome.welcome_bytes.len();
                 let sync_bytes = welcome.conversation_sync_bytes.len();

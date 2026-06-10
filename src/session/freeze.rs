@@ -44,7 +44,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Polling check for `PendingJoin`. Returns [`PendingJoinTick::Expired`]
     /// after emitting `SessionEvent::Leaving` and cancelling timers once the
     /// pending-join window elapses; the caller handles registry-side cleanup.
-    pub fn check_pending_join(&mut self) -> Result<PendingJoinTick, SessionError> {
+    pub(crate) fn check_pending_join(&mut self) -> Result<PendingJoinTick, SessionError> {
         let state = self.conversation.current_state();
         if state != ConversationState::PendingJoin {
             return Ok(PendingJoinTick::NotPending);
@@ -64,7 +64,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// freeze status. The [`DispatchOutcome`] is `LeaveRequested` if the
     /// applied commit ejected the local member — the caller drives the
     /// User-side registry teardown.
-    pub fn poll_freeze_status(
+    pub(crate) fn poll_freeze_status(
         &mut self,
     ) -> Result<(FreezeTimeoutStatus, DispatchOutcome), SessionError> {
         let state = self.conversation.current_state();
@@ -236,7 +236,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// their own commit candidate too; candidate-build failure is logged
     /// and the freeze transition proceeds (peers' candidates still get
     /// processed).
-    pub fn check_member_freeze(&mut self) -> Result<bool, SessionError> {
+    pub(crate) fn check_member_freeze(&mut self) -> Result<bool, SessionError> {
         let state = self.conversation.current_state();
         if state == ConversationState::PendingJoin {
             return Ok(false);

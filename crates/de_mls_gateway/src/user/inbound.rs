@@ -44,7 +44,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             self.finalize_self_leave(&inbound.conversation_id)?;
         }
         self.flush(&entry_arc)?;
-        Ok(entry_arc.read_or_err("session")?.tick())
+        Ok(SessionTick {
+            next_wakeup_in: entry_arc.read_or_err("session")?.next_wakeup_in(),
+        })
     }
 
     /// Ingest a joiner's key-package announcement. Echo-dedup and admission
@@ -57,7 +59,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .write_or_err("session")?
             .receive_key_package(&inbound.sender, &inbound.payload)?;
         self.flush(&entry_arc)?;
-        Ok(entry_arc.read_or_err("session")?.tick())
+        Ok(SessionTick {
+            next_wakeup_in: entry_arc.read_or_err("session")?.next_wakeup_in(),
+        })
     }
 
     /// User-side completion of `LeaveConversation`: drop the entry from

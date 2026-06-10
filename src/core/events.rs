@@ -75,6 +75,13 @@ pub enum SessionEvent {
         approved: bool,
         timestamp: u64,
     },
+
+    /// Freeze-round candidate progress changed: `received` stewards have
+    /// submitted candidates out of `expected`. Emitted by `poll()` when in
+    /// `Freezing` and the count changed since the previous emission. The
+    /// integrator can surface this as a progress indicator without polling
+    /// `get_freeze_candidate_count()`.
+    FreezeProgress { received: usize, expected: usize },
 }
 
 /// User-level conversation lifecycle event. Appended to `User`'s

@@ -17,7 +17,8 @@ use de_mls::{
     mls_crypto::{KeyPackageBytes, MlsError, MlsService},
     protos::de_mls::messages::v1::{BanRequest, ConversationUpdateRequest},
     session::{
-        ConversationState, CreatorVote, MemberRole, SessionError, SessionRunner, SessionTick,
+        ConversationState, CreatorVote, MemberRole, PollOutcome, SessionError, SessionRunner,
+        SessionTick,
     },
 };
 use de_mls_ds::{OutboundPacket, SharedDeliveryService};
@@ -150,36 +151,18 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         Ok(())
     }
 
-    /// Walk pending deadlines on `conversation_id`. Thin wrapper over
-    /// [`SessionRunner::tick_deadlines`].
-    pub fn tick_deadlines(&self, conversation_id: &str) -> Result<SessionTick, SessionError> {
+    /// Drive one polling cycle on `conversation_id`: tick consensus deadlines,
+    /// advance freeze state, check member-freeze inactivity, and check
+    /// pending-join expiry. Returns [`PollOutcome`] with a wakeup hint and a
+    /// `leave_requested` flag the caller uses to decide whether to finalize
+    /// the leave.
+    pub fn poll_session(&self, conversation_id: &str) -> Result<PollOutcome, SessionError> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(SessionError::ConversationNotFound)?;
-        let tick = entry.write_or_err("session")?.tick_deadlines()?;
+        let outcome = entry.write_or_err("session")?.poll()?;
         self.flush(&entry)?;
-        Ok(tick)
-    }
-
-    /// Advance every per-conversation polling path: deadlines (auto-votes
-    /// and consensus timeouts), freeze coordinator, member-side freeze
-    /// check, and `PendingJoin` expiry. Bundled so an integrator's
-    /// periodic wakeup needs one call to drive a session forward.
-    ///
-    /// The returned `SessionTick.next_wakeup_in` covers every time-based
-    /// transition the session is currently expecting. Drained events
-    /// (e.g. `Leaving` on `PendingJoin` expiry) are read separately via
-    /// [`Self::drain_events`].
-    pub fn poll_session(&self, conversation_id: &str) -> Result<SessionTick, SessionError> {
-        let entry = self
-            .lookup_entry(conversation_id)?
-            .ok_or(SessionError::ConversationNotFound)?;
-        entry.write_or_err("session")?.tick_deadlines()?;
-        entry.write_or_err("session")?.poll_freeze_status()?;
-        entry.write_or_err("session")?.check_member_freeze()?;
-        entry.write_or_err("session")?.check_pending_join()?;
-        self.flush(&entry)?;
-        Ok(entry.read_or_err("session")?.tick())
+        Ok(outcome)
     }
 
     /// Drain pending [`SessionEvent`]s for `conversation_id`. Thin
@@ -247,7 +230,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
         entry_arc.write_or_err("session")?.complete_join(svc)?;
         self.flush(&entry_arc)?;
-        let tick = entry_arc.read_or_err("session")?.tick();
+        let tick = SessionTick {
+            next_wakeup_in: entry_arc.read_or_err("session")?.next_wakeup_in(),
+        };
         Ok((conversation_id, tick))
     }
 
@@ -269,7 +254,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .write_or_err("session")?
             .process_user_vote(proposal_id, vote)?;
         self.flush(&entry)?;
-        Ok(entry.read_or_err("session")?.tick())
+        Ok(SessionTick {
+            next_wakeup_in: entry.read_or_err("session")?.next_wakeup_in(),
+        })
     }
 
     /// Open a `RemoveMember` consensus round targeting
@@ -308,7 +295,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .write_or_err("session")?
             .initiate_proposal(request, creator_vote)?;
         self.flush(&entry)?;
-        Ok(entry.read_or_err("session")?.tick())
+        Ok(SessionTick {
+            next_wakeup_in: entry.read_or_err("session")?.next_wakeup_in(),
+        })
     }
 
     // ── State queries ──────────────────────────────────────────────────

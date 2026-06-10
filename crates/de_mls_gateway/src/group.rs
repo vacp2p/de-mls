@@ -2,10 +2,7 @@ use std::str::FromStr;
 
 use alloy::primitives::Address;
 
-use de_mls::{
-    protos::de_mls::messages::v1::BanRequest,
-    session::{DispatchOutcome, FreezeTimeoutStatus, PendingJoinTick, SessionError},
-};
+use de_mls::{protos::de_mls::messages::v1::BanRequest, session::SessionError};
 use de_mls_ds::WakuDeliveryService;
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
 
@@ -13,10 +10,6 @@ use crate::{
     Gateway, UserRef,
     forwarder::{display_batch, load_member_info, lookup_session},
 };
-
-fn is_polling_fatal(err: &SessionError) -> bool {
-    err.is_fatal()
-}
 
 impl Gateway<WakuDeliveryService> {
     pub async fn create_conversation(&self, conversation_id: String) -> anyhow::Result<()> {
@@ -58,56 +51,40 @@ impl Gateway<WakuDeliveryService> {
             .send_key_package(&conversation_id, key_package)?;
         tracing::info!(group = %conversation_id, "key package sent");
 
-        // Phase 1 (PendingJoin): Poll every 5s until joined or timed out
-        // Phase 2 (Working): Wait until epoch boundaries and check for Waiting transition
         let user_clone = user_ref.clone();
         let group_name_clone = conversation_id.clone();
         let evt_tx_clone = self.evt_tx.clone();
         tokio::spawn(async move {
-            // Phase 1: Wait for join
+            // Phase 1: Poll until welcome received or timed out.
             let joined = loop {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                let Ok(session) = lookup_session(&user_clone, &group_name_clone).await else {
+                let outcome = match user_clone.read().await.poll_session(&group_name_clone) {
+                    Ok(o) => o,
+                    Err(e) if e.is_fatal() => {
+                        tracing::warn!(group = %group_name_clone, error = %e, "join poll exiting");
+                        break false;
+                    }
+                    Err(_) => continue,
+                };
+                if outcome.leave_requested {
+                    if let Err(e) = user_clone
+                        .read()
+                        .await
+                        .finalize_self_leave(&group_name_clone)
+                    {
+                        tracing::error!(group = %group_name_clone, error = %e, "pending-join cleanup failed");
+                    }
                     break false;
-                };
-                let tick = match session.write().map(|mut s| s.check_pending_join()) {
-                    Ok(Ok(t)) => t,
-                    Ok(Err(e)) => {
-                        tracing::warn!(group = %group_name_clone, error = %e, "check_pending_join failed");
-                        break false;
-                    }
-                    Err(_) => {
-                        tracing::warn!(group = %group_name_clone, "check_pending_join skipped: session lock poisoned");
-                        break false;
-                    }
-                };
-                match tick {
-                    PendingJoinTick::StillPending => continue,
-                    PendingJoinTick::NotPending => {
-                        // Transitioned out of PendingJoin (typically Working
-                        // after welcome merge). Confirm via state read.
-                        let state = match session.read() {
-                            Ok(s) => s.get_conversation_state(),
-                            Err(_) => {
-                                tracing::warn!(
-                                    group = %group_name_clone,
-                                    "state read skipped: session lock poisoned"
-                                );
-                                break false;
-                            }
-                        };
-                        break state == de_mls::session::ConversationState::Working;
-                    }
-                    PendingJoinTick::Expired => {
-                        if let Err(e) = user_clone
-                            .read()
-                            .await
-                            .finalize_self_leave(&group_name_clone)
-                        {
-                            tracing::error!(group = %group_name_clone, error = %e, "pending-join cleanup failed");
-                        }
-                        break false;
-                    }
+                }
+                match user_clone
+                    .read()
+                    .await
+                    .get_conversation_state(&group_name_clone)
+                {
+                    Ok(de_mls::session::ConversationState::Working) => break true,
+                    Ok(de_mls::session::ConversationState::PendingJoin) => continue,
+                    Ok(_) => break true,
+                    Err(_) => break false,
                 }
             };
 
@@ -118,108 +95,38 @@ impl Gateway<WakuDeliveryService> {
 
             tracing::info!(group = %group_name_clone, "member joined group");
 
-            // Phase 2: same unified polling loop as creator
+            // Phase 2: same unified polling loop as creator.
             Self::group_polling_loop(user_clone, evt_tx_clone, group_name_clone).await;
         });
 
         Ok(())
     }
 
-    /// Unified polling loop for any group member (creator or joiner).
-    ///
-    /// Handles freeze status polling, inactivity detection, and commit candidate
-    /// creation for stewards. All members run the same loop — steward-specific
-    /// behavior is triggered inside `check_member_freeze` when `is_steward()` is true.
+    /// Unified polling loop for any group member (creator or joiner). All
+    /// time-based session paths are driven by a single `poll_session` call.
     async fn group_polling_loop(
         user: UserRef,
-        evt_tx: futures::channel::mpsc::UnboundedSender<AppEvent>,
+        _evt_tx: futures::channel::mpsc::UnboundedSender<AppEvent>,
         conversation_id: String,
     ) {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            let Ok(session) = lookup_session(&user, &conversation_id).await else {
-                tracing::warn!(group = %conversation_id, "polling loop: session gone");
-                break;
-            };
-            let tick_result = session
-                .write()
-                .map_err(|_| SessionError::LockPoisoned("session"))
-                .and_then(|mut s| s.tick_deadlines());
-            if let Err(e) = tick_result {
-                if is_polling_fatal(&e) {
-                    tracing::warn!(group = %conversation_id, error = %e, "polling loop exiting (tick_deadlines)");
+            let outcome = match user.read().await.poll_session(&conversation_id) {
+                Ok(o) => o,
+                Err(e) if e.is_fatal() => {
+                    tracing::warn!(group = %conversation_id, error = %e, "polling loop exiting");
                     break;
                 }
-                tracing::warn!(group = %conversation_id, error = %e, "tick_deadlines failed");
-            }
-            let freeze_outcome = match session
-                .write()
-                .map_err(|_| SessionError::LockPoisoned("session"))
-                .and_then(|mut s| s.poll_freeze_status())
-            {
-                Ok(o) => o,
                 Err(e) => {
-                    if is_polling_fatal(&e) {
-                        tracing::warn!(group = %conversation_id, error = %e, "polling loop exiting");
-                        break;
-                    }
+                    tracing::warn!(group = %conversation_id, error = %e, "poll_session error");
                     continue;
                 }
             };
-            let (freeze_status, dispatch) = freeze_outcome;
-            if matches!(dispatch, DispatchOutcome::LeaveRequested) {
+            if outcome.leave_requested {
                 if let Err(e) = user.read().await.finalize_self_leave(&conversation_id) {
                     tracing::error!(group = %conversation_id, error = %e, "self-leave cleanup failed");
                 }
                 break;
-            }
-            match freeze_status {
-                FreezeTimeoutStatus::NotFreezing => {
-                    match session
-                        .write()
-                        .map_err(|_| SessionError::LockPoisoned("session"))
-                        .and_then(|mut s| s.check_member_freeze())
-                    {
-                        Ok(true) => { /* entered Freezing (+ created candidate if steward) */ }
-                        Ok(false) => {}
-                        Err(e) => {
-                            if is_polling_fatal(&e) {
-                                tracing::warn!(group = %conversation_id, error = %e, "polling loop exiting");
-                                break;
-                            }
-                            tracing::error!(group = %conversation_id, error = %e, "check_member_freeze failed");
-                        }
-                    }
-                }
-                FreezeTimeoutStatus::StillFreezing => {
-                    let candidate_count = match session.read() {
-                        Ok(s) => Some(s.get_freeze_candidate_count()),
-                        Err(_) => {
-                            tracing::warn!(
-                                group = %conversation_id,
-                                "freeze candidate count skipped: session lock poisoned"
-                            );
-                            None
-                        }
-                    };
-                    if let Some((received, expected)) = candidate_count {
-                        let _ = evt_tx.unbounded_send(AppEvent::FreezeCandidates {
-                            conversation_id: conversation_id.clone(),
-                            received,
-                            expected,
-                        });
-                    }
-                    continue;
-                }
-                FreezeTimeoutStatus::Applied => {}
-                FreezeTimeoutStatus::TimedOut { has_proposals } => {
-                    if has_proposals {
-                        tracing::warn!(
-                            group = %conversation_id,
-                            "commit timeout with pending proposals, emergency vote initiated"
-                        );
-                    }
-                }
             }
         }
     }

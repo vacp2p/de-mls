@@ -259,14 +259,11 @@ pub fn fast_test_config() -> ConversationConfig {
     }
 }
 
-/// One polling cycle on a session: drive freeze status, member-freeze
-/// check, and (for joiners) the pending-join tick. Mirrors the production
-/// `group_polling_loop` body in `de_mls_gateway::group`.
+/// One polling cycle on a session: tick deadlines, advance freeze state,
+/// check member-freeze inactivity, and check pending-join expiry. Mirrors the
+/// production `group_polling_loop` body in `de_mls_gateway::group`.
 pub fn poll_once(session: &SessionArc) {
-    let _ = session.write().unwrap().tick_deadlines();
-    let _ = session.write().unwrap().poll_freeze_status();
-    let _ = session.write().unwrap().check_member_freeze();
-    let _ = session.write().unwrap().check_pending_join();
+    let _ = session.write().unwrap().poll();
 }
 
 /// Flush a session's pull-buffered outbound into its user's transport handle

@@ -9,7 +9,7 @@ use de_mls::member_id::MemberId;
 use de_mls::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, RemoveMember, conversation_update_request,
 };
-use de_mls::session::{CreatorVote, DispatchOutcome};
+use de_mls::session::CreatorVote;
 
 mod common;
 use common::session_fixtures::{
@@ -67,25 +67,16 @@ fn removed_member_emits_leaving_and_is_evicted() {
         .unwrap();
 
     // Drive packet relay + polling until the target is evicted from its
-    // User registry. Mirrors the gateway's polling loop: when
-    // `poll_freeze_status` returns `DispatchOutcome::LeaveRequested`, the
-    // caller is responsible for running `User::finalize_self_leave`.
+    // User registry. Mirrors the gateway's polling loop: when `poll()`
+    // returns `leave_requested`, the caller runs `User::finalize_self_leave`.
     let mut target_evicted = false;
     for _ in 0..30 {
         settle_for(Duration::from_millis(40));
         for (i, (u, _)) in users.iter().enumerate() {
             if let Some(s) = u.lookup_entry("leave").unwrap() {
-                let _ = s.write().unwrap().tick_deadlines();
-                if i == target_idx
-                    && matches!(
-                        s.write().unwrap().poll_freeze_status(),
-                        Ok((_, DispatchOutcome::LeaveRequested))
-                    )
-                {
+                let outcome = s.write().unwrap().poll().unwrap();
+                if i == target_idx && outcome.leave_requested {
                     u.finalize_self_leave("leave").unwrap();
-                } else {
-                    let _ = s.write().unwrap().poll_freeze_status();
-                    let _ = s.write().unwrap().check_member_freeze();
                 }
             }
         }
