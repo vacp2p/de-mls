@@ -24,13 +24,9 @@
 //! `SessionRunner` via additional `impl` blocks.
 
 mod consensus;
-mod consensus_bridge;
-mod consensus_context;
-mod consensus_events;
 mod construct;
 mod display;
 mod error;
-mod freeze;
 mod inbound;
 mod messaging;
 mod phase_timer;
@@ -38,7 +34,6 @@ mod poll;
 mod query;
 mod runner;
 mod steward;
-mod tick;
 
 pub use crate::core::{
     ConversationConfig, ConversationState, DEFAULT_COMMIT_INACTIVITY_DURATION,
@@ -46,8 +41,7 @@ pub use crate::core::{
     DEFAULT_PEER_SCORE, DEFAULT_PROPOSAL_EXPIRATION, DEFAULT_RECOVERY_INACTIVITY_DURATION,
     DEFAULT_THRESHOLD_PEER_SCORE, DEFAULT_VOTING_DELAY,
 };
-pub use consensus::CreatorVote;
-pub use consensus_context::ConsensusContext;
+pub use consensus::{ConsensusContext, CreatorVote};
 pub use construct::ConversationDeps;
 pub use display::{MemberRole, MessageType, message_types};
 pub use error::SessionError;
@@ -56,6 +50,5 @@ pub use messaging::{Outbound, build_key_package_announcement};
 pub use poll::PollOutcome;
 pub use runner::LeaveOutcome;
 pub use runner::SessionRunner;
-pub use tick::SessionTick;
 
-pub(crate) use phase_timer::{FreezeTimeoutStatus, PhaseTimer};
+pub(crate) use phase_timer::PhaseTimer;

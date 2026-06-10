@@ -76,6 +76,6 @@ pub enum SessionEvent {
     /// submitted candidates out of `expected`. Emitted by `poll()` when in
     /// `Freezing` and the count changed since the previous emission. The
     /// integrator can surface this as a progress indicator without polling
-    /// `get_freeze_candidate_count()`.
+    /// `freeze_candidate_count()`.
     FreezeProgress { received: usize, expected: usize },
 }

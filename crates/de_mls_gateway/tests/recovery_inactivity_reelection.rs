@@ -4,7 +4,7 @@
 //! elapses without a valid commit candidate (e.g. the elected steward
 //! went silent), `finalize_freeze_round` returns `NoCandidate`. With
 //! `has_proposals == true` that drives `start_reelection`, and the
-//! `entered_reelection` branch of `poll_freeze_status` initiates a
+//! `entered_reelection` branch of the freeze step in `poll` initiates a
 //! recovery steward election.
 
 use std::time::Duration;
@@ -38,8 +38,8 @@ fn silent_steward_drives_observer_to_reelection() {
     let alice_session = users[0].0.lookup_entry("b2").unwrap().unwrap();
     let bob_session = users[1].0.lookup_entry("b2").unwrap().unwrap();
 
-    let alice_is_steward = alice_session.read().unwrap().is_steward_for_self();
-    let bob_is_steward = bob_session.read().unwrap().is_steward_for_self();
+    let alice_is_steward = alice_session.read().unwrap().is_steward();
+    let bob_is_steward = bob_session.read().unwrap().is_steward();
     assert!(
         alice_is_steward ^ bob_is_steward,
         "sn_max=1 must yield exactly one steward (alice_is_steward={alice_is_steward}, bob_is_steward={bob_is_steward})"
@@ -90,7 +90,7 @@ fn silent_steward_drives_observer_to_reelection() {
         let observer_approved = observer_session
             .read()
             .unwrap()
-            .get_approved_proposals_for_current_epoch()
+            .approved_proposals_for_current_epoch()
             .len();
         if observer_approved > 0 {
             consensus_reached = true;
@@ -120,7 +120,7 @@ fn silent_steward_drives_observer_to_reelection() {
             deliver(&users[steward_idx].0, &p);
         }
 
-        let observer_state = observer_session.read().unwrap().get_conversation_state();
+        let observer_state = observer_session.read().unwrap().conversation_state();
         if observer_state == ConversationState::Reelection {
             entered_reelection = true;
             break;

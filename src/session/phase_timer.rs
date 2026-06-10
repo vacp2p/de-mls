@@ -5,21 +5,6 @@
 
 use std::time::{Duration, Instant};
 
-/// What a freeze-timeout poll returned.
-#[derive(Debug, PartialEq)]
-pub enum FreezeTimeoutStatus {
-    NotFreezing,
-    StillFreezing,
-    /// A candidate was selected and applied.
-    Applied,
-    /// Timeout elapsed without a valid candidate. `has_proposals = true`
-    /// means approved work existed at timeout (steward fault); `false` is
-    /// just an empty epoch.
-    TimedOut {
-        has_proposals: bool,
-    },
-}
-
 /// Wall-clock anchor for the active phase. Holds only the anchor
 /// `Instant`; queries take the relevant `Duration` as a parameter.
 /// [`crate::session::SessionRunner`] composes the timer with the state

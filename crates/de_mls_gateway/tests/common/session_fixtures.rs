@@ -313,7 +313,7 @@ pub fn flush_user(user: &TestUser, transport: &TransportHandle) {
 /// exits the instant joiners are Working, that election gets orphaned — its
 /// `consensus_timeout` fires without enough votes, `handle_election_rejected`
 /// bumps the creator's `retry_round` to 1, and every subsequent
-/// `check_member_freeze` call flips to the recovery-inactivity window instead
+/// inactivity check in `poll` flips to the recovery-inactivity window instead
 /// of the commit one. Small groups (`members <= sn_max`) reconcile the list
 /// locally with no election, so they have nothing to orphan.
 ///
@@ -408,7 +408,7 @@ pub fn bootstrap_joined_conversation(
 
         let mut all_working = true;
         for s in sessions.iter().skip(1) {
-            if s.read().unwrap().get_conversation_state() != ConversationState::Working {
+            if s.read().unwrap().conversation_state() != ConversationState::Working {
                 all_working = false;
                 break;
             }

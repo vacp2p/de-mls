@@ -126,10 +126,7 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
             }
 
             AppCmd::GetGroupMembers { conversation_id } => {
-                match GATEWAY
-                    .get_conversation_members(conversation_id.clone())
-                    .await
-                {
+                match GATEWAY.members(conversation_id.clone()).await {
                     Ok(members) => {
                         GATEWAY.push_event(AppEvent::GroupMembers {
                             conversation_id,
@@ -211,7 +208,7 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 // Silently drop so the user doesn't see a surprising error
                 // popup; their vote is on record regardless.
                 if let Err(e) = GATEWAY
-                    .process_user_vote(conversation_id.clone(), proposal_id, choice)
+                    .vote(conversation_id.clone(), proposal_id, choice)
                     .await
                 {
                     let msg = e.to_string();

@@ -58,7 +58,7 @@
 //! let mut session = SessionRunner::create("de-mls-test", deps)?;
 //!
 //! // Send a chat message — buffered, never auto-sent.
-//! session.push_message(b"Hello, world!".to_vec())?;
+//! session.send_message(b"Hello, world!".to_vec())?;
 //!
 //! // Drain outbound and publish it on your own transport.
 //! for out in session.drain_outbound() { /* publish */ }

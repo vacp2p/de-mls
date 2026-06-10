@@ -58,19 +58,11 @@ fn write_lock_on_one_session_does_not_block_others() {
     // usable for real work, not just acquirable. `poll` takes `&mut self`,
     // so the caller holds the conv-b write guard for the call — independent
     // of conv-a's still-held guard.
-    session_b
-        .write()
-        .unwrap()
-        .poll()
-        .expect("poll on conv-b must succeed");
+    session_b.write().unwrap().poll();
 
     drop(a_guard);
 
     // After releasing, conv-a is also accessible — the same entry point
     // works against either session.
-    session_a
-        .write()
-        .unwrap()
-        .poll()
-        .expect("conv-a poll must succeed");
+    session_a.write().unwrap().poll();
 }

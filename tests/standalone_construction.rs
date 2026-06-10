@@ -69,12 +69,12 @@ fn create_builds_a_working_steward_session_without_user() {
     let integrator = Integrator::new();
     let runner = SessionRunner::create("standalone", integrator.deps()).expect("create");
 
-    assert_eq!(runner.get_conversation_state(), ConversationState::Working);
+    assert_eq!(runner.conversation_state(), ConversationState::Working);
     assert!(
-        runner.is_steward_for_self(),
+        runner.is_steward(),
         "creator is the sole steward at epoch 0"
     );
-    let (epoch, _retry) = runner.get_epoch_and_retry().expect("epoch");
+    let (epoch, _retry) = runner.epoch_and_retry().expect("epoch");
     assert_eq!(epoch, 0);
 
     // The opening phase is buffered for whoever drains the session.
@@ -92,12 +92,9 @@ fn join_builds_a_pending_join_session_without_user() {
     let integrator = Integrator::new();
     let runner = SessionRunner::join("standalone", integrator.deps()).expect("join");
 
-    assert_eq!(
-        runner.get_conversation_state(),
-        ConversationState::PendingJoin
-    );
+    assert_eq!(runner.conversation_state(), ConversationState::PendingJoin);
     assert!(
-        !runner.is_steward_for_self(),
+        !runner.is_steward(),
         "a pending joiner holds no steward list yet"
     );
 }

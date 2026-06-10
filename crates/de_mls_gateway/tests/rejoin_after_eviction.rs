@@ -34,7 +34,7 @@ fn evicted_member_can_rejoin_at_higher_epoch() {
     let mut target_idx = None;
     for (i, (u, _)) in users.iter().enumerate() {
         let s = u.lookup_entry("rejoin").unwrap().unwrap();
-        if !s.read().unwrap().is_steward_for_self() {
+        if !s.read().unwrap().is_steward() {
             target_idx = Some(i);
             break;
         }
@@ -51,12 +51,7 @@ fn evicted_member_can_rejoin_at_higher_epoch() {
         .lookup_entry("rejoin")
         .unwrap()
         .unwrap();
-    let pre_remove_epoch = steward_session
-        .read()
-        .unwrap()
-        .get_epoch_and_retry()
-        .unwrap()
-        .0;
+    let pre_remove_epoch = steward_session.read().unwrap().epoch_and_retry().unwrap().0;
 
     // Phase 1: removal.
     let target_id = common::WalletMemberId::from_hex(&users[target_idx].0.member_id_string())
@@ -108,11 +103,11 @@ fn evicted_member_can_rejoin_at_higher_epoch() {
     let mut rejoined = false;
     for _ in 0..30 {
         drive_one_round_no_target_eviction(&mut users, target_idx);
-        if let Some(s) = users[target_idx].0.lookup_entry("rejoin").unwrap() {
-            if s.read().unwrap().get_conversation_state() == ConversationState::Working {
-                rejoined = true;
-                break;
-            }
+        if let Some(s) = users[target_idx].0.lookup_entry("rejoin").unwrap()
+            && s.read().unwrap().conversation_state() == ConversationState::Working
+        {
+            rejoined = true;
+            break;
         }
     }
     assert!(rejoined, "target must rejoin and reach Working state");
@@ -124,7 +119,7 @@ fn evicted_member_can_rejoin_at_higher_epoch() {
         .unwrap()
         .read()
         .unwrap()
-        .get_epoch_and_retry()
+        .epoch_and_retry()
         .unwrap()
         .0;
     assert!(
@@ -133,11 +128,7 @@ fn evicted_member_can_rejoin_at_higher_epoch() {
     );
 
     // Steward sees the rejoined identity back in the member set.
-    let steward_members = steward_session
-        .read()
-        .unwrap()
-        .get_conversation_members()
-        .unwrap();
+    let steward_members = steward_session.read().unwrap().members().unwrap();
     assert!(
         steward_members.iter().any(|m| m == &target_id),
         "steward must see the rejoined identity in its member list, got {steward_members:?}"
@@ -155,7 +146,7 @@ fn drive_one_round(
     let mut sessions = Vec::with_capacity(users.len());
     for (i, (u, _)) in users.iter().enumerate() {
         if let Some(s) = u.lookup_entry("rejoin").unwrap() {
-            let outcome = s.write().unwrap().poll().unwrap();
+            let outcome = s.write().unwrap().poll();
             if i == target_idx && outcome.leave_requested {
                 u.finalize_self_leave("rejoin").unwrap();
                 continue;
@@ -195,7 +186,7 @@ fn drive_one_round_no_target_eviction(
     let mut sessions = Vec::with_capacity(users.len());
     for (i, (u, _)) in users.iter().enumerate() {
         if let Some(s) = u.lookup_entry("rejoin").unwrap() {
-            let outcome = s.write().unwrap().poll().unwrap();
+            let outcome = s.write().unwrap().poll();
             if i != target_idx && outcome.leave_requested {
                 u.finalize_self_leave("rejoin").unwrap();
                 continue;

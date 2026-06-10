@@ -829,7 +829,7 @@ fn ChatSection() -> Element {
     let mut ban_address = use_signal(String::new);
     let mut ban_error = use_signal(|| Option::<String>::None);
 
-    // States where `push_message` refuses (matches the core guard in
+    // States where `send_message` refuses (matches the core guard in
     // `src/app/user/messaging.rs`). Keep these two lists in sync.
     let send_disabled = matches!(
         cons.read().group_state.as_str(),

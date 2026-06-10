@@ -10,10 +10,10 @@ use crate::{
     core::{ConsensusPlugin, ConversationPluginsFactory},
     mls_crypto::{KeyPackageBytes, MlsService, key_package_bytes_from_tls},
     protos::de_mls::messages::v1::{
-        AppMessage, BanRequest, ConversationMessage, ConversationUpdateRequest, MemberInvite,
-        RemoveMember, conversation_update_request,
+        AppMessage, ConversationMessage, ConversationUpdateRequest, MemberInvite, RemoveMember,
+        conversation_update_request,
     },
-    session::{ConversationState, CreatorVote, SessionError, SessionRunner, SessionTick},
+    session::{ConversationState, CreatorVote, SessionError, SessionRunner},
 };
 
 /// A payload the conversation produced for the integrator to broadcast,
@@ -38,7 +38,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// yet), `Freezing`, and `Selection` (epoch rotation in flight — the
     /// message might not decrypt on peers who already merged the next
     /// commit). Governance traffic has its own gate (`check_proposal_allowed`).
-    pub fn push_message(&mut self, message: Vec<u8>) -> Result<SessionTick, SessionError> {
+    pub fn send_message(&mut self, message: Vec<u8>) -> Result<(), SessionError> {
         let state = self.conversation.current_state();
         if matches!(
             state,
@@ -60,7 +60,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             .expect_mls_mut()?
             .build_message(&app_msg)?;
         self.broadcast(payload);
-        Ok(self.tick())
+        Ok(())
     }
 
     /// Start a `MemberInvite` consensus round for the given TLS-encoded key
@@ -68,7 +68,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// proposal with a bundled YES vote. The resulting welcome fires as
     /// [`crate::core::SessionEvent::WelcomeReady`] for the integrator to
     /// deliver out of band.
-    pub fn add_member(&mut self, key_package_bytes: &[u8]) -> Result<SessionTick, SessionError> {
+    pub fn add_member(&mut self, key_package_bytes: &[u8]) -> Result<(), SessionError> {
         let state = self.conversation.current_state();
         if state != ConversationState::Working {
             return Err(SessionError::ConversationBlocked(state.to_string()));
@@ -85,17 +85,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             },
             CreatorVote::Yes,
         )?;
-        Ok(self.tick())
+        Ok(())
     }
 
-    /// Start a `RemoveMember` consensus round targeting `ban_request.user_to_ban`.
-    /// The requester's click means "I want this person removed" → the
-    /// creator's vote is bundled as YES at submit; no vote request is shown to
-    /// the requester.
-    pub fn process_ban_request(
-        &mut self,
-        ban_request: BanRequest,
-    ) -> Result<SessionTick, SessionError> {
+    /// Start a `RemoveMember` consensus round targeting `member_id`. The
+    /// requester's intent is the removal → the creator's vote is bundled as
+    /// YES at submit; no vote request is shown to the requester.
+    pub fn remove_member(&mut self, member_id: &[u8]) -> Result<(), SessionError> {
         let state = self.conversation.current_state();
         if state != ConversationState::Working {
             return Err(SessionError::ConversationBlocked(state.to_string()));
@@ -105,14 +101,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             ConversationUpdateRequest {
                 payload: Some(conversation_update_request::Payload::RemoveMember(
                     RemoveMember {
-                        member_id: ban_request.user_to_ban,
+                        member_id: member_id.to_vec(),
                     },
                 )),
             },
             CreatorVote::Yes,
         )?;
 
-        Ok(self.tick())
+        Ok(())
     }
 }
 

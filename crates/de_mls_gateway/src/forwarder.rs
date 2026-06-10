@@ -1,9 +1,9 @@
 use std::sync::{Arc, atomic::Ordering};
 
-use de_mls::{protos::de_mls::messages::v1::ConversationUpdateRequest, session::SessionError};
+use de_mls::protos::de_mls::messages::v1::ConversationUpdateRequest;
 use de_mls_ds::WakuDeliveryService;
 
-use crate::user::Inbound;
+use crate::user::{Inbound, UserError};
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo, encode_hex, format_conversation_request};
 use futures::channel::mpsc::UnboundedSender;
 
@@ -15,11 +15,11 @@ use crate::{CoreCtx, Gateway, SessionRef, UserRef};
 pub(crate) async fn lookup_session(
     user: &UserRef,
     conversation_id: &str,
-) -> Result<SessionRef, SessionError> {
+) -> Result<SessionRef, UserError> {
     user.read()
         .await
         .lookup_entry(conversation_id)?
-        .ok_or(SessionError::ConversationNotFound)
+        .ok_or(UserError::ConversationNotFound)
 }
 
 /// Render a batch of approved proposals as `(action, member_id)` pairs,
@@ -41,11 +41,11 @@ pub(crate) async fn load_member_info(
     let session = lookup_session(user, conversation_id).await?;
     let runner = session
         .read()
-        .map_err(|_| SessionError::LockPoisoned("session"))?;
-    let member_bytes = runner.get_conversation_members()?;
-    let scores = runner.get_member_scores();
-    let roles = runner.get_member_roles().unwrap_or_default();
-    let pending_leavers = runner.get_pending_leave_member_ids().unwrap_or_default();
+        .map_err(|_| UserError::LockPoisoned("session"))?;
+    let member_bytes = runner.members()?;
+    let scores = runner.member_scores();
+    let roles = runner.member_roles().unwrap_or_default();
+    let pending_leavers = runner.pending_leave_member_ids().unwrap_or_default();
 
     Ok(member_bytes
         .into_iter()
@@ -90,13 +90,13 @@ pub(crate) async fn push_consensus_state(
             return;
         }
     };
-    let proposals = runner.get_approved_proposals_for_current_epoch();
+    let proposals = runner.approved_proposals_for_current_epoch();
     let _ = evt_tx.unbounded_send(AppEvent::CurrentEpochProposals {
         conversation_id: conversation_id.to_string(),
         proposals: display_batch(&proposals),
     });
 
-    if let Ok((epoch, retry_round)) = runner.get_epoch_and_retry() {
+    if let Ok((epoch, retry_round)) = runner.epoch_and_retry() {
         let _ = evt_tx.unbounded_send(AppEvent::GroupEpoch {
             conversation_id: conversation_id.to_string(),
             epoch,
@@ -126,7 +126,7 @@ pub(crate) async fn push_member_scores(
         return;
     };
     let is_steward = match session.read() {
-        Ok(s) => s.is_steward_for_self(),
+        Ok(s) => s.is_steward(),
         Err(_) => {
             tracing::warn!(
                 conversation = %conversation_id,

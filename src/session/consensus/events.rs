@@ -18,7 +18,7 @@ use crate::{
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, conversation_update_request,
     },
-    session::{ConversationState, SessionError, SessionRunner, SessionTick},
+    session::{ConversationState, SessionError, SessionRunner},
 };
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
@@ -29,7 +29,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     pub(crate) fn apply_consensus_outcome(
         &mut self,
         event: ConsensusEvent,
-    ) -> Result<SessionTick, SessionError> {
+    ) -> Result<(), SessionError> {
         let (proposal_id, approved, timestamp) = match &event {
             ConsensusEvent::ConsensusReached {
                 proposal_id,
@@ -56,7 +56,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 proposal_id,
                 "duplicate consensus outcome dropped"
             );
-            return self.current_tick();
+            return Ok(());
         }
 
         // Surface the decision before any effects so UI fanout sees it in
@@ -100,7 +100,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             ConsensusApplyResult::NoAction => {}
             ConsensusApplyResult::ElectionAccepted(election) => {
                 self.handle_election_accepted(election)?;
-                return self.current_tick();
+                return Ok(());
             }
             ConsensusApplyResult::ElectionRejected => {
                 self.handle_election_rejected()?;
@@ -130,13 +130,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             self.handle_emergency_scored(proposal_id, &request, &score_ops)?;
         }
 
-        self.current_tick()
-    }
-
-    /// Latest [`SessionTick`]. Terminal value of every
-    /// `apply_consensus_outcome` exit path.
-    fn current_tick(&self) -> Result<SessionTick, SessionError> {
-        Ok(self.tick())
+        Ok(())
     }
 
     /// Emit a [`SessionEvent::PhaseChange`] for `transition`, if a state

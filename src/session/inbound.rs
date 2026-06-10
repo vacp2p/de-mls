@@ -26,7 +26,7 @@ use crate::{
     },
     session::{
         ConversationState, SessionError, SessionRunner,
-        consensus_bridge::{forward_incoming_proposal, forward_incoming_vote},
+        consensus::bridge::{forward_incoming_proposal, forward_incoming_vote},
     },
 };
 

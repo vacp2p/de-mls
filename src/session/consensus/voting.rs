@@ -18,8 +18,8 @@ use crate::{
         AppMessage, ConversationUpdateRequest, RemoveMember, conversation_update_request,
     },
     session::{
-        ConversationState, SessionError, SessionRunner, SessionTick,
-        consensus_bridge::{
+        ConversationState, SessionError, SessionRunner,
+        consensus::bridge::{
             ProposalParams, cast_vote, submit_proposal, submit_self_leave_proposal,
         },
     },
@@ -153,7 +153,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Cast a manual vote on behalf of the local member. Blocked in
     /// `Freezing` and `Selection`; cancels any pending auto-vote so the
     /// manual choice wins.
-    pub fn process_user_vote(&mut self, proposal_id: u32, vote: bool) -> Result<(), SessionError> {
+    pub fn vote(&mut self, proposal_id: u32, vote: bool) -> Result<(), SessionError> {
         let state = self.conversation.current_state();
         if state == ConversationState::Freezing || state == ConversationState::Selection {
             return Err(SessionError::ConversationBlocked(state.to_string()));
@@ -176,7 +176,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Walk pending deadlines, fire any whose `fire_at` has elapsed, then
     /// drain the consensus event bus and dispatch each event through
     /// `apply_consensus_outcome`. Called by `poll()`.
-    pub(crate) fn tick_deadlines(&mut self) -> Result<SessionTick, SessionError> {
+    pub(crate) fn tick_deadlines(&mut self) -> Result<(), SessionError> {
         let now = std::time::Instant::now();
         let auto_votes_due: Vec<(u32, bool)> = self
             .pending_auto_votes
@@ -227,7 +227,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             }
         }
 
-        Ok(self.tick())
+        Ok(())
     }
 
     // ── Crate-internal ───────────────────────────────────────────────

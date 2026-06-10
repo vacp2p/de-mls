@@ -78,7 +78,7 @@ fn second_conversation_sync_is_a_no_op() {
             }
         }
 
-        if sessions[1].read().unwrap().get_conversation_state() == ConversationState::Working {
+        if sessions[1].read().unwrap().conversation_state() == ConversationState::Working {
             break;
         }
     }
@@ -88,7 +88,7 @@ fn second_conversation_sync_is_a_no_op() {
         "bootstrap must produce a ConversationSync for the joiner"
     );
     assert_eq!(
-        sessions[1].read().unwrap().get_conversation_state(),
+        sessions[1].read().unwrap().conversation_state(),
         ConversationState::Working,
         "bob must be Working after bootstrap"
     );
@@ -97,7 +97,7 @@ fn second_conversation_sync_is_a_no_op() {
     let bob_tx = users[1].1.clone();
 
     // Bootstrap-driven sync left bob with steward-list state.
-    let roles_before = bob_session.read().unwrap().get_member_roles().unwrap();
+    let roles_before = bob_session.read().unwrap().member_roles().unwrap();
     assert!(
         roles_before.iter().any(|(_, r)| matches!(
             r,
@@ -105,15 +105,15 @@ fn second_conversation_sync_is_a_no_op() {
         )),
         "bob must see at least one steward after bootstrap, got {roles_before:?}"
     );
-    let scores_before = bob_session.read().unwrap().get_member_scores();
+    let scores_before = bob_session.read().unwrap().member_scores();
 
     // Deliver the captured sync bytes to bob again as a second delivery.
     let sync_packet = OutboundPacket::broadcast("c2", &alice_app_id, captured_sync);
     bob_tx.lock().unwrap().drain_packets();
     deliver(&users[1].0, &sync_packet);
     let bob_outbound_after = bob_tx.lock().unwrap().drain_packets();
-    let roles_after = bob_session.read().unwrap().get_member_roles().unwrap();
-    let scores_after = bob_session.read().unwrap().get_member_scores();
+    let roles_after = bob_session.read().unwrap().member_roles().unwrap();
+    let scores_after = bob_session.read().unwrap().member_scores();
 
     assert!(
         bob_outbound_after.is_empty(),

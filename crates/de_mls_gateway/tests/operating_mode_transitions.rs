@@ -42,12 +42,7 @@ fn deadlock_ecp_opens_recovery_and_force_freezes() {
 
     // File a Deadlock ECP. With both members as stewards and bob's
     // auto-vote, the emergency proposal reaches consensus YES.
-    let current_epoch = alice_session
-        .read()
-        .unwrap()
-        .get_epoch_and_retry()
-        .unwrap()
-        .0;
+    let current_epoch = alice_session.read().unwrap().epoch_and_retry().unwrap().0;
     let request = ViolationEvidence::deadlock(current_epoch)
         .with_creator(b"alice-creator".to_vec())
         .into_update_request()

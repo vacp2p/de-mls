@@ -9,12 +9,10 @@
 
 use de_mls::{
     core::{ConsensusPlugin, ConversationPluginsFactory},
-    session::{DispatchOutcome, SessionError, SessionTick},
+    session::DispatchOutcome,
 };
 
-use crate::user::ConversationLifecycle;
-
-use crate::user::{LockExt, User};
+use crate::user::{ConversationLifecycle, LockExt, User, UserError};
 
 /// A payload delivered from the network into the library, addressed to a
 /// conversation. The integrator builds this from its own wire format and
@@ -31,14 +29,19 @@ pub struct Inbound {
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     // ── Public API ───────────────────────────────────────────────────
 
-    /// Ingest conversation traffic (chat / vote / commit / sync). Echo-dedup
-    /// and `PendingJoin`-drop are handled inside the runner. On
-    /// `LeaveRequested` the session has completed its protocol-side teardown;
-    /// this method finalises the User-side registry cleanup.
-    pub fn handle_inbound(&self, inbound: Inbound) -> Result<SessionTick, SessionError> {
+    /// Ingest conversation traffic (chat / vote / commit / sync). Self-echoes
+    /// are dropped before the registry lookup — our own packets can still
+    /// arrive for a conversation we just left, and must not surface as
+    /// `ConversationNotFound`. The runner dedups again for direct integrators.
+    /// On `LeaveRequested` the session has completed its protocol-side
+    /// teardown; this method finalises the User-side registry cleanup.
+    pub fn handle_inbound(&self, inbound: Inbound) -> Result<(), UserError> {
+        if inbound.sender == self.app_id {
+            return Ok(());
+        }
         let entry_arc = self
             .lookup_entry(&inbound.conversation_id)?
-            .ok_or(SessionError::ConversationNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
         let outcome = entry_arc
             .write_or_err("session")?
             .process_inbound(&inbound.sender, &inbound.payload)?;
@@ -46,24 +49,24 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             self.finalize_self_leave(&inbound.conversation_id)?;
         }
         self.flush(&entry_arc)?;
-        Ok(SessionTick {
-            next_wakeup_in: entry_arc.read_or_err("session")?.next_wakeup_in(),
-        })
+        Ok(())
     }
 
-    /// Ingest a joiner's key-package announcement. Echo-dedup and admission
-    /// decisions are handled inside the runner.
-    pub fn receive_key_package(&self, inbound: Inbound) -> Result<SessionTick, SessionError> {
+    /// Ingest a joiner's key-package announcement. Self-echoes are dropped
+    /// before the registry lookup (same rationale as [`Self::handle_inbound`]);
+    /// admission decisions are handled inside the runner.
+    pub fn receive_key_package(&self, inbound: Inbound) -> Result<(), UserError> {
+        if inbound.sender == self.app_id {
+            return Ok(());
+        }
         let entry_arc = self
             .lookup_entry(&inbound.conversation_id)?
-            .ok_or(SessionError::ConversationNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
         entry_arc
             .write_or_err("session")?
             .receive_key_package(&inbound.sender, &inbound.payload)?;
         self.flush(&entry_arc)?;
-        Ok(SessionTick {
-            next_wakeup_in: entry_arc.read_or_err("session")?.next_wakeup_in(),
-        })
+        Ok(())
     }
 
     /// User-side completion of `LeaveConversation`: drop the entry from
@@ -71,7 +74,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// The session-side teardown (emit `Leaving`, cancel timers, delete MLS
     /// state) runs inside the runner before this is called; this method is
     /// the cleanup callers run when the runner signals it has finished.
-    pub fn finalize_self_leave(&self, conversation_id: &str) -> Result<(), SessionError> {
+    pub fn finalize_self_leave(&self, conversation_id: &str) -> Result<(), UserError> {
         // Scope cleanup before registry remove — the cleanup finds the runner
         // via lookup_entry, so the entry must still exist. Eviction and
         // `Removed` are unconditional: a scope-delete failure must not strand
@@ -79,7 +82,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let cleanup = self.cleanup_consensus_scope(conversation_id);
         self.conversations
             .write()
-            .map_err(|_| SessionError::LockPoisoned("conversation registry"))?
+            .map_err(|_| UserError::LockPoisoned("conversation registry"))?
             .remove(conversation_id);
         self.emit_lifecycle(ConversationLifecycle::Removed(conversation_id.to_string()));
         cleanup

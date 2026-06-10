@@ -6,19 +6,17 @@ use tracing::info;
 
 use de_mls::{
     core::{ConsensusPlugin, ConversationConfig, ConversationPluginsFactory},
-    session::{ConversationDeps, LeaveOutcome, SessionError, SessionRunner},
+    session::{ConversationDeps, LeaveOutcome, SessionRunner},
 };
 
-use crate::user::ConversationLifecycle;
-
-use crate::user::{LockExt, User};
+use crate::user::{ConversationLifecycle, LockExt, User, UserError};
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     pub fn start_conversation(
         &mut self,
         conversation_id: &str,
         is_creation: bool,
-    ) -> Result<(), SessionError> {
+    ) -> Result<(), UserError> {
         self.start_conversation_with_config(
             conversation_id,
             is_creation,
@@ -32,14 +30,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         conversation_id: &str,
         is_creation: bool,
         config: ConversationConfig,
-    ) -> Result<(), SessionError> {
+    ) -> Result<(), UserError> {
         if self
             .conversations
             .read()
-            .map_err(|_| SessionError::LockPoisoned("conversation registry"))?
+            .map_err(|_| UserError::LockPoisoned("conversation registry"))?
             .contains_key(conversation_id)
         {
-            return Err(SessionError::ConversationAlreadyExists);
+            return Err(UserError::ConversationAlreadyExists);
         }
 
         let deps = ConversationDeps {
@@ -61,9 +59,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             let mut conversations = self
                 .conversations
                 .write()
-                .map_err(|_| SessionError::LockPoisoned("conversation registry"))?;
+                .map_err(|_| UserError::LockPoisoned("conversation registry"))?;
             if conversations.contains_key(conversation_id) {
-                return Err(SessionError::ConversationAlreadyExists);
+                return Err(UserError::ConversationAlreadyExists);
             }
             conversations.insert(conversation_id.to_string(), session);
         }
@@ -81,12 +79,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// otherwise it opens a self-leave consensus round and returns
     /// `LeaveInitiated`. On `TornDown` this method finalises the User-side
     /// registry cleanup via `finalize_self_leave`.
-    pub fn leave_conversation(&mut self, conversation_id: &str) -> Result<(), SessionError> {
+    pub fn leave_conversation(&mut self, conversation_id: &str) -> Result<(), UserError> {
         info!(conversation = conversation_id, "leaving conversation");
 
         let entry_arc = self
             .lookup_entry(conversation_id)?
-            .ok_or(SessionError::ConversationNotFound)?;
+            .ok_or(UserError::ConversationNotFound)?;
 
         let outcome = entry_arc.write_or_err("session")?.leave()?;
         match outcome {

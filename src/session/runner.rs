@@ -20,7 +20,7 @@ use crate::{
         ConversationPluginsFactory, ConversationQueues, ConversationState,
         ConversationStateMachine, SessionEvent,
     },
-    session::{Outbound, PhaseTimer, SessionError, SessionTick},
+    session::{Outbound, PhaseTimer, SessionError},
 };
 
 /// Outcome of [`SessionRunner::leave`].
@@ -52,14 +52,15 @@ pub struct AutoVoteEntry {
 }
 
 pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
-    /// Conversation name. Identifies this session in the User registry and
-    /// is used to construct scope keys for consensus operations.
-    pub conversation_id: String,
+    /// Conversation name. Identifies this session in the integrator's
+    /// registry and is used to construct scope keys for consensus operations.
+    /// Read via [`SessionRunner::conversation_id`].
+    pub(crate) conversation_id: String,
     pub(crate) conversation: Conversation<CP>,
     /// Per-conversation consensus service. Owns this conversation's scope
     /// in the shared storage and a private event bus. Minted from the
     /// [`crate::session::ConversationDeps`] consensus context at construction.
-    pub consensus: ConsensusServiceFor<P>,
+    pub(crate) consensus: ConsensusServiceFor<P>,
     /// Subscriber on `consensus.event_bus()`. Drained by
     /// `tick_deadlines`, which dispatches each event through
     /// `apply_consensus_outcome`. Subscribed when the runner is built in
@@ -72,22 +73,24 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// `tick_deadlines`; each entry whose `fire_at` has passed
     /// gets a `cast_vote` and is removed from the map. Cancelled (removed)
     /// when a manual vote arrives or the consensus session resolves.
-    pub pending_auto_votes: HashMap<u32, AutoVoteEntry>,
+    pub(crate) pending_auto_votes: HashMap<u32, AutoVoteEntry>,
     /// Pending consensus-session timeouts: `proposal_id -> fire_at`.
     /// Registered when a proposal opens (own or incoming peer); fired by
     /// `tick_deadlines` which calls `consensus.handle_consensus_timeout`.
     /// Removed when the session resolves naturally via `apply_consensus_outcome`.
-    pub pending_consensus_timeouts: HashMap<u32, Instant>,
-    /// Identity bytes derived from `User.member_id.member_id_bytes()` at
-    /// session construction.
-    pub self_member_id: Arc<[u8]>,
-    /// Display form derived from `User.member_id.member_id_display()` at
-    /// session construction. `Arc<str>` for the same reason as
-    /// `self_member_id` — cheap clone across guard boundaries.
-    pub member_id_display: Arc<str>,
-    /// Per-User instance UUID (cloned from `User`). Tagged on every
-    /// outbound packet for self-message filtering.
-    pub app_id: Arc<[u8]>,
+    pub(crate) pending_consensus_timeouts: HashMap<u32, Instant>,
+    /// Identity bytes of the local member, derived from the integrator's
+    /// [`crate::member_id::MemberId`] at session construction. Read via
+    /// [`SessionRunner::member_id_bytes`].
+    pub(crate) self_member_id: Arc<[u8]>,
+    /// Display form of the local member id, derived at session construction.
+    /// `Arc<str>` for the same reason as `self_member_id` — cheap clone
+    /// across guard boundaries. Read via [`SessionRunner::member_id_display`].
+    pub(crate) member_id_display: Arc<str>,
+    /// Per-instance app id supplied at construction. Tagged on every
+    /// outbound packet and used for self-echo filtering in
+    /// [`SessionRunner::process_inbound`]. Read via [`SessionRunner::app_id`].
+    pub(crate) app_id: Arc<[u8]>,
     /// Pending [`SessionEvent`]s waiting for a caller to drain. Interior
     /// `Mutex` so producer-side `emit_event` stays `&self`; consumers
     /// drain via [`Self::drain_events`] once per polling cycle.
@@ -198,8 +201,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     }
 
     /// State-driven phase-timer deadline, if one is currently active. The
-    /// session's polling paths (`poll_freeze_status`, `check_member_freeze`,
-    /// `check_pending_join`, and the inactivity check in
+    /// session's polling paths (the freeze and pending-join steps in
+    /// `poll`, and the inactivity check in
     /// `check_steward_inactivity`) all gate on the phase timer; this
     /// surfaces the same wall-clock target so an external scheduler can
     /// wake us at the right time.
@@ -221,14 +224,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                 Some(anchor + dur)
             }
             _ => None,
-        }
-    }
-
-    /// Snapshot the earliest deadline into a [`SessionTick`]. Called at the
-    /// end of session operations that need to return a wakeup hint.
-    pub(crate) fn tick(&self) -> SessionTick {
-        SessionTick {
-            next_wakeup_in: self.next_wakeup_in(),
         }
     }
 

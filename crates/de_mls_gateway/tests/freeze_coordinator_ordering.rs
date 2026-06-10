@@ -82,7 +82,7 @@ fn freeze_cycle_emits_phase_events_in_order() {
         }
 
         alice_phases.extend(drain_phase_log(&alice_session));
-        let alice_state = alice_session.read().unwrap().get_conversation_state();
+        let alice_state = alice_session.read().unwrap().conversation_state();
         if alice_state == ConversationState::Freezing || alice_state == ConversationState::Selection
         {
             saw_freezing = true;

@@ -36,7 +36,7 @@ fn removed_member_emits_leaving_and_is_evicted() {
     let mut target_idx = None;
     for (i, (u, _)) in users.iter().enumerate() {
         let s = u.lookup_entry("leave").unwrap().unwrap();
-        if !s.read().unwrap().is_steward_for_self() {
+        if !s.read().unwrap().is_steward() {
             target_idx = Some(i);
             break;
         }
@@ -74,7 +74,7 @@ fn removed_member_emits_leaving_and_is_evicted() {
         settle_for(Duration::from_millis(40));
         for (i, (u, _)) in users.iter().enumerate() {
             if let Some(s) = u.lookup_entry("leave").unwrap() {
-                let outcome = s.write().unwrap().poll().unwrap();
+                let outcome = s.write().unwrap().poll();
                 if i == target_idx && outcome.leave_requested {
                     u.finalize_self_leave("leave").unwrap();
                 }

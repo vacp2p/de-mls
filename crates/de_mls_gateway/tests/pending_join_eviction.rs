@@ -92,7 +92,7 @@ fn await_leave_requested(session: &SessionArc, inactivity: Duration) -> bool {
     // Allow up to 6× inactivity so the test isn't fragile on slow CI.
     let deadline = Instant::now() + inactivity * 6;
     loop {
-        let outcome = session.write().unwrap().poll().unwrap();
+        let outcome = session.write().unwrap().poll();
         if outcome.leave_requested {
             return true;
         }

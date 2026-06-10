@@ -1,11 +1,8 @@
 //! Registry CRUD on the `User` side: per-conversation session lookup.
 
-use de_mls::{
-    core::{ConsensusPlugin, ConversationPluginsFactory},
-    session::SessionError,
-};
+use de_mls::core::{ConsensusPlugin, ConversationPluginsFactory};
 
-use crate::user::{SessionEntry, User};
+use crate::user::{SessionEntry, User, UserError};
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Look up a conversation runner. Returns `Ok(None)` when no runner is
@@ -15,21 +12,21 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     pub fn lookup_entry(
         &self,
         conversation_id: &str,
-    ) -> Result<Option<SessionEntry<P, CP>>, SessionError> {
+    ) -> Result<Option<SessionEntry<P, CP>>, UserError> {
         Ok(self
             .conversations
             .read()
-            .map_err(|_| SessionError::LockPoisoned("conversation registry"))?
+            .map_err(|_| UserError::LockPoisoned("conversation registry"))?
             .get(conversation_id)
             .cloned())
     }
 
     /// Names of every conversation registered on this `User`.
-    pub fn list_conversations(&self) -> Result<Vec<String>, SessionError> {
+    pub fn list_conversations(&self) -> Result<Vec<String>, UserError> {
         Ok(self
             .conversations
             .read()
-            .map_err(|_| SessionError::LockPoisoned("conversation registry"))?
+            .map_err(|_| UserError::LockPoisoned("conversation registry"))?
             .keys()
             .cloned()
             .collect())
