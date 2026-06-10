@@ -12,12 +12,13 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread::sleep;
 use std::time::Duration;
 
-use de_mls::app::{ConversationConfig, Inbound, SessionRunner, User};
+use de_mls::app::{ConversationConfig, SessionRunner};
 use de_mls::core::StewardListConfig;
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory};
 use de_mls::ds::{
     DeliveryService, DeliveryServiceError, OutboundPacket, SharedDeliveryService, WELCOME_SUBTOPIC,
 };
+use de_mls_gateway::user::{Inbound, User};
 use prost::Message;
 
 use crate::common::wallet::user_from_private_key;

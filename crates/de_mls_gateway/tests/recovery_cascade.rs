@@ -10,12 +10,13 @@ use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::Duration;
 
-use de_mls::app::{ConversationConfig, Inbound, User};
+use de_mls::app::ConversationConfig;
 use de_mls::core::StewardListConfig;
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory};
 use de_mls::ds::{
     DeliveryService, DeliveryServiceError, OutboundPacket, SharedDeliveryService, WELCOME_SUBTOPIC,
 };
+use de_mls_gateway::user::{Inbound, User};
 
 /// Test-only transport: captures every outbound packet for later inspection
 /// instead of sending it. `subscribe` is a no-op — tests deliver inbound

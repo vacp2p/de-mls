@@ -17,7 +17,6 @@
 //!   need. New tests should prefer [`session_fixtures`].
 #![allow(dead_code)]
 
-pub mod session_fixtures;
 pub mod wallet;
 
 pub use wallet::WalletMemberId;

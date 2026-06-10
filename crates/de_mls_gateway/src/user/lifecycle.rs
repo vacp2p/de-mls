@@ -4,13 +4,15 @@ use std::sync::{Arc, RwLock};
 
 use tracing::info;
 
-use crate::{
-    app::{ConversationDeps, ConversationState, LockExt, SessionRunner, User, UserError},
+use de_mls::{
+    app::{ConversationDeps, ConversationState, SessionRunner, UserError},
     core::{
         ConsensusPlugin, ConversationConfig, ConversationLifecycle, ConversationPluginsFactory,
         SessionEvent,
     },
 };
+
+use crate::user::{LockExt, User};
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     pub fn start_conversation(
@@ -88,10 +90,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
 
-        let is_pending_join = entry_arc
-            .read_or_err("session")?
-            .conversation
-            .current_state()
+        let is_pending_join = entry_arc.read_or_err("session")?.get_conversation_state()
             == ConversationState::PendingJoin;
         if is_pending_join {
             entry_arc

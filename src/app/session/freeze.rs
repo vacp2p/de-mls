@@ -3,7 +3,7 @@
 //! `check_pending_join` returns a [`PendingJoinTick`] so a polling caller can
 //! distinguish "still pending" / "now joined" / "timed out". On `Expired`
 //! the session has already emitted `Leaving`; the caller drives the
-//! User-side cleanup via [`crate::app::User::finalize_self_leave`].
+//! User-side cleanup via `User::finalize_self_leave`.
 //!
 //! `poll_freeze_status` returns the freeze-tick status alongside a
 //! [`DispatchOutcome`] for the rare case where a commit applied during
@@ -33,7 +33,7 @@ pub enum PendingJoinTick {
     NotPending,
     /// Pending-join window elapsed without a welcome. The session has
     /// emitted `Leaving`; the caller must follow up with
-    /// [`crate::app::User::finalize_self_leave`] to drop the entry from
+    /// `User::finalize_self_leave` to drop the entry from
     /// the registry and broadcast removal.
     Expired,
 }

@@ -10,6 +10,7 @@
 
 mod consensus;
 mod consensus_bridge;
+mod consensus_context;
 mod consensus_events;
 mod construct;
 mod freeze;
@@ -21,6 +22,7 @@ mod steward;
 mod tick;
 
 pub use consensus::CreatorVote;
+pub use consensus_context::ConsensusContext;
 pub use construct::ConversationDeps;
 pub use freeze::PendingJoinTick;
 pub use inbound::DispatchOutcome;

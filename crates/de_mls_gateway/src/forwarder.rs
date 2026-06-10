@@ -1,10 +1,11 @@
 use std::sync::{Arc, atomic::Ordering};
 
 use de_mls::{
-    app::{Inbound, UserError},
-    ds::WakuDeliveryService,
+    app::UserError, ds::WakuDeliveryService,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
+
+use crate::user::Inbound;
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo, encode_hex, format_conversation_request};
 use futures::channel::mpsc::UnboundedSender;
 

@@ -7,7 +7,7 @@
 
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::app::UserError;
+use de_mls::app::UserError;
 
 pub(crate) trait LockExt<T> {
     /// Acquire a read guard. Returns `UserError::LockPoisoned(ctx)` if poisoned.

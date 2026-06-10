@@ -1,9 +1,9 @@
 //! Reference application layer — wires [`crate::core`] into a working chat
 //! app with consensus, state machine, peer scoring, and freeze/commit timing.
 //!
-//! Integrate by constructing a [`crate::app::User`] with your
+//! Integrate by constructing a `User` with your
 //! `SessionEvent` / `ConversationLifecycle`, then drive it from a transport
-//! receive loop ([`crate::app::User::handle_inbound`]) and a
+//! receive loop (`User::handle_inbound`) and a
 //! periodic poll on each conversation's
 //! [`crate::app::SessionRunner::check_member_freeze`] and
 //! [`crate::app::SessionRunner::poll_freeze_status`].
@@ -24,7 +24,6 @@ mod display;
 mod error;
 mod phase_timer;
 mod session;
-mod user;
 
 pub use crate::core::{
     ConversationConfig, ConversationState, DEFAULT_COMMIT_INACTIVITY_DURATION,
@@ -36,8 +35,6 @@ pub use display::{MemberRole, MessageType, message_types};
 pub use error::UserError;
 pub use phase_timer::{FreezeTimeoutStatus, PhaseTimer};
 pub use session::{
-    ConversationDeps, CreatorVote, DispatchOutcome, Outbound, PendingJoinTick, SessionRunner,
-    SessionTick,
+    ConsensusContext, ConversationDeps, CreatorVote, DispatchOutcome, Outbound, PendingJoinTick,
+    SessionRunner, SessionTick,
 };
-pub(crate) use user::LockExt;
-pub use user::{ConsensusContext, Inbound, SessionEntry, User, UserPlugins};

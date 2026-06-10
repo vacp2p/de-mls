@@ -1,6 +1,6 @@
 //! Send operations on `SessionRunner`: app messages and ban requests.
 //! Key-package announcement is a user-level concern (the conversation knows
-//! nothing about how a key package is built) and lives on [`crate::app::User`].
+//! nothing about how a key package is built) and lives on `User`.
 //!
 //! Also defines [`Outbound`] — the conversation's I/O-agnostic product.
 

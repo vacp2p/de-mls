@@ -2,7 +2,7 @@
 //! so the `User` definition surfaces registry, transport at
 //! top level and groups plugin concerns here.
 
-use crate::{
+use de_mls::{
     app::ConsensusContext,
     core::{
         ConsensusPlugin, ConversationConfig, ConversationPluginsFactory, ScoringConfig,

@@ -11,10 +11,12 @@ use std::sync::{Arc, RwLock};
 
 use tracing::debug;
 
-use crate::{
-    app::{DispatchOutcome, LockExt, SessionRunner, SessionTick, User, UserError},
+use de_mls::{
+    app::{DispatchOutcome, SessionRunner, SessionTick, UserError},
     core::{ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, ProcessResult},
 };
+
+use crate::user::{LockExt, User};
 
 /// A payload delivered from the network into the library, addressed to a
 /// conversation. The integrator builds this from its own wire format and
@@ -45,7 +47,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .ok_or(UserError::ConversationNotFound)?;
         let result = {
             let mut entry = entry_arc.write_or_err("session")?;
-            if entry.conversation.mls().is_none() {
+            if !entry.has_mls() {
                 // PendingJoin: no MLS to decrypt with yet. Dropped, not
                 // buffered — replay is a separate recovery track.
                 debug!(
@@ -54,7 +56,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
                 );
                 return Ok(SessionTick::empty());
             }
-            entry.conversation.process_inbound(&inbound.payload)?
+            entry.process_inbound(&inbound.payload)?
         };
         self.finish_dispatch(&inbound.conversation_id, &entry_arc, result)?;
         self.flush(&entry_arc)?;
@@ -118,71 +120,5 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             self.finalize_self_leave(conversation_id)?;
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Mutex;
-    use std::time::Duration;
-
-    use crate::ds::{DeliveryService, DeliveryServiceError, OutboundPacket, SharedDeliveryService};
-    use crate::test_fixtures::make_user_from_private_key;
-
-    /// Transport stub: `publish` is a no-op so an outbound never reaches a
-    /// real network; `subscribe` is a no-op too.
-    #[derive(Debug)]
-    struct NullTransport;
-    impl DeliveryService for NullTransport {
-        type Error = DeliveryServiceError;
-
-        fn publish(&mut self, _: OutboundPacket) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        fn subscribe(&mut self, _delivery_address: &str) -> Result<(), Self::Error> {
-            Ok(())
-        }
-    }
-
-    const ALICE_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-
-    /// Self-leave must abort auto-vote timers — otherwise they fire
-    /// against a conversation we've left.
-    /// Self-leave must drop the pending auto-vote registry — otherwise
-    /// the next `tick_deadlines` would fire against a conversation
-    /// we've left.
-    #[test]
-    fn finalize_self_leave_clears_pending_auto_votes() {
-        let transport: SharedDeliveryService = Arc::new(Mutex::new(NullTransport));
-        let mut user = make_user_from_private_key(ALICE_KEY, transport);
-        user.start_conversation("test-conv", true).unwrap();
-
-        let session = user
-            .lookup_entry("test-conv")
-            .unwrap()
-            .expect("creator session registered");
-
-        // Seed a pending auto-vote with a far-future fire-at so the
-        // assertion isn't sensitive to wall-clock drift.
-        session
-            .write()
-            .unwrap()
-            .register_auto_vote(42, Duration::from_secs(600), true);
-        assert!(
-            session.read().unwrap().pending_auto_votes.contains_key(&42),
-            "auto-vote must be registered before self-leave"
-        );
-
-        user.finalize_self_leave("test-conv").unwrap();
-
-        // Session entry is gone from the registry, so the conversation's
-        // pending auto-votes can no longer fire from a poll cycle on this
-        // user.
-        assert!(
-            user.lookup_entry("test-conv").unwrap().is_none(),
-            "registry entry must be evicted on self-leave"
-        );
     }
 }

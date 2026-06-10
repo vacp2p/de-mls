@@ -139,7 +139,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// methods that emit during a brief read guard don't need to escalate
     /// to a write guard. Fire-and-forget (no `Result`), but a poisoned
     /// buffer is logged rather than silently dropped.
-    pub(crate) fn emit_event(&self, event: SessionEvent) {
+    pub fn emit_event(&self, event: SessionEvent) {
         match self.pending_events.lock() {
             Ok(mut buf) => buf.push(event),
             Err(_) => {
@@ -166,7 +166,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// deadline. Covers consensus-session timeouts, auto-vote timers, and
     /// state-machine phase deadlines (Freezing window, PendingJoin
     /// expiry, steward / recovery inactivity). Forward to an external
-    /// scheduler that calls [`crate::app::User::poll_session`] on fire;
+    /// scheduler that calls `User::poll_session` on fire;
     /// extra/early wakeups are no-ops.
     pub fn next_wakeup_in(&self) -> Option<Duration> {
         let now = Instant::now();
@@ -210,7 +210,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Snapshot the earliest deadline into a [`SessionTick`]. Public ops
     /// returning `SessionTick` call this at the end of their happy path
     /// so the caller gets a wakeup hint without a second accessor call.
-    pub(crate) fn tick(&self) -> SessionTick {
+    pub fn tick(&self) -> SessionTick {
         SessionTick {
             next_wakeup_in: self.next_wakeup_in(),
         }

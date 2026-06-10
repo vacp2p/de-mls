@@ -10,6 +10,7 @@ mod bootstrap;
 pub(crate) mod forwarder;
 mod group;
 pub mod handler;
+pub mod user;
 mod welcome_envelope;
 
 use std::{
@@ -23,7 +24,7 @@ use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 
 use de_mls::{
-    app::{ConsensusContext, ConversationConfig, SessionEntry, User, UserPlugins},
+    app::{ConsensusContext, ConversationConfig},
     core::{ScoringConfig, StewardListConfig},
     defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage},
     ds::{DeliveryService, SharedDeliveryService, WakuDeliveryService},
@@ -32,6 +33,8 @@ use de_mls::{
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
+
+use crate::user::{SessionEntry, User, UserPlugins};
 use futures::{
     StreamExt,
     channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded},
@@ -251,7 +254,7 @@ impl Gateway<WakuDeliveryService> {
     }
 
     /// Spawn the gateway's UI event pump. Once per polling cycle it
-    /// drains [`de_mls::app::User::drain_lifecycle_events`] (to learn
+    /// drains [`crate::user::User::drain_lifecycle_events`] (to learn
     /// when new sessions appear or disappear) and
     /// [`de_mls::app::SessionRunner::drain_events`] on every active
     /// session (to forward UI-bound events). Replaces the previous

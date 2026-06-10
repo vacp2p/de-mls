@@ -80,11 +80,30 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         })
     }
 
+    /// Decrypt and route an inbound conversation payload, returning the
+    /// [`ProcessResult`] the integrator then hands to
+    /// [`Self::dispatch_inbound_result`]. The envelope self-identifies its
+    /// kind (chat / vote / commit / sync) — no subtopic needed.
+    pub fn process_inbound(&mut self, payload: &[u8]) -> Result<ProcessResult, UserError> {
+        Ok(self.conversation.process_inbound(payload)?)
+    }
+
+    /// Attach a freshly-built MLS service after a joiner accepts a welcome.
+    pub fn attach_mls(&mut self, mls: CP::Mls) {
+        self.conversation.attach_mls(mls);
+    }
+
+    /// Whether this conversation's MLS service is attached. `false` for a
+    /// joiner still in `PendingJoin` (no welcome yet).
+    pub fn has_mls(&self) -> bool {
+        self.conversation.mls().is_some()
+    }
+
     /// Dispatch a single [`ProcessResult`] to its branch handler. Called
-    /// by `User::handle_inbound` after the MLS-side `process_inbound`
-    /// returns a result, and by other call sites that produce a
-    /// `ProcessResult` (e.g. the welcome-side `JoinedConversation`).
-    pub(crate) fn dispatch_inbound_result(
+    /// by the integrator after [`Self::process_inbound`] returns a result,
+    /// and by other call sites that produce a `ProcessResult` (e.g. the
+    /// welcome-side `JoinedConversation`).
+    pub fn dispatch_inbound_result(
         &mut self,
         result: ProcessResult,
     ) -> Result<DispatchOutcome, UserError> {

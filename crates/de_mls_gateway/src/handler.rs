@@ -1,7 +1,7 @@
 //! Gateway-side fan-out from per-session [`SessionEvent`]s to the UI event pipe.
 //!
 //! [`crate::Gateway`] runs one polling task per logged-in user. Each tick
-//! drains [`de_mls::app::User::drain_lifecycle_events`] for `Created` /
+//! drains [`crate::user::User::drain_lifecycle_events`] for `Created` /
 //! `Removed`, then drains [`de_mls::app::SessionRunner::drain_events`] on
 //! every active session and dispatches the [`SessionEvent`]s to `AppEvent`
 //! variants on the UI pipe — also maintaining the per-group

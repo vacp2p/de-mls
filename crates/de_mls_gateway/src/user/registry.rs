@@ -1,9 +1,11 @@
 //! Registry CRUD on the `User` side: per-conversation session lookup.
 
-use crate::{
-    app::{SessionEntry, User, UserError},
+use de_mls::{
+    app::UserError,
     core::{ConsensusPlugin, ConversationPluginsFactory},
 };
+
+use crate::user::{SessionEntry, User};
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Look up a conversation runner. Returns `Ok(None)` when no runner is

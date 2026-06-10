@@ -77,9 +77,9 @@ pub enum SessionEvent {
     },
 }
 
-/// User-level conversation lifecycle event. Appended to [`crate::app::User`]'s
+/// User-level conversation lifecycle event. Appended to `User`'s
 /// pending buffer; integrators drain via
-/// [`crate::app::User::drain_lifecycle_events`] once per polling cycle and
+/// `User::drain_lifecycle_events` once per polling cycle and
 /// use `Created` as the trigger to begin draining per-session
 /// [`SessionEvent`]s.
 #[derive(Debug, Clone)]

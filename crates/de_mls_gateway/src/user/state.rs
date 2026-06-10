@@ -10,11 +10,8 @@ use std::{
 
 use prost::Message;
 
-use crate::{
-    app::{
-        ConversationState, CreatorVote, LockExt, MemberRole, SessionRunner, SessionTick, UserError,
-        UserPlugins,
-    },
+use de_mls::{
+    app::{ConversationState, CreatorVote, MemberRole, SessionRunner, SessionTick, UserError},
     core::{
         ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory,
         ProcessResult::JoinedConversation, ScoringConfig, SessionEvent, StewardListConfig,
@@ -26,6 +23,8 @@ use crate::{
         BanRequest, ConversationUpdateRequest, MemberInvite, conversation_update_request,
     },
 };
+
+use crate::user::{LockExt, UserPlugins};
 
 /// Single registry entry: one `Arc<RwLock<SessionRunner>>` per conversation.
 /// Cloned out of the registry under the outer read lock, then locked
@@ -211,7 +210,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// `conversation_id`. The local vote is bundled YES at submit. On
     /// consensus YES the epoch steward authors a commit containing the
     /// Add; the resulting welcome arrives via
-    /// [`crate::core::SessionEvent::WelcomeReady`] for the integrator to
+    /// [`de_mls::core::SessionEvent::WelcomeReady`] for the integrator to
     /// deliver out of band.
     pub fn add_member(
         &self,
@@ -239,7 +238,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     }
 
     /// Ingest a raw MLS welcome blob delivered out of band (e.g. the
-    /// inviter's [`crate::core::SessionEvent::WelcomeReady`] routed
+    /// inviter's [`de_mls::core::SessionEvent::WelcomeReady`] routed
     /// through the integrator's transport). Returns the joined
     /// conversation name, or [`UserError::WelcomeNotForUs`] if the
     /// welcome doesn't address this user's key package.
@@ -268,11 +267,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             // Still-`PendingJoin`-with-MLS is a join that failed after
             // `attach_mls`; fall through to finish it. Re-attach only when
             // absent — overwriting would drop the existing group state.
-            if entry.conversation.current_state() != ConversationState::PendingJoin {
+            if entry.get_conversation_state() != ConversationState::PendingJoin {
                 return Ok((conversation_id, entry.tick()));
             }
-            if entry.conversation.mls().is_none() {
-                entry.conversation.attach_mls(svc);
+            if !entry.has_mls() {
+                entry.attach_mls(svc);
             }
         }
         self.finish_dispatch(&conversation_id, &entry_arc, JoinedConversation())?;
