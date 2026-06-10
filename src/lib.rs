@@ -28,9 +28,12 @@
 //!
 //! - **[`core`]** - Protocol implementation (message processing, consensus integration)
 //! - **[`mls_crypto`]** - MLS cryptographic operations (OpenMLS wrapper)
-//! - **[`ds`]** - Delivery service abstraction (Waku transport)
-//! - **[`app`]** - Reference application layer (multi-conversation management, state machine)
+//! - **[`app`]** - Reference application layer (per-conversation `SessionRunner`, state machine)
 //! - **[`protos`]** - Protobuf message definitions
+//!
+//! The library carries no transport. The reference delivery service (the
+//! `DeliveryService` trait + Waku implementation) lives in the `de-mls-ds`
+//! crate, and the reference integrator (`User`) in `de-mls-gateway`.
 //!
 //! ## Getting Started
 //!
@@ -66,10 +69,6 @@ pub mod core;
 
 /// Reference application layer.
 pub mod app;
-
-/// Delivery service: transport-agnostic messaging.
-/// Enable the **`waku`** feature for the Waku relay implementation.
-pub mod ds;
 
 /// MLS cryptographic operations: OpenMLS wrapper for encryption/decryption.
 pub mod mls_crypto;

@@ -8,9 +8,9 @@
 //! - [`ConversationLifecycle`] — User-level create/remove notifications.
 //!   Integrators use this to discover new sessions and start draining them.
 //!
-//! Synchronous outbound transport is supplied by
-//! [`crate::ds::DeliveryService`], passed to `User` at construction and
-//! cloned into each session.
+//! The library carries no transport: it buffers `Outbound` and consumes
+//! inbound payloads. The integrator owns delivery (see the `de-mls-ds`
+//! crate's `DeliveryService` for the reference transport).
 
 use crate::{
     core::ConversationState,

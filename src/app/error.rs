@@ -4,7 +4,7 @@ use std::time::SystemTimeError;
 
 use hashgraph_like_consensus::error::ConsensusError;
 
-use crate::{core::CoreError, ds::DeliveryServiceError, mls_crypto::MlsError};
+use crate::{core::CoreError, mls_crypto::MlsError};
 
 /// Errors from User operations.
 #[derive(Debug, thiserror::Error)]
@@ -30,7 +30,7 @@ pub enum UserError {
     PartialFreeze,
 
     #[error("Transport error: {0}")]
-    Transport(#[from] DeliveryServiceError),
+    Transport(String),
 
     #[error("Core error: {0}")]
     Core(#[from] CoreError),

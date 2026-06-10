@@ -1,10 +1,10 @@
 //! Delivery service — transport-agnostic messaging layer.
 //!
-//! Defines the [`DeliveryService`](crate::ds::DeliveryService) trait +
-//! its envelopes ([`OutboundPacket`](crate::ds::OutboundPacket),
-//! [`InboundPacket`](crate::ds::InboundPacket)), the
-//! [`DeliveryServiceError`](crate::ds::DeliveryServiceError) enum, and
-//! the [`TopicFilter`](crate::ds::TopicFilter) used by the app as a
+//! Defines the [`DeliveryService`] trait +
+//! its envelopes ([`OutboundPacket`],
+//! [`InboundPacket`]), the
+//! [`DeliveryServiceError`] enum, and
+//! the [`TopicFilter`] used by the app as a
 //! fast allowlist. A reference Waku-backed implementation lives in
 //! `waku/` and is gated by the `waku` cargo feature.
 

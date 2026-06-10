@@ -1778,17 +1778,15 @@ name = "de-mls"
 version = "3.0.0"
 dependencies = [
  "alloy",
- "base64",
+ "de-mls-ds",
  "hashgraph-like-consensus",
  "indexmap 2.14.0",
- "libc",
  "openmls",
  "openmls_basic_credential",
  "openmls_rust_crypto",
  "openmls_traits",
  "prost",
  "prost-build",
- "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.18",
  "tracing",
@@ -1821,6 +1819,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "de-mls-ds"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "de-mls",
+ "libc",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "de-mls-gateway"
 version = "0.1.0"
 dependencies = [
@@ -1828,6 +1838,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "de-mls",
+ "de-mls-ds",
  "de-mls-ui-protocol",
  "futures",
  "hashgraph-like-consensus",
@@ -7368,6 +7379,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "de-mls",
+ "de-mls-ds",
  "de-mls-gateway",
  "de-mls-ui-protocol",
  "futures",

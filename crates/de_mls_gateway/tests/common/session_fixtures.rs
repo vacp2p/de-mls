@@ -15,7 +15,7 @@ use std::time::Duration;
 use de_mls::app::{ConversationConfig, SessionRunner};
 use de_mls::core::StewardListConfig;
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory};
-use de_mls::ds::{
+use de_mls_ds::{
     DeliveryService, DeliveryServiceError, OutboundPacket, SharedDeliveryService, WELCOME_SUBTOPIC,
 };
 use de_mls_gateway::user::{Inbound, User};
@@ -101,8 +101,8 @@ impl DeliveryService for CapturingTransport {
 /// inspection.
 pub mod predicate {
     use super::*;
-    use de_mls::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
     use de_mls::protos::de_mls::messages::v1::{AppMessage, MemberInvite, app_message};
+    use de_mls_ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 
     pub fn is_app_msg(p: &OutboundPacket) -> bool {
         p.subtopic == APP_MSG_SUBTOPIC

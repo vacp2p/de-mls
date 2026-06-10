@@ -33,7 +33,6 @@ use de_mls::core::{
     finalize_freeze_round, member_set, process_inbound,
 };
 use de_mls::defaults::{InMemoryPeerScoreStorage, MemoryDeMlsStorage};
-use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
 use de_mls::member_id::MemberId;
 use de_mls::mls_crypto::{
     CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MlsCommitInput, MlsCredentials,
@@ -43,6 +42,7 @@ use de_mls::protos::de_mls::messages::v1::{
     AppMessage, CommitCandidate, ConversationUpdateRequest, MemberInvite,
     conversation_update_request,
 };
+use de_mls_ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
 use prost::Message as _;
 
 /// Test-side MLS service: storage is `Arc`-shared so a single helper can

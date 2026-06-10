@@ -9,11 +9,11 @@ use std::time::Duration;
 
 use de_mls::app::CreatorVote;
 use de_mls::core::StewardListConfig;
-use de_mls::ds::OutboundPacket;
 use de_mls::member_id::MemberId;
 use de_mls::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, RemoveMember, conversation_update_request,
 };
+use de_mls_ds::OutboundPacket;
 
 mod common;
 use common::session_fixtures::{

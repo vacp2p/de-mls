@@ -3,12 +3,12 @@
 
 use de_mls::core::StewardListPlugin;
 use de_mls::core::{FreezeOutcome, ProcessResult, ProposalId, ScoreEvent, finalize_freeze_round};
-use de_mls::ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 use de_mls::member_id::MemberId;
 use de_mls::mls_crypto::MlsService;
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, ViolationEvidence, app_message,
 };
+use de_mls_ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
 use prost::Message;
 
 mod common;

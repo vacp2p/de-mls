@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::ds::{APP_MSG_SUBTOPIC, DeliveryServiceError, WELCOME_SUBTOPIC};
+use crate::{APP_MSG_SUBTOPIC, DeliveryServiceError, WELCOME_SUBTOPIC};
 
 /// A transport-agnostic packet that should be sent to the network.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +43,15 @@ impl OutboundPacket {
     /// Address this packet is delivered to.
     pub fn delivery_address(&self) -> &str {
         &self.conversation_id
+    }
+}
+
+/// Map the library's transport-agnostic [`Outbound`](de_mls::app::Outbound)
+/// onto the reference wire packet. Conversation traffic is broadcast; the
+/// subtopic assignment lives here, in the transport layer.
+impl From<de_mls::app::Outbound> for OutboundPacket {
+    fn from(out: de_mls::app::Outbound) -> Self {
+        OutboundPacket::broadcast(&out.conversation_id, &out.sender, out.payload)
     }
 }
 

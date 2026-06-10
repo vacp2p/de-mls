@@ -27,11 +27,11 @@ use de_mls::{
     app::{ConsensusContext, ConversationConfig},
     core::{ScoringConfig, StewardListConfig},
     defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage},
-    ds::{DeliveryService, SharedDeliveryService, WakuDeliveryService},
     member_id::MemberId,
     mls_crypto::MlsCredentials,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
+use de_mls_ds::{DeliveryService, SharedDeliveryService, WakuDeliveryService};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 
 use crate::user::{SessionEntry, User, UserPlugins};

@@ -12,7 +12,7 @@ use std::{
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use tracing::{debug, error, info};
 
-use crate::ds::{
+use crate::{
     CONVERSATION_VERSION, DeliveryServiceError, SUBTOPICS,
     transport::{DeliveryService, InboundPacket, OutboundPacket},
     waku::wrapper::WakuNodeCtx,

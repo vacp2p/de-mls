@@ -6,7 +6,7 @@
 
 use std::{cell::OnceCell, ffi::CString, os::raw::c_void};
 
-use crate::ds::waku::sys::{self as waku_sys, RET_OK, get_trampoline};
+use crate::waku::sys::{self as waku_sys, RET_OK, get_trampoline};
 
 /// Structured error from a libwaku FFI call. `op` carries the C symbol
 /// name so `Display` output identifies which call failed.

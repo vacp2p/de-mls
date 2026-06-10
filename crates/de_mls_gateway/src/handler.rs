@@ -17,9 +17,9 @@ use prost::Message;
 
 use de_mls::{
     core::SessionEvent,
-    ds::{OutboundPacket, SharedDeliveryService, TopicFilter, WELCOME_SUBTOPIC},
     protos::de_mls::messages::v1::{AppMessage, ConversationMessage, VotePayload, app_message},
 };
+use de_mls_ds::{OutboundPacket, SharedDeliveryService, TopicFilter, WELCOME_SUBTOPIC};
 use de_mls_ui_protocol::v1::{AppEvent, format_conversation_request};
 use hashgraph_like_consensus::types::ConsensusEvent;
 

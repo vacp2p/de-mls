@@ -1,9 +1,7 @@
 use std::sync::{Arc, atomic::Ordering};
 
-use de_mls::{
-    app::UserError, ds::WakuDeliveryService,
-    protos::de_mls::messages::v1::ConversationUpdateRequest,
-};
+use de_mls::{app::UserError, protos::de_mls::messages::v1::ConversationUpdateRequest};
+use de_mls_ds::WakuDeliveryService;
 
 use crate::user::Inbound;
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo, encode_hex, format_conversation_request};
@@ -182,7 +180,7 @@ impl Gateway<WakuDeliveryService> {
                 }
 
                 let conversation_id = pkt.conversation_id.clone();
-                let is_welcome_channel = pkt.subtopic == de_mls::ds::WELCOME_SUBTOPIC;
+                let is_welcome_channel = pkt.subtopic == de_mls_ds::WELCOME_SUBTOPIC;
 
                 if is_welcome_channel
                     && let Some(mw) = crate::welcome_envelope::decode(&pkt.payload)

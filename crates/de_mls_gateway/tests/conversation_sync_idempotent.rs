@@ -6,7 +6,7 @@
 
 use de_mls::app::MemberRole;
 use de_mls::core::StewardListConfig;
-use de_mls::ds::OutboundPacket;
+use de_mls_ds::OutboundPacket;
 
 mod common;
 use common::session_fixtures::{bootstrap_joined_conversation, deliver, fast_test_config};

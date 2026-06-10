@@ -12,4 +12,5 @@ tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread"] }
 
 de-mls-gateway = { path = "../de_mls_gateway" }
 de-mls-ui-protocol = { path = "../de_mls_ui_protocol" }
-de-mls = { path = "../../", features = ["waku"] }
+de-mls = { path = "../../" }
+de-mls-ds = { path = "../de_mls_ds", features = ["waku"] }

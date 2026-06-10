@@ -4,9 +4,9 @@ use alloy::primitives::Address;
 
 use de_mls::{
     app::{DispatchOutcome, FreezeTimeoutStatus, PendingJoinTick, UserError},
-    ds::WakuDeliveryService,
     protos::de_mls::messages::v1::BanRequest,
 };
+use de_mls_ds::WakuDeliveryService;
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
 
 use crate::{

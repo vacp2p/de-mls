@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::sync::RwLock;
 
-use crate::ds::{DeliveryServiceError, SUBTOPICS};
+use crate::{DeliveryServiceError, SUBTOPICS};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TopicKey {

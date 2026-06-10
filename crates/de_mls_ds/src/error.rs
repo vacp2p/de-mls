@@ -1,5 +1,5 @@
 #[cfg(feature = "waku")]
-use crate::ds::waku::wrapper::WakuFfiError;
+use crate::waku::wrapper::WakuFfiError;
 
 /// Errors originating from the delivery service layer.
 #[derive(Debug, thiserror::Error)]

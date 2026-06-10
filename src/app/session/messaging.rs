@@ -7,7 +7,6 @@
 use crate::{
     app::{ConversationState, CreatorVote, SessionRunner, SessionTick, UserError},
     core::{ConsensusPlugin, ConversationPluginsFactory},
-    ds::OutboundPacket,
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, ConversationMessage, ConversationUpdateRequest, RemoveMember,
@@ -19,21 +18,15 @@ use crate::{
 /// tagged with the conversation it belongs to and the local sender (for
 /// self-message filtering). Already-encrypted bytes plus pragmatic
 /// addressing — no transport subtopic. The session never sends: it buffers
-/// these and the integrator drains them via
-/// [`SessionRunner::drain_outbound`], converting each to a wire
-/// [`OutboundPacket`] (the conversation only ever emits broadcast traffic —
-/// chat, votes, sync, commit candidates).
+/// these and the integrator drains them via [`SessionRunner::drain_outbound`]
+/// and maps each onto its own transport (the conversation only ever emits
+/// broadcast traffic — chat, votes, sync, commit candidates). The reference
+/// transport's `From<Outbound>` conversion lives in the `de-mls-ds` crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outbound {
     pub conversation_id: String,
     pub sender: Vec<u8>,
     pub payload: Vec<u8>,
-}
-
-impl From<Outbound> for OutboundPacket {
-    fn from(out: Outbound) -> Self {
-        OutboundPacket::broadcast(&out.conversation_id, &out.sender, out.payload)
-    }
 }
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {

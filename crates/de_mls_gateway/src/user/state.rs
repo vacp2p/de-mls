@@ -16,13 +16,13 @@ use de_mls::{
         ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory,
         ProcessResult::JoinedConversation, ScoringConfig, SessionEvent, StewardListConfig,
     },
-    ds::{OutboundPacket, SharedDeliveryService},
     member_id::MemberId,
     mls_crypto::{KeyPackageBytes, MlsError, MlsService, key_package_bytes_from_tls},
     protos::de_mls::messages::v1::{
         BanRequest, ConversationUpdateRequest, MemberInvite, conversation_update_request,
     },
 };
+use de_mls_ds::{OutboundPacket, SharedDeliveryService};
 
 use crate::user::{LockExt, UserPlugins};
 
@@ -151,7 +151,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         self.transport
             .lock()
             .map_err(|_| UserError::LockPoisoned("transport"))?
-            .publish(packet)?;
+            .publish(packet)
+            .map_err(|e| UserError::Transport(e.to_string()))?;
         Ok(())
     }
 
@@ -511,7 +512,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .lock()
             .map_err(|_| UserError::LockPoisoned("transport"))?;
         for out in outbound {
-            transport.publish(out.into())?;
+            transport
+                .publish(out.into())
+                .map_err(|e| UserError::Transport(e.to_string()))?;
         }
         Ok(())
     }

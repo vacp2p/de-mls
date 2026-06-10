@@ -20,9 +20,9 @@ use de_mls::core::{ScoringConfig, StewardListConfig};
 use de_mls::defaults::{
     DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage,
 };
-use de_mls::ds::SharedDeliveryService;
 use de_mls::member_id::MemberId;
 use de_mls::mls_crypto::MlsCredentials;
+use de_mls_ds::SharedDeliveryService;
 use de_mls_gateway::user::{User, UserPlugins};
 
 /// Wallet-flavoured [`Identity`] used by integration tests. Holds the
