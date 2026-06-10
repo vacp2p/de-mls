@@ -23,9 +23,9 @@ pub enum SessionEvent {
     /// notification, ban request, …).
     AppMessage(AppMessage),
 
-    /// The user is out of this conversation (self-leave commit merged, or
-    /// someone else removed us). The session entry is about to be removed
-    /// from `User`'s registry.
+    /// The local member is out of this conversation (self-leave commit
+    /// merged, or removed by a steward). The integrator should remove the
+    /// registry entry and clean up the consensus scope.
     Leaving,
 
     /// A background operation (e.g., vote submission) failed. UI may surface;

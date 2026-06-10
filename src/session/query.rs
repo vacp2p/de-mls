@@ -1,6 +1,4 @@
 //! Read-only queries over a conversation's state (UI and diagnostics).
-//! Callers reach these via `User::lookup_entry`; the registry-wide
-//! `list_conversations` getter lives on `User`.
 
 use crate::{
     core::{ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin, StewardListPlugin},

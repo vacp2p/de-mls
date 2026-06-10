@@ -183,7 +183,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// deadline. Covers consensus-session timeouts, auto-vote timers, and
     /// state-machine phase deadlines (Freezing window, PendingJoin
     /// expiry, steward / recovery inactivity). Forward to an external
-    /// scheduler that calls `User::poll_session` on fire;
+    /// scheduler that calls `poll()` on fire;
     /// extra/early wakeups are no-ops.
     pub fn next_wakeup_in(&self) -> Option<Duration> {
         let now = Instant::now();

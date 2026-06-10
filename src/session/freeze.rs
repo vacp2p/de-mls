@@ -1,14 +1,8 @@
 //! Timer polls for pending-join expiry, freeze timeout, and steward inactivity.
 //!
-//! `check_pending_join` returns a [`PendingJoinTick`] so a polling caller can
-//! distinguish "still pending" / "now joined" / "timed out". On `Expired`
-//! the session has already emitted `Leaving`; the caller drives the
-//! User-side cleanup via `User::finalize_self_leave`.
-//!
-//! `poll_freeze_status` returns the freeze-tick status alongside a
-//! [`DispatchOutcome`] for the rare case where a commit applied during
-//! the freeze fires `LeaveConversation`. Same handshake as
-//! [`SessionRunner::dispatch_inbound_result`].
+//! These sub-steps are driven by [`crate::session::SessionRunner::poll`];
+//! integrators call `poll()` once per cycle and act on
+//! [`crate::session::PollOutcome::leave_requested`] for registry cleanup.
 
 use std::sync::Arc;
 
@@ -34,9 +28,8 @@ pub enum PendingJoinTick {
     /// No longer in `PendingJoin` (joined or otherwise transitioned).
     NotPending,
     /// Pending-join window elapsed without a welcome. The session has
-    /// emitted `Leaving`; the caller must follow up with
-    /// `User::finalize_self_leave` to drop the entry from
-    /// the registry and broadcast removal.
+    /// emitted `Leaving`; the integrator must follow up with registry
+    /// cleanup (finalize self-leave) to drop the entry and broadcast removal.
     Expired,
 }
 

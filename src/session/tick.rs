@@ -1,5 +1,5 @@
 //! [`SessionTick`] — wakeup-hint envelope returned by public ops on
-//! [`crate::session::SessionRunner`] and `User`.
+//! [`crate::session::SessionRunner`].
 
 use std::time::Duration;
 
@@ -20,17 +20,14 @@ use std::time::Duration;
 /// timer), so wake me by then." The returning op determines *which*
 /// deadline that is:
 ///
-/// - **Ops that open a consensus session** — `User::initiate_proposal`,
-///   `User::add_member`, `User::process_ban_request`,
-///   `User::process_user_vote`, `User::initiate_self_leave`: the tick
+/// - **Ops that open a consensus session** — `initiate_proposal`,
+///   `add_member`, `process_ban_request`, `process_user_vote`: the tick
 ///   is when the local auto-vote casts or the consensus session times out.
 ///   Informally, "wait until we vote, then the steward commits."
-/// - **Lifecycle / poll ops** — `User::accept_welcome`,
-///   `User::handle_inbound`, `User::poll_session`,
-///   `User::tick_deadlines`: the tick is the earliest of *all* currently
-///   armed deadlines (commit-inactivity, freeze, recovery-inactivity,
-///   `PendingJoin` expiry) after this op re-derived them.
-/// - **Pure sends** — `User::push_message`, `User::send_key_package`:
+/// - **`poll()`** — the tick is the earliest of *all* currently armed
+///   deadlines (commit-inactivity, freeze, recovery-inactivity,
+///   `PendingJoin` expiry) after all sub-steps have run.
+/// - **Pure sends** — `push_message`, `send_key_package`:
 ///   nothing time-based is started, so the tick is usually `None`.
 ///
 #[derive(Debug, Default, Clone, Copy)]
