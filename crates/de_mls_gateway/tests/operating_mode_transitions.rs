@@ -11,9 +11,9 @@
 
 use std::time::Duration;
 
-use de_mls::app::CreatorVote;
 use de_mls::core::{ConversationState, SessionEvent, StewardListConfig};
 use de_mls::protos::de_mls::messages::v1::ViolationEvidence;
+use de_mls::session::CreatorVote;
 
 mod common;
 use common::session_fixtures::{

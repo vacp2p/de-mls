@@ -5,13 +5,13 @@
 //! Also defines [`Outbound`] — the conversation's I/O-agnostic product.
 
 use crate::{
-    app::{ConversationState, CreatorVote, SessionRunner, SessionTick, UserError},
     core::{ConsensusPlugin, ConversationPluginsFactory},
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, ConversationMessage, ConversationUpdateRequest, RemoveMember,
         conversation_update_request,
     },
+    session::{ConversationState, CreatorVote, SessionRunner, SessionTick, UserError},
 };
 
 /// A payload the conversation produced for the integrator to broadcast,

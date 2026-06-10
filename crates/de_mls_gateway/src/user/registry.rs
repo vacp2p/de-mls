@@ -1,8 +1,8 @@
 //! Registry CRUD on the `User` side: per-conversation session lookup.
 
 use de_mls::{
-    app::UserError,
     core::{ConsensusPlugin, ConversationPluginsFactory},
+    session::UserError,
 };
 
 use crate::user::{SessionEntry, User};

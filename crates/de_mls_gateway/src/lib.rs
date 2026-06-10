@@ -24,12 +24,12 @@ use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 
 use de_mls::{
-    app::{ConsensusContext, ConversationConfig},
     core::{ScoringConfig, StewardListConfig},
     defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage},
     member_id::MemberId,
     mls_crypto::MlsCredentials,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
+    session::{ConsensusContext, ConversationConfig},
 };
 use de_mls_ds::{DeliveryService, SharedDeliveryService, WakuDeliveryService};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
@@ -52,7 +52,7 @@ pub use crate::bootstrap::{
 
 /// Type alias for the user reference stored in the gateway.
 ///
-/// Uses [`de_mls::app::DefaultMlsService`] — `OpenMlsService` over
+/// Uses [`de_mls::session::DefaultMlsService`] — `OpenMlsService` over
 /// `Arc<MemoryDeMlsStorage>` — so per-group services share one storage
 /// (the `Arc<S>: DeMlsStorage` blanket impl makes this work). MLS
 /// credentials live on `User` and are passed in at service construction.
@@ -60,7 +60,7 @@ pub(crate) type UserRef =
     Arc<tokio::sync::RwLock<User<DefaultConsensusPlugin, DefaultConversationPluginsFactory>>>;
 
 /// Type alias for a per-conversation session reference obtained via
-/// `User::lookup_entry`. Re-exports the sync-locked entry from `de_mls::app`.
+/// `User::lookup_entry`. Re-exports the sync-locked entry from `de_mls::session`.
 pub(crate) type SessionRef =
     SessionEntry<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
 
@@ -256,7 +256,7 @@ impl Gateway<WakuDeliveryService> {
     /// Spawn the gateway's UI event pump. Once per polling cycle it
     /// drains [`crate::user::User::drain_lifecycle_events`] (to learn
     /// when new sessions appear or disappear) and
-    /// [`de_mls::app::SessionRunner::drain_events`] on every active
+    /// [`de_mls::session::SessionRunner::drain_events`] on every active
     /// session (to forward UI-bound events). Replaces the previous
     /// broadcast-channel subscriber pattern.
     fn spawn_session_subscribers(&self, user: UserRef, transport: SharedDeliveryService) {

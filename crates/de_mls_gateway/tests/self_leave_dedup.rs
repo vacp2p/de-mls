@@ -5,8 +5,8 @@
 //! dedup if the proposal is still mid-vote. Either path means a second
 //! `leave_conversation` call emits no new outbound packets.
 
-use de_mls::app::ConversationConfig;
 use de_mls::core::StewardListConfig;
+use de_mls::session::ConversationConfig;
 
 mod common;
 use common::session_fixtures::make_user;

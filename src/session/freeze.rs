@@ -15,12 +15,12 @@ use std::sync::Arc;
 use tracing::{error, info};
 
 use crate::{
-    app::{ConversationState, DispatchOutcome, FreezeTimeoutStatus, SessionRunner, UserError},
     core::{
         ConsensusPlugin, ConversationPluginsFactory, FreezeFinalizeResult, FreezeOutcome,
         PeerScoringPlugin, ScoreEvent, ScoreOp, SessionEvent, StewardListPlugin,
     },
     mls_crypto::MlsService,
+    session::{ConversationState, DispatchOutcome, FreezeTimeoutStatus, SessionRunner, UserError},
 };
 
 /// What [`SessionRunner::check_pending_join`] hands back to its polling

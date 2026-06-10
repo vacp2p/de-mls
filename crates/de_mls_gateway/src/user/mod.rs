@@ -1,7 +1,7 @@
 //! [`User`] — multi-conversation facade over the de-mls library. One node
 //! owns one `User`, which holds the per-conversation registry, the plugin
 //! bundle, and the outbound transport. Per-conv protocol work lives on each
-//! [`de_mls::app::SessionRunner`]; callers reach a session via
+//! [`de_mls::session::SessionRunner`]; callers reach a session via
 //! [`User::lookup_entry`].
 //!
 //! This is the reference integrator — the registry + routing + lifecycle
@@ -17,7 +17,7 @@
 //! - `inbound` — `handle_inbound` / `receive_key_package` entry points,
 //!   `finalize_self_leave` (registry-side completion of `LeaveConversation`).
 //! - `plugins` — `UserPlugins<P, CP>` bundle wrapping the library's
-//!   [`de_mls::app::ConsensusContext`].
+//!   [`de_mls::session::ConsensusContext`].
 
 mod inbound;
 mod lifecycle;

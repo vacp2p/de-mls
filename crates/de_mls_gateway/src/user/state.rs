@@ -11,7 +11,6 @@ use std::{
 use prost::Message;
 
 use de_mls::{
-    app::{ConversationState, CreatorVote, MemberRole, SessionRunner, SessionTick, UserError},
     core::{
         ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory,
         ProcessResult::JoinedConversation, ScoringConfig, SessionEvent, StewardListConfig,
@@ -21,6 +20,7 @@ use de_mls::{
     protos::de_mls::messages::v1::{
         BanRequest, ConversationUpdateRequest, MemberInvite, conversation_update_request,
     },
+    session::{ConversationState, CreatorVote, MemberRole, SessionRunner, SessionTick, UserError},
 };
 use de_mls_ds::{OutboundPacket, SharedDeliveryService};
 

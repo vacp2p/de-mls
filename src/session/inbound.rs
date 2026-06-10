@@ -18,10 +18,6 @@ use prost::Message;
 use tracing::{error, info};
 
 use crate::{
-    app::{
-        ConversationState, SessionRunner, UserError,
-        session::consensus_bridge::{forward_incoming_proposal, forward_incoming_vote},
-    },
     core::{
         ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin, ProcessResult,
         ProposalKind, ScoreSnapshot, SessionEvent, StewardList, StewardListConfig,
@@ -31,6 +27,10 @@ use crate::{
     protos::de_mls::messages::v1::{
         AppMessage, ConversationMessage, ConversationSync, ConversationUpdateRequest, MemberInvite,
         TimingConfig, conversation_update_request,
+    },
+    session::{
+        ConversationState, SessionRunner, UserError,
+        consensus_bridge::{forward_incoming_proposal, forward_incoming_vote},
     },
 };
 

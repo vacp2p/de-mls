@@ -11,7 +11,6 @@ use prost::Message;
 use tracing::{error, info};
 
 use crate::{
-    app::{ConversationState, SessionRunner, SessionTick, UserError},
     core::{
         ConsensusApplyResult, ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin,
         ScoreOp, SessionEvent, StewardListPlugin, apply_consensus_result, emergency_score_ops,
@@ -19,6 +18,7 @@ use crate::{
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, conversation_update_request,
     },
+    session::{ConversationState, SessionRunner, SessionTick, UserError},
 };
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {

@@ -3,10 +3,10 @@
 //! `list_conversations` getter lives on `User`.
 
 use crate::{
-    app::{ConversationState, MemberRole, SessionRunner, UserError},
     core::{ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin, StewardListPlugin},
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
+    session::{ConversationState, MemberRole, SessionRunner, UserError},
 };
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {

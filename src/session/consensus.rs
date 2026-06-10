@@ -9,12 +9,6 @@ use hashgraph_like_consensus::{error::ConsensusError, storage::ConsensusStorage}
 use tracing::info;
 
 use crate::{
-    app::{
-        ConversationState, SessionRunner, SessionTick, UserError,
-        session::consensus_bridge::{
-            ProposalParams, cast_vote, submit_proposal, submit_self_leave_proposal,
-        },
-    },
     core::{
         ConsensusPlugin, ConversationPluginsFactory, ProposalKind, SessionEvent, StewardListPlugin,
         SyncConsensusReceiver, self_leave_proposal_id, target_member_id_of,
@@ -22,6 +16,12 @@ use crate::{
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationUpdateRequest, RemoveMember, conversation_update_request,
+    },
+    session::{
+        ConversationState, SessionRunner, SessionTick, UserError,
+        consensus_bridge::{
+            ProposalParams, cast_vote, submit_proposal, submit_self_leave_proposal,
+        },
     },
 };
 

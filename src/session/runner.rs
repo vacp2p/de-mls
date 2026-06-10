@@ -1,6 +1,6 @@
 //! [`SessionRunner`] struct, constructor, and the state-machine + phase-timer
 //! coordinators that compose [`crate::core::Conversation`] with
-//! [`crate::app::PhaseTimer`] under one lock. Per-conversation method
+//! [`crate::session::PhaseTimer`] under one lock. Per-conversation method
 //! bodies (proposal submission, voting, inbound dispatch, etc.) live in
 //! sibling modules and extend `SessionRunner` via additional `impl` blocks.
 
@@ -15,12 +15,12 @@ use tracing::info;
 use hashgraph_like_consensus::events::ConsensusEventBus;
 
 use crate::{
-    app::{Outbound, PhaseTimer, SessionTick},
     core::{
         ConsensusPlugin, ConsensusServiceFor, Conversation, ConversationConfig,
         ConversationPluginsFactory, ConversationQueues, ConversationState,
         ConversationStateMachine, SessionEvent,
     },
+    session::{Outbound, PhaseTimer, SessionTick},
 };
 
 /// Receiver type the runner drains from `tick_deadlines`. Resolves to the
@@ -47,7 +47,7 @@ pub struct SessionRunner<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     pub(crate) conversation: Conversation<CP>,
     /// Per-conversation consensus service. Owns this conversation's scope
     /// in the shared storage and a private event bus. Minted from the
-    /// [`crate::app::ConversationDeps`] consensus context at construction.
+    /// [`crate::session::ConversationDeps`] consensus context at construction.
     pub consensus: ConsensusServiceFor<P>,
     /// Subscriber on `consensus.event_bus()`. Drained by
     /// [`Self::tick_deadlines`], which dispatches each event through

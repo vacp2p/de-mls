@@ -12,12 +12,12 @@ use std::sync::Arc;
 use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 
-use de_mls::app::{ConsensusContext, ConversationDeps, ConversationState, SessionRunner};
 use de_mls::core::{ScoringConfig, SessionEvent, StewardListConfig};
 use de_mls::defaults::{
     DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage,
 };
 use de_mls::mls_crypto::MlsCredentials;
+use de_mls::session::{ConsensusContext, ConversationDeps, ConversationState, SessionRunner};
 
 use common::wallet::WalletMemberId;
 
@@ -57,7 +57,7 @@ impl Integrator {
             consensus: &self.consensus,
             identity: &self.member_id,
             app_id: Arc::from(&[0u8; 16][..]),
-            config: de_mls::app::ConversationConfig::default(),
+            config: de_mls::session::ConversationConfig::default(),
             scoring_config: ScoringConfig::default(),
             steward_list_config: StewardListConfig::default(),
         }

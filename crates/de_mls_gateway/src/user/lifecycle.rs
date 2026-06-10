@@ -5,11 +5,11 @@ use std::sync::{Arc, RwLock};
 use tracing::info;
 
 use de_mls::{
-    app::{ConversationDeps, ConversationState, SessionRunner, UserError},
     core::{
         ConsensusPlugin, ConversationConfig, ConversationLifecycle, ConversationPluginsFactory,
         SessionEvent,
     },
+    session::{ConversationDeps, ConversationState, SessionRunner, UserError},
 };
 
 use crate::user::{LockExt, User};

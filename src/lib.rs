@@ -11,7 +11,7 @@
 //! └───────────────────────────────┬─────────────────────────────────────┘
 //!                                 │
 //!                        ┌────────┴────────┐
-//!                        │      app        │
+//!                        │    session      │
 //!                        │ (reference impl,│
 //!                        │   optional)     │
 //!                        └────────┬────────┘
@@ -28,7 +28,7 @@
 //!
 //! - **[`core`]** - Protocol implementation (message processing, consensus integration)
 //! - **[`mls_crypto`]** - MLS cryptographic operations (OpenMLS wrapper)
-//! - **[`app`]** - Reference application layer (per-conversation `SessionRunner`, state machine)
+//! - **[`session`]** - Reference session layer (per-conversation `SessionRunner`, state machine)
 //! - **[`protos`]** - Protobuf message definitions
 //!
 //! The library carries no transport. The reference delivery service (the
@@ -42,7 +42,7 @@
 //! - Core operations (start conversation, join, send messages)
 //! - The `ProcessResult` matching flow
 //!
-//! The library exposes the per-conversation [`app::SessionRunner`] handle.
+//! The library exposes the per-conversation [`session::SessionRunner`] handle.
 //! It carries no transport: it buffers outbound and consumes inbound
 //! payloads, and the integrator owns routing. A ready-to-use reference
 //! integrator (the multi-conversation `User` with registry + routing +
@@ -51,7 +51,7 @@
 //! ## Quick Example
 //!
 //! ```ignore
-//! use de_mls::app::{ConversationDeps, SessionRunner};
+//! use de_mls::session::{ConversationDeps, SessionRunner};
 //!
 //! // Build a per-conversation session from injected deps (plug-in factory,
 //! // consensus context, identity).
@@ -67,8 +67,8 @@
 /// Protocol implementation.
 pub mod core;
 
-/// Reference application layer.
-pub mod app;
+/// Reference session layer.
+pub mod session;
 
 /// MLS cryptographic operations: OpenMLS wrapper for encryption/decryption.
 pub mod mls_crypto;

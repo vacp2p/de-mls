@@ -7,7 +7,6 @@ use std::sync::Arc;
 use tracing::{error, info};
 
 use crate::{
-    app::{CreatorVote, SessionRunner, UserError},
     core::{
         ConsensusPlugin, ConversationPluginsFactory, ElectionDecision, PeerScoringPlugin,
         StewardListPlugin, member_set, scoring_member_diff, target_member_id_of,
@@ -17,6 +16,7 @@ use crate::{
         AppMessage, ConversationSync, ConversationUpdateRequest, PeerScore,
         StewardElectionProposal, TimingConfig, ViolationEvidence, conversation_update_request,
     },
+    session::{CreatorVote, SessionRunner, UserError},
 };
 
 /// Outcome of reconciling the steward list to the current epoch — see
@@ -224,7 +224,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Build an encrypted `ConversationSync` payload from the current
     /// steward list + protocol config + peer scores + timing snapshot.
     /// Returns `Ok(None)` when there's no steward list yet. The caller
-    /// owns delivery: broadcast it as an [`Outbound`](crate::app::Outbound)
+    /// owns delivery: broadcast it as an [`Outbound`](crate::session::Outbound)
     /// or feed it into another channel. The post-commit join path bundles
     /// the same payload into [`crate::core::SessionEvent::WelcomeReady`].
     pub fn build_conversation_sync_payload(&mut self) -> Result<Option<Vec<u8>>, UserError> {

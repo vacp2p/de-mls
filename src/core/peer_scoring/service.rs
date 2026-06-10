@@ -140,7 +140,7 @@ mod tests {
     // ── Test scaffolding ────────────────────────────────────────────
 
     /// Minimal in-memory storage for service tests. Production storage
-    /// lives in [`crate::app::InMemoryPeerScoreStorage`].
+    /// lives in [`crate::session::InMemoryPeerScoreStorage`].
     #[derive(Default)]
     struct TestStorage(HashMap<Vec<u8>, i64>);
 

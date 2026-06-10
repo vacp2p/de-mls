@@ -3,7 +3,7 @@
 //! Two queues:
 //!
 //! - [`SessionEvent`] — fire-and-forget notifications about a single
-//!   conversation. Each [`crate::app::SessionRunner`] holds a pending
+//!   conversation. Each [`crate::session::SessionRunner`] holds a pending
 //!   buffer; integrators drain it once per polling cycle.
 //! - [`ConversationLifecycle`] — User-level create/remove notifications.
 //!   Integrators use this to discover new sessions and start draining them.
@@ -19,7 +19,7 @@ use crate::{
 
 /// Per-conversation notification. Sessions append these to their pending
 /// buffer; integrators drain via
-/// [`crate::app::SessionRunner::drain_events`] once per polling cycle. All
+/// [`crate::session::SessionRunner::drain_events`] once per polling cycle. All
 /// variants are fire-and-forget — no failure path back to the session.
 #[derive(Debug, Clone)]
 pub enum SessionEvent {

@@ -1,6 +1,6 @@
 use std::sync::{Arc, atomic::Ordering};
 
-use de_mls::{app::UserError, protos::de_mls::messages::v1::ConversationUpdateRequest};
+use de_mls::{protos::de_mls::messages::v1::ConversationUpdateRequest, session::UserError};
 use de_mls_ds::WakuDeliveryService;
 
 use crate::user::Inbound;

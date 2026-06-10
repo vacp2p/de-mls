@@ -3,12 +3,12 @@
 
 use std::time::Duration;
 
-use de_mls::app::{CreatorVote, DispatchOutcome};
 use de_mls::core::{ConversationState, StewardListConfig};
 use de_mls::member_id::MemberId;
 use de_mls::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, RemoveMember, conversation_update_request,
 };
+use de_mls::session::{CreatorVote, DispatchOutcome};
 
 mod common;
 use common::session_fixtures::{

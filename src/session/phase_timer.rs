@@ -22,7 +22,7 @@ pub enum FreezeTimeoutStatus {
 
 /// Wall-clock anchor for the active phase. Holds only the anchor
 /// `Instant`; queries take the relevant `Duration` as a parameter.
-/// [`crate::app::SessionRunner`] composes the timer with the state
+/// [`crate::session::SessionRunner`] composes the timer with the state
 /// machine and [`crate::core::ConversationConfig`] durations.
 #[derive(Debug, Clone, Default)]
 pub struct PhaseTimer {

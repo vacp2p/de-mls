@@ -1,6 +1,6 @@
 //! Integration-test fixtures for SessionRunner-driven scenarios.
 //!
-//! Built around [`User`] + [`crate::app::SessionRunner`] over the
+//! Built around [`User`] + [`de_mls::session::SessionRunner`] over the
 //! `DefaultConversationPluginsFactory`. Every helper drives the production
 //! public surface — no peeking at private state. Packet relay is explicit:
 //! tests drain a [`CapturingTransport`] and call `process_inbound_packet`
@@ -12,9 +12,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread::sleep;
 use std::time::Duration;
 
-use de_mls::app::{ConversationConfig, SessionRunner};
 use de_mls::core::StewardListConfig;
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory};
+use de_mls::session::{ConversationConfig, SessionRunner};
 use de_mls_ds::{
     DeliveryService, DeliveryServiceError, OutboundPacket, SharedDeliveryService, WELCOME_SUBTOPIC,
 };

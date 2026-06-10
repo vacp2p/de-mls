@@ -4,8 +4,8 @@
 //! the join). A second sync delivered to that joiner must short-circuit
 //! inside `on_conversation_sync` — no state change, no new outbound.
 
-use de_mls::app::MemberRole;
 use de_mls::core::StewardListConfig;
+use de_mls::session::MemberRole;
 use de_mls_ds::OutboundPacket;
 
 mod common;

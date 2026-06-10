@@ -5,8 +5,8 @@
 //! block reads or writes on any other session, nor block the outer
 //! registry read path that `lookup_entry` walks.
 
-use de_mls::app::ConversationConfig;
 use de_mls::core::StewardListConfig;
+use de_mls::session::ConversationConfig;
 
 mod common;
 use common::session_fixtures::{fast_test_config, make_user};

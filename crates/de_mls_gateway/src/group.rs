@@ -3,8 +3,8 @@ use std::str::FromStr;
 use alloy::primitives::Address;
 
 use de_mls::{
-    app::{DispatchOutcome, FreezeTimeoutStatus, PendingJoinTick, UserError},
     protos::de_mls::messages::v1::BanRequest,
+    session::{DispatchOutcome, FreezeTimeoutStatus, PendingJoinTick, UserError},
 };
 use de_mls_ds::WakuDeliveryService;
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo};
@@ -116,7 +116,7 @@ impl Gateway<WakuDeliveryService> {
                                 break false;
                             }
                         };
-                        break state == de_mls::app::ConversationState::Working;
+                        break state == de_mls::session::ConversationState::Working;
                     }
                     PendingJoinTick::Expired => {
                         if let Err(e) = user_clone

@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::Duration;
 
-use de_mls::app::ConversationConfig;
 use de_mls::core::StewardListConfig;
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory};
+use de_mls::session::ConversationConfig;
 use de_mls_ds::{
     DeliveryService, DeliveryServiceError, OutboundPacket, SharedDeliveryService, WELCOME_SUBTOPIC,
 };

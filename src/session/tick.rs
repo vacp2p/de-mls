@@ -1,5 +1,5 @@
 //! [`SessionTick`] — wakeup-hint envelope returned by public ops on
-//! [`crate::app::SessionRunner`] and `User`.
+//! [`crate::session::SessionRunner`] and `User`.
 
 use std::time::Duration;
 
@@ -9,7 +9,7 @@ use std::time::Duration;
 /// Public ops return this so callers can forward the value to an
 /// external scheduler in one step. Events are not bundled — they stay
 /// in the per-session pending buffer, drained via
-/// [`crate::app::SessionRunner::drain_events`] independently. Keeping
+/// [`crate::session::SessionRunner::drain_events`] independently. Keeping
 /// the two concerns separate lets internal session methods emit events
 /// without coordinating with op return values.
 ///

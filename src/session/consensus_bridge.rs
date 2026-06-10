@@ -15,11 +15,11 @@ use prost::Message;
 use tracing::info;
 
 use crate::{
-    app::error::UserError,
     core::{ConsensusPlugin, ConsensusServiceFor, CoreError, self_leave_proposal_id},
     protos::de_mls::messages::v1::{
         AppMessage, ConversationUpdateRequest, RemoveMember, conversation_update_request,
     },
+    session::error::UserError,
 };
 
 /// Consensus-session parameters that come from `ConversationConfig`. Grouped so

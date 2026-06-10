@@ -2,9 +2,9 @@
 
 use std::time::Duration;
 
-use crate::app::DEFAULT_MAX_RETRIES;
 use crate::core::ProposalKind;
 use crate::protos::de_mls::messages::v1::TimingConfig;
+use crate::session::DEFAULT_MAX_RETRIES;
 
 /// Wall-clock window the steward waits before batching approved proposals
 /// into a commit (RFC §Inactivity Timer #1, "Commit inactivity").

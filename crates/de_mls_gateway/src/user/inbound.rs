@@ -12,8 +12,8 @@ use std::sync::{Arc, RwLock};
 use tracing::debug;
 
 use de_mls::{
-    app::{DispatchOutcome, SessionRunner, SessionTick, UserError},
     core::{ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, ProcessResult},
+    session::{DispatchOutcome, SessionRunner, SessionTick, UserError},
 };
 
 use crate::user::{LockExt, User};

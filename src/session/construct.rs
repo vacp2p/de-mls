@@ -15,13 +15,13 @@ use hashgraph_like_consensus::events::ConsensusEventBus;
 use tracing::info;
 
 use crate::{
-    app::{ConsensusContext, ConversationState, PhaseTimer, SessionRunner, UserError},
     core::{
         ConsensusPlugin, ConversationConfig, ConversationPluginsFactory, ConversationQueues,
         ConversationStateMachine, PeerScoringPlugin, ScoringConfig, SessionEvent,
         StewardListConfig, StewardListPlugin,
     },
     member_id::MemberId,
+    session::{ConsensusContext, ConversationState, PhaseTimer, SessionRunner, UserError},
 };
 
 /// Everything one conversation needs to come into being.

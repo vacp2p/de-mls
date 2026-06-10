@@ -46,11 +46,11 @@ impl OutboundPacket {
     }
 }
 
-/// Map the library's transport-agnostic [`Outbound`](de_mls::app::Outbound)
+/// Map the library's transport-agnostic [`Outbound`](de_mls::session::Outbound)
 /// onto the reference wire packet. Conversation traffic is broadcast; the
 /// subtopic assignment lives here, in the transport layer.
-impl From<de_mls::app::Outbound> for OutboundPacket {
-    fn from(out: de_mls::app::Outbound) -> Self {
+impl From<de_mls::session::Outbound> for OutboundPacket {
+    fn from(out: de_mls::session::Outbound) -> Self {
         OutboundPacket::broadcast(&out.conversation_id, &out.sender, out.payload)
     }
 }
