@@ -8,9 +8,11 @@
 //! enter through [`User::accept_welcome`].
 
 use de_mls::{
-    core::{ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory},
+    core::{ConsensusPlugin, ConversationPluginsFactory},
     session::{DispatchOutcome, SessionError, SessionTick},
 };
+
+use crate::user::ConversationLifecycle;
 
 use crate::user::{LockExt, User};
 

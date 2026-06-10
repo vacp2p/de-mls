@@ -9,8 +9,9 @@
 
 use std::time::{Duration, Instant};
 
-use de_mls::core::{ConversationLifecycle, SessionEvent, StewardListConfig};
+use de_mls::core::{SessionEvent, StewardListConfig};
 use de_mls::session::ConversationConfig;
+use de_mls_gateway::user::ConversationLifecycle;
 
 mod common;
 use common::session_fixtures::{SessionArc, make_user, settle_for};

@@ -1,47 +1,51 @@
-//! Self-leave must drop the conversation's pending auto-vote registry —
-//! otherwise the next `tick_deadlines` would fire against a conversation the
-//! user has already left.
+//! Leaving a conversation evicts the registry entry, preventing any
+//! pending timers from firing on a session the member has already exited.
 
 use std::time::Duration;
 
 use de_mls::core::StewardListConfig;
 
 mod common;
-use common::session_fixtures::{fast_test_config, make_user};
+use common::session_fixtures::{fast_test_config, make_user, settle_for};
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
 #[test]
-fn finalize_self_leave_clears_pending_auto_votes() {
-    let (mut user, _transport) = make_user(
+fn leave_conversation_evicts_registry_entry() {
+    let (mut alice, alice_transport) = make_user(
         ALICE,
         fast_test_config(),
         StewardListConfig::new(1, 5).unwrap(),
     );
-    user.start_conversation("test-conv", true).unwrap();
 
-    let session = user
-        .lookup_entry("test-conv")
-        .unwrap()
-        .expect("creator session registered");
-
-    // Seed a pending auto-vote with a far-future fire-at so the assertion
-    // isn't sensitive to wall-clock drift.
-    session
-        .write()
-        .unwrap()
-        .register_auto_vote(42, Duration::from_secs(600), true);
+    // Alice starts as a joiner (PendingJoin) — no welcome will arrive.
+    alice.start_conversation("ghost-conv", false).unwrap();
     assert!(
-        session.read().unwrap().pending_auto_votes.contains_key(&42),
-        "auto-vote must be registered before self-leave"
+        alice
+            .list_conversations()
+            .unwrap()
+            .contains(&"ghost-conv".to_string()),
+        "conversation must be registered before leave"
     );
 
-    user.finalize_self_leave("test-conv").unwrap();
+    alice.leave_conversation("ghost-conv").unwrap();
 
-    // The registry entry is gone, so the conversation's pending auto-votes
-    // can no longer fire from a poll cycle on this user.
     assert!(
-        user.lookup_entry("test-conv").unwrap().is_none(),
-        "registry entry must be evicted on self-leave"
+        !alice
+            .list_conversations()
+            .unwrap()
+            .contains(&"ghost-conv".to_string()),
+        "conversation must be evicted after leave"
+    );
+    assert!(
+        alice.lookup_entry("ghost-conv").unwrap().is_none(),
+        "lookup must return None after eviction"
+    );
+
+    // Wait longer than voting_delay to verify no auto-vote fires post-leave.
+    settle_for(Duration::from_millis(120));
+    assert!(
+        alice_transport.lock().unwrap().drain_packets().is_empty(),
+        "no packets must be emitted after leave"
     );
 }

@@ -195,11 +195,15 @@ pub fn broadcast(packets: &[OutboundPacket], receivers: &[&TestUser]) {
 /// route each welcome to the matching joiner via
 /// [`TestUser::accept_welcome`], then replay the bundled
 /// `conversation_sync_bytes` through `process_inbound_packet`. Returns
-/// the number of welcomes that were successfully accepted. Call this
-/// once per polling round, BEFORE relaying packets — same-round
-/// app-msg packets (e.g. the post-commit steward election proposal)
-/// need the joiner's MLS attached first.
-pub fn route_welcomes(sessions: &[SessionArc], users: &mut [(TestUser, TransportHandle)]) -> usize {
+/// `(delivered_count, sync_bytes_captured)` — the second element holds every
+/// non-empty `conversation_sync_bytes` from delivered welcomes, in order. Call
+/// this once per polling round, BEFORE relaying packets — same-round app-msg
+/// packets (e.g. the post-commit steward election proposal) need the joiner's
+/// MLS attached first.
+pub fn route_welcomes(
+    sessions: &[SessionArc],
+    users: &mut [(TestUser, TransportHandle)],
+) -> (usize, Vec<Vec<u8>>) {
     use de_mls::core::SessionEvent;
     use de_mls::protos::de_mls::messages::v1::MemberWelcome;
 
@@ -217,6 +221,7 @@ pub fn route_welcomes(sessions: &[SessionArc], users: &mut [(TestUser, Transport
         }
     }
     let mut delivered = 0;
+    let mut sync_bytes_out = Vec::new();
     for (welcome, welcomer_app_id) in welcomes {
         let conv_name = sessions
             .first()
@@ -230,6 +235,7 @@ pub fn route_welcomes(sessions: &[SessionArc], users: &mut [(TestUser, Transport
             if u.accept_welcome(&welcome.welcome_bytes).is_ok() {
                 delivered += 1;
                 if !welcome.conversation_sync_bytes.is_empty() {
+                    sync_bytes_out.push(welcome.conversation_sync_bytes.clone());
                     let _ = u.handle_inbound(Inbound {
                         conversation_id: conv_name.clone(),
                         sender: welcomer_app_id.clone(),
@@ -239,7 +245,7 @@ pub fn route_welcomes(sessions: &[SessionArc], users: &mut [(TestUser, Transport
             }
         }
     }
-    delivered
+    (delivered, sync_bytes_out)
 }
 
 /// Default fast-timing config for SessionRunner-driven tests. All inactivity
@@ -385,7 +391,8 @@ pub fn bootstrap_joined_conversation(
         // its joiner BEFORE relaying packets — same-round app-msg
         // traffic (the post-commit steward election proposal) needs
         // the joiner's MLS attached first.
-        let delivered_welcome = route_welcomes(&sessions, &mut users) > 0;
+        let (welcome_count, _) = route_welcomes(&sessions, &mut users);
+        let delivered_welcome = welcome_count > 0;
 
         let mut packets = Vec::new();
         for (_, h) in &users {

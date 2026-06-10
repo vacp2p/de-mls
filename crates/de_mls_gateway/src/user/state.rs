@@ -10,8 +10,7 @@ use std::{
 
 use de_mls::{
     core::{
-        ConsensusPlugin, ConversationLifecycle, ConversationPluginsFactory, ScoringConfig,
-        SessionEvent, StewardListConfig,
+        ConsensusPlugin, ConversationPluginsFactory, ScoringConfig, SessionEvent, StewardListConfig,
     },
     member_id::MemberId,
     mls_crypto::{KeyPackageBytes, MlsError, MlsService},
@@ -24,6 +23,17 @@ use de_mls::{
 use de_mls_ds::{OutboundPacket, SharedDeliveryService};
 
 use crate::user::{LockExt, UserPlugins};
+
+/// Registry-level notification emitted when conversations are created or
+/// removed. Drain via [`User::drain_lifecycle_events`] once per polling cycle.
+#[derive(Debug, Clone)]
+pub enum ConversationLifecycle {
+    /// A new entry has been registered. The session is in the registry;
+    /// the integrator can look it up and begin draining its events.
+    Created(String),
+    /// An entry has been removed from the registry.
+    Removed(String),
+}
 
 /// Single registry entry: one `Arc<RwLock<SessionRunner>>` per conversation.
 /// Cloned out of the registry under the outer read lock, then locked

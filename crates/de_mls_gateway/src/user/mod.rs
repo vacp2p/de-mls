@@ -29,4 +29,4 @@ mod state;
 pub use inbound::Inbound;
 pub(crate) use lock::LockExt;
 pub use plugins::UserPlugins;
-pub use state::{SessionEntry, User};
+pub use state::{ConversationLifecycle, SessionEntry, User};

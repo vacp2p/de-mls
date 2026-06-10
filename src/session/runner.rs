@@ -270,7 +270,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Register an auto-vote to fire `delay` from now with the given
     /// `vote` choice. Idempotent — re-registering for the same
     /// `proposal_id` replaces the existing entry.
-    pub fn register_auto_vote(&mut self, proposal_id: u32, delay: Duration, vote: bool) {
+    pub(crate) fn register_auto_vote(&mut self, proposal_id: u32, delay: Duration, vote: bool) {
         self.pending_auto_votes.insert(
             proposal_id,
             AutoVoteEntry {
@@ -283,7 +283,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Drop the pending auto-vote for `proposal_id` if any is registered.
     /// Called when a manual vote arrives (manual choice wins) or when the
     /// consensus session resolves (vote no longer meaningful).
-    pub fn cancel_auto_vote(&mut self, proposal_id: u32) {
+    pub(crate) fn cancel_auto_vote(&mut self, proposal_id: u32) {
         self.pending_auto_votes.remove(&proposal_id);
     }
 
@@ -312,7 +312,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
     /// Register a consensus-session timeout. Fires `delay` from now via
     /// `tick_deadlines`; removed naturally on consensus resolution.
-    pub fn register_consensus_timeout(&mut self, proposal_id: u32, delay: Duration) {
+    pub(crate) fn register_consensus_timeout(&mut self, proposal_id: u32, delay: Duration) {
         self.pending_consensus_timeouts
             .insert(proposal_id, Instant::now() + delay);
     }
@@ -321,7 +321,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// `apply_consensus_outcome` once the library reaches/fails consensus,
     /// so the timeout can't fire a stale `handle_consensus_timeout` against
     /// an already-resolved session.
-    pub fn unregister_consensus_timeout(&mut self, proposal_id: u32) {
+    pub(crate) fn unregister_consensus_timeout(&mut self, proposal_id: u32) {
         self.pending_consensus_timeouts.remove(&proposal_id);
     }
 
@@ -362,7 +362,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
     /// `true` once 3× `commit_inactivity_duration` has passed in
     /// `PendingJoin` without a welcome.
-    pub fn is_pending_join_expired(&self) -> bool {
+    pub(crate) fn is_pending_join_expired(&self) -> bool {
         self.conversation.current_state() == ConversationState::PendingJoin
             && self
                 .phase_timer
@@ -370,7 +370,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     }
 
     /// `true` once the freeze window elapsed while in `Freezing`.
-    pub fn is_freeze_timed_out(&self) -> bool {
+    pub(crate) fn is_freeze_timed_out(&self) -> bool {
         self.conversation.current_state() == ConversationState::Freezing
             && self
                 .phase_timer

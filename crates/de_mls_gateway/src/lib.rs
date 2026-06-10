@@ -277,7 +277,7 @@ impl Gateway<WakuDeliveryService> {
                 let app_id_snapshot = user_for_loop.read().await.app_id().to_vec();
                 for event in lifecycle {
                     match event {
-                        de_mls::core::ConversationLifecycle::Created(name) => {
+                        crate::user::ConversationLifecycle::Created(name) => {
                             let fanout = Arc::new(GatewaySessionFanout {
                                 evt_tx: evt_tx.clone(),
                                 topics: topics.clone(),
@@ -288,7 +288,7 @@ impl Gateway<WakuDeliveryService> {
                             });
                             active_sessions.insert(name, fanout);
                         }
-                        de_mls::core::ConversationLifecycle::Removed(name) => {
+                        crate::user::ConversationLifecycle::Removed(name) => {
                             active_sessions.remove(&name);
                         }
                     }

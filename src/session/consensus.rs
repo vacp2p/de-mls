@@ -83,7 +83,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// `RemoveMember`): buffer it so every member has a durable record, then
     /// promote it to a voting proposal if this node is the current epoch
     /// steward and the conversation accepts new proposals.
-    pub fn handle_incoming_update_request(
+    pub(crate) fn handle_incoming_update_request(
         &mut self,
         request: ConversationUpdateRequest,
     ) -> Result<(), SessionError> {
