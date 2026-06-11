@@ -15,7 +15,7 @@ use de_mls::{
     },
     member_id::MemberId,
     mls_crypto::{KeyPackageBytes, MlsError, MlsService},
-    protos::de_mls::messages::v1::ConversationUpdateRequest,
+    protos::de_mls::messages::v1::{ConversationUpdateRequest, MemberWelcome},
     session::{
         Conversation, ConversationError, ConversationState, CreatorVote, MemberRole, PollOutcome,
     },
@@ -211,16 +211,17 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         Ok(())
     }
 
-    /// Ingest a raw MLS welcome blob delivered out of band (e.g. the
+    /// Ingest a [`MemberWelcome`] delivered out of band (e.g. the
     /// inviter's [`de_mls::core::ConversationEvent::WelcomeReady`] routed
-    /// through the integrator's transport). Returns the joined
-    /// conversation name, or [`UserError::WelcomeNotForUs`] if the
-    /// welcome doesn't address this user's key package.
-    pub fn accept_welcome(&mut self, welcome_bytes: &[u8]) -> Result<String, UserError> {
+    /// through the integrator's transport). Completes the join and applies
+    /// the bundled `ConversationSync`. Returns the joined conversation
+    /// name, or [`UserError::WelcomeNotForUs`] if the welcome doesn't
+    /// address this user's key package.
+    pub fn accept_welcome(&mut self, welcome: &MemberWelcome) -> Result<String, UserError> {
         let svc = self
             .plugins
             .conversation_plugins
-            .welcome_mls(welcome_bytes)
+            .welcome_mls(&welcome.welcome_bytes)
             .map_err(ConversationError::from)?
             .ok_or(UserError::WelcomeNotForUs)?;
         let conversation_id = svc.conversation_id().to_string();
@@ -232,7 +233,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .lookup_entry(&conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
 
-        entry_arc.write_or_err("conversation")?.complete_join(svc)?;
+        {
+            let mut conversation = entry_arc.write_or_err("conversation")?;
+            conversation.complete_join(svc)?;
+            conversation.apply_welcome_sync(&welcome.conversation_sync_bytes)?;
+        }
         self.flush(&entry_arc)?;
         Ok(conversation_id)
     }

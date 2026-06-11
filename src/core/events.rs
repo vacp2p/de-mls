@@ -56,10 +56,16 @@ pub enum ConversationEvent {
     /// Conversation transitioned into `state`.
     PhaseChange(ConversationState),
 
-    /// Our merged commit added members. Carries the MLS welcome blob
-    /// and the encrypted `ConversationSync` payload bundled for atomic
-    /// delivery. The integrator owns delivery to each joiner.
-    WelcomeReady(MemberWelcome),
+    /// A merged commit added members. Carries the MLS welcome blob and the
+    /// encrypted `ConversationSync` payload bundled for atomic delivery.
+    /// Fires on every member — the committing steward mints it
+    /// (`minted_locally == true`) and broadcasts it to the group, so peers
+    /// receive the same welcome (`minted_locally == false`). The
+    /// application decides who delivers it to the joiners and how.
+    WelcomeReady {
+        welcome: MemberWelcome,
+        minted_locally: bool,
+    },
 
     /// A consensus session on this conversation resolved. Emitted before
     /// the protocol effects (commit candidate, freeze, score apply, …)

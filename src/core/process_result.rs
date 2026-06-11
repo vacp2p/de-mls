@@ -10,8 +10,9 @@ use crate::{
     core::{CoreError, ScoreEvent, ScoreOp},
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, CommitCandidate, ConversationMessage, ConversationSync,
-        ConversationUpdateRequest, EmergencyCriteriaProposal, Outcome, ProposalAdded, UserVote,
-        ViolationEvidence, ViolationType, VotePayload, app_message, conversation_update_request,
+        ConversationUpdateRequest, EmergencyCriteriaProposal, MemberWelcome, Outcome,
+        ProposalAdded, UserVote, ViolationEvidence, ViolationType, VotePayload, app_message,
+        conversation_update_request,
     },
 };
 
@@ -50,6 +51,11 @@ pub enum ProcessResult {
     /// Conversation-sync message from the steward.
     ConversationSyncReceived(Box<ConversationSync>),
 
+    /// Welcome broadcast from the committing steward: every member learns
+    /// the welcome so the application decides who delivers it to the
+    /// joiners and how.
+    WelcomeBroadcastReceived(Box<MemberWelcome>),
+
     /// Nothing to do.
     Noop(NoopReason),
 }
@@ -86,6 +92,10 @@ pub enum NoopReason {
     /// Candidate arrived before its proposal was locally approved (consensus
     /// outcome still in flight). Stashed for replay once approval lands.
     CandidateStashedEarly,
+    /// Welcome broadcast carried no welcome bytes.
+    EmptyWelcomePayload,
+    /// Welcome broadcast hash was already seen — duplicate gossip delivery.
+    DuplicateWelcomeBroadcast,
 }
 
 // ── ViolationEvidence constructors ────────────────────────────────
@@ -212,6 +222,7 @@ impl_payload_from!(
     Vote                => app_message::Payload::Vote,
     ConversationSync    => app_message::Payload::ConversationSync,
     ProposalAdded       => app_message::Payload::ProposalAdded,
+    MemberWelcome       => app_message::Payload::MemberWelcome,
 );
 
 impl From<ConsensusEvent> for Outcome {

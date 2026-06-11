@@ -132,6 +132,19 @@ pub mod predicate {
         }
         MemberInvite::decode(p.payload.as_slice()).is_ok()
     }
+
+    /// Matches the committer's in-group welcome broadcast on the app-msg
+    /// subtopic. Decodable for the same reason as [`is_commit_candidate`]:
+    /// the outer prost wrapper is plaintext.
+    pub fn is_member_welcome(p: &OutboundPacket) -> bool {
+        if p.subtopic != APP_MSG_SUBTOPIC {
+            return false;
+        }
+        let Ok(msg) = AppMessage::decode(p.payload.as_slice()) else {
+            return false;
+        };
+        matches!(msg.payload, Some(app_message::Payload::MemberWelcome(_)))
+    }
 }
 
 /// Build a [`TestUser`] with a [`CapturingTransport`] using the given
@@ -192,11 +205,11 @@ pub fn broadcast(packets: &[OutboundPacket], receivers: &[&TestUser]) {
 }
 
 /// Drain `ConversationEvent::WelcomeReady` events from each session and
-/// route each welcome to the matching joiner via
-/// [`TestUser::accept_welcome`], then replay the bundled
-/// `conversation_sync_bytes` through `process_inbound_packet`. Returns
-/// `(delivered_count, sync_bytes_captured)` — the second element holds every
-/// non-empty `conversation_sync_bytes` from delivered welcomes, in order. Call
+/// route each locally-minted welcome to the matching joiner via
+/// [`TestUser::accept_welcome`] (which also applies the bundled
+/// `conversation_sync_bytes`). Returns `(delivered_count,
+/// sync_bytes_captured)` — the second element holds every non-empty
+/// `conversation_sync_bytes` from delivered welcomes, in order. Call
 /// this once per polling round, BEFORE relaying packets — same-round app-msg
 /// packets (e.g. the post-commit steward election proposal) need the joiner's
 /// MLS attached first.
@@ -207,40 +220,33 @@ pub fn route_welcomes(
     use de_mls::core::ConversationEvent;
     use de_mls::protos::de_mls::messages::v1::MemberWelcome;
 
-    // Pair each welcome with its emitter's app_id. The bundled sync is the
-    // welcomer's outbound packet, so the replayed `Inbound` must carry the
-    // welcomer's app_id — replaying it under the joiner's own app_id would
-    // trip `handle_inbound`'s echo-dedup and silently drop it.
-    let mut welcomes: Vec<(MemberWelcome, Vec<u8>)> = Vec::new();
-    for (i, s) in sessions.iter().enumerate() {
-        let welcomer_app_id = users[i].0.app_id().to_vec();
+    // Route only minted welcomes — peers re-emit the committer's broadcast
+    // as `minted_locally: false`, and routing those too would just bounce
+    // off the joiner as duplicates (mirrors the gateway's delivery gate).
+    let mut welcomes: Vec<MemberWelcome> = Vec::new();
+    for s in sessions.iter() {
         for event in s.read().unwrap().drain_events() {
-            if let ConversationEvent::WelcomeReady(welcome) = event {
-                welcomes.push((welcome, welcomer_app_id.clone()));
+            if let ConversationEvent::WelcomeReady {
+                welcome,
+                minted_locally: true,
+            } = event
+            {
+                welcomes.push(welcome);
             }
         }
     }
     let mut delivered = 0;
     let mut sync_bytes_out = Vec::new();
-    for (welcome, welcomer_app_id) in welcomes {
-        let conv_name = sessions
-            .first()
-            .map(|s| s.read().unwrap().id().to_string())
-            .unwrap_or_default();
+    for welcome in welcomes {
         for (u, _) in users.iter_mut() {
             // Try every user — `welcome_mls` returns `Ok(None)` (which
             // `accept_welcome` surfaces as `Err(WelcomeNotForUs)`) for
             // anyone the welcome doesn't address. Only the targeted
-            // joiner attaches MLS and gets the bundled sync replayed.
-            if u.accept_welcome(&welcome.welcome_bytes).is_ok() {
+            // joiner attaches MLS and gets the bundled sync applied.
+            if u.accept_welcome(&welcome).is_ok() {
                 delivered += 1;
                 if !welcome.conversation_sync_bytes.is_empty() {
                     sync_bytes_out.push(welcome.conversation_sync_bytes.clone());
-                    let _ = u.handle_inbound(Inbound {
-                        conversation_id: conv_name.clone(),
-                        sender: welcomer_app_id.clone(),
-                        payload: welcome.conversation_sync_bytes.clone(),
-                    });
                 }
             }
         }

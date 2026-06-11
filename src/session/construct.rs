@@ -20,6 +20,8 @@ use crate::{
         PeerScoringPlugin, ScoringConfig, StewardListConfig, StewardListPlugin,
     },
     member_id::MemberId,
+    mls_crypto::MlsService,
+    protos::de_mls::messages::v1::MemberWelcome,
     session::{Conversation, ConversationError, ConversationState, PhaseTimer},
 };
 
@@ -67,6 +69,28 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         deps: ConversationDeps<P, CP>,
     ) -> Result<Self, ConversationError> {
         Self::build(conversation_id, deps, false)
+    }
+
+    /// Build a fully-joined conversation straight from a received
+    /// [`MemberWelcome`] — the whole joiner path in one call: attach MLS
+    /// from the welcome, complete the join, and replay the bundled
+    /// `ConversationSync` (steward list, timing, peer scores).
+    ///
+    /// Returns `Ok(None)` when the welcome doesn't address this member's
+    /// key package — ignore it. The conversation id comes from the welcome
+    /// itself, so the caller needs no prior knowledge of the conversation.
+    pub fn from_welcome(
+        deps: ConversationDeps<P, CP>,
+        welcome: &MemberWelcome,
+    ) -> Result<Option<Self>, ConversationError> {
+        let Some(mls) = deps.plugins.welcome_mls(&welcome.welcome_bytes)? else {
+            return Ok(None);
+        };
+        let conversation_id = mls.conversation_id().to_string();
+        let mut conversation = Self::join(&conversation_id, deps)?;
+        conversation.complete_join(mls)?;
+        conversation.apply_welcome_sync(&welcome.conversation_sync_bytes)?;
+        Ok(Some(conversation))
     }
 
     /// Shared construction body for [`Self::create`] / [`Self::join`].
