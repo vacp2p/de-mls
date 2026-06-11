@@ -131,6 +131,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         Ok(())
     }
 
+    pub fn apply_welcome_sync(&mut self, sync_bytes: &[u8]) -> Result<(), ConversationError> {
+        if sync_bytes.is_empty() {
+            return Ok(());
+        }
+        let result = self.core.process_inbound(sync_bytes)?;
+        self.dispatch_inbound_result(result)?;
+        Ok(())
+    }
+
     pub(crate) fn dispatch_inbound_result(
         &mut self,
         result: ProcessResult,

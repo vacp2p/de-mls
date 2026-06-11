@@ -185,34 +185,14 @@ impl Gateway<WakuDeliveryService> {
                 if is_welcome_channel
                     && let Some(mw) = crate::welcome_envelope::decode(&pkt.payload)
                 {
-                    let accepted = user.write().await.accept_welcome(&mw.welcome_bytes);
-                    match accepted {
-                        Ok(_) if !mw.conversation_sync_bytes.is_empty() => {
-                            // Replay the bundled ConversationSync through the
-                            // standard inbound path now that MLS is attached —
-                            // the sync payload is an MLS-encrypted app message
-                            // addressed to the new epoch.
-                            let sync_inbound = Inbound {
-                                conversation_id: pkt.conversation_id.clone(),
-                                sender: pkt.app_id.clone(),
-                                payload: mw.conversation_sync_bytes,
-                            };
-                            if let Err(e) = user.read().await.handle_inbound(sync_inbound) {
-                                tracing::warn!(
-                                    group = %conversation_id,
-                                    error = %e,
-                                    "bundled sync replay failed"
-                                );
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::warn!(
-                                group = %conversation_id,
-                                error = %e,
-                                "accept_welcome failed"
-                            );
-                        }
+                    // `accept_welcome` completes the join and applies the
+                    // bundled ConversationSync in one step.
+                    if let Err(e) = user.write().await.accept_welcome(&mw) {
+                        tracing::warn!(
+                            group = %conversation_id,
+                            error = %e,
+                            "accept_welcome failed"
+                        );
                     }
                     continue;
                 }
