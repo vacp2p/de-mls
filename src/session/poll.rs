@@ -8,6 +8,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+use prost::Message;
 use tracing::{error, info, warn};
 
 use crate::{
@@ -16,6 +17,7 @@ use crate::{
         FreezeOutcome, PeerScoringPlugin, ScoreEvent, ScoreOp, StewardListPlugin,
     },
     mls_crypto::MlsService,
+    protos::de_mls::messages::v1::AppMessage,
     session::{Conversation, ConversationError, ConversationState, DispatchOutcome},
 };
 
@@ -185,7 +187,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
                         let _ = self.reconcile_steward_list()?;
                         self.build_conversation_sync_payload()?.unwrap_or_default()
                     };
-                    self.emit_event(ConversationEvent::WelcomeReady(welcome));
+                    // Broadcast the welcome to the group so every member can deliver it to the
+                    // joiners, then surface it locally as freshly minted.
+                    let broadcast_payload = AppMessage::from(welcome.clone()).encode_to_vec();
+                    self.emit_event(ConversationEvent::WelcomeReady {
+                        welcome,
+                        minted_locally: true,
+                    });
+                    self.broadcast(broadcast_payload);
                 }
 
                 let outcome = match self.dispatch_inbound_result(result) {

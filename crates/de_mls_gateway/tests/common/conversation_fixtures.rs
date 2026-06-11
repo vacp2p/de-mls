@@ -132,6 +132,19 @@ pub mod predicate {
         }
         MemberInvite::decode(p.payload.as_slice()).is_ok()
     }
+
+    /// Matches the committer's in-group welcome broadcast on the app-msg
+    /// subtopic. Decodable for the same reason as [`is_commit_candidate`]:
+    /// the outer prost wrapper is plaintext.
+    pub fn is_member_welcome(p: &OutboundPacket) -> bool {
+        if p.subtopic != APP_MSG_SUBTOPIC {
+            return false;
+        }
+        let Ok(msg) = AppMessage::decode(p.payload.as_slice()) else {
+            return false;
+        };
+        matches!(msg.payload, Some(app_message::Payload::MemberWelcome(_)))
+    }
 }
 
 /// Build a [`TestUser`] with a [`CapturingTransport`] using the given
@@ -211,11 +224,19 @@ pub fn route_welcomes(
     // welcomer's outbound packet, so the replayed `Inbound` must carry the
     // welcomer's app_id — replaying it under the joiner's own app_id would
     // trip `handle_inbound`'s echo-dedup and silently drop it.
+    //
+    // Route only minted welcomes — peers re-emit the committer's broadcast
+    // as `minted_locally: false`, and routing those too would just bounce
+    // off the joiner as duplicates (mirrors the gateway's delivery gate).
     let mut welcomes: Vec<(MemberWelcome, Vec<u8>)> = Vec::new();
     for (i, s) in sessions.iter().enumerate() {
         let welcomer_app_id = users[i].0.app_id().to_vec();
         for event in s.read().unwrap().drain_events() {
-            if let ConversationEvent::WelcomeReady(welcome) = event {
+            if let ConversationEvent::WelcomeReady {
+                welcome,
+                minted_locally: true,
+            } = event
+            {
                 welcomes.push((welcome, welcomer_app_id.clone()));
             }
         }

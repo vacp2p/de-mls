@@ -183,6 +183,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
                 self.on_conversation_sync(*sync)?;
                 Ok(DispatchOutcome::Done)
             }
+            ProcessResult::WelcomeBroadcastReceived(welcome) => {
+                self.emit_event(ConversationEvent::WelcomeReady {
+                    welcome: *welcome,
+                    minted_locally: false,
+                });
+                Ok(DispatchOutcome::Done)
+            }
             ProcessResult::Noop(reason) => {
                 tracing::debug!(
                     conversation = %self.conversation_id,

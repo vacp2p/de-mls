@@ -44,6 +44,7 @@ pub mod message_types {
     pub const PROPOSAL_ADDED: &str = "ProposalAdded";
     pub const COMMIT_CANDIDATE: &str = "CommitCandidate";
     pub const CONVERSATION_SYNC: &str = "ConversationSync";
+    pub const MEMBER_WELCOME: &str = "MemberWelcome";
     pub const UNKNOWN: &str = "Unknown";
 }
 
@@ -64,6 +65,7 @@ impl MessageType for app_message::Payload {
             app_message::Payload::ProposalAdded(_) => message_types::PROPOSAL_ADDED,
             app_message::Payload::CommitCandidate(_) => message_types::COMMIT_CANDIDATE,
             app_message::Payload::ConversationSync(_) => message_types::CONVERSATION_SYNC,
+            app_message::Payload::MemberWelcome(_) => message_types::MEMBER_WELCOME,
         }
     }
 }

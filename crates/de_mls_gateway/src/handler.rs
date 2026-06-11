@@ -166,7 +166,16 @@ impl GatewayEventFanout {
                     expected,
                 });
             }
-            ConversationEvent::WelcomeReady(welcome) => {
+            ConversationEvent::WelcomeReady {
+                welcome,
+                minted_locally,
+            } => {
+                // Only the minting committer publishes to the welcome
+                // subtopic; peers receiving the in-group broadcast would
+                // otherwise flood the joiner with duplicates.
+                if !minted_locally {
+                    return;
+                }
                 let bytes = welcome.welcome_bytes.len();
                 let sync_bytes = welcome.conversation_sync_bytes.len();
                 let packet = OutboundPacket::new(

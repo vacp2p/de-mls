@@ -17,6 +17,9 @@ message AppMessage {
     ProposalAdded proposal_added = 7;
     CommitCandidate commit_candidate = 8;
     ConversationSync conversation_sync = 9;
+    // Plaintext broadcast of a freshly minted welcome so every member —
+    // not just the committing steward — can deliver it to the joiners.
+    MemberWelcome member_welcome = 10;
   }
 }
 

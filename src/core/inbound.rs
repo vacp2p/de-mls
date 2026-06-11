@@ -12,7 +12,7 @@ use crate::{
     core::{
         conversation::ConversationQueues,
         error::CoreError,
-        freeze::buffer_commit_candidate,
+        freeze::{buffer_commit_candidate, compute_commit_hash},
         process_result::{NoopReason, ProcessResult},
     },
     mls_crypto::{DecryptResult, MlsService},
@@ -51,11 +51,27 @@ pub fn process_inbound<M: MlsService>(
     mls: &mut M,
     payload: &[u8],
 ) -> Result<ProcessResult, CoreError> {
-    // 1. Try plaintext CommitCandidate (sent as plaintext AppMessage)
-    if let Ok(app_message) = AppMessage::decode(payload)
-        && let Some(app_message::Payload::CommitCandidate(candidate)) = app_message.payload
-    {
-        return buffer_commit_candidate(conversation, mls, candidate);
+    // 1. Try the plaintext envelopes (sent as plaintext AppMessage):
+    //    CommitCandidate and MemberWelcome both have to be readable before
+    //    the receiver merges the commit they belong to.
+    if let Ok(app_message) = AppMessage::decode(payload) {
+        match app_message.payload {
+            Some(app_message::Payload::CommitCandidate(candidate)) => {
+                return buffer_commit_candidate(conversation, mls, candidate);
+            }
+            Some(app_message::Payload::MemberWelcome(welcome)) => {
+                if welcome.welcome_bytes.is_empty() {
+                    return Ok(ProcessResult::Noop(NoopReason::EmptyWelcomePayload));
+                }
+                if !conversation
+                    .record_welcome_broadcast(compute_commit_hash(&welcome.welcome_bytes))
+                {
+                    return Ok(ProcessResult::Noop(NoopReason::DuplicateWelcomeBroadcast));
+                }
+                return Ok(ProcessResult::WelcomeBroadcastReceived(Box::new(welcome)));
+            }
+            _ => {}
+        }
     }
 
     // 2. MLS-encrypted app messages only — use decrypt_application_only.
