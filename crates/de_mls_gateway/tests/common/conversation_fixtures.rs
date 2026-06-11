@@ -1,6 +1,6 @@
-//! Integration-test fixtures for SessionRunner-driven scenarios.
+//! Integration-test fixtures for Conversation-driven scenarios.
 //!
-//! Built around [`User`] + [`de_mls::session::SessionRunner`] over the
+//! Built around [`User`] + [`de_mls::session::Conversation`] over the
 //! `DefaultConversationPluginsFactory`. Every helper drives the production
 //! public surface — no peeking at private state. Packet relay is explicit:
 //! tests drain a [`CapturingTransport`] and call `process_inbound_packet`
@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use de_mls::core::StewardListConfig;
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory};
-use de_mls::session::{ConversationConfig, SessionRunner};
+use de_mls::session::{Conversation, ConversationConfig};
 use de_mls_ds::{
     DeliveryService, DeliveryServiceError, OutboundPacket, SharedDeliveryService, WELCOME_SUBTOPIC,
 };
@@ -28,8 +28,8 @@ use crate::common::wallet::user_from_private_key;
 pub type TransportHandle = Arc<Mutex<CapturingTransport>>;
 
 pub type TestUser = User<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
-pub type TestSession = SessionRunner<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
-pub type SessionArc = Arc<RwLock<TestSession>>;
+pub type TestConversation = Conversation<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
+pub type ConversationArc = Arc<RwLock<TestConversation>>;
 
 /// Test transport that captures every outbound packet for later inspection
 /// instead of sending. `subscribe` is a no-op — tests deliver inbound
@@ -191,7 +191,7 @@ pub fn broadcast(packets: &[OutboundPacket], receivers: &[&TestUser]) {
     }
 }
 
-/// Drain `SessionEvent::WelcomeReady` events from each session and
+/// Drain `ConversationEvent::WelcomeReady` events from each session and
 /// route each welcome to the matching joiner via
 /// [`TestUser::accept_welcome`], then replay the bundled
 /// `conversation_sync_bytes` through `process_inbound_packet`. Returns
@@ -201,10 +201,10 @@ pub fn broadcast(packets: &[OutboundPacket], receivers: &[&TestUser]) {
 /// packets (e.g. the post-commit steward election proposal) need the joiner's
 /// MLS attached first.
 pub fn route_welcomes(
-    sessions: &[SessionArc],
+    sessions: &[ConversationArc],
     users: &mut [(TestUser, TransportHandle)],
 ) -> (usize, Vec<Vec<u8>>) {
-    use de_mls::core::SessionEvent;
+    use de_mls::core::ConversationEvent;
     use de_mls::protos::de_mls::messages::v1::MemberWelcome;
 
     // Pair each welcome with its emitter's app_id. The bundled sync is the
@@ -215,7 +215,7 @@ pub fn route_welcomes(
     for (i, s) in sessions.iter().enumerate() {
         let welcomer_app_id = users[i].0.app_id().to_vec();
         for event in s.read().unwrap().drain_events() {
-            if let SessionEvent::WelcomeReady(welcome) = event {
+            if let ConversationEvent::WelcomeReady(welcome) = event {
                 welcomes.push((welcome, welcomer_app_id.clone()));
             }
         }
@@ -225,7 +225,7 @@ pub fn route_welcomes(
     for (welcome, welcomer_app_id) in welcomes {
         let conv_name = sessions
             .first()
-            .map(|s| s.read().unwrap().conversation_id().to_string())
+            .map(|s| s.read().unwrap().id().to_string())
             .unwrap_or_default();
         for (u, _) in users.iter_mut() {
             // Try every user — `welcome_mls` returns `Ok(None)` (which
@@ -248,7 +248,7 @@ pub fn route_welcomes(
     (delivered, sync_bytes_out)
 }
 
-/// Default fast-timing config for SessionRunner-driven tests. All inactivity
+/// Default fast-timing config for Conversation-driven tests. All inactivity
 /// and consensus deadlines are sub-second so a polling loop converges in a
 /// handful of rounds. Override individual fields where the test needs
 /// different timing.
@@ -268,7 +268,7 @@ pub fn fast_test_config() -> ConversationConfig {
 /// One polling cycle on a session: tick deadlines, advance freeze state,
 /// check member-freeze inactivity, and check pending-join expiry. Mirrors the
 /// production `group_polling_loop` body in `de_mls_gateway::group`.
-pub fn poll_once(session: &SessionArc) {
+pub fn poll_once(session: &ConversationArc) {
     let _ = session.write().unwrap().poll();
 }
 
@@ -276,7 +276,7 @@ pub fn poll_once(session: &SessionArc) {
 /// so the relay (which drains the handle) picks it up. The session is
 /// pull-only — direct session calls in tests buffer here instead of sending;
 /// this stands in for the integrator's drain-and-publish.
-pub fn flush_session(session: &SessionArc, transport: &TransportHandle) {
+pub fn flush_conversation(session: &ConversationArc, transport: &TransportHandle) {
     let outbound = session.read().unwrap().drain_outbound();
     let mut t = transport.lock().unwrap();
     for out in outbound {
@@ -343,7 +343,7 @@ pub fn bootstrap_joined_conversation(
             .expect("joiner start");
     }
 
-    let mut sessions: Vec<SessionArc> = Vec::with_capacity(users.len());
+    let mut sessions: Vec<ConversationArc> = Vec::with_capacity(users.len());
     for (u, _) in &users {
         sessions.push(
             u.lookup_entry(conversation)
@@ -383,11 +383,11 @@ pub fn bootstrap_joined_conversation(
             poll_once(s);
         }
         for (i, (_, h)) in users.iter().enumerate() {
-            flush_session(&sessions[i], h);
+            flush_conversation(&sessions[i], h);
         }
 
         // Welcomes never traverse the test transport: the steward emits
-        // them as `SessionEvent::WelcomeReady`. Route each welcome to
+        // them as `ConversationEvent::WelcomeReady`. Route each welcome to
         // its joiner BEFORE relaying packets — same-round app-msg
         // traffic (the post-commit steward election proposal) needs
         // the joiner's MLS attached first.
@@ -408,7 +408,7 @@ pub fn bootstrap_joined_conversation(
 
         let mut all_working = true;
         for s in sessions.iter().skip(1) {
-            if s.read().unwrap().conversation_state() != ConversationState::Working {
+            if s.read().unwrap().state() != ConversationState::Working {
                 all_working = false;
                 break;
             }

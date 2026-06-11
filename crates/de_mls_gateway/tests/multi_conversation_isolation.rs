@@ -1,6 +1,6 @@
 //! Per-conversation lock isolation.
 //!
-//! Each `SessionRunner` lives behind its own `RwLock` inside the User's
+//! Each `Conversation` lives behind its own `RwLock` inside the User's
 //! conversation registry. Holding one session's write lock must not
 //! block reads or writes on any other session, nor block the outer
 //! registry read path that `lookup_entry` walks.
@@ -9,7 +9,7 @@ use de_mls::core::StewardListConfig;
 use de_mls::session::ConversationConfig;
 
 mod common;
-use common::session_fixtures::{fast_test_config, make_user};
+use common::conversation_fixtures::{fast_test_config, make_user};
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
@@ -33,7 +33,7 @@ fn write_lock_on_one_session_does_not_block_others() {
     let a_guard = session_a.write().unwrap();
 
     // Outer registry lookups touch only the sync `RwLock<HashMap<…>>`,
-    // not the inner SessionRunner locks. The call is synchronous — it
+    // not the inner Conversation locks. The call is synchronous — it
     // returns immediately even with the inner write lock held.
     alice
         .lookup_entry("conv-a")

@@ -1,4 +1,4 @@
-//! Send operations on `SessionRunner`: app messages, ban requests, and
+//! Send operations on `Conversation`: app messages, ban requests, and
 //! member-add proposals.
 //!
 //! Also defines [`Outbound`] — the conversation's I/O-agnostic product, and
@@ -12,14 +12,14 @@ use crate::{
     protos::de_mls::messages::v1::{
         AppMessage, ConversationMessage, ConversationUpdateRequest, MemberInvite,
     },
-    session::{ConversationState, CreatorVote, SessionError, SessionRunner},
+    session::{Conversation, ConversationError, ConversationState, CreatorVote},
 };
 
 /// A payload the conversation produced for the integrator to broadcast,
 /// tagged with the conversation it belongs to and the local sender (for
 /// self-message filtering). Already-encrypted bytes plus pragmatic
-/// addressing — no transport subtopic. The session never sends: it buffers
-/// these and the integrator drains them via [`SessionRunner::drain_outbound`]
+/// addressing — no transport subtopic. The conversation never sends: it buffers
+/// these and the integrator drains them via [`Conversation::drain_outbound`]
 /// and maps each onto its own transport (the conversation only ever emits
 /// broadcast traffic — chat, votes, sync, commit candidates). The reference
 /// transport's `From<Outbound>` conversion lives in the `de-mls-ds` crate.
@@ -30,22 +30,22 @@ pub struct Outbound {
     pub payload: Vec<u8>,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
-    /// Buffer a chat message for broadcast. The session never sends — the
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
+    /// Buffer a chat message for broadcast. The conversation never sends — the
     /// message is enqueued and the integrator drains it via
-    /// [`SessionRunner::drain_outbound`]. Blocked in `PendingJoin` (no keys
+    /// [`Conversation::drain_outbound`]. Blocked in `PendingJoin` (no keys
     /// yet), `Freezing`, and `Selection` (epoch rotation in flight — the
     /// message might not decrypt on peers who already merged the next
     /// commit). Governance traffic has its own gate (`check_proposal_allowed`).
-    pub fn send_message(&mut self, message: Vec<u8>) -> Result<(), SessionError> {
-        let state = self.conversation.current_state();
+    pub fn send_message(&mut self, message: Vec<u8>) -> Result<(), ConversationError> {
+        let state = self.core.current_state();
         if matches!(
             state,
             ConversationState::PendingJoin
                 | ConversationState::Freezing
                 | ConversationState::Selection
         ) {
-            return Err(SessionError::ConversationBlocked(state.to_string()));
+            return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
 
         let app_msg: AppMessage = ConversationMessage {
@@ -54,10 +54,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             conversation_id: self.conversation_id.clone(),
         }
         .into();
-        let payload = self
-            .conversation
-            .expect_mls_mut()?
-            .build_message(&app_msg)?;
+        let payload = self.core.expect_mls_mut()?.build_message(&app_msg)?;
         self.broadcast(payload);
         Ok(())
     }
@@ -65,12 +62,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Start a `MemberInvite` consensus round for the given TLS-encoded key
     /// package. Parses the key package, extracts the member id, and submits a
     /// proposal with a bundled YES vote. The resulting welcome fires as
-    /// [`crate::core::SessionEvent::WelcomeReady`] for the integrator to
+    /// [`crate::core::ConversationEvent::WelcomeReady`] for the integrator to
     /// deliver out of band.
-    pub fn add_member(&mut self, key_package_bytes: &[u8]) -> Result<(), SessionError> {
-        let state = self.conversation.current_state();
+    pub fn add_member(&mut self, key_package_bytes: &[u8]) -> Result<(), ConversationError> {
+        let state = self.core.current_state();
         if state != ConversationState::Working {
-            return Err(SessionError::ConversationBlocked(state.to_string()));
+            return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
         let (kp_bytes, member_id) = key_package_bytes_from_tls(key_package_bytes.to_vec())?;
         self.initiate_proposal(
@@ -86,10 +83,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Start a `RemoveMember` consensus round targeting `member_id`. The
     /// requester's intent is the removal → the creator's vote is bundled as
     /// YES at submit; no vote request is shown to the requester.
-    pub fn remove_member(&mut self, member_id: &[u8]) -> Result<(), SessionError> {
-        let state = self.conversation.current_state();
+    pub fn remove_member(&mut self, member_id: &[u8]) -> Result<(), ConversationError> {
+        let state = self.core.current_state();
         if state != ConversationState::Working {
-            return Err(SessionError::ConversationBlocked(state.to_string()));
+            return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
 
         self.initiate_proposal(

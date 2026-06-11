@@ -1,13 +1,13 @@
-//! Application message roundtrip through `SessionRunner::send_message`
-//! and `SessionRunner::dispatch_inbound_result` → `SessionEvent::AppMessage`.
+//! Application message roundtrip through `Conversation::send_message`
+//! and `Conversation::dispatch_inbound_result` → `ConversationEvent::AppMessage`.
 
 use std::time::Duration;
 
-use de_mls::core::{SessionEvent, StewardListConfig};
+use de_mls::core::{ConversationEvent, StewardListConfig};
 use de_mls::protos::de_mls::messages::v1::app_message;
 
 mod common;
-use common::session_fixtures::{
+use common::conversation_fixtures::{
     bootstrap_joined_conversation, deliver, fast_test_config, flush_user, settle_for,
 };
 
@@ -46,7 +46,7 @@ fn chat_message_delivered_to_peer_as_app_message_event() {
         .drain_events()
         .into_iter()
         .find_map(|e| match e {
-            SessionEvent::AppMessage(msg) => match msg.payload {
+            ConversationEvent::AppMessage(msg) => match msg.payload {
                 Some(app_message::Payload::ConversationMessage(cm)) => {
                     Some((cm.message, cm.sender))
                 }
@@ -54,7 +54,8 @@ fn chat_message_delivered_to_peer_as_app_message_event() {
             },
             _ => None,
         });
-    let (body, sender) = chat.expect("bob must surface alice's chat message as a SessionEvent");
+    let (body, sender) =
+        chat.expect("bob must surface alice's chat message as a ConversationEvent");
     assert_eq!(body, b"Hello from alice");
     assert_eq!(sender, users[0].0.member_id_string());
 }

@@ -20,7 +20,7 @@ use hashgraph_like_consensus::{
 ///
 /// Returns `None` when the queue is empty.
 ///
-/// `SessionRunner` holds one receiver per session and drains it from
+/// Each `Conversation` holds one receiver and drains it from
 /// `tick_deadlines`.
 pub trait SyncConsensusReceiver<Scope: ConsensusScope>: Send {
     fn try_recv(&mut self) -> Option<(Scope, ConsensusEvent)>;

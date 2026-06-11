@@ -1,9 +1,9 @@
-//! Gateway-side fan-out from per-session [`SessionEvent`]s to the UI event pipe.
+//! Gateway-side fan-out from per-conversation [`ConversationEvent`]s to the UI event pipe.
 //!
 //! [`crate::Gateway`] runs one polling task per logged-in user. Each tick
 //! drains [`crate::user::User::drain_lifecycle_events`] for `Created` /
-//! `Removed`, then drains [`de_mls::session::SessionRunner::drain_events`] on
-//! every active session and dispatches the [`SessionEvent`]s to `AppEvent`
+//! `Removed`, then drains [`de_mls::session::Conversation::drain_events`] on
+//! every active conversation and dispatches the [`ConversationEvent`]s to `AppEvent`
 //! variants on the UI pipe — also maintaining the per-group
 //! `epoch_history` cache used by the History tab.
 
@@ -16,7 +16,7 @@ use futures::channel::mpsc::UnboundedSender;
 use prost::Message;
 
 use de_mls::{
-    core::SessionEvent,
+    core::ConversationEvent,
     protos::de_mls::messages::v1::{AppMessage, ConversationMessage, VotePayload, app_message},
 };
 use de_mls_ds::{OutboundPacket, SharedDeliveryService, TopicFilter, WELCOME_SUBTOPIC};
@@ -29,13 +29,13 @@ use crate::{
     welcome_envelope,
 };
 
-/// Fan-out target for [`SessionEvent`]s on a single conversation. Held as
-/// `Arc` because the spawned per-session subscriber task owns a clone.
-pub(crate) struct GatewaySessionFanout {
+/// Fan-out target for [`ConversationEvent`]s on a single conversation. Held as
+/// `Arc` because the spawned per-conversation subscriber task owns a clone.
+pub(crate) struct GatewayEventFanout {
     pub evt_tx: UnboundedSender<AppEvent>,
     pub topics: Arc<TopicFilter>,
     pub epoch_history: EpochHistoryStore,
-    /// Shared transport handle. The [`SessionEvent::WelcomeReady`] arm
+    /// Shared transport handle. The [`ConversationEvent::WelcomeReady`] arm
     /// uses it to publish the envelope-wrapped welcome on
     /// [`WELCOME_SUBTOPIC`].
     pub transport: SharedDeliveryService,
@@ -47,14 +47,14 @@ pub(crate) struct GatewaySessionFanout {
     pub user: UserRef,
 }
 
-impl GatewaySessionFanout {
-    /// Dispatch one [`SessionEvent`] to the UI pipe + side caches.
-    pub(crate) async fn handle(&self, conversation_id: &str, event: SessionEvent) {
+impl GatewayEventFanout {
+    /// Dispatch one [`ConversationEvent`] to the UI pipe + side caches.
+    pub(crate) async fn handle(&self, conversation_id: &str, event: ConversationEvent) {
         match event {
-            SessionEvent::AppMessage(message) => {
+            ConversationEvent::AppMessage(message) => {
                 let _ = forward_app_message(&self.evt_tx, message);
             }
-            SessionEvent::Leaving => {
+            ConversationEvent::Leaving => {
                 if let Err(e) = self.topics.remove_many(conversation_id) {
                     tracing::warn!(error = %e, "topic filter remove failed");
                 }
@@ -71,12 +71,12 @@ impl GatewaySessionFanout {
                         conversation_id: conversation_id.to_string(),
                     }));
             }
-            SessionEvent::Error { operation, message } => {
+            ConversationEvent::Error { operation, message } => {
                 let _ = self.evt_tx.unbounded_send(AppEvent::Error(format!(
                     "{operation} failed for group {conversation_id}: {message}"
                 )));
             }
-            SessionEvent::OwnProposalSubmitted {
+            ConversationEvent::OwnProposalSubmitted {
                 proposal_id,
                 request,
             } => {
@@ -88,7 +88,7 @@ impl GatewaySessionFanout {
                     address,
                 });
             }
-            SessionEvent::VoteRequested {
+            ConversationEvent::VoteRequested {
                 proposal_id,
                 request,
             } => {
@@ -111,13 +111,13 @@ impl GatewaySessionFanout {
                         conversation_id: conversation_id.to_string(),
                     });
             }
-            SessionEvent::PhaseChange(state) => {
+            ConversationEvent::PhaseChange(state) => {
                 let _ = self.evt_tx.unbounded_send(AppEvent::GroupStateChanged {
                     conversation_id: conversation_id.to_string(),
                     state: state.to_string(),
                 });
             }
-            SessionEvent::CommitApplied(batch) => {
+            ConversationEvent::CommitApplied(batch) => {
                 if batch.is_empty() {
                     return;
                 }
@@ -135,7 +135,7 @@ impl GatewaySessionFanout {
                     epochs: formatted,
                 });
             }
-            SessionEvent::ConsensusReached {
+            ConversationEvent::ConsensusReached {
                 proposal_id,
                 approved,
                 timestamp,
@@ -159,14 +159,14 @@ impl GatewaySessionFanout {
                 push_consensus_state(&self.user, &self.evt_tx, conversation_id).await;
                 push_member_scores(&self.user, &self.evt_tx, conversation_id).await;
             }
-            SessionEvent::FreezeProgress { received, expected } => {
+            ConversationEvent::FreezeProgress { received, expected } => {
                 let _ = self.evt_tx.unbounded_send(AppEvent::FreezeCandidates {
                     conversation_id: conversation_id.to_string(),
                     received,
                     expected,
                 });
             }
-            SessionEvent::WelcomeReady(welcome) => {
+            ConversationEvent::WelcomeReady(welcome) => {
                 let bytes = welcome.welcome_bytes.len();
                 let sync_bytes = welcome.conversation_sync_bytes.len();
                 let packet = OutboundPacket::new(
@@ -219,7 +219,7 @@ pub fn forward_app_message(
         // Other variants (BanRequest, KeyPackage, Proposal, Vote, CommitCandidate,
         // ConversationSync, ProposalAdded, UserVote) are protocol-internal —
         // not surfaced to the UI as chat-style messages. Vote requests arrive
-        // as a dedicated `SessionEvent::VoteRequested`, not as an AppMessage.
+        // as a dedicated `ConversationEvent::VoteRequested`, not as an AppMessage.
         Some(_) => Ok(()),
         None => Err(anyhow::anyhow!("AppMessage payload missing")),
     }

@@ -1,6 +1,6 @@
 //! Session-side inbound dispatch.
 //!
-//! [`SessionRunner::process_inbound`] is the single entry point for all
+//! [`Conversation::process_inbound`] is the single entry point for all
 //! conversation traffic. It owns echo-dedup, `PendingJoin`-drop, and the
 //! internal `dispatch_inbound_result` chain. `LeaveConversation` is terminal:
 //! `prepare_self_leave` emits `Leaving`, cancels timers, and deletes local MLS
@@ -15,8 +15,8 @@ use tracing::{error, info};
 
 use crate::{
     core::{
-        ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin, ProcessResult,
-        ProposalKind, ScoreSnapshot, SessionEvent, StewardList, StewardListConfig,
+        ConsensusPlugin, ConversationEvent, ConversationPluginsFactory, PeerScoringPlugin,
+        ProcessResult, ProposalKind, ScoreSnapshot, StewardList, StewardListConfig,
         StewardListPlugin, member_set,
     },
     mls_crypto::MlsService,
@@ -25,24 +25,25 @@ use crate::{
         TimingConfig, conversation_update_request,
     },
     session::{
-        ConversationState, SessionError, SessionRunner, consensus::bridge::forward_incoming_vote,
+        Conversation, ConversationError, ConversationState,
+        consensus::bridge::forward_incoming_vote,
     },
 };
 
-/// What [`SessionRunner::process_inbound`] hands back to the integrator.
+/// What [`Conversation::process_inbound`] hands back to the integrator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
     /// No further integrator action required.
     Done,
     /// Packet was self-echoed or dropped (no MLS attached yet). No action.
     Dropped,
-    /// The session has completed its protocol-side teardown (emitted
+    /// The conversation has completed its protocol-side teardown (emitted
     /// `Leaving`, deleted MLS state). The integrator must remove the
     /// registry entry and clean up the consensus scope.
     LeaveRequested,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// Ingest a joiner's key-package announcement (a [`MemberInvite`]).
     /// Drops self-echoes (`sender == self.app_id`). If the holder isn't
     /// already a member, promotes the invite to a membership-change proposal
@@ -51,13 +52,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         &mut self,
         sender: &[u8],
         payload: &[u8],
-    ) -> Result<(), SessionError> {
+    ) -> Result<(), ConversationError> {
         if sender == self.app_id.as_ref() {
             return Ok(());
         }
         let invite = MemberInvite::decode(payload)?;
         let already_member = self
-            .conversation
+            .core
             .mls()
             .map(|m| m.is_member(&invite.member_id))
             .unwrap_or(false);
@@ -82,13 +83,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Decrypt and dispatch an inbound conversation payload. Drops self-echoes
     /// and packets arriving before MLS is attached (`PendingJoin`). Runs the
     /// full dispatch chain internally. Returns [`DispatchOutcome::LeaveRequested`]
-    /// when the session has completed its protocol-side teardown; the integrator
+    /// when the conversation has completed its protocol-side teardown; the integrator
     /// must then remove the registry entry and clean up the consensus scope.
     pub fn process_inbound(
         &mut self,
         sender: &[u8],
         payload: &[u8],
-    ) -> Result<DispatchOutcome, SessionError> {
+    ) -> Result<DispatchOutcome, ConversationError> {
         if sender == self.app_id.as_ref() {
             return Ok(DispatchOutcome::Dropped);
         }
@@ -99,19 +100,19 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             );
             return Ok(DispatchOutcome::Dropped);
         }
-        let result = self.conversation.process_inbound(payload)?;
+        let result = self.core.process_inbound(payload)?;
         self.dispatch_inbound_result(result)
     }
 
     /// Attach a freshly-built MLS service after a joiner accepts a welcome.
     pub(crate) fn attach_mls(&mut self, mls: CP::Mls) {
-        self.conversation.attach_mls(mls);
+        self.core.attach_mls(mls);
     }
 
     /// Whether this conversation's MLS service is attached. `false` for a
     /// joiner still in `PendingJoin` (no welcome yet).
     pub fn has_mls(&self) -> bool {
-        self.conversation.mls().is_some()
+        self.core.mls().is_some()
     }
 
     /// Complete a join after receiving a welcome. Idempotent: returns
@@ -119,8 +120,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// the MLS service if absent, then dispatches `JoinedConversation`
     /// internally (broadcasts the join message, seeds scoring, transitions to
     /// `Working`).
-    pub fn complete_join(&mut self, mls: CP::Mls) -> Result<(), SessionError> {
-        if self.conversation.current_state() != ConversationState::PendingJoin {
+    pub fn complete_join(&mut self, mls: CP::Mls) -> Result<(), ConversationError> {
+        if self.core.current_state() != ConversationState::PendingJoin {
             return Ok(());
         }
         if !self.has_mls() {
@@ -133,10 +134,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     pub(crate) fn dispatch_inbound_result(
         &mut self,
         result: ProcessResult,
-    ) -> Result<DispatchOutcome, SessionError> {
+    ) -> Result<DispatchOutcome, ConversationError> {
         match result {
             ProcessResult::AppMessage(msg) => {
-                self.emit_event(SessionEvent::AppMessage(*msg));
+                self.emit_event(ConversationEvent::AppMessage(*msg));
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::Proposal(proposal) => {
@@ -145,7 +146,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             }
             ProcessResult::Vote(vote) => {
                 let outcome_applied = self
-                    .conversation
+                    .core
                     .queues
                     .is_consensus_outcome_applied(vote.proposal_id);
                 forward_incoming_vote::<P>(
@@ -204,7 +205,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// blocked. We don't drop today — the RFC's Δ-synchrony assumption keeps
     /// divergence windows small. Consensus-service-level priority gating is
     /// tracked as a backlog item in `docs/ROADMAP.md`.
-    fn on_incoming_proposal(&mut self, proposal: Proposal) -> Result<(), SessionError> {
+    fn on_incoming_proposal(&mut self, proposal: Proposal) -> Result<(), ConversationError> {
         let decoded = match ConversationUpdateRequest::decode(proposal.payload.as_slice()) {
             Ok(req) => Some(req),
             Err(e) => {
@@ -217,19 +218,17 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             }
         };
         if let Some(req) = decoded.as_ref() {
-            let current_epoch = match self.conversation.mls() {
+            let current_epoch = match self.core.mls() {
                 Some(mls) => mls.current_epoch()?,
                 None => 0,
             };
             match &req.payload {
                 Some(conversation_update_request::Payload::EmergencyCriteria(_)) => {
-                    self.conversation
-                        .queues
-                        .insert_emergency(proposal.proposal_id);
+                    self.core.queues.insert_emergency(proposal.proposal_id);
                 }
                 Some(conversation_update_request::Payload::MemberInvite(_))
                 | Some(conversation_update_request::Payload::RemoveMember(_)) => {
-                    self.conversation
+                    self.core
                         .queues
                         .insert_pending_update(req.clone(), current_epoch);
                 }
@@ -246,20 +245,20 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         let scope = P::Scope::from(self.conversation_id.clone());
         self.consensus.process_incoming_proposal(&scope, proposal)?;
         // Skip the vote request + auto-vote for fast-path proposals: the
-        // creator's bundled YES already resolved the session, so peers have
+        // creator's bundled YES already resolved the consensus session, so peers have
         // nothing to vote on.
         if expected_voters > 1 {
             // A votable peer proposal always decodes as a
             // `ConversationUpdateRequest`; an opaque payload can't be
             // surfaced for a vote, so only the auto-vote drives it.
             if let Some(request) = decoded {
-                self.emit_event(SessionEvent::VoteRequested {
+                self.emit_event(ConversationEvent::VoteRequested {
                     proposal_id,
                     request,
                 });
             }
-            let delay = self.conversation.config.voting_delay_for(kind);
-            let vote = self.conversation.config.liveness_criteria_yes;
+            let delay = self.core.config.voting_delay_for(kind);
+            let vote = self.core.config.liveness_criteria_yes;
             self.register_auto_vote(proposal_id, delay, vote);
         }
         Ok(())
@@ -268,7 +267,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// We just joined via welcome. Broadcast a system "joined" chat
     /// message, seed scoring with the current member set, and
     /// transition to Working.
-    fn on_joined_conversation(&mut self) -> Result<(), SessionError> {
+    fn on_joined_conversation(&mut self) -> Result<(), ConversationError> {
         let msg: AppMessage = ConversationMessage {
             message: format!("User {} joined the conversation", self.member_id_display)
                 .into_bytes(),
@@ -277,14 +276,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         }
         .into();
         let conversation_id = self.conversation_id.clone();
-        let mls = self.conversation.expect_mls_mut()?;
+        let mls = self.core.expect_mls_mut()?;
         let mls_members = mls.members().unwrap_or_default();
         let payload = mls.build_message(&msg)?;
         self.broadcast(payload);
         self.sync_scoring_members(&mls_members);
 
         let event = self.start_working();
-        self.emit_event(SessionEvent::PhaseChange(event));
+        self.emit_event(ConversationEvent::PhaseChange(event));
         info!(conversation = %conversation_id, "joined conversation");
         Ok(())
     }
@@ -293,8 +292,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Working, and run steward housekeeping (list reconcile, election
     /// kick-off, buffered-update drain). The commit author's `SuccessfulCommit`
     /// reward is emitted by `finalize_freeze_round`, not here.
-    fn on_conversation_updated(&mut self) -> Result<(), SessionError> {
-        let mls_members = match self.conversation.mls() {
+    fn on_conversation_updated(&mut self) -> Result<(), ConversationError> {
+        let mls_members = match self.core.mls() {
             Some(mls) => mls.members().unwrap_or_default(),
             None => Vec::new(),
         };
@@ -304,8 +303,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // Transition to Working BEFORE steward checks (election needs Working
         // state). Reset reelection_round: this commit advanced the epoch,
         // so whatever retry cycle we were in belongs to the previous epoch.
-        self.conversation.steward_list.reset_retry();
-        let state = self.conversation.current_state();
+        self.core.steward_list.reset_retry();
+        let state = self.core.current_state();
         let working_event = if matches!(
             state,
             ConversationState::Working
@@ -323,7 +322,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         self.maybe_close_recovery_window();
 
         if let Some(event) = working_event {
-            self.emit_event(SessionEvent::PhaseChange(event));
+            self.emit_event(ConversationEvent::PhaseChange(event));
         }
         Ok(())
     }
@@ -331,7 +330,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Fire a steward election while `recovery_mode` is set so the next
     /// list installs and closes the window.
     fn maybe_close_recovery_window(&mut self) {
-        if !self.conversation.is_in_recovery_mode() {
+        if !self.core.is_in_recovery_mode() {
             return;
         }
         if let Err(e) = self.initiate_steward_election(true) {
@@ -346,10 +345,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Protocol-side teardown for `LeaveConversation`: emit `Leaving`, cancel
     /// pending timers, and delete the local MLS state. The integrator removes
     /// the registry entry and cleans up the consensus scope.
-    fn prepare_self_leave(&mut self) -> Result<(), SessionError> {
-        self.emit_event(SessionEvent::Leaving);
+    fn prepare_self_leave(&mut self) -> Result<(), ConversationError> {
+        self.emit_event(ConversationEvent::Leaving);
         self.cancel_all_auto_votes();
-        let taken_mls = self.conversation.take_mls();
+        let taken_mls = self.core.take_mls();
         if let Some(mut mls) = taken_mls {
             // The leave is already committed (`Leaving` emitted, MLS
             // detached); a delete failure must log and continue, else the
@@ -363,13 +362,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
     /// Peer broadcast a commit candidate. If we were in Working, enter
     /// Freezing and — if we're a steward — build our own candidate too.
-    fn on_commit_candidate_received(&mut self, steward: &[u8]) -> Result<(), SessionError> {
+    fn on_commit_candidate_received(&mut self, steward: &[u8]) -> Result<(), ConversationError> {
         tracing::debug!(
             conversation = %self.conversation_id,
             steward = ?steward,
             "candidate received from peer steward"
         );
-        let state = self.conversation.current_state();
+        let state = self.core.current_state();
         if state != ConversationState::Working && state != ConversationState::Reelection {
             return Ok(());
         }
@@ -377,12 +376,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         let Some(event) = self.start_freezing() else {
             return Ok(());
         };
-        let epoch = self.conversation.expect_mls()?.current_epoch()?;
-        self.conversation.queues.start_freeze_round(epoch);
+        let epoch = self.core.expect_mls()?.current_epoch()?;
+        self.core.queues.start_freeze_round(epoch);
 
         let self_member_id = Arc::clone(&self.self_member_id);
-        let outbound = if self.conversation.steward_list.is_steward(&self_member_id) {
-            match self.conversation.create_commit_candidate(&self_member_id) {
+        let outbound = if self.core.steward_list.is_steward(&self_member_id) {
+            match self.core.create_commit_candidate(&self_member_id) {
                 Ok(payload) => payload,
                 Err(e) => {
                     error!(
@@ -397,7 +396,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             None
         };
 
-        self.emit_event(SessionEvent::PhaseChange(event));
+        self.emit_event(ConversationEvent::PhaseChange(event));
         if let Some(payload) = outbound {
             self.broadcast(payload);
         }
@@ -408,16 +407,16 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// list. Validates the proposed list against the members it carries
     /// (not the full MLS set — the list may have been generated before we
     /// existed), then applies list + protocol flags + timing + peer scores.
-    fn on_conversation_sync(&mut self, sync: ConversationSync) -> Result<(), SessionError> {
-        if self.conversation.steward_list.current_list().is_some() {
+    fn on_conversation_sync(&mut self, sync: ConversationSync) -> Result<(), ConversationError> {
+        if self.core.steward_list.current_list().is_some() {
             return Ok(());
         }
         let conversation_id = self.conversation_id.clone();
         let (members, current_epoch) = {
-            let mls = self.conversation.expect_mls()?;
+            let mls = self.core.expect_mls()?;
             (mls.members()?, mls.current_epoch()?)
         };
-        let local_default_peer_score = self.conversation.scoring.default_score();
+        let local_default_peer_score = self.core.scoring.default_score();
         if !validate_conversation_sync(
             &conversation_id,
             &sync,
@@ -445,25 +444,23 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     fn apply_conversation_sync_to_entry(
         &mut self,
         sync: &ConversationSync,
-    ) -> Result<(), SessionError> {
+    ) -> Result<(), ConversationError> {
         let mut protocol_config =
             StewardListConfig::new(sync.sn_min as usize, sync.sn_max as usize)?;
         protocol_config.allow_subset_candidates = sync.allow_subset_candidates;
 
         let sn = sync.steward_members.len();
-        self.conversation.steward_list.set_config(protocol_config);
-        self.conversation.steward_list.install_list(
+        self.core.steward_list.set_config(protocol_config);
+        self.core.steward_list.install_list(
             sync.election_epoch,
             &sync.steward_members,
             sn,
             sync.retry_round,
         )?;
-        self.conversation
+        self.core
             .steward_list
             .set_max_retries(sync.max_reelection_attempts);
-        self.conversation
-            .scoring
-            .set_threshold(sync.threshold_peer_score);
+        self.core.scoring.set_threshold(sync.threshold_peer_score);
         let snapshot = ScoreSnapshot {
             diverged: sync
                 .peer_scores
@@ -476,11 +473,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // member in this snapshot — they'll submit
         // `SCORE_BELOW_THRESHOLD` from their own event chain. Drop our
         // result to avoid duplicate proposals from joiners.
-        let _ = self.conversation.scoring.apply_snapshot(&snapshot);
-        self.conversation.config.liveness_criteria_yes = sync.liveness_criteria_yes;
-        self.conversation.config.pending_update_max_epochs = sync.pending_update_max_epochs;
+        let _ = self.core.scoring.apply_snapshot(&snapshot);
+        self.core.config.liveness_criteria_yes = sync.liveness_criteria_yes;
+        self.core.config.pending_update_max_epochs = sync.pending_update_max_epochs;
         if let Some(timing) = &sync.timing {
-            self.conversation.config.apply_timing(timing);
+            self.core.config.apply_timing(timing);
         }
         Ok(())
     }
@@ -503,7 +500,7 @@ fn validate_conversation_sync(
     current_epoch: u64,
     members: &[Vec<u8>],
     local_default_peer_score: i64,
-) -> Result<bool, SessionError> {
+) -> Result<bool, ConversationError> {
     if sync.election_epoch > current_epoch {
         info!(
             conversation = conversation_id,

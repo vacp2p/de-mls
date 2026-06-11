@@ -1,6 +1,6 @@
 //! Ergonomic lock acquisition that propagates poisoning as `UserError`.
 //!
-//! `SessionRunner`'s per-conversation lock is `std::sync::RwLock`, which
+//! `Conversation`'s per-conversation lock is `std::sync::RwLock`, which
 //! marks itself poisoned if a holder panics. We never want to swallow that
 //! with `.expect(...)`; the helpers below convert poison errors into
 //! [`UserError::LockPoisoned`] so callers can return them upstream.

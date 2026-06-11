@@ -16,9 +16,9 @@ use de_mls::session::CreatorVote;
 use de_mls_ds::OutboundPacket;
 
 mod common;
-use common::session_fixtures::{
-    bootstrap_joined_conversation, deliver, fast_test_config, flush_session, poll_once, predicate,
-    settle_for,
+use common::conversation_fixtures::{
+    bootstrap_joined_conversation, deliver, fast_test_config, flush_conversation, poll_once,
+    predicate, settle_for,
 };
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -68,8 +68,8 @@ fn steward_inactivity_fires_commit_candidate() {
         settle_for(Duration::from_millis(40));
         poll_once(&alice_session);
         poll_once(&bob_session);
-        flush_session(&alice_session, &alice_tx);
-        flush_session(&bob_session, &bob_tx);
+        flush_conversation(&alice_session, &alice_tx);
+        flush_conversation(&bob_session, &bob_tx);
 
         let new_alice = alice_tx.lock().unwrap().drain_packets();
         let new_bob = bob_tx.lock().unwrap().drain_packets();

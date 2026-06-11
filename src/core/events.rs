@@ -1,7 +1,7 @@
 //! I/O contract between the protocol layer and an integrator.
 //!
-//! [`SessionEvent`] — fire-and-forget notifications about a single
-//! conversation. Each [`crate::session::SessionRunner`] holds a pending
+//! [`ConversationEvent`] — fire-and-forget notifications about a single
+//! conversation. Each [`crate::session::Conversation`] holds a pending
 //! buffer; integrators drain it once per polling cycle.
 //!
 //! The library carries no transport: it buffers `Outbound` and consumes
@@ -15,10 +15,10 @@ use crate::{
 
 /// Per-conversation notification. Sessions append these to their pending
 /// buffer; integrators drain via
-/// [`crate::session::SessionRunner::drain_events`] once per polling cycle. All
-/// variants are fire-and-forget — no failure path back to the session.
+/// [`crate::session::Conversation::drain_events`] once per polling cycle. All
+/// variants are fire-and-forget — no failure path back to the conversation.
 #[derive(Debug, Clone)]
-pub enum SessionEvent {
+pub enum ConversationEvent {
     /// Decrypted application message (chat, vote request, proposal
     /// notification, ban request, …).
     AppMessage(AppMessage),

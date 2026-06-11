@@ -4,7 +4,7 @@
 //! Layout:
 //! - [`queues`] — the [`ConversationQueues`] struct + protocol queues +
 //!   dedup caches.
-//! - [`conversation`] — [`Conversation`], the MLS-bound aggregate
+//! - [`conversation`] — [`ConversationCore`], the MLS-bound aggregate
 //!   (queues + MLS service + plug-ins + state machine), owned by the
 //!   orchestrator.
 //! - [`state_machine`] — passive state enum + named transitions.
@@ -23,7 +23,7 @@ pub use config::{
     DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION,
     DEFAULT_RECOVERY_INACTIVITY_DURATION, DEFAULT_VOTING_DELAY,
 };
-pub use conversation::Conversation;
+pub use conversation::ConversationCore;
 pub use queues::{BufferedCommitCandidate, ConversationQueues, FreezeBufferOutcome, ProposalId};
 pub use state_machine::{ConversationState, ConversationStateMachine, OperatingMode};
 pub use util::{member_set, self_leave_proposal_id, target_member_id_of};

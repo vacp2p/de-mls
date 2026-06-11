@@ -10,13 +10,13 @@ use tracing::info;
 
 use crate::{
     core::{
-        ConsensusPlugin, ConversationPluginsFactory, ProposalKind, SessionEvent,
+        ConsensusPlugin, ConversationEvent, ConversationPluginsFactory, ProposalKind,
         SyncConsensusReceiver, self_leave_proposal_id,
     },
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest},
     session::{
-        ConversationState, SessionError, SessionRunner,
+        Conversation, ConversationError, ConversationState,
         consensus::bridge::{
             ProposalParams, cast_vote, submit_proposal, submit_self_leave_proposal,
         },
@@ -38,7 +38,7 @@ pub enum CreatorVote {
     Deferred,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     // ── Public API ───────────────────────────────────────────────────
 
     /// Open a consensus vote for `request`; [`CreatorVote`] picks the wire
@@ -56,13 +56,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         &mut self,
         request: ConversationUpdateRequest,
         creator_vote: CreatorVote,
-    ) -> Result<(), SessionError> {
+    ) -> Result<(), ConversationError> {
         let kind = ProposalKind::of(&request);
         let expected_voters = self.check_proposal_allowed(kind)?;
 
-        let liveness_criteria_yes = self.conversation.config.liveness_criteria_yes;
-        let consensus_timeout = self.conversation.config.consensus_timeout;
-        let voting_delay = self.conversation.config.voting_delay_for(kind);
+        let liveness_criteria_yes = self.core.config.liveness_criteria_yes;
+        let consensus_timeout = self.core.config.consensus_timeout;
+        let voting_delay = self.core.config.voting_delay_for(kind);
 
         let (proposal_id, unbundled) = submit_proposal::<P>(
             &self.conversation_id,
@@ -71,17 +71,17 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             &self.consensus,
             ProposalParams {
                 expected_voters,
-                proposal_expiration: self.conversation.config.proposal_expiration,
+                proposal_expiration: self.core.config.proposal_expiration,
                 consensus_timeout,
                 liveness_criteria_yes,
             },
         )?;
 
-        self.conversation
+        self.core
             .queues
             .insert_voting_proposal(proposal_id, request.clone());
         if kind.is_emergency() {
-            self.conversation.queues.insert_emergency(proposal_id);
+            self.core.queues.insert_emergency(proposal_id);
         }
         // Removed again by `apply_consensus_outcome` if an outcome lands
         // before the deadline fires.
@@ -103,23 +103,17 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
                     "YES vote cast (bundled at submit)"
                 );
                 let outbound: AppMessage = proposal.into();
-                let payload = self
-                    .conversation
-                    .expect_mls_mut()?
-                    .build_message(&outbound)?;
+                let payload = self.core.expect_mls_mut()?.build_message(&outbound)?;
                 self.broadcast(payload);
-                self.emit_event(SessionEvent::OwnProposalSubmitted {
+                self.emit_event(ConversationEvent::OwnProposalSubmitted {
                     proposal_id,
                     request,
                 });
             }
             CreatorVote::Deferred => {
-                let payload = self
-                    .conversation
-                    .expect_mls_mut()?
-                    .build_message(&unbundled)?;
+                let payload = self.core.expect_mls_mut()?.build_message(&unbundled)?;
                 self.broadcast(payload);
-                self.emit_event(SessionEvent::VoteRequested {
+                self.emit_event(ConversationEvent::VoteRequested {
                     proposal_id,
                     request,
                 });
@@ -134,10 +128,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// manual choice wins. Blocked while an epoch rotation is in flight
     /// (`Freezing`/`Selection`) — the encrypted vote might not decrypt on
     /// peers that already merged the next commit.
-    pub fn vote(&mut self, proposal_id: u32, vote: bool) -> Result<(), SessionError> {
-        let state = self.conversation.current_state();
+    pub fn vote(&mut self, proposal_id: u32, vote: bool) -> Result<(), ConversationError> {
+        let state = self.core.current_state();
         if state == ConversationState::Freezing || state == ConversationState::Selection {
-            return Err(SessionError::ConversationBlocked(state.to_string()));
+            return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
         self.cancel_auto_vote(proposal_id);
         self.broadcast_vote(proposal_id, vote)
@@ -207,12 +201,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Safe to repeat: the pending-leave check catches local duplicates,
     /// and the deterministic [`self_leave_proposal_id`] dedupes
     /// retransmits inside the consensus library.
-    pub(crate) fn initiate_self_leave(&mut self) -> Result<(), SessionError> {
-        if self
-            .conversation
-            .queues
-            .is_pending_self_leave(&self.self_member_id)
-        {
+    pub(crate) fn initiate_self_leave(&mut self) -> Result<(), ConversationError> {
+        if self.core.queues.is_pending_self_leave(&self.self_member_id) {
             info!(
                 conversation = %self.conversation_id,
                 "self-leave already in flight, ignoring duplicate"
@@ -226,7 +216,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         // Ownership must be recorded before the session opens: the bundled
         // YES fires `ConsensusReached` synchronously, and the outcome
         // handler needs `is_owner_of_proposal` to already be true.
-        self.conversation
+        self.core
             .queues
             .insert_voting_proposal(proposal_id, request.clone());
 
@@ -236,8 +226,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             &self.consensus,
             ProposalParams {
                 expected_voters: 1,
-                proposal_expiration: self.conversation.config.proposal_expiration,
-                consensus_timeout: self.conversation.config.consensus_timeout,
+                proposal_expiration: self.core.config.proposal_expiration,
+                consensus_timeout: self.core.config.consensus_timeout,
                 liveness_criteria_yes: true,
             },
         )?;
@@ -248,10 +238,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             return Ok(());
         };
 
-        let payload = self
-            .conversation
-            .expect_mls_mut()?
-            .build_message(&app_msg)?;
+        let payload = self.core.expect_mls_mut()?.build_message(&app_msg)?;
         self.broadcast(payload);
         Ok(())
     }
@@ -262,29 +249,29 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// voter count (the full member set). During `Reelection` only
     /// emergency and election proposals pass; an active emergency
     /// partial-freezes everything below its priority.
-    fn check_proposal_allowed(&self, kind: ProposalKind) -> Result<u32, SessionError> {
-        let state = self.conversation.current_state();
+    fn check_proposal_allowed(&self, kind: ProposalKind) -> Result<u32, ConversationError> {
+        let state = self.core.current_state();
 
         match state {
             ConversationState::Reelection => {
                 if !kind.is_emergency() && !kind.is_steward_election() {
-                    return Err(SessionError::ConversationBlocked(state.to_string()));
+                    return Err(ConversationError::ConversationBlocked(state.to_string()));
                 }
-                if self.conversation.queues.partial_freeze_blocks(kind) {
-                    return Err(SessionError::PartialFreeze);
+                if self.core.queues.partial_freeze_blocks(kind) {
+                    return Err(ConversationError::PartialFreeze);
                 }
             }
             ConversationState::Freezing | ConversationState::Selection => {
-                return Err(SessionError::ConversationBlocked(state.to_string()));
+                return Err(ConversationError::ConversationBlocked(state.to_string()));
             }
             _ => {
-                if self.conversation.queues.partial_freeze_blocks(kind) {
-                    return Err(SessionError::PartialFreeze);
+                if self.core.queues.partial_freeze_blocks(kind) {
+                    return Err(ConversationError::PartialFreeze);
                 }
             }
         }
 
-        let members = self.conversation.expect_mls()?.members()?;
+        let members = self.core.expect_mls()?.members()?;
         Ok(members.len() as u32)
     }
 
@@ -307,10 +294,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         match self.consensus.handle_consensus_timeout(&scope, proposal_id) {
             Ok(_) => {}
             Err(ConsensusError::SessionNotFound) | Err(ConsensusError::SessionNotActive) => {
-                let resolved_locally = self
-                    .conversation
-                    .queues
-                    .is_consensus_outcome_applied(proposal_id);
+                let resolved_locally = self.core.queues.is_consensus_outcome_applied(proposal_id);
                 if resolved_locally {
                     tracing::debug!(
                         conversation = %self.conversation_id,
@@ -334,13 +318,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
     /// Cast a vote in the local session, encrypt the Vote-only wire
     /// message, and buffer it for broadcast. Manual votes and the auto-vote
     /// timer share this path; the consensus library can't tell them apart.
-    fn broadcast_vote(&mut self, proposal_id: u32, vote: bool) -> Result<(), SessionError> {
+    fn broadcast_vote(&mut self, proposal_id: u32, vote: bool) -> Result<(), ConversationError> {
         let app_message =
             cast_vote::<P>(&self.conversation_id, proposal_id, vote, &self.consensus)?;
-        let payload = self
-            .conversation
-            .expect_mls_mut()?
-            .build_message(&app_message)?;
+        let payload = self.core.expect_mls_mut()?.build_message(&app_message)?;
         self.broadcast(payload);
         Ok(())
     }

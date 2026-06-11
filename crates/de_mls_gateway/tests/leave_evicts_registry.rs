@@ -6,7 +6,7 @@ use std::time::Duration;
 use de_mls::core::StewardListConfig;
 
 mod common;
-use common::session_fixtures::{fast_test_config, make_user, settle_for};
+use common::conversation_fixtures::{fast_test_config, make_user, settle_for};
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 

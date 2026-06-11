@@ -11,9 +11,9 @@ use de_mls::session::MemberRole;
 use de_mls_ds::OutboundPacket;
 
 mod common;
-use common::session_fixtures::{
-    SessionArc, deliver, fast_test_config, flush_session, make_user, poll_once, route_welcomes,
-    settle_for,
+use common::conversation_fixtures::{
+    ConversationArc, deliver, fast_test_config, flush_conversation, make_user, poll_once,
+    route_welcomes, settle_for,
 };
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -35,7 +35,7 @@ fn second_conversation_sync_is_a_no_op() {
     users[0].0.start_conversation("c2", true).expect("creator");
     users[1].0.start_conversation("c2", false).expect("joiner");
 
-    let sessions: Vec<SessionArc> = users
+    let sessions: Vec<ConversationArc> = users
         .iter()
         .map(|(u, _)| u.lookup_entry("c2").unwrap().unwrap())
         .collect();
@@ -55,12 +55,12 @@ fn second_conversation_sync_is_a_no_op() {
     for _ in 0..30 {
         settle_for(Duration::from_millis(60));
         for (i, (_, h)) in users.iter().enumerate() {
-            flush_session(&sessions[i], h);
+            flush_conversation(&sessions[i], h);
         }
         poll_once(&sessions[0]);
         poll_once(&sessions[1]);
         for (i, (_, h)) in users.iter().enumerate() {
-            flush_session(&sessions[i], h);
+            flush_conversation(&sessions[i], h);
         }
 
         let (_, sync_bytes) = route_welcomes(&sessions, &mut users);
@@ -78,7 +78,7 @@ fn second_conversation_sync_is_a_no_op() {
             }
         }
 
-        if sessions[1].read().unwrap().conversation_state() == ConversationState::Working {
+        if sessions[1].read().unwrap().state() == ConversationState::Working {
             break;
         }
     }
@@ -88,7 +88,7 @@ fn second_conversation_sync_is_a_no_op() {
         "bootstrap must produce a ConversationSync for the joiner"
     );
     assert_eq!(
-        sessions[1].read().unwrap().conversation_state(),
+        sessions[1].read().unwrap().state(),
         ConversationState::Working,
         "bob must be Working after bootstrap"
     );

@@ -11,13 +11,14 @@
 
 use std::time::Duration;
 
-use de_mls::core::{ConversationState, SessionEvent, StewardListConfig};
+use de_mls::core::{ConversationEvent, ConversationState, StewardListConfig};
 use de_mls::protos::de_mls::messages::v1::ViolationEvidence;
 use de_mls::session::CreatorVote;
 
 mod common;
-use common::session_fixtures::{
-    bootstrap_joined_conversation, deliver, fast_test_config, flush_session, poll_once, settle_for,
+use common::conversation_fixtures::{
+    bootstrap_joined_conversation, deliver, fast_test_config, flush_conversation, poll_once,
+    settle_for,
 };
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -37,8 +38,8 @@ fn deadlock_ecp_opens_recovery_and_force_freezes() {
     let alice_tx = users[0].1.clone();
     let bob_tx = users[1].1.clone();
 
-    let mut alice_events: Vec<SessionEvent> = Vec::new();
-    let mut bob_events: Vec<SessionEvent> = Vec::new();
+    let mut alice_events: Vec<ConversationEvent> = Vec::new();
+    let mut bob_events: Vec<ConversationEvent> = Vec::new();
 
     // File a Deadlock ECP. With both members as stewards and bob's
     // auto-vote, the emergency proposal reaches consensus YES.
@@ -59,8 +60,8 @@ fn deadlock_ecp_opens_recovery_and_force_freezes() {
         settle_for(Duration::from_millis(40));
         poll_once(&alice_session);
         poll_once(&bob_session);
-        flush_session(&alice_session, &alice_tx);
-        flush_session(&bob_session, &bob_tx);
+        flush_conversation(&alice_session, &alice_tx);
+        flush_conversation(&bob_session, &bob_tx);
         let packets = alice_tx.lock().unwrap().drain_packets();
         for p in packets {
             deliver(&users[1].0, &p);
@@ -72,16 +73,14 @@ fn deadlock_ecp_opens_recovery_and_force_freezes() {
 
         alice_events.extend(alice_session.read().unwrap().drain_events());
         bob_events.extend(bob_session.read().unwrap().drain_events());
-        if alice_events
-            .iter()
-            .any(|e| matches!(e, SessionEvent::PhaseChange(s) if *s == ConversationState::Freezing))
-        {
+        if alice_events.iter().any(
+            |e| matches!(e, ConversationEvent::PhaseChange(s) if *s == ConversationState::Freezing),
+        ) {
             alice_saw_freezing = true;
         }
-        if bob_events
-            .iter()
-            .any(|e| matches!(e, SessionEvent::PhaseChange(s) if *s == ConversationState::Freezing))
-        {
+        if bob_events.iter().any(
+            |e| matches!(e, ConversationEvent::PhaseChange(s) if *s == ConversationState::Freezing),
+        ) {
             bob_saw_freezing = true;
         }
         if alice_saw_freezing && bob_saw_freezing {

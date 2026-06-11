@@ -18,7 +18,7 @@ use tracing::info;
 use crate::{
     core::{ConsensusPlugin, ConsensusServiceFor, CoreError, self_leave_proposal_id},
     protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest},
-    session::error::SessionError,
+    session::error::ConversationError,
 };
 
 /// Per-proposal consensus-session parameters.
@@ -71,7 +71,7 @@ pub(crate) fn cast_vote<P>(
     proposal_id: u32,
     vote: bool,
     consensus: &ConsensusServiceFor<P>,
-) -> Result<AppMessage, SessionError>
+) -> Result<AppMessage, ConversationError>
 where
     P: ConsensusPlugin,
 {
@@ -140,7 +140,7 @@ pub(crate) fn submit_self_leave_proposal<P>(
     self_member_id: &[u8],
     consensus: &ConsensusServiceFor<P>,
     params: ProposalParams,
-) -> Result<Option<(u32, AppMessage)>, SessionError>
+) -> Result<Option<(u32, AppMessage)>, ConversationError>
 where
     P: ConsensusPlugin,
 {

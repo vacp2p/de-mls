@@ -23,7 +23,7 @@ use crate::{
 /// Per-conversation aggregate owned by the orchestrator. Bundles protocol
 /// state, the MLS service, plug-ins, state machine, durable config, and
 /// operating mode behind one type parameter.
-pub struct Conversation<CP: ConversationPluginsFactory> {
+pub struct ConversationCore<CP: ConversationPluginsFactory> {
     pub queues: ConversationQueues,
     /// Per-conversation MLS service. `None` for joiners in `PendingJoin` who
     /// haven't accepted a welcome yet; once attached via
@@ -41,7 +41,7 @@ pub struct Conversation<CP: ConversationPluginsFactory> {
     operating_mode: OperatingMode,
 }
 
-impl<CP: ConversationPluginsFactory> Conversation<CP> {
+impl<CP: ConversationPluginsFactory> ConversationCore<CP> {
     /// Build a fresh conversation. Creator path passes `Some(mls)`; joiner
     /// path passes `None` and attaches later via [`Self::attach_mls`].
     pub(crate) fn new(
@@ -317,8 +317,8 @@ mod tests {
     use super::*;
     use crate::test_fixtures::{StubPluginsFactory, StubScoring, StubStewardList, UnusedMls};
 
-    fn make_conversation(steward_list: StubStewardList) -> Conversation<StubPluginsFactory> {
-        Conversation::new(
+    fn make_conversation(steward_list: StubStewardList) -> ConversationCore<StubPluginsFactory> {
+        ConversationCore::new(
             ConversationQueues::new("g"),
             Some(UnusedMls),
             ConversationStateMachine::new_as_member(),

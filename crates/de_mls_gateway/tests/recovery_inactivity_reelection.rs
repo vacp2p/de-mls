@@ -17,7 +17,7 @@ use de_mls::protos::de_mls::messages::v1::{
 use de_mls::session::CreatorVote;
 
 mod common;
-use common::session_fixtures::{
+use common::conversation_fixtures::{
     bootstrap_joined_conversation, deliver, fast_test_config, flush_user, poll_once, settle_for,
 };
 
@@ -120,7 +120,7 @@ fn silent_steward_drives_observer_to_reelection() {
             deliver(&users[steward_idx].0, &p);
         }
 
-        let observer_state = observer_session.read().unwrap().conversation_state();
+        let observer_state = observer_session.read().unwrap().state();
         if observer_state == ConversationState::Reelection {
             entered_reelection = true;
             break;

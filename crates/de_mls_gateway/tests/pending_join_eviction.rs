@@ -9,12 +9,12 @@
 
 use std::time::{Duration, Instant};
 
-use de_mls::core::{SessionEvent, StewardListConfig};
+use de_mls::core::{ConversationEvent, StewardListConfig};
 use de_mls::session::ConversationConfig;
 use de_mls_gateway::user::ConversationLifecycle;
 
 mod common;
-use common::session_fixtures::{SessionArc, make_user, settle_for};
+use common::conversation_fixtures::{ConversationArc, make_user, settle_for};
 
 const ALICE_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
@@ -58,7 +58,7 @@ fn pending_join_expires_evicts_entry_and_broadcasts_removal() {
     assert!(
         session_events
             .iter()
-            .any(|e| matches!(e, SessionEvent::Leaving)),
+            .any(|e| matches!(e, ConversationEvent::Leaving)),
         "session must emit Leaving on PendingJoin expiry"
     );
 
@@ -88,7 +88,7 @@ fn pending_join_expires_evicts_entry_and_broadcasts_removal() {
     );
 }
 
-fn await_leave_requested(session: &SessionArc, inactivity: Duration) -> bool {
+fn await_leave_requested(session: &ConversationArc, inactivity: Duration) -> bool {
     // Allow up to 6× inactivity so the test isn't fragile on slow CI.
     let deadline = Instant::now() + inactivity * 6;
     loop {

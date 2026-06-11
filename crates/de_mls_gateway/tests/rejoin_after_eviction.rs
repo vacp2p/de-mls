@@ -9,7 +9,7 @@ use de_mls::protos::de_mls::messages::v1::ConversationUpdateRequest;
 use de_mls::session::CreatorVote;
 
 mod common;
-use common::session_fixtures::{
+use common::conversation_fixtures::{
     bootstrap_joined_conversation, deliver, fast_test_config, flush_user, route_welcomes,
     settle_for,
 };
@@ -96,7 +96,7 @@ fn evicted_member_can_rejoin_at_higher_epoch() {
     for _ in 0..30 {
         drive_one_round_no_target_eviction(&mut users, target_idx);
         if let Some(s) = users[target_idx].0.lookup_entry("rejoin").unwrap()
-            && s.read().unwrap().conversation_state() == ConversationState::Working
+            && s.read().unwrap().state() == ConversationState::Working
         {
             rejoined = true;
             break;
@@ -129,8 +129,8 @@ fn evicted_member_can_rejoin_at_higher_epoch() {
 
 fn drive_one_round(
     users: &mut [(
-        common::session_fixtures::TestUser,
-        common::session_fixtures::TransportHandle,
+        common::conversation_fixtures::TestUser,
+        common::conversation_fixtures::TransportHandle,
     )],
     target_idx: usize,
 ) {
@@ -169,8 +169,8 @@ fn drive_one_round(
 /// if the pending-join expiry fires.
 fn drive_one_round_no_target_eviction(
     users: &mut [(
-        common::session_fixtures::TestUser,
-        common::session_fixtures::TransportHandle,
+        common::conversation_fixtures::TestUser,
+        common::conversation_fixtures::TransportHandle,
     )],
     target_idx: usize,
 ) {

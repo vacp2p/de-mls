@@ -1,18 +1,18 @@
-//! Registry CRUD on the `User` side: per-conversation session lookup.
+//! Registry CRUD on the `User` side: conversation lookup.
 
 use de_mls::core::{ConsensusPlugin, ConversationPluginsFactory};
 
-use crate::user::{SessionEntry, User, UserError};
+use crate::user::{ConversationEntry, User, UserError};
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
-    /// Look up a conversation runner. Returns `Ok(None)` when no runner is
+    /// Look up a conversation. Returns `Ok(None)` when no entry is
     /// registered for `conversation_id`. Takes the outer read lock briefly
     /// to clone the inner `Arc`, then releases it before the caller
-    /// acquires the runner's own lock.
+    /// acquires the conversation's own lock.
     pub fn lookup_entry(
         &self,
         conversation_id: &str,
-    ) -> Result<Option<SessionEntry<P, CP>>, UserError> {
+    ) -> Result<Option<ConversationEntry<P, CP>>, UserError> {
         Ok(self
             .conversations
             .read()

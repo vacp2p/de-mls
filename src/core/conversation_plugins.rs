@@ -23,10 +23,10 @@ pub trait ConversationPluginsFactory {
     /// Returns `Ok(None)` when the welcome isn't for us.
     fn welcome_mls(&self, welcome_bytes: &[u8]) -> Result<Option<Self::Mls>, MlsError>;
 
-    /// Build a fresh peer-scoring plug-in for a new conversation runner.
+    /// Build a fresh peer-scoring plug-in for a new conversation.
     fn make_scoring(&self, config: &ScoringConfig) -> Self::Scoring;
 
-    /// Build a fresh steward-list plug-in for a new conversation runner.
+    /// Build a fresh steward-list plug-in for a new conversation.
     /// Returns an empty plug-in; the lifecycle creator path bootstraps it
     /// via [`StewardListPlugin::install_list`].
     fn make_steward_list(
