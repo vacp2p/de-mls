@@ -7,15 +7,15 @@ use crate::user::{Inbound, UserError};
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo, encode_hex, format_conversation_request};
 use futures::channel::mpsc::UnboundedSender;
 
-use crate::{CoreCtx, Gateway, SessionRef, UserRef};
+use crate::{ConversationRef, CoreCtx, Gateway, UserRef};
 
-/// Look up a per-conversation session from the `User` registry. Returns
+/// Look up a conversation entry in the `User` registry. Returns
 /// `Err(ConversationNotFound)` when the conversation has been removed.
 /// Centralized so every call site uses the same lookup + error shape.
-pub(crate) async fn lookup_session(
+pub(crate) async fn lookup_conversation(
     user: &UserRef,
     conversation_id: &str,
-) -> Result<SessionRef, UserError> {
+) -> Result<ConversationRef, UserError> {
     user.read()
         .await
         .lookup_entry(conversation_id)?
@@ -38,14 +38,14 @@ pub(crate) async fn load_member_info(
     user: &UserRef,
     conversation_id: &str,
 ) -> anyhow::Result<Vec<MemberInfo>> {
-    let session = lookup_session(user, conversation_id).await?;
-    let runner = session
+    let entry = lookup_conversation(user, conversation_id).await?;
+    let conversation = entry
         .read()
-        .map_err(|_| UserError::LockPoisoned("session"))?;
-    let member_bytes = runner.members()?;
-    let scores = runner.member_scores();
-    let roles = runner.member_roles().unwrap_or_default();
-    let pending_leavers = runner.pending_leave_member_ids().unwrap_or_default();
+        .map_err(|_| UserError::LockPoisoned("conversation"))?;
+    let member_bytes = conversation.members()?;
+    let scores = conversation.member_scores();
+    let roles = conversation.member_roles().unwrap_or_default();
+    let pending_leavers = conversation.pending_leave_member_ids().unwrap_or_default();
 
     Ok(member_bytes
         .into_iter()
@@ -77,26 +77,26 @@ pub(crate) async fn push_consensus_state(
     evt_tx: &UnboundedSender<AppEvent>,
     conversation_id: &str,
 ) {
-    let Ok(session) = lookup_session(user, conversation_id).await else {
+    let Ok(entry) = lookup_conversation(user, conversation_id).await else {
         return;
     };
-    let runner = match session.read() {
+    let conversation = match entry.read() {
         Ok(s) => s,
         Err(_) => {
             tracing::warn!(
                 conversation = %conversation_id,
-                "push_consensus_state skipped: session lock poisoned"
+                "push_consensus_state skipped: conversation lock poisoned"
             );
             return;
         }
     };
-    let proposals = runner.approved_proposals_for_current_epoch();
+    let proposals = conversation.approved_proposals_for_current_epoch();
     let _ = evt_tx.unbounded_send(AppEvent::CurrentEpochProposals {
         conversation_id: conversation_id.to_string(),
         proposals: display_batch(&proposals),
     });
 
-    if let Ok((epoch, retry_round)) = runner.epoch_and_retry() {
+    if let Ok((epoch, retry_round)) = conversation.epoch_and_retry() {
         let _ = evt_tx.unbounded_send(AppEvent::GroupEpoch {
             conversation_id: conversation_id.to_string(),
             epoch,
@@ -122,15 +122,15 @@ pub(crate) async fn push_member_scores(
         members,
     });
 
-    let Ok(session) = lookup_session(user, conversation_id).await else {
+    let Ok(entry) = lookup_conversation(user, conversation_id).await else {
         return;
     };
-    let is_steward = match session.read() {
+    let is_steward = match entry.read() {
         Ok(s) => s.is_steward(),
         Err(_) => {
             tracing::warn!(
                 conversation = %conversation_id,
-                "is_steward read skipped: session lock poisoned"
+                "is_steward read skipped: conversation lock poisoned"
             );
             return;
         }

@@ -38,7 +38,7 @@ pub enum FreezeOutcome {
         result: ProcessResult,
         /// Welcome artifact when our own commit added members.
         /// Surfaced to integrators via
-        /// [`crate::core::SessionEvent::WelcomeReady`].
+        /// [`crate::core::ConversationEvent::WelcomeReady`].
         welcome: Option<MemberWelcome>,
     },
     #[default]

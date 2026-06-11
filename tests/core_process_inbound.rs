@@ -34,7 +34,7 @@ fn test_process_inbound_welcome_already_joined_ignores() {
 
     // A second welcome (this one for joiner2's KP) doesn't address us, so
     // try_accept_welcome surfaces "not for us" rather than disturbing our
-    // MLS state. `SessionRunner` additionally guards on
+    // MLS state. `Conversation` additionally guards on
     // `conversation.mls().is_some()` to skip wholesale; both safeguards land at
     // the same outcome.
     let mut joiner2 = setup_joiner(

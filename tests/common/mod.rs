@@ -1,20 +1,4 @@
 //! Shared fixtures for integration tests.
-//!
-//! Rust compiles each file in `tests/` as its own binary; a file under
-//! `tests/common/` is *not* a test binary, so this module can be reused by
-//! adding `mod common;` to any test file. Helpers carry `#[allow(dead_code)]`
-//! at the module level because not every binary exercises every helper.
-//!
-//! Two distinct fixture surfaces live here:
-//!
-//! - [`session_fixtures`] is the public-surface fixture set: `User` +
-//!   `SessionRunner` driven through `process_inbound_packet`, transport
-//!   capture, polling helpers. Default for new tests.
-//! - The low-level helpers in this file (`StewardHandle`, `JoinerHandle`,
-//!   `process_inbound_compat`, `build_commit_candidate`) let a test reach
-//!   into `core::process_inbound` and the MLS layer directly, which is
-//!   what the forgery / adversarial-input tests in `core_violations.rs`
-//!   need. New tests should prefer [`session_fixtures`].
 #![allow(dead_code)]
 
 pub mod wallet;
@@ -229,7 +213,7 @@ pub fn process_inbound_compat(
     } else if subtopic == APP_MSG_SUBTOPIC {
         let Some(mls) = mls else {
             // App messages on a conversation with no MLS state are
-            // silently ignored. Mirrors `SessionRunner::process_inbound_packet`,
+            // silently ignored. Mirrors `Conversation::process_inbound_packet`,
             // which gates app payloads on `conversation.mls().is_some()`.
             return Ok(ProcessResult::Noop(NoopReason::UnknownAppMessage));
         };

@@ -1,30 +1,31 @@
 //! Reference session layer — wires [`crate::core`] into a working chat app
 //! with consensus, state machine, peer scoring, and freeze/commit timing.
 //!
-//! The unit of integration is the per-conversation [`SessionRunner`](crate::session::SessionRunner): drive it
+//! The unit of integration is [`Conversation`](crate::session::Conversation): drive it
 //! from a transport receive loop (feeding inbound packets) and a periodic poll
 //! on each conversation's freeze/commit deadlines, draining outbound payloads
-//! and session events as you go.
+//! and conversation events as you go.
 //!
 //! [`crate::core::ConversationStateMachine`] owns the per-conversation state
 //! enum (`PendingJoin → Working → Freezing → Selection → Reelection`);
-//! `PhaseTimer` owns the wall-clock anchor; [`SessionRunner`](crate::session::SessionRunner) composes a
-//! [`crate::core::Conversation`] with that timer through coordinator methods
+//! `PhaseTimer` owns the wall-clock anchor; [`Conversation`](crate::session::Conversation) composes a
+//! [`crate::core::ConversationCore`] with that timer through coordinator methods
 //! that update both atomically. State transitions return the new
 //! [`crate::core::ConversationState`]; the session-side dispatcher emits a
-//! `SessionEvent::PhaseChange` on each one.
+//! `ConversationEvent::PhaseChange` on each one.
 //!
 //! Use this layer directly for epoch-based steward chat; write a custom session
 //! layer if you need a different consensus model, state machine, or epoch
 //! timing.
 //!
-//! [`SessionRunner`](crate::session::SessionRunner) is defined in the `runner` module; per-conversation method
+//! [`Conversation`](crate::session::Conversation) is defined in the `conversation` module; per-conversation method
 //! bodies (proposal submission, voting, inbound dispatch, freeze ticks, steward
 //! housekeeping, query getters) live in sibling modules and extend
-//! `SessionRunner` via additional `impl` blocks.
+//! `Conversation` via additional `impl` blocks.
 
 mod consensus;
 mod construct;
+mod conversation;
 mod display;
 mod error;
 mod inbound;
@@ -32,7 +33,6 @@ mod messaging;
 mod phase_timer;
 mod poll;
 mod query;
-mod runner;
 mod steward;
 
 pub use crate::core::{
@@ -43,12 +43,11 @@ pub use crate::core::{
 };
 pub use consensus::CreatorVote;
 pub use construct::ConversationDeps;
+pub use conversation::{Conversation, LeaveOutcome};
 pub use display::{MemberRole, MessageType, message_types};
-pub use error::SessionError;
+pub use error::ConversationError;
 pub use inbound::DispatchOutcome;
 pub use messaging::{Outbound, build_key_package_announcement};
 pub use poll::PollOutcome;
-pub use runner::LeaveOutcome;
-pub use runner::SessionRunner;
 
 pub(crate) use phase_timer::PhaseTimer;

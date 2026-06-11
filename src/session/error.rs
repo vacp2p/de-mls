@@ -6,13 +6,13 @@ use hashgraph_like_consensus::error::ConsensusError;
 
 use crate::{core::CoreError, mls_crypto::MlsError};
 
-/// Errors from operations on a single conversation session.
+/// Errors from operations on a single conversation.
 ///
 /// Registry-level failures (conversation lookup, lock poisoning, transport
 /// delivery) are integrator concerns and live in the integrator's own error
 /// type — see the reference `User` in the gateway crate.
 #[derive(Debug, thiserror::Error)]
-pub enum SessionError {
+pub enum ConversationError {
     #[error("Cannot send message: conversation is in {0} state")]
     ConversationBlocked(String),
 

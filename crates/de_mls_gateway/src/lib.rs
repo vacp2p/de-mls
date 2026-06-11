@@ -34,7 +34,7 @@ use de_mls::{
 use de_mls_ds::{DeliveryService, SharedDeliveryService, WakuDeliveryService};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 
-use crate::user::{ConsensusContext, SessionEntry, User, UserPlugins};
+use crate::user::{ConsensusContext, ConversationEntry, User, UserPlugins};
 use futures::{
     StreamExt,
     channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded},
@@ -43,7 +43,7 @@ use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use tokio::sync::Mutex;
 
-use crate::handler::GatewaySessionFanout;
+use crate::handler::GatewayEventFanout;
 
 pub use crate::bootstrap::{
     AppState, Bootstrap, BootstrapConfig, BootstrapError, CoreCtx, bootstrap_core,
@@ -59,10 +59,10 @@ pub use crate::bootstrap::{
 pub(crate) type UserRef =
     Arc<tokio::sync::RwLock<User<DefaultConsensusPlugin, DefaultConversationPluginsFactory>>>;
 
-/// Type alias for a per-conversation session reference obtained via
+/// Type alias for a conversation registry entry obtained via
 /// `User::lookup_entry`. Re-exports the sync-locked entry from `de_mls::session`.
-pub(crate) type SessionRef =
-    SessionEntry<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
+pub(crate) type ConversationRef =
+    ConversationEntry<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
 
 // Global, process-wide gateway instance
 pub static GATEWAY: Lazy<Gateway<WakuDeliveryService>> = Lazy::new(Gateway::new);
@@ -76,7 +76,7 @@ pub fn init_core(core: Arc<CoreCtx<WakuDeliveryService>>) {
 pub(crate) const MAX_EPOCH_HISTORY: usize = 10;
 
 /// Per-group rolling history of committed batches, populated by
-/// `on_commit_applied` and consumed by the History tab via
+/// the gateway's event fanout on `CommitApplied` and consumed by the History tab via
 /// `Gateway::get_epoch_history`. Cap is [`MAX_EPOCH_HISTORY`].
 pub(crate) type EpochHistoryStore =
     Arc<parking_lot::Mutex<HashMap<String, VecDeque<Vec<ConversationUpdateRequest>>>>>;
@@ -99,7 +99,7 @@ pub struct Gateway<DS: DeliveryService> {
     started: AtomicBool,
 
     // Per-group committed-batch history (UI cache). Shared by Arc with the
-    // gateway's ConversationEventHandler so `on_commit_applied` can append.
+    // gateway's event fanout so a `CommitApplied` event can append.
     epoch_history: EpochHistoryStore,
 }
 
@@ -244,10 +244,10 @@ impl Gateway<WakuDeliveryService> {
 
         // Per-conversation subscribers: one task watches the User's
         // lifecycle channel; on each `Created(name)`, spawn a task that
-        // subscribes to the new session's `SessionEvent` stream and
+        // subscribes to the new conversation's `ConversationEvent` stream and
         // forwards to the UI pipe; the consensus event forwarder is
         // spawned on the same trigger.
-        self.spawn_session_subscribers(user_ref.clone(), transport_for_subscribers);
+        self.spawn_conversation_subscribers(user_ref.clone(), transport_for_subscribers);
 
         self.spawn_delivery_service_forwarder(core.clone(), user_ref.clone());
         Ok(user_address)
@@ -255,30 +255,30 @@ impl Gateway<WakuDeliveryService> {
 
     /// Spawn the gateway's UI event pump. Once per polling cycle it
     /// drains [`crate::user::User::drain_lifecycle_events`] (to learn
-    /// when new sessions appear or disappear) and
-    /// [`de_mls::session::SessionRunner::drain_events`] on every active
-    /// session (to forward UI-bound events). Replaces the previous
+    /// when new conversations appear or disappear) and
+    /// [`de_mls::session::Conversation::drain_events`] on every active
+    /// conversation (to forward UI-bound events). Replaces the previous
     /// broadcast-channel subscriber pattern.
-    fn spawn_session_subscribers(&self, user: UserRef, transport: SharedDeliveryService) {
+    fn spawn_conversation_subscribers(&self, user: UserRef, transport: SharedDeliveryService) {
         let evt_tx = self.evt_tx.clone();
         let topics = self.core().topics.clone();
         let epoch_history = self.epoch_history.clone();
         let user_for_loop = user.clone();
 
         tokio::spawn(async move {
-            let mut active_sessions: HashMap<String, Arc<GatewaySessionFanout>> = HashMap::new();
+            let mut active_fanouts: HashMap<String, Arc<GatewayEventFanout>> = HashMap::new();
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
                 // Drain user-level lifecycle events first so newly-created
-                // sessions get their fanout registered before we look for
+                // conversations get their fanout registered before we look for
                 // events on them.
                 let lifecycle = user_for_loop.read().await.drain_lifecycle_events();
                 let app_id_snapshot = user_for_loop.read().await.app_id().to_vec();
                 for event in lifecycle {
                     match event {
                         crate::user::ConversationLifecycle::Created(name) => {
-                            let fanout = Arc::new(GatewaySessionFanout {
+                            let fanout = Arc::new(GatewayEventFanout {
                                 evt_tx: evt_tx.clone(),
                                 topics: topics.clone(),
                                 epoch_history: epoch_history.clone(),
@@ -286,26 +286,26 @@ impl Gateway<WakuDeliveryService> {
                                 app_id: app_id_snapshot.clone(),
                                 user: user_for_loop.clone(),
                             });
-                            active_sessions.insert(name, fanout);
+                            active_fanouts.insert(name, fanout);
                         }
                         crate::user::ConversationLifecycle::Removed(name) => {
-                            active_sessions.remove(&name);
+                            active_fanouts.remove(&name);
                         }
                     }
                 }
 
-                // Drain each active session's pending events.
-                for (name, fanout) in &active_sessions {
-                    let session = match user_for_loop.read().await.lookup_entry(name) {
+                // Drain each active conversation's pending events.
+                for (name, fanout) in &active_fanouts {
+                    let entry = match user_for_loop.read().await.lookup_entry(name) {
                         Ok(Some(s)) => s,
                         _ => continue,
                     };
-                    let events = match session.read() {
+                    let events = match entry.read() {
                         Ok(g) => g.drain_events(),
                         Err(_) => {
                             tracing::warn!(
                                 conversation = %name,
-                                "session drain skipped: lock poisoned"
+                                "conversation drain skipped: lock poisoned"
                             );
                             continue;
                         }
@@ -314,12 +314,12 @@ impl Gateway<WakuDeliveryService> {
                         fanout.handle(name, event).await;
                     }
 
-                    // Publish any outbound the session buffered. The session is
+                    // Publish any outbound the conversation buffered. The conversation is
                     // pull-only — it never sends. `User`-driven ops already
                     // flushed their own outbound; this catches packets produced
-                    // by direct session calls in the polling / handler paths
+                    // by direct conversation calls in the polling / handler paths
                     // (commit candidates, auto-votes, …).
-                    let outbound = match session.read() {
+                    let outbound = match entry.read() {
                         Ok(g) => g.drain_outbound(),
                         Err(_) => Vec::new(),
                     };

@@ -4,13 +4,13 @@
 
 use std::time::Duration;
 
-use de_mls::core::{SessionEvent, StewardListConfig};
+use de_mls::core::{ConversationEvent, StewardListConfig};
 use de_mls::member_id::MemberId;
 use de_mls::protos::de_mls::messages::v1::ConversationUpdateRequest;
 use de_mls::session::CreatorVote;
 
 mod common;
-use common::session_fixtures::{
+use common::conversation_fixtures::{
     bootstrap_joined_conversation, deliver, fast_test_config, flush_user, settle_for,
 };
 
@@ -98,7 +98,7 @@ fn removed_member_emits_leaving_and_is_evicted() {
     assert!(
         target_events
             .iter()
-            .any(|e| matches!(e, SessionEvent::Leaving)),
+            .any(|e| matches!(e, ConversationEvent::Leaving)),
         "removed member's session must emit Leaving"
     );
 }

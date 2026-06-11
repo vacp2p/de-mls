@@ -1,11 +1,11 @@
 //! Error type for the `User` registry layer.
 //!
-//! Session-level failures come from the library as
-//! [`SessionError`] and are wrapped; everything else here is
+//! Conversation-level failures come from the library as
+//! [`ConversationError`] and are wrapped; everything else here is
 //! registry-side: conversation lookup, lock poisoning, and transport
 //! delivery.
 
-use de_mls::session::SessionError;
+use de_mls::session::ConversationError;
 
 /// Errors from `User` operations.
 #[derive(Debug, thiserror::Error)]
@@ -26,7 +26,7 @@ pub enum UserError {
     LockPoisoned(&'static str),
 
     #[error(transparent)]
-    Session(#[from] SessionError),
+    Conversation(#[from] ConversationError),
 }
 
 impl UserError {
@@ -37,12 +37,12 @@ impl UserError {
         match self {
             // The conversation is no longer in the registry — stop polling.
             UserError::ConversationNotFound => true,
-            // Lock poisoning means the session is corrupted — no recovery.
+            // Lock poisoning means the conversation is corrupted — no recovery.
             UserError::LockPoisoned(_) => true,
             UserError::ConversationAlreadyExists
             | UserError::WelcomeNotForUs
             | UserError::Transport(_)
-            | UserError::Session(_) => false,
+            | UserError::Conversation(_) => false,
         }
     }
 }

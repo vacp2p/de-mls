@@ -1,11 +1,11 @@
-//! Standalone construction of a [`SessionRunner`] from a [`ConversationDeps`]
+//! Standalone construction of a [`Conversation`] from a [`ConversationDeps`]
 //! bundle — no `User` required.
 //!
 //! [`ConversationDeps`] gathers everything a single conversation needs:
 //! the shared plug-in factory (borrowed — one serves every conversation an
 //! integrator runs), a ready consensus service, the identity, and the
-//! per-conversation configs. [`SessionRunner::create`] and
-//! [`SessionRunner::join`] consume one bundle and return a runner ready to
+//! per-conversation configs. [`Conversation::create`] and
+//! [`Conversation::join`] consume one bundle and return a conversation ready to
 //! drop into a registry.
 
 use std::sync::Arc;
@@ -15,12 +15,12 @@ use tracing::info;
 
 use crate::{
     core::{
-        ConsensusPlugin, ConsensusServiceFor, ConversationConfig, ConversationPluginsFactory,
-        ConversationQueues, ConversationStateMachine, PeerScoringPlugin, ScoringConfig,
-        SessionEvent, StewardListConfig, StewardListPlugin,
+        ConsensusPlugin, ConsensusServiceFor, ConversationConfig, ConversationEvent,
+        ConversationPluginsFactory, ConversationQueues, ConversationStateMachine,
+        PeerScoringPlugin, ScoringConfig, StewardListConfig, StewardListPlugin,
     },
     member_id::MemberId,
-    session::{ConversationState, PhaseTimer, SessionError, SessionRunner},
+    session::{Conversation, ConversationError, ConversationState, PhaseTimer},
 };
 
 /// Everything one conversation needs to come into being.
@@ -33,11 +33,11 @@ use crate::{
 pub struct ConversationDeps<'a, P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Builds the per-conversation MLS / scoring / steward plug-ins.
     pub plugins: &'a CP,
-    /// This conversation's consensus service, ready to use. The runner
+    /// This conversation's consensus service, ready to use. The conversation
     /// subscribes to its event bus at construction.
     pub consensus: ConsensusServiceFor<P>,
     /// Local participant identity; the constructor snapshots its bytes
-    /// and display form onto the runner.
+    /// and display form onto the conversation.
     pub identity: &'a dyn MemberId,
     /// Per-instance UUID stamped on every outbound packet for echo dedup.
     pub app_id: Arc<[u8]>,
@@ -49,24 +49,23 @@ pub struct ConversationDeps<'a, P: ConsensusPlugin, CP: ConversationPluginsFacto
     pub steward_list_config: StewardListConfig,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
-    /// Build a runner for a brand-new conversation we create and steward.
-    /// Starts in `Working` with the local member installed as sole steward
-    /// at epoch 0.
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
+    /// Create a brand-new conversation we steward. Starts in `Working` with
+    /// the local member installed as sole steward at epoch 0.
     pub fn create(
         conversation_id: &str,
         deps: ConversationDeps<P, CP>,
-    ) -> Result<Self, SessionError> {
+    ) -> Result<Self, ConversationError> {
         Self::build(conversation_id, deps, true)
     }
 
-    /// Build a runner that joins an existing conversation. Starts in
-    /// `PendingJoin` with no MLS state; the steward list and scoring fill in
-    /// once the welcome and `ConversationSync` arrive.
+    /// Join an existing conversation. Starts in `PendingJoin` with no MLS
+    /// state; the steward list and scoring fill in once the welcome and
+    /// `ConversationSync` arrive.
     pub fn join(
         conversation_id: &str,
         deps: ConversationDeps<P, CP>,
-    ) -> Result<Self, SessionError> {
+    ) -> Result<Self, ConversationError> {
         Self::build(conversation_id, deps, false)
     }
 
@@ -75,7 +74,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
         conversation_id: &str,
         deps: ConversationDeps<P, CP>,
         is_creation: bool,
-    ) -> Result<Self, SessionError> {
+    ) -> Result<Self, ConversationError> {
         let self_member_id_bytes = deps.identity.member_id_bytes().to_vec();
 
         let (queues, mls_opt, state_machine, phase_timer) = if is_creation {
@@ -128,7 +127,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
 
         let consensus = deps.consensus;
         let consensus_rx = consensus.event_bus().subscribe();
-        let runner = SessionRunner::new(
+        let conversation = Conversation::new(
             conversation_id.to_string(),
             queues,
             mls_opt,
@@ -143,9 +142,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> SessionRunner<P, CP> {
             Arc::from(deps.identity.member_id_display()),
             deps.app_id,
         );
-        // Surface the opening phase so a caller draining session events sees
+        // Surface the opening phase so a caller draining conversation events sees
         // the conversation's starting state without a separate query.
-        runner.emit_event(SessionEvent::PhaseChange(initial_state));
-        Ok(runner)
+        conversation.emit_event(ConversationEvent::PhaseChange(initial_state));
+        Ok(conversation)
     }
 }

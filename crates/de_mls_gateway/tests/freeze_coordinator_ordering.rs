@@ -2,12 +2,12 @@
 //!
 //! During a commit cycle, every session must emit phase events in the
 //! order: `Freezing → Selection → CommitApplied → Working`. The
-//! coordinator runs in `SessionRunner` (Freeze is not a plug-in), so this
+//! coordinator runs in `Conversation` (Freeze is not a plug-in), so this
 //! is a direct probe of its orchestration.
 
 use std::time::Duration;
 
-use de_mls::core::{ConversationState, SessionEvent, StewardListConfig};
+use de_mls::core::{ConversationEvent, ConversationState, StewardListConfig};
 use de_mls::member_id::MemberId;
 use de_mls::protos::de_mls::messages::v1::{
     ConversationUpdateRequest, RemoveMember, conversation_update_request,
@@ -15,8 +15,9 @@ use de_mls::protos::de_mls::messages::v1::{
 use de_mls::session::CreatorVote;
 
 mod common;
-use common::session_fixtures::{
-    bootstrap_joined_conversation, deliver, fast_test_config, flush_session, poll_once, settle_for,
+use common::conversation_fixtures::{
+    bootstrap_joined_conversation, deliver, fast_test_config, flush_conversation, poll_once,
+    settle_for,
 };
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -70,8 +71,8 @@ fn freeze_cycle_emits_phase_events_in_order() {
         settle_for(Duration::from_millis(40));
         poll_once(&alice_session);
         poll_once(&bob_session);
-        flush_session(&alice_session, &alice_tx);
-        flush_session(&bob_session, &bob_tx);
+        flush_conversation(&alice_session, &alice_tx);
+        flush_conversation(&bob_session, &bob_tx);
 
         let mut packets = Vec::new();
         packets.extend(alice_tx.lock().unwrap().drain_packets());
@@ -82,7 +83,7 @@ fn freeze_cycle_emits_phase_events_in_order() {
         }
 
         alice_phases.extend(drain_phase_log(&alice_session));
-        let alice_state = alice_session.read().unwrap().conversation_state();
+        let alice_state = alice_session.read().unwrap().state();
         if alice_state == ConversationState::Freezing || alice_state == ConversationState::Selection
         {
             saw_freezing = true;
@@ -155,17 +156,21 @@ impl PhaseEntry {
 }
 
 /// Drain pending session events and project to the phase-relevant subset.
-fn drain_phase_log(session: &common::session_fixtures::SessionArc) -> Vec<PhaseEntry> {
+fn drain_phase_log(session: &common::conversation_fixtures::ConversationArc) -> Vec<PhaseEntry> {
     session
         .read()
         .unwrap()
         .drain_events()
         .into_iter()
         .filter_map(|e| match e {
-            SessionEvent::PhaseChange(ConversationState::Freezing) => Some(PhaseEntry::Freezing),
-            SessionEvent::PhaseChange(ConversationState::Selection) => Some(PhaseEntry::Selection),
-            SessionEvent::PhaseChange(ConversationState::Working) => Some(PhaseEntry::Working),
-            SessionEvent::CommitApplied(batch) => Some(PhaseEntry::CommitApplied(batch)),
+            ConversationEvent::PhaseChange(ConversationState::Freezing) => {
+                Some(PhaseEntry::Freezing)
+            }
+            ConversationEvent::PhaseChange(ConversationState::Selection) => {
+                Some(PhaseEntry::Selection)
+            }
+            ConversationEvent::PhaseChange(ConversationState::Working) => Some(PhaseEntry::Working),
+            ConversationEvent::CommitApplied(batch) => Some(PhaseEntry::CommitApplied(batch)),
             _ => None,
         })
         .collect()

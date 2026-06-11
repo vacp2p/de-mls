@@ -1,4 +1,4 @@
-//! Step 1 proof: a `SessionRunner` can be built and queried straight from a
+//! Step 1 proof: a `Conversation` can be built and queried straight from a
 //! `ConversationDeps` bundle, with no `User` in the picture. The integrator
 //! holds one plug-in factory plus shared consensus storage + signer, and
 //! mints each conversation's consensus service from them — exactly what
@@ -13,13 +13,13 @@ use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 
 use de_mls::core::{
-    ConsensusPlugin, ConsensusServiceFor, ScoringConfig, SessionEvent, StewardListConfig,
+    ConsensusPlugin, ConsensusServiceFor, ConversationEvent, ScoringConfig, StewardListConfig,
 };
 use de_mls::defaults::{
     DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage,
 };
 use de_mls::mls_crypto::MlsCredentials;
-use de_mls::session::{ConversationDeps, ConversationState, SessionRunner};
+use de_mls::session::{Conversation, ConversationDeps, ConversationState};
 
 use common::wallet::WalletMemberId;
 
@@ -77,22 +77,23 @@ impl Integrator {
 #[test]
 fn create_builds_a_working_steward_session_without_user() {
     let integrator = Integrator::new();
-    let runner = SessionRunner::create("standalone", integrator.deps()).expect("create");
+    let conversation = Conversation::create("standalone", integrator.deps()).expect("create");
 
-    assert_eq!(runner.conversation_state(), ConversationState::Working);
+    assert_eq!(conversation.state(), ConversationState::Working);
     assert!(
-        runner.is_steward(),
+        conversation.is_steward(),
         "creator is the sole steward at epoch 0"
     );
-    let (epoch, _retry) = runner.epoch_and_retry().expect("epoch");
+    let (epoch, _retry) = conversation.epoch_and_retry().expect("epoch");
     assert_eq!(epoch, 0);
 
     // The opening phase is buffered for whoever drains the session.
-    let events = runner.drain_events();
+    let events = conversation.drain_events();
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, SessionEvent::PhaseChange(ConversationState::Working))),
+        events.iter().any(|e| matches!(
+            e,
+            ConversationEvent::PhaseChange(ConversationState::Working)
+        )),
         "create buffers an opening Working PhaseChange"
     );
 }
@@ -100,11 +101,11 @@ fn create_builds_a_working_steward_session_without_user() {
 #[test]
 fn join_builds_a_pending_join_session_without_user() {
     let integrator = Integrator::new();
-    let runner = SessionRunner::join("standalone", integrator.deps()).expect("join");
+    let conversation = Conversation::join("standalone", integrator.deps()).expect("join");
 
-    assert_eq!(runner.conversation_state(), ConversationState::PendingJoin);
+    assert_eq!(conversation.state(), ConversationState::PendingJoin);
     assert!(
-        !runner.is_steward(),
+        !conversation.is_steward(),
         "a pending joiner holds no steward list yet"
     );
 }

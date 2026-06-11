@@ -28,7 +28,7 @@
 //!
 //! - **[`core`]** - Protocol implementation (message processing, consensus integration)
 //! - **[`mls_crypto`]** - MLS cryptographic operations (OpenMLS wrapper)
-//! - **[`session`]** - Reference session layer (per-conversation `SessionRunner`, state machine)
+//! - **[`session`]** - Reference session layer (the `Conversation` handle, state machine)
 //! - **[`protos`]** - Protobuf message definitions
 //!
 //! The library carries no transport. The reference delivery service (the
@@ -38,11 +38,11 @@
 //! ## Getting Started
 //!
 //! Most developers should start with the [`core`] module documentation, which explains:
-//! - What traits you need to implement (`core::SessionEvent`)
+//! - What traits you need to implement (`core::ConversationEvent`)
 //! - Core operations (start conversation, join, send messages)
 //! - The `ProcessResult` matching flow
 //!
-//! The library exposes the per-conversation [`session::SessionRunner`] handle.
+//! The library exposes the per-conversation [`session::Conversation`] handle.
 //! It carries no transport: it buffers outbound and consumes inbound
 //! payloads, and the integrator owns routing. A ready-to-use reference
 //! integrator (the multi-conversation `User` with registry + routing +
@@ -51,17 +51,17 @@
 //! ## Quick Example
 //!
 //! ```ignore
-//! use de_mls::session::{ConversationDeps, SessionRunner};
+//! use de_mls::session::{ConversationDeps, Conversation};
 //!
-//! // Build a per-conversation session from injected deps (plug-in factory,
-//! // consensus context, identity).
-//! let mut session = SessionRunner::create("de-mls-test", deps)?;
+//! // Build a conversation from injected deps (plug-in factory,
+//! // consensus service, identity).
+//! let mut conversation = Conversation::create("de-mls-test", deps)?;
 //!
 //! // Send a chat message — buffered, never auto-sent.
-//! session.send_message(b"Hello, world!".to_vec())?;
+//! conversation.send_message(b"Hello, world!".to_vec())?;
 //!
 //! // Drain outbound and publish it on your own transport.
-//! for out in session.drain_outbound() { /* publish */ }
+//! for out in conversation.drain_outbound() { /* publish */ }
 //! ```
 
 /// Protocol implementation.

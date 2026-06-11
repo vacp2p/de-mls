@@ -7,7 +7,7 @@ use de_mls_ui_protocol::v1::MemberInfo;
 
 use crate::{
     Gateway, UserRef,
-    forwarder::{display_batch, load_member_info, lookup_session},
+    forwarder::{display_batch, load_member_info, lookup_conversation},
     user::UserError,
 };
 
@@ -24,7 +24,7 @@ impl Gateway<WakuDeliveryService> {
         tracing::info!(group = %conversation_id, "group ready, subtopics subscribed");
 
         // Unified polling loop — stewards create commit candidates
-        // automatically inside `poll_session` when the inactivity timer fires.
+        // automatically inside `poll_conversation` when the inactivity timer fires.
         let user_clone = user_ref.clone();
         tokio::spawn(Self::group_polling_loop(user_clone, conversation_id));
         Ok(())
@@ -52,7 +52,7 @@ impl Gateway<WakuDeliveryService> {
             // Phase 1: Poll until welcome received or timed out.
             let joined = loop {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                let outcome = match user_clone.read().await.poll_session(&group_name_clone) {
+                let outcome = match user_clone.read().await.poll_conversation(&group_name_clone) {
                     Ok(o) => o,
                     Err(e) if e.is_fatal() => {
                         tracing::warn!(group = %group_name_clone, error = %e, "join poll exiting");
@@ -97,18 +97,18 @@ impl Gateway<WakuDeliveryService> {
     }
 
     /// Unified polling loop for any group member (creator or joiner). All
-    /// time-based session paths are driven by a single `poll_session` call.
+    /// time-based conversation paths are driven by a single `poll_conversation` call.
     async fn group_polling_loop(user: UserRef, conversation_id: String) {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            let outcome = match user.read().await.poll_session(&conversation_id) {
+            let outcome = match user.read().await.poll_conversation(&conversation_id) {
                 Ok(o) => o,
                 Err(e) if e.is_fatal() => {
                     tracing::warn!(group = %conversation_id, error = %e, "polling loop exiting");
                     break;
                 }
                 Err(e) => {
-                    tracing::warn!(group = %conversation_id, error = %e, "poll_session error");
+                    tracing::warn!(group = %conversation_id, error = %e, "poll_conversation error");
                     continue;
                 }
             };
@@ -127,10 +127,10 @@ impl Gateway<WakuDeliveryService> {
         message: String,
     ) -> anyhow::Result<()> {
         let user_ref = self.user()?;
-        let session = lookup_session(&user_ref, &conversation_id).await?;
-        session
+        let entry = lookup_conversation(&user_ref, &conversation_id).await?;
+        entry
             .write()
-            .map_err(|_| UserError::LockPoisoned("session"))?
+            .map_err(|_| UserError::LockPoisoned("conversation"))?
             .send_message(message.into_bytes())?;
         tracing::debug!(group = %conversation_id, "app message sent");
         Ok(())
@@ -142,14 +142,14 @@ impl Gateway<WakuDeliveryService> {
         user_to_ban: String,
     ) -> anyhow::Result<()> {
         let user_ref = self.user()?;
-        let session = lookup_session(&user_ref, &conversation_id).await?;
+        let entry = lookup_conversation(&user_ref, &conversation_id).await?;
 
         let target = Address::from_str(user_to_ban.trim())
             .map_err(|e| anyhow::anyhow!("invalid ban target address {user_to_ban:?}: {e}"))?;
 
-        session
+        entry
             .write()
-            .map_err(|_| UserError::LockPoisoned("session"))?
+            .map_err(|_| UserError::LockPoisoned("conversation"))?
             .remove_member(target.as_slice())?;
 
         Ok(())
@@ -162,10 +162,10 @@ impl Gateway<WakuDeliveryService> {
         vote: bool,
     ) -> anyhow::Result<()> {
         let user_ref = self.user()?;
-        let session = lookup_session(&user_ref, &conversation_id).await?;
-        session
+        let entry = lookup_conversation(&user_ref, &conversation_id).await?;
+        entry
             .write()
-            .map_err(|_| UserError::LockPoisoned("session"))?
+            .map_err(|_| UserError::LockPoisoned("conversation"))?
             .vote(proposal_id, vote)?;
         Ok(())
     }
@@ -192,21 +192,21 @@ impl Gateway<WakuDeliveryService> {
 
     pub async fn get_steward_status(&self, conversation_id: String) -> anyhow::Result<bool> {
         let user_ref = self.user()?;
-        let session = lookup_session(&user_ref, &conversation_id).await?;
-        let is_steward = session
+        let entry = lookup_conversation(&user_ref, &conversation_id).await?;
+        let is_steward = entry
             .read()
-            .map_err(|_| UserError::LockPoisoned("session"))?
+            .map_err(|_| UserError::LockPoisoned("conversation"))?
             .is_steward();
         Ok(is_steward)
     }
 
     pub async fn get_group_state(&self, conversation_id: String) -> anyhow::Result<String> {
         let user_ref = self.user()?;
-        let session = lookup_session(&user_ref, &conversation_id).await?;
-        let state = session
+        let entry = lookup_conversation(&user_ref, &conversation_id).await?;
+        let state = entry
             .read()
-            .map_err(|_| UserError::LockPoisoned("session"))?
-            .conversation_state();
+            .map_err(|_| UserError::LockPoisoned("conversation"))?
+            .state();
         Ok(state.to_string())
     }
 
@@ -216,10 +216,10 @@ impl Gateway<WakuDeliveryService> {
         conversation_id: String,
     ) -> anyhow::Result<Vec<(String, String)>> {
         let user_ref = self.user()?;
-        let session = lookup_session(&user_ref, &conversation_id).await?;
-        let proposals = session
+        let entry = lookup_conversation(&user_ref, &conversation_id).await?;
+        let proposals = entry
             .read()
-            .map_err(|_| UserError::LockPoisoned("session"))?
+            .map_err(|_| UserError::LockPoisoned("conversation"))?
             .approved_proposals_for_current_epoch();
         Ok(display_batch(&proposals))
     }

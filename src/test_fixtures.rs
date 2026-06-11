@@ -1,5 +1,5 @@
 //! Crate-internal test fixtures: minimal trait impls for tests that need
-//! to construct a [`crate::core::Conversation`] or [`crate::session::SessionRunner`]
+//! to construct a [`crate::core::ConversationCore`] or [`crate::session::Conversation`]
 //! without standing up real MLS / scoring / steward backends.
 //!
 //! Most methods are `unreachable!()` — tests should only exercise the
@@ -25,7 +25,7 @@ use crate::{
 };
 
 /// Build a `ConsensusServiceFor<DefaultConsensusPlugin>` paired with a
-/// subscribed receiver for [`crate::session::SessionRunner::new`].
+/// subscribed receiver for [`crate::session::Conversation::new`].
 pub(crate) fn make_test_consensus_service() -> (
     ConsensusServiceFor<DefaultConsensusPlugin>,
     crate::defaults::SyncEventReceiver<String>,
@@ -244,10 +244,10 @@ impl PeerScoringPlugin for StubScoring {
 }
 
 /// Test plug-in bundle wiring the three stubs into the [`ConversationPluginsFactory`]
-/// trait so tests can construct [`crate::core::Conversation`] and
-/// [`crate::session::SessionRunner`] under their single `<CP>` parameter. The
+/// trait so tests can construct [`crate::core::ConversationCore`] and
+/// [`crate::session::Conversation`] under their single `<CP>` parameter. The
 /// factory methods are `unreachable!()` — tests build plug-in instances
-/// directly and hand them to the handle/runner constructors.
+/// directly and hand them to the conversation constructors.
 pub(crate) struct StubPluginsFactory;
 
 impl ConversationPluginsFactory for StubPluginsFactory {

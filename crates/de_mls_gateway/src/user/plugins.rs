@@ -2,7 +2,7 @@
 //!
 //! [`UserPlugins`] holds all User-level plugin state: the per-conversation
 //! factory, the [`ConsensusContext`], and the three default configs cloned
-//! into new sessions. Grouping these here keeps the `User` definition
+//! into new conversations. Grouping these here keeps the `User` definition
 //! surfacing registry + transport at top level.
 
 use de_mls::core::{
@@ -21,7 +21,7 @@ pub struct UserPlugins<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Consensus-plugin state. Owns the shared storage + signer
     /// and mints per-conv services on demand.
     pub consensus: ConsensusContext<P>,
-    /// Seed config copied into newly-created `SessionRunner`s.
+    /// Seed config copied into newly-created `Conversation`s.
     pub default_conversation_config: ConversationConfig,
     /// Seed config for the per-conversation peer-scoring plug-in.
     pub default_scoring_config: ScoringConfig,

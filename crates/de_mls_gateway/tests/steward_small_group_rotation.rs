@@ -8,8 +8,8 @@ use std::time::Duration;
 use de_mls::core::{ConversationState, StewardListConfig};
 
 mod common;
-use common::session_fixtures::{
-    SessionArc, TestUser, TransportHandle, bootstrap_joined_conversation, deliver,
+use common::conversation_fixtures::{
+    ConversationArc, TestUser, TransportHandle, bootstrap_joined_conversation, deliver,
     fast_test_config, flush_user, poll_once, settle_for,
 };
 
@@ -39,7 +39,7 @@ fn relay_all(users: &[(TestUser, TransportHandle)]) {
 fn assert_stable_no_election(
     users: &[(TestUser, TransportHandle)],
     conversation: &str,
-    sessions: &[(&str, &SessionArc)],
+    sessions: &[(&str, &ConversationArc)],
 ) {
     assert!(
         sessions[0].1.read().unwrap().is_steward(),
@@ -61,7 +61,7 @@ fn assert_stable_no_election(
             "{label} retry_round must stay 0 — no election fires for unsettled members ({conversation})"
         );
         assert_eq!(
-            s.read().unwrap().conversation_state(),
+            s.read().unwrap().state(),
             ConversationState::Working,
             "{label} must stay Working ({conversation})"
         );
@@ -92,7 +92,7 @@ fn members_over_sn_max_do_not_elect_until_settled() {
         fast_test_config(),
         StewardListConfig::new(1, 2).unwrap(),
     );
-    let s: Vec<SessionArc> = (0..3)
+    let s: Vec<ConversationArc> = (0..3)
         .map(|i| users[i].0.lookup_entry("lg").unwrap().unwrap())
         .collect();
     assert_stable_no_election(

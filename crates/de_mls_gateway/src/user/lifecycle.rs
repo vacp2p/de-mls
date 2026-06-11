@@ -6,7 +6,7 @@ use tracing::info;
 
 use de_mls::{
     core::{ConsensusPlugin, ConversationConfig, ConversationPluginsFactory},
-    session::{ConversationDeps, LeaveOutcome, SessionRunner},
+    session::{Conversation, ConversationDeps, LeaveOutcome},
 };
 
 use crate::user::{ConversationLifecycle, LockExt, User, UserError};
@@ -49,12 +49,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             scoring_config: self.plugins.default_scoring_config.clone(),
             steward_list_config: self.plugins.default_steward_list_config.clone(),
         };
-        let runner = if is_creation {
-            SessionRunner::create(conversation_id, deps)?
+        let conversation = if is_creation {
+            Conversation::create(conversation_id, deps)?
         } else {
-            SessionRunner::join(conversation_id, deps)?
+            Conversation::join(conversation_id, deps)?
         };
-        let session = Arc::new(RwLock::new(runner));
+        let entry = Arc::new(RwLock::new(conversation));
         {
             let mut conversations = self
                 .conversations
@@ -63,19 +63,19 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             if conversations.contains_key(conversation_id) {
                 return Err(UserError::ConversationAlreadyExists);
             }
-            conversations.insert(conversation_id.to_string(), session);
+            conversations.insert(conversation_id.to_string(), entry);
         }
 
-        // The runner already buffered its opening `PhaseChange`; record the
+        // The conversation already buffered its opening `PhaseChange`; record the
         // lifecycle event so integrators draining
-        // [`User::drain_lifecycle_events`] discover the session.
+        // [`User::drain_lifecycle_events`] discover the conversation.
         self.emit_lifecycle(ConversationLifecycle::Created(conversation_id.to_string()));
 
         Ok(())
     }
 
-    /// Leave the conversation. Delegates to [`SessionRunner::leave`]: in
-    /// `PendingJoin` the runner tears down locally and returns `TornDown`;
+    /// Leave the conversation. Delegates to [`Conversation::leave`]: in
+    /// `PendingJoin` the conversation tears down locally and returns `TornDown`;
     /// otherwise it opens a self-leave consensus round and returns
     /// `LeaveInitiated`. On `TornDown` this method finalises the User-side
     /// registry cleanup via `finalize_self_leave`.
@@ -86,7 +86,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
 
-        let outcome = entry_arc.write_or_err("session")?.leave()?;
+        let outcome = entry_arc.write_or_err("conversation")?.leave()?;
         match outcome {
             LeaveOutcome::TornDown => {
                 self.finalize_self_leave(conversation_id)?;
