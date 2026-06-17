@@ -221,6 +221,28 @@ impl Member {
         self.last_sync.as_deref()
     }
 
+    /// Proposal id of the most recent `VoteRequested` this member surfaced, if
+    /// any — the id to pass to [`Self::vote`].
+    pub fn pending_vote_request(&self) -> Option<u32> {
+        self.events.iter().rev().find_map(|e| match e {
+            ConversationEvent::VoteRequested { proposal_id, .. } => Some(*proposal_id),
+            _ => None,
+        })
+    }
+
+    /// The `approved` outcome this member observed for `proposal_id`, if its
+    /// consensus session has resolved.
+    pub fn consensus_outcome(&self, proposal_id: u32) -> Option<bool> {
+        self.events.iter().rev().find_map(|e| match e {
+            ConversationEvent::ConsensusReached {
+                proposal_id: id,
+                approved,
+                ..
+            } if *id == proposal_id => Some(*approved),
+            _ => None,
+        })
+    }
+
     pub fn member_id_display(&self) -> String {
         self.integ.member_id.member_id_display().to_string()
     }
@@ -331,6 +353,11 @@ impl Member {
 
     pub fn remove_member(&mut self, member_id: &[u8]) {
         self.convo.remove_member(member_id).expect("remove member");
+    }
+
+    /// Cast a manual vote on `proposal_id` (cancels any pending auto-vote).
+    pub fn vote(&mut self, proposal_id: u32, vote: bool) {
+        self.convo.vote(proposal_id, vote).expect("vote");
     }
 
     /// Submit a raw proposal with the local vote bundled. Lower-level than
