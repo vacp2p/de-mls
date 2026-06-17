@@ -7,6 +7,7 @@
 //! state; the integrator then removes the registry entry and cleans up the
 //! consensus scope.
 
+use openmls_traits::signatures::Signer;
 use std::sync::Arc;
 
 use hashgraph_like_consensus::protos::consensus::v1::Proposal;
@@ -43,7 +44,7 @@ pub enum DispatchOutcome {
     LeaveRequested,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversation<P, CP, Sig> {
     /// Ingest a joiner's key-package announcement (a [`MemberInvite`]).
     /// Drops self-echoes (`sender == self.app_id`). If the holder isn't
     /// already a member, promotes the invite to a membership-change proposal
@@ -294,7 +295,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         let conversation_id = self.conversation_id.clone();
         let mls = self.core.expect_mls_mut()?;
         let mls_members = mls.members().unwrap_or_default();
-        let payload = mls.build_message(&msg)?;
+        let payload = mls.build_message(&self.signer, &msg)?;
         self.broadcast(payload);
         self.sync_scoring_members(&mls_members);
 
@@ -397,7 +398,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
 
         let self_member_id = Arc::clone(&self.self_member_id);
         let outbound = if self.core.steward_list.is_steward(&self_member_id) {
-            match self.core.create_commit_candidate(&self_member_id) {
+            match self
+                .core
+                .create_commit_candidate(&self.signer, &self_member_id)
+            {
                 Ok(payload) => payload,
                 Err(e) => {
                     error!(

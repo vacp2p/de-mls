@@ -1,76 +1,34 @@
-//! Default implementations of the library's plug-in traits.
+//! Default implementations of the library's non-MLS plug-in traits.
 //!
 //! Contents:
-//! - [`crate::defaults::MemoryDeMlsStorage`] — in-memory MLS keystore.
 //! - [`crate::defaults::InMemoryPeerScoreStorage`] — `HashMap`-backed
 //!   peer-score storage.
 //! - [`crate::defaults::DefaultConsensusPlugin`] — in-memory consensus
 //!   backend over `hashgraph_like_consensus` types.
-//! - [`crate::defaults::DefaultMlsService`],
-//!   [`crate::defaults::DefaultPeerScoring`],
-//!   [`crate::defaults::DefaultStewardList`] — type aliases for the
-//!   default-bundle per-conversation plug-ins.
-//! - [`crate::defaults::DefaultConversationPluginsFactory`] —
-//!   `ConversationPluginsFactory` wired to the above.
+//! - [`crate::defaults::DefaultPeerScoring`],
+//!   [`crate::defaults::DefaultStewardList`] — type aliases for the reference
+//!   peer-scoring and steward-list plug-ins.
+//!
+//! The reference MLS engine (the OpenMLS provider, credentials, key-package
+//! generation, and the plug-in factory that bundles them) lives in the
+//! integrator, not here — the protocol crate names no concrete MLS backend.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex, RwLock};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use hashgraph_like_consensus::{
     events::ConsensusEventBus, scope::ConsensusScope, signing::EthereumConsensusSigner,
     storage::InMemoryConsensusStorage, types::ConsensusEvent,
 };
-use openmls_rust_crypto::MemoryStorage;
 
 use crate::core::{
-    ConsensusPlugin, ConversationPluginsFactory, DeterministicStewardList, PeerScoreStorage,
-    PeerScoringService, ScoringConfig, StewardListConfig, SyncConsensusReceiver,
-    default_score_deltas,
+    ConsensusPlugin, DeterministicStewardList, PeerScoreStorage, PeerScoringService,
+    SyncConsensusReceiver,
 };
-use crate::mls_crypto::{DeMlsStorage, KeyPackageBytes, MlsCredentials, MlsError, OpenMlsService};
 
 // ═══════════════════════════════════════════════════════════════════
-// In-memory storage backends
+// In-memory peer-score storage
 // ═══════════════════════════════════════════════════════════════════
-
-/// In-memory MLS keystore for development and testing.
-///
-/// All data is lost on restart. Production callers supply a persistent
-/// [`DeMlsStorage`] (e.g. SQLite-backed) instead.
-#[derive(Default)]
-pub struct MemoryDeMlsStorage {
-    key_package_refs: RwLock<HashSet<Vec<u8>>>,
-    mls: MemoryStorage,
-}
-
-impl MemoryDeMlsStorage {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl DeMlsStorage for MemoryDeMlsStorage {
-    type MlsStorage = MemoryStorage;
-    type StorageError = openmls_rust_crypto::MemoryStorageError;
-
-    fn store_key_package_ref(&self, hash_ref: &[u8]) -> Result<(), MlsError> {
-        self.key_package_refs.write()?.insert(hash_ref.to_vec());
-        Ok(())
-    }
-
-    fn is_our_key_package(&self, hash_ref: &[u8]) -> Result<bool, MlsError> {
-        Ok(self.key_package_refs.read()?.contains(hash_ref))
-    }
-
-    fn remove_key_package_ref(&self, hash_ref: &[u8]) -> Result<(), MlsError> {
-        self.key_package_refs.write()?.remove(hash_ref);
-        Ok(())
-    }
-
-    fn mls_storage(&self) -> &Self::MlsStorage {
-        &self.mls
-    }
-}
 
 /// `HashMap`-backed [`PeerScoreStorage`] for tests and simple deployments.
 /// Production integrators supply a durable backend.
@@ -178,89 +136,16 @@ impl ConsensusPlugin for DefaultConsensusPlugin {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Default per-conversation plug-in bundle
+// Reference plug-in type aliases
 // ═══════════════════════════════════════════════════════════════════
 
-/// MLS service type for the default-bundle `User`. Uses in-memory storage
-/// shared across every per-conversation service via `Arc` (the
-/// `Arc<S>: DeMlsStorage` blanket impl makes this work).
-pub type DefaultMlsService = OpenMlsService<Arc<MemoryDeMlsStorage>>;
-
-/// Peer-scoring plug-in type for the default-bundle `User`: the reference
-/// [`PeerScoringService`] over in-memory storage. The per-event score
-/// deltas are supplied at construction (see [`default_score_deltas`]).
+/// Reference peer-scoring plug-in: [`PeerScoringService`] over in-memory
+/// storage. The per-event score deltas are supplied at construction (see
+/// [`crate::core::default_score_deltas`]).
 pub type DefaultPeerScoring = PeerScoringService<InMemoryPeerScoreStorage>;
 
-/// Steward-list plug-in type for the default-bundle `User`: the reference
-/// [`DeterministicStewardList`].
+/// Reference steward-list plug-in: [`DeterministicStewardList`].
 pub type DefaultStewardList = DeterministicStewardList;
-
-/// Default per-conversation plug-in bundle: in-memory MLS storage shared
-/// across per-conversation services; reference scoring + steward
-/// implementations.
-pub struct DefaultConversationPluginsFactory {
-    pub(crate) storage: Arc<MemoryDeMlsStorage>,
-    pub(crate) credentials: Arc<MlsCredentials>,
-}
-
-impl DefaultConversationPluginsFactory {
-    /// Build the default factory from an MLS storage handle and the
-    /// User-level [`MlsCredentials`]. Both are cloned into every
-    /// per-conversation MLS service this factory creates.
-    pub fn new(storage: Arc<MemoryDeMlsStorage>, credentials: Arc<MlsCredentials>) -> Self {
-        Self {
-            storage,
-            credentials,
-        }
-    }
-
-    /// Mint a single-use key package from this factory's storage and
-    /// credentials.
-    pub fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
-        OpenMlsService::<Arc<MemoryDeMlsStorage>>::generate_key_package(
-            &self.storage,
-            &self.credentials,
-        )
-    }
-}
-
-impl ConversationPluginsFactory for DefaultConversationPluginsFactory {
-    type Mls = DefaultMlsService;
-    type Scoring = DefaultPeerScoring;
-    type StewardList = DefaultStewardList;
-
-    fn create_mls(&self, conversation_id: String) -> Result<Self::Mls, MlsError> {
-        OpenMlsService::new_as_creator(
-            conversation_id,
-            Arc::clone(&self.storage),
-            Arc::clone(&self.credentials),
-        )
-    }
-
-    fn welcome_mls(&self, welcome_bytes: &[u8]) -> Result<Option<Self::Mls>, MlsError> {
-        OpenMlsService::new_from_welcome(
-            welcome_bytes,
-            Arc::clone(&self.storage),
-            Arc::clone(&self.credentials),
-        )
-    }
-
-    fn make_scoring(&self, config: &ScoringConfig) -> Self::Scoring {
-        PeerScoringService::new(
-            InMemoryPeerScoreStorage::new(),
-            default_score_deltas(),
-            config.clone(),
-        )
-    }
-
-    fn make_steward_list(
-        &self,
-        conversation_id: &[u8],
-        config: StewardListConfig,
-    ) -> Self::StewardList {
-        DeterministicStewardList::empty(conversation_id.to_vec(), config)
-    }
-}
 
 #[cfg(test)]
 mod tests {

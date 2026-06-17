@@ -4,9 +4,8 @@
 //! protocol needs to name a participant: the bytes go into the MLS
 //! credential's serialized content, the steward list, scoring keys, and
 //! every other "who is this?" comparison. MLS-specific binding (signing
-//! keypair, credential) lives in [`crate::mls_crypto::MlsCredentials`],
-//! built from a `MemberId` at User init and shared across every
-//! per-conversation service.
+//! keypair, credential) is built from a `MemberId` by the integrator and
+//! supplied to the engine — the protocol layer never sees it.
 //!
 //! The library is source-agnostic: integrators bring their own impl
 //! that derives bytes from whatever they use (Ethereum wallet address,

@@ -1,467 +1,126 @@
-//! Shared fixtures for integration tests.
+//! Shared fixtures for de-mls integration tests.
+//!
+//! A minimal [`ConversationPluginsFactory`] over the OpenMLS reference provider
+//! (`OpenMlsRustCrypto`), plus the credential/key-package helpers a test needs.
+//! The library names no concrete provider; tests supply this one.
 #![allow(dead_code)]
 
 pub mod wallet;
 
-pub use wallet::WalletMemberId;
-
-use std::sync::{
-    Arc,
-    atomic::{AtomicU32, Ordering},
-};
+use std::cell::RefCell;
 
 use de_mls::core::{
-    BufferedCommitCandidate, ConversationQueues, CoreError, DeterministicStewardList,
-    FreezeOutcome, NoopReason, OperatingMode, PeerScoringService, ProcessResult, ProposalKind,
-    ScoringConfig, StewardListConfig, StewardListPlugin, compute_commit_hash, default_score_deltas,
-    finalize_freeze_round, member_set, process_inbound,
+    ConversationPluginsFactory, DeterministicStewardList, PeerScoringService, ScoringConfig,
+    StewardListConfig, default_score_deltas,
 };
-use de_mls::defaults::{InMemoryPeerScoreStorage, MemoryDeMlsStorage};
-use de_mls::member_id::MemberId;
-use de_mls::mls_crypto::{
-    CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MlsCommitInput, MlsCredentials,
-    MlsService, OpenMlsService,
-};
-use de_mls::protos::de_mls::messages::v1::{
-    AppMessage, CommitCandidate, ConversationUpdateRequest, MemberInvite,
-    conversation_update_request,
-};
-use de_mls_ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
-use prost::Message as _;
+use de_mls::defaults::{DefaultPeerScoring, DefaultStewardList, InMemoryPeerScoreStorage};
+use de_mls::mls_crypto::{KeyPackageBytes, MlsError, OpenMlsService};
+use openmls::credentials::{BasicCredential, CredentialWithKey};
+use openmls::key_packages::KeyPackage;
+use openmls::prelude::Ciphersuite;
+use openmls::prelude::tls_codec::Serialize as _;
+use openmls_basic_credential::SignatureKeyPair;
+use openmls_rust_crypto::OpenMlsRustCrypto;
+use openmls_traits::signatures::Signer;
 
-/// Test-side MLS service: storage is `Arc`-shared so a single helper can
-/// build many per-group services from one identity. MLS credentials live
-/// at the test-fixture level (one per identity), passed in via
-/// `Arc<MlsCredentials>`.
-pub type TestMls = OpenMlsService<Arc<MemoryDeMlsStorage>>;
+/// Ciphersuite the test fixtures pin.
+pub const TEST_SUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
-pub const DEFAULT_SCORE: i64 = 100;
+/// MLS service type for the test factory: the reference engine over
+/// `OpenMlsRustCrypto`.
+pub type TestMls = OpenMlsService<OpenMlsRustCrypto>;
 
-// ─────────────────────────── Test-only protocol helper ───────────────────────────
-
-/// Test-side mirror of `Conversation::create_commit_candidate`.
-///
-/// Production callers go through `Conversation::create_commit_candidate`,
-/// which pulls `group`, `mls`, and `steward` from `&mut self`. Tests
-/// keep these as separate fields on `StewardHandle` / `JoinerHandle`
-/// (no `state_machine` / `scoring`), so we can't use the entry method
-/// directly. This helper takes the same fields as parameters and runs
-/// identical logic. **Keep in sync with `Conversation::create_commit_candidate`.**
-pub fn build_commit_candidate(
-    group: &mut ConversationQueues,
-    mls: &mut TestMls,
-    steward_list: &DeterministicStewardList,
-    in_recovery: bool,
-    self_member_id: &[u8],
-    app_id: &[u8],
-) -> Result<Option<OutboundPacket>, CoreError> {
-    if !steward_list.is_steward(self_member_id) && !in_recovery {
-        return Err(CoreError::NotASteward);
-    }
-    if group.approved_proposals().is_empty() {
-        return Err(CoreError::NoProposals);
-    }
-
-    let self_removal_pending = group.approved_proposals().values().any(|req| {
-        matches!(
-            req.payload.as_ref(),
-            Some(conversation_update_request::Payload::RemoveMember(r))
-                if r.member_id == self_member_id
-        )
-    });
-    if self_removal_pending {
-        return Ok(None);
-    }
-
-    let non_mls_ids: Vec<u32> = group
-        .approved_proposals()
-        .iter()
-        .filter(|(_, req)| ProposalKind::of(req).is_governance())
-        .map(|(&id, _)| id)
-        .collect();
-    if !non_mls_ids.is_empty() {
-        return Err(CoreError::UnexpectedNonMlsProposals {
-            proposal_ids: non_mls_ids,
-        });
-    }
-
-    let current_members = mls.members()?;
-    let current_members_set = member_set(&current_members);
-    let is_member = |id: &[u8]| current_members_set.contains(id);
-    let urgent_target = group.urgent_commit_target().map(|t| t.to_vec());
-
-    let k_max = mls.commit_batch_max();
-    let approved = group.approved_proposals();
-    let mut updates = Vec::with_capacity(approved.len().min(k_max));
-    let mut joiner_identities = Vec::new();
-    for (_pid, proposal) in approved.iter().take(k_max) {
-        match proposal.payload.as_ref() {
-            Some(conversation_update_request::Payload::MemberInvite(im)) => {
-                if urgent_target.is_some() {
-                    continue;
-                }
-                if is_member(&im.member_id) {
-                    continue;
-                }
-                updates.push(MlsCommitInput::Add(KeyPackageBytes::new(
-                    im.key_package_bytes.clone(),
-                    im.member_id.clone(),
-                )));
-                joiner_identities.push(im.member_id.clone());
-            }
-            Some(conversation_update_request::Payload::RemoveMember(rm)) => {
-                if let Some(target) = urgent_target.as_deref()
-                    && rm.member_id != target
-                {
-                    continue;
-                }
-                if !is_member(&rm.member_id) {
-                    continue;
-                }
-                updates.push(MlsCommitInput::Remove(rm.member_id.clone()));
-            }
-            _ => return Err(CoreError::InvalidConversationUpdateRequest),
-        }
-    }
-
-    if updates.is_empty() {
-        return Ok(None);
-    }
-
-    let MlsCommitCandidate {
-        proposals: mls_proposals,
-        commit,
-        welcome,
-    } = mls.create_commit_candidate(&updates)?;
-
-    let candidate = CommitCandidate {
-        conversation_id: group.name_bytes().to_vec(),
-        mls_proposals,
-        commit_message: commit,
-        steward_member_id: self_member_id.to_vec(),
+/// Build a fresh credential + signer for `member_id` (the integrator-side
+/// "credentials" the library no longer owns).
+pub fn test_credential(member_id: &[u8]) -> (CredentialWithKey, SignatureKeyPair) {
+    let signer = SignatureKeyPair::new(TEST_SUITE.signature_algorithm()).expect("signer");
+    let credential = CredentialWithKey {
+        credential: BasicCredential::new(member_id.to_vec()).into(),
+        signature_key: signer.to_public_vec().into(),
     };
-
-    let commit_hash = compute_commit_hash(&candidate.commit_message);
-    let epoch = mls.current_epoch()?;
-    let max_candidates = mls.members()?.len();
-    let _ = group.add_freeze_candidate(
-        BufferedCommitCandidate {
-            candidate_msg: candidate.clone(),
-            commit_hash,
-            is_local_candidate: true,
-            welcome_bytes: welcome,
-            joiner_identities,
-        },
-        epoch,
-        max_candidates,
-    );
-
-    let candidate_msg: AppMessage = candidate.into();
-    Ok(Some(OutboundPacket::new(
-        candidate_msg.encode_to_vec(),
-        APP_MSG_SUBTOPIC,
-        group.name(),
-        app_id,
-    )))
+    (credential, signer)
 }
 
-// ─────────────────────────── MLS + group setup ───────────────────────────
-
-pub fn default_steward_list_config() -> StewardListConfig {
-    StewardListConfig::new(1, 5).unwrap()
+/// Reference plug-in factory over `OpenMlsRustCrypto`. Holds the member's
+/// credential + signer; mints key packages and (per-conversation) the MLS
+/// engine. Mirrors what an integrator wires up.
+pub struct TestPluginsFactory {
+    credential: CredentialWithKey,
+    signer: SignatureKeyPair,
+    /// Provider stashed by [`Self::generate_key_package`] so the matching
+    /// [`Self::welcome_mls`] can reuse it (it holds the KP's private keys).
+    pending_provider: RefCell<Option<OpenMlsRustCrypto>>,
 }
 
-/// Build a fresh identity, MLS credentials, and storage. Both
-/// credentials and storage are `Arc`-shared so a later helper can
-/// construct multiple per-group services from one logical identity.
-pub fn setup_identity_storage(
-    wallet_hex: &str,
-) -> (
-    Arc<WalletMemberId>,
-    Arc<MlsCredentials>,
-    Arc<MemoryDeMlsStorage>,
-) {
-    let member_id = Arc::new(WalletMemberId::from_hex(wallet_hex));
-    let credentials = Arc::new(MlsCredentials::from_member_id(member_id.as_ref()).unwrap());
-    let storage = Arc::new(MemoryDeMlsStorage::new());
-    (member_id, credentials, storage)
-}
-
-/// Test-side packet router. WELCOME_SUBTOPIC carries [`MemberInvite`]
-/// (KP-broadcast) and is surfaced as `MembershipChangeReceived`;
-/// raw MLS welcomes flow out of band — tests apply them via
-/// [`JoinerHandle::accept_welcome`]. APP_MSG_SUBTOPIC delegates to
-/// [`process_inbound`].
-pub fn process_inbound_compat(
-    group: &mut ConversationQueues,
-    mls: Option<&mut TestMls>,
-    payload: &[u8],
-    subtopic: &str,
-) -> Result<ProcessResult, de_mls::core::CoreError> {
-    if subtopic == WELCOME_SUBTOPIC {
-        let invite = MemberInvite::decode(payload)?;
-        if let Some(mls) = mls
-            && mls.is_member(&invite.member_id)
-        {
-            return Ok(ProcessResult::Noop(NoopReason::UnknownAppMessage));
+impl TestPluginsFactory {
+    pub fn new(credential: CredentialWithKey, signer: SignatureKeyPair) -> Self {
+        Self {
+            credential,
+            signer,
+            pending_provider: RefCell::new(None),
         }
-        Ok(ProcessResult::MembershipChangeReceived(Box::new(
-            ConversationUpdateRequest {
-                payload: Some(conversation_update_request::Payload::MemberInvite(invite)),
-            },
-        )))
-    } else if subtopic == APP_MSG_SUBTOPIC {
-        let Some(mls) = mls else {
-            // App messages on a conversation with no MLS state are
-            // silently ignored. Mirrors `Conversation::process_inbound_packet`,
-            // which gates app payloads on `conversation.mls().is_some()`.
-            return Ok(ProcessResult::Noop(NoopReason::UnknownAppMessage));
-        };
-        process_inbound(group, mls, payload)
-    } else {
-        panic!("process_inbound_compat called with unknown subtopic: {subtopic}")
+    }
+
+    /// Mint a single-use key package in a fresh provider, stashing that
+    /// provider so a later `welcome_mls` can join with the KP's private keys.
+    pub fn generate_key_package(&self) -> KeyPackageBytes {
+        let provider = OpenMlsRustCrypto::default();
+        let member_id = self.credential.credential.serialized_content().to_vec();
+        let bundle = KeyPackage::builder()
+            .build(TEST_SUITE, &provider, &self.signer, self.credential.clone())
+            .expect("key package");
+        let bytes = bundle
+            .key_package()
+            .tls_serialize_detached()
+            .expect("kp tls");
+        *self.pending_provider.borrow_mut() = Some(provider);
+        KeyPackageBytes::new(bytes, member_id)
     }
 }
 
-/// Test conversation: bundles `Conversation`, the per-group MLS service, the
-/// steward-list plug-in, and the self identity. Tests access them as
-/// individual fields; `Deref<Target = Conversation>` keeps proposal-queue calls
-/// working unchanged (e.g. `conversation.insert_approved_proposal(...)`).
-pub struct StewardHandle {
-    pub group: ConversationQueues,
-    pub mls: TestMls,
-    pub steward_list: DeterministicStewardList,
-    pub member_id: Vec<u8>,
-    pub liveness_criteria_yes: bool,
-    pub pending_update_max_epochs: u32,
-    pub operating_mode: OperatingMode,
-}
+impl ConversationPluginsFactory for TestPluginsFactory {
+    type Mls = TestMls;
+    type Scoring = DefaultPeerScoring;
+    type StewardList = DefaultStewardList;
 
-impl StewardHandle {
-    /// Self member-id bytes for plug-in queries.
-    pub fn self_id(&self) -> &[u8] {
-        &self.member_id
-    }
-
-    /// Test convenience: member-id bytes stored on the conversation; matches
-    /// the value the User layer caches on `User::self_member_id`.
-    pub fn self_member_id(&self) -> &[u8] {
-        &self.member_id
-    }
-}
-
-impl std::ops::Deref for StewardHandle {
-    type Target = ConversationQueues;
-    fn deref(&self) -> &ConversationQueues {
-        &self.group
-    }
-}
-
-impl std::ops::DerefMut for StewardHandle {
-    fn deref_mut(&mut self) -> &mut ConversationQueues {
-        &mut self.group
-    }
-}
-
-pub fn setup_steward(conversation_id: &str, wallet_hex: &str) -> StewardHandle {
-    setup_steward_with_config(conversation_id, wallet_hex, default_steward_list_config())
-}
-
-pub fn setup_steward_with_config(
-    conversation_id: &str,
-    wallet_hex: &str,
-    config: StewardListConfig,
-) -> StewardHandle {
-    let (member_id, credentials, storage) = setup_identity_storage(wallet_hex);
-    let mls = OpenMlsService::new_as_creator(
-        conversation_id.to_string(),
-        storage,
-        Arc::clone(&credentials),
-    )
-    .unwrap();
-    let member_id_bytes = member_id.member_id_bytes().to_vec();
-    let group = ConversationQueues::new(conversation_id);
-    let mut steward_list =
-        DeterministicStewardList::empty(conversation_id.as_bytes().to_vec(), config);
-    steward_list
-        .install_list(0, std::slice::from_ref(&member_id_bytes), 1, 0)
-        .expect("bootstrap list install");
-    StewardHandle {
-        group,
-        mls,
-        steward_list,
-        member_id: member_id_bytes,
-        liveness_criteria_yes: de_mls::core::DEFAULT_LIVENESS_CRITERIA_YES,
-        pending_update_max_epochs: de_mls::core::DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
-        operating_mode: OperatingMode::Normal,
-    }
-}
-
-/// Pre-join conversation for a joiner: the joiner has no MLS service yet (they
-/// haven't accepted a welcome), so test code keeps `credentials` and
-/// `storage` to build one via [`OpenMlsService::new_from_welcome`] when a
-/// welcome arrives. KP generation uses the same storage/credentials pair.
-pub struct JoinerHandle {
-    pub member_id: Arc<WalletMemberId>,
-    pub credentials: Arc<MlsCredentials>,
-    pub storage: Arc<MemoryDeMlsStorage>,
-    pub group: ConversationQueues,
-    pub mls: Option<TestMls>,
-    pub steward_list: DeterministicStewardList,
-    pub kp_packet: OutboundPacket,
-    pub liveness_criteria_yes: bool,
-    pub pending_update_max_epochs: u32,
-    pub operating_mode: OperatingMode,
-}
-
-impl JoinerHandle {
-    /// Test convenience: identity bytes stored on the conversation; matches the
-    /// value the User layer caches on `User::self_member_id`.
-    pub fn self_member_id(&self) -> Vec<u8> {
-        self.member_id.member_id_bytes().to_vec()
-    }
-
-    /// Try to accept a serialized welcome, materialising the joiner's
-    /// MLS service if it addresses our key package. Returns `Ok(None)`
-    /// when the welcome isn't for us.
-    pub fn try_accept_welcome(
+    fn create_mls(
         &self,
-        welcome_bytes: &[u8],
-    ) -> Result<Option<TestMls>, de_mls::mls_crypto::MlsError> {
-        OpenMlsService::new_from_welcome(
-            welcome_bytes,
-            Arc::clone(&self.storage),
-            Arc::clone(&self.credentials),
+        conversation_id: String,
+        key_package: &[u8],
+        signer: &impl Signer,
+    ) -> Result<Self::Mls, MlsError> {
+        OpenMlsService::new_as_creator(
+            conversation_id,
+            OpenMlsRustCrypto::default(),
+            key_package,
+            signer,
         )
     }
 
-    /// Accept raw MLS welcome bytes (the kind `steward_add_joiner`
-    /// returns) and store the resulting MLS service on the conversation.
-    /// Panics if the welcome doesn't match this joiner's key package —
-    /// a test setup bug.
-    pub fn accept_welcome(&mut self, welcome_bytes: &[u8]) {
-        let svc = self
-            .try_accept_welcome(welcome_bytes)
-            .unwrap()
-            .expect("welcome did not match this joiner's KP");
-        self.mls = Some(svc);
+    fn welcome_mls(&self, welcome_bytes: &[u8]) -> Result<Option<Self::Mls>, MlsError> {
+        // No stashed provider (we never minted a KP) → a fresh empty provider
+        // holds no matching key package, so the join cleanly yields `None`.
+        let provider = self
+            .pending_provider
+            .borrow_mut()
+            .take()
+            .unwrap_or_default();
+        OpenMlsService::new_from_welcome(welcome_bytes, provider)
     }
-}
 
-pub fn setup_joiner(conversation_id: &str, wallet_hex: &str) -> JoinerHandle {
-    setup_joiner_with_config(conversation_id, wallet_hex, default_steward_list_config())
-}
-
-pub fn setup_joiner_with_config(
-    conversation_id: &str,
-    wallet_hex: &str,
-    config: StewardListConfig,
-) -> JoinerHandle {
-    let (member_id, credentials, storage) = setup_identity_storage(wallet_hex);
-    let group = ConversationQueues::new(conversation_id);
-    let steward_list = DeterministicStewardList::empty(conversation_id.as_bytes().to_vec(), config);
-    let key_package =
-        OpenMlsService::<Arc<MemoryDeMlsStorage>>::generate_key_package(&storage, &credentials)
-            .unwrap();
-    let invite = MemberInvite {
-        key_package_bytes: key_package.as_bytes().to_vec(),
-        member_id: key_package.member_id().to_vec(),
-    };
-    let kp_packet =
-        OutboundPacket::key_package(conversation_id, b"test-app-id", invite.encode_to_vec());
-    JoinerHandle {
-        member_id,
-        credentials,
-        storage,
-        group,
-        mls: None,
-        steward_list,
-        kp_packet,
-        liveness_criteria_yes: de_mls::core::DEFAULT_LIVENESS_CRITERIA_YES,
-        pending_update_max_epochs: de_mls::core::DEFAULT_PENDING_UPDATE_MAX_EPOCHS,
-        operating_mode: OperatingMode::Normal,
+    fn make_scoring(&self, config: &ScoringConfig) -> Self::Scoring {
+        PeerScoringService::new(
+            InMemoryPeerScoreStorage::new(),
+            default_score_deltas(),
+            config.clone(),
+        )
     }
-}
 
-/// Full join: steward processes the joiner's KP-broadcast packet,
-/// commits, and finalizes the freeze round. Returns
-/// `(welcome_bytes, batch_packet)` — `welcome_bytes` is the raw MLS
-/// welcome blob the joiner feeds into
-/// [`JoinerHandle::accept_welcome`].
-///
-/// Proposal IDs come from a process-local atomic counter starting at 100 —
-/// high enough not to collide with the manually-picked IDs test code uses
-/// for direct `insert_approved_proposal` calls.
-pub fn steward_add_joiner(
-    steward_handle: &mut StewardHandle,
-    joiner_kp_packet: &OutboundPacket,
-) -> (Vec<u8>, OutboundPacket) {
-    static PROPOSAL_COUNTER: AtomicU32 = AtomicU32::new(100);
-
-    let invite = MemberInvite::decode(joiner_kp_packet.payload.as_slice()).unwrap();
-    if steward_handle.mls.is_member(&invite.member_id) {
-        panic!("Expected key package skipped for already-member");
+    fn make_steward_list(
+        &self,
+        conversation_id: &[u8],
+        config: StewardListConfig,
+    ) -> Self::StewardList {
+        DeterministicStewardList::empty(conversation_id.to_vec(), config)
     }
-    let gur = ConversationUpdateRequest {
-        payload: Some(conversation_update_request::Payload::MemberInvite(invite)),
-    };
-
-    let proposal_id = PROPOSAL_COUNTER.fetch_add(1, Ordering::Relaxed);
-    steward_handle
-        .group
-        .insert_approved_proposal(proposal_id, gur);
-    let self_id = steward_handle.member_id.clone();
-    let packets = build_commit_candidate(
-        &mut steward_handle.group,
-        &mut steward_handle.mls,
-        &steward_handle.steward_list,
-        steward_handle.operating_mode == OperatingMode::Recovery,
-        &self_id,
-        b"test-app-id",
-    )
-    .unwrap();
-
-    let finalize = finalize_freeze_round(
-        &mut steward_handle.group,
-        &mut steward_handle.mls,
-        &steward_handle.steward_list,
-        steward_handle.operating_mode == OperatingMode::Recovery,
-        false,
-        &self_id,
-    )
-    .unwrap();
-    let welcome_bytes = match finalize.outcome {
-        FreezeOutcome::Applied { result, welcome } => {
-            assert!(
-                matches!(result, ProcessResult::ConversationUpdated),
-                "Expected ConversationUpdated, got {:?}",
-                result
-            );
-            welcome
-                .expect("Expected a welcome artifact from finalize_freeze_round")
-                .welcome_bytes
-        }
-        other => panic!("Expected Applied, got {:?}", other),
-    };
-
-    let batch_packet = packets
-        .iter()
-        .find(|p| p.subtopic == APP_MSG_SUBTOPIC)
-        .expect("Expected batch proposals packet")
-        .clone();
-
-    (welcome_bytes, batch_packet)
-}
-
-// ─────────────────────────── Scoring ───────────────────────────
-
-pub fn make_scoring() -> PeerScoringService<InMemoryPeerScoreStorage> {
-    PeerScoringService::new(
-        InMemoryPeerScoreStorage::new(),
-        default_score_deltas(),
-        ScoringConfig {
-            default_score: DEFAULT_SCORE,
-            threshold: 0,
-        },
-    )
 }

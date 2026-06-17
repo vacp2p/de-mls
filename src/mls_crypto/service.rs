@@ -2,9 +2,7 @@
 //!
 //! DE-MLS talks to an MLS engine only through [`MlsService`]. Methods take
 //! boundary types from [`crate::mls_crypto`] (wire bytes, [`MlsCommitInput`],
-//! etc.) so protocol and app code do not depend on a concrete engine. The
-//! reference engine and its [`CIPHERSUITE`](crate::mls_crypto::CIPHERSUITE)
-//! live alongside in the `mls_crypto` engine submodule.
+//! etc.) so protocol and app code do not depend on a concrete engine.
 //!
 //! # Construction
 //!
@@ -13,6 +11,8 @@
 //! [`OpenMlsService`](crate::mls_crypto::OpenMlsService), because a joiner must
 //! publish a key package before any per-conversation service exists.
 
+use openmls_traits::signatures::Signer;
+
 use crate::{
     mls_crypto::{
         CommitCandidate, DecryptResult, MlsCommitInput, MlsError, MlsMessageKind,
@@ -20,6 +20,13 @@ use crate::{
     },
     protos::de_mls::messages::v1::AppMessage,
 };
+
+/// Ceiling on MLS proposals per commit batch used by the reference engine.
+/// Defends against runaway batch growth when freeze recovery preserves work
+/// across multiple failed cycles. Per-node policy; not synced via
+/// `ConversationSync`. Implementations may return it from
+/// [`MlsService::commit_batch_max`] or choose their own.
+pub const DEFAULT_COMMIT_BATCH_MAX: usize = 50;
 
 /// Per-conversation MLS backend. Each instance corresponds to one MLS group.
 ///
@@ -31,7 +38,7 @@ pub trait MlsService {
 
     /// Maximum number of MLS proposals the steward will pack into one commit
     /// batch. Implementation-specific policy — the reference engine caps at
-    /// [`DEFAULT_COMMIT_BATCH_MAX`](crate::mls_crypto::DEFAULT_COMMIT_BATCH_MAX).
+    /// [`DEFAULT_COMMIT_BATCH_MAX`].
     fn commit_batch_max(&self) -> usize;
 
     // ── Conversation lifecycle ──
@@ -66,6 +73,7 @@ pub trait MlsService {
     /// to roll back.
     fn create_commit_candidate(
         &mut self,
+        signer: &impl Signer,
         updates: &[MlsCommitInput],
     ) -> Result<CommitCandidate, MlsError>;
 
@@ -115,12 +123,16 @@ pub trait MlsService {
 
     /// Encrypt an application message for the conversation, returning the raw
     /// MLS wire bytes.
-    fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, MlsError>;
+    fn encrypt(&mut self, signer: &impl Signer, plaintext: &[u8]) -> Result<Vec<u8>, MlsError>;
 
     /// Encode and encrypt `app_msg`, returning the raw payload bytes. The
     /// session wraps these into an [`Outbound`](crate::session::Outbound); the
     /// convenience path most senders use.
-    fn build_message(&mut self, app_msg: &AppMessage) -> Result<Vec<u8>, MlsError>;
+    fn build_message(
+        &mut self,
+        signer: &impl Signer,
+        app_msg: &AppMessage,
+    ) -> Result<Vec<u8>, MlsError>;
 
     /// Strict app-subtopic decrypt: accepts only `Application` messages,
     /// silently ignoring anything else (including proposals and commits).

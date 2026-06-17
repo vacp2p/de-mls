@@ -1,6 +1,7 @@
 //! Applying resolved consensus outcomes to the conversation.
 
 use hashgraph_like_consensus::{storage::ConsensusStorage, types::ConsensusEvent};
+use openmls_traits::signatures::Signer;
 use prost::Message;
 use tracing::{error, info};
 
@@ -15,7 +16,7 @@ use crate::{
     session::{Conversation, ConversationError, ConversationState},
 };
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversation<P, CP, Sig> {
     /// Apply one resolved outcome: surface the decision to the integrator,
     /// apply the queue effects, then run whatever follow-up the result
     /// calls for (election install/retry, freeze entry, emergency scoring).

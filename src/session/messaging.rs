@@ -4,6 +4,7 @@
 //! Also defines [`Outbound`] — the conversation's I/O-agnostic product, and
 //! [`build_key_package_announcement`] — the encoding helper for KP broadcasts.
 
+use openmls_traits::signatures::Signer;
 use prost::Message;
 
 use crate::{
@@ -30,7 +31,7 @@ pub struct Outbound {
     pub payload: Vec<u8>,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversation<P, CP, Sig> {
     /// Buffer a chat message for broadcast. The conversation never sends — the
     /// message is enqueued and the integrator drains it via
     /// [`Conversation::drain_outbound`]. Blocked in `PendingJoin` (no keys
@@ -54,7 +55,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             conversation_id: self.conversation_id.clone(),
         }
         .into();
-        let payload = self.core.expect_mls_mut()?.build_message(&app_msg)?;
+        let payload = self
+            .core
+            .expect_mls_mut()?
+            .build_message(&self.signer, &app_msg)?;
         self.broadcast(payload);
         Ok(())
     }

@@ -1,63 +1,134 @@
-//! OpenMLS-backed implementation of [`MlsService`].
+//! [`OpenMlsService`] — the OpenMLS-backed
+//! [`MlsService`] engine: the per-conversation
+//! struct, its `new_as_creator` / `new_from_welcome` constructors, and the full
+//! trait implementation.
 //!
-//! The trait definition lives in the `mls_crypto` contract module; this file
-//! is the reference impl for the OpenMLS engine. It works with any
-//! `DeMlsStorage` whose `MlsStorage` implements
-//! [`openmls_traits::storage::StorageProvider`] — the impl is not tied to
-//! `openmls_rust_crypto::MemoryStorage`.
+//! Generic over the OpenMLS provider `P` (crypto + rand + storage), which it
+//! owns, so it pins no storage or crypto backend — `&self.provider` and
+//! `&mut self.group` are disjoint fields, so no borrow-splitting adapter is
+//! needed.
 
-use openmls::{
-    group::MlsGroup,
-    key_packages::KeyPackageIn,
-    prelude::{
-        ContentType, DeserializeBytes, MlsMessageBodyIn, MlsMessageIn, ProcessedMessageContent,
-        Proposal, ProtocolMessage, ProtocolVersion,
-    },
+use std::error::Error as StdError;
+
+use openmls::credentials::CredentialWithKey;
+use openmls::group::{
+    GroupId, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, StagedCommit, StagedWelcome,
+    WelcomeError,
 };
-use openmls_traits::{
-    OpenMlsProvider, crypto::OpenMlsCrypto, random::OpenMlsRand, storage::StorageProvider,
+use openmls::key_packages::KeyPackageIn;
+use openmls::prelude::{
+    ContentType, DeserializeBytes, MlsMessageBodyIn, MlsMessageIn, ProcessedMessageContent,
+    Proposal, ProtocolMessage, ProtocolVersion,
 };
+use openmls_traits::storage::StorageProvider;
+use openmls_traits::{OpenMlsProvider, signatures::Signer};
 use prost::Message;
 
 use crate::{
     mls_crypto::{
-        CommitCandidate, DecryptResult, MlsCommitInput, MlsError, MlsMessageKind,
-        MlsProposalOutput, MlsService, StagedCandidateResult,
-        engine::{DEFAULT_COMMIT_BATCH_MAX, DeMlsStorage, OpenMlsService},
+        CommitCandidate, DEFAULT_COMMIT_BATCH_MAX, DecryptResult, MlsCommitInput, MlsError,
+        MlsMessageKind, MlsProposalOutput, MlsService, StagedCandidateResult,
     },
     protos::de_mls::messages::v1::AppMessage,
 };
 
-/// Internal OpenMLS provider binding a crypto/rand provider `C` to the
-/// configured storage backend.
-pub(super) struct MlsProvider<'a, T: StorageProvider<1>, C> {
-    crypto: &'a C,
-    storage: &'a T,
+/// OpenMLS-backed MLS service, scoped to a single conversation.
+///
+/// Owns the OpenMLS provider `P` (crypto + rand + storage — e.g.
+/// `openmls_rust_crypto::OpenMlsRustCrypto`), one `MlsGroup`, and an optional
+/// staged-commit slot for the inbound stage→merge/discard pipeline. The
+/// integrator chooses `P`; the engine pins no storage or crypto backend.
+///
+/// The service holds no identity material either: the credential and
+/// ciphersuite arrive in the creator's key package at construction, and the
+/// signer is passed in per call (see the
+/// [`MlsService`] signing methods).
+pub struct OpenMlsService<P: OpenMlsProvider> {
+    provider: P,
+    conversation_id: String,
+    group: MlsGroup,
+    pending_staged_commit: Option<StagedCommit>,
 }
 
-impl<'a, T: StorageProvider<1>, C> MlsProvider<'a, T, C> {
-    pub(super) fn new(crypto: &'a C, storage: &'a T) -> Self {
-        Self { crypto, storage }
-    }
-}
-
-impl<'a, T: StorageProvider<1>, C: OpenMlsCrypto + OpenMlsRand> OpenMlsProvider
-    for MlsProvider<'a, T, C>
+impl<P> OpenMlsService<P>
+where
+    P: OpenMlsProvider,
+    <P::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
 {
-    type CryptoProvider = C;
-    type RandProvider = C;
-    type StorageProvider = T;
+    /// Create a fresh MLS group as the sole initial member ("creator").
+    ///
+    /// The creator's own `key_package` supplies the leaf credential and the
+    /// ciphersuite;
+    pub fn new_as_creator(
+        conversation_id: String,
+        provider: P,
+        key_package: &[u8],
+        signer: &impl Signer,
+    ) -> Result<Self, MlsError> {
+        let group = {
+            let (kp_in, _) = KeyPackageIn::tls_deserialize_bytes(key_package)?;
+            let kp = kp_in
+                .validate(provider.crypto(), ProtocolVersion::Mls10)
+                .map_err(MlsError::storage)?;
+            let ciphersuite = kp.ciphersuite();
+            let credential = CredentialWithKey {
+                credential: kp.leaf_node().credential().clone(),
+                signature_key: kp.leaf_node().signature_key().clone(),
+            };
+            let config = MlsGroupCreateConfig::builder()
+                .ciphersuite(ciphersuite)
+                .use_ratchet_tree_extension(true)
+                .build();
+            MlsGroup::new_with_group_id(
+                &provider,
+                signer,
+                &config,
+                GroupId::from_slice(conversation_id.as_bytes()),
+                credential,
+            )?
+        };
 
-    fn crypto(&self) -> &Self::CryptoProvider {
-        self.crypto
+        Ok(Self {
+            provider,
+            conversation_id,
+            group,
+            pending_staged_commit: None,
+        })
     }
 
-    fn rand(&self) -> &Self::RandProvider {
-        self.crypto
-    }
+    /// Try to join a group from a serialized welcome, using `provider` — which
+    /// must hold the joiner's key-package private keys from the earlier
+    /// key-package build.
+    ///
+    /// Returns `Ok(None)` when the welcome doesn't address one of our key
+    /// packages — the "not for us" branch, not an error — detected by the
+    /// `NoMatchingKeyPackage` / `JoinerSecretNotFound` join errors.
+    pub fn new_from_welcome(welcome_bytes: &[u8], provider: P) -> Result<Option<Self>, MlsError> {
+        let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(welcome_bytes)?;
+        let welcome = match mls_message.extract() {
+            MlsMessageBodyIn::Welcome(w) => w,
+            _ => return Ok(None),
+        };
 
-    fn storage(&self) -> &Self::StorageProvider {
-        self.storage
+        let config = MlsGroupJoinConfig::builder()
+            .use_ratchet_tree_extension(true)
+            .build();
+        let staged = match StagedWelcome::new_from_welcome(&provider, &config, welcome, None) {
+            Ok(staged) => staged,
+            Err(WelcomeError::NoMatchingKeyPackage | WelcomeError::JoinerSecretNotFound) => {
+                return Ok(None);
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let group = staged.into_group(&provider)?;
+
+        let conversation_id = String::from_utf8_lossy(group.group_id().as_slice()).to_string();
+        Ok(Some(Self {
+            provider,
+            conversation_id,
+            group,
+            pending_staged_commit: None,
+        }))
     }
 }
 
@@ -88,10 +159,10 @@ fn extract_proposal_action(
     }
 }
 
-impl<S, C> MlsService for OpenMlsService<S, C>
+impl<P> MlsService for OpenMlsService<P>
 where
-    S: DeMlsStorage,
-    C: OpenMlsCrypto + OpenMlsRand,
+    P: OpenMlsProvider,
+    <P::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
 {
     fn conversation_id(&self) -> &str {
         &self.conversation_id
@@ -107,7 +178,7 @@ where
 
     fn delete(&mut self) -> Result<(), MlsError> {
         self.group
-            .delete(self.storage.mls_storage())
+            .delete(self.provider.storage())
             .map_err(MlsError::storage)
     }
 
@@ -139,12 +210,10 @@ where
 
     fn create_commit_candidate(
         &mut self,
+        signer: &impl Signer,
         updates: &[MlsCommitInput],
     ) -> Result<CommitCandidate, MlsError> {
-        let crypto = &self.crypto;
-        let mls_storage = self.storage.mls_storage();
-        let provider = MlsProvider::new(crypto, mls_storage);
-        let signer = self.credentials.signer();
+        let provider = &self.provider;
         let group = &mut self.group;
         let mut mls_proposals = Vec::new();
 
@@ -158,7 +227,7 @@ where
                         .validate(provider.crypto(), ProtocolVersion::Mls10)
                         .map_err(MlsError::storage)?;
                     let (mls_message_out, _proposal_ref) =
-                        group.propose_add_member(&provider, signer, &kp)?;
+                        group.propose_add_member(provider, signer, &kp)?;
                     mls_proposals.push(mls_message_out.to_bytes()?);
                 }
                 MlsCommitInput::Remove(member_id) => {
@@ -171,7 +240,7 @@ where
                     });
                     if let Some(index) = member_index {
                         let (mls_message_out, _proposal_ref) =
-                            group.propose_remove_member(&provider, signer, index)?;
+                            group.propose_remove_member(provider, signer, index)?;
                         mls_proposals.push(mls_message_out.to_bytes()?);
                     }
                 }
@@ -179,7 +248,7 @@ where
         }
 
         let (commit_msg, welcome, _group_info) =
-            group.commit_to_pending_proposals(&provider, signer)?;
+            group.commit_to_pending_proposals(provider, signer)?;
 
         let welcome_bytes = match welcome {
             Some(w) => Some(w.to_bytes()?),
@@ -194,17 +263,13 @@ where
     }
 
     fn merge_own_commit(&mut self) -> Result<(), MlsError> {
-        let crypto = &self.crypto;
-        let mls_storage = self.storage.mls_storage();
-        let provider = MlsProvider::new(crypto, mls_storage);
-        self.group.merge_pending_commit(&provider)?;
+        let provider = &self.provider;
+        self.group.merge_pending_commit(provider)?;
         Ok(())
     }
 
     fn discard_own_commit(&mut self) -> Result<(), MlsError> {
-        let crypto = &self.crypto;
-        let mls_storage = self.storage.mls_storage();
-        let provider = MlsProvider::new(crypto, mls_storage);
+        let provider = &self.provider;
         self.group
             .clear_pending_commit(provider.storage())
             .map_err(MlsError::storage)?;
@@ -223,7 +288,7 @@ where
         proposals: &[Vec<u8>],
         commit_bytes: &[u8],
     ) -> Result<StagedCandidateResult, MlsError> {
-        let provider = MlsProvider::new(&self.crypto, self.storage.mls_storage());
+        let provider = &self.provider;
         let group = &mut self.group;
         let conversation_id = &self.conversation_id;
 
@@ -232,7 +297,7 @@ where
         for (i, proposal_bytes) in proposals.iter().enumerate() {
             let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(proposal_bytes)?;
             let protocol_message: ProtocolMessage = mls_message.try_into_protocol_message()?;
-            let processed = group.process_message(&provider, protocol_message)?;
+            let processed = group.process_message(provider, protocol_message)?;
             let sender = processed.credential().serialized_content().to_vec();
             match processed.into_content() {
                 ProcessedMessageContent::ProposalMessage(proposal) => {
@@ -272,7 +337,7 @@ where
             return Ok(StagedCandidateResult::Aborted);
         }
 
-        let processed = group.process_message(&provider, protocol_message)?;
+        let processed = group.process_message(provider, protocol_message)?;
         let commit_sender = processed.credential().serialized_content().to_vec();
 
         let outcome = match processed.into_content() {
@@ -328,19 +393,19 @@ where
     }
 
     fn merge_staged_commit(&mut self) -> Result<(), MlsError> {
-        let provider = MlsProvider::new(&self.crypto, self.storage.mls_storage());
+        let provider = &self.provider;
         let staged = self
             .pending_staged_commit
             .take()
             .ok_or_else(|| MlsError::NoPendingStagedCommit(self.conversation_id.clone()))?;
-        self.group.merge_staged_commit(&provider, staged)?;
+        self.group.merge_staged_commit(provider, staged)?;
         Ok(())
     }
 
     fn discard_staged_commit(&mut self) -> Result<(), MlsError> {
         self.pending_staged_commit = None;
         self.group
-            .clear_pending_proposals(self.storage.mls_storage())
+            .clear_pending_proposals(self.provider.storage())
             .map_err(MlsError::storage)?;
         Ok(())
     }
@@ -349,19 +414,22 @@ where
     // Application messages
     // ══════════════════════════════════════════════════════════
 
-    fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, MlsError> {
-        let provider = MlsProvider::new(&self.crypto, self.storage.mls_storage());
-        let signer = self.credentials.signer();
-        let message = self.group.create_message(&provider, signer, plaintext)?;
+    fn encrypt(&mut self, signer: &impl Signer, plaintext: &[u8]) -> Result<Vec<u8>, MlsError> {
+        let provider = &self.provider;
+        let message = self.group.create_message(provider, signer, plaintext)?;
         Ok(message.to_bytes()?)
     }
 
-    fn build_message(&mut self, app_msg: &AppMessage) -> Result<Vec<u8>, MlsError> {
-        self.encrypt(&app_msg.encode_to_vec())
+    fn build_message(
+        &mut self,
+        signer: &impl Signer,
+        app_msg: &AppMessage,
+    ) -> Result<Vec<u8>, MlsError> {
+        self.encrypt(signer, &app_msg.encode_to_vec())
     }
 
     fn decrypt_application_only(&mut self, ciphertext: &[u8]) -> Result<DecryptResult, MlsError> {
-        let provider = MlsProvider::new(&self.crypto, self.storage.mls_storage());
+        let provider = &self.provider;
         let group = &mut self.group;
 
         let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(ciphertext)?;
@@ -386,7 +454,7 @@ where
             ContentType::Application => {}
         }
 
-        let processed = group.process_message(&provider, protocol_message)?;
+        let processed = group.process_message(provider, protocol_message)?;
         let sender_id = processed.credential().serialized_content().to_vec();
 
         match processed.into_content() {
@@ -398,7 +466,7 @@ where
     }
 
     fn decrypt(&mut self, ciphertext: &[u8]) -> Result<DecryptResult, MlsError> {
-        let provider = MlsProvider::new(&self.crypto, self.storage.mls_storage());
+        let provider = &self.provider;
         let group = &mut self.group;
         let conversation_id = &self.conversation_id;
 
@@ -428,7 +496,7 @@ where
             return Ok(DecryptResult::Ignored);
         }
 
-        let processed = group.process_message(&provider, protocol_message)?;
+        let processed = group.process_message(provider, protocol_message)?;
         let sender_id = processed.credential().serialized_content().to_vec();
 
         match processed.into_content() {

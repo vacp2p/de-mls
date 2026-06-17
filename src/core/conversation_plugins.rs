@@ -5,6 +5,8 @@
 //! packages (a joiner publishes one out of band before any conversation
 //! exists), so it is the integrator's concern, not part of this contract.
 
+use openmls_traits::signatures::Signer;
+
 use crate::{
     core::{PeerScoringPlugin, ScoringConfig, StewardListConfig, StewardListPlugin},
     mls_crypto::{MlsError, MlsService},
@@ -19,7 +21,14 @@ pub trait ConversationPluginsFactory {
     type StewardList: StewardListPlugin;
 
     /// Build an MLS service for a brand-new conversation as its sole creator.
-    fn create_mls(&self, conversation_id: String) -> Result<Self::Mls, MlsError>;
+    /// The creator's own `key_package` supplies the leaf credential and
+    /// ciphersuite; `signer` authors the group's initial state.
+    fn create_mls(
+        &self,
+        conversation_id: String,
+        key_package: &[u8],
+        signer: &impl Signer,
+    ) -> Result<Self::Mls, MlsError>;
 
     /// Try to build an MLS service from a serialized MLS welcome.
     /// Returns `Ok(None)` when the welcome isn't for us.

@@ -12,19 +12,18 @@ use std::time::Duration;
 
 use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
+use openmls_basic_credential::SignatureKeyPair;
 
 use de_mls::member_id::MemberId;
 
 use de_mls::core::{
     ConsensusPlugin, ConsensusServiceFor, ConversationEvent, ScoringConfig, StewardListConfig,
 };
-use de_mls::defaults::{
-    DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage,
-};
-use de_mls::mls_crypto::MlsCredentials;
+use de_mls::defaults::DefaultConsensusPlugin;
+use de_mls::mls_crypto::KeyPackageBytes;
 use de_mls::session::{Conversation, ConversationDeps, ConversationState};
 
-use common::wallet::WalletMemberId;
+use common::{TestPluginsFactory, test_credential, wallet::WalletMemberId};
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
@@ -32,7 +31,8 @@ const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b786
 /// The shared, conversation-agnostic state an integrator keeps once: the
 /// plug-in factory, the consensus storage + signer, and the identity.
 struct Integrator {
-    plugins: DefaultConversationPluginsFactory,
+    plugins: TestPluginsFactory,
+    signer: SignatureKeyPair,
     consensus_storage: <DefaultConsensusPlugin as ConsensusPlugin>::ConsensusStorage,
     consensus_signer: <DefaultConsensusPlugin as ConsensusPlugin>::Signer,
     member_id: WalletMemberId,
@@ -44,18 +44,22 @@ impl Integrator {
     }
 
     fn with_key(private_key: &str) -> Self {
-        let signer = PrivateKeySigner::from_str(private_key).expect("valid private key");
-        let member_id = WalletMemberId::from_address(signer.address());
-        let credentials =
-            Arc::new(MlsCredentials::from_member_id(&member_id).expect("credentials"));
-        let storage = Arc::new(MemoryDeMlsStorage::new());
-        let plugins = DefaultConversationPluginsFactory::new(storage, credentials);
+        let eth_signer = PrivateKeySigner::from_str(private_key).expect("valid private key");
+        let member_id = WalletMemberId::from_address(eth_signer.address());
+        let (credential, signer) = test_credential(member_id.member_id_bytes());
+        let plugins = TestPluginsFactory::new(credential, signer.clone());
         Self {
             plugins,
+            signer,
             consensus_storage: DefaultConsensusPlugin::new_storage(),
-            consensus_signer: EthereumConsensusSigner::new(signer),
+            consensus_signer: EthereumConsensusSigner::new(eth_signer),
             member_id,
         }
+    }
+
+    /// Mint the local member's own key package (its leaf seeds a created group).
+    fn key_package(&self) -> KeyPackageBytes {
+        self.plugins.generate_key_package()
     }
 
     /// Fresh per-conversation deps drawn from the shared state. The
@@ -64,14 +68,14 @@ impl Integrator {
     /// two integrators in one test don't echo-drop each other's packets.
     fn deps(
         &self,
-    ) -> ConversationDeps<'_, DefaultConsensusPlugin, DefaultConversationPluginsFactory> {
+    ) -> ConversationDeps<'_, DefaultConsensusPlugin, TestPluginsFactory, SignatureKeyPair> {
         self.deps_with_config(de_mls::session::ConversationConfig::default())
     }
 
     fn deps_with_config(
         &self,
         config: de_mls::session::ConversationConfig,
-    ) -> ConversationDeps<'_, DefaultConsensusPlugin, DefaultConversationPluginsFactory> {
+    ) -> ConversationDeps<'_, DefaultConsensusPlugin, TestPluginsFactory, SignatureKeyPair> {
         let consensus = ConsensusServiceFor::<DefaultConsensusPlugin>::new_with_components(
             self.consensus_storage.clone(),
             DefaultConsensusPlugin::new_event_bus(),
@@ -81,6 +85,7 @@ impl Integrator {
         ConversationDeps {
             plugins: &self.plugins,
             consensus,
+            signer: self.signer.clone(),
             identity: &self.member_id,
             app_id: Arc::from(self.member_id.member_id_bytes()),
             config,
@@ -93,7 +98,9 @@ impl Integrator {
 #[test]
 fn create_builds_a_working_steward_session_without_user() {
     let integrator = Integrator::new();
-    let conversation = Conversation::create("standalone", integrator.deps()).expect("create");
+    let kp = integrator.key_package();
+    let conversation =
+        Conversation::create("standalone", kp.as_bytes(), integrator.deps()).expect("create");
 
     assert_eq!(conversation.state(), ConversationState::Working);
     assert!(
@@ -145,13 +152,17 @@ fn from_welcome_joins_in_one_call() {
     let alice = Integrator::new();
     let bob = Integrator::with_key(BOB);
 
-    let mut creator =
-        Conversation::create("standalone-welcome", alice.deps_with_config(fast_config()))
-            .expect("create");
+    let alice_kp = alice.key_package();
+    let mut creator = Conversation::create(
+        "standalone-welcome",
+        alice_kp.as_bytes(),
+        alice.deps_with_config(fast_config()),
+    )
+    .expect("create");
 
     // Bob mints a key package out of band; Alice — the sole member — proposes
     // the add, so her bundled YES resolves consensus on its own.
-    let bob_kp = bob.plugins.generate_key_package().expect("kp");
+    let bob_kp = bob.plugins.generate_key_package();
     creator.add_member(bob_kp.as_bytes()).expect("add member");
 
     // Drive the creator until the welcome is minted.

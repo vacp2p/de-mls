@@ -8,6 +8,7 @@
 //! [`Conversation::join`] consume one bundle and return a conversation ready to
 //! drop into a registry.
 
+use openmls_traits::signatures::Signer;
 use std::sync::Arc;
 
 use hashgraph_like_consensus::events::ConsensusEventBus;
@@ -32,12 +33,15 @@ use crate::{
 /// snapshots its bytes/display. The consensus service is owned: each
 /// conversation gets its own, and how services share storage is the
 /// integrator's wiring (see the gateway's `ConsensusContext`).
-pub struct ConversationDeps<'a, P: ConsensusPlugin, CP: ConversationPluginsFactory> {
+pub struct ConversationDeps<'a, P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> {
     /// Builds the per-conversation MLS / scoring / steward plug-ins.
     pub plugins: &'a CP,
     /// This conversation's consensus service, ready to use. The conversation
     /// subscribes to its event bus at construction.
     pub consensus: ConsensusServiceFor<P>,
+    /// The local member's MLS signer. Stored on the conversation and passed
+    /// into every signing call; the MLS service holds no identity material.
+    pub signer: Sig,
     /// Local participant identity; the constructor snapshots its bytes
     /// and display form onto the conversation.
     pub identity: &'a dyn MemberId,
@@ -51,14 +55,16 @@ pub struct ConversationDeps<'a, P: ConsensusPlugin, CP: ConversationPluginsFacto
     pub steward_list_config: StewardListConfig,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversation<P, CP, Sig> {
     /// Create a brand-new conversation we steward. Starts in `Working` with
-    /// the local member installed as sole steward at epoch 0.
+    /// the local member installed as sole steward at epoch 0. The creator's
+    /// own `key_package` supplies the leaf credential and ciphersuite.
     pub fn create(
         conversation_id: &str,
-        deps: ConversationDeps<P, CP>,
+        key_package: &[u8],
+        deps: ConversationDeps<P, CP, Sig>,
     ) -> Result<Self, ConversationError> {
-        Self::build(conversation_id, deps, true)
+        Self::build(conversation_id, deps, Some(key_package))
     }
 
     /// Join an existing conversation. Starts in `PendingJoin` with no MLS
@@ -66,9 +72,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// `ConversationSync` arrive.
     pub fn join(
         conversation_id: &str,
-        deps: ConversationDeps<P, CP>,
+        deps: ConversationDeps<P, CP, Sig>,
     ) -> Result<Self, ConversationError> {
-        Self::build(conversation_id, deps, false)
+        Self::build(conversation_id, deps, None)
     }
 
     /// Build a fully-joined conversation straight from a received
@@ -80,7 +86,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// key package — ignore it. The conversation id comes from the welcome
     /// itself, so the caller needs no prior knowledge of the conversation.
     pub fn from_welcome(
-        deps: ConversationDeps<P, CP>,
+        deps: ConversationDeps<P, CP, Sig>,
         welcome: &MemberWelcome,
     ) -> Result<Option<Self>, ConversationError> {
         let Some(mls) = deps.plugins.welcome_mls(&welcome.welcome_bytes)? else {
@@ -94,15 +100,20 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     }
 
     /// Shared construction body for [`Self::create`] / [`Self::join`].
+    /// `key_package` is `Some` on the creator path (its leaf seeds the group)
+    /// and `None` on the joiner path.
     fn build(
         conversation_id: &str,
-        deps: ConversationDeps<P, CP>,
-        is_creation: bool,
+        deps: ConversationDeps<P, CP, Sig>,
+        key_package: Option<&[u8]>,
     ) -> Result<Self, ConversationError> {
         let self_member_id_bytes = deps.identity.member_id_bytes().to_vec();
+        let is_creation = key_package.is_some();
 
-        let (queues, mls_opt, state_machine, phase_timer) = if is_creation {
-            let mls = deps.plugins.create_mls(conversation_id.to_string())?;
+        let (queues, mls_opt, state_machine, phase_timer) = if let Some(kp) = key_package {
+            let mls = deps
+                .plugins
+                .create_mls(conversation_id.to_string(), kp, &deps.signer)?;
             (
                 ConversationQueues::new(conversation_id),
                 Some(mls),
@@ -155,6 +166,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             conversation_id.to_string(),
             queues,
             mls_opt,
+            deps.signer,
             state_machine,
             phase_timer,
             deps.config,

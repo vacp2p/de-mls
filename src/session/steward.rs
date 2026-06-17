@@ -2,6 +2,7 @@
 //! pending-update buffering and drain, scoring sync, conversation-sync
 //! broadcast.
 
+use openmls_traits::signatures::Signer;
 use std::sync::Arc;
 
 use tracing::{error, info};
@@ -31,7 +32,7 @@ pub(crate) enum StewardListReconcile {
     NeedsElection,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversation<P, CP, Sig> {
     // ── Public API ───────────────────────────────────────────────────
 
     /// Add any MLS members not yet tracked in scoring, and drop scored
@@ -339,7 +340,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         };
 
         let app_msg: AppMessage = sync.into();
-        Ok(Some(self.core.expect_mls_mut()?.build_message(&app_msg)?))
+        Ok(Some(
+            self.core
+                .expect_mls_mut()?
+                .build_message(&self.signer, &app_msg)?,
+        ))
     }
 
     /// Steward-only: file `ScoreBelowThreshold` ECPs for any member whose

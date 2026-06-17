@@ -6,6 +6,7 @@
 //! fires on a later poll.
 
 use hashgraph_like_consensus::{error::ConsensusError, storage::ConsensusStorage};
+use openmls_traits::signatures::Signer;
 use tracing::info;
 
 use crate::{
@@ -38,7 +39,7 @@ pub enum CreatorVote {
     Deferred,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversation<P, CP, Sig> {
     // ── Public API ───────────────────────────────────────────────────
 
     /// Open a consensus vote for `request`; [`CreatorVote`] picks the wire
@@ -103,7 +104,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
                     "YES vote cast (bundled at submit)"
                 );
                 let outbound: AppMessage = proposal.into();
-                let payload = self.core.expect_mls_mut()?.build_message(&outbound)?;
+                let payload = self
+                    .core
+                    .expect_mls_mut()?
+                    .build_message(&self.signer, &outbound)?;
                 self.broadcast(payload);
                 self.emit_event(ConversationEvent::OwnProposalSubmitted {
                     proposal_id,
@@ -111,7 +115,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
                 });
             }
             CreatorVote::Deferred => {
-                let payload = self.core.expect_mls_mut()?.build_message(&unbundled)?;
+                let payload = self
+                    .core
+                    .expect_mls_mut()?
+                    .build_message(&self.signer, &unbundled)?;
                 self.broadcast(payload);
                 self.emit_event(ConversationEvent::VoteRequested {
                     proposal_id,
@@ -238,7 +245,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             return Ok(());
         };
 
-        let payload = self.core.expect_mls_mut()?.build_message(&app_msg)?;
+        let payload = self
+            .core
+            .expect_mls_mut()?
+            .build_message(&self.signer, &app_msg)?;
         self.broadcast(payload);
         Ok(())
     }
@@ -321,7 +331,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     fn broadcast_vote(&mut self, proposal_id: u32, vote: bool) -> Result<(), ConversationError> {
         let app_message =
             cast_vote::<P>(&self.conversation_id, proposal_id, vote, &self.consensus)?;
-        let payload = self.core.expect_mls_mut()?.build_message(&app_message)?;
+        let payload = self
+            .core
+            .expect_mls_mut()?
+            .build_message(&self.signer, &app_message)?;
         self.broadcast(payload);
         Ok(())
     }

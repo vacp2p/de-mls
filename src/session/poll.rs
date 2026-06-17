@@ -6,6 +6,7 @@
 //! the integrator calls `poll()` once per wakeup cycle and reacts to the
 //! returned [`PollOutcome`].
 
+use openmls_traits::signatures::Signer;
 use std::{sync::Arc, time::Duration};
 
 use prost::Message;
@@ -34,7 +35,7 @@ pub struct PollOutcome {
     pub leave_requested: bool,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversation<P, CP, Sig> {
     /// Drive one polling cycle: tick consensus deadlines, advance freeze
     /// state, check steward inactivity, and check pending-join expiry.
     ///
@@ -305,7 +306,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
 
         let self_member_id = Arc::clone(&self.self_member_id);
         let outbound = if self.core.steward_list.is_steward(&self_member_id) {
-            match self.core.create_commit_candidate(&self_member_id) {
+            match self
+                .core
+                .create_commit_candidate(&self.signer, &self_member_id)
+            {
                 Ok(payload) => payload,
                 Err(e) => {
                     error!(

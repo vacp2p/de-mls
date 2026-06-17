@@ -1,6 +1,7 @@
 //! Per-conversation aggregate owned by the orchestrator: protocol state, MLS
 //! service, plug-ins, state machine, durable config, and operating mode.
 
+use openmls_traits::signatures::Signer;
 use prost::Message;
 use tracing::info;
 
@@ -127,6 +128,7 @@ impl<CP: ConversationPluginsFactory> ConversationCore<CP> {
     /// attached.
     pub(crate) fn create_commit_candidate(
         &mut self,
+        signer: &impl Signer,
         self_member_id: &[u8],
     ) -> Result<Option<Vec<u8>>, CoreError> {
         if self.mls.is_none() {
@@ -228,7 +230,7 @@ impl<CP: ConversationPluginsFactory> ConversationCore<CP> {
             proposals: mls_proposals,
             commit,
             welcome,
-        } = mls.create_commit_candidate(&updates)?;
+        } = mls.create_commit_candidate(signer, &updates)?;
 
         let candidate = CommitCandidate {
             conversation_id: self.queues.name_bytes().to_vec(),
@@ -315,7 +317,9 @@ impl<CP: ConversationPluginsFactory> ConversationCore<CP> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_fixtures::{StubPluginsFactory, StubScoring, StubStewardList, UnusedMls};
+    use crate::test_fixtures::{
+        StubPluginsFactory, StubScoring, StubStewardList, UnusedMls, UnusedSigner,
+    };
 
     fn make_conversation(steward_list: StubStewardList) -> ConversationCore<StubPluginsFactory> {
         ConversationCore::new(
@@ -332,7 +336,7 @@ mod tests {
     fn create_commit_candidate_errors_for_non_steward_outside_recovery() {
         let mut conversation = make_conversation(StubStewardList::member());
         let err = conversation
-            .create_commit_candidate(b"me")
+            .create_commit_candidate(&UnusedSigner, b"me")
             .expect_err("non-steward should be rejected");
         assert!(matches!(err, CoreError::NotASteward));
     }
@@ -341,7 +345,7 @@ mod tests {
     fn create_commit_candidate_errors_when_no_approved_proposals() {
         let mut conversation = make_conversation(StubStewardList::steward());
         let err = conversation
-            .create_commit_candidate(b"me")
+            .create_commit_candidate(&UnusedSigner, b"me")
             .expect_err("empty approved queue should be rejected");
         assert!(matches!(err, CoreError::NoProposals));
     }
@@ -362,7 +366,7 @@ mod tests {
         conversation.queues.insert_approved_proposal(50, emergency);
 
         let err = conversation
-            .create_commit_candidate(b"me")
+            .create_commit_candidate(&UnusedSigner, b"me")
             .expect_err("emergency in approved queue should be rejected");
         let CoreError::UnexpectedNonMlsProposals { proposal_ids } = err else {
             panic!("expected UnexpectedNonMlsProposals, got {err:?}");

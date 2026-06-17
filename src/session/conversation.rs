@@ -10,6 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use openmls_traits::signatures::Signer;
 use tracing::info;
 
 use hashgraph_like_consensus::events::ConsensusEventBus;
@@ -51,12 +52,16 @@ pub struct AutoVoteEntry {
     pub vote: bool,
 }
 
-pub struct Conversation<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
+pub struct Conversation<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> {
     /// Conversation name. Identifies this conversation in the integrator's
     /// registry and is used to construct scope keys for consensus operations.
     /// Read via [`Conversation::conversation_id`].
     pub(crate) conversation_id: String,
     pub(crate) core: ConversationCore<CP>,
+    /// The local member's MLS signer, supplied by the integrator at
+    /// construction. Passed into every signing call (`create_commit_candidate`,
+    /// `build_message`); the MLS service itself holds no identity material.
+    pub(crate) signer: Sig,
     /// Per-conversation consensus service. Owns this conversation's scope
     /// in the shared storage and a private event bus. Minted from the
     /// [`crate::session::ConversationDeps`] consensus service at construction.
@@ -108,7 +113,7 @@ pub struct Conversation<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     pub(crate) last_freeze_progress: Option<(usize, usize)>,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversation<P, CP, Sig> {
     /// Build a fresh conversation. Creator path passes `Some(mls)`; joiner
     /// path passes `None` and attaches the MLS service later via
     /// `core.attach_mls`. `consensus_rx` is a subscriber on
@@ -118,6 +123,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         conversation_id: String,
         queues: ConversationQueues,
         mls: Option<CP::Mls>,
+        signer: Sig,
         state_machine: ConversationStateMachine,
         phase_timer: PhaseTimer,
         config: ConversationConfig,
@@ -132,6 +138,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         Self {
             conversation_id,
             core: ConversationCore::new(queues, mls, state_machine, config, scoring, steward_list),
+            signer,
             consensus,
             consensus_rx,
             phase_timer,
@@ -408,12 +415,13 @@ mod tests {
     use crate::core::ConversationQueues;
     use crate::defaults::DefaultConsensusPlugin;
     use crate::test_fixtures::{
-        StubPluginsFactory, StubScoring, StubStewardList, UnusedMls, make_test_consensus_service,
+        StubPluginsFactory, StubScoring, StubStewardList, UnusedMls, UnusedSigner,
+        make_test_consensus_service,
     };
 
     fn make_conversation_pending_join(
         commit_inactivity: Duration,
-    ) -> Conversation<DefaultConsensusPlugin, StubPluginsFactory> {
+    ) -> Conversation<DefaultConsensusPlugin, StubPluginsFactory, UnusedSigner> {
         let config = ConversationConfig {
             commit_inactivity_duration: commit_inactivity,
             ..ConversationConfig::default()
@@ -423,6 +431,7 @@ mod tests {
             "g".to_string(),
             ConversationQueues::new("g"),
             Some(UnusedMls),
+            UnusedSigner,
             ConversationStateMachine::new_as_pending_join(),
             PhaseTimer::new(),
             config,
@@ -438,12 +447,14 @@ mod tests {
         conversation
     }
 
-    fn make_conversation_working() -> Conversation<DefaultConsensusPlugin, StubPluginsFactory> {
+    fn make_conversation_working()
+    -> Conversation<DefaultConsensusPlugin, StubPluginsFactory, UnusedSigner> {
         let (consensus, consensus_rx) = make_test_consensus_service();
         Conversation::new(
             "g".to_string(),
             ConversationQueues::new("g"),
             Some(UnusedMls),
+            UnusedSigner,
             ConversationStateMachine::new_as_member(),
             PhaseTimer::new(),
             ConversationConfig::default(),

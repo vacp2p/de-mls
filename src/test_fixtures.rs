@@ -9,6 +9,8 @@
 
 use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
+use openmls_traits::signatures::{Signer, SignerError};
+use openmls_traits::types::SignatureScheme;
 
 use crate::{
     core::{
@@ -41,6 +43,19 @@ pub(crate) fn make_test_consensus_service() -> (
     (service, rx)
 }
 
+/// Signer that panics on use. Lets tests pass a signer through paths that
+/// return before any signing happens.
+pub(crate) struct UnusedSigner;
+
+impl Signer for UnusedSigner {
+    fn sign(&self, _: &[u8]) -> Result<Vec<u8>, SignerError> {
+        unreachable!("UnusedSigner::sign called")
+    }
+    fn signature_scheme(&self) -> SignatureScheme {
+        unreachable!("UnusedSigner::signature_scheme called")
+    }
+}
+
 /// MLS service that errors on every operation. Lets tests construct a
 /// `Conversation` whose early-return paths never invoke MLS.
 pub(crate) struct UnusedMls;
@@ -66,6 +81,7 @@ impl MlsService for UnusedMls {
     }
     fn create_commit_candidate(
         &mut self,
+        _: &impl Signer,
         _: &[MlsCommitInput],
     ) -> Result<CommitCandidate, MlsError> {
         unreachable!("UnusedMls::create_commit_candidate called")
@@ -89,10 +105,10 @@ impl MlsService for UnusedMls {
     fn discard_staged_commit(&mut self) -> Result<(), MlsError> {
         unreachable!()
     }
-    fn encrypt(&mut self, _: &[u8]) -> Result<Vec<u8>, MlsError> {
+    fn encrypt(&mut self, _: &impl Signer, _: &[u8]) -> Result<Vec<u8>, MlsError> {
         unreachable!()
     }
-    fn build_message(&mut self, _: &AppMessage) -> Result<Vec<u8>, MlsError> {
+    fn build_message(&mut self, _: &impl Signer, _: &AppMessage) -> Result<Vec<u8>, MlsError> {
         unreachable!()
     }
     fn decrypt_application_only(&mut self, _: &[u8]) -> Result<DecryptResult, MlsError> {
@@ -258,7 +274,7 @@ impl ConversationPluginsFactory for StubPluginsFactory {
     type Scoring = StubScoring;
     type StewardList = StubStewardList;
 
-    fn create_mls(&self, _: String) -> Result<Self::Mls, MlsError> {
+    fn create_mls(&self, _: String, _: &[u8], _: &impl Signer) -> Result<Self::Mls, MlsError> {
         unreachable!()
     }
     fn welcome_mls(&self, _: &[u8]) -> Result<Option<Self::Mls>, MlsError> {
