@@ -11,12 +11,14 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use de_mls::core::StewardListConfig;
-use de_mls::defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory};
+use de_mls::defaults::DefaultConsensusPlugin;
 use de_mls::session::ConversationConfig;
 use de_mls_ds::{
     DeliveryService, DeliveryServiceError, OutboundPacket, SharedDeliveryService, WELCOME_SUBTOPIC,
 };
+use de_mls_gateway::mls::DefaultConversationPluginsFactory;
 use de_mls_gateway::user::{Inbound, User};
+use openmls_basic_credential::SignatureKeyPair;
 
 /// Test-only transport: captures every outbound packet for later inspection
 /// instead of sending it. `subscribe` is a no-op — tests deliver inbound
@@ -54,7 +56,7 @@ const BOB_KEY: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6
 const CHARLIE_KEY: &str = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
 const DAVE_KEY: &str = "7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6";
 
-type TU = User<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
+type TU = User<DefaultConsensusPlugin, DefaultConversationPluginsFactory, SignatureKeyPair>;
 
 fn make(key: &str, cfg: ConversationConfig, steward_cfg: StewardListConfig) -> (TU, Arc<Mutex<H>>) {
     let h = H::handle();

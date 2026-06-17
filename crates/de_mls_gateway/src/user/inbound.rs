@@ -12,6 +12,8 @@ use de_mls::{
     session::DispatchOutcome,
 };
 
+use openmls_traits::signatures::Signer;
+
 use crate::user::{ConversationLifecycle, LockExt, User, UserError};
 
 /// A payload delivered from the network into the library, addressed to a
@@ -26,7 +28,7 @@ pub struct Inbound {
     pub payload: Vec<u8>,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> User<P, CP, Sig> {
     // ── Public API ───────────────────────────────────────────────────
 
     /// Ingest conversation traffic (chat / vote / commit / sync). Self-echoes

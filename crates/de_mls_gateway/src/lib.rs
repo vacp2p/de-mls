@@ -10,6 +10,7 @@ mod bootstrap;
 pub(crate) mod forwarder;
 mod group;
 pub mod handler;
+pub mod mls;
 pub mod user;
 mod welcome_envelope;
 
@@ -25,15 +26,16 @@ use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 
 use de_mls::{
     core::{ScoringConfig, StewardListConfig},
-    defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage},
+    defaults::DefaultConsensusPlugin,
     member_id::MemberId,
-    mls_crypto::MlsCredentials,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
     session::ConversationConfig,
 };
 use de_mls_ds::{DeliveryService, SharedDeliveryService, WakuDeliveryService};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
+use openmls_basic_credential::SignatureKeyPair;
 
+use crate::mls::{DefaultConversationPluginsFactory, build_credential};
 use crate::user::{ConsensusContext, ConversationEntry, User, UserPlugins};
 use futures::{
     StreamExt,
@@ -52,17 +54,20 @@ pub use crate::bootstrap::{
 
 /// Type alias for the user reference stored in the gateway.
 ///
-/// Uses [`de_mls::session::DefaultMlsService`] — `OpenMlsService` over
-/// `Arc<MemoryDeMlsStorage>` — so per-group services share one storage
-/// (the `Arc<S>: DeMlsStorage` blanket impl makes this work). MLS
-/// credentials live on `User` and are passed in at service construction.
-pub(crate) type UserRef =
-    Arc<tokio::sync::RwLock<User<DefaultConsensusPlugin, DefaultConversationPluginsFactory>>>;
+/// The MLS engine is the reference [`mls::GatewayMls`] — `OpenMlsService` over
+/// `OpenMlsRustCrypto` — minted per conversation by
+/// [`mls::DefaultConversationPluginsFactory`]. The MLS signing keypair is
+/// [`SignatureKeyPair`], owned by `User` and threaded into every signing call.
+pub(crate) type UserRef = Arc<
+    tokio::sync::RwLock<
+        User<DefaultConsensusPlugin, DefaultConversationPluginsFactory, SignatureKeyPair>,
+    >,
+>;
 
 /// Type alias for a conversation registry entry obtained via
 /// `User::lookup_entry`. Re-exports the sync-locked entry from `de_mls::session`.
 pub(crate) type ConversationRef =
-    ConversationEntry<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
+    ConversationEntry<DefaultConsensusPlugin, DefaultConversationPluginsFactory, SignatureKeyPair>;
 
 // Global, process-wide gateway instance
 pub static GATEWAY: Lazy<Gateway<WakuDeliveryService>> = Lazy::new(Gateway::new);
@@ -194,16 +199,17 @@ impl MemberId for WalletMemberId {
 fn build_user_from_private_key(
     private_key: &str,
     transport: SharedDeliveryService,
-) -> anyhow::Result<User<DefaultConsensusPlugin, DefaultConversationPluginsFactory>> {
-    let signer = PrivateKeySigner::from_str(private_key)
+) -> anyhow::Result<User<DefaultConsensusPlugin, DefaultConversationPluginsFactory, SignatureKeyPair>>
+{
+    let eth_signer = PrivateKeySigner::from_str(private_key)
         .map_err(|e| anyhow::anyhow!("invalid private key: {e}"))?;
-    let member_id = WalletMemberId::from_address(signer.address());
+    let member_id = WalletMemberId::from_address(eth_signer.address());
 
-    let credentials = Arc::new(MlsCredentials::from_member_id(&member_id)?);
-    let storage = Arc::new(MemoryDeMlsStorage::new());
-    let conversation_plugins = DefaultConversationPluginsFactory::new(storage, credentials);
+    let (credential, mls_signer) = build_credential(member_id.member_id_bytes())?;
+    let conversation_plugins =
+        DefaultConversationPluginsFactory::new(credential, mls_signer.clone());
 
-    let consensus_signer = EthereumConsensusSigner::new(signer);
+    let consensus_signer = EthereumConsensusSigner::new(eth_signer);
     let consensus = ConsensusContext::<DefaultConsensusPlugin>::new(consensus_signer);
 
     let plugins = UserPlugins {
@@ -216,6 +222,7 @@ fn build_user_from_private_key(
 
     Ok(User::new_with_plugins(
         Box::new(member_id),
+        mls_signer,
         plugins,
         transport,
     ))

@@ -13,7 +13,6 @@ use de_mls::{
         ConsensusPlugin, ConversationEvent, ConversationPluginsFactory, ScoringConfig,
         StewardListConfig,
     },
-    defaults::DefaultConversationPluginsFactory,
     member_id::MemberId,
     mls_crypto::{KeyPackageBytes, MlsError, MlsService},
     protos::de_mls::messages::v1::{ConversationUpdateRequest, MemberWelcome},
@@ -22,7 +21,9 @@ use de_mls::{
     },
 };
 use de_mls_ds::{OutboundPacket, SharedDeliveryService};
+use openmls_traits::signatures::Signer;
 
+use crate::mls::DefaultConversationPluginsFactory;
 use crate::user::{LockExt, UserError, UserPlugins};
 
 /// Registry-level notification emitted when conversations are created or
@@ -39,15 +40,20 @@ pub enum ConversationLifecycle {
 /// Single registry entry: one `Arc<RwLock<Conversation>>` per conversation.
 /// Cloned out of the registry under the outer read lock, then locked
 /// independently — writes on one conversation don't block reads on another.
-pub type ConversationEntry<P, CP> = Arc<RwLock<Conversation<P, CP>>>;
+pub type ConversationEntry<P, CP, Sig> = Arc<RwLock<Conversation<P, CP, Sig>>>;
 
 /// Per-user registry of conversations. Each entry's inner per-conversation
 /// lock guards per-conversation reads/mutations so a write on conversation
 /// A doesn't block reads on conversation B.
-pub(crate) type ConversationRegistry<P, CP> = RwLock<HashMap<String, ConversationEntry<P, CP>>>;
+pub(crate) type ConversationRegistry<P, CP, Sig> =
+    RwLock<HashMap<String, ConversationEntry<P, CP, Sig>>>;
 
-pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
+pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> {
     pub(crate) member_id: Box<dyn MemberId>,
+    /// MLS signing key for this user. Owned here — the single holder across
+    /// the conversation registry — and cloned into each conversation's
+    /// [`ConversationDeps`], which threads it into every signing call.
+    pub(crate) signer: Sig,
     /// Per-instance UUID embedded in every outbound packet. Inbound packets
     /// carrying our `app_id` are self-echoes and silently dropped.
     pub(crate) app_id: Vec<u8>,
@@ -60,7 +66,7 @@ pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// configs cloned into newly-created conversations.
     pub(crate) plugins: UserPlugins<P, CP>,
     /// Conversation handles keyed by conversation id.
-    pub(crate) conversations: ConversationRegistry<P, CP>,
+    pub(crate) conversations: ConversationRegistry<P, CP, Sig>,
     /// User-level conversation lifecycle events: `Created(name)` /
     /// `Removed(name)`. Integrators drain via
     /// [`Self::drain_lifecycle_events`] once per polling cycle to learn
@@ -71,7 +77,7 @@ pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
 
 // ── Public API ──────────────────────────────────────────────────────────
 
-impl<P: ConsensusPlugin> User<P, DefaultConversationPluginsFactory> {
+impl<P: ConsensusPlugin, Sig: Signer> User<P, DefaultConversationPluginsFactory, Sig> {
     /// Generate a single-use key package via the default factory. Key-package
     /// generation is the integrator's concern — not part of the de-mls plug-in
     /// contract — so it lives on the concrete-factory `User`.
@@ -80,7 +86,7 @@ impl<P: ConsensusPlugin> User<P, DefaultConversationPluginsFactory> {
     }
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer + Clone> User<P, CP, Sig> {
     /// Display form of the local member_id, derived from [`MemberId::member_id_display`].
     pub fn member_id_string(&self) -> String {
         self.member_id.member_id_display().to_string()
@@ -232,7 +238,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let conversation_id = svc.conversation_id().to_string();
 
         if self.lookup_entry(&conversation_id)?.is_none() {
-            self.start_conversation(&conversation_id, false)?;
+            self.register_conversation(
+                &conversation_id,
+                None,
+                self.plugins.default_conversation_config.clone(),
+            )?;
         }
         let entry_arc = self
             .lookup_entry(&conversation_id)?
@@ -411,7 +421,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
 // ── User-internal helpers ───────────────────────────────────────────────
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> User<P, CP, Sig> {
     pub fn self_member_id(&self) -> &[u8] {
         self.member_id.member_id_bytes()
     }
@@ -434,7 +444,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// User's push-adapter so its callers keep their send-on-op behaviour.
     /// (When `User` moves out of the library, the integrator drains and
     /// publishes directly instead.)
-    pub(crate) fn flush(&self, entry: &ConversationEntry<P, CP>) -> Result<(), UserError> {
+    pub(crate) fn flush(&self, entry: &ConversationEntry<P, CP, Sig>) -> Result<(), UserError> {
         let outbound = entry.read_or_err("conversation")?.drain_outbound();
         if outbound.is_empty() {
             return Ok(());
@@ -465,11 +475,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
 
     pub fn new_with_plugins(
         member_id: Box<dyn MemberId>,
+        signer: Sig,
         plugins: UserPlugins<P, CP>,
         transport: SharedDeliveryService,
     ) -> Self {
         Self {
             member_id,
+            signer,
             app_id: uuid::Uuid::new_v4().as_bytes().to_vec(),
             transport,
             plugins,

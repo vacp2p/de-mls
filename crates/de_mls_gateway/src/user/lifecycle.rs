@@ -6,12 +6,20 @@ use tracing::info;
 
 use de_mls::{
     core::{ConsensusPlugin, ConversationConfig, ConversationPluginsFactory},
-    session::{Conversation, ConversationDeps, LeaveOutcome},
+    session::{Conversation, ConversationDeps, ConversationError, LeaveOutcome},
 };
 
+use openmls_traits::signatures::Signer;
+
+use crate::mls::DefaultConversationPluginsFactory;
 use crate::user::{ConversationLifecycle, LockExt, User, UserError};
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
+impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, DefaultConversationPluginsFactory, Sig> {
+    /// Register a conversation: create it (we seed the group, minting our own
+    /// key package) when `is_creation`, otherwise join it (we attach MLS later
+    /// from a welcome). Minting the creator key package needs the concrete
+    /// factory, so this entry point is concrete; the registration itself is
+    /// generic via `register_conversation`.
     pub fn start_conversation(
         &mut self,
         conversation_id: &str,
@@ -31,6 +39,28 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         is_creation: bool,
         config: ConversationConfig,
     ) -> Result<(), UserError> {
+        if is_creation {
+            let key_package = self
+                .generate_key_package()
+                .map_err(ConversationError::from)?;
+            self.register_conversation(conversation_id, Some(key_package.as_bytes()), config)
+        } else {
+            self.register_conversation(conversation_id, None, config)
+        }
+    }
+}
+
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer + Clone> User<P, CP, Sig> {
+    /// Build and register one conversation. `Some(key_package)` creates the
+    /// group (we are the creator, seeding it with our leaf); `None` joins it
+    /// (MLS attaches later from a welcome). Shared by the creation entry point
+    /// and the welcome-driven join in `accept_welcome`.
+    pub(crate) fn register_conversation(
+        &mut self,
+        conversation_id: &str,
+        key_package: Option<&[u8]>,
+        config: ConversationConfig,
+    ) -> Result<(), UserError> {
         if self
             .conversations
             .read()
@@ -43,16 +73,16 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let deps = ConversationDeps {
             plugins: &self.plugins.conversation_plugins,
             consensus: self.plugins.consensus.build_service(),
+            signer: self.signer.clone(),
             identity: self.member_id.as_ref(),
             app_id: Arc::from(self.app_id.as_slice()),
             config,
             scoring_config: self.plugins.default_scoring_config.clone(),
             steward_list_config: self.plugins.default_steward_list_config.clone(),
         };
-        let conversation = if is_creation {
-            Conversation::create(conversation_id, deps)?
-        } else {
-            Conversation::join(conversation_id, deps)?
+        let conversation = match key_package {
+            Some(kp) => Conversation::create(conversation_id, kp, deps)?,
+            None => Conversation::join(conversation_id, deps)?,
         };
         let entry = Arc::new(RwLock::new(conversation));
         {
