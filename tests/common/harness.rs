@@ -33,12 +33,13 @@ use de_mls::core::{
 };
 use de_mls::defaults::DefaultConsensusPlugin;
 use de_mls::member_id::MemberId;
+use de_mls::mls_crypto::KeyPackageBytes;
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberWelcome, app_message,
 };
 use de_mls::session::{
     Conversation, ConversationConfig, ConversationDeps, CreatorVote, MemberRole, Outbound,
-    build_key_package_announcement,
+    PollOutcome, build_key_package_announcement,
 };
 
 use crate::common::{TestPluginsFactory, test_credential, wallet::WalletMemberId};
@@ -295,6 +296,21 @@ impl Member {
             .any(|e| matches!(e, ConversationEvent::Leaving))
     }
 
+    /// Every `WelcomeReady` this member emitted, with its `minted_locally` flag
+    /// (`true` only on the committing steward).
+    pub fn welcome_readys(&self) -> Vec<(MemberWelcome, bool)> {
+        self.events
+            .iter()
+            .filter_map(|e| match e {
+                ConversationEvent::WelcomeReady {
+                    welcome,
+                    minted_locally,
+                } => Some((welcome.clone(), *minted_locally)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Count of commits this member has applied (membership batches landed).
     pub fn commits_applied(&self) -> usize {
         self.events
@@ -352,8 +368,30 @@ impl Member {
         }
     }
 
-    fn poll(&mut self) {
-        self.convo.poll();
+    /// Mint a key package and hand back its bytes — for an explicit
+    /// `add_member(kp_bytes)` (the proposer-side path, where a member is added
+    /// without a prior key-package announcement).
+    pub fn mint_key_package(&mut self) -> KeyPackageBytes {
+        self.integ.plugins.generate_key_package()
+    }
+
+    /// Rebuild this member as a fresh joiner of `conversation_id` (same
+    /// identity / keys) — for rejoining after eviction.
+    pub fn rejoin(&mut self, conversation_id: &str, config: ConversationConfig) {
+        self.convo = Conversation::join(conversation_id, self.integ.deps(config)).expect("rejoin");
+        self.last_sync = None;
+    }
+
+    /// Advance this member's timers/state machine one tick, returning the
+    /// poll outcome (e.g. `leave_requested` on pending-join expiry).
+    pub fn poll(&mut self) -> PollOutcome {
+        self.convo.poll()
+    }
+
+    /// Drain this member's pending events into its log (no welcome routing) —
+    /// for standalone members driven outside a [`TestHarness`].
+    pub fn pump_events(&mut self) {
+        let _ = self.drain_events_collect_welcomes();
     }
 
     fn drain_outbound(&mut self) -> Vec<Outbound> {
@@ -548,7 +586,7 @@ impl<const N: usize> TestHarness<N> {
     pub fn process(&mut self, step: Duration) {
         sleep(step);
         for member in &mut self.members {
-            member.poll();
+            let _ = member.poll();
         }
         self.drain_and_route_welcomes();
         self.relay_outbound();
