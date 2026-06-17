@@ -5,6 +5,7 @@
 //! The library names no concrete provider; tests supply this one.
 #![allow(dead_code)]
 
+pub mod harness;
 pub mod wallet;
 
 use std::cell::RefCell;

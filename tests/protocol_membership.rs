@@ -1,0 +1,111 @@
+//! Membership + welcome: multi-member bootstrap convergence, removal, and the
+//! PendingJoin buffer-hygiene invariant. Each test checks that every member
+//! agrees on the epoch and member set — the protocol-level "we are the same
+//! group" guarantee — not just that one node changed state.
+
+mod common;
+
+use std::time::Duration;
+
+use common::harness::{TestHarness, fast_config};
+use de_mls::core::{ConversationState, StewardListConfig};
+use de_mls::session::ConversationConfig;
+
+const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+const CHARLIE: &str = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
+const DAVE: &str = "7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6";
+
+#[test]
+fn three_members_join_and_converge() {
+    let h = TestHarness::<3>::bootstrap(
+        [ALICE, BOB, CHARLIE],
+        "grp",
+        fast_config(),
+        StewardListConfig::new(1, 5).unwrap(),
+    );
+
+    assert!(h.all_working(), "every member reaches Working");
+    assert!(h.epochs_agree(), "every member converges on the same epoch");
+    assert!(
+        h.membership_agrees(),
+        "every member sees the same member set"
+    );
+    assert_eq!(h.member(0).member_count(), 3, "all three are in the group");
+    // Each joiner actually transitioned into Working off its welcome.
+    assert!(h.member(1).saw_phase(ConversationState::Working));
+    assert!(h.member(2).saw_phase(ConversationState::Working));
+}
+
+#[test]
+fn removed_member_observes_leaving_and_group_shrinks() {
+    // sn_max = 2 so at least one member is a non-steward; target it (a
+    // self-remove would wedge the steward mid-freeze).
+    let mut h = TestHarness::<3>::bootstrap(
+        [ALICE, BOB, CHARLIE],
+        "rm",
+        fast_config(),
+        StewardListConfig::new(1, 2).unwrap(),
+    );
+
+    let target = (0..3)
+        .find(|&i| !h.member(i).is_steward())
+        .expect("a non-steward exists");
+    let steward = (0..3)
+        .find(|&i| i != target && h.member(i).is_steward())
+        .expect("a steward drives the removal");
+
+    let target_id = h.member(target).member_id_bytes().to_vec();
+    h.member_mut(steward).remove_member(&target_id);
+
+    h.process_until("target removed", |h| h.member(steward).member_count() == 2);
+
+    assert!(
+        h.member(target).saw_leaving(),
+        "the removed member observes its own removal"
+    );
+    assert_eq!(
+        h.member(steward).member_count(),
+        2,
+        "the group shrank to two"
+    );
+}
+
+#[test]
+fn pending_joiners_do_not_buffer_peer_key_packages() {
+    // Concurrent-join regression guard: three joiners announce key packages
+    // before any welcome. A PendingJoin member that buffered a peer's key
+    // package would later (once a steward) re-propose an Add for an
+    // already-joined identity, which MLS rejects.
+    let cfg = ConversationConfig {
+        commit_inactivity_duration: Duration::from_millis(50),
+        freeze_duration: Duration::from_millis(10),
+        ..ConversationConfig::default()
+    };
+    let mut h = TestHarness::<4>::start(
+        [ALICE, BOB, CHARLIE, DAVE],
+        "rec",
+        cfg,
+        StewardListConfig::new(1, 5).unwrap(),
+    );
+
+    let announcements: Vec<_> = (1..4)
+        .map(|i| h.member_mut(i).announce_key_package("rec"))
+        .collect();
+    for packet in &announcements {
+        h.deliver_key_package_all(packet);
+    }
+
+    for i in 1..4 {
+        assert_eq!(
+            h.member(i).state(),
+            ConversationState::PendingJoin,
+            "joiner {i} is still PendingJoin"
+        );
+        assert_eq!(
+            h.member(i).pending_update_count(),
+            0,
+            "joiner {i} in PendingJoin must not buffer peer key packages"
+        );
+    }
+}
