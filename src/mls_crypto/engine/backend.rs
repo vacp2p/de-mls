@@ -14,8 +14,9 @@ use openmls::{
         Proposal, ProtocolMessage, ProtocolVersion,
     },
 };
-use openmls_rust_crypto::RustCrypto;
-use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
+use openmls_traits::{
+    OpenMlsProvider, crypto::OpenMlsCrypto, random::OpenMlsRand, storage::StorageProvider,
+};
 use prost::Message;
 
 use crate::{
@@ -27,21 +28,24 @@ use crate::{
     protos::de_mls::messages::v1::AppMessage,
 };
 
-/// Internal OpenMLS provider that wraps the configured storage backend.
-pub(super) struct MlsProvider<'a, T: StorageProvider<1>> {
-    crypto: &'a RustCrypto,
+/// Internal OpenMLS provider binding a crypto/rand provider `C` to the
+/// configured storage backend.
+pub(super) struct MlsProvider<'a, T: StorageProvider<1>, C> {
+    crypto: &'a C,
     storage: &'a T,
 }
 
-impl<'a, T: StorageProvider<1>> MlsProvider<'a, T> {
-    pub(super) fn new(crypto: &'a RustCrypto, storage: &'a T) -> Self {
+impl<'a, T: StorageProvider<1>, C> MlsProvider<'a, T, C> {
+    pub(super) fn new(crypto: &'a C, storage: &'a T) -> Self {
         Self { crypto, storage }
     }
 }
 
-impl<'a, T: StorageProvider<1>> OpenMlsProvider for MlsProvider<'a, T> {
-    type CryptoProvider = RustCrypto;
-    type RandProvider = RustCrypto;
+impl<'a, T: StorageProvider<1>, C: OpenMlsCrypto + OpenMlsRand> OpenMlsProvider
+    for MlsProvider<'a, T, C>
+{
+    type CryptoProvider = C;
+    type RandProvider = C;
     type StorageProvider = T;
 
     fn crypto(&self) -> &Self::CryptoProvider {
@@ -57,40 +61,37 @@ impl<'a, T: StorageProvider<1>> OpenMlsProvider for MlsProvider<'a, T> {
     }
 }
 
-impl<S> OpenMlsService<S>
-where
-    S: DeMlsStorage,
-{
-    fn extract_proposal_action(
-        group: &MlsGroup,
-        proposal: &Proposal,
-    ) -> Result<MlsProposalOutput, MlsError> {
-        match proposal {
-            Proposal::Add(add) => {
-                let id = add
-                    .key_package()
-                    .leaf_node()
-                    .credential()
-                    .serialized_content()
-                    .to_vec();
-                Ok(MlsProposalOutput::Add(id))
-            }
-            Proposal::Remove(remove) => {
-                let removed = remove.removed();
-                let id = group
-                    .member(removed)
-                    .map(|c| c.serialized_content().to_vec())
-                    .ok_or(MlsError::UnknownLeafIndex(removed.u32()))?;
-                Ok(MlsProposalOutput::Remove(id))
-            }
-            _ => Err(MlsError::UnknownProposalAction),
+/// Read the membership change carried by a single MLS proposal.
+fn extract_proposal_action(
+    group: &MlsGroup,
+    proposal: &Proposal,
+) -> Result<MlsProposalOutput, MlsError> {
+    match proposal {
+        Proposal::Add(add) => {
+            let id = add
+                .key_package()
+                .leaf_node()
+                .credential()
+                .serialized_content()
+                .to_vec();
+            Ok(MlsProposalOutput::Add(id))
         }
+        Proposal::Remove(remove) => {
+            let removed = remove.removed();
+            let id = group
+                .member(removed)
+                .map(|c| c.serialized_content().to_vec())
+                .ok_or(MlsError::UnknownLeafIndex(removed.u32()))?;
+            Ok(MlsProposalOutput::Remove(id))
+        }
+        _ => Err(MlsError::UnknownProposalAction),
     }
 }
 
-impl<S> MlsService for OpenMlsService<S>
+impl<S, C> MlsService for OpenMlsService<S, C>
 where
     S: DeMlsStorage,
+    C: OpenMlsCrypto + OpenMlsRand,
 {
     fn conversation_id(&self) -> &str {
         &self.conversation_id
@@ -435,8 +436,7 @@ where
                 Ok(DecryptResult::Application(app.into_bytes(), sender_id))
             }
             ProcessedMessageContent::ProposalMessage(proposal) => {
-                let action =
-                    OpenMlsService::<S>::extract_proposal_action(group, proposal.proposal())?;
+                let action = extract_proposal_action(group, proposal.proposal())?;
 
                 group
                     .store_pending_proposal(provider.storage(), proposal.as_ref().clone())

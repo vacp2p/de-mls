@@ -15,37 +15,43 @@ use openmls::{
     prelude::{DeserializeBytes, MlsMessageBodyIn, MlsMessageIn},
 };
 use openmls_rust_crypto::RustCrypto;
-use openmls_traits::OpenMlsProvider;
+use openmls_traits::{OpenMlsProvider, crypto::OpenMlsCrypto, random::OpenMlsRand};
 
 use crate::mls_crypto::{
     KeyPackageBytes, MlsError,
-    engine::{CIPHERSUITE, DeMlsStorage, MlsCredentials, backend::MlsProvider},
+    engine::{DeMlsStorage, MlsCredentials, backend::MlsProvider},
 };
 
-/// OpenMLS-backed MLS service, scoped to a single conversation. Owns
-/// one `MlsGroup` plus an optional staged-commit slot for the inbound
-/// stage→merge/discard pipeline. Credentials are `Arc<MlsCredentials>`
-/// so one user's keypair backs every per-conversation service.
-pub struct OpenMlsService<S: DeMlsStorage> {
+/// OpenMLS-backed MLS service, scoped to a single conversation. Owns one
+/// `MlsGroup` plus an optional staged-commit slot for the inbound
+/// stage→merge/discard pipeline.
+///
+/// Generic over the storage backend `S` and the OpenMLS crypto/rand provider
+/// `C` (default [`RustCrypto`]); the signing keypair, credential, and
+/// ciphersuite are injected via [`MlsCredentials`], so the engine pins none of
+/// those choices. Credentials are `Arc<MlsCredentials>` so one user's keypair
+/// backs every per-conversation service.
+pub struct OpenMlsService<S: DeMlsStorage, C = RustCrypto> {
     pub(super) storage: S,
-    pub(super) crypto: RustCrypto,
+    pub(super) crypto: C,
     pub(super) credentials: Arc<MlsCredentials>,
     pub(super) conversation_id: String,
     pub(super) group: MlsGroup,
     pub(super) pending_staged_commit: Option<StagedCommit>,
 }
 
-impl<S: DeMlsStorage> OpenMlsService<S> {
+impl<S: DeMlsStorage, C: OpenMlsCrypto + OpenMlsRand + Default> OpenMlsService<S, C> {
     /// Create a fresh MLS group as the sole initial member ("creator").
     pub fn new_as_creator(
         conversation_id: String,
         storage: S,
         credentials: Arc<MlsCredentials>,
     ) -> Result<Self, MlsError> {
-        let crypto = RustCrypto::default();
+        let crypto = C::default();
         let group = {
             let provider = MlsProvider::new(&crypto, storage.mls_storage());
             let config = MlsGroupCreateConfig::builder()
+                .ciphersuite(credentials.ciphersuite())
                 .use_ratchet_tree_extension(true)
                 .build();
             MlsGroup::new_with_group_id(
@@ -78,7 +84,7 @@ impl<S: DeMlsStorage> OpenMlsService<S> {
         storage: S,
         credentials: Arc<MlsCredentials>,
     ) -> Result<Option<Self>, MlsError> {
-        let crypto = RustCrypto::default();
+        let crypto = C::default();
 
         let (mls_message, _) = MlsMessageIn::tls_deserialize_bytes(welcome_bytes)?;
         let welcome = match mls_message.extract() {
@@ -129,11 +135,11 @@ impl<S: DeMlsStorage> OpenMlsService<S> {
         storage: &S,
         credentials: &MlsCredentials,
     ) -> Result<KeyPackageBytes, MlsError> {
-        let crypto = RustCrypto::default();
+        let crypto = C::default();
         let provider = MlsProvider::new(&crypto, storage.mls_storage());
 
         let kp_bundle = KeyPackage::builder().build(
-            CIPHERSUITE,
+            credentials.ciphersuite(),
             &provider,
             credentials.signer(),
             credentials.credential().clone(),
