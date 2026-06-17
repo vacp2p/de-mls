@@ -13,6 +13,7 @@ use de_mls::{
         ConsensusPlugin, ConversationEvent, ConversationPluginsFactory, ScoringConfig,
         StewardListConfig,
     },
+    defaults::DefaultConversationPluginsFactory,
     member_id::MemberId,
     mls_crypto::{KeyPackageBytes, MlsError, MlsService},
     protos::de_mls::messages::v1::{ConversationUpdateRequest, MemberWelcome},
@@ -70,6 +71,15 @@ pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
 
 // ── Public API ──────────────────────────────────────────────────────────
 
+impl<P: ConsensusPlugin> User<P, DefaultConversationPluginsFactory> {
+    /// Generate a single-use key package via the default factory. Key-package
+    /// generation is the integrator's concern — not part of the de-mls plug-in
+    /// contract — so it lives on the concrete-factory `User`.
+    pub fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
+        self.plugins.conversation_plugins.generate_key_package()
+    }
+}
+
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// Display form of the local member_id, derived from [`MemberId::member_id_display`].
     pub fn member_id_string(&self) -> String {
@@ -86,11 +96,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     /// [`Self::handle_inbound`] / [`Self::receive_key_package`].
     pub fn app_id(&self) -> &[u8] {
         &self.app_id
-    }
-
-    /// Generate a single-use key package.
-    pub fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
-        self.plugins.conversation_plugins.generate_key_package()
     }
 
     /// Drain every pending [`ConversationLifecycle`] event accumulated

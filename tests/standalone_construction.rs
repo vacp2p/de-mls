@@ -16,8 +16,7 @@ use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use de_mls::member_id::MemberId;
 
 use de_mls::core::{
-    ConsensusPlugin, ConsensusServiceFor, ConversationEvent, ConversationPluginsFactory,
-    ScoringConfig, StewardListConfig,
+    ConsensusPlugin, ConsensusServiceFor, ConversationEvent, ScoringConfig, StewardListConfig,
 };
 use de_mls::defaults::{
     DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage,

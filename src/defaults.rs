@@ -213,6 +213,15 @@ impl DefaultConversationPluginsFactory {
             credentials,
         }
     }
+
+    /// Mint a single-use key package from this factory's storage and
+    /// credentials.
+    pub fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
+        OpenMlsService::<Arc<MemoryDeMlsStorage>>::generate_key_package(
+            &self.storage,
+            &self.credentials,
+        )
+    }
 }
 
 impl ConversationPluginsFactory for DefaultConversationPluginsFactory {
@@ -250,13 +259,6 @@ impl ConversationPluginsFactory for DefaultConversationPluginsFactory {
         config: StewardListConfig,
     ) -> Self::StewardList {
         DeterministicStewardList::empty(conversation_id.to_vec(), config)
-    }
-
-    fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
-        OpenMlsService::<Arc<MemoryDeMlsStorage>>::generate_key_package(
-            &self.storage,
-            &self.credentials,
-        )
     }
 }
 

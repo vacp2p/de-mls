@@ -1,11 +1,13 @@
 //! [`ConversationPluginsFactory`] trait — bundle of per-conversation plug-in
-//! types plus the construction methods for each, *plus* the
-//! `generate_key_package` entry that joiners use before
-//! any conversation exists.
+//! types plus the construction methods for each.
+//!
+//! Key-package generation is **not** here: the protocol layer never mints key
+//! packages (a joiner publishes one out of band before any conversation
+//! exists), so it is the integrator's concern, not part of this contract.
 
 use crate::{
     core::{PeerScoringPlugin, ScoringConfig, StewardListConfig, StewardListPlugin},
-    mls_crypto::{KeyPackageBytes, MlsError, MlsService},
+    mls_crypto::{MlsError, MlsService},
 };
 
 /// Per-conversation plug-in bundle. One trait carries the three plug-in
@@ -34,7 +36,4 @@ pub trait ConversationPluginsFactory {
         conversation_id: &[u8],
         config: StewardListConfig,
     ) -> Self::StewardList;
-
-    /// Generate a single-use key package.
-    fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError>;
 }

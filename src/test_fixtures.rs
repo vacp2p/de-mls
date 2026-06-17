@@ -270,7 +270,4 @@ impl ConversationPluginsFactory for StubPluginsFactory {
     fn make_steward_list(&self, _: &[u8], _: StewardListConfig) -> Self::StewardList {
         unreachable!()
     }
-    fn generate_key_package(&self) -> Result<crate::mls_crypto::KeyPackageBytes, MlsError> {
-        unreachable!()
-    }
 }
