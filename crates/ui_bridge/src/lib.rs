@@ -179,7 +179,7 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                         GATEWAY.push_event(AppEvent::ChatMessage(ConversationMessage {
                             message: body.into_bytes(),
                             sender: "me".to_string(),
-                            conversation_id: conversation_id,
+                            conversation_id,
                         }));
                     }
                     Err(e) => {
