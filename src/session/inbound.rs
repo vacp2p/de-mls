@@ -21,8 +21,8 @@ use crate::{
     },
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
-        AppMessage, ConversationMessage, ConversationSync, ConversationUpdateRequest, MemberInvite,
-        TimingConfig, conversation_update_request,
+        AppMessage, ConversationSync, ConversationUpdateRequest, EventMembershipChange,
+        MemberInvite, TimingConfig, TypeMembershipChange, conversation_update_request,
     },
     session::{
         Conversation, ConversationError, ConversationState,
@@ -284,11 +284,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// message, seed scoring with the current member set, and
     /// transition to Working.
     fn on_joined_conversation(&mut self) -> Result<(), ConversationError> {
-        let msg: AppMessage = ConversationMessage {
-            message: format!("User {} joined the conversation", self.member_id_display)
-                .into_bytes(),
-            sender: "SYSTEM".to_string(),
+        let msg: AppMessage = EventMembershipChange {
             conversation_id: self.conversation_id.clone(),
+            member: self.member_id_display().to_string(),
+            change_type: TypeMembershipChange::Add as i32,
         }
         .into();
         let conversation_id = self.conversation_id.clone();
