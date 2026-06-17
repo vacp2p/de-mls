@@ -1,55 +1,29 @@
 //! MLS cryptographic operations for DE-MLS.
 //!
-//! Each `OpenMlsService` instance is scoped to a single MLS group. The
-//! `MlsService` trait defines the per-conversation surface; constructors for the
-//! OpenMLS impl live as inherent methods on `OpenMlsService`.
+//! Two halves with a one-way dependency:
 //!
-//! Identity and MLS credentials are split: [`crate::member_id::MemberId`]
-//! is the user-level abstraction (just `member_id_bytes` + display);
-//! `MlsCredentials` (re-exported here) holds the MLS-specific signing keypair and
-//! credential, built from an `MemberId` at User init and shared across
-//! every per-conversation service.
+//! - `api` — the protocol **contract**: the `MlsService` trait plus the byte
+//!   boundary types (`KeyPackageBytes`, `MlsCommitInput`, …) and `MlsError`.
+//!   Core and session depend only on this; it names no concrete engine.
+//! - `engine` — the reference **OpenMLS implementation**: `OpenMlsService`,
+//!   its `MlsCredentials`, the `DeMlsStorage` backend abstraction, and the
+//!   pinned `CIPHERSUITE`. Only integrators and tests construct these.
 //!
-//! # Quick Start
+//! Everything is re-exported here so callers use `de_mls::mls_crypto::*`
+//! regardless of which half an item lives in.
 //!
-//! ```ignore
-//! use std::sync::Arc;
-//! use de_mls::mls_crypto::{
-//!     MemoryDeMlsStorage, MlsCredentials, MlsService, OpenMlsService,
-//! };
-//!
-//! // `member_id` is any type implementing `de_mls::member_id::MemberId`.
-//! let credentials = Arc::new(MlsCredentials::from_member_id(&member_id)?);
-//! let storage = MemoryDeMlsStorage::new();
-//!
-//! // Create a fresh group as its sole initial member.
-//! let mls = OpenMlsService::new_as_creator(
-//!     "my-chat".into(),
-//!     storage,
-//!     Arc::clone(&credentials),
-//! )?;
-//!
-//! // Encrypt a message.
-//! let ciphertext = mls.encrypt(b"Hello!")?;
-//! ```
-//!
-//! # Storage
-//!
-//! Each service requires a storage backend implementing `DeMlsStorage`.
-//! Use `MemoryDeMlsStorage` for development or implement your own for
-//! persistence. Storage may be shared across services via `Arc<S>`.
+//! Identity and MLS credentials are split: [`crate::member_id::MemberId`] is
+//! the user-level abstraction (just `member_id_bytes` + display);
+//! `MlsCredentials` holds the MLS-specific signing keypair and credential,
+//! built from a `MemberId` and shared across every per-conversation service.
 
-mod credentials;
-mod error;
-mod service;
-mod storage;
-mod types;
+mod api;
+mod engine;
 
-pub use credentials::MlsCredentials;
-pub use error::MlsError;
-pub use service::{CIPHERSUITE, DEFAULT_COMMIT_BATCH_MAX, MlsService, OpenMlsService};
-pub use storage::DeMlsStorage;
-pub use types::{
-    CommitCandidate, DecryptResult, KeyPackageBytes, MlsCommitInput, MlsMessageKind,
-    MlsProposalOutput, StagedCandidateResult, key_package_bytes_from_tls,
+pub use api::{
+    CommitCandidate, DecryptResult, KeyPackageBytes, MlsCommitInput, MlsError, MlsMessageKind,
+    MlsProposalOutput, MlsService, StagedCandidateResult, key_package_bytes_from_tls,
+};
+pub use engine::{
+    CIPHERSUITE, DEFAULT_COMMIT_BATCH_MAX, DeMlsStorage, MlsCredentials, OpenMlsService,
 };

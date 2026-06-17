@@ -1,25 +1,17 @@
-//! [`MlsService`] trait and protocol constants for one MLS group per instance.
+//! [`MlsService`] trait — DE-MLS's only contract with an MLS engine.
 //!
 //! DE-MLS talks to an MLS engine only through [`MlsService`]. Methods take
 //! boundary types from [`crate::mls_crypto`] (wire bytes, [`MlsCommitInput`],
-//! etc.) so protocol and app code do not depend on OpenMLS. The only
-//! engine-specific export here is [`CIPHERSUITE`], which pins the default
-//! [`OpenMlsService`](super::OpenMlsService) backend.
+//! etc.) so protocol and app code do not depend on a concrete engine. The
+//! reference engine and its [`CIPHERSUITE`](crate::mls_crypto::CIPHERSUITE)
+//! live alongside in the `mls_crypto` engine submodule.
 //!
 //! # Construction
 //!
 //! Creating a group, joining from a welcome, and publishing key packages are
-//! not on the trait: they are inherent methods on [`OpenMlsService`](super::OpenMlsService),
-//! because a joiner must publish a key package before any per-conversation
-//! service exists. See the quick-start in [`crate::mls_crypto`].
-//!
-//! # Constants
-//!
-//! * [`CIPHERSUITE`] — algorithm suite for [`OpenMlsService`](super::OpenMlsService).
-//! * [`DEFAULT_COMMIT_BATCH_MAX`] — default cap on proposals per steward commit;
-//!   override per instance with [`MlsService::commit_batch_max`].
-
-use openmls::prelude::Ciphersuite;
+//! not on the trait: they are inherent methods on the reference
+//! [`OpenMlsService`](crate::mls_crypto::OpenMlsService), because a joiner must
+//! publish a key package before any per-conversation service exists.
 
 use crate::{
     mls_crypto::{
@@ -29,14 +21,6 @@ use crate::{
     protos::de_mls::messages::v1::AppMessage,
 };
 
-/// MLS ciphersuite used by the default OpenMLS-backed impl.
-pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
-
-/// Default ceiling on MLS proposals per commit batch. Defends against
-/// runaway batch growth when freeze recovery preserves work across
-/// multiple failed cycles. Per-node config; not synced via `ConversationSync`.
-pub const DEFAULT_COMMIT_BATCH_MAX: usize = 50;
-
 /// Per-conversation MLS backend. Each instance corresponds to one MLS group.
 ///
 /// Read-only methods take `&self`; methods that advance MLS state take
@@ -45,12 +29,10 @@ pub trait MlsService {
     /// The conversation id this service is scoped to.
     fn conversation_id(&self) -> &str;
 
-    /// Maximum number of MLS proposals the steward will pack into one
-    /// commit batch. Defaults to [`DEFAULT_COMMIT_BATCH_MAX`]; impls may
-    /// override per-instance.
-    fn commit_batch_max(&self) -> usize {
-        DEFAULT_COMMIT_BATCH_MAX
-    }
+    /// Maximum number of MLS proposals the steward will pack into one commit
+    /// batch. Implementation-specific policy — the reference engine caps at
+    /// [`DEFAULT_COMMIT_BATCH_MAX`](crate::mls_crypto::DEFAULT_COMMIT_BATCH_MAX).
+    fn commit_batch_max(&self) -> usize;
 
     // ── Conversation lifecycle ──
 

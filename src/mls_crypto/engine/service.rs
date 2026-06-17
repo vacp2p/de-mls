@@ -18,8 +18,8 @@ use openmls_rust_crypto::RustCrypto;
 use openmls_traits::OpenMlsProvider;
 
 use crate::mls_crypto::{
-    DeMlsStorage, KeyPackageBytes, MlsCredentials, MlsError,
-    service::{CIPHERSUITE, backend::MlsProvider},
+    KeyPackageBytes, MlsError,
+    engine::{CIPHERSUITE, DeMlsStorage, MlsCredentials, backend::MlsProvider},
 };
 
 /// OpenMLS-backed MLS service, scoped to a single conversation. Owns

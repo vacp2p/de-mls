@@ -49,6 +49,9 @@ impl MlsService for UnusedMls {
     fn conversation_id(&self) -> &str {
         "unused"
     }
+    fn commit_batch_max(&self) -> usize {
+        crate::mls_crypto::DEFAULT_COMMIT_BATCH_MAX
+    }
     fn delete(&mut self) -> Result<(), MlsError> {
         unreachable!("UnusedMls::delete called")
     }

@@ -8,7 +8,7 @@ use openmls_basic_credential::SignatureKeyPair;
 
 use crate::{
     member_id::MemberId,
-    mls_crypto::{MlsError, service::CIPHERSUITE},
+    mls_crypto::{MlsError, engine::CIPHERSUITE},
 };
 
 /// MLS credential + signing keypair for one user, shared across all

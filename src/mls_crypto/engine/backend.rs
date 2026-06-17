@@ -1,9 +1,10 @@
-//! OpenMLS-backed implementation of [`super::MlsService`].
+//! OpenMLS-backed implementation of [`MlsService`].
 //!
-//! The trait definition lives in `super::api`; this file is the reference
-//! impl for the OpenMLS engine. It works with any `DeMlsStorage` whose
-//! `MlsStorage` implements [`openmls_traits::storage::StorageProvider`] —
-//! the impl is not tied to `openmls_rust_crypto::MemoryStorage`.
+//! The trait definition lives in the `mls_crypto` contract module; this file
+//! is the reference impl for the OpenMLS engine. It works with any
+//! `DeMlsStorage` whose `MlsStorage` implements
+//! [`openmls_traits::storage::StorageProvider`] — the impl is not tied to
+//! `openmls_rust_crypto::MemoryStorage`.
 
 use openmls::{
     group::MlsGroup,
@@ -19,8 +20,9 @@ use prost::Message;
 
 use crate::{
     mls_crypto::{
-        CommitCandidate, DeMlsStorage, DecryptResult, MlsCommitInput, MlsError, MlsMessageKind,
-        MlsProposalOutput, OpenMlsService, StagedCandidateResult, service::api::MlsService,
+        CommitCandidate, DecryptResult, MlsCommitInput, MlsError, MlsMessageKind,
+        MlsProposalOutput, MlsService, StagedCandidateResult,
+        engine::{DEFAULT_COMMIT_BATCH_MAX, DeMlsStorage, OpenMlsService},
     },
     protos::de_mls::messages::v1::AppMessage,
 };
@@ -92,6 +94,10 @@ where
 {
     fn conversation_id(&self) -> &str {
         &self.conversation_id
+    }
+
+    fn commit_batch_max(&self) -> usize {
+        DEFAULT_COMMIT_BATCH_MAX
     }
 
     // ══════════════════════════════════════════════════════════
