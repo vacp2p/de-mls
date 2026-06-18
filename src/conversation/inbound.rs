@@ -8,8 +8,8 @@
 //!   `MlsService` via the user-supplied factory) and are not routed through
 //!   this function.
 //! - [`Conversation::process_inbound`] is the single entry point for all
-//!   conversation traffic. It owns echo-dedup, `PendingJoin`-drop, and the
-//!   internal `dispatch_inbound_result` chain. `LeaveConversation` is terminal:
+//!   conversation traffic. It owns echo-dedup and the internal
+//!   `dispatch_inbound_result` chain. `LeaveConversation` is terminal:
 //!   `prepare_self_leave` emits `Leaving`, cancels timers, and deletes local
 //!   MLS state; the integrator then removes the registry entry and cleans up
 //!   the consensus scope.
@@ -30,7 +30,7 @@ use crate::{
     process_result::NoopReason,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationSync, ConversationUpdateRequest, EventMembershipChange,
-        MemberInvite, TimingConfig, TypeMembershipChange, app_message, conversation_update_request,
+        TimingConfig, TypeMembershipChange, app_message, conversation_update_request,
     },
 };
 
@@ -148,7 +148,7 @@ pub fn decode_inbound_payload<M: MlsService>(
 pub enum DispatchOutcome {
     /// No further integrator action required.
     Done,
-    /// Packet was self-echoed or dropped (no MLS attached yet). No action.
+    /// Packet was self-echoed. No action.
     Dropped,
     /// The conversation has completed its protocol-side teardown (emitted
     /// `Leaving`, deleted MLS state). The integrator must remove the
@@ -157,50 +157,11 @@ pub enum DispatchOutcome {
 }
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
-    /// Ingest a joiner's key-package announcement (a [`MemberInvite`]).
-    /// Drops self-echoes (`sender == self.app_id`). If the holder isn't
-    /// already a member, promotes the invite to a membership-change proposal
-    /// the epoch steward can act on.
-    pub fn receive_key_package(
-        &mut self,
-        sender: &[u8],
-        payload: &[u8],
-        signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
-        if sender == self.app_id.as_ref() {
-            return Ok(());
-        }
-        let invite = MemberInvite::decode(payload)?;
-        let already_member = self
-            .mls()
-            .map(|m| m.is_member(&invite.member_id))
-            .unwrap_or(false);
-        if already_member {
-            info!(
-                conversation = %self.conversation_id,
-                member = ?invite.member_id,
-                "key package skipped: already a member"
-            );
-            return Ok(());
-        }
-        info!(
-            conversation = %self.conversation_id,
-            member = ?invite.member_id,
-            "key package received"
-        );
-        self.handle_incoming_update_request(
-            ConversationUpdateRequest {
-                payload: Some(conversation_update_request::Payload::MemberInvite(invite)),
-            },
-            signer,
-        )
-    }
-
-    /// Decrypt and dispatch an inbound conversation payload. Drops self-echoes
-    /// and packets arriving before MLS is attached (`PendingJoin`). Runs the
-    /// full dispatch chain internally. Returns [`DispatchOutcome::LeaveRequested`]
-    /// when the conversation has completed its protocol-side teardown; the integrator
-    /// must then remove the registry entry and clean up the consensus scope.
+    /// Decrypt and dispatch an inbound conversation payload. Drops self-echoes.
+    /// Runs the full dispatch chain internally. Returns
+    /// [`DispatchOutcome::LeaveRequested`] when the conversation has completed
+    /// its protocol-side teardown; the integrator must then remove the registry
+    /// entry and clean up the consensus scope.
     pub fn process_inbound(
         &mut self,
         sender: &[u8],
@@ -210,41 +171,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         if sender == self.app_id.as_ref() {
             return Ok(DispatchOutcome::Dropped);
         }
-        if !self.has_mls() {
-            tracing::debug!(
-                conversation = %self.conversation_id,
-                "inbound dropped: MLS not attached (still PendingJoin)"
-            );
-            return Ok(DispatchOutcome::Dropped);
-        }
         let result = self.decode_inbound(payload)?;
         self.dispatch_inbound_result(result, signer)
-    }
-
-    /// Whether this conversation's MLS service is attached. `false` for a
-    /// joiner still in `PendingJoin` (no welcome yet).
-    pub fn has_mls(&self) -> bool {
-        self.mls().is_some()
-    }
-
-    /// Complete a join after receiving a welcome. Idempotent: returns
-    /// immediately if the conversation is no longer in `PendingJoin`. Attaches
-    /// the MLS service if absent, then dispatches `JoinedConversation`
-    /// internally (broadcasts the join message, seeds scoring, transitions to
-    /// `Working`).
-    pub fn complete_join(
-        &mut self,
-        mls: CP::Mls,
-        signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
-        if self.current_state() != ConversationState::PendingJoin {
-            return Ok(());
-        }
-        if !self.has_mls() {
-            self.attach_mls(mls);
-        }
-        self.dispatch_inbound_result(ProcessResult::JoinedConversation(), signer)?;
-        Ok(())
     }
 
     pub fn apply_welcome_sync(
@@ -286,10 +214,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             }
             ProcessResult::MembershipChangeReceived(request) => {
                 self.handle_incoming_update_request(*request, signer)?;
-                Ok(DispatchOutcome::Done)
-            }
-            ProcessResult::JoinedConversation() => {
-                self.on_joined_conversation(signer)?;
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::ConversationUpdated => {
@@ -352,10 +276,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             }
         };
         if let Some(req) = decoded.as_ref() {
-            let current_epoch = match self.mls() {
-                Some(mls) => mls.current_epoch()?,
-                None => 0,
-            };
+            let current_epoch = self.mls().current_epoch()?;
             match &req.payload {
                 Some(conversation_update_request::Payload::EmergencyCriteria(_)) => {
                     self.queues.insert_emergency(proposal.proposal_id);
@@ -397,10 +318,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         Ok(())
     }
 
-    /// We just joined via welcome. Broadcast a system "joined" chat
-    /// message, seed scoring with the current member set, and
-    /// transition to Working.
-    fn on_joined_conversation(&mut self, signer: &impl Signer) -> Result<(), ConversationError> {
+    /// We just joined via welcome. Runs after `assemble` already put the
+    /// conversation in `Working` and emitted the opening `PhaseChange`, so it
+    /// neither transitions state nor emits a second phase change. Broadcasts a
+    /// system "joined" chat message and seeds scoring with the current member
+    /// set.
+    pub(crate) fn on_joined(&mut self, signer: &impl Signer) -> Result<(), ConversationError> {
         let msg: AppMessage = EventMembershipChange {
             conversation_id: self.conversation_id.clone(),
             member: self.member_id_display().to_string(),
@@ -408,14 +331,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         }
         .into();
         let conversation_id = self.conversation_id.clone();
-        let mls = self.expect_mls_mut()?;
-        let mls_members = mls.members().unwrap_or_default();
+        let mls = self.mls_mut();
+        let members = mls.members().unwrap_or_default();
         let payload = mls.build_message(signer, &msg)?;
         self.broadcast(payload);
-        self.sync_scoring_members(&mls_members);
-
-        let event = self.start_working();
-        self.emit_event(ConversationEvent::PhaseChange(event));
+        self.sync_scoring_members(&members);
         info!(conversation = %conversation_id, "joined conversation");
         Ok(())
     }
@@ -425,10 +345,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// kick-off, buffered-update drain). The commit author's `SuccessfulCommit`
     /// reward is emitted by `finalize_freeze_round`, not here.
     fn on_conversation_updated(&mut self, signer: &impl Signer) -> Result<(), ConversationError> {
-        let mls_members = match self.mls() {
-            Some(mls) => mls.members().unwrap_or_default(),
-            None => Vec::new(),
-        };
+        let mls_members = self.mls().members().unwrap_or_default();
         self.sync_scoring_members(&mls_members);
         self.prune_pending_updates_after_commit()?;
 
@@ -480,14 +397,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     fn prepare_self_leave(&mut self) -> Result<(), ConversationError> {
         self.emit_event(ConversationEvent::Leaving);
         self.cancel_all_auto_votes();
-        let taken_mls = self.take_mls();
-        if let Some(mut mls) = taken_mls {
-            // The leave is already committed (`Leaving` emitted, MLS
-            // detached); a delete failure must log and continue, else the
-            // caller never reaches `LeaveRequested` and the entry leaks.
-            if let Err(e) = mls.delete() {
-                error!(error = %e, "self-leave: MLS storage delete failed; leaving anyway");
-            }
+        // The leave is already committed (`Leaving` emitted); a delete failure
+        // must log and continue, else the caller never reaches
+        // `LeaveRequested` and the entry leaks. The integrator tears the
+        // conversation down right after.
+        if let Err(e) = self.mls_mut().delete() {
+            error!(error = %e, "self-leave: MLS storage delete failed; leaving anyway");
         }
         Ok(())
     }
@@ -512,7 +427,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         let Some(event) = self.start_freezing() else {
             return Ok(());
         };
-        let epoch = self.expect_mls()?.current_epoch()?;
+        let epoch = self.mls().current_epoch()?;
         self.queues.start_freeze_round(epoch);
 
         let self_member_id = Arc::clone(&self.self_member_id);
@@ -549,7 +464,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         }
         let conversation_id = self.conversation_id.clone();
         let (members, current_epoch) = {
-            let mls = self.expect_mls()?;
+            let mls = self.mls();
             (mls.members()?, mls.current_epoch()?)
         };
         let local_default_peer_score = self.scoring.default_score();

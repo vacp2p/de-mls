@@ -1,10 +1,9 @@
 //! Unified per-cycle polling entry point for [`crate::Conversation`].
 //!
 //! [`Conversation::poll`] drives all time-based conversation paths in one call:
-//! consensus-deadline ticks, freeze progression, steward-inactivity freeze
-//! entry, and pending-join expiry. The sub-steps are private to this module —
-//! the integrator calls `poll()` once per wakeup cycle and reacts to the
-//! returned [`PollOutcome`].
+//! consensus-deadline ticks, freeze progression, and steward-inactivity freeze
+//! entry. The sub-steps are private to this module — the integrator calls
+//! `poll()` once per wakeup cycle and reacts to the returned [`PollOutcome`].
 
 use openmls_traits::signatures::Signer;
 use std::{sync::Arc, time::Duration};
@@ -25,16 +24,15 @@ pub struct PollOutcome {
     /// Earliest deadline still pending after this pass. Forward to an
     /// external scheduler as the next wakeup hint.
     pub next_wakeup_in: Option<Duration>,
-    /// `true` if this conversation should be torn down: either a `PendingJoin`
-    /// expiry or a commit that ejected the local member. The integrator
-    /// must remove the registry entry and clean up the consensus scope
-    /// before its next polling cycle.
+    /// `true` if this conversation should be torn down: a commit ejected the
+    /// local member. The integrator must remove the registry entry and clean
+    /// up the consensus scope before its next polling cycle.
     pub leave_requested: bool,
 }
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// Drive one polling cycle: tick consensus deadlines, advance freeze
-    /// state, check steward inactivity, and check pending-join expiry.
+    /// state, and check steward inactivity.
     ///
     /// Best-effort: each step runs regardless of whether the previous one
     /// failed; step errors are transient (a step that can't act this cycle
@@ -69,31 +67,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             );
         }
 
-        if self.check_pending_join() {
-            leave_requested = true;
-        }
-
         PollOutcome {
             next_wakeup_in: self.next_wakeup_in(),
             leave_requested,
         }
-    }
-
-    /// Polling check for `PendingJoin`: returns `true` once the pending-join
-    /// window elapses without a welcome. By then the conversation has emitted
-    /// `ConversationEvent::Leaving` and cancelled its timers; the integrator
-    /// handles registry-side cleanup.
-    fn check_pending_join(&mut self) -> bool {
-        if self.current_state() != ConversationState::PendingJoin {
-            return false;
-        }
-        if !self.is_pending_join_expired() {
-            return false;
-        }
-        info!(conversation = %self.conversation_id, "pending join timed out");
-        self.emit_event(ConversationEvent::Leaving);
-        self.cancel_all_auto_votes();
-        true
     }
 
     /// Drive the freeze phase forward. While `Freezing`, emits
@@ -138,16 +115,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         let conversation_id = self.conversation_id.clone();
         let allow_subset = self.steward_list.config().allow_subset_candidates;
         let self_member_id = Arc::clone(&self.self_member_id);
-        let mut finalize_result = if self.has_mls() {
-            match self.finalize_freeze_round(allow_subset, &self_member_id) {
-                Ok(result) => result,
-                Err(e) => {
-                    error!(conversation = %conversation_id, error = %e, "freeze finalize failed");
-                    FreezeFinalizeResult::default()
-                }
+        let mut finalize_result = match self.finalize_freeze_round(allow_subset, &self_member_id) {
+            Ok(result) => result,
+            Err(e) => {
+                error!(conversation = %conversation_id, error = %e, "freeze finalize failed");
+                FreezeFinalizeResult::default()
             }
-        } else {
-            FreezeFinalizeResult::default()
         };
         // Apply locally-observed score events. These come from dropped
         // candidates in the phase-3 loop (RFC §Peer Scoring: direct local
@@ -225,18 +198,16 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
                     // the same event independently; threshold-crossing
                     // removal still goes through SCORE_BELOW_THRESHOLD
                     // consensus in steward.rs.
-                    let accuse_target = match self.mls() {
-                        Some(mls) => {
-                            let violation_epoch = mls.current_epoch()?;
-                            let members = mls.members()?;
-                            let self_member_id: &[u8] = &self.self_member_id;
-                            let eligible = self.queues.steward_eligibility(&members);
-                            self.steward_list
-                                .epoch_steward(violation_epoch, &eligible)
-                                .filter(|id| !id.is_empty() && *id != self_member_id)
-                                .map(|id| id.to_vec())
-                        }
-                        None => None,
+                    let accuse_target = {
+                        let mls = self.mls();
+                        let violation_epoch = mls.current_epoch()?;
+                        let members = mls.members()?;
+                        let self_member_id: &[u8] = &self.self_member_id;
+                        let eligible = self.queues.steward_eligibility(&members);
+                        self.steward_list
+                            .epoch_steward(violation_epoch, &eligible)
+                            .filter(|id| !id.is_empty() && *id != self_member_id)
+                            .map(|id| id.to_vec())
                     };
                     let cross = if let Some(steward_id) = accuse_target {
                         self.scoring.apply_op(&ScoreOp {
@@ -282,10 +253,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         &mut self,
         signer: &impl Signer,
     ) -> Result<(), ConversationError> {
-        if self.current_state() == ConversationState::PendingJoin {
-            return Ok(());
-        }
-
         let proposal_count = self.queues.approved_proposals_count();
         // Hold the freeze while an election is in flight — committing on
         // the known-stale list would just produce a NoCandidate.
@@ -303,7 +270,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         let Some(event) = self.check_steward_inactivity(proposal_count, inactivity) else {
             return Ok(());
         };
-        let epoch = self.expect_mls()?.current_epoch()?;
+        let epoch = self.mls().current_epoch()?;
         self.queues.start_freeze_round(epoch);
 
         let self_member_id = Arc::clone(&self.self_member_id);

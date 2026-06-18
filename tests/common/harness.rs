@@ -14,7 +14,7 @@
 //!   (self-echoes drop internally).
 //! - Key-package announcements and welcomes never traverse `drain_outbound`:
 //!   the harness mints/announces key packages explicitly and routes
-//!   `WelcomeReady` events to joiners via `welcome_mls` + `complete_join`.
+//!   `WelcomeReady` events to joiners via `Conversation::from_welcome`.
 
 #![allow(dead_code)]
 
@@ -26,12 +26,13 @@ use std::time::Duration;
 use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use openmls_basic_credential::SignatureKeyPair;
+use prost::Message;
 
 use de_mls::defaults::DefaultConsensusPlugin;
 use de_mls::member_id::MemberId;
 use de_mls::mls_crypto::KeyPackageBytes;
 use de_mls::protos::de_mls::messages::v1::{
-    AppMessage, ConversationUpdateRequest, MemberWelcome, app_message,
+    AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
 };
 use de_mls::{
     ConsensusPlugin, ConsensusServiceFor, ConversationEvent, ConversationState, ScoringConfig,
@@ -121,16 +122,20 @@ pub struct ReceivedChat {
     pub sender: String,
 }
 
-/// One protocol participant: integrator state + its live `Conversation` + the
-/// log of every [`ConversationEvent`] it has emitted. Query methods take
-/// `&self`; driving methods take `&mut self`.
+/// One protocol participant: integrator state + its `Conversation` (absent
+/// until a joiner accepts its welcome) + the log of every
+/// [`ConversationEvent`] it has emitted. Query methods take `&self`; driving
+/// methods take `&mut self`.
 pub struct Member {
     integ: Integrator,
-    convo: TestConversation,
+    convo: Option<TestConversation>,
     events: Vec<ConversationEvent>,
     /// The encrypted `conversation_sync_bytes` from the welcome this member
     /// joined with — captured so a test can replay it (idempotency check).
     last_sync: Option<Vec<u8>>,
+    /// Config used to build this member's `ConversationDeps` when it accepts a
+    /// welcome (joiner path) or rejoins.
+    pending_config: ConversationConfig,
 }
 
 impl Member {
@@ -147,40 +152,44 @@ impl Member {
         let convo = Conversation::create(
             conversation_id,
             key_package.as_bytes(),
-            integ.deps(config),
+            integ.deps(config.clone()),
             &integ.signer,
         )
         .expect("create conversation");
         Self {
             integ,
-            convo,
+            convo: Some(convo),
             events: Vec::new(),
             last_sync: None,
+            pending_config: config,
         }
     }
 
-    /// Open a pending-join conversation; MLS attaches later from a welcome.
+    /// Build a prospective joiner: it holds integrator state and can mint /
+    /// announce its key package, but has no conversation until its welcome
+    /// arrives (`try_accept_welcome` installs it via `Conversation::from_welcome`).
     pub fn join(
         private_key: &str,
-        conversation_id: &str,
+        _conversation_id: &str,
         config: ConversationConfig,
         steward_list_config: StewardListConfig,
     ) -> Self {
         let integ = Integrator::new(private_key, steward_list_config);
-        let convo =
-            Conversation::join(conversation_id, integ.deps(config)).expect("join conversation");
         Self {
             integ,
-            convo,
+            convo: None,
             events: Vec::new(),
             last_sync: None,
+            pending_config: config,
         }
     }
 
     // ── Queries (`&self`) ────────────────────────────────────────────────
 
+    /// The live conversation. Panics if this member hasn't joined yet — only
+    /// call on a member known to hold a conversation.
     pub fn convo(&self) -> &TestConversation {
-        &self.convo
+        self.convo.as_ref().expect("member has joined")
     }
 
     pub fn app_id(&self) -> &[u8] {
@@ -193,29 +202,46 @@ impl Member {
         self.integ.member_id.member_id_bytes()
     }
 
-    /// Reelection retry round; `0` while no recovery election is in flight.
+    /// Reelection retry round; `0` while no recovery election is in flight or
+    /// the member hasn't joined.
     pub fn retry_round(&self) -> u32 {
-        self.convo.epoch_and_retry().map(|(_, r)| r).unwrap_or(0)
+        self.convo
+            .as_ref()
+            .and_then(|c| c.epoch_and_retry().ok())
+            .map(|(_, r)| r)
+            .unwrap_or(0)
     }
 
     /// Membership-change proposals buffered locally but not yet committed.
     pub fn pending_update_count(&self) -> usize {
-        self.convo.pending_update_count()
+        self.convo
+            .as_ref()
+            .map(|c| c.pending_update_count())
+            .unwrap_or(0)
     }
 
     /// Count of proposals approved for the current epoch.
     pub fn approved_count(&self) -> usize {
-        self.convo.approved_proposals_for_current_epoch().len()
+        self.convo
+            .as_ref()
+            .map(|c| c.approved_proposals_for_current_epoch().len())
+            .unwrap_or(0)
     }
 
     /// Per-member roles (steward / backup / member) in this conversation.
     pub fn member_roles(&self) -> Vec<(Vec<u8>, MemberRole)> {
-        self.convo.member_roles().unwrap_or_default()
+        self.convo
+            .as_ref()
+            .and_then(|c| c.member_roles().ok())
+            .unwrap_or_default()
     }
 
     /// Per-member peer scores.
     pub fn member_scores(&self) -> Vec<(Vec<u8>, i64)> {
-        self.convo.member_scores()
+        self.convo
+            .as_ref()
+            .map(|c| c.member_scores())
+            .unwrap_or_default()
     }
 
     /// The encrypted sync bytes this member joined with (for idempotency tests).
@@ -249,24 +275,37 @@ impl Member {
         self.integ.member_id.member_id_display().to_string()
     }
 
+    /// Current conversation state. Panics if this member hasn't joined yet.
     pub fn state(&self) -> ConversationState {
-        self.convo.state()
+        self.convo.as_ref().expect("member has joined").state()
     }
 
     pub fn is_steward(&self) -> bool {
-        self.convo.is_steward()
+        self.convo.as_ref().is_some_and(|c| c.is_steward())
     }
 
+    /// `true` once this member holds a conversation in `Working` (joiners
+    /// without a welcome yet are not working).
     pub fn is_working(&self) -> bool {
-        self.convo.state() == ConversationState::Working
+        self.convo
+            .as_ref()
+            .is_some_and(|c| c.state() == ConversationState::Working)
     }
 
     pub fn epoch(&self) -> u64 {
-        self.convo.epoch_and_retry().map(|(e, _)| e).unwrap_or(0)
+        self.convo
+            .as_ref()
+            .and_then(|c| c.epoch_and_retry().ok())
+            .map(|(e, _)| e)
+            .unwrap_or(0)
     }
 
     pub fn member_count(&self) -> usize {
-        self.convo.members().map(|m| m.len()).unwrap_or(0)
+        self.convo
+            .as_ref()
+            .and_then(|c| c.members().ok())
+            .map(|m| m.len())
+            .unwrap_or(0)
     }
 
     /// Every [`ConversationEvent`] this member has emitted, in order.
@@ -347,18 +386,24 @@ impl Member {
 
     pub fn send_message(&mut self, message: Vec<u8>) {
         self.convo
+            .as_mut()
+            .expect("member has joined")
             .send_message(message, &self.integ.signer)
             .expect("send message");
     }
 
     pub fn add_member(&mut self, key_package: &[u8]) {
         self.convo
+            .as_mut()
+            .expect("member has joined")
             .add_member(key_package, &self.integ.signer)
             .expect("add member");
     }
 
     pub fn remove_member(&mut self, member_id: &[u8]) {
         self.convo
+            .as_mut()
+            .expect("member has joined")
             .remove_member(member_id, &self.integ.signer)
             .expect("remove member");
     }
@@ -366,6 +411,8 @@ impl Member {
     /// Cast a manual vote on `proposal_id` (cancels any pending auto-vote).
     pub fn vote(&mut self, proposal_id: u32, vote: bool) {
         self.convo
+            .as_mut()
+            .expect("member has joined")
             .vote(proposal_id, vote, &self.integ.signer)
             .expect("vote");
     }
@@ -374,30 +421,37 @@ impl Member {
     /// [`Self::remove_member`]; used for emergency/violation proposals.
     pub fn initiate_proposal(&mut self, request: ConversationUpdateRequest, vote: CreatorVote) {
         self.convo
+            .as_mut()
+            .expect("member has joined")
             .initiate_proposal(request, vote, &self.integ.signer)
             .expect("initiate proposal");
     }
 
     pub fn leave(&mut self) {
-        self.convo.leave(&self.integ.signer).expect("leave");
+        self.convo
+            .as_mut()
+            .expect("member has joined")
+            .leave(&self.integ.signer)
+            .expect("leave");
     }
 
     /// Drain this member's buffered outbound directly (bypassing the bus) — for
     /// tests that count or inspect what a single member emitted.
     pub fn take_outbound(&mut self) -> Vec<Outbound> {
-        self.convo.drain_outbound()
+        self.drain_outbound()
     }
 
     /// Deliver a raw payload to this member as if it arrived from `sender`.
+    /// No-op when the member hasn't joined.
     pub fn deliver_raw(&mut self, sender: &[u8], payload: &[u8]) {
-        let _ = self
-            .convo
-            .process_inbound(sender, payload, &self.integ.signer);
+        if let Some(convo) = self.convo.as_mut() {
+            let _ = convo.process_inbound(sender, payload, &self.integ.signer);
+        }
     }
 
     /// Mint a key package and return its announcement as an [`Outbound`] (the
     /// integrator publishes this on the welcome channel; the harness routes it
-    /// via `receive_key_package`).
+    /// to existing members via `add_member`).
     pub fn announce_key_package(&mut self, conversation_id: &str) -> Outbound {
         let key_package = self.integ.plugins.generate_key_package();
         Outbound {
@@ -414,17 +468,25 @@ impl Member {
         self.integ.plugins.generate_key_package()
     }
 
-    /// Rebuild this member as a fresh joiner of `conversation_id` (same
-    /// identity / keys) — for rejoining after eviction.
-    pub fn rejoin(&mut self, conversation_id: &str, config: ConversationConfig) {
-        self.convo = Conversation::join(conversation_id, self.integ.deps(config)).expect("rejoin");
+    /// Reset this member to a fresh prospective joiner of `conversation_id`
+    /// (same identity / keys) — for rejoining after eviction. The conversation
+    /// rebuilds from the next welcome.
+    pub fn rejoin(&mut self, _conversation_id: &str, config: ConversationConfig) {
+        self.convo = None;
         self.last_sync = None;
+        self.pending_config = config;
     }
 
     /// Advance this member's timers/state machine one tick, returning the
-    /// poll outcome (e.g. `leave_requested` on pending-join expiry).
+    /// poll outcome. No-op (empty outcome) when the member hasn't joined.
     pub fn poll(&mut self) -> PollOutcome {
-        self.convo.poll(&self.integ.signer)
+        match self.convo.as_mut() {
+            Some(convo) => convo.poll(&self.integ.signer),
+            None => PollOutcome {
+                next_wakeup_in: None,
+                leave_requested: false,
+            },
+        }
     }
 
     /// Drain this member's pending events into its log (no welcome routing) —
@@ -434,34 +496,47 @@ impl Member {
     }
 
     fn drain_outbound(&mut self) -> Vec<Outbound> {
-        self.convo.drain_outbound()
+        self.convo
+            .as_ref()
+            .map(|c| c.drain_outbound())
+            .unwrap_or_default()
     }
 
     fn deliver(&mut self, packet: &Outbound) {
-        let _ = self
-            .convo
-            .process_inbound(&packet.sender, &packet.payload, &self.integ.signer);
+        if let Some(convo) = self.convo.as_mut() {
+            let _ = convo.process_inbound(&packet.sender, &packet.payload, &self.integ.signer);
+        }
     }
 
+    /// Route a peer's key-package announcement to an existing member, which
+    /// proposes the add. No-op when this member hasn't joined or the announcer
+    /// is itself.
     fn deliver_key_package(&mut self, packet: &Outbound) {
-        let _ = self
-            .convo
-            .receive_key_package(&packet.sender, &packet.payload, &self.integ.signer);
+        if packet.sender == self.app_id() {
+            return;
+        }
+        let Some(convo) = self.convo.as_mut() else {
+            return;
+        };
+        if convo.state() != ConversationState::Working {
+            return;
+        }
+        let invite = MemberInvite::decode(packet.payload.as_slice()).expect("decode key package");
+        let _ = convo.add_member(&invite.key_package_bytes, &self.integ.signer);
     }
 
     /// Try to open `welcome` with this member's stashed key-package provider.
-    /// Returns `true` only for the addressed joiner (attaches MLS + applies the
-    /// bundled sync); `false` for everyone else.
+    /// Returns `true` only for the addressed joiner (builds the conversation
+    /// from the welcome + bundled sync); `false` for everyone else. Already-
+    /// joined members ignore further welcomes.
     fn try_accept_welcome(&mut self, welcome: &MemberWelcome) -> bool {
-        use de_mls::ConversationPluginsFactory;
-        match self.integ.plugins.welcome_mls(&welcome.welcome_bytes) {
-            Ok(Some(mls)) => {
-                self.convo
-                    .complete_join(mls, &self.integ.signer)
-                    .expect("complete join");
-                self.convo
-                    .apply_welcome_sync(&welcome.conversation_sync_bytes, &self.integ.signer)
-                    .expect("apply welcome sync");
+        if self.convo.is_some() {
+            return false;
+        }
+        let deps = self.integ.deps(self.pending_config.clone());
+        match Conversation::from_welcome(deps, welcome, &self.integ.signer) {
+            Ok(Some(convo)) => {
+                self.convo = Some(convo);
                 self.last_sync = Some(welcome.conversation_sync_bytes.clone());
                 true
             }
@@ -473,7 +548,10 @@ impl Member {
     /// harness to route to joiners.
     fn drain_events_collect_welcomes(&mut self) -> Vec<MemberWelcome> {
         let mut welcomes = Vec::new();
-        for event in self.convo.drain_events() {
+        let Some(convo) = self.convo.as_ref() else {
+            return welcomes;
+        };
+        for event in convo.drain_events() {
             if let ConversationEvent::WelcomeReady {
                 welcome,
                 minted_locally: true,
@@ -498,9 +576,9 @@ pub struct TestHarness<const N: usize> {
 }
 
 impl<const N: usize> TestHarness<N> {
-    /// Build `keys[0]` as creator and the rest as joiners, with no driving:
-    /// joiners are still `PendingJoin`. Use for tests that need to observe an
-    /// intermediate state before the join cycle runs.
+    /// Build `keys[0]` as creator and the rest as prospective joiners, with no
+    /// driving: joiners hold no conversation yet. Use for tests that need to
+    /// observe an intermediate state before the join cycle runs.
     pub fn start(
         keys: [&str; N],
         conversation_id: &str,
@@ -567,7 +645,7 @@ impl<const N: usize> TestHarness<N> {
     }
 
     /// Deliver a key-package announcement to every member (self-echoes drop
-    /// inside `receive_key_package`).
+    /// inside `deliver_key_package`).
     pub fn deliver_key_package_all(&mut self, packet: &Outbound) {
         for member in &mut self.members {
             member.deliver_key_package(packet);
@@ -624,8 +702,8 @@ impl<const N: usize> TestHarness<N> {
     /// then broadcast all buffered outbound. Welcomes are routed before app
     /// traffic so a joiner's MLS is attached before same-round commit/election
     /// packets arrive. Events are drained twice — before and after relay — so
-    /// phase/chat events emitted by this round's `complete_join` and delivery
-    /// land in the log before the next predicate check.
+    /// phase/chat events emitted by this round's welcome acceptance and
+    /// delivery land in the log before the next predicate check.
     pub fn process(&mut self, step: Duration) {
         sleep(step);
         for member in &mut self.members {

@@ -98,7 +98,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
                     "YES vote cast (bundled at submit)"
                 );
                 let outbound: AppMessage = proposal.into();
-                let payload = self.expect_mls_mut()?.build_message(signer, &outbound)?;
+                let payload = self.mls_mut().build_message(signer, &outbound)?;
                 self.broadcast(payload);
                 self.emit_event(ConversationEvent::OwnProposalSubmitted {
                     proposal_id,
@@ -106,7 +106,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
                 });
             }
             CreatorVote::Deferred => {
-                let payload = self.expect_mls_mut()?.build_message(signer, &unbundled)?;
+                let payload = self.mls_mut().build_message(signer, &unbundled)?;
                 self.broadcast(payload);
                 self.emit_event(ConversationEvent::VoteRequested {
                     proposal_id,
@@ -240,7 +240,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             return Ok(());
         };
 
-        let payload = self.expect_mls_mut()?.build_message(signer, &app_msg)?;
+        let payload = self.mls_mut().build_message(signer, &app_msg)?;
         self.broadcast(payload);
         Ok(())
     }
@@ -273,7 +273,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             }
         }
 
-        let members = self.expect_mls()?.members()?;
+        let members = self.mls().members()?;
         Ok(members.len() as u32)
     }
 
@@ -328,7 +328,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     ) -> Result<(), ConversationError> {
         let app_message =
             cast_vote::<P>(&self.conversation_id, proposal_id, vote, &self.consensus)?;
-        let payload = self.expect_mls_mut()?.build_message(signer, &app_message)?;
+        let payload = self.mls_mut().build_message(signer, &app_message)?;
         self.broadcast(payload);
         Ok(())
     }

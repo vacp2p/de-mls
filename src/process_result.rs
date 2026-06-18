@@ -39,9 +39,6 @@ pub enum ProcessResult {
     /// Steward received a membership change (invite KP / ban) — start a vote.
     MembershipChangeReceived(Box<ConversationUpdateRequest>),
 
-    /// Successfully joined via a welcome message.
-    JoinedConversation(),
-
     /// MLS state advanced (batch commit applied).
     ConversationUpdated,
 

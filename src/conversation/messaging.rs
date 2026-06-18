@@ -6,6 +6,7 @@
 
 use openmls_traits::signatures::Signer;
 use prost::Message;
+use tracing::info;
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationPluginsFactory,
@@ -34,12 +35,11 @@ pub struct Outbound {
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// Buffer a chat message for broadcast. The conversation never sends — the
     /// message is enqueued and the integrator drains it via
-    /// [`Conversation::drain_outbound`]. Blocked in `PendingJoin` (no keys
-    /// yet), `Freezing`, and `Selection` (epoch rotation in flight — the
-    /// message might not decrypt on peers who already merged the next
-    /// commit). Governance traffic has its own gate (`check_proposal_allowed`).
-    /// `signer` is the local member's MLS signer, used to authenticate the
-    /// outbound message.
+    /// [`Conversation::drain_outbound`]. Blocked in `Freezing` and `Selection`
+    /// (epoch rotation in flight — the message might not decrypt on peers who
+    /// already merged the next commit). Governance traffic has its own gate
+    /// (`check_proposal_allowed`). `signer` is the local member's MLS signer,
+    /// used to authenticate the outbound message.
     pub fn send_message(
         &mut self,
         message: Vec<u8>,
@@ -48,9 +48,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         let state = self.current_state();
         if matches!(
             state,
-            ConversationState::PendingJoin
-                | ConversationState::Freezing
-                | ConversationState::Selection
+            ConversationState::Freezing | ConversationState::Selection
         ) {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
@@ -61,7 +59,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             conversation_id: self.conversation_id.clone(),
         }
         .into();
-        let payload = self.expect_mls_mut()?.build_message(signer, &app_msg)?;
+        let payload = self.mls_mut().build_message(signer, &app_msg)?;
         self.broadcast(payload);
         Ok(())
     }
@@ -70,7 +68,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// package. Parses the key package, extracts the member id, and submits a
     /// proposal with a bundled YES vote. The resulting welcome fires as
     /// [`crate::ConversationEvent::WelcomeReady`] for the integrator to
-    /// deliver out of band.
+    /// deliver out of band. No-op when the key package addresses the local
+    /// member or someone already in the group.
     pub fn add_member(
         &mut self,
         key_package_bytes: &[u8],
@@ -81,6 +80,19 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
         let (kp_bytes, member_id) = key_package_bytes_from_tls(key_package_bytes.to_vec())?;
+        // Don't propose our own key package.
+        if member_id == *self.member_id_bytes() {
+            return Ok(());
+        }
+        // The target is already in the group — nothing to add.
+        if self.mls().is_member(&member_id) {
+            info!(
+                conversation = %self.id(),
+                member = ?member_id,
+                "add member skipped: already a member"
+            );
+            return Ok(());
+        }
         self.initiate_proposal(
             ConversationUpdateRequest::member_invite(MemberInvite {
                 key_package_bytes: kp_bytes,

@@ -123,18 +123,6 @@ fn create_builds_a_working_steward_session_without_user() {
     );
 }
 
-#[test]
-fn join_builds_a_pending_join_session_without_user() {
-    let integrator = Integrator::new();
-    let conversation = Conversation::join("standalone", integrator.deps()).expect("join");
-
-    assert_eq!(conversation.state(), ConversationState::PendingJoin);
-    assert!(
-        !conversation.is_steward(),
-        "a pending joiner holds no steward list yet"
-    );
-}
-
 /// Sub-second timers so the solo creator's bundled-YES consensus and the
 /// inactivity commit land within a few polling rounds.
 fn fast_config() -> de_mls::ConversationConfig {

@@ -35,11 +35,8 @@ use crate::{
 /// Outcome of [`Conversation::leave`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaveOutcome {
-    /// `PendingJoin` path: local teardown complete. The integrator must remove
-    /// the registry entry and clean up the consensus scope.
-    TornDown,
-    /// Active-conversation path: a self-leave consensus round has been opened. The
-    /// conversation stays active until the next steward commit merges the removal.
+    /// A self-leave consensus round has been opened. The conversation stays
+    /// active until the next steward commit merges the removal.
     LeaveInitiated,
 }
 
@@ -66,10 +63,10 @@ pub struct Conversation<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Read via [`Conversation::conversation_id`].
     pub(crate) conversation_id: String,
     pub(crate) queues: ConversationQueues,
-    /// Per-conversation MLS service. `None` for joiners in `PendingJoin` who
-    /// haven't accepted a welcome yet; once attached via
-    /// [`Self::attach_mls`] it stays `Some` for the conversation's lifetime.
-    mls: Option<CP::Mls>,
+    /// Per-conversation MLS service. Present for the conversation's whole
+    /// lifetime: the creator seeds it at [`Conversation::create`], the joiner
+    /// at [`Conversation::from_welcome`].
+    mls: CP::Mls,
     pub(crate) state_machine: ConversationStateMachine,
     /// Per-conversation durable config: voting/consensus durations,
     /// `liveness_criteria_yes`, `pending_update_max_epochs`.
@@ -87,7 +84,7 @@ pub struct Conversation<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Subscriber on `consensus.event_bus()`. Drained by
     /// `tick_deadlines`, which dispatches each event through
     /// `apply_consensus_outcome`. Subscribed when the conversation is built in
-    /// [`Conversation::create`] / [`Conversation::join`].
+    /// [`Conversation::create`] / [`Conversation::from_welcome`].
     pub(crate) consensus_rx: ConsensusReceiver<P>,
     /// Wall-clock anchor combined with [`Self::state_machine`] by
     /// coordinator methods.
@@ -132,15 +129,13 @@ pub struct Conversation<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
 }
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
-    /// Build a fresh conversation. Creator path passes `Some(mls)`; joiner
-    /// path passes `None` and attaches the MLS service later via
-    /// [`Self::attach_mls`]. `consensus_rx` is a subscriber on
-    /// `consensus.event_bus()`.
+    /// Build a fresh conversation around an already-seeded MLS service.
+    /// `consensus_rx` is a subscriber on `consensus.event_bus()`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         conversation_id: String,
         queues: ConversationQueues,
-        mls: Option<CP::Mls>,
+        mls: CP::Mls,
         state_machine: ConversationStateMachine,
         phase_timer: PhaseTimer,
         config: ConversationConfig,
@@ -197,39 +192,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
 
     // ── MLS service ─────────────────────────────────────────────────
 
-    /// Borrow the MLS service, if attached. `None` for joiners
-    /// pre-welcome.
-    pub(crate) fn mls(&self) -> Option<&CP::Mls> {
-        self.mls.as_ref()
+    /// Borrow the MLS service.
+    pub(crate) fn mls(&self) -> &CP::Mls {
+        &self.mls
     }
 
-    /// Borrow the MLS service, erroring with
-    /// [`ConversationError::MlsGroupNotInitialized`] when not attached.
-    pub(crate) fn expect_mls(&self) -> Result<&CP::Mls, ConversationError> {
-        self.mls
-            .as_ref()
-            .ok_or(ConversationError::MlsGroupNotInitialized)
-    }
-
-    /// Mutable [`Self::expect_mls`] — required for the commit pipeline
+    /// Mutably borrow the MLS service — required for the commit pipeline
     /// and encrypt/decrypt methods that advance MLS state.
-    pub(crate) fn expect_mls_mut(&mut self) -> Result<&mut CP::Mls, ConversationError> {
-        self.mls
-            .as_mut()
-            .ok_or(ConversationError::MlsGroupNotInitialized)
-    }
-
-    /// Attach an MLS service (joiner, post-welcome). Overwrites, so the
-    /// caller must only attach when `mls().is_none()` — a double-attach
-    /// drops live group state.
-    pub(crate) fn attach_mls(&mut self, mls: CP::Mls) {
-        self.mls = Some(mls);
-    }
-
-    /// Drop the attached MLS service and return it. Used on conversation leave
-    /// so the caller can run service-side cleanup (`mls.delete()`).
-    pub(crate) fn take_mls(&mut self) -> Option<CP::Mls> {
-        self.mls.take()
+    pub(crate) fn mls_mut(&mut self) -> &mut CP::Mls {
+        &mut self.mls
     }
 
     // ── Protocol-function wrappers ─────────────────────────────────
@@ -238,17 +209,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     // callsites don't destructure the conversation. Protocol logic lives in
     // sibling `core` modules; these are pure delegation.
 
-    /// Build a commit candidate. Errors with
-    /// [`ConversationError::MlsGroupNotInitialized`] when no MLS service is
-    /// attached.
+    /// Build a commit candidate.
     pub(crate) fn create_commit_candidate(
         &mut self,
         signer: &impl Signer,
         self_member_id: &[u8],
     ) -> Result<Option<Vec<u8>>, ConversationError> {
-        if self.mls.is_none() {
-            return Err(ConversationError::MlsGroupNotInitialized);
-        }
         if !self.steward_list.is_steward(self_member_id) && !self.is_in_recovery_mode() {
             return Err(ConversationError::NotASteward);
         }
@@ -286,10 +252,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
 
         // Borrow `self.mls` directly so later `self.queues` reads stay
         // a disjoint borrow.
-        let mls = self
-            .mls
-            .as_mut()
-            .ok_or(ConversationError::MlsGroupNotInitialized)?;
+        let mls = &mut self.mls;
 
         // Drop approved entries already reflected in conversation state (stale
         // rebroadcast KPs, duplicate removes) — without this MLS would reject
@@ -402,10 +365,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         self_member_id: &[u8],
     ) -> Result<FreezeFinalizeResult, ConversationError> {
         let in_recovery = self.operating_mode == OperatingMode::Recovery;
-        let mls = self
-            .mls
-            .as_mut()
-            .ok_or(ConversationError::MlsGroupNotInitialized)?;
+        let mls = &mut self.mls;
         finalize_freeze_round(
             &mut self.queues,
             mls,
@@ -417,27 +377,18 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     }
 
     /// Re-buffer commit candidates stashed before their proposal was locally
-    /// approved. Call after applying a consensus outcome. No-op when MLS isn't
-    /// attached or nothing is stashed.
+    /// approved. Call after applying a consensus outcome. No-op when nothing
+    /// is stashed.
     pub(crate) fn replay_early_candidates(&mut self) -> Result<(), ConversationError> {
-        let Some(mls) = self.mls.as_mut() else {
-            return Ok(());
-        };
-        replay_early_candidates(&mut self.queues, mls)
+        replay_early_candidates(&mut self.queues, &mut self.mls)
     }
 
     /// Decode an inbound app-subtopic payload into a [`ProcessResult`].
-    /// Errors with [`ConversationError::MlsGroupNotInitialized`] when no MLS service
-    /// is attached — caller should check `mls().is_some()` first.
     pub(crate) fn decode_inbound(
         &mut self,
         payload: &[u8],
     ) -> Result<ProcessResult, ConversationError> {
-        let mls = self
-            .mls
-            .as_mut()
-            .ok_or(ConversationError::MlsGroupNotInitialized)?;
-        decode_inbound_payload(&mut self.queues, mls, payload)
+        decode_inbound_payload(&mut self.queues, &mut self.mls, payload)
     }
 
     /// Append a [`ConversationEvent`] to the pending-events buffer. The caller's
@@ -471,10 +422,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// Smallest pending deadline relative to now, or `None` when nothing
     /// is scheduled. Returns `Some(Duration::ZERO)` for an already-elapsed
     /// deadline. Covers consensus-session timeouts, auto-vote timers, and
-    /// state-machine phase deadlines (Freezing window, PendingJoin
-    /// expiry, steward / recovery inactivity). Forward to an external
-    /// scheduler that calls `poll()` on fire;
-    /// extra/early wakeups are no-ops.
+    /// state-machine phase deadlines (Freezing window, steward / recovery
+    /// inactivity). Forward to an external scheduler that calls `poll()` on
+    /// fire; extra/early wakeups are no-ops.
     pub fn next_wakeup_in(&self) -> Option<Duration> {
         let now = Instant::now();
         let earliest = self
@@ -488,17 +438,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     }
 
     /// State-driven phase-timer deadline, if one is currently active. The
-    /// conversation's polling paths (the freeze and pending-join steps in
-    /// `poll`, and the inactivity check in
-    /// `check_steward_inactivity`) all gate on the phase timer; this
-    /// surfaces the same wall-clock target so an external scheduler can
-    /// wake us at the right time.
+    /// conversation's polling paths (the freeze step in `poll`, and the
+    /// inactivity check in `check_steward_inactivity`) all gate on the phase
+    /// timer; this surfaces the same wall-clock target so an external
+    /// scheduler can wake us at the right time.
     fn phase_deadline(&self) -> Option<Instant> {
         let anchor = self.phase_timer.started_at()?;
         let cfg = &self.config;
         match self.current_state() {
             ConversationState::Freezing => Some(anchor + cfg.freeze_duration),
-            ConversationState::PendingJoin => Some(anchor + cfg.commit_inactivity_duration * 3),
             ConversationState::Working => {
                 if self.queues.approved_proposals_count() == 0 {
                     return None;
@@ -576,20 +524,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         self.pending_auto_votes.clear();
     }
 
-    /// Leave this conversation. In `PendingJoin` (no MLS yet), does local
-    /// teardown — emits `Leaving`, cancels timers — and returns
-    /// [`LeaveOutcome::TornDown`]; the integrator must then remove the registry
-    /// entry and clean up the consensus scope. In all other states, opens a
-    /// self-leave consensus round and returns [`LeaveOutcome::LeaveInitiated`];
-    /// the leave completes when the next steward commit merges the removal.
-    /// `signer` is the local member's MLS signer, used to authenticate the
-    /// self-leave proposal on the active-conversation path.
+    /// Leave this conversation. Opens a self-leave consensus round and returns
+    /// [`LeaveOutcome::LeaveInitiated`]; the leave completes when the next
+    /// steward commit merges the removal. `signer` is the local member's MLS
+    /// signer, used to authenticate the self-leave proposal.
     pub fn leave(&mut self, signer: &impl Signer) -> Result<LeaveOutcome, ConversationError> {
-        if self.current_state() == ConversationState::PendingJoin {
-            self.emit_event(ConversationEvent::Leaving);
-            self.cancel_all_auto_votes();
-            return Ok(LeaveOutcome::TornDown);
-        }
         self.initiate_self_leave(signer)?;
         Ok(LeaveOutcome::LeaveInitiated)
     }
@@ -642,15 +581,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         self.phase_timer.clear();
         info!(state = "Reelection", "state transition");
         ConversationState::Reelection
-    }
-
-    /// `true` once 3× `commit_inactivity_duration` has passed in
-    /// `PendingJoin` without a welcome.
-    pub(crate) fn is_pending_join_expired(&self) -> bool {
-        self.current_state() == ConversationState::PendingJoin
-            && self
-                .phase_timer
-                .elapsed_since_anchor(self.config.commit_inactivity_duration * 3)
     }
 
     /// `true` once the freeze window elapsed while in `Freezing`.
@@ -714,7 +644,7 @@ mod tests {
         Conversation::new(
             "g".to_string(),
             ConversationQueues::new("g"),
-            Some(UnusedMls),
+            UnusedMls,
             ConversationStateMachine::new_as_member(),
             PhaseTimer::new(),
             ConversationConfig::default(),
@@ -728,39 +658,12 @@ mod tests {
         )
     }
 
-    fn make_conversation_pending_join(
-        commit_inactivity: Duration,
-    ) -> Conversation<DefaultConsensusPlugin, StubPluginsFactory> {
-        let config = ConversationConfig {
-            commit_inactivity_duration: commit_inactivity,
-            ..ConversationConfig::default()
-        };
-        let (consensus, consensus_rx) = make_test_consensus_service();
-        let mut conversation = Conversation::new(
-            "g".to_string(),
-            ConversationQueues::new("g"),
-            Some(UnusedMls),
-            ConversationStateMachine::new_as_pending_join(),
-            PhaseTimer::new(),
-            config,
-            StubScoring,
-            StubStewardList::member(),
-            consensus,
-            consensus_rx,
-            Arc::from(&b"test-member-id"[..]),
-            Arc::from("0xtest-display"),
-            Arc::from(&[0u8; 16][..]),
-        );
-        conversation.phase_timer.start();
-        conversation
-    }
-
     fn make_conversation_working() -> Conversation<DefaultConsensusPlugin, StubPluginsFactory> {
         let (consensus, consensus_rx) = make_test_consensus_service();
         Conversation::new(
             "g".to_string(),
             ConversationQueues::new("g"),
-            Some(UnusedMls),
+            UnusedMls,
             ConversationStateMachine::new_as_member(),
             PhaseTimer::new(),
             ConversationConfig::default(),
@@ -772,52 +675,6 @@ mod tests {
             Arc::from("0xtest-display"),
             Arc::from(&[0u8; 16][..]),
         )
-    }
-
-    /// `is_pending_join_expired` flips once 3× `commit_inactivity_duration`
-    /// has passed since the anchor. Test backdates the anchor to avoid
-    /// a real wall-clock wait.
-    #[test]
-    fn pending_join_expires_after_three_times_commit_inactivity() {
-        let inactivity = Duration::from_millis(50);
-        let mut conversation = make_conversation_pending_join(inactivity);
-
-        assert!(
-            !conversation.is_pending_join_expired(),
-            "fresh anchor must not be expired"
-        );
-
-        // Just inside the window: anchor 2.5× inactivity in the past.
-        conversation
-            .phase_timer
-            .set_started_at_for_test(Some(Instant::now() - inactivity * 5 / 2));
-        assert!(
-            !conversation.is_pending_join_expired(),
-            "before 3× boundary must not be expired"
-        );
-
-        // Past the boundary: anchor 4× inactivity in the past.
-        conversation
-            .phase_timer
-            .set_started_at_for_test(Some(Instant::now() - inactivity * 4));
-        assert!(
-            conversation.is_pending_join_expired(),
-            "past 3× boundary must be expired"
-        );
-    }
-
-    /// Outside `PendingJoin`, `is_pending_join_expired` always returns false
-    /// regardless of how old the anchor is.
-    #[test]
-    fn pending_join_expired_only_in_pending_join_state() {
-        let mut conversation = make_conversation_working();
-        conversation
-            .phase_timer
-            .set_started_at_for_test(Some(Instant::now() - Duration::from_secs(3600)));
-        assert!(
-            !conversation.is_pending_join_expired(),
-            "Working state must never report pending-join-expired"
-        );
     }
 
     /// First tick with approved work auto-anchors the timer and returns `None`.

@@ -82,7 +82,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         &mut self,
     ) -> Result<StewardListReconcile, ConversationError> {
         let (current_epoch, members) = {
-            let mls = self.expect_mls()?;
+            let mls = self.mls();
             (mls.current_epoch()?, mls.members()?)
         };
         if !self.steward_list.is_exhausted(current_epoch) {
@@ -110,18 +110,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         signer: &impl Signer,
     ) -> Result<(), ConversationError> {
         let state = self.current_state();
-        if state == ConversationState::PendingJoin {
-            return Ok(());
-        }
         // Defensive — core only emits membership changes here.
         if target_member_id_of(&request).is_none() {
             return Ok(());
         }
-        // No MLS outside PendingJoin (e.g. Leaving teardown): buffer only,
-        // with no epoch or steward context.
-        let (members, current_epoch) = match self.mls() {
-            Some(mls) => (mls.members()?, mls.current_epoch()?),
-            None => (Vec::new(), 0),
+        let (members, current_epoch) = {
+            let mls = self.mls();
+            (mls.members()?, mls.current_epoch()?)
         };
 
         let inserted = self
@@ -167,9 +162,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// `pending_update_max_epochs`.
     pub(crate) fn prune_pending_updates_after_commit(&mut self) -> Result<(), ConversationError> {
         let (current_epoch, members, max_age) = {
-            let Some(mls) = self.mls() else {
-                return Ok(());
-            };
+            let mls = self.mls();
             (
                 mls.current_epoch()?,
                 mls.members()?,
@@ -205,9 +198,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             Vec<ConversationUpdateRequest>,
             String,
         ) = {
-            let (current_epoch, members) = match self.mls() {
-                Some(mls) => (mls.current_epoch()?, mls.members()?),
-                None => (0, Vec::new()),
+            let (current_epoch, members) = {
+                let mls = self.mls();
+                (mls.current_epoch()?, mls.members()?)
             };
             let self_member_id: &[u8] = &self.self_member_id;
             let eligible = self.queues.steward_eligibility(&members);
@@ -307,7 +300,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         // Filter ghosts and queued-removal targets so joiners don't
         // inherit stewards they would have to walk past on the very
         // first epoch.
-        let mls_members = self.expect_mls()?.members()?;
+        let mls_members = self.mls().members()?;
         let steward_members = {
             let eligible = self.queues.steward_eligibility(&mls_members);
             self.steward_list.steward_members(&eligible)
@@ -333,9 +326,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         };
 
         let app_msg: AppMessage = sync.into();
-        Ok(Some(
-            self.expect_mls_mut()?.build_message(signer, &app_msg)?,
-        ))
+        Ok(Some(self.mls_mut().build_message(signer, &app_msg)?))
     }
 
     /// Steward-only: file `ScoreBelowThreshold` ECPs for any member whose
@@ -350,7 +341,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         // member to be at-or-below threshold. The scan is the source of
         // truth — events just trigger the look.
         let (epoch, to_remove, self_id_arc, conversation_id) = {
-            let epoch = self.expect_mls()?.current_epoch()?;
+            let epoch = self.mls().current_epoch()?;
             let self_id_arc = Arc::clone(&self.self_member_id);
             let is_steward = self.steward_list.is_steward(&self_id_arc);
             if !is_steward {
@@ -432,7 +423,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         signer: &impl Signer,
     ) -> Result<(), ConversationError> {
         let (proposed_stewards, election_epoch, retry_round, conversation_id) = {
-            let mls = self.expect_mls()?;
+            let mls = self.mls();
             let epoch = mls.current_epoch()?;
             let mls_members = mls.members()?;
             let self_member_id: &[u8] = &self.self_member_id;
@@ -517,7 +508,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         signer: &impl Signer,
     ) -> Result<(), ConversationError> {
         let (is_authorized, self_id, epoch, conversation_id) = {
-            let mls = self.expect_mls()?;
+            let mls = self.mls();
             let mls_members = mls.members()?;
             let epoch = mls.current_epoch()?;
             let self_id: &[u8] = &self.self_member_id;

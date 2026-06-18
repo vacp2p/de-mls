@@ -153,7 +153,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         election: StewardElectionProposal,
         signer: &impl Signer,
     ) -> Result<(), ConversationError> {
-        self.expect_mls()?;
         // The proposal carries no separate candidate pool: `proposed_stewards`
         // is the full set the proposer sorted.
         let is_valid = self.steward_list.validate_proposed(

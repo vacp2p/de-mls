@@ -34,9 +34,6 @@ pub enum ConversationError {
     #[error("System time error: {0}")]
     SystemTime(#[from] SystemTimeError),
 
-    #[error("MLS group not initialized")]
-    MlsGroupNotInitialized,
-
     #[error("Caller is not a steward")]
     NotASteward,
 

@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, Default)]
 pub struct PhaseTimer {
     /// Meaning depends on the orchestrator's intent at start time:
-    /// - PendingJoin: time the join was initiated.
     /// - Working: time the first approved proposal arrived
     ///   (drives the steward-inactivity timer).
     /// - Freezing: time the freeze window started.
@@ -26,8 +25,8 @@ impl PhaseTimer {
     }
 
     /// Anchor the timer at "now". Called by the orchestrator when entering
-    /// a phase whose timeout matters (PendingJoin, Freezing, on first
-    /// approved proposal in Working).
+    /// a phase whose timeout matters (Freezing, on first approved proposal
+    /// in Working).
     pub fn start(&mut self) {
         self.started_at = Some(Instant::now());
     }
@@ -49,13 +48,6 @@ impl PhaseTimer {
             Some(t) => Instant::now() >= t + duration,
             None => false,
         }
-    }
-
-    /// Test-only: overwrite the anchor with an explicit `Instant`. Lets
-    /// timer-boundary tests synthesize an aged anchor without sleeping.
-    #[cfg(test)]
-    pub(crate) fn set_started_at_for_test(&mut self, anchor: Option<Instant>) {
-        self.started_at = anchor;
     }
 }
 

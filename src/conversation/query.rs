@@ -34,14 +34,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         &self.app_id
     }
 
-    /// Current MLS epoch + reelection retry round. `(0, 0)` when the
-    /// conversation has no MLS state yet (pending join). Intended for UI
-    /// status display.
+    /// Current MLS epoch + reelection retry round. Intended for UI status
+    /// display.
     pub fn epoch_and_retry(&self) -> Result<(u64, u32), ConversationError> {
-        let epoch = match self.mls() {
-            Some(mls) => mls.current_epoch()?,
-            None => 0,
-        };
+        let epoch = self.mls().current_epoch()?;
         Ok((epoch, self.steward_list.next_retry_round()))
     }
 
@@ -69,13 +65,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     }
 
     /// Identity bytes of every current member of this conversation, as
-    /// reported by MLS. Returns an empty vec when the local user has no
-    /// MLS state yet (pending join).
+    /// reported by MLS.
     pub fn members(&self) -> Result<Vec<Vec<u8>>, ConversationError> {
-        match self.mls() {
-            Some(mls) => Ok(mls.members()?),
-            None => Ok(Vec::new()),
-        }
+        Ok(self.mls().members()?)
     }
 
     pub fn member_scores(&self) -> Vec<(Vec<u8>, i64)> {
@@ -89,7 +81,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// Identities that have an in-flight self-leave request. Used by the UI
     /// to render a "pending leave" indicator.
     pub fn pending_leave_member_ids(&self) -> Result<Vec<Vec<u8>>, ConversationError> {
-        let members = self.expect_mls()?.members()?;
+        let members = self.mls().members()?;
         Ok(members
             .into_iter()
             .filter(|id| self.queues.is_pending_self_leave(id))
@@ -99,7 +91,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// Steward role for each member. Uses live rotation so removed or
     /// pending-leave stewards are skipped in role display.
     pub fn member_roles(&self) -> Result<Vec<(Vec<u8>, MemberRole)>, ConversationError> {
-        let mls = self.expect_mls()?;
+        let mls = self.mls();
         let epoch = mls.current_epoch()?;
         let members = mls.members()?;
 

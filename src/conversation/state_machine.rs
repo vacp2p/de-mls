@@ -5,8 +5,6 @@ use std::fmt::Display;
 /// Lifecycle state for a conversation session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConversationState {
-    /// Joiner waiting for a welcome.
-    PendingJoin,
     /// Normal operation.
     Working,
     /// Members have stopped accepting new proposals; commit candidates
@@ -36,7 +34,6 @@ pub enum OperatingMode {
 impl Display for ConversationState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConversationState::PendingJoin => write!(f, "PendingJoin"),
             ConversationState::Working => write!(f, "Working"),
             ConversationState::Freezing => write!(f, "Freezing"),
             ConversationState::Selection => write!(f, "Selection"),
@@ -61,13 +58,6 @@ impl ConversationStateMachine {
     pub fn new_as_member() -> Self {
         Self {
             state: ConversationState::Working,
-        }
-    }
-
-    /// Joiner starts in `PendingJoin` until the welcome arrives.
-    pub fn new_as_pending_join() -> Self {
-        Self {
-            state: ConversationState::PendingJoin,
         }
     }
 
@@ -108,12 +98,6 @@ mod tests {
     fn new_as_member_starts_working() {
         let sm = ConversationStateMachine::new_as_member();
         assert_eq!(sm.current_state(), ConversationState::Working);
-    }
-
-    #[test]
-    fn new_as_pending_join_starts_pending() {
-        let sm = ConversationStateMachine::new_as_pending_join();
-        assert_eq!(sm.current_state(), ConversationState::PendingJoin);
     }
 
     #[test]
