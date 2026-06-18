@@ -56,7 +56,11 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
             timestamp,
         });
         let scope = P::Scope::from(self.conversation_id.clone());
-        let proposal = self.consensus.storage().get_proposal(&scope, proposal_id)?;
+        let proposal = self
+            .services
+            .consensus
+            .storage()
+            .get_proposal(&scope, proposal_id)?;
         let request = ConversationUpdateRequest::decode(proposal.payload.as_slice())?;
 
         // Nothing arms the inactivity timer here — the next poll's
@@ -132,7 +136,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         target: &[u8],
         signer: &impl Signer,
     ) -> Result<(), ConversationError> {
-        if !self.steward_list.is_steward(target) {
+        if !self.services.steward_list.is_steward(target) {
             return Ok(());
         }
         if let Err(e) = self.initiate_steward_election(true, signer) {
@@ -155,7 +159,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     ) -> Result<(), ConversationError> {
         // The proposal carries no separate candidate pool: `proposed_stewards`
         // is the full set the proposer sorted.
-        let is_valid = self.steward_list.validate_proposed(
+        let is_valid = self.services.steward_list.validate_proposed(
             &election.proposed_stewards,
             election.election_epoch,
             &election.proposed_stewards,
@@ -169,7 +173,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
             return Ok(());
         }
 
-        self.steward_list.install_list(
+        self.services.steward_list.install_list(
             election.election_epoch,
             &election.proposed_stewards,
             election.proposed_stewards.len(),
@@ -198,9 +202,9 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     /// Bump the retry round and re-run the election, or escalate to a
     /// `Deadlock` emergency proposal once retries are exhausted.
     fn handle_election_rejected(&mut self, signer: &impl Signer) -> Result<(), ConversationError> {
-        self.steward_list.bump_retry();
-        let round = self.steward_list.next_retry_round();
-        let max = self.steward_list.max_retries();
+        self.services.steward_list.bump_retry();
+        let round = self.services.steward_list.next_retry_round();
+        let max = self.services.steward_list.max_retries();
         if round > max {
             info!(
                 conversation = %self.conversation_id,
@@ -239,7 +243,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     ) -> Result<(), ConversationError> {
         // The threshold-cross flag is dropped: the terminal
         // `check_and_initiate_score_removals` sweep below covers it.
-        let _ = self.scoring.apply_ops(score_ops);
+        let _ = self.services.scoring.apply_ops(score_ops);
         if let Some(conversation_update_request::Payload::EmergencyCriteria(ec)) = &request.payload
             && let Some(ev) = &ec.evidence
         {

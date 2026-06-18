@@ -38,7 +38,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     /// display.
     pub fn epoch_and_retry(&self) -> Result<(u64, u32), ConversationError> {
         let epoch = self.mls().current_epoch()?;
-        Ok((epoch, self.steward_list.next_retry_round()))
+        Ok((epoch, self.services.steward_list.next_retry_round()))
     }
 
     /// Count of buffered pending membership updates. Used by tests and the UI
@@ -53,6 +53,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     pub fn freeze_candidate_count(&self) -> (usize, usize) {
         let received = self.queues.freeze_candidate_count();
         let expected = self
+            .services
             .steward_list
             .current_list()
             .map(|l| l.len())
@@ -61,7 +62,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     }
 
     pub fn is_steward(&self) -> bool {
-        self.steward_list.is_steward(&self.self_member_id)
+        self.services.steward_list.is_steward(&self.self_member_id)
     }
 
     /// Identity bytes of every current member of this conversation, as
@@ -71,11 +72,11 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     }
 
     pub fn member_scores(&self) -> Vec<(Vec<u8>, i64)> {
-        self.scoring.all_members_with_scores()
+        self.services.scoring.all_members_with_scores()
     }
 
     pub fn member_score(&self, member_id: &[u8]) -> Option<i64> {
-        self.scoring.score_for(member_id)
+        self.services.scoring.score_for(member_id)
     }
 
     /// Identities that have an in-flight self-leave request. Used by the UI
@@ -96,11 +97,14 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         let members = mls.members()?;
 
         let eligible = self.queues.steward_eligibility(&members);
-        let (live_epoch, live_backup) = self.steward_list.epoch_and_backup(epoch, &eligible);
+        let (live_epoch, live_backup) = self
+            .services
+            .steward_list
+            .epoch_and_backup(epoch, &eligible);
         let live_epoch = live_epoch.map(|s| s.to_vec());
         let live_backup = live_backup.map(|s| s.to_vec());
-        let exhausted = self.steward_list.is_exhausted(epoch);
-        let has_list = self.steward_list.current_list().is_some();
+        let exhausted = self.services.steward_list.is_exhausted(epoch);
+        let has_list = self.services.steward_list.current_list().is_some();
         let roles = members
             .iter()
             .cloned()
@@ -110,12 +114,12 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
                         MemberRole::EpochSteward
                     } else if live_backup.as_deref().is_some_and(|bs| bs == id) {
                         MemberRole::BackupSteward
-                    } else if self.steward_list.is_steward(&id) {
+                    } else if self.services.steward_list.is_steward(&id) {
                         MemberRole::Steward
                     } else {
                         MemberRole::Member
                     }
-                } else if has_list && self.steward_list.is_steward(&id) {
+                } else if has_list && self.services.steward_list.is_steward(&id) {
                     MemberRole::Steward
                 } else {
                     MemberRole::Member

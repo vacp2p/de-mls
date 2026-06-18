@@ -86,13 +86,14 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     ) -> Result<DispatchOutcome, ConversationError> {
         let state = self.current_state();
         if state != ConversationState::Freezing {
-            self.last_freeze_progress = None;
+            self.timing.last_freeze_progress = None;
             return Ok(DispatchOutcome::Done);
         }
 
         // Early selection: skip remaining freeze time if all expected
         // stewards have submitted candidates.
         let all_candidates_in = self
+            .services
             .steward_list
             .current_list()
             .is_some_and(|list| self.queues.freeze_candidate_count() >= list.len());
@@ -100,20 +101,20 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         if !all_candidates_in && !self.is_freeze_timed_out() {
             // Still freezing — surface candidate progress when it changes.
             let (received, expected) = self.freeze_candidate_count();
-            if self.last_freeze_progress != Some((received, expected)) {
-                self.last_freeze_progress = Some((received, expected));
+            if self.timing.last_freeze_progress != Some((received, expected)) {
+                self.timing.last_freeze_progress = Some((received, expected));
                 self.emit_event(ConversationEvent::FreezeProgress { received, expected });
             }
             return Ok(DispatchOutcome::Done);
         }
-        self.last_freeze_progress = None;
+        self.timing.last_freeze_progress = None;
 
         let selection_event = self.start_selection();
         let has_proposals = self.queues.approved_proposals_count() > 0;
         self.emit_event(ConversationEvent::PhaseChange(selection_event));
 
         let conversation_id = self.conversation_id.clone();
-        let allow_subset = self.steward_list.config().allow_subset_candidates;
+        let allow_subset = self.services.steward_list.config().allow_subset_candidates;
         let self_member_id = Arc::clone(&self.self_member_id);
         let mut finalize_result = match self.finalize_freeze_round(allow_subset, &self_member_id) {
             Ok(result) => result,
@@ -127,7 +128,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         // observation, no ECP needed). A downward threshold cross schedules
         // a removal-init pass below.
         let downward_cross = if !finalize_result.score_ops.is_empty() {
-            self.scoring.apply_ops(&finalize_result.score_ops)
+            self.services.scoring.apply_ops(&finalize_result.score_ops)
         } else {
             false
         };
@@ -204,13 +205,14 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
                         let members = mls.members()?;
                         let self_member_id: &[u8] = &self.self_member_id;
                         let eligible = self.queues.steward_eligibility(&members);
-                        self.steward_list
+                        self.services
+                            .steward_list
                             .epoch_steward(violation_epoch, &eligible)
                             .filter(|id| !id.is_empty() && *id != self_member_id)
                             .map(|id| id.to_vec())
                     };
                     let cross = if let Some(steward_id) = accuse_target {
-                        self.scoring.apply_op(&ScoreOp {
+                        self.services.scoring.apply_op(&ScoreOp {
                             member_id: steward_id,
                             event: ScoreEvent::CensorshipInactivity,
                         })
@@ -261,7 +263,8 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         }
         // Recovery uses the shorter retry inactivity window so we don't
         // burn another full epoch waiting for a steward to commit.
-        let in_recovery = self.is_in_recovery_mode() || self.steward_list.next_retry_round() > 0;
+        let in_recovery =
+            self.is_in_recovery_mode() || self.services.steward_list.next_retry_round() > 0;
         let inactivity = if in_recovery {
             self.config.recovery_inactivity_duration
         } else {
@@ -274,7 +277,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         self.queues.start_freeze_round(epoch);
 
         let self_member_id = Arc::clone(&self.self_member_id);
-        let outbound = if self.steward_list.is_steward(&self_member_id) {
+        let outbound = if self.services.steward_list.is_steward(&self_member_id) {
             match self.create_commit_candidate(signer, &self_member_id) {
                 Ok(payload) => payload,
                 Err(e) => {

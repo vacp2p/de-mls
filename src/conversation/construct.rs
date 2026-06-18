@@ -14,8 +14,8 @@ use hashgraph_like_consensus::events::ConsensusEventBus;
 
 use crate::{
     ConsensusPlugin, ConsensusServiceFor, Conversation, ConversationConfig, ConversationError,
-    ConversationEvent, ConversationPlugins, ConversationQueues, ConversationStateMachine,
-    PeerScoringPlugin, PhaseTimer, StewardListPlugin, mls_crypto::MlsService,
+    ConversationEvent, ConversationPlugins, ConversationQueues, ConversationServices,
+    ConversationStateMachine, PeerScoringPlugin, StewardListPlugin, mls_crypto::MlsService,
 };
 
 /// Everything one conversation needs to come into being.
@@ -118,17 +118,19 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
 
         let consensus = deps.consensus;
         let consensus_rx = consensus.event_bus().subscribe();
-        let conversation = Conversation::new(
-            conversation_id.to_string(),
-            queues,
+        let services = ConversationServices {
             mls,
-            state_machine,
-            PhaseTimer::new(),
-            deps.config,
             scoring,
             steward_list,
             consensus,
             consensus_rx,
+        };
+        let conversation = Conversation::new(
+            conversation_id.to_string(),
+            queues,
+            services,
+            state_machine,
+            deps.config,
             Arc::from(member_id),
             Arc::from(member_id_display),
             deps.app_id,

@@ -38,6 +38,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     /// [`scoring_member_diff`]; this method only applies the diff.
     pub(crate) fn sync_scoring_members(&mut self, mls_members: &[Vec<u8>]) {
         let scored: Vec<Vec<u8>> = self
+            .services
             .scoring
             .all_members_with_scores()
             .into_iter()
@@ -49,10 +50,10 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
             // returns false; an exotic config could surface a fresh member
             // as below-threshold, but the score-removal chain doesn't fire
             // on membership-sync ticks today.
-            let _ = self.scoring.add_member(member_id);
+            let _ = self.services.scoring.add_member(member_id);
         }
         for member_id in &diff.to_remove {
-            self.scoring.remove_member(member_id);
+            self.services.scoring.remove_member(member_id);
         }
     }
 
@@ -84,17 +85,22 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
             let mls = self.mls();
             (mls.current_epoch()?, mls.members()?)
         };
-        if !self.steward_list.is_exhausted(current_epoch) {
+        if !self.services.steward_list.is_exhausted(current_epoch) {
             return Ok(StewardListReconcile::Settled);
         }
         // Stewards are settled members only — a just-joined member can't commit
         // or vote yet, so it's excluded until the next epoch.
         let settled = self.queues.settled_members(&members, current_epoch);
-        if self.steward_list.election_required(settled.len()) {
+        if self.services.steward_list.election_required(settled.len()) {
             return Ok(StewardListReconcile::NeedsElection);
         }
-        let sn = self.steward_list.config().compute_list_size(settled.len());
-        self.steward_list
+        let sn = self
+            .services
+            .steward_list
+            .config()
+            .compute_list_size(settled.len());
+        self.services
+            .steward_list
             .install_list(current_epoch, &settled, sn, 0)?;
         Ok(StewardListReconcile::Settled)
     }
@@ -126,7 +132,8 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         // survives freeze rounds so a later steward can retry.
         let is_epoch_steward = {
             let eligible = self.queues.steward_eligibility(&members);
-            self.steward_list
+            self.services
+                .steward_list
                 .epoch_steward(current_epoch, &eligible)
                 .is_some_and(|es| es == &*self.self_member_id)
         };
@@ -204,6 +211,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
             let self_member_id: &[u8] = &self.self_member_id;
             let eligible = self.queues.steward_eligibility(&members);
             let is_live = self
+                .services
                 .steward_list
                 .epoch_steward(current_epoch, &eligible)
                 .is_some_and(|es| es == self_member_id);
@@ -279,6 +287,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         // missing entries imply default. Saves wire size at scale
         // (Waku message budget concern past ~1k members).
         let scores: Vec<PeerScore> = self
+            .services
             .scoring
             .snapshot()
             .diverged
@@ -289,7 +298,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
             })
             .collect();
 
-        let list = match self.steward_list.current_list() {
+        let list = match self.services.steward_list.current_list() {
             Some(l) => l,
             None => return Ok(None),
         };
@@ -302,7 +311,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         let mls_members = self.mls().members()?;
         let steward_members = {
             let eligible = self.queues.steward_eligibility(&mls_members);
-            self.steward_list.steward_members(&eligible)
+            self.services.steward_list.steward_members(&eligible)
         };
 
         // `retry_round` is the seed that produced the *stored* list —
@@ -314,13 +323,13 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
             election_epoch: list.election_epoch(),
             sn_min: list.config().sn_min as u32,
             sn_max: list.config().sn_max as u32,
-            allow_subset_candidates: self.steward_list.config().allow_subset_candidates,
+            allow_subset_candidates: self.services.steward_list.config().allow_subset_candidates,
             peer_scores: scores,
             timing: Some(timing),
             retry_round: list.retry_round(),
-            max_reelection_attempts: self.steward_list.max_retries(),
+            max_reelection_attempts: self.services.steward_list.max_retries(),
             liveness_criteria_yes: self.config.liveness_criteria_yes,
-            threshold_peer_score: self.scoring.threshold(),
+            threshold_peer_score: self.services.scoring.threshold(),
             pending_update_max_epochs: self.config.pending_update_max_epochs,
         };
 
@@ -342,7 +351,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         let (epoch, to_remove, self_id_arc, conversation_id) = {
             let epoch = self.mls().current_epoch()?;
             let self_id_arc = Arc::clone(&self.self_member_id);
-            let is_steward = self.steward_list.is_steward(&self_id_arc);
+            let is_steward = self.services.steward_list.is_steward(&self_id_arc);
             if !is_steward {
                 return Ok(());
             }
@@ -359,6 +368,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
             //     same target before the RemoveMember commits.
             let self_id: &[u8] = &self_id_arc;
             let to_remove: Vec<(Vec<u8>, i64)> = self
+                .services
                 .scoring
                 .members_below_threshold()
                 .into_iter()
@@ -366,7 +376,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
                 .filter(|id| !self.queues.has_pending_removal(id))
                 .filter(|id| !self.queues.has_approved_removal(id))
                 .filter_map(|id| {
-                    let score = self.scoring.score_for(&id)?;
+                    let score = self.services.scoring.score_for(&id)?;
                     Some((id, score))
                 })
                 .collect();
@@ -447,7 +457,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
                 candidate_pool.iter().map(Vec::as_slice).collect();
             let eligible = |c: &[u8]| pool_set.contains(c);
 
-            match self.steward_list.propose_election(
+            match self.services.steward_list.propose_election(
                 epoch,
                 &candidate_pool,
                 self_member_id,
@@ -517,6 +527,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
                 mls_members.iter().map(Vec::as_slice).collect();
             let conversation_ref = &self.queues;
             let authorized = self
+                .services
                 .steward_list
                 .election_proposer(|c: &[u8]| {
                     mls_set.contains(c) && !conversation_ref.has_approved_removal(c)

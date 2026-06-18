@@ -57,26 +57,18 @@ pub struct AutoVoteEntry {
     pub vote: bool,
 }
 
-pub struct Conversation<P: ConsensusPlugin, CP: ConversationPlugins> {
-    /// Conversation name. Identifies this conversation in the integrator's
-    /// registry and is used to construct scope keys for consensus operations.
-    /// Read via [`Conversation::conversation_id`].
-    pub(crate) conversation_id: String,
-    pub(crate) queues: ConversationQueues,
+/// The per-conversation plug-in instances and consensus wiring, grouped so the
+/// handle holds them as one unit. Construction moves the instances in from
+/// `ConversationDeps` and subscribes the consensus receiver here.
+pub(crate) struct ConversationServices<P: ConsensusPlugin, CP: ConversationPlugins> {
     /// Per-conversation MLS service. Present for the conversation's whole
     /// lifetime: the creator seeds it at [`Conversation::create`], the joiner
     /// at [`Conversation::join`].
-    mls: CP::Mls,
-    pub(crate) state_machine: ConversationStateMachine,
-    /// Per-conversation durable config: voting/consensus durations,
-    /// `liveness_criteria_yes`, `pending_update_max_epochs`.
-    pub(crate) config: ConversationConfig,
+    pub(crate) mls: CP::Mls,
     /// Per-conversation peer-score plug-in.
     pub(crate) scoring: CP::Scoring,
     /// Per-conversation steward-list plug-in.
     pub(crate) steward_list: CP::StewardList,
-    /// Authorization mode (RFC §Layer 3 Anti-Deadlock ECP).
-    operating_mode: OperatingMode,
     /// Per-conversation consensus service. Owns this conversation's scope
     /// in the shared storage and a private event bus. Minted from the
     /// [`crate::ConversationDeps`] consensus service at construction.
@@ -86,9 +78,12 @@ pub struct Conversation<P: ConsensusPlugin, CP: ConversationPlugins> {
     /// `apply_consensus_outcome`. Subscribed when the conversation is built in
     /// [`Conversation::create`] / [`Conversation::join`].
     pub(crate) consensus_rx: ConsensusReceiver<P>,
-    /// Wall-clock anchor combined with [`Self::state_machine`] by
-    /// coordinator methods.
-    phase_timer: PhaseTimer,
+}
+
+/// Time-driven conversation state walked once per polling cycle.
+pub(crate) struct Timing {
+    /// Wall-clock anchor combined with the state machine by coordinator methods.
+    pub(crate) phase_timer: PhaseTimer,
     /// Pending auto-votes by `proposal_id`. Walked by
     /// `tick_deadlines`; each entry whose `fire_at` has passed
     /// gets a `cast_vote` and is removed from the map. Cancelled (removed)
@@ -99,6 +94,43 @@ pub struct Conversation<P: ConsensusPlugin, CP: ConversationPlugins> {
     /// `tick_deadlines` which calls `consensus.handle_consensus_timeout`.
     /// Removed when the consensus session resolves naturally via `apply_consensus_outcome`.
     pub(crate) pending_consensus_timeouts: HashMap<u32, Instant>,
+    /// Last freeze-progress snapshot emitted as `ConversationEvent::FreezeProgress`.
+    /// `poll()` compares the current `(received, expected)` against this and
+    /// emits a new event only when the count changes, avoiding repeated events
+    /// on consecutive polling ticks that observe the same progress. Reset to
+    /// `None` when the conversation leaves `Freezing`.
+    pub(crate) last_freeze_progress: Option<(usize, usize)>,
+}
+
+impl Timing {
+    /// Fresh time-driven state: a cleared phase timer, no pending votes or
+    /// timeouts, and no recorded freeze progress.
+    fn new() -> Self {
+        Self {
+            phase_timer: PhaseTimer::new(),
+            pending_auto_votes: HashMap::new(),
+            pending_consensus_timeouts: HashMap::new(),
+            last_freeze_progress: None,
+        }
+    }
+}
+
+pub struct Conversation<P: ConsensusPlugin, CP: ConversationPlugins> {
+    /// Conversation name. Identifies this conversation in the integrator's
+    /// registry and is used to construct scope keys for consensus operations.
+    /// Read via [`Conversation::conversation_id`].
+    pub(crate) conversation_id: String,
+    pub(crate) queues: ConversationQueues,
+    /// Per-conversation plug-in instances and consensus wiring.
+    pub(crate) services: ConversationServices<P, CP>,
+    pub(crate) state_machine: ConversationStateMachine,
+    /// Per-conversation durable config: voting/consensus durations,
+    /// `liveness_criteria_yes`, `pending_update_max_epochs`.
+    pub(crate) config: ConversationConfig,
+    /// Authorization mode (RFC §Layer 3 Anti-Deadlock ECP).
+    operating_mode: OperatingMode,
+    /// Time-driven state walked once per polling cycle.
+    pub(crate) timing: Timing,
     /// Identity bytes of the local member, snapshotted from the `member_id`
     /// passed at construction. Read via [`Conversation::member_id_bytes`].
     pub(crate) self_member_id: Arc<[u8]>,
@@ -119,29 +151,19 @@ pub struct Conversation<P: ConsensusPlugin, CP: ConversationPlugins> {
     /// drains via [`Self::drain_outbound`] once per cycle. Interior `Mutex`
     /// so producer-side `broadcast` stays `&self`.
     pending_outbound: Mutex<Vec<Outbound>>,
-    /// Last freeze-progress snapshot emitted as `ConversationEvent::FreezeProgress`.
-    /// `poll()` compares the current `(received, expected)` against this and
-    /// emits a new event only when the count changes, avoiding repeated events
-    /// on consecutive polling ticks that observe the same progress. Reset to
-    /// `None` when the conversation leaves `Freezing`.
-    pub(crate) last_freeze_progress: Option<(usize, usize)>,
 }
 
 impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
-    /// Build a fresh conversation around an already-seeded MLS service.
-    /// `consensus_rx` is a subscriber on `consensus.event_bus()`.
+    /// Build a fresh conversation around an already-assembled `services`
+    /// bundle (MLS service seeded, plug-ins configured, consensus receiver
+    /// subscribed). The time-driven `timing` state starts from defaults.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         conversation_id: String,
         queues: ConversationQueues,
-        mls: CP::Mls,
+        services: ConversationServices<P, CP>,
         state_machine: ConversationStateMachine,
-        phase_timer: PhaseTimer,
         config: ConversationConfig,
-        scoring: CP::Scoring,
-        steward_list: CP::StewardList,
-        consensus: ConsensusServiceFor<P>,
-        consensus_rx: ConsensusReceiver<P>,
         self_member_id: Arc<[u8]>,
         member_id_display: Arc<str>,
         app_id: Arc<[u8]>,
@@ -149,23 +171,16 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         Self {
             conversation_id,
             queues,
-            mls,
+            services,
             state_machine,
             config,
-            scoring,
-            steward_list,
             operating_mode: OperatingMode::Normal,
-            consensus,
-            consensus_rx,
-            phase_timer,
-            pending_auto_votes: HashMap::new(),
-            pending_consensus_timeouts: HashMap::new(),
+            timing: Timing::new(),
             self_member_id,
             member_id_display,
             app_id,
             pending_events: Mutex::new(Vec::new()),
             pending_outbound: Mutex::new(Vec::new()),
-            last_freeze_progress: None,
         }
     }
 
@@ -193,13 +208,13 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
 
     /// Borrow the MLS service.
     pub(crate) fn mls(&self) -> &CP::Mls {
-        &self.mls
+        &self.services.mls
     }
 
     /// Mutably borrow the MLS service — required for the commit pipeline
     /// and encrypt/decrypt methods that advance MLS state.
     pub(crate) fn mls_mut(&mut self) -> &mut CP::Mls {
-        &mut self.mls
+        &mut self.services.mls
     }
 
     // ── Protocol-function wrappers ─────────────────────────────────
@@ -214,7 +229,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         signer: &impl Signer,
         self_member_id: &[u8],
     ) -> Result<Option<Vec<u8>>, ConversationError> {
-        if !self.steward_list.is_steward(self_member_id) && !self.is_in_recovery_mode() {
+        if !self.services.steward_list.is_steward(self_member_id) && !self.is_in_recovery_mode() {
             return Err(ConversationError::NotASteward);
         }
 
@@ -249,9 +264,9 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
             });
         }
 
-        // Borrow `self.mls` directly so later `self.queues` reads stay
+        // Borrow `self.services.mls` directly so later `self.queues` reads stay
         // a disjoint borrow.
-        let mls = &mut self.mls;
+        let mls = &mut self.services.mls;
 
         // Drop approved entries already reflected in conversation state (stale
         // rebroadcast KPs, duplicate removes) — without this MLS would reject
@@ -364,11 +379,11 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         self_member_id: &[u8],
     ) -> Result<FreezeFinalizeResult, ConversationError> {
         let in_recovery = self.operating_mode == OperatingMode::Recovery;
-        let mls = &mut self.mls;
+        let mls = &mut self.services.mls;
         finalize_freeze_round(
             &mut self.queues,
             mls,
-            &self.steward_list,
+            &self.services.steward_list,
             in_recovery,
             allow_subset_candidates,
             self_member_id,
@@ -379,7 +394,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     /// approved. Call after applying a consensus outcome. No-op when nothing
     /// is stashed.
     pub(crate) fn replay_early_candidates(&mut self) -> Result<(), ConversationError> {
-        replay_early_candidates(&mut self.queues, &mut self.mls)
+        replay_early_candidates(&mut self.queues, &mut self.services.mls)
     }
 
     /// Decode an inbound app-subtopic payload into a [`ProcessResult`].
@@ -387,7 +402,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         &mut self,
         payload: &[u8],
     ) -> Result<ProcessResult, ConversationError> {
-        decode_inbound_payload(&mut self.queues, &mut self.mls, payload)
+        decode_inbound_payload(&mut self.queues, &mut self.services.mls, payload)
     }
 
     /// Append a [`ConversationEvent`] to the pending-events buffer. The caller's
@@ -427,10 +442,11 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     pub fn next_wakeup_in(&self) -> Option<Duration> {
         let now = Instant::now();
         let earliest = self
+            .timing
             .pending_consensus_timeouts
             .values()
             .copied()
-            .chain(self.pending_auto_votes.values().map(|e| e.fire_at))
+            .chain(self.timing.pending_auto_votes.values().map(|e| e.fire_at))
             .chain(self.phase_deadline())
             .min()?;
         Some(earliest.saturating_duration_since(now))
@@ -442,7 +458,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     /// timer; this surfaces the same wall-clock target so an external
     /// scheduler can wake us at the right time.
     fn phase_deadline(&self) -> Option<Instant> {
-        let anchor = self.phase_timer.started_at()?;
+        let anchor = self.timing.phase_timer.started_at()?;
         let cfg = &self.config;
         match self.current_state() {
             ConversationState::Freezing => Some(anchor + cfg.freeze_duration),
@@ -500,7 +516,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     /// `vote` choice. Idempotent — re-registering for the same
     /// `proposal_id` replaces the existing entry.
     pub(crate) fn register_auto_vote(&mut self, proposal_id: u32, delay: Duration, vote: bool) {
-        self.pending_auto_votes.insert(
+        self.timing.pending_auto_votes.insert(
             proposal_id,
             AutoVoteEntry {
                 fire_at: Instant::now() + delay,
@@ -513,14 +529,14 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     /// Called when a manual vote arrives (manual choice wins) or when the
     /// consensus session resolves (vote no longer meaningful).
     pub(crate) fn cancel_auto_vote(&mut self, proposal_id: u32) {
-        self.pending_auto_votes.remove(&proposal_id);
+        self.timing.pending_auto_votes.remove(&proposal_id);
     }
 
     /// Drop every pending auto-vote on this conversation. Called on every path that
     /// emits `Leaving` so no stale entries fire against a conversation we've
     /// left.
     pub(crate) fn cancel_all_auto_votes(&mut self) {
-        self.pending_auto_votes.clear();
+        self.timing.pending_auto_votes.clear();
     }
 
     /// Leave this conversation. Opens a self-leave consensus round and returns
@@ -535,7 +551,8 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     /// Register a consensus-session timeout. Fires `delay` from now via
     /// `tick_deadlines`; removed naturally on consensus resolution.
     pub(crate) fn register_consensus_timeout(&mut self, proposal_id: u32, delay: Duration) {
-        self.pending_consensus_timeouts
+        self.timing
+            .pending_consensus_timeouts
             .insert(proposal_id, Instant::now() + delay);
     }
 
@@ -544,14 +561,14 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     /// so the timeout can't fire a stale `handle_consensus_timeout` against
     /// an already-resolved consensus session.
     pub(crate) fn unregister_consensus_timeout(&mut self, proposal_id: u32) {
-        self.pending_consensus_timeouts.remove(&proposal_id);
+        self.timing.pending_consensus_timeouts.remove(&proposal_id);
     }
 
     // ── State-machine + phase-timer coordinators ────────────────────
 
     pub(crate) fn start_working(&mut self) -> ConversationState {
         self.state_machine.start_working();
-        self.phase_timer.clear();
+        self.timing.phase_timer.clear();
         info!(state = "Working", "state transition");
         ConversationState::Working
     }
@@ -561,7 +578,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     /// from any other state.
     pub(crate) fn start_freezing(&mut self) -> Option<ConversationState> {
         if self.state_machine.start_freezing() {
-            self.phase_timer.start();
+            self.timing.phase_timer.start();
             info!(state = "Freezing", "state transition");
             Some(ConversationState::Freezing)
         } else {
@@ -577,7 +594,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
 
     pub(crate) fn start_reelection(&mut self) -> ConversationState {
         self.state_machine.start_reelection();
-        self.phase_timer.clear();
+        self.timing.phase_timer.clear();
         info!(state = "Reelection", "state transition");
         ConversationState::Reelection
     }
@@ -586,6 +603,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     pub(crate) fn is_freeze_timed_out(&self) -> bool {
         self.current_state() == ConversationState::Freezing
             && self
+                .timing
                 .phase_timer
                 .elapsed_since_anchor(self.config.freeze_duration)
     }
@@ -603,8 +621,8 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         if self.current_state() != ConversationState::Working || approved_proposals_count == 0 {
             return None;
         }
-        if self.phase_timer.started_at().is_none() {
-            self.phase_timer.start();
+        if self.timing.phase_timer.started_at().is_none() {
+            self.timing.phase_timer.start();
             info!(
                 approved = approved_proposals_count,
                 inactivity_ms = inactivity_duration.as_millis() as u64,
@@ -612,7 +630,11 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
             );
             return None;
         }
-        if !self.phase_timer.elapsed_since_anchor(inactivity_duration) {
+        if !self
+            .timing
+            .phase_timer
+            .elapsed_since_anchor(inactivity_duration)
+        {
             return None;
         }
         info!(
@@ -643,14 +665,15 @@ mod tests {
         Conversation::new(
             "g".to_string(),
             ConversationQueues::new("g"),
-            UnusedMls,
+            ConversationServices {
+                mls: UnusedMls,
+                scoring: StubScoring,
+                steward_list,
+                consensus,
+                consensus_rx,
+            },
             ConversationStateMachine::new_as_member(),
-            PhaseTimer::new(),
             ConversationConfig::default(),
-            StubScoring,
-            steward_list,
-            consensus,
-            consensus_rx,
             Arc::from(&b"test-member-id"[..]),
             Arc::from("0xtest-display"),
             Arc::from(&[0u8; 16][..]),
@@ -662,14 +685,15 @@ mod tests {
         Conversation::new(
             "g".to_string(),
             ConversationQueues::new("g"),
-            UnusedMls,
+            ConversationServices {
+                mls: UnusedMls,
+                scoring: StubScoring,
+                steward_list: StubStewardList::member(),
+                consensus,
+                consensus_rx,
+            },
             ConversationStateMachine::new_as_member(),
-            PhaseTimer::new(),
             ConversationConfig::default(),
-            StubScoring,
-            StubStewardList::member(),
-            consensus,
-            consensus_rx,
             Arc::from(&b"test-member-id"[..]),
             Arc::from("0xtest-display"),
             Arc::from(&[0u8; 16][..]),
@@ -683,7 +707,7 @@ mod tests {
         let mut conversation = make_conversation_working();
         assert_eq!(conversation.current_state(), ConversationState::Working);
         assert!(
-            conversation.phase_timer.started_at().is_none(),
+            conversation.timing.phase_timer.started_at().is_none(),
             "fresh conversation has no anchor"
         );
 
@@ -692,7 +716,7 @@ mod tests {
 
         assert_eq!(result, None, "first tick auto-anchors and returns None");
         assert!(
-            conversation.phase_timer.started_at().is_some(),
+            conversation.timing.phase_timer.started_at().is_some(),
             "anchor must be set after first tick"
         );
         assert_eq!(
@@ -716,7 +740,7 @@ mod tests {
         let result = conversation.check_steward_inactivity(0, Duration::from_secs(10));
         assert_eq!(result, None);
         assert!(
-            conversation.phase_timer.started_at().is_none(),
+            conversation.timing.phase_timer.started_at().is_none(),
             "no approved work must not start the timer"
         );
     }
@@ -752,14 +776,14 @@ mod tests {
     fn register_auto_vote_replaces_existing_entry() {
         let mut conversation = make_conversation_working();
         conversation.register_auto_vote(7, Duration::from_secs(10), true);
-        let first_fire = conversation.pending_auto_votes[&7].fire_at;
+        let first_fire = conversation.timing.pending_auto_votes[&7].fire_at;
 
         // Re-register with a different `vote` and a longer delay; the
         // second insert must overwrite, not co-exist.
         std::thread::sleep(Duration::from_millis(2));
         conversation.register_auto_vote(7, Duration::from_secs(20), false);
-        assert_eq!(conversation.pending_auto_votes.len(), 1);
-        let entry = conversation.pending_auto_votes[&7];
+        assert_eq!(conversation.timing.pending_auto_votes.len(), 1);
+        let entry = conversation.timing.pending_auto_votes[&7];
         assert!(!entry.vote);
         assert!(entry.fire_at > first_fire);
     }
@@ -775,12 +799,12 @@ mod tests {
         conversation.register_auto_vote(3, Duration::from_secs(5), true);
 
         conversation.cancel_auto_vote(2);
-        assert!(conversation.pending_auto_votes.contains_key(&1));
-        assert!(!conversation.pending_auto_votes.contains_key(&2));
-        assert!(conversation.pending_auto_votes.contains_key(&3));
+        assert!(conversation.timing.pending_auto_votes.contains_key(&1));
+        assert!(!conversation.timing.pending_auto_votes.contains_key(&2));
+        assert!(conversation.timing.pending_auto_votes.contains_key(&3));
 
         conversation.cancel_all_auto_votes();
-        assert!(conversation.pending_auto_votes.is_empty());
+        assert!(conversation.timing.pending_auto_votes.is_empty());
     }
 
     /// `register_consensus_timeout` records `now + delay`;
@@ -792,12 +816,17 @@ mod tests {
         let mut conversation = make_conversation_working();
         let before = Instant::now();
         conversation.register_consensus_timeout(42, Duration::from_secs(30));
-        let fire_at = conversation.pending_consensus_timeouts[&42];
+        let fire_at = conversation.timing.pending_consensus_timeouts[&42];
         assert!(fire_at > before + Duration::from_secs(29));
         assert!(fire_at < Instant::now() + Duration::from_secs(31));
 
         conversation.unregister_consensus_timeout(42);
-        assert!(!conversation.pending_consensus_timeouts.contains_key(&42));
+        assert!(
+            !conversation
+                .timing
+                .pending_consensus_timeouts
+                .contains_key(&42)
+        );
 
         // Unregistering an unknown id is a no-op (no panic, no error).
         conversation.unregister_consensus_timeout(999);

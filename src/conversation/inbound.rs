@@ -207,7 +207,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
                 forward_incoming_vote::<P>(
                     &self.conversation_id,
                     *vote,
-                    &self.consensus,
+                    &self.services.consensus,
                     outcome_applied,
                 )?;
                 Ok(DispatchOutcome::Done)
@@ -297,7 +297,9 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
             .unwrap_or(ProposalKind::Commit);
 
         let scope = P::Scope::from(self.conversation_id.clone());
-        self.consensus.process_incoming_proposal(&scope, proposal)?;
+        self.services
+            .consensus
+            .process_incoming_proposal(&scope, proposal)?;
         // Skip the vote request + auto-vote for fast-path proposals: the
         // creator's bundled YES already resolved the consensus session, so peers have
         // nothing to vote on.
@@ -352,7 +354,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         // Transition to Working BEFORE steward checks (election needs Working
         // state). Reset reelection_round: this commit advanced the epoch,
         // so whatever retry cycle we were in belongs to the previous epoch.
-        self.steward_list.reset_retry();
+        self.services.steward_list.reset_retry();
         let state = self.current_state();
         let working_event = if matches!(
             state,
@@ -431,7 +433,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         self.queues.start_freeze_round(epoch);
 
         let self_member_id = Arc::clone(&self.self_member_id);
-        let outbound = if self.steward_list.is_steward(&self_member_id) {
+        let outbound = if self.services.steward_list.is_steward(&self_member_id) {
             match self.create_commit_candidate(signer, &self_member_id) {
                 Ok(payload) => payload,
                 Err(e) => {
@@ -459,7 +461,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     /// (not the full MLS set — the list may have been generated before we
     /// existed), then applies list + protocol flags + timing + peer scores.
     fn on_conversation_sync(&mut self, sync: ConversationSync) -> Result<(), ConversationError> {
-        if self.steward_list.current_list().is_some() {
+        if self.services.steward_list.current_list().is_some() {
             return Ok(());
         }
         let conversation_id = self.conversation_id.clone();
@@ -467,7 +469,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
             let mls = self.mls();
             (mls.members()?, mls.current_epoch()?)
         };
-        let local_default_peer_score = self.scoring.default_score();
+        let local_default_peer_score = self.services.scoring.default_score();
         if !validate_conversation_sync(
             &conversation_id,
             &sync,
@@ -501,16 +503,19 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         protocol_config.allow_subset_candidates = sync.allow_subset_candidates;
 
         let sn = sync.steward_members.len();
-        self.steward_list.set_config(protocol_config);
-        self.steward_list.install_list(
+        self.services.steward_list.set_config(protocol_config);
+        self.services.steward_list.install_list(
             sync.election_epoch,
             &sync.steward_members,
             sn,
             sync.retry_round,
         )?;
-        self.steward_list
+        self.services
+            .steward_list
             .set_max_retries(sync.max_reelection_attempts);
-        self.scoring.set_threshold(sync.threshold_peer_score);
+        self.services
+            .scoring
+            .set_threshold(sync.threshold_peer_score);
         let snapshot = ScoreSnapshot {
             diverged: sync
                 .peer_scores
@@ -523,7 +528,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         // member in this snapshot — they'll submit
         // `SCORE_BELOW_THRESHOLD` from their own event chain. Drop our
         // result to avoid duplicate proposals from joiners.
-        let _ = self.scoring.apply_snapshot(&snapshot);
+        let _ = self.services.scoring.apply_snapshot(&snapshot);
         self.config.liveness_criteria_yes = sync.liveness_criteria_yes;
         self.config.pending_update_max_epochs = sync.pending_update_max_epochs;
         if let Some(timing) = &sync.timing {

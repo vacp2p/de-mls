@@ -64,7 +64,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
             &self.conversation_id,
             &request,
             &self.self_member_id,
-            &self.consensus,
+            &self.services.consensus,
             ProposalParams {
                 expected_voters,
                 proposal_expiration: self.config.proposal_expiration,
@@ -88,9 +88,11 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
                 // have the proposal yet, so a Vote-only message would be
                 // undeliverable.
                 let scope = P::Scope::from(self.conversation_id.clone());
-                let proposal =
-                    self.consensus
-                        .cast_vote_and_get_proposal(&scope, proposal_id, true)?;
+                let proposal = self.services.consensus.cast_vote_and_get_proposal(
+                    &scope,
+                    proposal_id,
+                    true,
+                )?;
                 info!(
                     conversation = %self.conversation_id,
                     proposal_id,
@@ -143,22 +145,24 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     pub(crate) fn tick_deadlines(&mut self, signer: &impl Signer) {
         let now = std::time::Instant::now();
         let auto_votes_due: Vec<(u32, bool)> = self
+            .timing
             .pending_auto_votes
             .iter()
             .filter(|(_, e)| e.fire_at <= now)
             .map(|(id, e)| (*id, e.vote))
             .collect();
         for (id, _) in &auto_votes_due {
-            self.pending_auto_votes.remove(id);
+            self.timing.pending_auto_votes.remove(id);
         }
         let timeouts_due: Vec<u32> = self
+            .timing
             .pending_consensus_timeouts
             .iter()
             .filter(|(_, fire_at)| **fire_at <= now)
             .map(|(id, _)| *id)
             .collect();
         for id in &timeouts_due {
-            self.pending_consensus_timeouts.remove(id);
+            self.timing.pending_consensus_timeouts.remove(id);
         }
 
         for (proposal_id, vote) in auto_votes_due {
@@ -178,7 +182,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
             // The bus is private to this conversation's service, so the
             // scope on each event is always ours — drained, not matched.
             let Some((_scope, event)) =
-                <_ as SyncConsensusReceiver<_>>::try_recv(&mut self.consensus_rx)
+                <_ as SyncConsensusReceiver<_>>::try_recv(&mut self.services.consensus_rx)
             else {
                 break;
             };
@@ -225,7 +229,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         let submitted = submit_self_leave_proposal::<P>(
             &self.conversation_id,
             &self.self_member_id,
-            &self.consensus,
+            &self.services.consensus,
             ProposalParams {
                 expected_voters: 1,
                 proposal_expiration: self.config.proposal_expiration,
@@ -285,6 +289,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     fn resolve_on_timeout(&self, proposal_id: u32) {
         let scope = P::Scope::from(self.conversation_id.clone());
         let still_active = self
+            .services
             .consensus
             .storage()
             .get_active_proposals(&scope)
@@ -293,7 +298,11 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         if !still_active {
             return;
         }
-        match self.consensus.handle_consensus_timeout(&scope, proposal_id) {
+        match self
+            .services
+            .consensus
+            .handle_consensus_timeout(&scope, proposal_id)
+        {
             Ok(_) => {}
             Err(ConsensusError::SessionNotFound) | Err(ConsensusError::SessionNotActive) => {
                 let resolved_locally = self.queues.is_consensus_outcome_applied(proposal_id);
@@ -326,8 +335,12 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         vote: bool,
         signer: &impl Signer,
     ) -> Result<(), ConversationError> {
-        let app_message =
-            cast_vote::<P>(&self.conversation_id, proposal_id, vote, &self.consensus)?;
+        let app_message = cast_vote::<P>(
+            &self.conversation_id,
+            proposal_id,
+            vote,
+            &self.services.consensus,
+        )?;
         let payload = self.mls_mut().build_message(signer, &app_message)?;
         self.broadcast(payload);
         Ok(())
