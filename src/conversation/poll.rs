@@ -138,7 +138,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         let conversation_id = self.conversation_id.clone();
         let allow_subset = self.steward_list.config().allow_subset_candidates;
         let self_member_id = Arc::clone(&self.self_member_id);
-        let mut finalize_result = if self.mls().is_some() {
+        let mut finalize_result = if self.has_mls() {
             match self.finalize_freeze_round(allow_subset, &self_member_id) {
                 Ok(result) => result,
                 Err(e) => {
