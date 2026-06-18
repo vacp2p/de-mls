@@ -111,10 +111,7 @@ impl Integrator {
     /// Build a fresh (empty) steward-list plug-in from this integrator's
     /// seed config.
     fn steward(&self) -> DefaultStewardList {
-        make_steward(
-            self.member_id.member_id_bytes(),
-            self.steward_list_config.clone(),
-        )
+        make_steward(self.steward_list_config.clone())
     }
 
     /// Mint a single-use key package into this integrator's reused provider,

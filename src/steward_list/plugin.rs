@@ -26,6 +26,14 @@ pub trait StewardListPlugin {
     /// Adopt conversation-wide bounds; keeps list and retry state.
     fn set_config(&mut self, config: StewardListConfig);
 
+    /// Seed the deterministic-sort salt with the conversation id. Every member
+    /// of a conversation must use the same salt or their generated/validated
+    /// lists diverge on a subset election. The library sets this when it builds
+    /// the conversation — once the conversation id is known for both the
+    /// creator and a joiner — so the integrator can hand in a seedless plug-in.
+    /// Default no-op for plug-ins whose ordering doesn't depend on a salt.
+    fn set_conversation_id(&mut self, _conversation_id: &[u8]) {}
+
     /// Active list, or `None` before the first `ConversationSync`.
     fn current_list(&self) -> Option<&StewardList>;
 

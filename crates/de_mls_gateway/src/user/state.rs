@@ -101,10 +101,7 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
     pub fn accept_welcome(&mut self, welcome: &MemberWelcome) -> Result<String, UserError> {
         let factory = &self.plugins.conversation_plugins;
         let scoring = factory.make_scoring(&self.plugins.default_scoring_config);
-        let steward = factory.make_steward(
-            self.member_id.member_id_bytes(),
-            self.plugins.default_steward_list_config.clone(),
-        );
+        let steward = factory.make_steward(self.plugins.default_steward_list_config.clone());
         let Some(conversation) = Conversation::join(
             factory.provider(),
             &welcome.welcome_bytes,

@@ -104,12 +104,10 @@ impl DefaultConversationPluginsFactory {
         )
     }
 
-    /// Build a fresh (empty) steward-list plug-in.
-    pub fn make_steward(
-        &self,
-        conversation_id: &[u8],
-        config: StewardListConfig,
-    ) -> DefaultStewardList {
-        DeterministicStewardList::empty(conversation_id.to_vec(), config)
+    /// Build a fresh (empty) steward-list plug-in. The library stamps the
+    /// conversation-id sort salt when it builds the conversation, so the
+    /// gateway supplies none.
+    pub fn make_steward(&self, config: StewardListConfig) -> DefaultStewardList {
+        DeterministicStewardList::empty(config)
     }
 }

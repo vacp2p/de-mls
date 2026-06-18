@@ -15,45 +15,29 @@ pub struct DeterministicStewardList {
 }
 
 impl DeterministicStewardList {
-    /// Joiner: no list until `ConversationSync`.
-    pub fn empty(conversation_id: impl Into<Vec<u8>>, config: StewardListConfig) -> Self {
+    /// Empty roster — no list until the library installs one (the creator's
+    /// bootstrap list or a joiner's `ConversationSync`). The deterministic-sort
+    /// salt is seeded by the library via [`StewardListPlugin::set_conversation_id`]
+    /// once the conversation id is known, so the integrator builds this without
+    /// it.
+    pub fn empty(config: StewardListConfig) -> Self {
         Self {
             list: None,
             config,
-            conversation_id: conversation_id.into(),
+            conversation_id: Vec::new(),
             next_retry_round: 0,
             max_retries: DEFAULT_MAX_RETRIES,
         }
-    }
-
-    /// Creator: sole steward at epoch 0.
-    pub fn with_creator(
-        conversation_id: impl Into<Vec<u8>>,
-        creator_member_id: Vec<u8>,
-        config: StewardListConfig,
-    ) -> Result<Self, ConversationError> {
-        let conversation_id = conversation_id.into();
-        let list = StewardList::generate(
-            0,
-            &conversation_id,
-            &[creator_member_id],
-            1,
-            config.clone(),
-            0,
-        )?;
-        Ok(Self {
-            list: Some(list),
-            config,
-            conversation_id,
-            next_retry_round: 0,
-            max_retries: DEFAULT_MAX_RETRIES,
-        })
     }
 }
 
 impl StewardListPlugin for DeterministicStewardList {
     fn config(&self) -> &StewardListConfig {
         &self.config
+    }
+
+    fn set_conversation_id(&mut self, conversation_id: &[u8]) {
+        self.conversation_id = conversation_id.to_vec();
     }
 
     fn set_config(&mut self, config: StewardListConfig) {
@@ -227,7 +211,7 @@ mod tests {
 
     #[test]
     fn empty_plugin_has_no_list() {
-        let p = DeterministicStewardList::empty(b"g".to_vec(), config());
+        let p = DeterministicStewardList::empty(config());
         assert!(p.current_list().is_none());
         assert!(!p.is_steward(&member(1)));
         assert!(!p.is_exhausted(0));
@@ -236,18 +220,8 @@ mod tests {
     }
 
     #[test]
-    fn creator_bootstrap_makes_creator_a_steward() {
-        let creator = member(1);
-        let p = DeterministicStewardList::with_creator(b"g".to_vec(), creator.clone(), config())
-            .unwrap();
-        assert!(p.is_steward(&creator));
-        assert_eq!(p.election_epoch(), Some(0));
-        assert_eq!(p.current_list().unwrap().len(), 1);
-    }
-
-    #[test]
     fn install_sets_current_list() {
-        let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
+        let mut p = DeterministicStewardList::empty(config());
         let mems = members(&[1, 2, 3]);
         p.install_list(0, &mems, 3, 0).unwrap();
         assert_eq!(p.current_list().unwrap().len(), 3);
@@ -256,7 +230,7 @@ mod tests {
 
     #[test]
     fn epoch_steward_filters_by_eligibility() {
-        let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
+        let mut p = DeterministicStewardList::empty(config());
         let mems = members(&[1, 2, 3]);
         p.install_list(0, &mems, 3, 0).unwrap();
 
@@ -270,8 +244,7 @@ mod tests {
 
     #[test]
     fn epoch_and_backup_distinct_when_two_eligible() {
-        let mut p =
-            DeterministicStewardList::empty(b"g".to_vec(), StewardListConfig::new(3, 3).unwrap());
+        let mut p = DeterministicStewardList::empty(StewardListConfig::new(3, 3).unwrap());
         let mems = members(&[1, 2, 3]);
         p.install_list(0, &mems, 3, 0).unwrap();
 
@@ -282,7 +255,7 @@ mod tests {
 
     #[test]
     fn backup_is_none_when_only_one_eligible() {
-        let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
+        let mut p = DeterministicStewardList::empty(config());
         let mems = members(&[1, 2, 3]);
         p.install_list(0, &mems, 3, 0).unwrap();
 
@@ -296,7 +269,7 @@ mod tests {
     fn bump_retry_increments_round_past_max() {
         // Exhaustion is detected by the caller comparing next_retry_round()
         // against max_retries() (config default = 1).
-        let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
+        let mut p = DeterministicStewardList::empty(config());
         p.bump_retry();
         assert_eq!(p.next_retry_round(), 1);
         assert!(p.next_retry_round() <= p.max_retries());
@@ -311,7 +284,7 @@ mod tests {
 
     #[test]
     fn reset_retry_clears_round() {
-        let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
+        let mut p = DeterministicStewardList::empty(config());
         p.bump_retry();
         p.bump_retry();
         assert_eq!(p.next_retry_round(), 2);
@@ -321,7 +294,7 @@ mod tests {
 
     #[test]
     fn validate_proposed_against_self_derived_list() {
-        let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
+        let mut p = DeterministicStewardList::empty(config());
         let mems = members(&[1, 2, 3]);
         p.install_list(0, &mems, 3, 0).unwrap();
         let proposed = p.current_list().unwrap().members().to_vec();
@@ -330,7 +303,7 @@ mod tests {
 
     #[test]
     fn validate_proposed_rejects_tampered_order() {
-        let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
+        let mut p = DeterministicStewardList::empty(config());
         let mems = members(&[1, 2, 3]);
         p.install_list(0, &mems, 3, 0).unwrap();
         let mut tampered = p.current_list().unwrap().members().to_vec();
@@ -340,7 +313,7 @@ mod tests {
 
     #[test]
     fn steward_members_returns_filtered_roster() {
-        let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
+        let mut p = DeterministicStewardList::empty(config());
         let mems = members(&[1, 2, 3]);
         p.install_list(0, &mems, 3, 0).unwrap();
         let dropped = mems[0].clone();
@@ -351,7 +324,7 @@ mod tests {
 
     #[test]
     fn set_max_retries_updates_threshold() {
-        let mut p = DeterministicStewardList::empty(b"g".to_vec(), config());
+        let mut p = DeterministicStewardList::empty(config());
         p.set_max_retries(3);
         assert_eq!(p.max_retries(), 3);
 
@@ -368,8 +341,7 @@ mod tests {
 
     #[test]
     fn election_proposer_walks_eligibility() {
-        let mut p =
-            DeterministicStewardList::empty(b"g".to_vec(), StewardListConfig::new(3, 3).unwrap());
+        let mut p = DeterministicStewardList::empty(StewardListConfig::new(3, 3).unwrap());
         let mems = members(&[1, 2, 3]);
         p.install_list(0, &mems, 3, 0).unwrap();
 
@@ -383,7 +355,7 @@ mod tests {
     #[test]
     fn election_required_only_above_sn_max() {
         let cfg = StewardListConfig::new(2, 3).unwrap();
-        let p = DeterministicStewardList::empty(b"g".to_vec(), cfg);
+        let p = DeterministicStewardList::empty(cfg);
         // At or below sn_max the list is the full membership — regenerate
         // locally, no vote.
         assert!(!p.election_required(1));

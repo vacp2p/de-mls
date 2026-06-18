@@ -72,10 +72,7 @@ impl Integrator {
     }
 
     fn steward(&self) -> DefaultStewardList {
-        make_steward(
-            self.member_id.member_id_bytes(),
-            StewardListConfig::default(),
-        )
+        make_steward(StewardListConfig::default())
     }
 
     /// Mint a single-use key package into this integrator's reused provider,

@@ -67,7 +67,9 @@ pub fn make_scoring(config: &ScoringConfig) -> DefaultPeerScoring {
     )
 }
 
-/// Build a fresh (empty) steward-list plug-in.
-pub fn make_steward(conversation_id: &[u8], config: StewardListConfig) -> DefaultStewardList {
-    DeterministicStewardList::empty(conversation_id.to_vec(), config)
+/// Build a fresh (empty) steward-list plug-in. The library stamps the
+/// conversation-id sort salt when it builds the conversation, so the fixture
+/// supplies none.
+pub fn make_steward(config: StewardListConfig) -> DefaultStewardList {
+    DeterministicStewardList::empty(config)
 }

@@ -142,6 +142,10 @@ where
         let self_member_id_bytes = member_id.to_vec();
         let queues = ConversationQueues::new(conversation_id);
 
+        // The conversation id is the deterministic-sort salt every member must
+        // share; the library owns it (the integrator hands in a seedless
+        // plug-in) so creator and joiner agree on every elected list.
+        steward_list.set_conversation_id(conversation_id.as_bytes());
         steward_list.set_max_retries(config.max_reelection_attempts);
         // Creator path: bootstrap the list with self as sole steward at
         // epoch 0. Joiner path leaves the plug-in empty until `ConversationSync`.
