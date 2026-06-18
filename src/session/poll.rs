@@ -35,7 +35,7 @@ pub struct PollOutcome {
     pub leave_requested: bool,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversation<P, CP, Sig> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// Drive one polling cycle: tick consensus deadlines, advance freeze
     /// state, check steward inactivity, and check pending-join expiry.
     ///
@@ -45,12 +45,16 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     ///
     /// Returns [`PollOutcome::leave_requested`] when the conversation is ready
     /// to be torn down; the integrator finalizes the leave.
-    pub fn poll(&mut self) -> PollOutcome {
+    ///
+    /// `signer` is the local member's MLS signer, threaded into the
+    /// steward commit-candidate build and any auto-vote casts that fire
+    /// this cycle.
+    pub fn poll(&mut self, signer: &impl Signer) -> PollOutcome {
         let mut leave_requested = false;
 
-        self.tick_deadlines();
+        self.tick_deadlines(signer);
 
-        match self.advance_freeze() {
+        match self.advance_freeze(signer) {
             Ok(DispatchOutcome::LeaveRequested) => leave_requested = true,
             Ok(_) => {}
             Err(e) => warn!(
@@ -60,7 +64,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
             ),
         }
 
-        if let Err(e) = self.start_freeze_on_inactivity() {
+        if let Err(e) = self.start_freeze_on_inactivity(signer) {
             warn!(
                 conversation = %self.conversation_id,
                 error = %e,
@@ -102,7 +106,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     /// [`crate::core::ProcessResult`]. Returns
     /// [`DispatchOutcome::LeaveRequested`] if the applied commit ejected the
     /// local member — `poll()` surfaces that as `leave_requested`.
-    fn advance_freeze(&mut self) -> Result<DispatchOutcome, ConversationError> {
+    fn advance_freeze(
+        &mut self,
+        signer: &impl Signer,
+    ) -> Result<DispatchOutcome, ConversationError> {
         let state = self.core.current_state();
         if state != ConversationState::Freezing {
             self.last_freeze_progress = None;
@@ -167,7 +174,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
 
         // `check_and_initiate_score_removals` calls `initiate_proposal`. A
         // downward threshold cross during finalize schedules a removal pass.
-        if downward_cross && let Err(e) = self.check_and_initiate_score_removals() {
+        if downward_cross && let Err(e) = self.check_and_initiate_score_removals(signer) {
             error!(conversation = %conversation_id, error = %e, "score-removal check failed (freeze finalize)");
         }
 
@@ -186,7 +193,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
                     // group leaves the list for the post-commit election.
                     welcome.conversation_sync_bytes = {
                         let _ = self.reconcile_steward_list()?;
-                        self.build_conversation_sync_payload()?.unwrap_or_default()
+                        self.build_conversation_sync_payload(signer)?
+                            .unwrap_or_default()
                     };
                     // Broadcast the welcome to the group so every member can deliver it to the
                     // joiners, then surface it locally as freshly minted.
@@ -198,7 +206,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
                     self.broadcast(broadcast_payload);
                 }
 
-                let outcome = match self.dispatch_inbound_result(result) {
+                let outcome = match self.dispatch_inbound_result(result, signer) {
                     Ok(o) => o,
                     Err(e) => {
                         error!(conversation = %conversation_id, error = %e, "finalize result dispatch failed");
@@ -254,7 +262,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
                     (event, false)
                 };
 
-                if downward_cross && let Err(e) = self.check_and_initiate_score_removals() {
+                if downward_cross && let Err(e) = self.check_and_initiate_score_removals(signer) {
                     error!(conversation = %conversation_id, error = %e, "score-removal check failed (freeze timeout)");
                 }
 
@@ -263,7 +271,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
 
                 // Layer 2 recovery: regenerate the steward list. Only the
                 // responsible proposer's call actually submits.
-                if entered_reelection && let Err(e) = self.initiate_steward_election(true) {
+                if entered_reelection && let Err(e) = self.initiate_steward_election(true, signer) {
                     info!(conversation = %conversation_id, error = %e, "recovery election deferred");
                 }
 
@@ -278,7 +286,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     /// candidate-build failure is logged and the freeze transition proceeds
     /// (peers' candidates still get processed). No-ops outside `Working`
     /// (via `check_steward_inactivity`) and while an election is in flight.
-    fn start_freeze_on_inactivity(&mut self) -> Result<(), ConversationError> {
+    fn start_freeze_on_inactivity(
+        &mut self,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError> {
         if self.core.current_state() == ConversationState::PendingJoin {
             return Ok(());
         }
@@ -306,10 +317,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
 
         let self_member_id = Arc::clone(&self.self_member_id);
         let outbound = if self.core.steward_list.is_steward(&self_member_id) {
-            match self
-                .core
-                .create_commit_candidate(&self.signer, &self_member_id)
-            {
+            match self.core.create_commit_candidate(signer, &self_member_id) {
                 Ok(payload) => payload,
                 Err(e) => {
                     error!(

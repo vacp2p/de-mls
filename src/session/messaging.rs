@@ -31,14 +31,20 @@ pub struct Outbound {
     pub payload: Vec<u8>,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversation<P, CP, Sig> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// Buffer a chat message for broadcast. The conversation never sends — the
     /// message is enqueued and the integrator drains it via
     /// [`Conversation::drain_outbound`]. Blocked in `PendingJoin` (no keys
     /// yet), `Freezing`, and `Selection` (epoch rotation in flight — the
     /// message might not decrypt on peers who already merged the next
     /// commit). Governance traffic has its own gate (`check_proposal_allowed`).
-    pub fn send_message(&mut self, message: Vec<u8>) -> Result<(), ConversationError> {
+    /// `signer` is the local member's MLS signer, used to authenticate the
+    /// outbound message.
+    pub fn send_message(
+        &mut self,
+        message: Vec<u8>,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError> {
         let state = self.core.current_state();
         if matches!(
             state,
@@ -58,7 +64,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
         let payload = self
             .core
             .expect_mls_mut()?
-            .build_message(&self.signer, &app_msg)?;
+            .build_message(signer, &app_msg)?;
         self.broadcast(payload);
         Ok(())
     }
@@ -68,7 +74,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     /// proposal with a bundled YES vote. The resulting welcome fires as
     /// [`crate::core::ConversationEvent::WelcomeReady`] for the integrator to
     /// deliver out of band.
-    pub fn add_member(&mut self, key_package_bytes: &[u8]) -> Result<(), ConversationError> {
+    pub fn add_member(
+        &mut self,
+        key_package_bytes: &[u8],
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError> {
         let state = self.core.current_state();
         if state != ConversationState::Working {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
@@ -80,6 +90,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
                 member_id,
             }),
             CreatorVote::Yes,
+            signer,
         )?;
         Ok(())
     }
@@ -87,7 +98,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     /// Start a `RemoveMember` consensus round targeting `member_id`. The
     /// requester's intent is the removal → the creator's vote is bundled as
     /// YES at submit; no vote request is shown to the requester.
-    pub fn remove_member(&mut self, member_id: &[u8]) -> Result<(), ConversationError> {
+    pub fn remove_member(
+        &mut self,
+        member_id: &[u8],
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError> {
         let state = self.core.current_state();
         if state != ConversationState::Working {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
@@ -96,6 +111,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
         self.initiate_proposal(
             ConversationUpdateRequest::remove_member(member_id.to_vec()),
             CreatorVote::Yes,
+            signer,
         )?;
 
         Ok(())

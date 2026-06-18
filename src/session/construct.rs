@@ -33,15 +33,12 @@ use crate::{
 /// snapshots its bytes/display. The consensus service is owned: each
 /// conversation gets its own, and how services share storage is the
 /// integrator's wiring (see the gateway's `ConsensusContext`).
-pub struct ConversationDeps<'a, P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> {
+pub struct ConversationDeps<'a, P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Builds the per-conversation MLS / scoring / steward plug-ins.
     pub plugins: &'a CP,
     /// This conversation's consensus service, ready to use. The conversation
     /// subscribes to its event bus at construction.
     pub consensus: ConsensusServiceFor<P>,
-    /// The local member's MLS signer. Stored on the conversation and passed
-    /// into every signing call; the MLS service holds no identity material.
-    pub signer: Sig,
     /// Local participant identity; the constructor snapshots its bytes
     /// and display form onto the conversation.
     pub identity: &'a dyn MemberId,
@@ -55,16 +52,28 @@ pub struct ConversationDeps<'a, P: ConsensusPlugin, CP: ConversationPluginsFacto
     pub steward_list_config: StewardListConfig,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversation<P, CP, Sig> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// Create a brand-new conversation we steward. Starts in `Working` with
     /// the local member installed as sole steward at epoch 0. The creator's
     /// own `key_package` supplies the leaf credential and ciphersuite.
+    /// `signer` is the local member's MLS signer, used to seed the group.
     pub fn create(
         conversation_id: &str,
         key_package: &[u8],
-        deps: ConversationDeps<P, CP, Sig>,
+        deps: ConversationDeps<P, CP>,
+        signer: &impl Signer,
     ) -> Result<Self, ConversationError> {
-        Self::build(conversation_id, deps, Some(key_package))
+        let mls = deps
+            .plugins
+            .create_mls(conversation_id.to_string(), key_package, signer)?;
+        Self::assemble(
+            conversation_id,
+            deps,
+            Some(mls),
+            ConversationStateMachine::new_as_member(),
+            PhaseTimer::new(),
+            true,
+        )
     }
 
     /// Join an existing conversation. Starts in `PendingJoin` with no MLS
@@ -72,9 +81,20 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     /// `ConversationSync` arrive.
     pub fn join(
         conversation_id: &str,
-        deps: ConversationDeps<P, CP, Sig>,
+        deps: ConversationDeps<P, CP>,
     ) -> Result<Self, ConversationError> {
-        Self::build(conversation_id, deps, None)
+        // Anchor the timer at "now" so `is_pending_join_expired` can detect the
+        // 3× commit-inactivity timeout.
+        let mut phase_timer = PhaseTimer::new();
+        phase_timer.start();
+        Self::assemble(
+            conversation_id,
+            deps,
+            None,
+            ConversationStateMachine::new_as_pending_join(),
+            phase_timer,
+            false,
+        )
     }
 
     /// Build a fully-joined conversation straight from a received
@@ -86,52 +106,35 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     /// key package — ignore it. The conversation id comes from the welcome
     /// itself, so the caller needs no prior knowledge of the conversation.
     pub fn from_welcome(
-        deps: ConversationDeps<P, CP, Sig>,
+        deps: ConversationDeps<P, CP>,
         welcome: &MemberWelcome,
+        signer: &impl Signer,
     ) -> Result<Option<Self>, ConversationError> {
         let Some(mls) = deps.plugins.welcome_mls(&welcome.welcome_bytes)? else {
             return Ok(None);
         };
         let conversation_id = mls.conversation_id().to_string();
         let mut conversation = Self::join(&conversation_id, deps)?;
-        conversation.complete_join(mls)?;
-        conversation.apply_welcome_sync(&welcome.conversation_sync_bytes)?;
+        conversation.complete_join(mls, signer)?;
+        conversation.apply_welcome_sync(&welcome.conversation_sync_bytes, signer)?;
         Ok(Some(conversation))
     }
 
-    /// Shared construction body for [`Self::create`] / [`Self::join`].
-    /// `key_package` is `Some` on the creator path (its leaf seeds the group)
-    /// and `None` on the joiner path.
-    fn build(
+    /// Shared assembly tail for [`Self::create`] / [`Self::join`]: builds the
+    /// queues, plug-ins, and consensus subscription around an already-decided
+    /// MLS service and opening state. `is_creation` bootstraps the steward list
+    /// and scoring with the local member (creator) versus leaving them empty
+    /// until `ConversationSync` (joiner).
+    fn assemble(
         conversation_id: &str,
-        deps: ConversationDeps<P, CP, Sig>,
-        key_package: Option<&[u8]>,
+        deps: ConversationDeps<P, CP>,
+        mls_opt: Option<CP::Mls>,
+        state_machine: ConversationStateMachine,
+        phase_timer: PhaseTimer,
+        is_creation: bool,
     ) -> Result<Self, ConversationError> {
         let self_member_id_bytes = deps.identity.member_id_bytes().to_vec();
-        let is_creation = key_package.is_some();
-
-        let (queues, mls_opt, state_machine, phase_timer) = if let Some(kp) = key_package {
-            let mls = deps
-                .plugins
-                .create_mls(conversation_id.to_string(), kp, &deps.signer)?;
-            (
-                ConversationQueues::new(conversation_id),
-                Some(mls),
-                ConversationStateMachine::new_as_member(),
-                PhaseTimer::new(),
-            )
-        } else {
-            // Anchor the timer at "now" so `is_pending_join_expired` can
-            // detect the 3× commit-inactivity timeout.
-            let mut phase_timer = PhaseTimer::new();
-            phase_timer.start();
-            (
-                ConversationQueues::new(conversation_id),
-                None,
-                ConversationStateMachine::new_as_pending_join(),
-                phase_timer,
-            )
-        };
+        let queues = ConversationQueues::new(conversation_id);
 
         let mut steward_list = deps
             .plugins
@@ -166,7 +169,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
             conversation_id.to_string(),
             queues,
             mls_opt,
-            deps.signer,
             state_machine,
             phase_timer,
             deps.config,

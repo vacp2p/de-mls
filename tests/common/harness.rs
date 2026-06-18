@@ -45,8 +45,7 @@ use de_mls::session::{
 use crate::common::{TestPluginsFactory, test_credential, wallet::WalletMemberId};
 
 /// Per-conversation MLS service stack the harness runs.
-pub type TestConversation =
-    Conversation<DefaultConsensusPlugin, TestPluginsFactory, SignatureKeyPair>;
+pub type TestConversation = Conversation<DefaultConsensusPlugin, TestPluginsFactory>;
 
 const MAX_SESSIONS_PER_SCOPE: usize = 10;
 
@@ -95,7 +94,7 @@ impl Integrator {
     fn deps(
         &self,
         config: ConversationConfig,
-    ) -> ConversationDeps<'_, DefaultConsensusPlugin, TestPluginsFactory, SignatureKeyPair> {
+    ) -> ConversationDeps<'_, DefaultConsensusPlugin, TestPluginsFactory> {
         let consensus = ConsensusServiceFor::<DefaultConsensusPlugin>::new_with_components(
             self.consensus_storage.clone(),
             DefaultConsensusPlugin::new_event_bus(),
@@ -105,7 +104,6 @@ impl Integrator {
         ConversationDeps {
             plugins: &self.plugins,
             consensus,
-            signer: self.signer.clone(),
             identity: &self.member_id,
             app_id: Arc::from(self.member_id.member_id_bytes()),
             config,
@@ -146,9 +144,13 @@ impl Member {
     ) -> Self {
         let integ = Integrator::new(private_key, steward_list_config);
         let key_package = integ.plugins.generate_key_package();
-        let convo =
-            Conversation::create(conversation_id, key_package.as_bytes(), integ.deps(config))
-                .expect("create conversation");
+        let convo = Conversation::create(
+            conversation_id,
+            key_package.as_bytes(),
+            integ.deps(config),
+            &integ.signer,
+        )
+        .expect("create conversation");
         Self {
             integ,
             convo,
@@ -344,32 +346,40 @@ impl Member {
     // ── Actions (`&mut self`) ────────────────────────────────────────────
 
     pub fn send_message(&mut self, message: Vec<u8>) {
-        self.convo.send_message(message).expect("send message");
+        self.convo
+            .send_message(message, &self.integ.signer)
+            .expect("send message");
     }
 
     pub fn add_member(&mut self, key_package: &[u8]) {
-        self.convo.add_member(key_package).expect("add member");
+        self.convo
+            .add_member(key_package, &self.integ.signer)
+            .expect("add member");
     }
 
     pub fn remove_member(&mut self, member_id: &[u8]) {
-        self.convo.remove_member(member_id).expect("remove member");
+        self.convo
+            .remove_member(member_id, &self.integ.signer)
+            .expect("remove member");
     }
 
     /// Cast a manual vote on `proposal_id` (cancels any pending auto-vote).
     pub fn vote(&mut self, proposal_id: u32, vote: bool) {
-        self.convo.vote(proposal_id, vote).expect("vote");
+        self.convo
+            .vote(proposal_id, vote, &self.integ.signer)
+            .expect("vote");
     }
 
     /// Submit a raw proposal with the local vote bundled. Lower-level than
     /// [`Self::remove_member`]; used for emergency/violation proposals.
     pub fn initiate_proposal(&mut self, request: ConversationUpdateRequest, vote: CreatorVote) {
         self.convo
-            .initiate_proposal(request, vote)
+            .initiate_proposal(request, vote, &self.integ.signer)
             .expect("initiate proposal");
     }
 
     pub fn leave(&mut self) {
-        self.convo.leave().expect("leave");
+        self.convo.leave(&self.integ.signer).expect("leave");
     }
 
     /// Drain this member's buffered outbound directly (bypassing the bus) — for
@@ -380,7 +390,9 @@ impl Member {
 
     /// Deliver a raw payload to this member as if it arrived from `sender`.
     pub fn deliver_raw(&mut self, sender: &[u8], payload: &[u8]) {
-        let _ = self.convo.process_inbound(sender, payload);
+        let _ = self
+            .convo
+            .process_inbound(sender, payload, &self.integ.signer);
     }
 
     /// Mint a key package and return its announcement as an [`Outbound`] (the
@@ -412,7 +424,7 @@ impl Member {
     /// Advance this member's timers/state machine one tick, returning the
     /// poll outcome (e.g. `leave_requested` on pending-join expiry).
     pub fn poll(&mut self) -> PollOutcome {
-        self.convo.poll()
+        self.convo.poll(&self.integ.signer)
     }
 
     /// Drain this member's pending events into its log (no welcome routing) —
@@ -426,13 +438,15 @@ impl Member {
     }
 
     fn deliver(&mut self, packet: &Outbound) {
-        let _ = self.convo.process_inbound(&packet.sender, &packet.payload);
+        let _ = self
+            .convo
+            .process_inbound(&packet.sender, &packet.payload, &self.integ.signer);
     }
 
     fn deliver_key_package(&mut self, packet: &Outbound) {
         let _ = self
             .convo
-            .receive_key_package(&packet.sender, &packet.payload);
+            .receive_key_package(&packet.sender, &packet.payload, &self.integ.signer);
     }
 
     /// Try to open `welcome` with this member's stashed key-package provider.
@@ -442,9 +456,11 @@ impl Member {
         use de_mls::core::ConversationPluginsFactory;
         match self.integ.plugins.welcome_mls(&welcome.welcome_bytes) {
             Ok(Some(mls)) => {
-                self.convo.complete_join(mls).expect("complete join");
                 self.convo
-                    .apply_welcome_sync(&welcome.conversation_sync_bytes)
+                    .complete_join(mls, &self.integ.signer)
+                    .expect("complete join");
+                self.convo
+                    .apply_welcome_sync(&welcome.conversation_sync_bytes, &self.integ.signer)
                     .expect("apply welcome sync");
                 self.last_sync = Some(welcome.conversation_sync_bytes.clone());
                 true

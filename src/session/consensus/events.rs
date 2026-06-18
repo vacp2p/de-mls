@@ -16,13 +16,14 @@ use crate::{
     session::{Conversation, ConversationError, ConversationState},
 };
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversation<P, CP, Sig> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// Apply one resolved outcome: surface the decision to the integrator,
     /// apply the queue effects, then run whatever follow-up the result
     /// calls for (election install/retry, freeze entry, emergency scoring).
     pub(crate) fn apply_consensus_outcome(
         &mut self,
         event: ConsensusEvent,
+        signer: &impl Signer,
     ) -> Result<(), ConversationError> {
         let (proposal_id, approved, timestamp) = match &event {
             ConsensusEvent::ConsensusReached {
@@ -80,10 +81,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
         match consensus_apply {
             ConsensusApplyResult::NoAction => {}
             ConsensusApplyResult::ElectionAccepted(election) => {
-                self.handle_election_accepted(election)?;
+                self.handle_election_accepted(election, signer)?;
             }
             ConsensusApplyResult::ElectionRejected => {
-                self.handle_election_rejected()?;
+                self.handle_election_rejected(signer)?;
             }
             ConsensusApplyResult::RecoveryModeOpened => {
                 self.core.enter_recovery_mode();
@@ -91,10 +92,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
             }
             ConsensusApplyResult::UrgentRemoval { target } => {
                 self.start_freezing_and_emit();
-                self.refresh_stewards_after_removal(&target)?;
+                self.refresh_stewards_after_removal(&target, signer)?;
             }
             ConsensusApplyResult::QueuedRemoval { target } => {
-                self.refresh_stewards_after_removal(&target)?;
+                self.refresh_stewards_after_removal(&target, signer)?;
             }
             ConsensusApplyResult::RejectedMembership { target } => {
                 self.core.queues.remove_pending_update(&target);
@@ -104,7 +105,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
         // Empty for everything but emergency-criteria payloads.
         let score_ops = emergency_score_ops(&request, approved);
         if !score_ops.is_empty() {
-            self.handle_emergency_scored(proposal_id, &request, &score_ops)?;
+            self.handle_emergency_scored(proposal_id, &request, &score_ops, signer)?;
         }
 
         Ok(())
@@ -128,11 +129,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     /// the next epoch still has a live epoch + backup steward. Election
     /// rejection here is deferred, not fatal — the list heals on a later
     /// reconcile.
-    fn refresh_stewards_after_removal(&mut self, target: &[u8]) -> Result<(), ConversationError> {
+    fn refresh_stewards_after_removal(
+        &mut self,
+        target: &[u8],
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError> {
         if !self.core.steward_list.is_steward(target) {
             return Ok(());
         }
-        if let Err(e) = self.initiate_steward_election(true) {
+        if let Err(e) = self.initiate_steward_election(true, signer) {
             info!(
                 conversation = %self.conversation_id,
                 error = %e,
@@ -148,6 +153,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     fn handle_election_accepted(
         &mut self,
         election: StewardElectionProposal,
+        signer: &impl Signer,
     ) -> Result<(), ConversationError> {
         self.core.expect_mls()?;
         // The proposal carries no separate candidate pool: `proposed_stewards`
@@ -190,12 +196,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
             "steward election applied"
         );
 
-        self.process_buffered_updates()
+        self.process_buffered_updates(signer)
     }
 
     /// Bump the retry round and re-run the election, or escalate to a
     /// `Deadlock` emergency proposal once retries are exhausted.
-    fn handle_election_rejected(&mut self) -> Result<(), ConversationError> {
+    fn handle_election_rejected(&mut self, signer: &impl Signer) -> Result<(), ConversationError> {
         self.core.steward_list.bump_retry();
         let round = self.core.steward_list.next_retry_round();
         let max = self.core.steward_list.max_retries();
@@ -204,7 +210,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
                 conversation = %self.conversation_id,
                 round, max, "election retries exhausted; escalating to Layer 3"
             );
-            if let Err(e) = self.initiate_deadlock_ecp() {
+            if let Err(e) = self.initiate_deadlock_ecp(signer) {
                 error!(conversation = %self.conversation_id, error = %e, "Deadlock ECP filing failed");
                 self.emit_event(ConversationEvent::Error {
                     operation: "Reelection stuck".to_string(),
@@ -217,7 +223,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
             conversation = %self.conversation_id,
             round, max, "steward election rejected, retrying"
         );
-        if let Err(e) = self.initiate_steward_election(true) {
+        if let Err(e) = self.initiate_steward_election(true, signer) {
             info!(conversation = %self.conversation_id, error = %e, "election retry deferred");
         }
         Ok(())
@@ -233,6 +239,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
         proposal_id: u32,
         request: &ConversationUpdateRequest,
         score_ops: &[ScoreOp],
+        signer: &impl Signer,
     ) -> Result<(), ConversationError> {
         // The threshold-cross flag is dropped: the terminal
         // `check_and_initiate_score_removals` sweep below covers it.
@@ -253,7 +260,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
         };
         self.emit_phase_change(resumed_event);
 
-        if let Err(e) = self.check_and_initiate_score_removals() {
+        if let Err(e) = self.check_and_initiate_score_removals(signer) {
             error!(conversation = %self.conversation_id, error = %e, "score-removal check failed");
         }
         Ok(())

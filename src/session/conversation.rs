@@ -52,16 +52,12 @@ pub struct AutoVoteEntry {
     pub vote: bool,
 }
 
-pub struct Conversation<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> {
+pub struct Conversation<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Conversation name. Identifies this conversation in the integrator's
     /// registry and is used to construct scope keys for consensus operations.
     /// Read via [`Conversation::conversation_id`].
     pub(crate) conversation_id: String,
     pub(crate) core: ConversationCore<CP>,
-    /// The local member's MLS signer, supplied by the integrator at
-    /// construction. Passed into every signing call (`create_commit_candidate`,
-    /// `build_message`); the MLS service itself holds no identity material.
-    pub(crate) signer: Sig,
     /// Per-conversation consensus service. Owns this conversation's scope
     /// in the shared storage and a private event bus. Minted from the
     /// [`crate::session::ConversationDeps`] consensus service at construction.
@@ -113,7 +109,7 @@ pub struct Conversation<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig:
     pub(crate) last_freeze_progress: Option<(usize, usize)>,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversation<P, CP, Sig> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// Build a fresh conversation. Creator path passes `Some(mls)`; joiner
     /// path passes `None` and attaches the MLS service later via
     /// `core.attach_mls`. `consensus_rx` is a subscriber on
@@ -123,7 +119,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
         conversation_id: String,
         queues: ConversationQueues,
         mls: Option<CP::Mls>,
-        signer: Sig,
         state_machine: ConversationStateMachine,
         phase_timer: PhaseTimer,
         config: ConversationConfig,
@@ -138,7 +133,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
         Self {
             conversation_id,
             core: ConversationCore::new(queues, mls, state_machine, config, scoring, steward_list),
-            signer,
             consensus,
             consensus_rx,
             phase_timer,
@@ -295,13 +289,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     /// entry and clean up the consensus scope. In all other states, opens a
     /// self-leave consensus round and returns [`LeaveOutcome::LeaveInitiated`];
     /// the leave completes when the next steward commit merges the removal.
-    pub fn leave(&mut self) -> Result<LeaveOutcome, ConversationError> {
+    /// `signer` is the local member's MLS signer, used to authenticate the
+    /// self-leave proposal on the active-conversation path.
+    pub fn leave(&mut self, signer: &impl Signer) -> Result<LeaveOutcome, ConversationError> {
         if self.core.current_state() == ConversationState::PendingJoin {
             self.emit_event(ConversationEvent::Leaving);
             self.cancel_all_auto_votes();
             return Ok(LeaveOutcome::TornDown);
         }
-        self.initiate_self_leave()?;
+        self.initiate_self_leave(signer)?;
         Ok(LeaveOutcome::LeaveInitiated)
     }
 
@@ -415,13 +411,12 @@ mod tests {
     use crate::core::ConversationQueues;
     use crate::defaults::DefaultConsensusPlugin;
     use crate::test_fixtures::{
-        StubPluginsFactory, StubScoring, StubStewardList, UnusedMls, UnusedSigner,
-        make_test_consensus_service,
+        StubPluginsFactory, StubScoring, StubStewardList, UnusedMls, make_test_consensus_service,
     };
 
     fn make_conversation_pending_join(
         commit_inactivity: Duration,
-    ) -> Conversation<DefaultConsensusPlugin, StubPluginsFactory, UnusedSigner> {
+    ) -> Conversation<DefaultConsensusPlugin, StubPluginsFactory> {
         let config = ConversationConfig {
             commit_inactivity_duration: commit_inactivity,
             ..ConversationConfig::default()
@@ -431,7 +426,6 @@ mod tests {
             "g".to_string(),
             ConversationQueues::new("g"),
             Some(UnusedMls),
-            UnusedSigner,
             ConversationStateMachine::new_as_pending_join(),
             PhaseTimer::new(),
             config,
@@ -447,14 +441,12 @@ mod tests {
         conversation
     }
 
-    fn make_conversation_working()
-    -> Conversation<DefaultConsensusPlugin, StubPluginsFactory, UnusedSigner> {
+    fn make_conversation_working() -> Conversation<DefaultConsensusPlugin, StubPluginsFactory> {
         let (consensus, consensus_rx) = make_test_consensus_service();
         Conversation::new(
             "g".to_string(),
             ConversationQueues::new("g"),
             Some(UnusedMls),
-            UnusedSigner,
             ConversationStateMachine::new_as_member(),
             PhaseTimer::new(),
             ConversationConfig::default(),

@@ -39,7 +39,7 @@ pub enum CreatorVote {
     Deferred,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversation<P, CP, Sig> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     // ── Public API ───────────────────────────────────────────────────
 
     /// Open a consensus vote for `request`; [`CreatorVote`] picks the wire
@@ -57,6 +57,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
         &mut self,
         request: ConversationUpdateRequest,
         creator_vote: CreatorVote,
+        signer: &impl Signer,
     ) -> Result<(), ConversationError> {
         let kind = ProposalKind::of(&request);
         let expected_voters = self.check_proposal_allowed(kind)?;
@@ -107,7 +108,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
                 let payload = self
                     .core
                     .expect_mls_mut()?
-                    .build_message(&self.signer, &outbound)?;
+                    .build_message(signer, &outbound)?;
                 self.broadcast(payload);
                 self.emit_event(ConversationEvent::OwnProposalSubmitted {
                     proposal_id,
@@ -118,7 +119,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
                 let payload = self
                     .core
                     .expect_mls_mut()?
-                    .build_message(&self.signer, &unbundled)?;
+                    .build_message(signer, &unbundled)?;
                 self.broadcast(payload);
                 self.emit_event(ConversationEvent::VoteRequested {
                     proposal_id,
@@ -135,19 +136,24 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     /// manual choice wins. Blocked while an epoch rotation is in flight
     /// (`Freezing`/`Selection`) — the encrypted vote might not decrypt on
     /// peers that already merged the next commit.
-    pub fn vote(&mut self, proposal_id: u32, vote: bool) -> Result<(), ConversationError> {
+    pub fn vote(
+        &mut self,
+        proposal_id: u32,
+        vote: bool,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError> {
         let state = self.core.current_state();
         if state == ConversationState::Freezing || state == ConversationState::Selection {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
         self.cancel_auto_vote(proposal_id);
-        self.broadcast_vote(proposal_id, vote)
+        self.broadcast_vote(proposal_id, vote, signer)
     }
 
     /// Fire elapsed auto-votes and consensus timeouts, then drain the
     /// event bus into `apply_consensus_outcome`. Per-proposal errors are
     /// logged and skipped so one stuck proposal can't block the rest.
-    pub(crate) fn tick_deadlines(&mut self) {
+    pub(crate) fn tick_deadlines(&mut self, signer: &impl Signer) {
         let now = std::time::Instant::now();
         let auto_votes_due: Vec<(u32, bool)> = self
             .pending_auto_votes
@@ -169,7 +175,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
         }
 
         for (proposal_id, vote) in auto_votes_due {
-            if let Err(e) = self.broadcast_vote(proposal_id, vote) {
+            if let Err(e) = self.broadcast_vote(proposal_id, vote, signer) {
                 tracing::debug!(
                     proposal_id,
                     error = %e,
@@ -189,7 +195,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
             else {
                 break;
             };
-            if let Err(e) = self.apply_consensus_outcome(event) {
+            if let Err(e) = self.apply_consensus_outcome(event, signer) {
                 tracing::warn!(
                     conversation = %self.conversation_id,
                     error = %e,
@@ -208,7 +214,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     /// Safe to repeat: the pending-leave check catches local duplicates,
     /// and the deterministic [`self_leave_proposal_id`] dedupes
     /// retransmits inside the consensus library.
-    pub(crate) fn initiate_self_leave(&mut self) -> Result<(), ConversationError> {
+    pub(crate) fn initiate_self_leave(
+        &mut self,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError> {
         if self.core.queues.is_pending_self_leave(&self.self_member_id) {
             info!(
                 conversation = %self.conversation_id,
@@ -248,7 +257,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
         let payload = self
             .core
             .expect_mls_mut()?
-            .build_message(&self.signer, &app_msg)?;
+            .build_message(signer, &app_msg)?;
         self.broadcast(payload);
         Ok(())
     }
@@ -328,13 +337,18 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     /// Cast a vote in the local session, encrypt the Vote-only wire
     /// message, and buffer it for broadcast. Manual votes and the auto-vote
     /// timer share this path; the consensus library can't tell them apart.
-    fn broadcast_vote(&mut self, proposal_id: u32, vote: bool) -> Result<(), ConversationError> {
+    fn broadcast_vote(
+        &mut self,
+        proposal_id: u32,
+        vote: bool,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError> {
         let app_message =
             cast_vote::<P>(&self.conversation_id, proposal_id, vote, &self.consensus)?;
         let payload = self
             .core
             .expect_mls_mut()?
-            .build_message(&self.signer, &app_message)?;
+            .build_message(signer, &app_message)?;
         self.broadcast(payload);
         Ok(())
     }

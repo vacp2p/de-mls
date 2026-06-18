@@ -32,7 +32,7 @@ pub(crate) enum StewardListReconcile {
     NeedsElection,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversation<P, CP, Sig> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     // ── Public API ───────────────────────────────────────────────────
 
     /// Add any MLS members not yet tracked in scoring, and drop scored
@@ -62,10 +62,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     /// Reconcile the list after an epoch advance, opening a voted election when
     /// it's needed. Election-init failures are logged, not surfaced — the
     /// conversation may legitimately reject a new proposal right now.
-    pub(crate) fn steward_list_housekeeping(&mut self) -> Result<(), ConversationError> {
+    pub(crate) fn steward_list_housekeeping(
+        &mut self,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError> {
         let reconcile = self.reconcile_steward_list()?;
         if reconcile == StewardListReconcile::NeedsElection
-            && let Err(e) = self.initiate_steward_election(false)
+            && let Err(e) = self.initiate_steward_election(false, signer)
         {
             info!(conversation = %self.conversation_id, error = %e, "election initiation deferred");
         }
@@ -111,6 +114,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     pub(crate) fn handle_incoming_update_request(
         &mut self,
         request: ConversationUpdateRequest,
+        signer: &impl Signer,
     ) -> Result<(), ConversationError> {
         let state = self.core.current_state();
         if state == ConversationState::PendingJoin {
@@ -160,7 +164,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
             // let the vote request drive the steward's vote like any other member.
             // `check_proposal_allowed` may still reject (active emergency
             // etc.) — leave the entry in the buffer for next rotation.
-            if let Err(e) = self.initiate_proposal(request, CreatorVote::Deferred) {
+            if let Err(e) = self.initiate_proposal(request, CreatorVote::Deferred, signer) {
                 info!(conversation = %self.conversation_id, error = %e, "proposal deferred");
             }
         }
@@ -204,7 +208,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     /// On epoch advance, the new live epoch steward drains the pending-update
     /// buffer into voting proposals. Skips entries already covered by the
     /// current voting/approved queues so we don't double-propose.
-    pub(crate) fn process_buffered_updates(&mut self) -> Result<(), ConversationError> {
+    pub(crate) fn process_buffered_updates(
+        &mut self,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError> {
         let (current_epoch, to_propose, conversation_id): (
             u64,
             Vec<ConversationUpdateRequest>,
@@ -267,7 +274,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
         // Buffered updates inherit the same vote request path as fresh
         // steward-auto-propose — the steward still decides per proposal.
         for request in to_propose {
-            if let Err(e) = self.initiate_proposal(request, CreatorVote::Deferred) {
+            if let Err(e) = self.initiate_proposal(request, CreatorVote::Deferred, signer) {
                 info!(
                     conversation = %conversation_id,
                     error = %e,
@@ -286,6 +293,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     /// the same payload into [`crate::core::ConversationEvent::WelcomeReady`].
     pub(crate) fn build_conversation_sync_payload(
         &mut self,
+        signer: &impl Signer,
     ) -> Result<Option<Vec<u8>>, ConversationError> {
         // Sparse snapshot — only members whose score has diverged
         // from `default_score`. Joiners init every member at default
@@ -343,14 +351,17 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
         Ok(Some(
             self.core
                 .expect_mls_mut()?
-                .build_message(&self.signer, &app_msg)?,
+                .build_message(signer, &app_msg)?,
         ))
     }
 
     /// Steward-only: file `ScoreBelowThreshold` ECPs for any member whose
     /// score fell at or below the removal threshold. Skips self and any
     /// target already covered by a pending removal.
-    pub(crate) fn check_and_initiate_score_removals(&mut self) -> Result<(), ConversationError> {
+    pub(crate) fn check_and_initiate_score_removals(
+        &mut self,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError> {
         // Reactive entry: callers chain into this after a scoring apply
         // emitted a downward cross, so we expect at least one tracked
         // member to be at-or-below threshold. The scan is the source of
@@ -408,7 +419,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
             // SCORE_BELOW_THRESHOLD is self-executing: threshold crossed ⇒
             // member must be removed. The steward's vote is YES by
             // protocol, so we bundle it at submit and skip the vote request.
-            if let Err(e) = self.initiate_proposal(request, CreatorVote::Yes) {
+            if let Err(e) = self.initiate_proposal(request, CreatorVote::Yes, signer) {
                 self.core.queues.remove_pending_removal(&target_id);
                 error!(
                     conversation = %conversation_id,
@@ -436,6 +447,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     pub(crate) fn initiate_steward_election(
         &mut self,
         recovery: bool,
+        signer: &impl Signer,
     ) -> Result<(), ConversationError> {
         let (proposed_stewards, election_epoch, retry_round, conversation_id) = {
             let mls = self.core.expect_mls()?;
@@ -510,7 +522,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
 
         // Elections are conversation-wide decisions — broadcast unbundled
         // so the responsible proposer still votes via the vote request.
-        self.initiate_proposal(request, CreatorVote::Deferred)?;
+        self.initiate_proposal(request, CreatorVote::Deferred, signer)?;
 
         Ok(())
     }
@@ -518,7 +530,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     /// Layer 3 escalation: file a `Deadlock` ECP after re-election retries
     /// exhaust. Only the deterministic responsible proposer submits;
     /// others no-op. On YES the ECP opens `recovery_mode`.
-    pub(crate) fn initiate_deadlock_ecp(&mut self) -> Result<(), ConversationError> {
+    pub(crate) fn initiate_deadlock_ecp(
+        &mut self,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError> {
         let (is_authorized, self_id, epoch, conversation_id) = {
             let mls = self.core.expect_mls()?;
             let mls_members = mls.members()?;
@@ -559,7 +574,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
 
         // Bundle YES — the proposer's observation that the deadlock is
         // real is their vote.
-        self.initiate_proposal(request, CreatorVote::Yes)?;
+        self.initiate_proposal(request, CreatorVote::Yes, signer)?;
         Ok(())
     }
 }

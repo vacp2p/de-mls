@@ -44,7 +44,7 @@ pub enum DispatchOutcome {
     LeaveRequested,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversation<P, CP, Sig> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// Ingest a joiner's key-package announcement (a [`MemberInvite`]).
     /// Drops self-echoes (`sender == self.app_id`). If the holder isn't
     /// already a member, promotes the invite to a membership-change proposal
@@ -53,6 +53,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
         &mut self,
         sender: &[u8],
         payload: &[u8],
+        signer: &impl Signer,
     ) -> Result<(), ConversationError> {
         if sender == self.app_id.as_ref() {
             return Ok(());
@@ -76,9 +77,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
             member = ?invite.member_id,
             "key package received"
         );
-        self.handle_incoming_update_request(ConversationUpdateRequest {
-            payload: Some(conversation_update_request::Payload::MemberInvite(invite)),
-        })
+        self.handle_incoming_update_request(
+            ConversationUpdateRequest {
+                payload: Some(conversation_update_request::Payload::MemberInvite(invite)),
+            },
+            signer,
+        )
     }
 
     /// Decrypt and dispatch an inbound conversation payload. Drops self-echoes
@@ -90,6 +94,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
         &mut self,
         sender: &[u8],
         payload: &[u8],
+        signer: &impl Signer,
     ) -> Result<DispatchOutcome, ConversationError> {
         if sender == self.app_id.as_ref() {
             return Ok(DispatchOutcome::Dropped);
@@ -102,7 +107,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
             return Ok(DispatchOutcome::Dropped);
         }
         let result = self.core.process_inbound(payload)?;
-        self.dispatch_inbound_result(result)
+        self.dispatch_inbound_result(result, signer)
     }
 
     /// Attach a freshly-built MLS service after a joiner accepts a welcome.
@@ -121,29 +126,38 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     /// the MLS service if absent, then dispatches `JoinedConversation`
     /// internally (broadcasts the join message, seeds scoring, transitions to
     /// `Working`).
-    pub fn complete_join(&mut self, mls: CP::Mls) -> Result<(), ConversationError> {
+    pub fn complete_join(
+        &mut self,
+        mls: CP::Mls,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError> {
         if self.core.current_state() != ConversationState::PendingJoin {
             return Ok(());
         }
         if !self.has_mls() {
             self.attach_mls(mls);
         }
-        self.dispatch_inbound_result(ProcessResult::JoinedConversation())?;
+        self.dispatch_inbound_result(ProcessResult::JoinedConversation(), signer)?;
         Ok(())
     }
 
-    pub fn apply_welcome_sync(&mut self, sync_bytes: &[u8]) -> Result<(), ConversationError> {
+    pub fn apply_welcome_sync(
+        &mut self,
+        sync_bytes: &[u8],
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError> {
         if sync_bytes.is_empty() {
             return Ok(());
         }
         let result = self.core.process_inbound(sync_bytes)?;
-        self.dispatch_inbound_result(result)?;
+        self.dispatch_inbound_result(result, signer)?;
         Ok(())
     }
 
     pub(crate) fn dispatch_inbound_result(
         &mut self,
         result: ProcessResult,
+        signer: &impl Signer,
     ) -> Result<DispatchOutcome, ConversationError> {
         match result {
             ProcessResult::AppMessage(msg) => {
@@ -168,15 +182,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::MembershipChangeReceived(request) => {
-                self.handle_incoming_update_request(*request)?;
+                self.handle_incoming_update_request(*request, signer)?;
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::JoinedConversation() => {
-                self.on_joined_conversation()?;
+                self.on_joined_conversation(signer)?;
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::ConversationUpdated => {
-                self.on_conversation_updated()?;
+                self.on_conversation_updated(signer)?;
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::LeaveConversation => {
@@ -186,7 +200,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
             ProcessResult::CommitCandidateReceived {
                 steward_id: steward,
             } => {
-                self.on_commit_candidate_received(&steward)?;
+                self.on_commit_candidate_received(&steward, signer)?;
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::ConversationSyncReceived(sync) => {
@@ -284,7 +298,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     /// We just joined via welcome. Broadcast a system "joined" chat
     /// message, seed scoring with the current member set, and
     /// transition to Working.
-    fn on_joined_conversation(&mut self) -> Result<(), ConversationError> {
+    fn on_joined_conversation(&mut self, signer: &impl Signer) -> Result<(), ConversationError> {
         let msg: AppMessage = EventMembershipChange {
             conversation_id: self.conversation_id.clone(),
             member: self.member_id_display().to_string(),
@@ -294,7 +308,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
         let conversation_id = self.conversation_id.clone();
         let mls = self.core.expect_mls_mut()?;
         let mls_members = mls.members().unwrap_or_default();
-        let payload = mls.build_message(&self.signer, &msg)?;
+        let payload = mls.build_message(signer, &msg)?;
         self.broadcast(payload);
         self.sync_scoring_members(&mls_members);
 
@@ -308,7 +322,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
     /// Working, and run steward housekeeping (list reconcile, election
     /// kick-off, buffered-update drain). The commit author's `SuccessfulCommit`
     /// reward is emitted by `finalize_freeze_round`, not here.
-    fn on_conversation_updated(&mut self) -> Result<(), ConversationError> {
+    fn on_conversation_updated(&mut self, signer: &impl Signer) -> Result<(), ConversationError> {
         let mls_members = match self.core.mls() {
             Some(mls) => mls.members().unwrap_or_default(),
             None => Vec::new(),
@@ -333,9 +347,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
             None
         };
 
-        self.steward_list_housekeeping()?;
-        self.process_buffered_updates()?;
-        self.maybe_close_recovery_window();
+        self.steward_list_housekeeping(signer)?;
+        self.process_buffered_updates(signer)?;
+        self.maybe_close_recovery_window(signer);
 
         if let Some(event) = working_event {
             self.emit_event(ConversationEvent::PhaseChange(event));
@@ -345,11 +359,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
 
     /// Fire a steward election while `recovery_mode` is set so the next
     /// list installs and closes the window.
-    fn maybe_close_recovery_window(&mut self) {
+    fn maybe_close_recovery_window(&mut self, signer: &impl Signer) {
         if !self.core.is_in_recovery_mode() {
             return;
         }
-        if let Err(e) = self.initiate_steward_election(true) {
+        if let Err(e) = self.initiate_steward_election(true, signer) {
             info!(
                 conversation = %self.conversation_id,
                 error = %e,
@@ -378,7 +392,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
 
     /// Peer broadcast a commit candidate. If we were in Working, enter
     /// Freezing and — if we're a steward — build our own candidate too.
-    fn on_commit_candidate_received(&mut self, steward: &[u8]) -> Result<(), ConversationError> {
+    fn on_commit_candidate_received(
+        &mut self,
+        steward: &[u8],
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError> {
         tracing::debug!(
             conversation = %self.conversation_id,
             steward = ?steward,
@@ -397,10 +415,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversati
 
         let self_member_id = Arc::clone(&self.self_member_id);
         let outbound = if self.core.steward_list.is_steward(&self_member_id) {
-            match self
-                .core
-                .create_commit_candidate(&self.signer, &self_member_id)
-            {
+            match self.core.create_commit_candidate(signer, &self_member_id) {
                 Ok(payload) => payload,
                 Err(e) => {
                     error!(

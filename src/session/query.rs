@@ -1,7 +1,5 @@
 //! Read-only queries over a conversation's state.
 
-use openmls_traits::signatures::Signer;
-
 use crate::{
     core::{ConsensusPlugin, ConversationPluginsFactory, PeerScoringPlugin, StewardListPlugin},
     mls_crypto::MlsService,
@@ -9,7 +7,7 @@ use crate::{
     session::{Conversation, ConversationError, ConversationState, MemberRole},
 };
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> Conversation<P, CP, Sig> {
+impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// Current state of the conversation's state machine.
     pub fn state(&self) -> ConversationState {
         self.core.current_state()

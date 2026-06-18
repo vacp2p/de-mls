@@ -66,16 +66,14 @@ impl Integrator {
     /// consensus service clones the shared storage (scope-keyed) and gets
     /// its own private event bus. The member id doubles as the `app_id` so
     /// two integrators in one test don't echo-drop each other's packets.
-    fn deps(
-        &self,
-    ) -> ConversationDeps<'_, DefaultConsensusPlugin, TestPluginsFactory, SignatureKeyPair> {
+    fn deps(&self) -> ConversationDeps<'_, DefaultConsensusPlugin, TestPluginsFactory> {
         self.deps_with_config(de_mls::session::ConversationConfig::default())
     }
 
     fn deps_with_config(
         &self,
         config: de_mls::session::ConversationConfig,
-    ) -> ConversationDeps<'_, DefaultConsensusPlugin, TestPluginsFactory, SignatureKeyPair> {
+    ) -> ConversationDeps<'_, DefaultConsensusPlugin, TestPluginsFactory> {
         let consensus = ConsensusServiceFor::<DefaultConsensusPlugin>::new_with_components(
             self.consensus_storage.clone(),
             DefaultConsensusPlugin::new_event_bus(),
@@ -85,7 +83,6 @@ impl Integrator {
         ConversationDeps {
             plugins: &self.plugins,
             consensus,
-            signer: self.signer.clone(),
             identity: &self.member_id,
             app_id: Arc::from(self.member_id.member_id_bytes()),
             config,
@@ -99,8 +96,13 @@ impl Integrator {
 fn create_builds_a_working_steward_session_without_user() {
     let integrator = Integrator::new();
     let kp = integrator.key_package();
-    let conversation =
-        Conversation::create("standalone", kp.as_bytes(), integrator.deps()).expect("create");
+    let conversation = Conversation::create(
+        "standalone",
+        kp.as_bytes(),
+        integrator.deps(),
+        &integrator.signer,
+    )
+    .expect("create");
 
     assert_eq!(conversation.state(), ConversationState::Working);
     assert!(
@@ -157,19 +159,22 @@ fn from_welcome_joins_in_one_call() {
         "standalone-welcome",
         alice_kp.as_bytes(),
         alice.deps_with_config(fast_config()),
+        &alice.signer,
     )
     .expect("create");
 
     // Bob mints a key package out of band; Alice — the sole member — proposes
     // the add, so her bundled YES resolves consensus on its own.
     let bob_kp = bob.plugins.generate_key_package();
-    creator.add_member(bob_kp.as_bytes()).expect("add member");
+    creator
+        .add_member(bob_kp.as_bytes(), &alice.signer)
+        .expect("add member");
 
     // Drive the creator until the welcome is minted.
     let mut welcome = None;
     for _ in 0..40 {
         std::thread::sleep(Duration::from_millis(30));
-        creator.poll();
+        creator.poll(&alice.signer);
         for event in creator.drain_events() {
             if let ConversationEvent::WelcomeReady {
                 welcome: w,
@@ -189,17 +194,22 @@ fn from_welcome_joins_in_one_call() {
     // never minted the key package can't open it.
     let bystander = Integrator::with_key(ALICE);
     assert!(
-        Conversation::from_welcome(bystander.deps_with_config(fast_config()), &welcome)
-            .expect("from_welcome on a foreign welcome")
-            .is_none(),
+        Conversation::from_welcome(
+            bystander.deps_with_config(fast_config()),
+            &welcome,
+            &bystander.signer,
+        )
+        .expect("from_welcome on a foreign welcome")
+        .is_none(),
         "a welcome for someone else is ignored"
     );
 
     // The whole joiner path in one call: attach MLS, complete the join,
     // apply the bundled sync.
-    let joined = Conversation::from_welcome(bob.deps_with_config(fast_config()), &welcome)
-        .expect("from_welcome")
-        .expect("welcome addresses bob");
+    let joined =
+        Conversation::from_welcome(bob.deps_with_config(fast_config()), &welcome, &bob.signer)
+            .expect("from_welcome")
+            .expect("welcome addresses bob");
     assert_eq!(joined.id(), "standalone-welcome");
     assert_eq!(joined.state(), ConversationState::Working);
     assert_eq!(joined.members().expect("members").len(), 2);
