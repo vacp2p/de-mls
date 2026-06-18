@@ -33,8 +33,8 @@
 //! ```ignore
 //! use de_mls::{ConversationDeps, Conversation};
 //!
-//! // Build a conversation from injected deps (plug-in factory,
-//! // consensus service, identity).
+//! // Build a conversation from injected deps (pre-built plug-in
+//! // instances, consensus service, identity).
 //! let mut conversation = Conversation::create("de-mls-test", deps)?;
 //!
 //! // Send a chat message — buffered, never auto-sent.
@@ -69,7 +69,7 @@ pub mod process_result;
 /// Proposal classification.
 pub mod proposal_kind;
 
-/// Per-conversation plug-in factory bundle.
+/// Per-conversation plug-in types bundle.
 pub mod conversation_plugins;
 
 /// Wall-clock anchor combined with the conversation state machine.
@@ -95,7 +95,7 @@ pub use consensus::{
     ConsensusApplyResult, ConsensusPlugin, ConsensusServiceFor, CreatorVote, SyncConsensusReceiver,
     apply_consensus_result,
 };
-pub use conversation_plugins::ConversationPluginsFactory;
+pub use conversation_plugins::ConversationPlugins;
 
 pub(crate) use phase_timer::PhaseTimer;
 

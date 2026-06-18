@@ -1,12 +1,12 @@
 //! Read-only queries over a conversation's state.
 
 use crate::{
-    ConsensusPlugin, Conversation, ConversationError, ConversationPluginsFactory,
-    ConversationState, MemberRole, PeerScoringPlugin, StewardListPlugin, mls_crypto::MlsService,
+    ConsensusPlugin, Conversation, ConversationError, ConversationPlugins, ConversationState,
+    MemberRole, PeerScoringPlugin, StewardListPlugin, mls_crypto::MlsService,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     /// Current state of the conversation's state machine.
     pub fn state(&self) -> ConversationState {
         self.current_state()

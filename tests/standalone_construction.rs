@@ -14,13 +14,13 @@ use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use openmls_basic_credential::SignatureKeyPair;
 
-use de_mls::defaults::DefaultConsensusPlugin;
+use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, DefaultStewardList};
 use de_mls::{
     ConsensusPlugin, ConsensusServiceFor, ConversationEvent, ScoringConfig, StewardListConfig,
 };
 use de_mls::{Conversation, ConversationDeps, ConversationState};
 
-use common::{TestPluginsFactory, test_credential, wallet::WalletMemberId};
+use common::{TestMls, TestPluginsFactory, test_credential, wallet::WalletMemberId};
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
@@ -54,18 +54,31 @@ impl Integrator {
         }
     }
 
-    /// Fresh per-conversation deps drawn from the shared state. The
-    /// consensus service clones the shared storage (scope-keyed) and gets
-    /// its own private event bus. The member id doubles as the `app_id` so
-    /// two integrators in one test don't echo-drop each other's packets.
-    fn deps(&self) -> ConversationDeps<'_, DefaultConsensusPlugin, TestPluginsFactory> {
-        self.deps_with_config(de_mls::ConversationConfig::default())
+    fn make_scoring(&self) -> DefaultPeerScoring {
+        self.plugins.make_scoring(&ScoringConfig::default())
+    }
+
+    fn make_steward_list(&self) -> DefaultStewardList {
+        self.plugins.make_steward_list(
+            self.member_id.member_id_bytes(),
+            StewardListConfig::default(),
+        )
+    }
+
+    /// Fresh per-conversation deps drawn from the shared state, around a
+    /// pre-built MLS service. The consensus service clones the shared storage
+    /// (scope-keyed) and gets its own private event bus. The member id doubles
+    /// as the `app_id` so two integrators in one test don't echo-drop each
+    /// other's packets.
+    fn deps(&self, mls: TestMls) -> ConversationDeps<DefaultConsensusPlugin, TestPluginsFactory> {
+        self.deps_with_config(mls, de_mls::ConversationConfig::default())
     }
 
     fn deps_with_config(
         &self,
+        mls: TestMls,
         config: de_mls::ConversationConfig,
-    ) -> ConversationDeps<'_, DefaultConsensusPlugin, TestPluginsFactory> {
+    ) -> ConversationDeps<DefaultConsensusPlugin, TestPluginsFactory> {
         let consensus = ConsensusServiceFor::<DefaultConsensusPlugin>::new_with_components(
             self.consensus_storage.clone(),
             DefaultConsensusPlugin::new_event_bus(),
@@ -73,12 +86,12 @@ impl Integrator {
             10,
         );
         ConversationDeps {
-            plugins: &self.plugins,
+            mls,
+            scoring: self.make_scoring(),
+            steward: self.make_steward_list(),
             consensus,
             app_id: Arc::from(self.member_id.member_id_bytes()),
             config,
-            scoring_config: ScoringConfig::default(),
-            steward_list_config: StewardListConfig::default(),
         }
     }
 }
@@ -86,12 +99,15 @@ impl Integrator {
 #[test]
 fn create_builds_a_working_steward_session_without_user() {
     let integrator = Integrator::new();
+    let mls = integrator
+        .plugins
+        .create_mls("standalone".to_string(), &integrator.signer)
+        .expect("create mls");
     let conversation = Conversation::create(
         "standalone",
-        integrator.deps(),
+        integrator.deps(mls),
         integrator.member_id.member_id_bytes(),
         integrator.member_id.member_id_display(),
-        &integrator.signer,
     )
     .expect("create");
 
@@ -129,16 +145,19 @@ fn fast_config() -> de_mls::ConversationConfig {
 }
 
 #[test]
-fn from_welcome_joins_in_one_call() {
+fn join_completes_in_one_call() {
     let alice = Integrator::new();
     let bob = Integrator::with_key(BOB);
 
+    let alice_mls = alice
+        .plugins
+        .create_mls("standalone-welcome".to_string(), &alice.signer)
+        .expect("create mls");
     let mut creator = Conversation::create(
         "standalone-welcome",
-        alice.deps_with_config(fast_config()),
+        alice.deps_with_config(alice_mls, fast_config()),
         alice.member_id.member_id_bytes(),
         alice.member_id.member_id_display(),
-        &alice.signer,
     )
     .expect("create");
 
@@ -169,33 +188,33 @@ fn from_welcome_joins_in_one_call() {
     }
     let welcome = welcome.expect("creator mints a welcome");
 
-    // A welcome not addressed to us yields `None` — a fresh integrator that
-    // never minted the key package can't open it.
+    // A welcome not addressed to us yields `None` at open time — a fresh
+    // integrator that never minted the key package can't open it.
     let bystander = Integrator::with_key(ALICE);
     assert!(
-        Conversation::from_welcome(
-            bystander.deps_with_config(fast_config()),
-            &welcome,
-            bystander.member_id.member_id_bytes(),
-            bystander.member_id.member_id_display(),
-            &bystander.signer,
-        )
-        .expect("from_welcome on a foreign welcome")
-        .is_none(),
+        bystander
+            .plugins
+            .welcome_mls(&welcome.welcome_bytes)
+            .expect("open a foreign welcome")
+            .is_none(),
         "a welcome for someone else is ignored"
     );
 
-    // The whole joiner path in one call: attach MLS, complete the join,
-    // apply the bundled sync.
-    let joined = Conversation::from_welcome(
-        bob.deps_with_config(fast_config()),
-        &welcome,
+    // The integrator opens the welcome, then `join` completes the whole joiner
+    // path in one call: run the join side-effects, apply the bundled sync.
+    let bob_mls = bob
+        .plugins
+        .welcome_mls(&welcome.welcome_bytes)
+        .expect("open welcome")
+        .expect("welcome addresses bob");
+    let joined = Conversation::join(
+        bob.deps_with_config(bob_mls, fast_config()),
+        &welcome.conversation_sync_bytes,
         bob.member_id.member_id_bytes(),
         bob.member_id.member_id_display(),
         &bob.signer,
     )
-    .expect("from_welcome")
-    .expect("welcome addresses bob");
+    .expect("join");
     assert_eq!(joined.id(), "standalone-welcome");
     assert_eq!(joined.state(), ConversationState::Working);
     assert_eq!(joined.members().expect("members").len(), 2);

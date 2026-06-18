@@ -22,8 +22,8 @@ use prost::Message;
 use tracing::{error, info, warn};
 
 use crate::{
-    ConsensusPlugin, ConversationEvent, ConversationPluginsFactory, PeerScoringPlugin,
-    ProcessResult, ProposalKind, ScoreSnapshot, StewardList, StewardListConfig, StewardListPlugin,
+    ConsensusPlugin, ConversationEvent, ConversationPlugins, PeerScoringPlugin, ProcessResult,
+    ProposalKind, ScoreSnapshot, StewardList, StewardListConfig, StewardListPlugin,
     conversation::{ConversationQueues, member_set},
     freeze::{buffer_commit_candidate, compute_commit_hash},
     mls_crypto::{DecryptResult, MlsService},
@@ -156,7 +156,7 @@ pub enum DispatchOutcome {
     LeaveRequested,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     /// Decrypt and dispatch an inbound conversation payload. Drops self-echoes.
     /// Runs the full dispatch chain internally. Returns
     /// [`DispatchOutcome::LeaveRequested`] when the conversation has completed

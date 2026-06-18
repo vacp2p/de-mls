@@ -8,7 +8,7 @@
 //! enter through [`User::accept_welcome`].
 
 use de_mls::{
-    ConsensusPlugin, ConversationPluginsFactory, ConversationState, DispatchOutcome,
+    ConsensusPlugin, ConversationPlugins, ConversationState, DispatchOutcome,
     protos::de_mls::messages::v1::MemberInvite,
 };
 use prost::Message;
@@ -29,7 +29,7 @@ pub struct Inbound {
     pub payload: Vec<u8>,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer + Clone> User<P, CP, Sig> {
+impl<P: ConsensusPlugin, CP: ConversationPlugins, Sig: Signer + Clone> User<P, CP, Sig> {
     // ── Public API ───────────────────────────────────────────────────
 
     /// Ingest conversation traffic (chat / vote / commit / sync). Self-echoes

@@ -12,10 +12,10 @@ use prost::Message;
 use tracing::{error, info, warn};
 
 use crate::{
-    ConsensusPlugin, Conversation, ConversationError, ConversationEvent,
-    ConversationPluginsFactory, ConversationState, DispatchOutcome, FreezeFinalizeResult,
-    FreezeOutcome, PeerScoringPlugin, ScoreEvent, ScoreOp, StewardListPlugin,
-    mls_crypto::MlsService, protos::de_mls::messages::v1::AppMessage,
+    ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationPlugins,
+    ConversationState, DispatchOutcome, FreezeFinalizeResult, FreezeOutcome, PeerScoringPlugin,
+    ScoreEvent, ScoreOp, StewardListPlugin, mls_crypto::MlsService,
+    protos::de_mls::messages::v1::AppMessage,
 };
 
 /// Summary returned by [`Conversation::poll`] after one polling pass.
@@ -30,7 +30,7 @@ pub struct PollOutcome {
     pub leave_requested: bool,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     /// Drive one polling cycle: tick consensus deadlines, advance freeze
     /// state, and check steward inactivity.
     ///

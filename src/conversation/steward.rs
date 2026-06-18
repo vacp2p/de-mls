@@ -8,9 +8,8 @@ use std::sync::Arc;
 use tracing::{error, info};
 
 use crate::{
-    ConsensusPlugin, Conversation, ConversationError, ConversationPluginsFactory,
-    ConversationState, CreatorVote, ElectionDecision, PeerScoringPlugin, StewardListPlugin,
-    member_set,
+    ConsensusPlugin, Conversation, ConversationError, ConversationPlugins, ConversationState,
+    CreatorVote, ElectionDecision, PeerScoringPlugin, StewardListPlugin, member_set,
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationSync, ConversationUpdateRequest, PeerScore,
@@ -31,7 +30,7 @@ pub(crate) enum StewardListReconcile {
     NeedsElection,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     // ── Public API ───────────────────────────────────────────────────
 
     /// Add any MLS members not yet tracked in scoring, and drop scored

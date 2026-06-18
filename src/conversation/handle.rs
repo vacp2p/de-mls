@@ -19,7 +19,7 @@ use hashgraph_like_consensus::events::ConsensusEventBus;
 
 use crate::{
     BufferedCommitCandidate, ConsensusPlugin, ConsensusServiceFor, ConversationConfig,
-    ConversationError, ConversationEvent, ConversationPluginsFactory, ConversationQueues,
+    ConversationError, ConversationEvent, ConversationPlugins, ConversationQueues,
     ConversationState, ConversationStateMachine, FreezeBufferOutcome, FreezeFinalizeResult,
     OperatingMode, Outbound, PhaseTimer, ProcessResult, ProposalKind, StewardListPlugin,
     compute_commit_hash, decode_inbound_payload, finalize_freeze_round, member_set,
@@ -57,7 +57,7 @@ pub struct AutoVoteEntry {
     pub vote: bool,
 }
 
-pub struct Conversation<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
+pub struct Conversation<P: ConsensusPlugin, CP: ConversationPlugins> {
     /// Conversation name. Identifies this conversation in the integrator's
     /// registry and is used to construct scope keys for consensus operations.
     /// Read via [`Conversation::conversation_id`].
@@ -65,7 +65,7 @@ pub struct Conversation<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     pub(crate) queues: ConversationQueues,
     /// Per-conversation MLS service. Present for the conversation's whole
     /// lifetime: the creator seeds it at [`Conversation::create`], the joiner
-    /// at [`Conversation::from_welcome`].
+    /// at [`Conversation::join`].
     mls: CP::Mls,
     pub(crate) state_machine: ConversationStateMachine,
     /// Per-conversation durable config: voting/consensus durations,
@@ -84,7 +84,7 @@ pub struct Conversation<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Subscriber on `consensus.event_bus()`. Drained by
     /// `tick_deadlines`, which dispatches each event through
     /// `apply_consensus_outcome`. Subscribed when the conversation is built in
-    /// [`Conversation::create`] / [`Conversation::from_welcome`].
+    /// [`Conversation::create`] / [`Conversation::join`].
     pub(crate) consensus_rx: ConsensusReceiver<P>,
     /// Wall-clock anchor combined with [`Self::state_machine`] by
     /// coordinator methods.
@@ -127,7 +127,7 @@ pub struct Conversation<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     pub(crate) last_freeze_progress: Option<(usize, usize)>,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     /// Build a fresh conversation around an already-seeded MLS service.
     /// `consensus_rx` is a subscriber on `consensus.event_bus()`.
     #[allow(clippy::too_many_arguments)]

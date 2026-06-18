@@ -10,9 +10,9 @@ use std::{
 
 use de_mls::{
     ConsensusPlugin, Conversation, ConversationConfig, ConversationDeps, ConversationError,
-    ConversationEvent, ConversationPluginsFactory, ConversationState, CreatorVote, MemberRole,
+    ConversationEvent, ConversationPlugins, ConversationState, CreatorVote, MemberRole,
     PollOutcome, ScoringConfig, StewardListConfig,
-    mls_crypto::{KeyPackageBytes, MlsError},
+    mls_crypto::{KeyPackageBytes, MlsError, MlsService},
     protos::de_mls::messages::v1::{ConversationUpdateRequest, MemberWelcome},
 };
 use de_mls_ds::{OutboundPacket, SharedDeliveryService};
@@ -42,7 +42,7 @@ pub type ConversationEntry<P, CP> = Arc<RwLock<Conversation<P, CP>>>;
 /// A doesn't block reads on conversation B.
 pub(crate) type ConversationRegistry<P, CP> = RwLock<HashMap<String, ConversationEntry<P, CP>>>;
 
-pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> {
+pub struct User<P: ConsensusPlugin, CP: ConversationPlugins, Sig: Signer> {
     pub(crate) member_id: WalletMemberId,
     /// MLS signing key for this user. Owned here — the single holder across
     /// the conversation registry — and passed by reference into every
@@ -80,7 +80,51 @@ impl<P: ConsensusPlugin, Sig: Signer> User<P, DefaultConversationPluginsFactory,
     }
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer + Clone> User<P, CP, Sig> {
+impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, DefaultConversationPluginsFactory, Sig> {
+    /// Ingest a [`MemberWelcome`] delivered out of band (e.g. the
+    /// inviter's [`de_mls::ConversationEvent::WelcomeReady`] routed
+    /// through the integrator's transport). The factory opens the welcome
+    /// (needs the concrete provider that minted our key package); on a match we
+    /// build the plug-in instances and complete the join — running the
+    /// joiner-side side-effects and replaying the bundled `ConversationSync` —
+    /// then register it. Returns the joined conversation name, or
+    /// [`UserError::WelcomeNotForUs`] if the welcome doesn't address this
+    /// user's key package. Idempotent: a welcome for an already-joined
+    /// conversation returns its name without re-registering.
+    pub fn accept_welcome(&mut self, welcome: &MemberWelcome) -> Result<String, UserError> {
+        let factory = &self.plugins.conversation_plugins;
+        let Some(mls) = factory.welcome_mls(&welcome.welcome_bytes)? else {
+            return Err(UserError::WelcomeNotForUs);
+        };
+        let conversation_id = mls.conversation_id().to_string();
+        if self.lookup_entry(&conversation_id)?.is_some() {
+            return Ok(conversation_id);
+        }
+        let scoring = factory.make_scoring(&self.plugins.default_scoring_config);
+        let steward = factory.make_steward_list(
+            self.member_id.member_id_bytes(),
+            self.plugins.default_steward_list_config.clone(),
+        );
+        let deps = self.build_deps(
+            mls,
+            scoring,
+            steward,
+            self.plugins.default_conversation_config.clone(),
+        );
+        let conversation = Conversation::join(
+            deps,
+            &welcome.conversation_sync_bytes,
+            self.member_id.member_id_bytes(),
+            self.member_id.member_id_display(),
+            &self.signer,
+        )?;
+        let entry_arc = self.register_built(&conversation_id, conversation)?;
+        self.flush(&entry_arc)?;
+        Ok(conversation_id)
+    }
+}
+
+impl<P: ConsensusPlugin, CP: ConversationPlugins, Sig: Signer + Clone> User<P, CP, Sig> {
     /// Display form of the local member_id, derived from [`MemberId::member_id_display`].
     pub fn member_id_string(&self) -> String {
         self.member_id.member_id_display().to_string()
@@ -215,36 +259,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer + Clone> Us
             .add_member(key_package_bytes, &self.signer)?;
         self.flush(&entry)?;
         Ok(())
-    }
-
-    /// Ingest a [`MemberWelcome`] delivered out of band (e.g. the
-    /// inviter's [`de_mls::ConversationEvent::WelcomeReady`] routed
-    /// through the integrator's transport). Builds a fully-joined
-    /// conversation from the welcome — seeding MLS, running the joiner-side
-    /// side-effects, and replaying the bundled `ConversationSync` — and
-    /// registers it. Returns the joined conversation name, or
-    /// [`UserError::WelcomeNotForUs`] if the welcome doesn't address this
-    /// user's key package. Idempotent: a welcome for an already-joined
-    /// conversation returns its name without re-registering.
-    pub fn accept_welcome(&mut self, welcome: &MemberWelcome) -> Result<String, UserError> {
-        let deps = self.build_deps(self.plugins.default_conversation_config.clone());
-        let Some(conversation) = Conversation::from_welcome(
-            deps,
-            welcome,
-            self.member_id.member_id_bytes(),
-            self.member_id.member_id_display(),
-            &self.signer,
-        )?
-        else {
-            return Err(UserError::WelcomeNotForUs);
-        };
-        let conversation_id = conversation.id().to_string();
-        if self.lookup_entry(&conversation_id)?.is_some() {
-            return Ok(conversation_id);
-        }
-        let entry_arc = self.register_built(&conversation_id, conversation)?;
-        self.flush(&entry_arc)?;
-        Ok(conversation_id)
     }
 
     // ── UI actions ─────────────────────────────────────────────────────
@@ -412,24 +426,30 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer + Clone> Us
 
 // ── User-internal helpers ───────────────────────────────────────────────
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> User<P, CP, Sig> {
+impl<P: ConsensusPlugin, CP: ConversationPlugins, Sig: Signer> User<P, CP, Sig> {
     pub fn self_member_id(&self) -> &[u8] {
         self.member_id.member_id_bytes()
     }
 
     /// Assemble a [`ConversationDeps`] bundle for a new conversation on this
-    /// user — the shared plug-in factory, a freshly-minted consensus service,
-    /// the local identity, and the per-conversation configs. Shared by the
+    /// user around the pre-built plug-in instances — a freshly-minted consensus
+    /// service, the local identity, and the durable config. Shared by the
     /// creator path (`register_conversation`) and the welcome-driven join
     /// (`accept_welcome`).
-    pub(crate) fn build_deps(&self, config: ConversationConfig) -> ConversationDeps<'_, P, CP> {
+    pub(crate) fn build_deps(
+        &self,
+        mls: CP::Mls,
+        scoring: CP::Scoring,
+        steward: CP::StewardList,
+        config: ConversationConfig,
+    ) -> ConversationDeps<P, CP> {
         ConversationDeps {
-            plugins: &self.plugins.conversation_plugins,
+            mls,
+            scoring,
+            steward,
             consensus: self.plugins.consensus.build_service(),
             app_id: Arc::from(self.app_id.as_slice()),
             config,
-            scoring_config: self.plugins.default_scoring_config.clone(),
-            steward_list_config: self.plugins.default_steward_list_config.clone(),
         }
     }
 

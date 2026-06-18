@@ -14,7 +14,7 @@
 //!   (self-echoes drop internally).
 //! - Key-package announcements and welcomes never traverse `drain_outbound`:
 //!   the harness mints/announces key packages explicitly and routes
-//!   `WelcomeReady` events to joiners via `Conversation::from_welcome`.
+//!   `WelcomeReady` events to joiners via `Conversation::join`.
 
 #![allow(dead_code)]
 
@@ -28,7 +28,7 @@ use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use openmls_basic_credential::SignatureKeyPair;
 use prost::Message;
 
-use de_mls::defaults::DefaultConsensusPlugin;
+use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, DefaultStewardList};
 use de_mls::mls_crypto::KeyPackageBytes;
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
@@ -42,7 +42,7 @@ use de_mls::{
     PollOutcome, build_key_package_announcement,
 };
 
-use crate::common::{TestPluginsFactory, test_credential, wallet::WalletMemberId};
+use crate::common::{TestMls, TestPluginsFactory, test_credential, wallet::WalletMemberId};
 
 /// Per-conversation MLS service stack the harness runs.
 pub type TestConversation = Conversation<DefaultConsensusPlugin, TestPluginsFactory>;
@@ -64,7 +64,7 @@ pub fn fast_config() -> ConversationConfig {
 }
 
 /// Per-member integrator state: everything needed to build per-conversation
-/// `ConversationDeps`. Borrowed (never moved) while a conversation is built.
+/// `ConversationDeps`, including the pre-built plug-in instances.
 struct Integrator {
     plugins: TestPluginsFactory,
     signer: SignatureKeyPair,
@@ -91,10 +91,28 @@ impl Integrator {
         }
     }
 
+    /// Build a fresh scoring plug-in from this integrator's seed config.
+    fn make_scoring(&self) -> DefaultPeerScoring {
+        self.plugins.make_scoring(&self.scoring_config)
+    }
+
+    /// Build a fresh (empty) steward-list plug-in from this integrator's
+    /// seed config.
+    fn make_steward_list(&self) -> DefaultStewardList {
+        self.plugins.make_steward_list(
+            self.member_id.member_id_bytes(),
+            self.steward_list_config.clone(),
+        )
+    }
+
+    /// Assemble a deps bundle around pre-built plug-in instances.
     fn deps(
         &self,
+        mls: TestMls,
+        scoring: DefaultPeerScoring,
+        steward: DefaultStewardList,
         config: ConversationConfig,
-    ) -> ConversationDeps<'_, DefaultConsensusPlugin, TestPluginsFactory> {
+    ) -> ConversationDeps<DefaultConsensusPlugin, TestPluginsFactory> {
         let consensus = ConsensusServiceFor::<DefaultConsensusPlugin>::new_with_components(
             self.consensus_storage.clone(),
             DefaultConsensusPlugin::new_event_bus(),
@@ -102,12 +120,12 @@ impl Integrator {
             MAX_SESSIONS_PER_SCOPE,
         );
         ConversationDeps {
-            plugins: &self.plugins,
+            mls,
+            scoring,
+            steward,
             consensus,
             app_id: Arc::from(self.member_id.member_id_bytes()),
             config,
-            scoring_config: self.scoring_config.clone(),
-            steward_list_config: self.steward_list_config.clone(),
         }
     }
 }
@@ -146,12 +164,18 @@ impl Member {
         steward_list_config: StewardListConfig,
     ) -> Self {
         let integ = Integrator::new(private_key, steward_list_config);
+        let mls = integ
+            .plugins
+            .create_mls(conversation_id.to_string(), &integ.signer)
+            .expect("create mls");
+        let scoring = integ.make_scoring();
+        let steward = integ.make_steward_list();
+        let deps = integ.deps(mls, scoring, steward, config.clone());
         let convo = Conversation::create(
             conversation_id,
-            integ.deps(config.clone()),
+            deps,
             integ.member_id.member_id_bytes(),
             integ.member_id.member_id_display(),
-            &integ.signer,
         )
         .expect("create conversation");
         Self {
@@ -165,7 +189,7 @@ impl Member {
 
     /// Build a prospective joiner: it holds integrator state and can mint /
     /// announce its key package, but has no conversation until its welcome
-    /// arrives (`try_accept_welcome` installs it via `Conversation::from_welcome`).
+    /// arrives (`try_accept_welcome` installs it via `Conversation::join`).
     pub fn join(
         private_key: &str,
         _conversation_id: &str,
@@ -531,20 +555,28 @@ impl Member {
         if self.convo.is_some() {
             return false;
         }
-        let deps = self.integ.deps(self.pending_config.clone());
-        match Conversation::from_welcome(
+        // Integrator opens the welcome; only the addressed joiner gets `Some`.
+        let Ok(Some(mls)) = self.integ.plugins.welcome_mls(&welcome.welcome_bytes) else {
+            return false;
+        };
+        let scoring = self.integ.make_scoring();
+        let steward = self.integ.make_steward_list();
+        let deps = self
+            .integ
+            .deps(mls, scoring, steward, self.pending_config.clone());
+        match Conversation::join(
             deps,
-            welcome,
+            &welcome.conversation_sync_bytes,
             self.integ.member_id.member_id_bytes(),
             self.integ.member_id.member_id_display(),
             &self.integ.signer,
         ) {
-            Ok(Some(convo)) => {
+            Ok(convo) => {
                 self.convo = Some(convo);
                 self.last_sync = Some(welcome.conversation_sync_bytes.clone());
                 true
             }
-            _ => false,
+            Err(_) => false,
         }
     }
 

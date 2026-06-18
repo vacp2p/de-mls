@@ -10,8 +10,8 @@ use openmls_traits::signatures::Signer;
 use tracing::info;
 
 use crate::{
-    ConsensusPlugin, Conversation, ConversationError, ConversationEvent,
-    ConversationPluginsFactory, ConversationState, ProposalKind, SyncConsensusReceiver,
+    ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationPlugins,
+    ConversationState, ProposalKind, SyncConsensusReceiver,
     consensus::bridge::{ProposalParams, cast_vote, submit_proposal, submit_self_leave_proposal},
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest},
@@ -33,7 +33,7 @@ pub enum CreatorVote {
     Deferred,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     // ── Public API ───────────────────────────────────────────────────
 
     /// Open a consensus vote for `request`; [`CreatorVote`] picks the wire

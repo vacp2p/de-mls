@@ -3,7 +3,7 @@
 use tracing::info;
 
 use de_mls::{
-    ConsensusPlugin, Conversation, ConversationConfig, ConversationPluginsFactory, LeaveOutcome,
+    ConsensusPlugin, Conversation, ConversationConfig, ConversationPlugins, LeaveOutcome,
 };
 
 use openmls_traits::signatures::Signer;
@@ -12,12 +12,10 @@ use crate::mls::DefaultConversationPluginsFactory;
 use crate::user::{LockExt, User, UserError};
 
 impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, DefaultConversationPluginsFactory, Sig> {
-    /// Create a conversation we steward: mint our own key package, seed the
-    /// group, and register it in `Working`. Minting the creator key package
-    /// needs the concrete factory, so this entry point is concrete; the build
-    /// itself is generic via `register_conversation`. Joiners hold no
-    /// conversation until a welcome arrives — they reach one through
-    /// [`User::accept_welcome`], not here.
+    /// Create a conversation we steward: seed the group from our credential and
+    /// register it in `Working`. Seeding needs the concrete factory, so this
+    /// path is concrete. Joiners hold no conversation until a welcome arrives —
+    /// they reach one through [`User::accept_welcome`], not here.
     pub fn start_conversation(&mut self, conversation_id: &str) -> Result<(), UserError> {
         self.start_conversation_with_config(
             conversation_id,
@@ -33,9 +31,7 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, DefaultConversationPlugins
     ) -> Result<(), UserError> {
         self.register_conversation(conversation_id, config)
     }
-}
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer + Clone> User<P, CP, Sig> {
     /// Build and register the conversation we create; the factory seeds the
     /// group's leaf from our credential. The joiner side never lands here — it
     /// builds straight from a welcome in [`User::accept_welcome`].
@@ -53,18 +49,26 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer + Clone> Us
             return Err(UserError::ConversationAlreadyExists);
         }
 
-        let deps = self.build_deps(config);
+        let factory = &self.plugins.conversation_plugins;
+        let mls = factory.create_mls(conversation_id.to_string(), &self.signer)?;
+        let scoring = factory.make_scoring(&self.plugins.default_scoring_config);
+        let steward = factory.make_steward_list(
+            self.member_id.member_id_bytes(),
+            self.plugins.default_steward_list_config.clone(),
+        );
+        let deps = self.build_deps(mls, scoring, steward, config);
         let conversation = Conversation::create(
             conversation_id,
             deps,
             self.member_id.member_id_bytes(),
             self.member_id.member_id_display(),
-            &self.signer,
         )?;
         self.register_built(conversation_id, conversation)?;
         Ok(())
     }
+}
 
+impl<P: ConsensusPlugin, CP: ConversationPlugins, Sig: Signer + Clone> User<P, CP, Sig> {
     /// Leave the conversation. Delegates to [`Conversation::leave`], which
     /// opens a self-leave consensus round and returns
     /// [`LeaveOutcome::LeaveInitiated`]; the User-side registry cleanup

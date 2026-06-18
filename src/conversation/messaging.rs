@@ -9,8 +9,8 @@ use prost::Message;
 use tracing::info;
 
 use crate::{
-    ConsensusPlugin, Conversation, ConversationError, ConversationPluginsFactory,
-    ConversationState, CreatorVote,
+    ConsensusPlugin, Conversation, ConversationError, ConversationPlugins, ConversationState,
+    CreatorVote,
     mls_crypto::{KeyPackageBytes, MlsService, key_package_bytes_from_tls},
     protos::de_mls::messages::v1::{
         AppMessage, ConversationMessage, ConversationUpdateRequest, MemberInvite,
@@ -32,7 +32,7 @@ pub struct Outbound {
     pub payload: Vec<u8>,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     /// Buffer a chat message for broadcast. The conversation never sends — the
     /// message is enqueued and the integrator drains it via
     /// [`Conversation::drain_outbound`]. Blocked in `Freezing` and `Selection`

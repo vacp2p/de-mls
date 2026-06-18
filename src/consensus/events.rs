@@ -7,14 +7,14 @@ use tracing::{error, info};
 
 use crate::{
     ConsensusApplyResult, ConsensusPlugin, Conversation, ConversationError, ConversationEvent,
-    ConversationPluginsFactory, ConversationState, PeerScoringPlugin, ScoreOp, StewardListPlugin,
+    ConversationPlugins, ConversationState, PeerScoringPlugin, ScoreOp, StewardListPlugin,
     apply_consensus_result, emergency_score_ops,
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, conversation_update_request,
     },
 };
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
+impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     /// Apply one resolved outcome: surface the decision to the integrator,
     /// apply the queue effects, then run whatever follow-up the result
     /// calls for (election install/retry, freeze entry, emergency scoring).
