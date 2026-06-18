@@ -7,7 +7,7 @@ use hashgraph_like_consensus::{
 };
 
 use crate::{
-    CoreError, ScoreEvent, ScoreOp,
+    ConversationError, ScoreEvent, ScoreOp,
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, CommitCandidate, ConversationMessage, ConversationSync,
         ConversationUpdateRequest, EmergencyCriteriaProposal, EventMembershipChange, MemberWelcome,
@@ -158,9 +158,9 @@ impl ViolationEvidence {
     ///
     /// Returns an error if `creator_member_id` is empty. Call `.with_creator()` before this
     /// method — every ECP must carry the creator member_id for peer scoring (RFC §"Peer Scoring").
-    pub fn into_update_request(self) -> Result<ConversationUpdateRequest, CoreError> {
+    pub fn into_update_request(self) -> Result<ConversationUpdateRequest, ConversationError> {
         if self.creator_member_id.is_empty() {
-            return Err(CoreError::InvalidConversationUpdateRequest);
+            return Err(ConversationError::InvalidConversationUpdateRequest);
         }
         Ok(ConversationUpdateRequest {
             payload: Some(conversation_update_request::Payload::EmergencyCriteria(
@@ -237,7 +237,7 @@ impl From<ConsensusEvent> for Outcome {
 }
 
 impl TryFrom<AppMessage> for ProcessResult {
-    type Error = CoreError;
+    type Error = ConversationError;
     fn try_from(value: AppMessage) -> Result<Self, Self::Error> {
         match &value.payload {
             Some(app_message::Payload::ConversationMessage(_)) => {
@@ -303,6 +303,9 @@ mod tests {
         let err = evidence
             .into_update_request()
             .expect_err("creator required");
-        assert!(matches!(err, CoreError::InvalidConversationUpdateRequest));
+        assert!(matches!(
+            err,
+            ConversationError::InvalidConversationUpdateRequest
+        ));
     }
 }

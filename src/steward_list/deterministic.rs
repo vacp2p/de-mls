@@ -2,7 +2,7 @@
 
 use crate::{
     DEFAULT_MAX_RETRIES, ElectionDecision, StewardList, StewardListConfig, StewardListPlugin,
-    error::CoreError,
+    error::ConversationError,
 };
 
 #[derive(Debug)]
@@ -31,7 +31,7 @@ impl DeterministicStewardList {
         conversation_id: impl Into<Vec<u8>>,
         creator_member_id: Vec<u8>,
         config: StewardListConfig,
-    ) -> Result<Self, CoreError> {
+    ) -> Result<Self, ConversationError> {
         let conversation_id = conversation_id.into();
         let list = StewardList::generate(
             0,
@@ -130,7 +130,7 @@ impl StewardListPlugin for DeterministicStewardList {
         candidate_pool: &[Vec<u8>],
         sn: usize,
         retry_round: u32,
-    ) -> Result<(), CoreError> {
+    ) -> Result<(), ConversationError> {
         let list = StewardList::generate(
             epoch,
             &self.conversation_id,
@@ -149,7 +149,7 @@ impl StewardListPlugin for DeterministicStewardList {
         epoch: u64,
         candidate_pool: &[Vec<u8>],
         retry_round: u32,
-    ) -> Result<bool, CoreError> {
+    ) -> Result<bool, ConversationError> {
         StewardList::validate(
             proposed,
             epoch,
@@ -167,7 +167,7 @@ impl StewardListPlugin for DeterministicStewardList {
         self_member_id: &[u8],
         eligible: F,
         recovery: bool,
-    ) -> Result<ElectionDecision, CoreError> {
+    ) -> Result<ElectionDecision, ConversationError> {
         if !recovery && !self.is_exhausted(epoch) {
             return Ok(ElectionDecision::Skip("steward list not exhausted"));
         }

@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::{
-    ConversationQueues, CoreError, FreezeBufferOutcome, NoopReason, ProcessResult, ScoreOp,
+    ConversationError, ConversationQueues, FreezeBufferOutcome, NoopReason, ProcessResult, ScoreOp,
     StewardListPlugin,
     conversation::BufferedCommitCandidate,
     freeze::apply::apply_in_priority_order,
@@ -64,7 +64,7 @@ pub fn buffer_commit_candidate<M: MlsService>(
     conversation: &mut ConversationQueues,
     mls: &mut M,
     candidate_msg: CommitCandidate,
-) -> Result<ProcessResult, CoreError> {
+) -> Result<ProcessResult, ConversationError> {
     let conversation_id = conversation.name().to_owned();
 
     // Validate fully before touching freeze-round state: a dup/malformed
@@ -164,7 +164,7 @@ pub fn buffer_commit_candidate<M: MlsService>(
 pub fn replay_early_candidates<M: MlsService>(
     conversation: &mut ConversationQueues,
     mls: &mut M,
-) -> Result<(), CoreError> {
+) -> Result<(), ConversationError> {
     let epoch = mls.current_epoch()?;
     for candidate in conversation.take_early_candidates(epoch) {
         buffer_commit_candidate(conversation, mls, candidate)?;
@@ -181,7 +181,7 @@ pub fn finalize_freeze_round<M: MlsService, St: StewardListPlugin>(
     in_recovery: bool,
     allow_subset_candidates: bool,
     self_member_id: &[u8],
-) -> Result<FreezeFinalizeResult, CoreError> {
+) -> Result<FreezeFinalizeResult, ConversationError> {
     let current_epoch = mls.current_epoch()?;
     let Some(candidates) = conversation.take_round_candidates(current_epoch) else {
         return discard_and_finish(mls);
@@ -210,7 +210,9 @@ pub fn finalize_freeze_round<M: MlsService, St: StewardListPlugin>(
 
 /// No candidate applied: drop any local pending commit (otherwise the next
 /// MLS encrypt trips on "pending proposal exists") and report a no-op.
-fn discard_and_finish<M: MlsService>(mls: &mut M) -> Result<FreezeFinalizeResult, CoreError> {
+fn discard_and_finish<M: MlsService>(
+    mls: &mut M,
+) -> Result<FreezeFinalizeResult, ConversationError> {
     mls.discard_own_commit()?;
     Ok(FreezeFinalizeResult::default())
 }
@@ -245,7 +247,7 @@ impl RoundContext {
         current_epoch: u64,
         in_recovery: bool,
         self_member_id: &[u8],
-    ) -> Result<Self, CoreError> {
+    ) -> Result<Self, ConversationError> {
         let mls_count = conversation
             .approved_proposals()
             .values()

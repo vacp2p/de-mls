@@ -3,8 +3,8 @@
 //! MLS staging, validation, and post-commit bookkeeping live here.
 
 use crate::{
-    CommitHash, ConversationQueues, CoreError, FreezeFinalizeResult, FreezeOutcome, ProcessResult,
-    ScoreEvent, ScoreOp, StewardListPlugin,
+    CommitHash, ConversationError, ConversationQueues, FreezeFinalizeResult, FreezeOutcome,
+    ProcessResult, ScoreEvent, ScoreOp, StewardListPlugin,
     conversation::BufferedCommitCandidate,
     freeze::round::RoundContext,
     mls_crypto::{MlsProposalOutput, MlsService, StagedCandidateResult},
@@ -42,7 +42,7 @@ pub(super) fn apply_in_priority_order<M: MlsService, St: StewardListPlugin>(
     sorted: Vec<BufferedCommitCandidate>,
     ctx: &RoundContext,
     self_member_id: &[u8],
-) -> Result<FreezeFinalizeResult, CoreError> {
+) -> Result<FreezeFinalizeResult, ConversationError> {
     let mut score_ops: Vec<ScoreOp> = Vec::new();
     let mut own_commit_discarded = false;
     let conversation_id = conversation.name().to_owned();
@@ -164,7 +164,7 @@ fn apply_local_candidate<M: MlsService>(
     mls: &mut M,
     chosen: BufferedCommitCandidate,
     ctx: &RoundContext,
-) -> Result<CandidateOutcome, CoreError> {
+) -> Result<CandidateOutcome, ConversationError> {
     mls.merge_own_commit()?;
 
     let committed_batch =
@@ -201,7 +201,7 @@ fn apply_incoming_candidate<M: MlsService, St: StewardListPlugin>(
     steward: &St,
     chosen: BufferedCommitCandidate,
     ctx: &RoundContext,
-) -> Result<CandidateOutcome, CoreError> {
+) -> Result<CandidateOutcome, ConversationError> {
     let conversation_id = conversation.name().to_owned();
 
     let (commit_sender, self_removed, commit_actions) =
@@ -286,7 +286,7 @@ fn stage_candidate<M>(
     conversation_id: &str,
     candidate: &CommitCandidate,
     ctx: &RoundContext,
-) -> Result<StagingOutcome, CoreError>
+) -> Result<StagingOutcome, ConversationError>
 where
     M: MlsService,
 {
@@ -350,7 +350,7 @@ fn validate_commit_candidate(
     sender_id: &[u8],
     mls_actions: &[MlsProposalOutput],
     ctx: &RoundContext,
-) -> Result<Option<ViolationEvidence>, CoreError> {
+) -> Result<Option<ViolationEvidence>, ConversationError> {
     let mut expected: Vec<(u8, &[u8])> = conversation
         .approved_proposals()
         .values()

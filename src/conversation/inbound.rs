@@ -25,7 +25,6 @@ use crate::{
     ConsensusPlugin, ConversationEvent, ConversationPluginsFactory, PeerScoringPlugin,
     ProcessResult, ProposalKind, ScoreSnapshot, StewardList, StewardListConfig, StewardListPlugin,
     conversation::{ConversationQueues, member_set},
-    error::CoreError,
     freeze::{buffer_commit_candidate, compute_commit_hash},
     mls_crypto::{DecryptResult, MlsService},
     process_result::NoopReason,
@@ -68,7 +67,7 @@ pub fn process_inbound<M: MlsService>(
     conversation: &mut ConversationQueues,
     mls: &mut M,
     payload: &[u8],
-) -> Result<ProcessResult, CoreError> {
+) -> Result<ProcessResult, ConversationError> {
     // 1. Try the plaintext envelopes (sent as plaintext AppMessage):
     //    CommitCandidate and MemberWelcome both have to be readable before
     //    the receiver merges the commit they belong to.

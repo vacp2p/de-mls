@@ -189,7 +189,7 @@ impl StewardListPlugin for StubStewardList {
         _: &[Vec<u8>],
         _: usize,
         _: u32,
-    ) -> Result<(), crate::CoreError> {
+    ) -> Result<(), crate::ConversationError> {
         unreachable!()
     }
     fn validate_proposed(
@@ -198,7 +198,7 @@ impl StewardListPlugin for StubStewardList {
         _: u64,
         _: &[Vec<u8>],
         _: u32,
-    ) -> Result<bool, crate::CoreError> {
+    ) -> Result<bool, crate::ConversationError> {
         unreachable!()
     }
     fn propose_election<F: Fn(&[u8]) -> bool>(
@@ -208,7 +208,7 @@ impl StewardListPlugin for StubStewardList {
         _: &[u8],
         _: F,
         _: bool,
-    ) -> Result<ElectionDecision, crate::CoreError> {
+    ) -> Result<ElectionDecision, crate::ConversationError> {
         unreachable!()
     }
     fn bump_retry(&mut self) {

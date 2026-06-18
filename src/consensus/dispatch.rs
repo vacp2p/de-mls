@@ -5,7 +5,7 @@
 use tracing::info;
 
 use crate::{
-    ConversationQueues, CoreError,
+    ConversationError, ConversationQueues,
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, ViolationEvidence, ViolationType,
         conversation_update_request,
@@ -72,7 +72,7 @@ pub fn apply_consensus_result(
     proposal_id: u32,
     approved: bool,
     request: &ConversationUpdateRequest,
-) -> Result<ConsensusApplyResult, CoreError> {
+) -> Result<ConsensusApplyResult, ConversationError> {
     let is_owner = conversation.is_owner_of_proposal(proposal_id);
     let evidence = extract_emergency_evidence(request).cloned();
     let is_emergency = evidence.is_some();

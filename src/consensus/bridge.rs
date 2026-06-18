@@ -16,8 +16,7 @@ use prost::Message;
 use tracing::info;
 
 use crate::{
-    ConsensusPlugin, ConsensusServiceFor, CoreError,
-    error::ConversationError,
+    ConsensusPlugin, ConsensusServiceFor, ConversationError,
     protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest},
     self_leave_proposal_id,
 };
@@ -38,7 +37,7 @@ pub(crate) fn submit_proposal<P: ConsensusPlugin>(
     creator_id: &[u8],
     consensus: &ConsensusServiceFor<P>,
     params: ProposalParams,
-) -> Result<(u32, AppMessage), CoreError> {
+) -> Result<(u32, AppMessage), ConversationError> {
     let create_request = CreateProposalRequest::new(
         uuid::Uuid::new_v4().to_string(),
         request.encode_to_vec(),
@@ -97,7 +96,7 @@ pub(crate) fn forward_incoming_vote<P: ConsensusPlugin>(
     vote: Vote,
     consensus: &ConsensusServiceFor<P>,
     outcome_applied_locally: bool,
-) -> Result<(), CoreError> {
+) -> Result<(), ConversationError> {
     let proposal_id = vote.proposal_id;
     let scope = P::Scope::from(conversation_id.to_string());
     match consensus.process_incoming_vote(&scope, vote) {

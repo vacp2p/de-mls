@@ -20,9 +20,9 @@ use hashgraph_like_consensus::events::ConsensusEventBus;
 use crate::{
     BufferedCommitCandidate, ConsensusPlugin, ConsensusServiceFor, ConversationConfig,
     ConversationError, ConversationEvent, ConversationPluginsFactory, ConversationQueues,
-    ConversationState, ConversationStateMachine, CoreError, FreezeBufferOutcome,
-    FreezeFinalizeResult, OperatingMode, Outbound, PhaseTimer, ProcessResult, ProposalKind,
-    StewardListPlugin, compute_commit_hash, finalize_freeze_round, member_set,
+    ConversationState, ConversationStateMachine, FreezeBufferOutcome, FreezeFinalizeResult,
+    OperatingMode, Outbound, PhaseTimer, ProcessResult, ProposalKind, StewardListPlugin,
+    compute_commit_hash, finalize_freeze_round, member_set,
     mls_crypto::{
         CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MlsCommitInput, MlsService,
     },
@@ -205,15 +205,19 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     }
 
     /// Borrow the MLS service, erroring with
-    /// [`CoreError::MlsGroupNotInitialized`] when not attached.
-    pub(crate) fn expect_mls(&self) -> Result<&CP::Mls, CoreError> {
-        self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)
+    /// [`ConversationError::MlsGroupNotInitialized`] when not attached.
+    pub(crate) fn expect_mls(&self) -> Result<&CP::Mls, ConversationError> {
+        self.mls
+            .as_ref()
+            .ok_or(ConversationError::MlsGroupNotInitialized)
     }
 
     /// Mutable [`Self::expect_mls`] — required for the commit pipeline
     /// and encrypt/decrypt methods that advance MLS state.
-    pub(crate) fn expect_mls_mut(&mut self) -> Result<&mut CP::Mls, CoreError> {
-        self.mls.as_mut().ok_or(CoreError::MlsGroupNotInitialized)
+    pub(crate) fn expect_mls_mut(&mut self) -> Result<&mut CP::Mls, ConversationError> {
+        self.mls
+            .as_mut()
+            .ok_or(ConversationError::MlsGroupNotInitialized)
     }
 
     /// Attach an MLS service (joiner, post-welcome). Overwrites, so the
@@ -236,22 +240,22 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     // sibling `core` modules; these are pure delegation.
 
     /// Build a commit candidate. Errors with
-    /// [`CoreError::MlsGroupNotInitialized`] when no MLS service is
+    /// [`ConversationError::MlsGroupNotInitialized`] when no MLS service is
     /// attached.
     pub(crate) fn create_commit_candidate(
         &mut self,
         signer: &impl Signer,
         self_member_id: &[u8],
-    ) -> Result<Option<Vec<u8>>, CoreError> {
+    ) -> Result<Option<Vec<u8>>, ConversationError> {
         if self.mls.is_none() {
-            return Err(CoreError::MlsGroupNotInitialized);
+            return Err(ConversationError::MlsGroupNotInitialized);
         }
         if !self.steward_list.is_steward(self_member_id) && !self.is_in_recovery_mode() {
-            return Err(CoreError::NotASteward);
+            return Err(ConversationError::NotASteward);
         }
 
         if self.queues.approved_proposals().is_empty() {
-            return Err(CoreError::NoProposals);
+            return Err(ConversationError::NoProposals);
         }
 
         // MLS forbids committing one's own removal. If the approved batch contains
@@ -276,14 +280,17 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             .collect();
 
         if !non_mls_ids.is_empty() {
-            return Err(CoreError::UnexpectedNonMlsProposals {
+            return Err(ConversationError::UnexpectedNonMlsProposals {
                 proposal_ids: non_mls_ids,
             });
         }
 
         // Borrow `self.mls` directly so later `self.queues` reads stay
         // a disjoint borrow.
-        let mls = self.mls.as_mut().ok_or(CoreError::MlsGroupNotInitialized)?;
+        let mls = self
+            .mls
+            .as_mut()
+            .ok_or(ConversationError::MlsGroupNotInitialized)?;
 
         // Drop approved entries already reflected in conversation state (stale
         // rebroadcast KPs, duplicate removes) — without this MLS would reject
@@ -330,7 +337,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
                     }
                     updates.push(MlsCommitInput::Remove(rm.member_id.clone()));
                 }
-                _ => return Err(CoreError::InvalidConversationUpdateRequest),
+                _ => return Err(ConversationError::InvalidConversationUpdateRequest),
             }
         }
 
@@ -394,9 +401,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         &mut self,
         allow_subset_candidates: bool,
         self_member_id: &[u8],
-    ) -> Result<FreezeFinalizeResult, CoreError> {
+    ) -> Result<FreezeFinalizeResult, ConversationError> {
         let in_recovery = self.operating_mode == OperatingMode::Recovery;
-        let mls = self.mls.as_mut().ok_or(CoreError::MlsGroupNotInitialized)?;
+        let mls = self
+            .mls
+            .as_mut()
+            .ok_or(ConversationError::MlsGroupNotInitialized)?;
         finalize_freeze_round(
             &mut self.queues,
             mls,
@@ -410,7 +420,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// Re-buffer commit candidates stashed before their proposal was locally
     /// approved. Call after applying a consensus outcome. No-op when MLS isn't
     /// attached or nothing is stashed.
-    pub(crate) fn replay_early_candidates(&mut self) -> Result<(), CoreError> {
+    pub(crate) fn replay_early_candidates(&mut self) -> Result<(), ConversationError> {
         let Some(mls) = self.mls.as_mut() else {
             return Ok(());
         };
@@ -418,10 +428,16 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     }
 
     /// Decode an inbound app-subtopic payload into a [`ProcessResult`].
-    /// Errors with [`CoreError::MlsGroupNotInitialized`] when no MLS service
+    /// Errors with [`ConversationError::MlsGroupNotInitialized`] when no MLS service
     /// is attached — caller should check `mls().is_some()` first.
-    pub(crate) fn decode_inbound(&mut self, payload: &[u8]) -> Result<ProcessResult, CoreError> {
-        let mls = self.mls.as_mut().ok_or(CoreError::MlsGroupNotInitialized)?;
+    pub(crate) fn decode_inbound(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<ProcessResult, ConversationError> {
+        let mls = self
+            .mls
+            .as_mut()
+            .ok_or(ConversationError::MlsGroupNotInitialized)?;
         process_inbound(&mut self.queues, mls, payload)
     }
 
@@ -940,7 +956,7 @@ mod tests {
         let err = conversation
             .create_commit_candidate(&UnusedSigner, b"me")
             .expect_err("non-steward should be rejected");
-        assert!(matches!(err, CoreError::NotASteward));
+        assert!(matches!(err, ConversationError::NotASteward));
     }
 
     #[test]
@@ -949,7 +965,7 @@ mod tests {
         let err = conversation
             .create_commit_candidate(&UnusedSigner, b"me")
             .expect_err("empty approved queue should be rejected");
-        assert!(matches!(err, CoreError::NoProposals));
+        assert!(matches!(err, ConversationError::NoProposals));
     }
 
     /// An emergency-criteria proposal in the approved queue must surface as
@@ -970,7 +986,7 @@ mod tests {
         let err = conversation
             .create_commit_candidate(&UnusedSigner, b"me")
             .expect_err("emergency in approved queue should be rejected");
-        let CoreError::UnexpectedNonMlsProposals { proposal_ids } = err else {
+        let ConversationError::UnexpectedNonMlsProposals { proposal_ids } = err else {
             panic!("expected UnexpectedNonMlsProposals, got {err:?}");
         };
         assert_eq!(proposal_ids, vec![50]);

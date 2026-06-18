@@ -5,7 +5,7 @@
 
 use sha2::{Digest, Sha256};
 
-use crate::error::CoreError;
+use crate::error::ConversationError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StewardListConfig {
@@ -25,9 +25,9 @@ impl Default for StewardListConfig {
 }
 
 impl StewardListConfig {
-    pub fn new(sn_min: usize, sn_max: usize) -> Result<Self, CoreError> {
+    pub fn new(sn_min: usize, sn_max: usize) -> Result<Self, ConversationError> {
         if sn_min < 1 || sn_min > sn_max {
-            return Err(CoreError::InvalidConfigSize);
+            return Err(ConversationError::InvalidConfigSize);
         }
         Ok(Self {
             sn_min,
@@ -71,7 +71,7 @@ impl StewardList {
         sn: usize,
         config: StewardListConfig,
         retry_round: u32,
-    ) -> Result<Self, CoreError> {
+    ) -> Result<Self, ConversationError> {
         check_generation_inputs(&config, member_ids, sn)?;
         let ordered =
             sorted_steward_indices(election_epoch, retry_round, conversation_id, member_ids);
@@ -96,7 +96,7 @@ impl StewardList {
         member_ids: &[Vec<u8>],
         config: &StewardListConfig,
         retry_round: u32,
-    ) -> Result<bool, CoreError> {
+    ) -> Result<bool, ConversationError> {
         let sn = proposed.len();
         check_generation_inputs(config, member_ids, sn)?;
         let ordered =
@@ -190,12 +190,12 @@ fn check_generation_inputs(
     config: &StewardListConfig,
     member_ids: &[Vec<u8>],
     sn: usize,
-) -> Result<(), CoreError> {
+) -> Result<(), ConversationError> {
     if member_ids.is_empty() {
-        return Err(CoreError::EmptyMembersList);
+        return Err(ConversationError::EmptyMembersList);
     }
     if !config.is_valid_size(sn, member_ids.len()) {
-        return Err(CoreError::InvalidConfigSize);
+        return Err(ConversationError::InvalidConfigSize);
     }
     Ok(())
 }

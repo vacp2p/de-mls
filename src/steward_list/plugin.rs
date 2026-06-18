@@ -1,6 +1,6 @@
 //! [`StewardListPlugin`] trait and election vocabulary.
 
-use crate::error::CoreError;
+use crate::error::ConversationError;
 use crate::steward_list::list::{StewardList, StewardListConfig};
 
 /// Steward-election retries *after* the initial attempt, before `Deadlock`
@@ -77,7 +77,7 @@ pub trait StewardListPlugin {
         candidate_pool: &[Vec<u8>],
         sn: usize,
         retry_round: u32,
-    ) -> Result<(), CoreError>;
+    ) -> Result<(), ConversationError>;
 
     /// `true` if `proposed` matches [`StewardList::validate`] for these parameters.
     fn validate_proposed(
@@ -86,7 +86,7 @@ pub trait StewardListPlugin {
         epoch: u64,
         candidate_pool: &[Vec<u8>],
         retry_round: u32,
-    ) -> Result<bool, CoreError>;
+    ) -> Result<bool, ConversationError>;
 
     /// Whether this node should propose a steward election at `epoch`.
     fn propose_election<F: Fn(&[u8]) -> bool>(
@@ -96,7 +96,7 @@ pub trait StewardListPlugin {
         self_member_id: &[u8],
         eligible: F,
         recovery: bool,
-    ) -> Result<ElectionDecision, CoreError>;
+    ) -> Result<ElectionDecision, ConversationError>;
 
     /// Increment the retry round. Exhaustion is detected by the caller via
     /// [`Self::next_retry_round`] vs [`Self::max_retries`].
