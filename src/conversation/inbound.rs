@@ -2,7 +2,7 @@
 //!
 //! Two layers co-located:
 //!
-//! - The free function [`process_inbound`] decodes an app-subtopic payload
+//! - The free function [`decode_inbound_payload`] decodes an app-subtopic payload
 //!   into a [`ProcessResult`]. Welcome-subtopic packets are handled at the
 //!   integrator layer (because the invitation path constructs a new
 //!   `MlsService` via the user-supplied factory) and are not routed through
@@ -63,7 +63,7 @@ fn authorize_fast_path_proposal(proposal: &Proposal, mls_sender: &[u8]) -> bool 
 
 /// Process an inbound packet on the app subtopic and decide what action is
 /// needed. Welcome-subtopic packets are handled at the integrator layer.
-pub fn process_inbound<M: MlsService>(
+pub fn decode_inbound_payload<M: MlsService>(
     conversation: &mut ConversationQueues,
     mls: &mut M,
     payload: &[u8],
@@ -713,7 +713,7 @@ fn first_zero_timing_field(timing: &TimingConfig) -> Option<&'static str> {
 }
 
 #[cfg(test)]
-mod process_inbound_tests {
+mod decode_inbound_payload_tests {
     use super::*;
     use crate::conversation::self_leave_proposal_id;
 

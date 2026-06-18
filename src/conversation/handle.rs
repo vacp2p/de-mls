@@ -22,11 +22,10 @@ use crate::{
     ConversationError, ConversationEvent, ConversationPluginsFactory, ConversationQueues,
     ConversationState, ConversationStateMachine, FreezeBufferOutcome, FreezeFinalizeResult,
     OperatingMode, Outbound, PhaseTimer, ProcessResult, ProposalKind, StewardListPlugin,
-    compute_commit_hash, finalize_freeze_round, member_set,
+    compute_commit_hash, decode_inbound_payload, finalize_freeze_round, member_set,
     mls_crypto::{
         CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MlsCommitInput, MlsService,
     },
-    process_inbound,
     protos::de_mls::messages::v1::{
         AppMessage, CommitCandidate, conversation_update_request::Payload,
     },
@@ -438,7 +437,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             .mls
             .as_mut()
             .ok_or(ConversationError::MlsGroupNotInitialized)?;
-        process_inbound(&mut self.queues, mls, payload)
+        decode_inbound_payload(&mut self.queues, mls, payload)
     }
 
     /// Append a [`ConversationEvent`] to the pending-events buffer. The caller's

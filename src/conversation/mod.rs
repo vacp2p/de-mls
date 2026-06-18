@@ -31,7 +31,7 @@ pub use config::{
 pub use construct::ConversationDeps;
 pub use display::{MemberRole, MessageType, message_types};
 pub use handle::{Conversation, LeaveOutcome};
-pub use inbound::{DispatchOutcome, process_inbound};
+pub use inbound::{DispatchOutcome, decode_inbound_payload};
 pub use messaging::{Outbound, build_key_package_announcement};
 pub use poll::PollOutcome;
 pub use queues::{BufferedCommitCandidate, ConversationQueues, FreezeBufferOutcome, ProposalId};

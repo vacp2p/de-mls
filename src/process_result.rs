@@ -1,4 +1,4 @@
-//! [`ProcessResult`] returned by [`process_inbound`](crate::process_inbound)
+//! [`ProcessResult`] returned by [`decode_inbound_payload`](crate::decode_inbound_payload)
 //! plus protobuf ↔ message-envelope `From` impls.
 
 use hashgraph_like_consensus::{
