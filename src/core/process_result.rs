@@ -10,9 +10,9 @@ use crate::{
     core::{CoreError, ScoreEvent, ScoreOp},
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, CommitCandidate, ConversationMessage, ConversationSync,
-        ConversationUpdateRequest, EmergencyCriteriaProposal, MemberWelcome, Outcome,
-        ProposalAdded, UserVote, ViolationEvidence, ViolationType, VotePayload, app_message,
-        conversation_update_request,
+        ConversationUpdateRequest, EmergencyCriteriaProposal, EventMembershipChange, MemberWelcome,
+        Outcome, ProposalAdded, UserVote, ViolationEvidence, ViolationType, VotePayload,
+        app_message, conversation_update_request,
     },
 };
 
@@ -223,6 +223,7 @@ impl_payload_from!(
     ConversationSync    => app_message::Payload::ConversationSync,
     ProposalAdded       => app_message::Payload::ProposalAdded,
     MemberWelcome       => app_message::Payload::MemberWelcome,
+    EventMembershipChange => app_message::Payload::MembershipChange,
 );
 
 impl From<ConsensusEvent> for Outcome {
@@ -240,6 +241,9 @@ impl TryFrom<AppMessage> for ProcessResult {
     fn try_from(value: AppMessage) -> Result<Self, Self::Error> {
         match &value.payload {
             Some(app_message::Payload::ConversationMessage(_)) => {
+                Ok(ProcessResult::AppMessage(Box::new(value)))
+            }
+            Some(app_message::Payload::MembershipChange(_)) => {
                 Ok(ProcessResult::AppMessage(Box::new(value)))
             }
             Some(app_message::Payload::Proposal(proposal)) => {

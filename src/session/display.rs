@@ -36,6 +36,7 @@ impl fmt::Display for MemberRole {
 /// String constants shared with the UI so string-keyed dispatch stays typo-safe.
 pub mod message_types {
     pub const CONVERSATION_MESSAGE: &str = "ConversationMessage";
+    pub const MEMBERSHIP_CHANGE: &str = "MembershipChange";
     pub const BAN_REQUEST: &str = "BanRequest";
     pub const PROPOSAL: &str = "Proposal";
     pub const VOTE: &str = "Vote";
@@ -57,6 +58,7 @@ impl MessageType for app_message::Payload {
     fn message_type(&self) -> &'static str {
         match self {
             app_message::Payload::ConversationMessage(_) => message_types::CONVERSATION_MESSAGE,
+            app_message::Payload::MembershipChange(_) => message_types::MEMBERSHIP_CHANGE,
             app_message::Payload::BanRequest(_) => message_types::BAN_REQUEST,
             app_message::Payload::Proposal(_) => message_types::PROPOSAL,
             app_message::Payload::Vote(_) => message_types::VOTE,
