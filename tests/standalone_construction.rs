@@ -15,7 +15,6 @@ use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use openmls_basic_credential::SignatureKeyPair;
 
 use de_mls::defaults::DefaultConsensusPlugin;
-use de_mls::mls_crypto::KeyPackageBytes;
 use de_mls::{
     ConsensusPlugin, ConsensusServiceFor, ConversationEvent, ScoringConfig, StewardListConfig,
 };
@@ -55,11 +54,6 @@ impl Integrator {
         }
     }
 
-    /// Mint the local member's own key package (its leaf seeds a created group).
-    fn key_package(&self) -> KeyPackageBytes {
-        self.plugins.generate_key_package()
-    }
-
     /// Fresh per-conversation deps drawn from the shared state. The
     /// consensus service clones the shared storage (scope-keyed) and gets
     /// its own private event bus. The member id doubles as the `app_id` so
@@ -92,10 +86,8 @@ impl Integrator {
 #[test]
 fn create_builds_a_working_steward_session_without_user() {
     let integrator = Integrator::new();
-    let kp = integrator.key_package();
     let conversation = Conversation::create(
         "standalone",
-        kp.as_bytes(),
         integrator.deps(),
         integrator.member_id.member_id_bytes(),
         integrator.member_id.member_id_display(),
@@ -141,10 +133,8 @@ fn from_welcome_joins_in_one_call() {
     let alice = Integrator::new();
     let bob = Integrator::with_key(BOB);
 
-    let alice_kp = alice.key_package();
     let mut creator = Conversation::create(
         "standalone-welcome",
-        alice_kp.as_bytes(),
         alice.deps_with_config(fast_config()),
         alice.member_id.member_id_bytes(),
         alice.member_id.member_id_display(),

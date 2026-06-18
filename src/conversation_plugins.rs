@@ -21,12 +21,12 @@ pub trait ConversationPluginsFactory {
     type StewardList: StewardListPlugin;
 
     /// Build an MLS service for a brand-new conversation as its sole creator.
-    /// The creator's own `key_package` supplies the leaf credential and
-    /// ciphersuite; `signer` authors the group's initial state.
+    /// The factory supplies the leaf credential and ciphersuite from its own
+    /// state; `signer` authors the group's initial state. No key package is
+    /// needed — those are how joiners are added.
     fn create_mls(
         &self,
         conversation_id: String,
-        key_package: &[u8],
         signer: &impl Signer,
     ) -> Result<Self::Mls, MlsError>;
 

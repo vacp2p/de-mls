@@ -272,7 +272,7 @@ impl ConversationPluginsFactory for StubPluginsFactory {
     type Scoring = StubScoring;
     type StewardList = StubStewardList;
 
-    fn create_mls(&self, _: String, _: &[u8], _: &impl Signer) -> Result<Self::Mls, MlsError> {
+    fn create_mls(&self, _: String, _: &impl Signer) -> Result<Self::Mls, MlsError> {
         unreachable!()
     }
     fn welcome_mls(&self, _: &[u8]) -> Result<Option<Self::Mls>, MlsError> {

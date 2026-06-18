@@ -146,10 +146,8 @@ impl Member {
         steward_list_config: StewardListConfig,
     ) -> Self {
         let integ = Integrator::new(private_key, steward_list_config);
-        let key_package = integ.plugins.generate_key_package();
         let convo = Conversation::create(
             conversation_id,
-            key_package.as_bytes(),
             integ.deps(config.clone()),
             integ.member_id.member_id_bytes(),
             integ.member_id.member_id_display(),

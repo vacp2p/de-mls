@@ -97,13 +97,13 @@ impl ConversationPluginsFactory for DefaultConversationPluginsFactory {
     fn create_mls(
         &self,
         conversation_id: String,
-        key_package: &[u8],
         signer: &impl Signer,
     ) -> Result<Self::Mls, MlsError> {
         OpenMlsService::new_as_creator(
             conversation_id,
             OpenMlsRustCrypto::default(),
-            key_package,
+            self.credential.clone(),
+            GATEWAY_SUITE,
             signer,
         )
     }

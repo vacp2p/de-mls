@@ -17,8 +17,8 @@ use openmls::group::{
 };
 use openmls::key_packages::KeyPackageIn;
 use openmls::prelude::{
-    ContentType, DeserializeBytes, MlsMessageBodyIn, MlsMessageIn, ProcessedMessageContent,
-    Proposal, ProtocolMessage, ProtocolVersion,
+    Ciphersuite, ContentType, DeserializeBytes, MlsMessageBodyIn, MlsMessageIn,
+    ProcessedMessageContent, Proposal, ProtocolMessage, ProtocolVersion,
 };
 use openmls_traits::storage::StorageProvider;
 use openmls_traits::{OpenMlsProvider, signatures::Signer};
@@ -57,36 +57,26 @@ where
 {
     /// Create a fresh MLS group as the sole initial member ("creator").
     ///
-    /// The creator's own `key_package` supplies the leaf credential and the
-    /// ciphersuite;
+    /// The creator seeds its leaf straight from `credential` and `ciphersuite`
+    /// — it needs no key package (key packages are how *joiners* are added).
     pub fn new_as_creator(
         conversation_id: String,
         provider: P,
-        key_package: &[u8],
+        credential: CredentialWithKey,
+        ciphersuite: Ciphersuite,
         signer: &impl Signer,
     ) -> Result<Self, MlsError> {
-        let group = {
-            let (kp_in, _) = KeyPackageIn::tls_deserialize_bytes(key_package)?;
-            let kp = kp_in
-                .validate(provider.crypto(), ProtocolVersion::Mls10)
-                .map_err(MlsError::storage)?;
-            let ciphersuite = kp.ciphersuite();
-            let credential = CredentialWithKey {
-                credential: kp.leaf_node().credential().clone(),
-                signature_key: kp.leaf_node().signature_key().clone(),
-            };
-            let config = MlsGroupCreateConfig::builder()
-                .ciphersuite(ciphersuite)
-                .use_ratchet_tree_extension(true)
-                .build();
-            MlsGroup::new_with_group_id(
-                &provider,
-                signer,
-                &config,
-                GroupId::from_slice(conversation_id.as_bytes()),
-                credential,
-            )?
-        };
+        let config = MlsGroupCreateConfig::builder()
+            .ciphersuite(ciphersuite)
+            .use_ratchet_tree_extension(true)
+            .build();
+        let group = MlsGroup::new_with_group_id(
+            &provider,
+            signer,
+            &config,
+            GroupId::from_slice(conversation_id.as_bytes()),
+            credential,
+        )?;
 
         Ok(Self {
             provider,

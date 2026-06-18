@@ -44,14 +44,13 @@ pub struct ConversationDeps<'a, P: ConsensusPlugin, CP: ConversationPluginsFacto
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// Create a brand-new conversation we steward. Starts in `Working` with
-    /// the local member installed as sole steward at epoch 0. The creator's
-    /// own `key_package` supplies the leaf credential and ciphersuite.
+    /// the local member installed as sole steward at epoch 0. The factory
+    /// seeds the group's leaf from its own credential — no key package needed.
     /// `member_id` / `member_id_display` name the local member — the opaque id
     /// bytes the protocol matches on and the human-readable form. `signer` is
     /// the member's MLS signer, used to seed the group.
     pub fn create(
         conversation_id: &str,
-        key_package: &[u8],
         deps: ConversationDeps<P, CP>,
         member_id: &[u8],
         member_id_display: &str,
@@ -59,7 +58,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     ) -> Result<Self, ConversationError> {
         let mls = deps
             .plugins
-            .create_mls(conversation_id.to_string(), key_package, signer)?;
+            .create_mls(conversation_id.to_string(), signer)?;
         Self::assemble(
             conversation_id,
             deps,

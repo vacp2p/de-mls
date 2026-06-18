@@ -3,8 +3,7 @@
 use tracing::info;
 
 use de_mls::{
-    ConsensusPlugin, Conversation, ConversationConfig, ConversationError,
-    ConversationPluginsFactory, LeaveOutcome,
+    ConsensusPlugin, Conversation, ConversationConfig, ConversationPluginsFactory, LeaveOutcome,
 };
 
 use openmls_traits::signatures::Signer;
@@ -32,21 +31,17 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, DefaultConversationPlugins
         conversation_id: &str,
         config: ConversationConfig,
     ) -> Result<(), UserError> {
-        let key_package = self
-            .generate_key_package()
-            .map_err(ConversationError::from)?;
-        self.register_conversation(conversation_id, key_package.as_bytes(), config)
+        self.register_conversation(conversation_id, config)
     }
 }
 
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer + Clone> User<P, CP, Sig> {
-    /// Build and register the conversation we create, seeding the group with
-    /// our own `key_package` leaf. The joiner side never lands here — it
+    /// Build and register the conversation we create; the factory seeds the
+    /// group's leaf from our credential. The joiner side never lands here — it
     /// builds straight from a welcome in [`User::accept_welcome`].
     pub(crate) fn register_conversation(
         &mut self,
         conversation_id: &str,
-        key_package: &[u8],
         config: ConversationConfig,
     ) -> Result<(), UserError> {
         if self
@@ -61,7 +56,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer + Clone> Us
         let deps = self.build_deps(config);
         let conversation = Conversation::create(
             conversation_id,
-            key_package,
             deps,
             self.member_id.member_id_bytes(),
             self.member_id.member_id_display(),
