@@ -8,9 +8,9 @@
 //!
 //! [`crate::core::ConversationStateMachine`] owns the per-conversation state
 //! enum (`PendingJoin → Working → Freezing → Selection → Reelection`);
-//! `PhaseTimer` owns the wall-clock anchor; [`Conversation`](crate::session::Conversation) composes a
-//! [`crate::core::ConversationCore`] with that timer through coordinator methods
-//! that update both atomically. State transitions return the new
+//! `PhaseTimer` owns the wall-clock anchor; [`Conversation`](crate::session::Conversation)
+//! holds the state machine and that timer, driving both through coordinator
+//! methods that update them atomically. State transitions return the new
 //! [`crate::core::ConversationState`]; the session-side dispatcher emits a
 //! `ConversationEvent::PhaseChange` on each one.
 //!

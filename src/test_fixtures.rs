@@ -1,6 +1,6 @@
 //! Crate-internal test fixtures: minimal trait impls for tests that need
-//! to construct a [`crate::core::ConversationCore`] or [`crate::session::Conversation`]
-//! without standing up real MLS / scoring / steward backends.
+//! to construct a [`crate::session::Conversation`] without standing up real
+//! MLS / scoring / steward backends.
 //!
 //! Most methods are `unreachable!()` — tests should only exercise the
 //! handful of paths the test specifically targets. If a test reaches
@@ -263,10 +263,10 @@ impl PeerScoringPlugin for StubScoring {
 }
 
 /// Test plug-in bundle wiring the three stubs into the [`ConversationPluginsFactory`]
-/// trait so tests can construct [`crate::core::ConversationCore`] and
-/// [`crate::session::Conversation`] under their single `<CP>` parameter. The
-/// factory methods are `unreachable!()` — tests build plug-in instances
-/// directly and hand them to the conversation constructors.
+/// trait so tests can construct a [`crate::session::Conversation`] under its
+/// single `<CP>` parameter. The factory methods are `unreachable!()` — tests
+/// build plug-in instances directly and hand them to the conversation
+/// constructors.
 pub(crate) struct StubPluginsFactory;
 
 impl ConversationPluginsFactory for StubPluginsFactory {

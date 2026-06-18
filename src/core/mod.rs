@@ -44,9 +44,9 @@ pub use inbound::process_inbound;
 
 // ── Per-conversation types: state, queues, state machine, config ──
 pub use conversation::{
-    BufferedCommitCandidate, ConversationConfig, ConversationCore, ConversationQueues,
-    ConversationState, ConversationStateMachine, DEFAULT_COMMIT_INACTIVITY_DURATION,
-    DEFAULT_CONSENSUS_TIMEOUT, DEFAULT_ELECTION_VOTING_DELAY, DEFAULT_LIVENESS_CRITERIA_YES,
+    BufferedCommitCandidate, ConversationConfig, ConversationQueues, ConversationState,
+    ConversationStateMachine, DEFAULT_COMMIT_INACTIVITY_DURATION, DEFAULT_CONSENSUS_TIMEOUT,
+    DEFAULT_ELECTION_VOTING_DELAY, DEFAULT_LIVENESS_CRITERIA_YES,
     DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION,
     DEFAULT_RECOVERY_INACTIVITY_DURATION, DEFAULT_VOTING_DELAY, FreezeBufferOutcome, OperatingMode,
     ProposalId, member_set, self_leave_proposal_id, target_member_id_of,

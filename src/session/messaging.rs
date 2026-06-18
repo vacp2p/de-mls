@@ -45,7 +45,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         message: Vec<u8>,
         signer: &impl Signer,
     ) -> Result<(), ConversationError> {
-        let state = self.core.current_state();
+        let state = self.current_state();
         if matches!(
             state,
             ConversationState::PendingJoin
@@ -61,10 +61,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             conversation_id: self.conversation_id.clone(),
         }
         .into();
-        let payload = self
-            .core
-            .expect_mls_mut()?
-            .build_message(signer, &app_msg)?;
+        let payload = self.expect_mls_mut()?.build_message(signer, &app_msg)?;
         self.broadcast(payload);
         Ok(())
     }
@@ -79,7 +76,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         key_package_bytes: &[u8],
         signer: &impl Signer,
     ) -> Result<(), ConversationError> {
-        let state = self.core.current_state();
+        let state = self.current_state();
         if state != ConversationState::Working {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
@@ -103,7 +100,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         member_id: &[u8],
         signer: &impl Signer,
     ) -> Result<(), ConversationError> {
-        let state = self.core.current_state();
+        let state = self.current_state();
         if state != ConversationState::Working {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }

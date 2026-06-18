@@ -1,8 +1,9 @@
 //! [`Conversation`] struct, constructor, and the state-machine + phase-timer
-//! coordinators that compose [`crate::core::ConversationCore`] with
-//! [`crate::session::PhaseTimer`] under one lock. Per-conversation method
-//! bodies (proposal submission, voting, inbound dispatch, etc.) live in
-//! sibling modules and extend `Conversation` via additional `impl` blocks.
+//! coordinators that hold per-conversation protocol state, the MLS service,
+//! plug-ins, and durable config alongside [`crate::session::PhaseTimer`] under
+//! one lock. Per-conversation method bodies (proposal submission, voting,
+//! inbound dispatch, etc.) live in sibling modules and extend `Conversation`
+//! via additional `impl` blocks.
 
 use std::{
     collections::HashMap,
@@ -11,15 +12,24 @@ use std::{
 };
 
 use openmls_traits::signatures::Signer;
+use prost::Message;
 use tracing::info;
 
 use hashgraph_like_consensus::events::ConsensusEventBus;
 
 use crate::{
     core::{
-        ConsensusPlugin, ConsensusServiceFor, ConversationConfig, ConversationCore,
+        BufferedCommitCandidate, ConsensusPlugin, ConsensusServiceFor, ConversationConfig,
         ConversationEvent, ConversationPluginsFactory, ConversationQueues, ConversationState,
-        ConversationStateMachine,
+        ConversationStateMachine, CoreError, FreezeBufferOutcome, FreezeFinalizeResult,
+        OperatingMode, ProcessResult, ProposalKind, StewardListPlugin, compute_commit_hash,
+        finalize_freeze_round, member_set, process_inbound, replay_early_candidates,
+    },
+    mls_crypto::{
+        CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MlsCommitInput, MlsService,
+    },
+    protos::de_mls::messages::v1::{
+        AppMessage, CommitCandidate, conversation_update_request::Payload,
     },
     session::{ConversationError, Outbound, PhaseTimer},
 };
@@ -57,7 +67,21 @@ pub struct Conversation<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// registry and is used to construct scope keys for consensus operations.
     /// Read via [`Conversation::conversation_id`].
     pub(crate) conversation_id: String,
-    pub(crate) core: ConversationCore<CP>,
+    pub(crate) queues: ConversationQueues,
+    /// Per-conversation MLS service. `None` for joiners in `PendingJoin` who
+    /// haven't accepted a welcome yet; once attached via
+    /// [`Self::attach_mls`] it stays `Some` for the conversation's lifetime.
+    mls: Option<CP::Mls>,
+    pub(crate) state_machine: ConversationStateMachine,
+    /// Per-conversation durable config: voting/consensus durations,
+    /// `liveness_criteria_yes`, `pending_update_max_epochs`.
+    pub(crate) config: ConversationConfig,
+    /// Per-conversation peer-score plug-in.
+    pub(crate) scoring: CP::Scoring,
+    /// Per-conversation steward-list plug-in.
+    pub(crate) steward_list: CP::StewardList,
+    /// Authorization mode (RFC §Layer 3 Anti-Deadlock ECP).
+    operating_mode: OperatingMode,
     /// Per-conversation consensus service. Owns this conversation's scope
     /// in the shared storage and a private event bus. Minted from the
     /// [`crate::session::ConversationDeps`] consensus service at construction.
@@ -67,7 +91,7 @@ pub struct Conversation<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// `apply_consensus_outcome`. Subscribed when the conversation is built in
     /// [`Conversation::create`] / [`Conversation::join`].
     pub(crate) consensus_rx: ConsensusReceiver<P>,
-    /// Wall-clock anchor combined with `core.state_machine` by
+    /// Wall-clock anchor combined with [`Self::state_machine`] by
     /// coordinator methods.
     phase_timer: PhaseTimer,
     /// Pending auto-votes by `proposal_id`. Walked by
@@ -112,7 +136,7 @@ pub struct Conversation<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// Build a fresh conversation. Creator path passes `Some(mls)`; joiner
     /// path passes `None` and attaches the MLS service later via
-    /// `core.attach_mls`. `consensus_rx` is a subscriber on
+    /// [`Self::attach_mls`]. `consensus_rx` is a subscriber on
     /// `consensus.event_bus()`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -132,7 +156,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     ) -> Self {
         Self {
             conversation_id,
-            core: ConversationCore::new(queues, mls, state_machine, config, scoring, steward_list),
+            queues,
+            mls,
+            state_machine,
+            config,
+            scoring,
+            steward_list,
+            operating_mode: OperatingMode::Normal,
             consensus,
             consensus_rx,
             phase_timer,
@@ -145,6 +175,255 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             pending_outbound: Mutex::new(Vec::new()),
             last_freeze_progress: None,
         }
+    }
+
+    // ── Operating mode (Layer 3 Anti-Deadlock) ──────────────────────
+
+    pub fn is_in_recovery_mode(&self) -> bool {
+        self.operating_mode == OperatingMode::Recovery
+    }
+
+    pub fn enter_recovery_mode(&mut self) {
+        self.operating_mode = OperatingMode::Recovery;
+    }
+
+    pub fn exit_recovery_mode(&mut self) {
+        self.operating_mode = OperatingMode::Normal;
+    }
+
+    // ── State accessor ──────────────────────────────────────────────
+
+    pub fn current_state(&self) -> ConversationState {
+        self.state_machine.current_state()
+    }
+
+    // ── MLS service ─────────────────────────────────────────────────
+
+    /// Borrow the MLS service, if attached. `None` for joiners
+    /// pre-welcome.
+    pub(crate) fn mls(&self) -> Option<&CP::Mls> {
+        self.mls.as_ref()
+    }
+
+    /// Borrow the MLS service, erroring with
+    /// [`CoreError::MlsGroupNotInitialized`] when not attached.
+    pub(crate) fn expect_mls(&self) -> Result<&CP::Mls, CoreError> {
+        self.mls.as_ref().ok_or(CoreError::MlsGroupNotInitialized)
+    }
+
+    /// Mutable [`Self::expect_mls`] — required for the commit pipeline
+    /// and encrypt/decrypt methods that advance MLS state.
+    pub(crate) fn expect_mls_mut(&mut self) -> Result<&mut CP::Mls, CoreError> {
+        self.mls.as_mut().ok_or(CoreError::MlsGroupNotInitialized)
+    }
+
+    /// Attach an MLS service (joiner, post-welcome). Overwrites, so the
+    /// caller must only attach when `mls().is_none()` — a double-attach
+    /// drops live group state.
+    pub(crate) fn attach_mls(&mut self, mls: CP::Mls) {
+        self.mls = Some(mls);
+    }
+
+    /// Drop the attached MLS service and return it. Used on conversation leave
+    /// so the caller can run service-side cleanup (`mls.delete()`).
+    pub(crate) fn take_mls(&mut self) -> Option<CP::Mls> {
+        self.mls.take()
+    }
+
+    // ── Protocol-function wrappers ─────────────────────────────────
+    //
+    // Read `queues`, `mls`, and `steward` from `self` so coordinator
+    // callsites don't destructure the conversation. Protocol logic lives in
+    // sibling `core` modules; these are pure delegation.
+
+    /// Build a commit candidate. Errors with
+    /// [`CoreError::MlsGroupNotInitialized`] when no MLS service is
+    /// attached.
+    pub(crate) fn create_commit_candidate(
+        &mut self,
+        signer: &impl Signer,
+        self_member_id: &[u8],
+    ) -> Result<Option<Vec<u8>>, CoreError> {
+        if self.mls.is_none() {
+            return Err(CoreError::MlsGroupNotInitialized);
+        }
+        if !self.steward_list.is_steward(self_member_id) && !self.is_in_recovery_mode() {
+            return Err(CoreError::NotASteward);
+        }
+
+        if self.queues.approved_proposals().is_empty() {
+            return Err(CoreError::NoProposals);
+        }
+
+        // MLS forbids committing one's own removal. If the approved batch contains
+        // RemoveMember(self), skip local candidate creation — another steward will
+        // commit the batch (including this node's removal) once they enter freeze.
+        if self.queues.has_approved_removal(self_member_id) {
+            info!(
+                conversation = self.queues.name(),
+                "commit candidate skipped: approved batch contains self-remove"
+            );
+            return Ok(None);
+        }
+
+        // Governance proposals (emergency, election) are consensus-only and must
+        // not be in the approved queue at batch creation time.
+        let non_mls_ids: Vec<u32> = self
+            .queues
+            .approved_proposals()
+            .iter()
+            .filter(|(_, req)| ProposalKind::of(req).is_governance())
+            .map(|(&id, _)| id)
+            .collect();
+
+        if !non_mls_ids.is_empty() {
+            return Err(CoreError::UnexpectedNonMlsProposals {
+                proposal_ids: non_mls_ids,
+            });
+        }
+
+        // Borrow `self.mls` directly so later `self.queues` reads stay
+        // a disjoint borrow.
+        let mls = self.mls.as_mut().ok_or(CoreError::MlsGroupNotInitialized)?;
+
+        // Drop approved entries already reflected in conversation state (stale
+        // rebroadcast KPs, duplicate removes) — without this MLS would reject
+        // the whole batch with "Duplicate signature key in proposals and conversation".
+        let current_members = mls.members()?;
+        let current_members_set = member_set(&current_members);
+        let is_member = |id: &[u8]| current_members_set.contains(id);
+
+        // Urgent (ECP-driven) freeze: restrict the batch to just the target's
+        // RemoveMember. See `ConversationQueues::urgent_commit_target`.
+        let urgent_target = self.queues.urgent_commit_target().map(|t| t.to_vec());
+
+        // Iterate in insertion order (FIFO): library proposal IDs are
+        // content-derived hashes, so sort-by-id is not temporal.
+        let k_max = mls.commit_batch_max();
+        let approved = self.queues.approved_proposals();
+        let mut updates = Vec::with_capacity(approved.len().min(k_max));
+        // Joiners admitted by this batch, in Add order. Travels with the
+        // welcome so any holder can address delivery.
+        let mut joiner_identities = Vec::new();
+        for (_pid, proposal) in approved.iter().take(k_max) {
+            match proposal.payload.as_ref() {
+                Some(Payload::MemberInvite(im)) => {
+                    if urgent_target.is_some() {
+                        continue;
+                    }
+                    if is_member(&im.member_id) {
+                        continue;
+                    }
+                    updates.push(MlsCommitInput::Add(KeyPackageBytes::new(
+                        im.key_package_bytes.clone(),
+                        im.member_id.clone(),
+                    )));
+                    joiner_identities.push(im.member_id.clone());
+                }
+                Some(Payload::RemoveMember(rm)) => {
+                    if let Some(target) = urgent_target.as_deref()
+                        && rm.member_id != target
+                    {
+                        continue;
+                    }
+                    if !is_member(&rm.member_id) {
+                        continue;
+                    }
+                    updates.push(MlsCommitInput::Remove(rm.member_id.clone()));
+                }
+                _ => return Err(CoreError::InvalidConversationUpdateRequest),
+            }
+        }
+
+        if updates.is_empty() {
+            return Ok(None);
+        }
+
+        let MlsCommitCandidate {
+            proposals: mls_proposals,
+            commit,
+            welcome,
+        } = mls.create_commit_candidate(signer, &updates)?;
+
+        let candidate = CommitCandidate {
+            conversation_id: self.queues.name_bytes().to_vec(),
+            mls_proposals,
+            commit_message: commit,
+            steward_member_id: self_member_id.to_vec(),
+        };
+
+        // Welcome bytes are deferred until our merge so joiners can't
+        // advance epoch ahead of the steward.
+        let commit_hash = compute_commit_hash(&candidate.commit_message);
+        let epoch = mls.current_epoch()?;
+        let max_candidates = mls.members()?.len();
+        let outcome = self.queues.add_freeze_candidate(
+            BufferedCommitCandidate {
+                candidate_msg: candidate.clone(),
+                commit_hash,
+                is_local_candidate: true,
+                welcome_bytes: welcome,
+                joiner_identities,
+            },
+            epoch,
+            max_candidates,
+        );
+        // Non-Buffered outcomes are legitimate runtime states (see
+        // `FreezeBufferOutcome`), not errors — log at debug.
+        if !matches!(outcome, FreezeBufferOutcome::Buffered) {
+            tracing::debug!(
+                conversation = self.queues.name(),
+                epoch,
+                ?outcome,
+                "local commit candidate not buffered",
+            );
+        }
+
+        info!(
+            conversation = self.queues.name(),
+            epoch,
+            proposals = updates.len(),
+            "commit candidate created"
+        );
+
+        let candidate_msg: AppMessage = candidate.into();
+        Ok(Some(candidate_msg.encode_to_vec()))
+    }
+
+    /// Finalize the active freeze round.
+    pub(crate) fn finalize_freeze_round(
+        &mut self,
+        allow_subset_candidates: bool,
+        self_member_id: &[u8],
+    ) -> Result<FreezeFinalizeResult, CoreError> {
+        let in_recovery = self.operating_mode == OperatingMode::Recovery;
+        let mls = self.mls.as_mut().ok_or(CoreError::MlsGroupNotInitialized)?;
+        finalize_freeze_round(
+            &mut self.queues,
+            mls,
+            &self.steward_list,
+            in_recovery,
+            allow_subset_candidates,
+            self_member_id,
+        )
+    }
+
+    /// Re-buffer commit candidates stashed before their proposal was locally
+    /// approved. Call after applying a consensus outcome. No-op when MLS isn't
+    /// attached or nothing is stashed.
+    pub(crate) fn replay_early_candidates(&mut self) -> Result<(), CoreError> {
+        let Some(mls) = self.mls.as_mut() else {
+            return Ok(());
+        };
+        replay_early_candidates(&mut self.queues, mls)
+    }
+
+    /// Decode an inbound app-subtopic payload into a [`ProcessResult`].
+    /// Errors with [`CoreError::MlsGroupNotInitialized`] when no MLS service
+    /// is attached — caller should check `mls().is_some()` first.
+    pub(crate) fn decode_inbound(&mut self, payload: &[u8]) -> Result<ProcessResult, CoreError> {
+        let mls = self.mls.as_mut().ok_or(CoreError::MlsGroupNotInitialized)?;
+        process_inbound(&mut self.queues, mls, payload)
     }
 
     /// Append a [`ConversationEvent`] to the pending-events buffer. The caller's
@@ -202,15 +481,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// wake us at the right time.
     fn phase_deadline(&self) -> Option<Instant> {
         let anchor = self.phase_timer.started_at()?;
-        let cfg = &self.core.config;
-        match self.core.current_state() {
+        let cfg = &self.config;
+        match self.current_state() {
             ConversationState::Freezing => Some(anchor + cfg.freeze_duration),
             ConversationState::PendingJoin => Some(anchor + cfg.commit_inactivity_duration * 3),
             ConversationState::Working => {
-                if self.core.queues.approved_proposals_count() == 0 {
+                if self.queues.approved_proposals_count() == 0 {
                     return None;
                 }
-                let dur = if self.core.is_in_recovery_mode() {
+                let dur = if self.is_in_recovery_mode() {
                     cfg.recovery_inactivity_duration
                 } else {
                     cfg.commit_inactivity_duration
@@ -292,7 +571,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// `signer` is the local member's MLS signer, used to authenticate the
     /// self-leave proposal on the active-conversation path.
     pub fn leave(&mut self, signer: &impl Signer) -> Result<LeaveOutcome, ConversationError> {
-        if self.core.current_state() == ConversationState::PendingJoin {
+        if self.current_state() == ConversationState::PendingJoin {
             self.emit_event(ConversationEvent::Leaving);
             self.cancel_all_auto_votes();
             return Ok(LeaveOutcome::TornDown);
@@ -319,7 +598,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     // ── State-machine + phase-timer coordinators ────────────────────
 
     pub(crate) fn start_working(&mut self) -> ConversationState {
-        self.core.state_machine.start_working();
+        self.state_machine.start_working();
         self.phase_timer.clear();
         info!(state = "Working", "state transition");
         ConversationState::Working
@@ -329,7 +608,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// phase timer. Returns `Some(Freezing)` on transition; `None` (no-op)
     /// from any other state.
     pub(crate) fn start_freezing(&mut self) -> Option<ConversationState> {
-        if self.core.state_machine.start_freezing() {
+        if self.state_machine.start_freezing() {
             self.phase_timer.start();
             info!(state = "Freezing", "state transition");
             Some(ConversationState::Freezing)
@@ -339,13 +618,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     }
 
     pub(crate) fn start_selection(&mut self) -> ConversationState {
-        self.core.state_machine.start_selection();
+        self.state_machine.start_selection();
         info!(state = "Selection", "state transition");
         ConversationState::Selection
     }
 
     pub(crate) fn start_reelection(&mut self) -> ConversationState {
-        self.core.state_machine.start_reelection();
+        self.state_machine.start_reelection();
         self.phase_timer.clear();
         info!(state = "Reelection", "state transition");
         ConversationState::Reelection
@@ -354,18 +633,18 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// `true` once 3× `commit_inactivity_duration` has passed in
     /// `PendingJoin` without a welcome.
     pub(crate) fn is_pending_join_expired(&self) -> bool {
-        self.core.current_state() == ConversationState::PendingJoin
+        self.current_state() == ConversationState::PendingJoin
             && self
                 .phase_timer
-                .elapsed_since_anchor(self.core.config.commit_inactivity_duration * 3)
+                .elapsed_since_anchor(self.config.commit_inactivity_duration * 3)
     }
 
     /// `true` once the freeze window elapsed while in `Freezing`.
     pub(crate) fn is_freeze_timed_out(&self) -> bool {
-        self.core.current_state() == ConversationState::Freezing
+        self.current_state() == ConversationState::Freezing
             && self
                 .phase_timer
-                .elapsed_since_anchor(self.core.config.freeze_duration)
+                .elapsed_since_anchor(self.config.freeze_duration)
     }
 
     /// Drives the "steward waited too long to commit" transition into
@@ -378,8 +657,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         approved_proposals_count: usize,
         inactivity_duration: Duration,
     ) -> Option<ConversationState> {
-        if self.core.current_state() != ConversationState::Working || approved_proposals_count == 0
-        {
+        if self.current_state() != ConversationState::Working || approved_proposals_count == 0 {
             return None;
         }
         if self.phase_timer.started_at().is_none() {
@@ -411,8 +689,30 @@ mod tests {
     use crate::core::ConversationQueues;
     use crate::defaults::DefaultConsensusPlugin;
     use crate::test_fixtures::{
-        StubPluginsFactory, StubScoring, StubStewardList, UnusedMls, make_test_consensus_service,
+        StubPluginsFactory, StubScoring, StubStewardList, UnusedMls, UnusedSigner,
+        make_test_consensus_service,
     };
+
+    fn make_conversation_with_steward(
+        steward_list: StubStewardList,
+    ) -> Conversation<DefaultConsensusPlugin, StubPluginsFactory> {
+        let (consensus, consensus_rx) = make_test_consensus_service();
+        Conversation::new(
+            "g".to_string(),
+            ConversationQueues::new("g"),
+            Some(UnusedMls),
+            ConversationStateMachine::new_as_member(),
+            PhaseTimer::new(),
+            ConversationConfig::default(),
+            StubScoring,
+            steward_list,
+            consensus,
+            consensus_rx,
+            Arc::from(&b"test-member-id"[..]),
+            Arc::from("0xtest-display"),
+            Arc::from(&[0u8; 16][..]),
+        )
+    }
 
     fn make_conversation_pending_join(
         commit_inactivity: Duration,
@@ -511,10 +811,7 @@ mod tests {
     #[test]
     fn check_steward_inactivity_first_tick_anchors_and_returns_none() {
         let mut conversation = make_conversation_working();
-        assert_eq!(
-            conversation.core.current_state(),
-            ConversationState::Working
-        );
+        assert_eq!(conversation.current_state(), ConversationState::Working);
         assert!(
             conversation.phase_timer.started_at().is_none(),
             "fresh conversation has no anchor"
@@ -529,7 +826,7 @@ mod tests {
             "anchor must be set after first tick"
         );
         assert_eq!(
-            conversation.core.current_state(),
+            conversation.current_state(),
             ConversationState::Working,
             "state must stay Working until inactivity actually elapses"
         );
@@ -634,5 +931,49 @@ mod tests {
 
         // Unregistering an unknown id is a no-op (no panic, no error).
         conversation.unregister_consensus_timeout(999);
+    }
+
+    // ── create_commit_candidate guards ──────────────────────────────────
+
+    #[test]
+    fn create_commit_candidate_errors_for_non_steward_outside_recovery() {
+        let mut conversation = make_conversation_with_steward(StubStewardList::member());
+        let err = conversation
+            .create_commit_candidate(&UnusedSigner, b"me")
+            .expect_err("non-steward should be rejected");
+        assert!(matches!(err, CoreError::NotASteward));
+    }
+
+    #[test]
+    fn create_commit_candidate_errors_when_no_approved_proposals() {
+        let mut conversation = make_conversation_with_steward(StubStewardList::steward());
+        let err = conversation
+            .create_commit_candidate(&UnusedSigner, b"me")
+            .expect_err("empty approved queue should be rejected");
+        assert!(matches!(err, CoreError::NoProposals));
+    }
+
+    /// An emergency-criteria proposal in the approved queue must surface as
+    /// `UnexpectedNonMlsProposals` — only MLS-producing payloads belong in a
+    /// commit. The error carries the offending proposal ids so the
+    /// orchestrator can drop them.
+    #[test]
+    fn create_commit_candidate_errors_on_emergency_in_approved_queue() {
+        use crate::protos::de_mls::messages::v1::ViolationEvidence;
+
+        let mut conversation = make_conversation_with_steward(StubStewardList::steward());
+        let emergency = ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new())
+            .with_creator(vec![0x01])
+            .into_update_request()
+            .unwrap();
+        conversation.queues.insert_approved_proposal(50, emergency);
+
+        let err = conversation
+            .create_commit_candidate(&UnusedSigner, b"me")
+            .expect_err("emergency in approved queue should be rejected");
+        let CoreError::UnexpectedNonMlsProposals { proposal_ids } = err else {
+            panic!("expected UnexpectedNonMlsProposals, got {err:?}");
+        };
+        assert_eq!(proposal_ids, vec![50]);
     }
 }

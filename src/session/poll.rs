@@ -87,7 +87,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// `ConversationEvent::Leaving` and cancelled its timers; the integrator
     /// handles registry-side cleanup.
     fn check_pending_join(&mut self) -> bool {
-        if self.core.current_state() != ConversationState::PendingJoin {
+        if self.current_state() != ConversationState::PendingJoin {
             return false;
         }
         if !self.is_pending_join_expired() {
@@ -110,7 +110,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         &mut self,
         signer: &impl Signer,
     ) -> Result<DispatchOutcome, ConversationError> {
-        let state = self.core.current_state();
+        let state = self.current_state();
         if state != ConversationState::Freezing {
             self.last_freeze_progress = None;
             return Ok(DispatchOutcome::Done);
@@ -119,10 +119,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         // Early selection: skip remaining freeze time if all expected
         // stewards have submitted candidates.
         let all_candidates_in = self
-            .core
             .steward_list
             .current_list()
-            .is_some_and(|list| self.core.queues.freeze_candidate_count() >= list.len());
+            .is_some_and(|list| self.queues.freeze_candidate_count() >= list.len());
 
         if !all_candidates_in && !self.is_freeze_timed_out() {
             // Still freezing — surface candidate progress when it changes.
@@ -136,17 +135,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         self.last_freeze_progress = None;
 
         let selection_event = self.start_selection();
-        let has_proposals = self.core.queues.approved_proposals_count() > 0;
+        let has_proposals = self.queues.approved_proposals_count() > 0;
         self.emit_event(ConversationEvent::PhaseChange(selection_event));
 
         let conversation_id = self.conversation_id.clone();
-        let allow_subset = self.core.steward_list.config().allow_subset_candidates;
+        let allow_subset = self.steward_list.config().allow_subset_candidates;
         let self_member_id = Arc::clone(&self.self_member_id);
-        let mut finalize_result = if self.core.mls().is_some() {
-            match self
-                .core
-                .finalize_freeze_round(allow_subset, &self_member_id)
-            {
+        let mut finalize_result = if self.mls().is_some() {
+            match self.finalize_freeze_round(allow_subset, &self_member_id) {
                 Ok(result) => result,
                 Err(e) => {
                     error!(conversation = %conversation_id, error = %e, "freeze finalize failed");
@@ -161,7 +157,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         // observation, no ECP needed). A downward threshold cross schedules
         // a removal-init pass below.
         let downward_cross = if !finalize_result.score_ops.is_empty() {
-            self.core.scoring.apply_ops(&finalize_result.score_ops)
+            self.scoring.apply_ops(&finalize_result.score_ops)
         } else {
             false
         };
@@ -232,14 +228,13 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
                     // the same event independently; threshold-crossing
                     // removal still goes through SCORE_BELOW_THRESHOLD
                     // consensus in steward.rs.
-                    let accuse_target = match self.core.mls() {
+                    let accuse_target = match self.mls() {
                         Some(mls) => {
                             let violation_epoch = mls.current_epoch()?;
                             let members = mls.members()?;
                             let self_member_id: &[u8] = &self.self_member_id;
-                            let eligible = self.core.queues.steward_eligibility(&members);
-                            self.core
-                                .steward_list
+                            let eligible = self.queues.steward_eligibility(&members);
+                            self.steward_list
                                 .epoch_steward(violation_epoch, &eligible)
                                 .filter(|id| !id.is_empty() && *id != self_member_id)
                                 .map(|id| id.to_vec())
@@ -247,7 +242,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
                         None => None,
                     };
                     let cross = if let Some(steward_id) = accuse_target {
-                        self.core.scoring.apply_op(&ScoreOp {
+                        self.scoring.apply_op(&ScoreOp {
                             member_id: steward_id,
                             event: ScoreEvent::CensorshipInactivity,
                         })
@@ -257,7 +252,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
 
                     (event, cross)
                 } else {
-                    self.core.queues.clear_freeze_round();
+                    self.queues.clear_freeze_round();
                     let event = self.start_working();
                     (event, false)
                 };
@@ -290,34 +285,33 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         &mut self,
         signer: &impl Signer,
     ) -> Result<(), ConversationError> {
-        if self.core.current_state() == ConversationState::PendingJoin {
+        if self.current_state() == ConversationState::PendingJoin {
             return Ok(());
         }
 
-        let proposal_count = self.core.queues.approved_proposals_count();
+        let proposal_count = self.queues.approved_proposals_count();
         // Hold the freeze while an election is in flight — committing on
         // the known-stale list would just produce a NoCandidate.
-        if self.core.queues.has_election_in_flight() {
+        if self.queues.has_election_in_flight() {
             return Ok(());
         }
         // Recovery uses the shorter retry inactivity window so we don't
         // burn another full epoch waiting for a steward to commit.
-        let in_recovery =
-            self.core.is_in_recovery_mode() || self.core.steward_list.next_retry_round() > 0;
+        let in_recovery = self.is_in_recovery_mode() || self.steward_list.next_retry_round() > 0;
         let inactivity = if in_recovery {
-            self.core.config.recovery_inactivity_duration
+            self.config.recovery_inactivity_duration
         } else {
-            self.core.config.commit_inactivity_duration
+            self.config.commit_inactivity_duration
         };
         let Some(event) = self.check_steward_inactivity(proposal_count, inactivity) else {
             return Ok(());
         };
-        let epoch = self.core.expect_mls()?.current_epoch()?;
-        self.core.queues.start_freeze_round(epoch);
+        let epoch = self.expect_mls()?.current_epoch()?;
+        self.queues.start_freeze_round(epoch);
 
         let self_member_id = Arc::clone(&self.self_member_id);
-        let outbound = if self.core.steward_list.is_steward(&self_member_id) {
-            match self.core.create_commit_candidate(signer, &self_member_id) {
+        let outbound = if self.steward_list.is_steward(&self_member_id) {
+            match self.create_commit_candidate(signer, &self_member_id) {
                 Ok(payload) => payload,
                 Err(e) => {
                     error!(

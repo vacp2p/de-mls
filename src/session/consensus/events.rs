@@ -40,7 +40,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         // Any outcome moots both pending deadlines for this proposal.
         self.cancel_auto_vote(proposal_id);
         self.unregister_consensus_timeout(proposal_id);
-        let already_applied = self.core.queues.is_consensus_outcome_applied(proposal_id);
+        let already_applied = self.queues.is_consensus_outcome_applied(proposal_id);
         if already_applied {
             tracing::debug!(
                 conversation = %self.conversation_id,
@@ -67,16 +67,16 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             conversation = %self.conversation_id,
             proposal_id, approved, "consensus reached"
         );
-        self.core.queues.mark_consensus_outcome_applied(proposal_id);
+        self.queues.mark_consensus_outcome_applied(proposal_id);
         let consensus_apply =
-            apply_consensus_result(&mut self.core.queues, proposal_id, approved, &request)?;
+            apply_consensus_result(&mut self.queues, proposal_id, approved, &request)?;
 
         // A peer steward can reach consensus and broadcast its commit
         // candidate before our own outcome lands. Now that the approved
         // queue is populated, replay any stashed candidate so the freeze
         // round starts with it instead of empty (which would force a
         // needless reelection).
-        self.core.replay_early_candidates()?;
+        self.replay_early_candidates()?;
 
         match consensus_apply {
             ConsensusApplyResult::NoAction => {}
@@ -87,7 +87,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
                 self.handle_election_rejected(signer)?;
             }
             ConsensusApplyResult::RecoveryModeOpened => {
-                self.core.enter_recovery_mode();
+                self.enter_recovery_mode();
                 self.start_freezing_and_emit();
             }
             ConsensusApplyResult::UrgentRemoval { target } => {
@@ -98,7 +98,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
                 self.refresh_stewards_after_removal(&target, signer)?;
             }
             ConsensusApplyResult::RejectedMembership { target } => {
-                self.core.queues.remove_pending_update(&target);
+                self.queues.remove_pending_update(&target);
             }
         }
 
@@ -134,7 +134,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         target: &[u8],
         signer: &impl Signer,
     ) -> Result<(), ConversationError> {
-        if !self.core.steward_list.is_steward(target) {
+        if !self.steward_list.is_steward(target) {
             return Ok(());
         }
         if let Err(e) = self.initiate_steward_election(true, signer) {
@@ -155,10 +155,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         election: StewardElectionProposal,
         signer: &impl Signer,
     ) -> Result<(), ConversationError> {
-        self.core.expect_mls()?;
+        self.expect_mls()?;
         // The proposal carries no separate candidate pool: `proposed_stewards`
         // is the full set the proposer sorted.
-        let is_valid = self.core.steward_list.validate_proposed(
+        let is_valid = self.steward_list.validate_proposed(
             &election.proposed_stewards,
             election.election_epoch,
             &election.proposed_stewards,
@@ -172,7 +172,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             return Ok(());
         }
 
-        self.core.steward_list.install_list(
+        self.steward_list.install_list(
             election.election_epoch,
             &election.proposed_stewards,
             election.proposed_stewards.len(),
@@ -180,9 +180,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         )?;
         // `retry_round` stays > 0 until the next successful commit, so the
         // post-election inactivity check keeps the short recovery window.
-        self.core.exit_recovery_mode();
-        let resumed_from_reelection = if self.core.current_state() == ConversationState::Reelection
-        {
+        self.exit_recovery_mode();
+        let resumed_from_reelection = if self.current_state() == ConversationState::Reelection {
             Some(self.start_working())
         } else {
             None
@@ -202,9 +201,9 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// Bump the retry round and re-run the election, or escalate to a
     /// `Deadlock` emergency proposal once retries are exhausted.
     fn handle_election_rejected(&mut self, signer: &impl Signer) -> Result<(), ConversationError> {
-        self.core.steward_list.bump_retry();
-        let round = self.core.steward_list.next_retry_round();
-        let max = self.core.steward_list.max_retries();
+        self.steward_list.bump_retry();
+        let round = self.steward_list.next_retry_round();
+        let max = self.steward_list.max_retries();
         if round > max {
             info!(
                 conversation = %self.conversation_id,
@@ -243,17 +242,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     ) -> Result<(), ConversationError> {
         // The threshold-cross flag is dropped: the terminal
         // `check_and_initiate_score_removals` sweep below covers it.
-        let _ = self.core.scoring.apply_ops(score_ops);
+        let _ = self.scoring.apply_ops(score_ops);
         if let Some(conversation_update_request::Payload::EmergencyCriteria(ec)) = &request.payload
             && let Some(ev) = &ec.evidence
         {
-            self.core
-                .queues
-                .remove_pending_removal(&ev.target_member_id);
+            self.queues.remove_pending_removal(&ev.target_member_id);
         }
 
-        self.core.queues.remove_emergency(proposal_id);
-        let resumed_event = if self.core.current_state() == ConversationState::Reelection {
+        self.queues.remove_emergency(proposal_id);
+        let resumed_event = if self.current_state() == ConversationState::Reelection {
             Some(self.start_working())
         } else {
             None

@@ -10,7 +10,7 @@ use crate::{
 impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// Current state of the conversation's state machine.
     pub fn state(&self) -> ConversationState {
-        self.core.current_state()
+        self.current_state()
     }
 
     /// Name of this conversation. Identifies it in the integrator's
@@ -39,26 +39,25 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// conversation has no MLS state yet (pending join). Intended for UI
     /// status display.
     pub fn epoch_and_retry(&self) -> Result<(u64, u32), ConversationError> {
-        let epoch = match self.core.mls() {
+        let epoch = match self.mls() {
             Some(mls) => mls.current_epoch()?,
             None => 0,
         };
-        Ok((epoch, self.core.steward_list.next_retry_round()))
+        Ok((epoch, self.steward_list.next_retry_round()))
     }
 
     /// Count of buffered pending membership updates. Used by tests and the UI
     /// to verify buffer hygiene (e.g., that a joiner's buffer is empty right
     /// after they receive the welcome).
     pub fn pending_update_count(&self) -> usize {
-        self.core.queues.pending_update_count()
+        self.queues.pending_update_count()
     }
 
     /// Freeze round progress: `(received, expected)`. Returns `(0, 0)` if not
     /// in freeze or no steward list is known.
     pub fn freeze_candidate_count(&self) -> (usize, usize) {
-        let received = self.core.queues.freeze_candidate_count();
+        let received = self.queues.freeze_candidate_count();
         let expected = self
-            .core
             .steward_list
             .current_list()
             .map(|l| l.len())
@@ -67,50 +66,50 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     }
 
     pub fn is_steward(&self) -> bool {
-        self.core.steward_list.is_steward(&self.self_member_id)
+        self.steward_list.is_steward(&self.self_member_id)
     }
 
     /// Identity bytes of every current member of this conversation, as
     /// reported by MLS. Returns an empty vec when the local user has no
     /// MLS state yet (pending join).
     pub fn members(&self) -> Result<Vec<Vec<u8>>, ConversationError> {
-        match self.core.mls() {
+        match self.mls() {
             Some(mls) => Ok(mls.members()?),
             None => Ok(Vec::new()),
         }
     }
 
     pub fn member_scores(&self) -> Vec<(Vec<u8>, i64)> {
-        self.core.scoring.all_members_with_scores()
+        self.scoring.all_members_with_scores()
     }
 
     pub fn member_score(&self, member_id: &[u8]) -> Option<i64> {
-        self.core.scoring.score_for(member_id)
+        self.scoring.score_for(member_id)
     }
 
     /// Identities that have an in-flight self-leave request. Used by the UI
     /// to render a "pending leave" indicator.
     pub fn pending_leave_member_ids(&self) -> Result<Vec<Vec<u8>>, ConversationError> {
-        let members = self.core.expect_mls()?.members()?;
+        let members = self.expect_mls()?.members()?;
         Ok(members
             .into_iter()
-            .filter(|id| self.core.queues.is_pending_self_leave(id))
+            .filter(|id| self.queues.is_pending_self_leave(id))
             .collect())
     }
 
     /// Steward role for each member. Uses live rotation so removed or
     /// pending-leave stewards are skipped in role display.
     pub fn member_roles(&self) -> Result<Vec<(Vec<u8>, MemberRole)>, ConversationError> {
-        let mls = self.core.expect_mls()?;
+        let mls = self.expect_mls()?;
         let epoch = mls.current_epoch()?;
         let members = mls.members()?;
 
-        let eligible = self.core.queues.steward_eligibility(&members);
-        let (live_epoch, live_backup) = self.core.steward_list.epoch_and_backup(epoch, &eligible);
+        let eligible = self.queues.steward_eligibility(&members);
+        let (live_epoch, live_backup) = self.steward_list.epoch_and_backup(epoch, &eligible);
         let live_epoch = live_epoch.map(|s| s.to_vec());
         let live_backup = live_backup.map(|s| s.to_vec());
-        let exhausted = self.core.steward_list.is_exhausted(epoch);
-        let has_list = self.core.steward_list.current_list().is_some();
+        let exhausted = self.steward_list.is_exhausted(epoch);
+        let has_list = self.steward_list.current_list().is_some();
         let roles = members
             .iter()
             .cloned()
@@ -120,12 +119,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
                         MemberRole::EpochSteward
                     } else if live_backup.as_deref().is_some_and(|bs| bs == id) {
                         MemberRole::BackupSteward
-                    } else if self.core.steward_list.is_steward(&id) {
+                    } else if self.steward_list.is_steward(&id) {
                         MemberRole::Steward
                     } else {
                         MemberRole::Member
                     }
-                } else if has_list && self.core.steward_list.is_steward(&id) {
+                } else if has_list && self.steward_list.is_steward(&id) {
                     MemberRole::Steward
                 } else {
                     MemberRole::Member
@@ -137,11 +136,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     }
 
     pub fn approved_proposals_for_current_epoch(&self) -> Vec<ConversationUpdateRequest> {
-        self.core
-            .queues
-            .approved_proposals()
-            .values()
-            .cloned()
-            .collect()
+        self.queues.approved_proposals().values().cloned().collect()
     }
 }

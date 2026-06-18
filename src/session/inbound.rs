@@ -60,7 +60,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         }
         let invite = MemberInvite::decode(payload)?;
         let already_member = self
-            .core
             .mls()
             .map(|m| m.is_member(&invite.member_id))
             .unwrap_or(false);
@@ -106,19 +105,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             );
             return Ok(DispatchOutcome::Dropped);
         }
-        let result = self.core.process_inbound(payload)?;
+        let result = self.decode_inbound(payload)?;
         self.dispatch_inbound_result(result, signer)
-    }
-
-    /// Attach a freshly-built MLS service after a joiner accepts a welcome.
-    pub(crate) fn attach_mls(&mut self, mls: CP::Mls) {
-        self.core.attach_mls(mls);
     }
 
     /// Whether this conversation's MLS service is attached. `false` for a
     /// joiner still in `PendingJoin` (no welcome yet).
     pub fn has_mls(&self) -> bool {
-        self.core.mls().is_some()
+        self.mls().is_some()
     }
 
     /// Complete a join after receiving a welcome. Idempotent: returns
@@ -131,7 +125,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         mls: CP::Mls,
         signer: &impl Signer,
     ) -> Result<(), ConversationError> {
-        if self.core.current_state() != ConversationState::PendingJoin {
+        if self.current_state() != ConversationState::PendingJoin {
             return Ok(());
         }
         if !self.has_mls() {
@@ -149,7 +143,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         if sync_bytes.is_empty() {
             return Ok(());
         }
-        let result = self.core.process_inbound(sync_bytes)?;
+        let result = self.decode_inbound(sync_bytes)?;
         self.dispatch_inbound_result(result, signer)?;
         Ok(())
     }
@@ -169,10 +163,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::Vote(vote) => {
-                let outcome_applied = self
-                    .core
-                    .queues
-                    .is_consensus_outcome_applied(vote.proposal_id);
+                let outcome_applied = self.queues.is_consensus_outcome_applied(vote.proposal_id);
                 forward_incoming_vote::<P>(
                     &self.conversation_id,
                     *vote,
@@ -249,18 +240,17 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             }
         };
         if let Some(req) = decoded.as_ref() {
-            let current_epoch = match self.core.mls() {
+            let current_epoch = match self.mls() {
                 Some(mls) => mls.current_epoch()?,
                 None => 0,
             };
             match &req.payload {
                 Some(conversation_update_request::Payload::EmergencyCriteria(_)) => {
-                    self.core.queues.insert_emergency(proposal.proposal_id);
+                    self.queues.insert_emergency(proposal.proposal_id);
                 }
                 Some(conversation_update_request::Payload::MemberInvite(_))
                 | Some(conversation_update_request::Payload::RemoveMember(_)) => {
-                    self.core
-                        .queues
+                    self.queues
                         .insert_pending_update(req.clone(), current_epoch);
                 }
                 _ => {}
@@ -288,8 +278,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
                     request,
                 });
             }
-            let delay = self.core.config.voting_delay_for(kind);
-            let vote = self.core.config.liveness_criteria_yes;
+            let delay = self.config.voting_delay_for(kind);
+            let vote = self.config.liveness_criteria_yes;
             self.register_auto_vote(proposal_id, delay, vote);
         }
         Ok(())
@@ -306,7 +296,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         }
         .into();
         let conversation_id = self.conversation_id.clone();
-        let mls = self.core.expect_mls_mut()?;
+        let mls = self.expect_mls_mut()?;
         let mls_members = mls.members().unwrap_or_default();
         let payload = mls.build_message(signer, &msg)?;
         self.broadcast(payload);
@@ -323,7 +313,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// kick-off, buffered-update drain). The commit author's `SuccessfulCommit`
     /// reward is emitted by `finalize_freeze_round`, not here.
     fn on_conversation_updated(&mut self, signer: &impl Signer) -> Result<(), ConversationError> {
-        let mls_members = match self.core.mls() {
+        let mls_members = match self.mls() {
             Some(mls) => mls.members().unwrap_or_default(),
             None => Vec::new(),
         };
@@ -333,8 +323,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         // Transition to Working BEFORE steward checks (election needs Working
         // state). Reset reelection_round: this commit advanced the epoch,
         // so whatever retry cycle we were in belongs to the previous epoch.
-        self.core.steward_list.reset_retry();
-        let state = self.core.current_state();
+        self.steward_list.reset_retry();
+        let state = self.current_state();
         let working_event = if matches!(
             state,
             ConversationState::Working
@@ -360,7 +350,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// Fire a steward election while `recovery_mode` is set so the next
     /// list installs and closes the window.
     fn maybe_close_recovery_window(&mut self, signer: &impl Signer) {
-        if !self.core.is_in_recovery_mode() {
+        if !self.is_in_recovery_mode() {
             return;
         }
         if let Err(e) = self.initiate_steward_election(true, signer) {
@@ -378,7 +368,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     fn prepare_self_leave(&mut self) -> Result<(), ConversationError> {
         self.emit_event(ConversationEvent::Leaving);
         self.cancel_all_auto_votes();
-        let taken_mls = self.core.take_mls();
+        let taken_mls = self.take_mls();
         if let Some(mut mls) = taken_mls {
             // The leave is already committed (`Leaving` emitted, MLS
             // detached); a delete failure must log and continue, else the
@@ -402,7 +392,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             steward = ?steward,
             "candidate received from peer steward"
         );
-        let state = self.core.current_state();
+        let state = self.current_state();
         if state != ConversationState::Working && state != ConversationState::Reelection {
             return Ok(());
         }
@@ -410,12 +400,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         let Some(event) = self.start_freezing() else {
             return Ok(());
         };
-        let epoch = self.core.expect_mls()?.current_epoch()?;
-        self.core.queues.start_freeze_round(epoch);
+        let epoch = self.expect_mls()?.current_epoch()?;
+        self.queues.start_freeze_round(epoch);
 
         let self_member_id = Arc::clone(&self.self_member_id);
-        let outbound = if self.core.steward_list.is_steward(&self_member_id) {
-            match self.core.create_commit_candidate(signer, &self_member_id) {
+        let outbound = if self.steward_list.is_steward(&self_member_id) {
+            match self.create_commit_candidate(signer, &self_member_id) {
                 Ok(payload) => payload,
                 Err(e) => {
                     error!(
@@ -442,15 +432,15 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// (not the full MLS set — the list may have been generated before we
     /// existed), then applies list + protocol flags + timing + peer scores.
     fn on_conversation_sync(&mut self, sync: ConversationSync) -> Result<(), ConversationError> {
-        if self.core.steward_list.current_list().is_some() {
+        if self.steward_list.current_list().is_some() {
             return Ok(());
         }
         let conversation_id = self.conversation_id.clone();
         let (members, current_epoch) = {
-            let mls = self.core.expect_mls()?;
+            let mls = self.expect_mls()?;
             (mls.members()?, mls.current_epoch()?)
         };
-        let local_default_peer_score = self.core.scoring.default_score();
+        let local_default_peer_score = self.scoring.default_score();
         if !validate_conversation_sync(
             &conversation_id,
             &sync,
@@ -484,17 +474,16 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         protocol_config.allow_subset_candidates = sync.allow_subset_candidates;
 
         let sn = sync.steward_members.len();
-        self.core.steward_list.set_config(protocol_config);
-        self.core.steward_list.install_list(
+        self.steward_list.set_config(protocol_config);
+        self.steward_list.install_list(
             sync.election_epoch,
             &sync.steward_members,
             sn,
             sync.retry_round,
         )?;
-        self.core
-            .steward_list
+        self.steward_list
             .set_max_retries(sync.max_reelection_attempts);
-        self.core.scoring.set_threshold(sync.threshold_peer_score);
+        self.scoring.set_threshold(sync.threshold_peer_score);
         let snapshot = ScoreSnapshot {
             diverged: sync
                 .peer_scores
@@ -507,11 +496,11 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         // member in this snapshot — they'll submit
         // `SCORE_BELOW_THRESHOLD` from their own event chain. Drop our
         // result to avoid duplicate proposals from joiners.
-        let _ = self.core.scoring.apply_snapshot(&snapshot);
-        self.core.config.liveness_criteria_yes = sync.liveness_criteria_yes;
-        self.core.config.pending_update_max_epochs = sync.pending_update_max_epochs;
+        let _ = self.scoring.apply_snapshot(&snapshot);
+        self.config.liveness_criteria_yes = sync.liveness_criteria_yes;
+        self.config.pending_update_max_epochs = sync.pending_update_max_epochs;
         if let Some(timing) = &sync.timing {
-            self.core.config.apply_timing(timing);
+            self.config.apply_timing(timing);
         }
         Ok(())
     }
