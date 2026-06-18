@@ -328,7 +328,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     pub(crate) fn on_joined(&mut self, signer: &impl Signer) -> Result<(), ConversationError> {
         let msg: AppMessage = EventMembershipChange {
             conversation_id: self.conversation_id.clone(),
-            member: self.member_id_display().to_string(),
+            member: self.self_member_id.to_vec(),
             change_type: TypeMembershipChange::Add as i32,
         }
         .into();

@@ -192,6 +192,18 @@ impl WalletMemberId {
     }
 }
 
+/// Render opaque member-id bytes to the gateway's display form. Member ids
+/// here are wallet address bytes, rendered EIP-55 checksummed the same way
+/// [`WalletMemberId::from_address`] builds its display; non-address byte
+/// strings fall back to lowercase hex.
+pub fn render_member_id(bytes: &[u8]) -> String {
+    if bytes.len() == Address::len_bytes() {
+        Address::from_slice(bytes).to_checksum(None)
+    } else {
+        alloy::hex::encode(bytes)
+    }
+}
+
 fn build_user_from_private_key(
     private_key: &str,
     transport: SharedDeliveryService,

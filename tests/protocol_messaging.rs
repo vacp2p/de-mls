@@ -37,7 +37,7 @@ fn chat_message_delivered_to_peer() {
     // The message landed on the *other* member, decrypted, attributed to alice.
     let chat = &h.member(1).received()[0];
     assert_eq!(chat.body, b"Hello from alice");
-    assert_eq!(chat.sender, h.member(0).member_id_display());
+    assert_eq!(chat.sender, h.member(0).member_id_bytes());
     // And the sender did not echo it back to itself.
     assert!(
         !h.member(0).got_chat(b"Hello from alice"),

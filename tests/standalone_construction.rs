@@ -142,7 +142,6 @@ fn create_builds_a_working_steward_session_without_user() {
         "standalone",
         integrator.deps(mls),
         integrator.member_id.member_id_bytes(),
-        integrator.member_id.member_id_display(),
     )
     .expect("create");
 
@@ -189,7 +188,6 @@ fn join_completes_in_one_call() {
         "standalone-welcome",
         alice.deps_with_config(alice_mls, fast_config()),
         alice.member_id.member_id_bytes(),
-        alice.member_id.member_id_display(),
     )
     .expect("create");
 
@@ -237,7 +235,6 @@ fn join_completes_in_one_call() {
         bob.deps_with_config(bob_mls, fast_config()),
         &welcome.conversation_sync_bytes,
         bob.member_id.member_id_bytes(),
-        bob.member_id.member_id_display(),
         &bob.signer,
     )
     .expect("join");

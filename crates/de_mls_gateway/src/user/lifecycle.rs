@@ -57,12 +57,8 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, DefaultConversationPlugins
             self.plugins.default_steward_list_config.clone(),
         );
         let deps = self.build_deps(mls, scoring, steward, config);
-        let conversation = Conversation::create(
-            conversation_id,
-            deps,
-            self.member_id.member_id_bytes(),
-            self.member_id.member_id_display(),
-        )?;
+        let conversation =
+            Conversation::create(conversation_id, deps, self.member_id.member_id_bytes())?;
         self.register_built(conversation_id, conversation)?;
         Ok(())
     }

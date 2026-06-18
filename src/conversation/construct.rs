@@ -45,16 +45,14 @@ pub struct ConversationDeps<P: ConsensusPlugin, CP: ConversationPlugins> {
 impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     /// Create a brand-new conversation we steward. Starts in `Working` with
     /// the local member installed as sole steward at epoch 0. The MLS service
-    /// in `deps` is already seeded by the integrator. `member_id` /
-    /// `member_id_display` name the local member — the opaque id bytes the
-    /// protocol matches on and the human-readable form.
+    /// in `deps` is already seeded by the integrator. `member_id` names the
+    /// local member — the opaque id bytes the protocol matches on.
     pub fn create(
         conversation_id: &str,
         deps: ConversationDeps<P, CP>,
         member_id: &[u8],
-        member_id_display: &str,
     ) -> Result<Self, ConversationError> {
-        Self::assemble(conversation_id, deps, true, member_id, member_id_display)
+        Self::assemble(conversation_id, deps, true, member_id)
     }
 
     /// Build a fully-joined conversation from a welcome the integrator already
@@ -68,12 +66,10 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         deps: ConversationDeps<P, CP>,
         conversation_sync_bytes: &[u8],
         member_id: &[u8],
-        member_id_display: &str,
         signer: &impl Signer,
     ) -> Result<Self, ConversationError> {
         let conversation_id = deps.mls.conversation_id().to_string();
-        let mut conversation =
-            Self::assemble(&conversation_id, deps, false, member_id, member_id_display)?;
+        let mut conversation = Self::assemble(&conversation_id, deps, false, member_id)?;
         conversation.on_joined(signer)?;
         conversation.apply_welcome_sync(conversation_sync_bytes, signer)?;
         Ok(conversation)
@@ -90,7 +86,6 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         deps: ConversationDeps<P, CP>,
         is_creation: bool,
         member_id: &[u8],
-        member_id_display: &str,
     ) -> Result<Self, ConversationError> {
         let self_member_id_bytes = member_id.to_vec();
         let queues = ConversationQueues::new(conversation_id);
@@ -132,7 +127,6 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
             state_machine,
             deps.config,
             Arc::from(member_id),
-            Arc::from(member_id_display),
             deps.app_id,
         );
         // Surface the opening phase so a caller draining conversation events sees

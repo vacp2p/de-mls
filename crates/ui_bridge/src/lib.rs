@@ -154,7 +154,7 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                         message: "You requested to leave or ban user from the group"
                             .to_string()
                             .into_bytes(),
-                        sender: "system".to_string(),
+                        sender: b"system".to_vec(),
                         conversation_id: conversation_id.clone(),
                     }));
                 }
@@ -178,7 +178,7 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                     Ok(()) => {
                         GATEWAY.push_event(AppEvent::ChatMessage(ConversationMessage {
                             message: body.into_bytes(),
-                            sender: "me".to_string(),
+                            sender: b"me".to_vec(),
                             conversation_id,
                         }));
                     }
@@ -192,7 +192,7 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 // TODO: load from storage; stub:
                 GATEWAY.push_event(AppEvent::ChatMessage(ConversationMessage {
                     message: "History loaded (stub)".as_bytes().to_vec(),
-                    sender: "system".to_string(),
+                    sender: b"system".to_vec(),
                     conversation_id: conversation_id.clone(),
                 }));
             }
@@ -230,7 +230,7 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                     )
                     .as_bytes()
                     .to_vec(),
-                    sender: "system".to_string(),
+                    sender: b"system".to_vec(),
                     conversation_id: conversation_id.clone(),
                 }));
             }

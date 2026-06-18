@@ -134,10 +134,6 @@ pub struct Conversation<P: ConsensusPlugin, CP: ConversationPlugins> {
     /// Identity bytes of the local member, snapshotted from the `member_id`
     /// passed at construction. Read via [`Conversation::member_id_bytes`].
     pub(crate) self_member_id: Arc<[u8]>,
-    /// Display form of the local member id, derived at construction.
-    /// `Arc<str>` for the same reason as `self_member_id` — cheap clone
-    /// across guard boundaries. Read via [`Conversation::member_id_display`].
-    pub(crate) member_id_display: Arc<str>,
     /// Per-instance app id supplied at construction. Tagged on every
     /// outbound packet and used for self-echo filtering in
     /// [`Conversation::process_inbound`]. Read via [`Conversation::app_id`].
@@ -157,7 +153,6 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     /// Build a fresh conversation around an already-assembled `services`
     /// bundle (MLS service seeded, plug-ins configured, consensus receiver
     /// subscribed). The time-driven `timing` state starts from defaults.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         conversation_id: String,
         queues: ConversationQueues,
@@ -165,7 +160,6 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         state_machine: ConversationStateMachine,
         config: ConversationConfig,
         self_member_id: Arc<[u8]>,
-        member_id_display: Arc<str>,
         app_id: Arc<[u8]>,
     ) -> Self {
         Self {
@@ -177,7 +171,6 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
             operating_mode: OperatingMode::Normal,
             timing: Timing::new(),
             self_member_id,
-            member_id_display,
             app_id,
             pending_events: Mutex::new(Vec::new()),
             pending_outbound: Mutex::new(Vec::new()),
@@ -675,7 +668,6 @@ mod tests {
             ConversationStateMachine::new_as_member(),
             ConversationConfig::default(),
             Arc::from(&b"test-member-id"[..]),
-            Arc::from("0xtest-display"),
             Arc::from(&[0u8; 16][..]),
         )
     }
@@ -695,7 +687,6 @@ mod tests {
             ConversationStateMachine::new_as_member(),
             ConversationConfig::default(),
             Arc::from(&b"test-member-id"[..]),
-            Arc::from("0xtest-display"),
             Arc::from(&[0u8; 16][..]),
         )
     }

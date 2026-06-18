@@ -23,11 +23,6 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         &self.self_member_id
     }
 
-    /// Display form of the local member id.
-    pub fn member_id_display(&self) -> &str {
-        &self.member_id_display
-    }
-
     /// App id this conversation tags on outbound packets and uses for self-echo
     /// filtering in [`Conversation::process_inbound`].
     pub fn app_id(&self) -> &[u8] {

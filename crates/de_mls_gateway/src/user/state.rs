@@ -115,7 +115,6 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, DefaultConversationPlugins
             deps,
             &welcome.conversation_sync_bytes,
             self.member_id.member_id_bytes(),
-            self.member_id.member_id_display(),
             &self.signer,
         )?;
         let entry_arc = self.register_built(&conversation_id, conversation)?;

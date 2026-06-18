@@ -55,7 +55,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
 
         let app_msg: AppMessage = ConversationMessage {
             message,
-            sender: self.member_id_display.to_string(),
+            sender: self.self_member_id.to_vec(),
             conversation_id: self.conversation_id.clone(),
         }
         .into();

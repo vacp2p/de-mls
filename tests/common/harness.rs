@@ -149,11 +149,11 @@ impl Integrator {
 }
 
 /// A captured inbound chat message: the decrypted body plus the sender's
-/// display string.
+/// opaque member-id bytes.
 #[derive(Debug, Clone)]
 pub struct ReceivedChat {
     pub body: Vec<u8>,
-    pub sender: String,
+    pub sender: Vec<u8>,
 }
 
 /// One protocol participant: integrator state + its `Conversation` (absent
@@ -191,13 +191,8 @@ impl Member {
         let scoring = integ.scoring();
         let steward = integ.steward();
         let deps = integ.deps(mls, scoring, steward, config.clone());
-        let convo = Conversation::create(
-            conversation_id,
-            deps,
-            integ.member_id.member_id_bytes(),
-            integ.member_id.member_id_display(),
-        )
-        .expect("create conversation");
+        let convo = Conversation::create(conversation_id, deps, integ.member_id.member_id_bytes())
+            .expect("create conversation");
         Self {
             integ,
             convo: Some(convo),
@@ -591,7 +586,6 @@ impl Member {
             deps,
             &welcome.conversation_sync_bytes,
             self.integ.member_id.member_id_bytes(),
-            self.integ.member_id.member_id_display(),
             &self.integ.signer,
         ) {
             Ok(convo) => {
