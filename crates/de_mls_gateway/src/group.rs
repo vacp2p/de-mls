@@ -2,7 +2,6 @@ use std::str::FromStr;
 
 use alloy::primitives::Address;
 
-use de_mls::ConversationState;
 use de_mls_ds::WakuDeliveryService;
 use de_mls_ui_protocol::v1::MemberInfo;
 
@@ -20,7 +19,7 @@ impl Gateway<WakuDeliveryService> {
         user_ref
             .write()
             .await
-            .start_conversation(&conversation_id, true)?;
+            .start_conversation(&conversation_id)?;
         core.topics.add_many(&conversation_id)?;
         tracing::info!(group = %conversation_id, "group ready, subtopics subscribed");
 
@@ -35,10 +34,10 @@ impl Gateway<WakuDeliveryService> {
         tracing::info!(group = %conversation_id, "joining group");
         let core = self.core();
         let user_ref = self.user()?;
-        user_ref
-            .write()
-            .await
-            .start_conversation(&conversation_id, false)?;
+        // A joiner holds no conversation until a welcome arrives: it subscribes
+        // to the topics and announces its key package, then waits. The welcome
+        // is ingested by the delivery forwarder via `User::accept_welcome`,
+        // which builds and registers the conversation in `Working`.
         core.topics.add_many(&conversation_id)?;
         let key_package = user_ref.read().await.generate_key_package()?;
         user_ref
@@ -50,41 +49,35 @@ impl Gateway<WakuDeliveryService> {
         let user_clone = user_ref.clone();
         let group_name_clone = conversation_id.clone();
         tokio::spawn(async move {
-            // Phase 1: Poll until welcome received or timed out.
-            let joined = loop {
+            // Phase 1: wait for the welcome to register the conversation in
+            // `Working`. Until then `conversation_state` returns
+            // `ConversationNotFound` — treat that as "still waiting", not
+            // failure. Bound the wait by a fixed number of polling rounds.
+            const MAX_JOIN_ROUNDS: usize = 24;
+            let mut joined = false;
+            for _ in 0..MAX_JOIN_ROUNDS {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                let outcome = match user_clone.read().await.poll_conversation(&group_name_clone) {
-                    Ok(o) => o,
-                    Err(e) if e.is_fatal() => {
-                        tracing::warn!(group = %group_name_clone, error = %e, "join poll exiting");
-                        break false;
-                    }
-                    Err(_) => continue,
-                };
-                if outcome.leave_requested {
-                    if let Err(e) = user_clone
-                        .read()
-                        .await
-                        .finalize_self_leave(&group_name_clone)
-                    {
-                        tracing::error!(group = %group_name_clone, error = %e, "pending-join cleanup failed");
-                    }
-                    break false;
-                }
                 match user_clone
                     .read()
                     .await
                     .conversation_state(&group_name_clone)
                 {
-                    Ok(ConversationState::Working) => break true,
-                    Ok(ConversationState::PendingJoin) => continue,
-                    Ok(_) => break true,
-                    Err(_) => break false,
+                    // Conversation registered and live — joined.
+                    Ok(_) => {
+                        joined = true;
+                        break;
+                    }
+                    // Welcome not in yet — keep waiting.
+                    Err(UserError::ConversationNotFound) => continue,
+                    Err(e) => {
+                        tracing::warn!(group = %group_name_clone, error = %e, "join wait exiting");
+                        break;
+                    }
                 }
-            };
+            }
 
             if !joined {
-                tracing::debug!(group = %group_name_clone, "join failed");
+                tracing::debug!(group = %group_name_clone, "join timed out waiting for welcome");
                 return;
             }
 
@@ -128,11 +121,12 @@ impl Gateway<WakuDeliveryService> {
         message: String,
     ) -> anyhow::Result<()> {
         let user_ref = self.user()?;
-        let entry = lookup_conversation(&user_ref, &conversation_id).await?;
-        entry
-            .write()
-            .map_err(|_| UserError::LockPoisoned("conversation"))?
-            .send_message(message.into_bytes())?;
+        // Route through `User`, which threads the user's signer into the
+        // conversation's `send_message` and flushes the outbound.
+        user_ref
+            .read()
+            .await
+            .send_message(&conversation_id, message.into_bytes())?;
         tracing::debug!(group = %conversation_id, "app message sent");
         Ok(())
     }
@@ -143,15 +137,16 @@ impl Gateway<WakuDeliveryService> {
         user_to_ban: String,
     ) -> anyhow::Result<()> {
         let user_ref = self.user()?;
-        let entry = lookup_conversation(&user_ref, &conversation_id).await?;
 
         let target = Address::from_str(user_to_ban.trim())
             .map_err(|e| anyhow::anyhow!("invalid ban target address {user_to_ban:?}: {e}"))?;
 
-        entry
-            .write()
-            .map_err(|_| UserError::LockPoisoned("conversation"))?
-            .remove_member(target.as_slice())?;
+        // Route through `User`, which threads the signer into the
+        // conversation's `remove_member` and flushes the outbound.
+        user_ref
+            .read()
+            .await
+            .remove_member(&conversation_id, target.as_slice())?;
 
         Ok(())
     }
@@ -163,11 +158,12 @@ impl Gateway<WakuDeliveryService> {
         vote: bool,
     ) -> anyhow::Result<()> {
         let user_ref = self.user()?;
-        let entry = lookup_conversation(&user_ref, &conversation_id).await?;
-        entry
-            .write()
-            .map_err(|_| UserError::LockPoisoned("conversation"))?
-            .vote(proposal_id, vote)?;
+        // Route through `User`, which threads the signer into the
+        // conversation's `vote` and flushes the outbound.
+        user_ref
+            .read()
+            .await
+            .vote(&conversation_id, proposal_id, vote)?;
         Ok(())
     }
 

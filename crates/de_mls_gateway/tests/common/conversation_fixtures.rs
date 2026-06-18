@@ -3,8 +3,8 @@
 //! Built around [`User`] + [`de_mls::Conversation`] over the
 //! `DefaultConversationPluginsFactory`. Every helper drives the production
 //! public surface — no peeking at private state. Packet relay is explicit:
-//! tests drain a [`CapturingTransport`] and call `process_inbound_packet`
-//! on the receivers, mirroring what `recovery_cascade.rs` established.
+//! tests drain a [`CapturingTransport`] and route each packet into the
+//! receivers via `User::handle_inbound` / `User::receive_key_package`.
 
 #![allow(dead_code)]
 
@@ -30,13 +30,12 @@ pub type TransportHandle = Arc<Mutex<CapturingTransport>>;
 
 pub type TestUser =
     User<DefaultConsensusPlugin, DefaultConversationPluginsFactory, SignatureKeyPair>;
-pub type TestConversation =
-    Conversation<DefaultConsensusPlugin, DefaultConversationPluginsFactory, SignatureKeyPair>;
+pub type TestConversation = Conversation<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
 pub type ConversationArc = Arc<RwLock<TestConversation>>;
 
 /// Test transport that captures every outbound packet for later inspection
 /// instead of sending. `subscribe` is a no-op — tests deliver inbound
-/// explicitly via `process_inbound_packet`.
+/// explicitly via the `User` inbound entry points.
 #[derive(Debug, Default)]
 pub struct CapturingTransport {
     packets: Vec<OutboundPacket>,
@@ -141,9 +140,9 @@ pub fn broadcast(packets: &[OutboundPacket], receivers: &[&TestUser]) {
     }
 }
 
-/// Drain `ConversationEvent::WelcomeReady` events from each session and
-/// route each locally-minted welcome to the matching joiner via
-/// [`TestUser::accept_welcome`] (which also applies the bundled
+/// Drain `ConversationEvent::WelcomeReady` events from each user's
+/// conversation and route each locally-minted welcome to the matching joiner
+/// via [`TestUser::accept_welcome`] (which also applies the bundled
 /// `conversation_sync_bytes`). Returns `(delivered_count,
 /// sync_bytes_captured)` — the second element holds every non-empty
 /// `conversation_sync_bytes` from delivered welcomes, in order. Call
@@ -151,7 +150,7 @@ pub fn broadcast(packets: &[OutboundPacket], receivers: &[&TestUser]) {
 /// packets (e.g. the post-commit steward election proposal) need the joiner's
 /// MLS attached first.
 pub fn route_welcomes(
-    sessions: &[ConversationArc],
+    conversation: &str,
     users: &mut [(TestUser, TransportHandle)],
 ) -> (usize, Vec<Vec<u8>>) {
     use de_mls::ConversationEvent;
@@ -161,8 +160,8 @@ pub fn route_welcomes(
     // as `minted_locally: false`, and routing those too would just bounce
     // off the joiner as duplicates (mirrors the gateway's delivery gate).
     let mut welcomes: Vec<MemberWelcome> = Vec::new();
-    for s in sessions.iter() {
-        for event in s.read().unwrap().drain_events() {
+    for (u, _) in users.iter() {
+        for event in u.drain_events(conversation).unwrap_or_default() {
             if let ConversationEvent::WelcomeReady {
                 welcome,
                 minted_locally: true,
@@ -208,11 +207,14 @@ pub fn fast_test_config() -> ConversationConfig {
     }
 }
 
-/// One polling cycle on a session: tick deadlines, advance freeze state,
-/// check member-freeze inactivity, and check pending-join expiry. Mirrors the
-/// production `group_polling_loop` body in `de_mls_gateway::group`.
-pub fn poll_once(session: &ConversationArc) {
-    let _ = session.write().unwrap().poll();
+/// One polling cycle on a user's conversation: tick deadlines, advance freeze
+/// state, and check member-freeze inactivity. Routes through
+/// [`TestUser::poll_conversation`] so the user's signer is threaded in,
+/// mirroring the production `group_polling_loop` body in
+/// `de_mls_gateway::group`. A no-op for a conversation the user hasn't joined
+/// yet (no welcome).
+pub fn poll_once(user: &TestUser, conversation: &str) {
+    let _ = user.poll_conversation(conversation);
 }
 
 /// Flush a session's pull-buffered outbound into its user's transport handle
@@ -277,23 +279,12 @@ pub fn bootstrap_joined_conversation(
         .map(|k| make_user(k, cfg.clone(), steward_cfg.clone()))
         .collect();
 
+    // Only the creator registers a conversation up front; joiners hold none
+    // until a welcome arrives and `accept_welcome` builds one.
     users[0]
         .0
-        .start_conversation(conversation, true)
+        .start_conversation(conversation)
         .expect("creator start");
-    for (u, _) in users.iter_mut().skip(1) {
-        u.start_conversation(conversation, false)
-            .expect("joiner start");
-    }
-
-    let mut sessions: Vec<ConversationArc> = Vec::with_capacity(users.len());
-    for (u, _) in &users {
-        sessions.push(
-            u.lookup_entry(conversation)
-                .unwrap()
-                .expect("session registered"),
-        );
-    }
 
     // Joiners announce KPs. Key-package send is user-level and publishes
     // straight to the user's transport. Drain joiner transports, deliver to
@@ -322,11 +313,11 @@ pub fn bootstrap_joined_conversation(
     let mut quiet_rounds = 0;
     for round in 0..MAX_ROUNDS {
         sleep(Duration::from_millis(60));
-        for s in &sessions {
-            poll_once(s);
-        }
-        for (i, (_, h)) in users.iter().enumerate() {
-            flush_conversation(&sessions[i], h);
+        // Poll every user's conversation (a no-op for joiners not joined yet)
+        // and drain their pull-buffered outbound into their transport handle.
+        for (u, h) in &users {
+            poll_once(u, conversation);
+            flush_user(u, h);
         }
 
         // Welcomes never traverse the test transport: the steward emits
@@ -334,7 +325,7 @@ pub fn bootstrap_joined_conversation(
         // its joiner BEFORE relaying packets — same-round app-msg
         // traffic (the post-commit steward election proposal) needs
         // the joiner's MLS attached first.
-        let (welcome_count, _) = route_welcomes(&sessions, &mut users);
+        let (welcome_count, _) = route_welcomes(conversation, &mut users);
         let delivered_welcome = welcome_count > 0;
 
         let mut packets = Vec::new();
@@ -349,11 +340,16 @@ pub fn bootstrap_joined_conversation(
             }
         }
 
+        // A joiner is Working only once its welcome built a conversation that
+        // reached `Working`; before that it holds no conversation at all.
         let mut all_working = true;
-        for s in sessions.iter().skip(1) {
-            if s.read().unwrap().state() != ConversationState::Working {
-                all_working = false;
-                break;
+        for (u, _) in users.iter().skip(1) {
+            match u.conversation_state(conversation) {
+                Ok(ConversationState::Working) => {}
+                _ => {
+                    all_working = false;
+                    break;
+                }
             }
         }
         if all_working && packets.is_empty() && !delivered_welcome {

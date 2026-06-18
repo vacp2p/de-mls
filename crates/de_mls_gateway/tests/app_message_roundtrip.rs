@@ -1,5 +1,5 @@
 //! Application message roundtrip through `Conversation::send_message`
-//! and `Conversation::dispatch_inbound_result` → `ConversationEvent::AppMessage`.
+//! and `Conversation::process_inbound` → `ConversationEvent::AppMessage`.
 
 use std::time::Duration;
 
@@ -23,13 +23,13 @@ fn chat_message_delivered_to_peer_as_app_message_event() {
         StewardListConfig::new(1, 5).unwrap(),
     );
 
-    let alice_session = users[0].0.lookup_entry("chat").unwrap().unwrap();
     let bob_session = users[1].0.lookup_entry("chat").unwrap().unwrap();
 
-    alice_session
-        .write()
-        .unwrap()
-        .send_message(b"Hello from alice".to_vec())
+    // Route through `User`, which threads alice's signer into the
+    // conversation's `send_message`.
+    users[0]
+        .0
+        .send_message("chat", b"Hello from alice".to_vec())
         .unwrap();
 
     // Relay alice's outbound to bob.

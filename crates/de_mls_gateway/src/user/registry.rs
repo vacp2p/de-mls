@@ -14,7 +14,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> User<P, CP
     pub fn lookup_entry(
         &self,
         conversation_id: &str,
-    ) -> Result<Option<ConversationEntry<P, CP, Sig>>, UserError> {
+    ) -> Result<Option<ConversationEntry<P, CP>>, UserError> {
         Ok(self
             .conversations
             .read()

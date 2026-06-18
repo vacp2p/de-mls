@@ -64,7 +64,7 @@ pub(crate) type UserRef = Arc<
 /// Type alias for a conversation registry entry obtained via
 /// `User::lookup_entry`. Re-exports the sync-locked entry from `de_mls::session`.
 pub(crate) type ConversationRef =
-    ConversationEntry<DefaultConsensusPlugin, DefaultConversationPluginsFactory, SignatureKeyPair>;
+    ConversationEntry<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
 
 // Global, process-wide gateway instance
 pub static GATEWAY: Lazy<Gateway<WakuDeliveryService>> = Lazy::new(Gateway::new);
