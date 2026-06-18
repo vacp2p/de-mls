@@ -52,6 +52,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             message,
             sender: self.member_id_display.to_string(),
             conversation_id: self.conversation_id.clone(),
+            ..Default::default()
         }
         .into();
         let payload = self.core.expect_mls_mut()?.build_message(&app_msg)?;
