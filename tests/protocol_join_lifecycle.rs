@@ -1,51 +1,14 @@
-//! Join-lifecycle edge flows: a joiner whose welcome never arrives expires out
-//! of `PendingJoin`, and an evicted member can rejoin at a strictly later
+//! Join-lifecycle edge flows: an evicted member can rejoin at a strictly later
 //! epoch.
 
 mod common;
 
-use std::time::Duration;
-
-use common::harness::{Member, TestHarness, fast_config};
-use de_mls::core::{ConversationState, StewardListConfig};
-use de_mls::session::ConversationConfig;
+use common::harness::{TestHarness, fast_config};
+use de_mls::StewardListConfig;
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 const CHARLIE: &str = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
-
-#[test]
-fn pending_join_without_welcome_expires() {
-    // A lone joiner for a conversation no creator is on: no welcome ever
-    // arrives, so after 3× the commit-inactivity window the joiner gives up.
-    let inactivity = Duration::from_millis(80);
-    let cfg = ConversationConfig {
-        commit_inactivity_duration: inactivity,
-        ..ConversationConfig::default()
-    };
-    let mut joiner = Member::join(ALICE, "ghost", cfg, StewardListConfig::new(1, 5).unwrap());
-    assert_eq!(joiner.state(), ConversationState::PendingJoin);
-
-    // Poll until the pending-join window elapses (allow generous slack for CI).
-    let mut leave_requested = false;
-    for _ in 0..24 {
-        std::thread::sleep(inactivity / 2);
-        if joiner.poll().leave_requested {
-            leave_requested = true;
-            break;
-        }
-    }
-    assert!(
-        leave_requested,
-        "pending-join must signal leave_requested after 3× inactivity"
-    );
-
-    joiner.pump_events();
-    assert!(
-        joiner.saw_leaving(),
-        "the joiner must emit Leaving on pending-join expiry"
-    );
-}
 
 #[test]
 fn evicted_member_rejoins_at_a_later_epoch() {

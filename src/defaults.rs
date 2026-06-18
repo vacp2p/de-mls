@@ -21,7 +21,7 @@ use hashgraph_like_consensus::{
     storage::InMemoryConsensusStorage, types::ConsensusEvent,
 };
 
-use crate::core::{
+use crate::{
     ConsensusPlugin, DeterministicStewardList, PeerScoreStorage, PeerScoringService,
     SyncConsensusReceiver,
 };
@@ -117,7 +117,7 @@ impl<Scope: ConsensusScope> SyncConsensusReceiver<Scope> for SyncEventReceiver<S
 
 /// In-memory consensus backend for tests and simple deployments.
 ///
-/// Implements [`crate::core::ConsensusPlugin`].
+/// Implements [`crate::ConsensusPlugin`].
 pub struct DefaultConsensusPlugin;
 
 impl ConsensusPlugin for DefaultConsensusPlugin {
@@ -141,7 +141,7 @@ impl ConsensusPlugin for DefaultConsensusPlugin {
 
 /// Reference peer-scoring plug-in: [`PeerScoringService`] over in-memory
 /// storage. The per-event score deltas are supplied at construction (see
-/// [`crate::core::default_score_deltas`]).
+/// [`crate::default_score_deltas`]).
 pub type DefaultPeerScoring = PeerScoringService<InMemoryPeerScoreStorage>;
 
 /// Reference steward-list plug-in: [`DeterministicStewardList`].

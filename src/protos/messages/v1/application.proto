@@ -20,6 +20,7 @@ message AppMessage {
     // Plaintext broadcast of a freshly minted welcome so every member —
     // not just the committing steward — can deliver it to the joiners.
     MemberWelcome member_welcome = 10;
+    EventMembershipChange membership_change = 11;
   }
 }
 
@@ -30,8 +31,18 @@ message BanRequest {
 
 message ConversationMessage {
   bytes message = 1;
-  string sender = 2;
+  bytes sender = 2;
   string conversation_id = 3;
+}
+
+message EventMembershipChange {
+  string conversation_id = 1;
+  bytes member = 2;
+  TypeMembershipChange change_type = 3;
+}
+
+enum TypeMembershipChange{
+  Add = 0;
 }
 
 message CommitCandidate {

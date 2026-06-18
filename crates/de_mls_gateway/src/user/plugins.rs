@@ -5,16 +5,15 @@
 //! into new conversations. Grouping these here keeps the `User` definition
 //! surfacing registry + transport at top level.
 
-use de_mls::core::{
-    ConsensusPlugin, ConversationConfig, ConversationPluginsFactory, ScoringConfig,
-    StewardListConfig,
+use de_mls::{
+    ConsensusPlugin, ConversationConfig, ConversationPlugins, ScoringConfig, StewardListConfig,
 };
 
 use crate::user::ConsensusContext;
 
 /// Bundle of all User-level plugin state. One factory plus its three
 /// seed configs, owned outright.
-pub struct UserPlugins<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
+pub struct UserPlugins<P: ConsensusPlugin, CP: ConversationPlugins> {
     /// Builds per-conversation plug-in instances (MLS service, scoring,
     /// steward list) and generate key packages for joiners.
     pub conversation_plugins: CP,

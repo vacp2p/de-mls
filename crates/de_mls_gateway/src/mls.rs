@@ -10,10 +10,8 @@
 use std::sync::Mutex;
 
 use de_mls::{
-    core::{
-        ConversationPluginsFactory, DeterministicStewardList, PeerScoringService, ScoringConfig,
-        StewardListConfig, default_score_deltas,
-    },
+    ConversationPlugins, DeterministicStewardList, PeerScoringService, ScoringConfig,
+    StewardListConfig, default_score_deltas,
     defaults::{DefaultPeerScoring, DefaultStewardList, InMemoryPeerScoreStorage},
     mls_crypto::{KeyPackageBytes, MlsError, OpenMlsService},
 };
@@ -89,28 +87,25 @@ impl DefaultConversationPluginsFactory {
         }
         Ok(KeyPackageBytes::new(bytes, member_id))
     }
-}
 
-impl ConversationPluginsFactory for DefaultConversationPluginsFactory {
-    type Mls = GatewayMls;
-    type Scoring = DefaultPeerScoring;
-    type StewardList = DefaultStewardList;
-
-    fn create_mls(
+    /// Build an MLS service seeding a brand-new conversation we create.
+    pub fn create_mls(
         &self,
         conversation_id: String,
-        key_package: &[u8],
         signer: &impl Signer,
-    ) -> Result<Self::Mls, MlsError> {
+    ) -> Result<GatewayMls, MlsError> {
         OpenMlsService::new_as_creator(
             conversation_id,
             OpenMlsRustCrypto::default(),
-            key_package,
+            self.credential.clone(),
+            GATEWAY_SUITE,
             signer,
         )
     }
 
-    fn welcome_mls(&self, welcome_bytes: &[u8]) -> Result<Option<Self::Mls>, MlsError> {
+    /// Try to open an MLS service from a serialized welcome. `Ok(None)` when
+    /// the welcome isn't for us.
+    pub fn welcome_mls(&self, welcome_bytes: &[u8]) -> Result<Option<GatewayMls>, MlsError> {
         // Reuse the provider stashed when we minted our key package; with no
         // stash (we never minted one) a fresh empty provider holds no matching
         // key package, so the join cleanly yields `None`.
@@ -123,7 +118,8 @@ impl ConversationPluginsFactory for DefaultConversationPluginsFactory {
         OpenMlsService::new_from_welcome(welcome_bytes, provider)
     }
 
-    fn make_scoring(&self, config: &ScoringConfig) -> Self::Scoring {
+    /// Build a fresh peer-scoring plug-in.
+    pub fn make_scoring(&self, config: &ScoringConfig) -> DefaultPeerScoring {
         PeerScoringService::new(
             InMemoryPeerScoreStorage::new(),
             default_score_deltas(),
@@ -131,11 +127,18 @@ impl ConversationPluginsFactory for DefaultConversationPluginsFactory {
         )
     }
 
-    fn make_steward_list(
+    /// Build a fresh (empty) steward-list plug-in.
+    pub fn make_steward_list(
         &self,
         conversation_id: &[u8],
         config: StewardListConfig,
-    ) -> Self::StewardList {
+    ) -> DefaultStewardList {
         DeterministicStewardList::empty(conversation_id.to_vec(), config)
     }
+}
+
+impl ConversationPlugins for DefaultConversationPluginsFactory {
+    type Mls = GatewayMls;
+    type Scoring = DefaultPeerScoring;
+    type StewardList = DefaultStewardList;
 }

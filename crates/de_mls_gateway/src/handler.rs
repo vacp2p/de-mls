@@ -2,7 +2,7 @@
 //!
 //! [`crate::Gateway`] runs one polling task per logged-in user. Each tick
 //! drains [`crate::user::User::drain_lifecycle_events`] for `Created` /
-//! `Removed`, then drains [`de_mls::session::Conversation::drain_events`] on
+//! `Removed`, then drains [`de_mls::Conversation::drain_events`] on
 //! every active conversation and dispatches the [`ConversationEvent`]s to `AppEvent`
 //! variants on the UI pipe — also maintaining the per-group
 //! `epoch_history` cache used by the History tab.
@@ -16,7 +16,7 @@ use futures::channel::mpsc::UnboundedSender;
 use prost::Message;
 
 use de_mls::{
-    core::ConversationEvent,
+    ConversationEvent,
     protos::de_mls::messages::v1::{AppMessage, ConversationMessage, VotePayload, app_message},
 };
 use de_mls_ds::{OutboundPacket, SharedDeliveryService, TopicFilter, WELCOME_SUBTOPIC};
@@ -26,7 +26,7 @@ use hashgraph_like_consensus::types::ConsensusEvent;
 use crate::{
     EpochHistoryStore, MAX_EPOCH_HISTORY, UserRef,
     forwarder::{display_batch, push_consensus_state, push_member_scores},
-    welcome_envelope,
+    render_member_id, welcome_envelope,
 };
 
 /// Fan-out target for [`ConversationEvent`]s on a single conversation. Held as
@@ -67,7 +67,7 @@ impl GatewayEventFanout {
                     .unbounded_send(AppEvent::ChatMessage(ConversationMessage {
                         message: format!("You're removed from the group {conversation_id}")
                             .into_bytes(),
-                        sender: "system".to_string(),
+                        sender: b"system".to_vec(),
                         conversation_id: conversation_id.to_string(),
                     }));
             }
@@ -220,7 +220,14 @@ pub fn forward_app_message(
 ) -> anyhow::Result<()> {
     match &app_msg.payload {
         Some(app_message::Payload::ConversationMessage(cm)) => {
-            let msg = cm.clone();
+            // The protocol carries the sender as opaque member-id bytes;
+            // render them to the gateway's display form before handing the
+            // message to the UI.
+            let msg = ConversationMessage {
+                message: cm.message.clone(),
+                sender: render_member_id(&cm.sender).into_bytes(),
+                conversation_id: cm.conversation_id.clone(),
+            };
             evt_tx
                 .unbounded_send(AppEvent::ChatMessage(msg))
                 .map_err(|e| anyhow::anyhow!("error sending chat message event: {e}"))

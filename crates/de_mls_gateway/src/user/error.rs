@@ -5,7 +5,7 @@
 //! registry-side: conversation lookup, lock poisoning, and transport
 //! delivery.
 
-use de_mls::session::ConversationError;
+use de_mls::{ConversationError, mls_crypto::MlsError};
 
 /// Errors from `User` operations.
 #[derive(Debug, thiserror::Error)]
@@ -27,6 +27,11 @@ pub enum UserError {
 
     #[error(transparent)]
     Conversation(#[from] ConversationError),
+
+    /// Building the per-conversation MLS service failed (creator-side seeding
+    /// or opening a welcome).
+    #[error(transparent)]
+    Mls(#[from] MlsError),
 }
 
 impl UserError {
@@ -42,7 +47,8 @@ impl UserError {
             UserError::ConversationAlreadyExists
             | UserError::WelcomeNotForUs
             | UserError::Transport(_)
-            | UserError::Conversation(_) => false,
+            | UserError::Conversation(_)
+            | UserError::Mls(_) => false,
         }
     }
 }

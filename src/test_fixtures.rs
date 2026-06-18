@@ -1,6 +1,6 @@
 //! Crate-internal test fixtures: minimal trait impls for tests that need
-//! to construct a [`crate::core::ConversationCore`] or [`crate::session::Conversation`]
-//! without standing up real MLS / scoring / steward backends.
+//! to construct a [`crate::Conversation`] without standing up real
+//! MLS / scoring / steward backends.
 //!
 //! Most methods are `unreachable!()` — tests should only exercise the
 //! handful of paths the test specifically targets. If a test reaches
@@ -13,11 +13,8 @@ use openmls_traits::signatures::{Signer, SignerError};
 use openmls_traits::types::SignatureScheme;
 
 use crate::{
-    core::{
-        ConsensusPlugin, ConsensusServiceFor, ConversationPluginsFactory, ElectionDecision,
-        PeerScoringPlugin, ScoreOp, ScoreSnapshot, ScoringConfig, StewardList, StewardListConfig,
-        StewardListPlugin,
-    },
+    ConsensusPlugin, ConsensusServiceFor, ConversationPlugins, ElectionDecision, PeerScoringPlugin,
+    ScoreOp, ScoreSnapshot, StewardList, StewardListConfig, StewardListPlugin,
     defaults::DefaultConsensusPlugin,
     mls_crypto::{
         CommitCandidate, DecryptResult, MlsCommitInput, MlsError, MlsMessageKind, MlsService,
@@ -27,7 +24,7 @@ use crate::{
 };
 
 /// Build a `ConsensusServiceFor<DefaultConsensusPlugin>` paired with a
-/// subscribed receiver for [`crate::session::Conversation::new`].
+/// subscribed receiver for [`crate::Conversation::new`].
 pub(crate) fn make_test_consensus_service() -> (
     ConsensusServiceFor<DefaultConsensusPlugin>,
     crate::defaults::SyncEventReceiver<String>,
@@ -191,7 +188,7 @@ impl StewardListPlugin for StubStewardList {
         _: &[Vec<u8>],
         _: usize,
         _: u32,
-    ) -> Result<(), crate::core::CoreError> {
+    ) -> Result<(), crate::ConversationError> {
         unreachable!()
     }
     fn validate_proposed(
@@ -200,7 +197,7 @@ impl StewardListPlugin for StubStewardList {
         _: u64,
         _: &[Vec<u8>],
         _: u32,
-    ) -> Result<bool, crate::core::CoreError> {
+    ) -> Result<bool, crate::ConversationError> {
         unreachable!()
     }
     fn propose_election<F: Fn(&[u8]) -> bool>(
@@ -210,7 +207,7 @@ impl StewardListPlugin for StubStewardList {
         _: &[u8],
         _: F,
         _: bool,
-    ) -> Result<ElectionDecision, crate::core::CoreError> {
+    ) -> Result<ElectionDecision, crate::ConversationError> {
         unreachable!()
     }
     fn bump_retry(&mut self) {
@@ -222,8 +219,8 @@ impl StewardListPlugin for StubStewardList {
 }
 
 /// Scoring plug-in that panics on every call. Tests that don't read
-/// scores use this as `StubPluginsFactory::Scoring` so the bundle still
-/// satisfies [`crate::core::ConversationPluginsFactory`].
+/// scores use this as `StubPlugins::Scoring` so the bundle still
+/// satisfies [`crate::ConversationPlugins`].
 pub(crate) struct StubScoring;
 
 impl PeerScoringPlugin for StubScoring {
@@ -262,28 +259,14 @@ impl PeerScoringPlugin for StubScoring {
     }
 }
 
-/// Test plug-in bundle wiring the three stubs into the [`ConversationPluginsFactory`]
-/// trait so tests can construct [`crate::core::ConversationCore`] and
-/// [`crate::session::Conversation`] under their single `<CP>` parameter. The
-/// factory methods are `unreachable!()` — tests build plug-in instances
-/// directly and hand them to the conversation constructors.
-pub(crate) struct StubPluginsFactory;
+/// Test plug-in bundle naming the three stubs as the [`ConversationPlugins`]
+/// types so tests can construct a [`crate::Conversation`] under its single
+/// `<CP>` parameter. Tests build plug-in instances directly and hand them to
+/// the conversation constructors.
+pub(crate) struct StubPlugins;
 
-impl ConversationPluginsFactory for StubPluginsFactory {
+impl ConversationPlugins for StubPlugins {
     type Mls = UnusedMls;
     type Scoring = StubScoring;
     type StewardList = StubStewardList;
-
-    fn create_mls(&self, _: String, _: &[u8], _: &impl Signer) -> Result<Self::Mls, MlsError> {
-        unreachable!()
-    }
-    fn welcome_mls(&self, _: &[u8]) -> Result<Option<Self::Mls>, MlsError> {
-        unreachable!()
-    }
-    fn make_scoring(&self, _: &ScoringConfig) -> Self::Scoring {
-        unreachable!()
-    }
-    fn make_steward_list(&self, _: &[u8], _: StewardListConfig) -> Self::StewardList {
-        unreachable!()
-    }
 }

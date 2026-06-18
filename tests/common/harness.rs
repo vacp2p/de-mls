@@ -5,7 +5,7 @@
 //! owns `N` [`Member`]s wired to one in-memory bus, and [`TestHarness::process`]
 //! / [`TestHarness::process_until`] drive the polling-and-relay loop until a
 //! predicate holds. Each `Member` bundles the per-participant integrator state
-//! (plug-in factory, consensus storage + signer, member id) with its live
+//! (credential + signer, consensus storage + signer, member id) with its live
 //! `Conversation` and a captured-chat buffer.
 //!
 //! Relay model (de-mls layer has no transport subtopic):
@@ -14,7 +14,7 @@
 //!   (self-echoes drop internally).
 //! - Key-package announcements and welcomes never traverse `drain_outbound`:
 //!   the harness mints/announces key packages explicitly and routes
-//!   `WelcomeReady` events to joiners via `welcome_mls` + `complete_join`.
+//!   `WelcomeReady` events to joiners via `Conversation::join`.
 
 #![allow(dead_code)]
 
@@ -25,28 +25,32 @@ use std::time::Duration;
 
 use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
+use openmls::credentials::CredentialWithKey;
 use openmls_basic_credential::SignatureKeyPair;
+use openmls_rust_crypto::OpenMlsRustCrypto;
+use prost::Message;
 
-use de_mls::core::{
+use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, DefaultStewardList};
+use de_mls::mls_crypto::KeyPackageBytes;
+use de_mls::protos::de_mls::messages::v1::{
+    AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
+};
+use de_mls::{
     ConsensusPlugin, ConsensusServiceFor, ConversationEvent, ConversationState, ScoringConfig,
     StewardListConfig,
 };
-use de_mls::defaults::DefaultConsensusPlugin;
-use de_mls::member_id::MemberId;
-use de_mls::mls_crypto::KeyPackageBytes;
-use de_mls::protos::de_mls::messages::v1::{
-    AppMessage, ConversationUpdateRequest, MemberWelcome, app_message,
-};
-use de_mls::session::{
+use de_mls::{
     Conversation, ConversationConfig, ConversationDeps, CreatorVote, MemberRole, Outbound,
     PollOutcome, build_key_package_announcement,
 };
 
-use crate::common::{TestPluginsFactory, test_credential, wallet::WalletMemberId};
+use crate::common::{
+    TestMls, TestPlugins, creator_mls, make_scoring, make_steward, mint_key_package, open_welcome,
+    test_credential, wallet::WalletMemberId,
+};
 
 /// Per-conversation MLS service stack the harness runs.
-pub type TestConversation =
-    Conversation<DefaultConsensusPlugin, TestPluginsFactory, SignatureKeyPair>;
+pub type TestConversation = Conversation<DefaultConsensusPlugin, TestPlugins>;
 
 const MAX_SESSIONS_PER_SCOPE: usize = 10;
 
@@ -64,16 +68,20 @@ pub fn fast_config() -> ConversationConfig {
     }
 }
 
-/// Per-member integrator state: everything needed to build per-conversation
-/// `ConversationDeps`. Borrowed (never moved) while a conversation is built.
+/// Per-member integrator state: the member's credential + signer, the shared
+/// consensus bits, the seed configs, and the provider it mints a key package
+/// into while waiting for the matching welcome.
 struct Integrator {
-    plugins: TestPluginsFactory,
+    credential: CredentialWithKey,
     signer: SignatureKeyPair,
     consensus_storage: <DefaultConsensusPlugin as ConsensusPlugin>::ConsensusStorage,
     consensus_signer: <DefaultConsensusPlugin as ConsensusPlugin>::Signer,
     member_id: WalletMemberId,
     scoring_config: ScoringConfig,
     steward_list_config: StewardListConfig,
+    /// Provider holding the private keys of a minted-but-not-yet-joined key
+    /// package; `open_welcome` consumes it once the welcome arrives.
+    pending_provider: Option<OpenMlsRustCrypto>,
 }
 
 impl Integrator {
@@ -82,20 +90,47 @@ impl Integrator {
         let member_id = WalletMemberId::from_address(eth_signer.address());
         let (credential, signer) = test_credential(member_id.member_id_bytes());
         Self {
-            plugins: TestPluginsFactory::new(credential, signer.clone()),
+            credential,
             signer,
             consensus_storage: DefaultConsensusPlugin::new_storage(),
             consensus_signer: EthereumConsensusSigner::new(eth_signer),
             member_id,
             scoring_config: ScoringConfig::default(),
             steward_list_config,
+            pending_provider: None,
         }
     }
 
+    /// Build a fresh scoring plug-in from this integrator's seed config.
+    fn scoring(&self) -> DefaultPeerScoring {
+        make_scoring(&self.scoring_config)
+    }
+
+    /// Build a fresh (empty) steward-list plug-in from this integrator's
+    /// seed config.
+    fn steward(&self) -> DefaultStewardList {
+        make_steward(
+            self.member_id.member_id_bytes(),
+            self.steward_list_config.clone(),
+        )
+    }
+
+    /// Mint a single-use key package, stashing its provider for the matching
+    /// welcome.
+    fn mint_key_package(&mut self) -> KeyPackageBytes {
+        let (kp, provider) = mint_key_package(&self.credential, &self.signer);
+        self.pending_provider = Some(provider);
+        kp
+    }
+
+    /// Assemble a deps bundle around pre-built plug-in instances.
     fn deps(
         &self,
+        mls: TestMls,
+        scoring: DefaultPeerScoring,
+        steward: DefaultStewardList,
         config: ConversationConfig,
-    ) -> ConversationDeps<'_, DefaultConsensusPlugin, TestPluginsFactory, SignatureKeyPair> {
+    ) -> ConversationDeps<DefaultConsensusPlugin, TestPlugins> {
         let consensus = ConsensusServiceFor::<DefaultConsensusPlugin>::new_with_components(
             self.consensus_storage.clone(),
             DefaultConsensusPlugin::new_event_bus(),
@@ -103,36 +138,38 @@ impl Integrator {
             MAX_SESSIONS_PER_SCOPE,
         );
         ConversationDeps {
-            plugins: &self.plugins,
+            mls,
+            scoring,
+            steward,
             consensus,
-            signer: self.signer.clone(),
-            identity: &self.member_id,
             app_id: Arc::from(self.member_id.member_id_bytes()),
             config,
-            scoring_config: self.scoring_config.clone(),
-            steward_list_config: self.steward_list_config.clone(),
         }
     }
 }
 
 /// A captured inbound chat message: the decrypted body plus the sender's
-/// display string.
+/// opaque member-id bytes.
 #[derive(Debug, Clone)]
 pub struct ReceivedChat {
     pub body: Vec<u8>,
-    pub sender: String,
+    pub sender: Vec<u8>,
 }
 
-/// One protocol participant: integrator state + its live `Conversation` + the
-/// log of every [`ConversationEvent`] it has emitted. Query methods take
-/// `&self`; driving methods take `&mut self`.
+/// One protocol participant: integrator state + its `Conversation` (absent
+/// until a joiner accepts its welcome) + the log of every
+/// [`ConversationEvent`] it has emitted. Query methods take `&self`; driving
+/// methods take `&mut self`.
 pub struct Member {
     integ: Integrator,
-    convo: TestConversation,
+    convo: Option<TestConversation>,
     events: Vec<ConversationEvent>,
     /// The encrypted `conversation_sync_bytes` from the welcome this member
     /// joined with — captured so a test can replay it (idempotency check).
     last_sync: Option<Vec<u8>>,
+    /// Config used to build this member's `ConversationDeps` when it accepts a
+    /// welcome (joiner path) or rejoins.
+    pending_config: ConversationConfig,
 }
 
 impl Member {
@@ -145,40 +182,51 @@ impl Member {
         steward_list_config: StewardListConfig,
     ) -> Self {
         let integ = Integrator::new(private_key, steward_list_config);
-        let key_package = integ.plugins.generate_key_package();
-        let convo =
-            Conversation::create(conversation_id, key_package.as_bytes(), integ.deps(config))
-                .expect("create conversation");
+        let mls = creator_mls(
+            conversation_id.to_string(),
+            integ.credential.clone(),
+            &integ.signer,
+        )
+        .expect("create mls");
+        let scoring = integ.scoring();
+        let steward = integ.steward();
+        let deps = integ.deps(mls, scoring, steward, config.clone());
+        let convo = Conversation::create(conversation_id, deps, integ.member_id.member_id_bytes())
+            .expect("create conversation");
         Self {
             integ,
-            convo,
+            convo: Some(convo),
             events: Vec::new(),
             last_sync: None,
+            pending_config: config,
         }
     }
 
-    /// Open a pending-join conversation; MLS attaches later from a welcome.
+    /// Build a prospective joiner: it holds integrator state and can mint /
+    /// announce its key package, but has no conversation until its welcome
+    /// arrives (`try_accept_welcome` installs it via `Conversation::join`).
     pub fn join(
         private_key: &str,
-        conversation_id: &str,
+        _conversation_id: &str,
         config: ConversationConfig,
         steward_list_config: StewardListConfig,
     ) -> Self {
         let integ = Integrator::new(private_key, steward_list_config);
-        let convo =
-            Conversation::join(conversation_id, integ.deps(config)).expect("join conversation");
         Self {
             integ,
-            convo,
+            convo: None,
             events: Vec::new(),
             last_sync: None,
+            pending_config: config,
         }
     }
 
     // ── Queries (`&self`) ────────────────────────────────────────────────
 
+    /// The live conversation. Panics if this member hasn't joined yet — only
+    /// call on a member known to hold a conversation.
     pub fn convo(&self) -> &TestConversation {
-        &self.convo
+        self.convo.as_ref().expect("member has joined")
     }
 
     pub fn app_id(&self) -> &[u8] {
@@ -191,29 +239,46 @@ impl Member {
         self.integ.member_id.member_id_bytes()
     }
 
-    /// Reelection retry round; `0` while no recovery election is in flight.
+    /// Reelection retry round; `0` while no recovery election is in flight or
+    /// the member hasn't joined.
     pub fn retry_round(&self) -> u32 {
-        self.convo.epoch_and_retry().map(|(_, r)| r).unwrap_or(0)
+        self.convo
+            .as_ref()
+            .and_then(|c| c.epoch_and_retry().ok())
+            .map(|(_, r)| r)
+            .unwrap_or(0)
     }
 
     /// Membership-change proposals buffered locally but not yet committed.
     pub fn pending_update_count(&self) -> usize {
-        self.convo.pending_update_count()
+        self.convo
+            .as_ref()
+            .map(|c| c.pending_update_count())
+            .unwrap_or(0)
     }
 
     /// Count of proposals approved for the current epoch.
     pub fn approved_count(&self) -> usize {
-        self.convo.approved_proposals_for_current_epoch().len()
+        self.convo
+            .as_ref()
+            .map(|c| c.approved_proposals_for_current_epoch().len())
+            .unwrap_or(0)
     }
 
     /// Per-member roles (steward / backup / member) in this conversation.
     pub fn member_roles(&self) -> Vec<(Vec<u8>, MemberRole)> {
-        self.convo.member_roles().unwrap_or_default()
+        self.convo
+            .as_ref()
+            .and_then(|c| c.member_roles().ok())
+            .unwrap_or_default()
     }
 
     /// Per-member peer scores.
     pub fn member_scores(&self) -> Vec<(Vec<u8>, i64)> {
-        self.convo.member_scores()
+        self.convo
+            .as_ref()
+            .map(|c| c.member_scores())
+            .unwrap_or_default()
     }
 
     /// The encrypted sync bytes this member joined with (for idempotency tests).
@@ -247,24 +312,37 @@ impl Member {
         self.integ.member_id.member_id_display().to_string()
     }
 
+    /// Current conversation state. Panics if this member hasn't joined yet.
     pub fn state(&self) -> ConversationState {
-        self.convo.state()
+        self.convo.as_ref().expect("member has joined").state()
     }
 
     pub fn is_steward(&self) -> bool {
-        self.convo.is_steward()
+        self.convo.as_ref().is_some_and(|c| c.is_steward())
     }
 
+    /// `true` once this member holds a conversation in `Working` (joiners
+    /// without a welcome yet are not working).
     pub fn is_working(&self) -> bool {
-        self.convo.state() == ConversationState::Working
+        self.convo
+            .as_ref()
+            .is_some_and(|c| c.state() == ConversationState::Working)
     }
 
     pub fn epoch(&self) -> u64 {
-        self.convo.epoch_and_retry().map(|(e, _)| e).unwrap_or(0)
+        self.convo
+            .as_ref()
+            .and_then(|c| c.epoch_and_retry().ok())
+            .map(|(e, _)| e)
+            .unwrap_or(0)
     }
 
     pub fn member_count(&self) -> usize {
-        self.convo.members().map(|m| m.len()).unwrap_or(0)
+        self.convo
+            .as_ref()
+            .and_then(|c| c.members().ok())
+            .map(|m| m.len())
+            .unwrap_or(0)
     }
 
     /// Every [`ConversationEvent`] this member has emitted, in order.
@@ -344,50 +422,75 @@ impl Member {
     // ── Actions (`&mut self`) ────────────────────────────────────────────
 
     pub fn send_message(&mut self, message: Vec<u8>) {
-        self.convo.send_message(message).expect("send message");
+        self.convo
+            .as_mut()
+            .expect("member has joined")
+            .send_message(message, &self.integ.signer)
+            .expect("send message");
     }
 
     pub fn add_member(&mut self, key_package: &[u8]) {
-        self.convo.add_member(key_package).expect("add member");
+        self.convo
+            .as_mut()
+            .expect("member has joined")
+            .add_member(key_package, &self.integ.signer)
+            .expect("add member");
     }
 
     pub fn remove_member(&mut self, member_id: &[u8]) {
-        self.convo.remove_member(member_id).expect("remove member");
+        self.convo
+            .as_mut()
+            .expect("member has joined")
+            .remove_member(member_id, &self.integ.signer)
+            .expect("remove member");
     }
 
     /// Cast a manual vote on `proposal_id` (cancels any pending auto-vote).
     pub fn vote(&mut self, proposal_id: u32, vote: bool) {
-        self.convo.vote(proposal_id, vote).expect("vote");
+        self.convo
+            .as_mut()
+            .expect("member has joined")
+            .vote(proposal_id, vote, &self.integ.signer)
+            .expect("vote");
     }
 
     /// Submit a raw proposal with the local vote bundled. Lower-level than
     /// [`Self::remove_member`]; used for emergency/violation proposals.
     pub fn initiate_proposal(&mut self, request: ConversationUpdateRequest, vote: CreatorVote) {
         self.convo
-            .initiate_proposal(request, vote)
+            .as_mut()
+            .expect("member has joined")
+            .initiate_proposal(request, vote, &self.integ.signer)
             .expect("initiate proposal");
     }
 
     pub fn leave(&mut self) {
-        self.convo.leave().expect("leave");
+        self.convo
+            .as_mut()
+            .expect("member has joined")
+            .leave(&self.integ.signer)
+            .expect("leave");
     }
 
     /// Drain this member's buffered outbound directly (bypassing the bus) — for
     /// tests that count or inspect what a single member emitted.
     pub fn take_outbound(&mut self) -> Vec<Outbound> {
-        self.convo.drain_outbound()
+        self.drain_outbound()
     }
 
     /// Deliver a raw payload to this member as if it arrived from `sender`.
+    /// No-op when the member hasn't joined.
     pub fn deliver_raw(&mut self, sender: &[u8], payload: &[u8]) {
-        let _ = self.convo.process_inbound(sender, payload);
+        if let Some(convo) = self.convo.as_mut() {
+            let _ = convo.process_inbound(sender, payload, &self.integ.signer);
+        }
     }
 
     /// Mint a key package and return its announcement as an [`Outbound`] (the
     /// integrator publishes this on the welcome channel; the harness routes it
-    /// via `receive_key_package`).
+    /// to existing members via `add_member`).
     pub fn announce_key_package(&mut self, conversation_id: &str) -> Outbound {
-        let key_package = self.integ.plugins.generate_key_package();
+        let key_package = self.integ.mint_key_package();
         Outbound {
             conversation_id: conversation_id.to_string(),
             sender: self.app_id().to_vec(),
@@ -399,20 +502,28 @@ impl Member {
     /// `add_member(kp_bytes)` (the proposer-side path, where a member is added
     /// without a prior key-package announcement).
     pub fn mint_key_package(&mut self) -> KeyPackageBytes {
-        self.integ.plugins.generate_key_package()
+        self.integ.mint_key_package()
     }
 
-    /// Rebuild this member as a fresh joiner of `conversation_id` (same
-    /// identity / keys) — for rejoining after eviction.
-    pub fn rejoin(&mut self, conversation_id: &str, config: ConversationConfig) {
-        self.convo = Conversation::join(conversation_id, self.integ.deps(config)).expect("rejoin");
+    /// Reset this member to a fresh prospective joiner of `conversation_id`
+    /// (same identity / keys) — for rejoining after eviction. The conversation
+    /// rebuilds from the next welcome.
+    pub fn rejoin(&mut self, _conversation_id: &str, config: ConversationConfig) {
+        self.convo = None;
         self.last_sync = None;
+        self.pending_config = config;
     }
 
     /// Advance this member's timers/state machine one tick, returning the
-    /// poll outcome (e.g. `leave_requested` on pending-join expiry).
+    /// poll outcome. No-op (empty outcome) when the member hasn't joined.
     pub fn poll(&mut self) -> PollOutcome {
-        self.convo.poll()
+        match self.convo.as_mut() {
+            Some(convo) => convo.poll(&self.integ.signer),
+            None => PollOutcome {
+                next_wakeup_in: None,
+                leave_requested: false,
+            },
+        }
     }
 
     /// Drain this member's pending events into its log (no welcome routing) —
@@ -422,34 +533,67 @@ impl Member {
     }
 
     fn drain_outbound(&mut self) -> Vec<Outbound> {
-        self.convo.drain_outbound()
+        self.convo
+            .as_ref()
+            .map(|c| c.drain_outbound())
+            .unwrap_or_default()
     }
 
     fn deliver(&mut self, packet: &Outbound) {
-        let _ = self.convo.process_inbound(&packet.sender, &packet.payload);
+        if let Some(convo) = self.convo.as_mut() {
+            let _ = convo.process_inbound(&packet.sender, &packet.payload, &self.integ.signer);
+        }
     }
 
+    /// Route a peer's key-package announcement to an existing member, which
+    /// proposes the add. No-op when this member hasn't joined or the announcer
+    /// is itself.
     fn deliver_key_package(&mut self, packet: &Outbound) {
-        let _ = self
-            .convo
-            .receive_key_package(&packet.sender, &packet.payload);
+        if packet.sender == self.app_id() {
+            return;
+        }
+        let Some(convo) = self.convo.as_mut() else {
+            return;
+        };
+        if convo.state() != ConversationState::Working {
+            return;
+        }
+        let invite = MemberInvite::decode(packet.payload.as_slice()).expect("decode key package");
+        let _ = convo.add_member(&invite.key_package_bytes, &self.integ.signer);
     }
 
     /// Try to open `welcome` with this member's stashed key-package provider.
-    /// Returns `true` only for the addressed joiner (attaches MLS + applies the
-    /// bundled sync); `false` for everyone else.
+    /// Returns `true` only for the addressed joiner (builds the conversation
+    /// from the welcome + bundled sync); `false` for everyone else. Already-
+    /// joined members ignore further welcomes.
     fn try_accept_welcome(&mut self, welcome: &MemberWelcome) -> bool {
-        use de_mls::core::ConversationPluginsFactory;
-        match self.integ.plugins.welcome_mls(&welcome.welcome_bytes) {
-            Ok(Some(mls)) => {
-                self.convo.complete_join(mls).expect("complete join");
-                self.convo
-                    .apply_welcome_sync(&welcome.conversation_sync_bytes)
-                    .expect("apply welcome sync");
+        if self.convo.is_some() {
+            return false;
+        }
+        // A fresh provider (we never minted a KP) holds no matching key package,
+        // so a welcome not for us cleanly yields `None`.
+        let provider = self.integ.pending_provider.take().unwrap_or_default();
+        // Integrator opens the welcome; only the addressed joiner gets `Some`.
+        let Ok(Some(mls)) = open_welcome(&welcome.welcome_bytes, provider) else {
+            return false;
+        };
+        let scoring = self.integ.scoring();
+        let steward = self.integ.steward();
+        let deps = self
+            .integ
+            .deps(mls, scoring, steward, self.pending_config.clone());
+        match Conversation::join(
+            deps,
+            &welcome.conversation_sync_bytes,
+            self.integ.member_id.member_id_bytes(),
+            &self.integ.signer,
+        ) {
+            Ok(convo) => {
+                self.convo = Some(convo);
                 self.last_sync = Some(welcome.conversation_sync_bytes.clone());
                 true
             }
-            _ => false,
+            Err(_) => false,
         }
     }
 
@@ -457,7 +601,10 @@ impl Member {
     /// harness to route to joiners.
     fn drain_events_collect_welcomes(&mut self) -> Vec<MemberWelcome> {
         let mut welcomes = Vec::new();
-        for event in self.convo.drain_events() {
+        let Some(convo) = self.convo.as_ref() else {
+            return welcomes;
+        };
+        for event in convo.drain_events() {
             if let ConversationEvent::WelcomeReady {
                 welcome,
                 minted_locally: true,
@@ -482,9 +629,9 @@ pub struct TestHarness<const N: usize> {
 }
 
 impl<const N: usize> TestHarness<N> {
-    /// Build `keys[0]` as creator and the rest as joiners, with no driving:
-    /// joiners are still `PendingJoin`. Use for tests that need to observe an
-    /// intermediate state before the join cycle runs.
+    /// Build `keys[0]` as creator and the rest as prospective joiners, with no
+    /// driving: joiners hold no conversation yet. Use for tests that need to
+    /// observe an intermediate state before the join cycle runs.
     pub fn start(
         keys: [&str; N],
         conversation_id: &str,
@@ -551,7 +698,7 @@ impl<const N: usize> TestHarness<N> {
     }
 
     /// Deliver a key-package announcement to every member (self-echoes drop
-    /// inside `receive_key_package`).
+    /// inside `deliver_key_package`).
     pub fn deliver_key_package_all(&mut self, packet: &Outbound) {
         for member in &mut self.members {
             member.deliver_key_package(packet);
@@ -608,8 +755,8 @@ impl<const N: usize> TestHarness<N> {
     /// then broadcast all buffered outbound. Welcomes are routed before app
     /// traffic so a joiner's MLS is attached before same-round commit/election
     /// packets arrive. Events are drained twice — before and after relay — so
-    /// phase/chat events emitted by this round's `complete_join` and delivery
-    /// land in the log before the next predicate check.
+    /// phase/chat events emitted by this round's welcome acceptance and
+    /// delivery land in the log before the next predicate check.
     pub fn process(&mut self, step: Duration) {
         sleep(step);
         for member in &mut self.members {

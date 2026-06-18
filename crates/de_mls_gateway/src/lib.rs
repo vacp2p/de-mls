@@ -25,11 +25,8 @@ use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 
 use de_mls::{
-    core::{ScoringConfig, StewardListConfig},
-    defaults::DefaultConsensusPlugin,
-    member_id::MemberId,
+    ConversationConfig, ScoringConfig, StewardListConfig, defaults::DefaultConsensusPlugin,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
-    session::ConversationConfig,
 };
 use de_mls_ds::{DeliveryService, SharedDeliveryService, WakuDeliveryService};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
@@ -67,7 +64,7 @@ pub(crate) type UserRef = Arc<
 /// Type alias for a conversation registry entry obtained via
 /// `User::lookup_entry`. Re-exports the sync-locked entry from `de_mls::session`.
 pub(crate) type ConversationRef =
-    ConversationEntry<DefaultConsensusPlugin, DefaultConversationPluginsFactory, SignatureKeyPair>;
+    ConversationEntry<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
 
 // Global, process-wide gateway instance
 pub static GATEWAY: Lazy<Gateway<WakuDeliveryService>> = Lazy::new(Gateway::new);
@@ -173,26 +170,37 @@ impl<DS: DeliveryService> Gateway<DS> {
 }
 
 #[derive(Debug, Clone)]
-struct WalletMemberId {
+pub struct WalletMemberId {
     bytes: Vec<u8>,
     display: String,
 }
 
 impl WalletMemberId {
-    fn from_address(addr: Address) -> Self {
+    pub fn from_address(addr: Address) -> Self {
         Self {
             bytes: addr.as_slice().to_vec(),
             display: addr.to_checksum(None),
         }
     }
-}
 
-impl MemberId for WalletMemberId {
-    fn member_id_bytes(&self) -> &[u8] {
+    pub fn member_id_bytes(&self) -> &[u8] {
         &self.bytes
     }
-    fn member_id_display(&self) -> &str {
+
+    pub fn member_id_display(&self) -> &str {
         &self.display
+    }
+}
+
+/// Render opaque member-id bytes to the gateway's display form. Member ids
+/// here are wallet address bytes, rendered EIP-55 checksummed the same way
+/// [`WalletMemberId::from_address`] builds its display; non-address byte
+/// strings fall back to lowercase hex.
+pub fn render_member_id(bytes: &[u8]) -> String {
+    if bytes.len() == Address::len_bytes() {
+        Address::from_slice(bytes).to_checksum(None)
+    } else {
+        alloy::hex::encode(bytes)
     }
 }
 
@@ -221,10 +229,7 @@ fn build_user_from_private_key(
     };
 
     Ok(User::new_with_plugins(
-        Box::new(member_id),
-        mls_signer,
-        plugins,
-        transport,
+        member_id, mls_signer, plugins, transport,
     ))
 }
 
@@ -263,7 +268,7 @@ impl Gateway<WakuDeliveryService> {
     /// Spawn the gateway's UI event pump. Once per polling cycle it
     /// drains [`crate::user::User::drain_lifecycle_events`] (to learn
     /// when new conversations appear or disappear) and
-    /// [`de_mls::session::Conversation::drain_events`] on every active
+    /// [`de_mls::Conversation::drain_events`] on every active
     /// conversation (to forward UI-bound events). Replaces the previous
     /// broadcast-channel subscriber pattern.
     fn spawn_conversation_subscribers(&self, user: UserRef, transport: SharedDeliveryService) {

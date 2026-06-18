@@ -126,7 +126,7 @@ pub trait MlsService {
     fn encrypt(&mut self, signer: &impl Signer, plaintext: &[u8]) -> Result<Vec<u8>, MlsError>;
 
     /// Encode and encrypt `app_msg`, returning the raw payload bytes. The
-    /// session wraps these into an [`Outbound`](crate::session::Outbound); the
+    /// session wraps these into an [`Outbound`](crate::Outbound); the
     /// convenience path most senders use.
     fn build_message(
         &mut self,
