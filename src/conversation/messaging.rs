@@ -35,11 +35,9 @@ pub struct Outbound {
     pub payload: Vec<u8>,
 }
 
-impl<C, P, Sc, St> Conversation<C, P, Sc, St>
+impl<C, Sc, St> Conversation<C, Sc, St>
 where
     C: ConsensusPlugin,
-    P: OpenMlsProvider,
-    <P::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     Sc: PeerScoringPlugin,
     St: StewardListPlugin,
 {
@@ -50,11 +48,16 @@ where
     /// already merged the next commit). Governance traffic has its own gate
     /// (`check_proposal_allowed`). `signer` is the local member's MLS signer,
     /// used to authenticate the outbound message.
-    pub fn send_message(
+    pub fn send_message<Pr>(
         &mut self,
+        provider: &Pr,
         message: Vec<u8>,
         signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let state = self.current_state();
         if matches!(
             state,
@@ -70,7 +73,7 @@ where
             ..Default::default()
         }
         .into();
-        let payload = self.mls_mut().build_message(signer, &app_msg)?;
+        let payload = self.mls_mut().build_message(provider, signer, &app_msg)?;
         self.broadcast(payload);
         Ok(())
     }
@@ -81,11 +84,16 @@ where
     /// [`crate::ConversationEvent::WelcomeReady`] for the integrator to
     /// deliver out of band. No-op when the key package addresses the local
     /// member or someone already in the group.
-    pub fn add_member(
+    pub fn add_member<Pr>(
         &mut self,
+        provider: &Pr,
         key_package_bytes: &[u8],
         signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let state = self.current_state();
         if state != ConversationState::Working {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
@@ -105,6 +113,7 @@ where
             return Ok(());
         }
         self.initiate_proposal(
+            provider,
             ConversationUpdateRequest::member_invite(MemberInvite {
                 key_package_bytes: kp_bytes,
                 member_id,
@@ -118,17 +127,23 @@ where
     /// Start a `RemoveMember` consensus round targeting `member_id`. The
     /// requester's intent is the removal → the creator's vote is bundled as
     /// YES at submit; no vote request is shown to the requester.
-    pub fn remove_member(
+    pub fn remove_member<Pr>(
         &mut self,
+        provider: &Pr,
         member_id: &[u8],
         signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let state = self.current_state();
         if state != ConversationState::Working {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
 
         self.initiate_proposal(
+            provider,
             ConversationUpdateRequest::remove_member(member_id.to_vec()),
             CreatorVote::Yes,
             signer,

@@ -45,6 +45,7 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
             .lookup_entry(&inbound.conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         let outcome = entry_arc.write_or_err("conversation")?.process_inbound(
+            self.plugins.conversation_plugins.provider(),
             &inbound.sender,
             &inbound.payload,
             &self.signer,
@@ -78,7 +79,11 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
             if conversation.state() != ConversationState::Working {
                 return Ok(());
             }
-            conversation.add_member(&invite.key_package_bytes, &self.signer)?;
+            conversation.add_member(
+                self.plugins.conversation_plugins.provider(),
+                &invite.key_package_bytes,
+                &self.signer,
+            )?;
         }
         self.flush(&entry_arc)?;
         Ok(())

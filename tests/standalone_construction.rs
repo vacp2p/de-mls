@@ -6,7 +6,6 @@
 
 mod common;
 
-use std::cell::RefCell;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,22 +29,23 @@ use common::{
 
 /// Per-conversation stack the standalone tests build.
 type TestConversation =
-    Conversation<DefaultConsensusPlugin, TestProvider, DefaultPeerScoring, DefaultStewardList>;
+    Conversation<DefaultConsensusPlugin, DefaultPeerScoring, DefaultStewardList>;
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
 /// The shared, conversation-agnostic state an integrator keeps once: its
-/// credential + signer, the consensus storage + signer, and the identity. The
-/// `RefCell` provider stash carries a minted key package's private keys until
-/// the matching welcome arrives — `&self` call sites mint and open in turn.
+/// credential + signer, the consensus storage + signer, the identity, and one
+/// OpenMLS provider reused across every call. The creator seeds its group into
+/// it; a joiner mints its key package into it and later opens the welcome from
+/// it.
 struct Integrator {
     credential: CredentialWithKey,
     signer: SignatureKeyPair,
     consensus_storage: <DefaultConsensusPlugin as ConsensusPlugin>::ConsensusStorage,
     consensus_signer: <DefaultConsensusPlugin as ConsensusPlugin>::Signer,
     member_id: WalletMemberId,
-    pending_provider: RefCell<Option<TestProvider>>,
+    provider: TestProvider,
 }
 
 impl Integrator {
@@ -63,7 +63,7 @@ impl Integrator {
             consensus_storage: DefaultConsensusPlugin::new_storage(),
             consensus_signer: EthereumConsensusSigner::new(eth_signer),
             member_id,
-            pending_provider: RefCell::new(None),
+            provider: TestProvider::default(),
         }
     }
 
@@ -78,21 +78,10 @@ impl Integrator {
         )
     }
 
-    /// Mint a single-use key package, stashing its provider for the welcome.
+    /// Mint a single-use key package into this integrator's reused provider,
+    /// which thereby holds the private keys for the matching welcome.
     fn mint_key_package(&self) -> KeyPackageBytes {
-        let (kp, provider) = mint_key_package(&self.credential, &self.signer);
-        *self.pending_provider.borrow_mut() = Some(provider);
-        kp
-    }
-
-    /// Take the stashed provider (the joiner-side keys minted with the KP). A
-    /// fresh provider (we never minted a KP) holds no matching key package, so
-    /// `Conversation::join` returns `Ok(None)`.
-    fn take_provider(&self) -> TestProvider {
-        self.pending_provider
-            .borrow_mut()
-            .take()
-            .unwrap_or_default()
+        mint_key_package(&self.provider, &self.credential, &self.signer)
     }
 
     /// Fresh per-conversation consensus service drawn from the shared state.
@@ -119,7 +108,7 @@ fn create_builds_a_working_steward_session_without_user() {
     let integrator = Integrator::new();
     let conversation: TestConversation = Conversation::create(
         "standalone",
-        TestProvider::default(),
+        &integrator.provider,
         integrator.credential.clone(),
         TEST_SUITE,
         &integrator.signer,
@@ -172,7 +161,7 @@ fn join_completes_in_one_call() {
 
     let mut creator: TestConversation = Conversation::create(
         "standalone-welcome",
-        TestProvider::default(),
+        &alice.provider,
         alice.credential.clone(),
         TEST_SUITE,
         &alice.signer,
@@ -189,14 +178,14 @@ fn join_completes_in_one_call() {
     // the add, so her bundled YES resolves consensus on its own.
     let bob_kp = bob.mint_key_package();
     creator
-        .add_member(bob_kp.as_bytes(), &alice.signer)
+        .add_member(&alice.provider, bob_kp.as_bytes(), &alice.signer)
         .expect("add member");
 
     // Drive the creator until the welcome is minted.
     let mut welcome = None;
     for _ in 0..40 {
         std::thread::sleep(Duration::from_millis(30));
-        creator.poll(&alice.signer);
+        creator.poll(&alice.provider, &alice.signer);
         for event in creator.drain_events() {
             if let ConversationEvent::WelcomeReady {
                 welcome: w,
@@ -216,7 +205,7 @@ fn join_completes_in_one_call() {
     // never minted the key package can't open it.
     let bystander = Integrator::with_key(ALICE);
     let bystander_join: Option<TestConversation> = Conversation::join(
-        bystander.take_provider(),
+        &bystander.provider,
         &welcome.welcome_bytes,
         &welcome.conversation_sync_bytes,
         bystander.scoring(),
@@ -237,7 +226,7 @@ fn join_completes_in_one_call() {
     // run the join side-effects, apply the bundled sync. Only the addressed
     // joiner — holding the KP provider — gets `Some`.
     let joined: TestConversation = Conversation::join(
-        bob.take_provider(),
+        &bob.provider,
         &welcome.welcome_bytes,
         &welcome.conversation_sync_bytes,
         bob.scoring(),

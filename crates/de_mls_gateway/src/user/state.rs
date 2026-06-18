@@ -18,8 +18,8 @@ use de_mls::{
 use de_mls_ds::{OutboundPacket, SharedDeliveryService};
 use openmls_traits::signatures::Signer;
 
+use crate::WalletMemberId;
 use crate::user::{LockExt, UserError, UserPlugins};
-use crate::{WalletMemberId, mls::GatewayProvider};
 
 /// Registry-level notification emitted when conversations are created or
 /// removed. Drain via [`User::drain_lifecycle_events`] once per polling cycle.
@@ -33,10 +33,10 @@ pub enum ConversationLifecycle {
 }
 
 /// The concrete conversation type the gateway stores: the consensus plug-in is
-/// the User's `C`, the OpenMLS provider is the reference RustCrypto backend, and
-/// the scoring / steward-list plug-ins are the library defaults.
-pub type GatewayConversation<C> =
-    Conversation<C, GatewayProvider, DefaultPeerScoring, DefaultStewardList>;
+/// the User's `C`, and the scoring / steward-list plug-ins are the library
+/// defaults. The OpenMLS provider is no longer a type param — it's borrowed per
+/// call from the User's factory.
+pub type GatewayConversation<C> = Conversation<C, DefaultPeerScoring, DefaultStewardList>;
 
 /// Single registry entry: one `Arc<RwLock<Conversation>>` per conversation.
 /// Cloned out of the registry under the outer read lock, then locked
@@ -89,26 +89,24 @@ impl<P: ConsensusPlugin, Sig: Signer> User<P, Sig> {
 impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
     /// Ingest a [`MemberWelcome`] delivered out of band (e.g. the
     /// inviter's [`de_mls::ConversationEvent::WelcomeReady`] routed
-    /// through the integrator's transport). We hand de-mls the provider that
-    /// minted our key package and let it open the welcome; on a match it builds
-    /// the joined conversation — running the joiner-side side-effects and
-    /// replaying the bundled `ConversationSync` — which we then register.
+    /// through the integrator's transport). We hand de-mls the User's provider —
+    /// the one our key package was minted into — and let it open the welcome; on
+    /// a match it builds the joined conversation — running the joiner-side
+    /// side-effects and replaying the bundled `ConversationSync` — which we then
+    /// register.
     /// Returns the joined conversation name, or [`UserError::WelcomeNotForUs`]
     /// if the welcome doesn't address this user's key package (de-mls returns
     /// `None`). Idempotent: a welcome for an already-joined conversation returns
     /// its name without re-registering.
     pub fn accept_welcome(&mut self, welcome: &MemberWelcome) -> Result<String, UserError> {
         let factory = &self.plugins.conversation_plugins;
-        let Some(provider) = factory.take_pending_provider() else {
-            return Err(UserError::WelcomeNotForUs);
-        };
         let scoring = factory.make_scoring(&self.plugins.default_scoring_config);
         let steward = factory.make_steward(
             self.member_id.member_id_bytes(),
             self.plugins.default_steward_list_config.clone(),
         );
         let Some(conversation) = Conversation::join(
-            provider,
+            factory.provider(),
             &welcome.welcome_bytes,
             &welcome.conversation_sync_bytes,
             scoring,
@@ -189,9 +187,11 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        entry
-            .write_or_err("conversation")?
-            .send_message(message, &self.signer)?;
+        entry.write_or_err("conversation")?.send_message(
+            self.plugins.conversation_plugins.provider(),
+            message,
+            &self.signer,
+        )?;
         self.flush(&entry)?;
         Ok(())
     }
@@ -224,7 +224,9 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        let outcome = entry.write_or_err("conversation")?.poll(&self.signer);
+        let outcome = entry
+            .write_or_err("conversation")?
+            .poll(self.plugins.conversation_plugins.provider(), &self.signer);
         self.flush(&entry)?;
         Ok(outcome)
     }
@@ -262,9 +264,11 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        entry
-            .write_or_err("conversation")?
-            .add_member(key_package_bytes, &self.signer)?;
+        entry.write_or_err("conversation")?.add_member(
+            self.plugins.conversation_plugins.provider(),
+            key_package_bytes,
+            &self.signer,
+        )?;
         self.flush(&entry)?;
         Ok(())
     }
@@ -283,9 +287,12 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        entry
-            .write_or_err("conversation")?
-            .vote(proposal_id, vote, &self.signer)?;
+        entry.write_or_err("conversation")?.vote(
+            self.plugins.conversation_plugins.provider(),
+            proposal_id,
+            vote,
+            &self.signer,
+        )?;
         self.flush(&entry)?;
         Ok(())
     }
@@ -297,9 +304,11 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        entry
-            .write_or_err("conversation")?
-            .remove_member(member_id, &self.signer)?;
+        entry.write_or_err("conversation")?.remove_member(
+            self.plugins.conversation_plugins.provider(),
+            member_id,
+            &self.signer,
+        )?;
         self.flush(&entry)?;
         Ok(())
     }
@@ -319,6 +328,7 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
         entry.write_or_err("conversation")?.initiate_proposal(
+            self.plugins.conversation_plugins.provider(),
             request,
             creator_vote,
             &self.signer,

@@ -57,7 +57,7 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
         );
         let conversation = Conversation::create(
             conversation_id,
-            factory.creator_provider(),
+            factory.provider(),
             factory.credential(),
             GATEWAY_SUITE,
             &self.signer,
@@ -89,7 +89,7 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
 
         let LeaveOutcome::LeaveInitiated = entry_arc
             .write_or_err("conversation")?
-            .leave(&self.signer)?;
+            .leave(self.plugins.conversation_plugins.provider(), &self.signer)?;
         self.flush(&entry_arc)?;
         Ok(())
     }

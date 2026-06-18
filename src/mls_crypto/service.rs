@@ -11,7 +11,10 @@
 //! [`OpenMlsService`](crate::mls_crypto::OpenMlsService), because a joiner must
 //! publish a key package before any per-conversation service exists.
 
-use openmls_traits::signatures::Signer;
+use std::error::Error as StdError;
+
+use openmls_traits::storage::StorageProvider;
+use openmls_traits::{OpenMlsProvider, signatures::Signer};
 
 use crate::{
     mls_crypto::{
@@ -32,6 +35,12 @@ pub const DEFAULT_COMMIT_BATCH_MAX: usize = 50;
 ///
 /// Read-only methods take `&self`; methods that advance MLS state take
 /// `&mut self`. Callers serialize via the outer per-session lock.
+///
+/// The service does not own an OpenMLS provider. Methods that touch crypto,
+/// rand, or storage take a `provider: &Pr` by reference per call, so one
+/// provider can back every conversation. The pure-query and message-peek
+/// methods (`members`, `current_epoch`, `inspect_message_kind`, …) need no
+/// provider.
 pub trait MlsService {
     /// The conversation id this service is scoped to.
     fn conversation_id(&self) -> &str;
@@ -45,7 +54,10 @@ pub trait MlsService {
 
     /// Tear down all local MLS state for this conversation. Idempotent so
     /// repeated leave / cleanup is safe.
-    fn delete(&mut self) -> Result<(), MlsError>;
+    fn delete<Pr>(&mut self, provider: &Pr) -> Result<(), MlsError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
 
     // ── Membership / state queries ──
 
@@ -71,21 +83,31 @@ pub trait MlsService {
     /// [`merge_own_commit`](Self::merge_own_commit) once the candidate
     /// wins selection, or [`discard_own_commit`](Self::discard_own_commit)
     /// to roll back.
-    fn create_commit_candidate(
+    fn create_commit_candidate<Pr>(
         &mut self,
+        provider: &Pr,
         signer: &impl Signer,
         updates: &[MlsCommitInput],
-    ) -> Result<CommitCandidate, MlsError>;
+    ) -> Result<CommitCandidate, MlsError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
 
     /// Apply our pending commit, advancing the MLS epoch. Call after a
     /// successful [`create_commit_candidate`](Self::create_commit_candidate)
     /// when our candidate has won the freeze round.
-    fn merge_own_commit(&mut self) -> Result<(), MlsError>;
+    fn merge_own_commit<Pr>(&mut self, provider: &Pr) -> Result<(), MlsError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
 
     /// Roll back the local side effects of
     /// [`create_commit_candidate`](Self::create_commit_candidate):
     /// drop the pending commit and the pending proposals it contained.
-    fn discard_own_commit(&mut self) -> Result<(), MlsError>;
+    fn discard_own_commit<Pr>(&mut self, provider: &Pr) -> Result<(), MlsError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
 
     // ── Inbound commit pipeline (someone else committed) ──
 
@@ -104,48 +126,80 @@ pub trait MlsService {
     /// (stale epoch, wrong conversation id, wire-shape mismatch). The caller
     /// must still call `discard_staged_commit` to clean up any partial
     /// state before trying the next candidate.
-    fn stage_remote_commit(
+    fn stage_remote_commit<Pr>(
         &mut self,
+        provider: &Pr,
         proposals: &[Vec<u8>],
         commit_bytes: &[u8],
-    ) -> Result<StagedCandidateResult, MlsError>;
+    ) -> Result<StagedCandidateResult, MlsError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
 
     /// Apply the previously staged inbound commit, advancing the MLS
     /// epoch. Errors if no commit is staged.
-    fn merge_staged_commit(&mut self) -> Result<(), MlsError>;
+    fn merge_staged_commit<Pr>(&mut self, provider: &Pr) -> Result<(), MlsError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
 
     /// Roll back [`stage_remote_commit`](Self::stage_remote_commit):
     /// drop the staged commit and clear the pending proposals it
     /// staged on top of.
-    fn discard_staged_commit(&mut self) -> Result<(), MlsError>;
+    fn discard_staged_commit<Pr>(&mut self, provider: &Pr) -> Result<(), MlsError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
 
     // ── Application messages ──
 
     /// Encrypt an application message for the conversation, returning the raw
     /// MLS wire bytes.
-    fn encrypt(&mut self, signer: &impl Signer, plaintext: &[u8]) -> Result<Vec<u8>, MlsError>;
+    fn encrypt<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, MlsError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
 
     /// Encode and encrypt `app_msg`, returning the raw payload bytes. The
     /// session wraps these into an [`Outbound`](crate::Outbound); the
     /// convenience path most senders use.
-    fn build_message(
+    fn build_message<Pr>(
         &mut self,
+        provider: &Pr,
         signer: &impl Signer,
         app_msg: &AppMessage,
-    ) -> Result<Vec<u8>, MlsError>;
+    ) -> Result<Vec<u8>, MlsError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
 
     /// Strict app-subtopic decrypt: accepts only `Application` messages,
     /// silently ignoring anything else (including proposals and commits).
     /// This guards the app subtopic against MLS-state pollution from
     /// peers that misroute control messages.
-    fn decrypt_application_only(&mut self, ciphertext: &[u8]) -> Result<DecryptResult, MlsError>;
+    fn decrypt_application_only<Pr>(
+        &mut self,
+        provider: &Pr,
+        ciphertext: &[u8],
+    ) -> Result<DecryptResult, MlsError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
 
     /// General decrypt: accepts `Application` messages and stores
     /// incoming proposals as pending. Commits are out of scope here —
     /// route them through
     /// [`stage_remote_commit`](Self::stage_remote_commit) so they pass
     /// the validation pipeline.
-    fn decrypt(&mut self, ciphertext: &[u8]) -> Result<DecryptResult, MlsError>;
+    fn decrypt<Pr>(&mut self, provider: &Pr, ciphertext: &[u8]) -> Result<DecryptResult, MlsError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static;
 
     /// Peek the untrusted outer kind of an MLS wire message without
     /// processing or signature-checking it. Used for cheap pre-dispatch

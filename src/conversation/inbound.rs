@@ -66,11 +66,16 @@ fn authorize_fast_path_proposal(proposal: &Proposal, mls_sender: &[u8]) -> bool 
 
 /// Process an inbound packet on the app subtopic and decide what action is
 /// needed. Welcome-subtopic packets are handled at the integrator layer.
-pub fn decode_inbound_payload<M: MlsService>(
+pub fn decode_inbound_payload<Pr, M: MlsService>(
+    provider: &Pr,
     conversation: &mut ConversationQueues,
     mls: &mut M,
     payload: &[u8],
-) -> Result<ProcessResult, ConversationError> {
+) -> Result<ProcessResult, ConversationError>
+where
+    Pr: OpenMlsProvider,
+    <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+{
     // 1. Try the plaintext envelopes (sent as plaintext AppMessage):
     //    CommitCandidate and MemberWelcome both have to be readable before
     //    the receiver merges the commit they belong to.
@@ -97,7 +102,7 @@ pub fn decode_inbound_payload<M: MlsService>(
     // 2. MLS-encrypted app messages only — use decrypt_application_only.
     //    This NEVER stores proposals or processes commits, preventing
     //    rogue MLS proposals on the app subtopic from polluting state.
-    let res = mls.decrypt_application_only(payload)?;
+    let res = mls.decrypt_application_only(provider, payload)?;
 
     match res {
         DecryptResult::Application(app_bytes, sender) => {
@@ -164,11 +169,9 @@ pub enum DispatchOutcome {
     LeaveRequested,
 }
 
-impl<C, P, Sc, St> Conversation<C, P, Sc, St>
+impl<C, Sc, St> Conversation<C, Sc, St>
 where
     C: ConsensusPlugin,
-    P: OpenMlsProvider,
-    <P::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     Sc: PeerScoringPlugin,
     St: StewardListPlugin,
 {
@@ -177,37 +180,52 @@ where
     /// [`DispatchOutcome::LeaveRequested`] when the conversation has completed
     /// its protocol-side teardown; the integrator must then remove the registry
     /// entry and clean up the consensus scope.
-    pub fn process_inbound(
+    pub fn process_inbound<Pr>(
         &mut self,
+        provider: &Pr,
         sender: &[u8],
         payload: &[u8],
         signer: &impl Signer,
-    ) -> Result<DispatchOutcome, ConversationError> {
+    ) -> Result<DispatchOutcome, ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         if sender == self.app_id.as_ref() {
             return Ok(DispatchOutcome::Dropped);
         }
-        let result = self.decode_inbound(payload)?;
-        self.dispatch_inbound_result(result, signer)
+        let result = self.decode_inbound(provider, payload)?;
+        self.dispatch_inbound_result(provider, result, signer)
     }
 
-    pub fn apply_welcome_sync(
+    pub fn apply_welcome_sync<Pr>(
         &mut self,
+        provider: &Pr,
         sync_bytes: &[u8],
         signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         if sync_bytes.is_empty() {
             return Ok(());
         }
-        let result = self.decode_inbound(sync_bytes)?;
-        self.dispatch_inbound_result(result, signer)?;
+        let result = self.decode_inbound(provider, sync_bytes)?;
+        self.dispatch_inbound_result(provider, result, signer)?;
         Ok(())
     }
 
-    pub(crate) fn dispatch_inbound_result(
+    pub(crate) fn dispatch_inbound_result<Pr>(
         &mut self,
+        provider: &Pr,
         result: ProcessResult,
         signer: &impl Signer,
-    ) -> Result<DispatchOutcome, ConversationError> {
+    ) -> Result<DispatchOutcome, ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         match result {
             ProcessResult::AppMessage(msg) => {
                 self.emit_event(ConversationEvent::AppMessage(*msg));
@@ -228,21 +246,21 @@ where
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::MembershipChangeReceived(request) => {
-                self.handle_incoming_update_request(*request, signer)?;
+                self.handle_incoming_update_request(provider, *request, signer)?;
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::ConversationUpdated => {
-                self.on_conversation_updated(signer)?;
+                self.on_conversation_updated(provider, signer)?;
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::LeaveConversation => {
-                self.prepare_self_leave()?;
+                self.prepare_self_leave(provider)?;
                 Ok(DispatchOutcome::LeaveRequested)
             }
             ProcessResult::CommitCandidateReceived {
                 steward_id: steward,
             } => {
-                self.on_commit_candidate_received(&steward, signer)?;
+                self.on_commit_candidate_received(provider, &steward, signer)?;
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::ConversationSyncReceived(sync) => {
@@ -340,7 +358,15 @@ where
     /// neither transitions state nor emits a second phase change. Broadcasts a
     /// system "joined" chat message and seeds scoring with the current member
     /// set.
-    pub(crate) fn on_joined(&mut self, signer: &impl Signer) -> Result<(), ConversationError> {
+    pub(crate) fn on_joined<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let msg: AppMessage = EventMembershipChange {
             conversation_id: self.conversation_id.clone(),
             member: self.self_member_id.to_vec(),
@@ -350,7 +376,7 @@ where
         let conversation_id = self.conversation_id.clone();
         let mls = self.mls_mut();
         let members = mls.members().unwrap_or_default();
-        let payload = mls.build_message(signer, &msg)?;
+        let payload = mls.build_message(provider, signer, &msg)?;
         self.broadcast(payload);
         self.sync_scoring_members(&members);
         info!(conversation = %conversation_id, "joined conversation");
@@ -361,7 +387,15 @@ where
     /// Working, and run steward housekeeping (list reconcile, election
     /// kick-off, buffered-update drain). The commit author's `SuccessfulCommit`
     /// reward is emitted by `finalize_freeze_round`, not here.
-    fn on_conversation_updated(&mut self, signer: &impl Signer) -> Result<(), ConversationError> {
+    fn on_conversation_updated<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let mls_members = self.mls().members().unwrap_or_default();
         self.sync_scoring_members(&mls_members);
         self.prune_pending_updates_after_commit()?;
@@ -383,9 +417,9 @@ where
             None
         };
 
-        self.steward_list_housekeeping(signer)?;
-        self.process_buffered_updates(signer)?;
-        self.maybe_close_recovery_window(signer);
+        self.steward_list_housekeeping(provider, signer)?;
+        self.process_buffered_updates(provider, signer)?;
+        self.maybe_close_recovery_window(provider, signer);
 
         if let Some(event) = working_event {
             self.emit_event(ConversationEvent::PhaseChange(event));
@@ -395,11 +429,15 @@ where
 
     /// Fire a steward election while `recovery_mode` is set so the next
     /// list installs and closes the window.
-    fn maybe_close_recovery_window(&mut self, signer: &impl Signer) {
+    fn maybe_close_recovery_window<Pr>(&mut self, provider: &Pr, signer: &impl Signer)
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         if !self.is_in_recovery_mode() {
             return;
         }
-        if let Err(e) = self.initiate_steward_election(true, signer) {
+        if let Err(e) = self.initiate_steward_election(provider, true, signer) {
             info!(
                 conversation = %self.conversation_id,
                 error = %e,
@@ -411,14 +449,18 @@ where
     /// Protocol-side teardown for `LeaveConversation`: emit `Leaving`, cancel
     /// pending timers, and delete the local MLS state. The integrator removes
     /// the registry entry and cleans up the consensus scope.
-    fn prepare_self_leave(&mut self) -> Result<(), ConversationError> {
+    fn prepare_self_leave<Pr>(&mut self, provider: &Pr) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         self.emit_event(ConversationEvent::Leaving);
         self.cancel_all_auto_votes();
         // The leave is already committed (`Leaving` emitted); a delete failure
         // must log and continue, else the caller never reaches
         // `LeaveRequested` and the entry leaks. The integrator tears the
         // conversation down right after.
-        if let Err(e) = self.mls_mut().delete() {
+        if let Err(e) = self.mls_mut().delete(provider) {
             error!(error = %e, "self-leave: MLS storage delete failed; leaving anyway");
         }
         Ok(())
@@ -426,11 +468,16 @@ where
 
     /// Peer broadcast a commit candidate. If we were in Working, enter
     /// Freezing and — if we're a steward — build our own candidate too.
-    fn on_commit_candidate_received(
+    fn on_commit_candidate_received<Pr>(
         &mut self,
+        provider: &Pr,
         steward: &[u8],
         signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         tracing::debug!(
             conversation = %self.conversation_id,
             steward = ?steward,
@@ -449,7 +496,7 @@ where
 
         let self_member_id = Arc::clone(&self.self_member_id);
         let outbound = if self.services.steward_list.is_steward(&self_member_id) {
-            match self.create_commit_candidate(signer, &self_member_id) {
+            match self.create_commit_candidate(provider, signer, &self_member_id) {
                 Ok(payload) => payload,
                 Err(e) => {
                     error!(

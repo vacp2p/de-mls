@@ -64,11 +64,11 @@ pub struct AutoVoteEntry {
 /// grouped so the handle holds them as one unit. Construction builds the MLS
 /// service, moves the plug-in instances in, and subscribes the consensus
 /// receiver here.
-pub(crate) struct ConversationServices<C: ConsensusPlugin, P: OpenMlsProvider, Sc, St> {
+pub(crate) struct ConversationServices<C: ConsensusPlugin, Sc, St> {
     /// Per-conversation MLS service. Present for the conversation's whole
     /// lifetime: the creator seeds it at [`Conversation::create`], the joiner
     /// at [`Conversation::join`].
-    pub(crate) mls: OpenMlsService<P>,
+    pub(crate) mls: OpenMlsService,
     /// Per-conversation peer-score plug-in.
     pub(crate) scoring: Sc,
     /// Per-conversation steward-list plug-in.
@@ -119,14 +119,14 @@ impl Timing {
     }
 }
 
-pub struct Conversation<C: ConsensusPlugin, P: OpenMlsProvider, Sc, St> {
+pub struct Conversation<C: ConsensusPlugin, Sc: PeerScoringPlugin, St: StewardListPlugin> {
     /// Conversation name. Identifies this conversation in the integrator's
     /// registry and is used to construct scope keys for consensus operations.
     /// Read via [`Conversation::conversation_id`].
     pub(crate) conversation_id: String,
     pub(crate) queues: ConversationQueues,
     /// Per-conversation MLS service, plug-in instances, and consensus wiring.
-    pub(crate) services: ConversationServices<C, P, Sc, St>,
+    pub(crate) services: ConversationServices<C, Sc, St>,
     pub(crate) state_machine: ConversationStateMachine,
     /// Per-conversation durable config: voting/consensus durations,
     /// `liveness_criteria_yes`, `pending_update_max_epochs`.
@@ -153,11 +153,9 @@ pub struct Conversation<C: ConsensusPlugin, P: OpenMlsProvider, Sc, St> {
     pending_outbound: Mutex<Vec<Outbound>>,
 }
 
-impl<C, P, Sc, St> Conversation<C, P, Sc, St>
+impl<C, Sc, St> Conversation<C, Sc, St>
 where
     C: ConsensusPlugin,
-    P: OpenMlsProvider,
-    <P::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     Sc: PeerScoringPlugin,
     St: StewardListPlugin,
 {
@@ -167,7 +165,7 @@ where
     pub(crate) fn new(
         conversation_id: String,
         queues: ConversationQueues,
-        services: ConversationServices<C, P, Sc, St>,
+        services: ConversationServices<C, Sc, St>,
         state_machine: ConversationStateMachine,
         config: ConversationConfig,
         self_member_id: Arc<[u8]>,
@@ -211,13 +209,13 @@ where
     // ── MLS service ─────────────────────────────────────────────────
 
     /// Borrow the MLS service.
-    pub(crate) fn mls(&self) -> &OpenMlsService<P> {
+    pub(crate) fn mls(&self) -> &OpenMlsService {
         &self.services.mls
     }
 
     /// Mutably borrow the MLS service — required for the commit pipeline
     /// and encrypt/decrypt methods that advance MLS state.
-    pub(crate) fn mls_mut(&mut self) -> &mut OpenMlsService<P> {
+    pub(crate) fn mls_mut(&mut self) -> &mut OpenMlsService {
         &mut self.services.mls
     }
 
@@ -228,11 +226,16 @@ where
     // sibling `core` modules; these are pure delegation.
 
     /// Build a commit candidate.
-    pub(crate) fn create_commit_candidate(
+    pub(crate) fn create_commit_candidate<Pr>(
         &mut self,
+        provider: &Pr,
         signer: &impl Signer,
         self_member_id: &[u8],
-    ) -> Result<Option<Vec<u8>>, ConversationError> {
+    ) -> Result<Option<Vec<u8>>, ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         if !self.services.steward_list.is_steward(self_member_id) && !self.is_in_recovery_mode() {
             return Err(ConversationError::NotASteward);
         }
@@ -329,7 +332,7 @@ where
             proposals: mls_proposals,
             commit,
             welcome,
-        } = mls.create_commit_candidate(signer, &updates)?;
+        } = mls.create_commit_candidate(provider, signer, &updates)?;
 
         let candidate = CommitCandidate {
             conversation_id: self.queues.name_bytes().to_vec(),
@@ -377,14 +380,20 @@ where
     }
 
     /// Finalize the active freeze round.
-    pub(crate) fn finalize_freeze_round(
+    pub(crate) fn finalize_freeze_round<Pr>(
         &mut self,
+        provider: &Pr,
         allow_subset_candidates: bool,
         self_member_id: &[u8],
-    ) -> Result<FreezeFinalizeResult, ConversationError> {
+    ) -> Result<FreezeFinalizeResult, ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let in_recovery = self.operating_mode == OperatingMode::Recovery;
         let mls = &mut self.services.mls;
         finalize_freeze_round(
+            provider,
             &mut self.queues,
             mls,
             &self.services.steward_list,
@@ -402,11 +411,16 @@ where
     }
 
     /// Decode an inbound app-subtopic payload into a [`ProcessResult`].
-    pub(crate) fn decode_inbound(
+    pub(crate) fn decode_inbound<Pr>(
         &mut self,
+        provider: &Pr,
         payload: &[u8],
-    ) -> Result<ProcessResult, ConversationError> {
-        decode_inbound_payload(&mut self.queues, &mut self.services.mls, payload)
+    ) -> Result<ProcessResult, ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        decode_inbound_payload(provider, &mut self.queues, &mut self.services.mls, payload)
     }
 
     /// Append a [`ConversationEvent`] to the pending-events buffer. The caller's
@@ -547,8 +561,16 @@ where
     /// [`LeaveOutcome::LeaveInitiated`]; the leave completes when the next
     /// steward commit merges the removal. `signer` is the local member's MLS
     /// signer, used to authenticate the self-leave proposal.
-    pub fn leave(&mut self, signer: &impl Signer) -> Result<LeaveOutcome, ConversationError> {
-        self.initiate_self_leave(signer)?;
+    pub fn leave<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<LeaveOutcome, ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        self.initiate_self_leave(provider, signer)?;
         Ok(LeaveOutcome::LeaveInitiated)
     }
 
@@ -664,21 +686,21 @@ mod tests {
         make_test_consensus_service,
     };
 
-    type TestConversation =
-        Conversation<DefaultConsensusPlugin, TestProvider, StubScoring, StubStewardList>;
+    type TestConversation = Conversation<DefaultConsensusPlugin, StubScoring, StubStewardList>;
 
     /// Build a conversation with a real creator-side MLS service and the given
-    /// steward stub, returning it alongside the signer that seeded the MLS
-    /// group (for paths that sign — the guard tests early-return before then).
+    /// steward stub, returning it alongside the provider that backs the MLS
+    /// group and the signer that seeded it (for paths that sign — the guard
+    /// tests early-return before then).
     fn make_conversation_with_steward(
         steward_list: StubStewardList,
-    ) -> (TestConversation, SignatureKeyPair) {
-        let (mls, signer) = make_creator_mls(b"test-member-id");
-        (build_conversation(mls, steward_list), signer)
+    ) -> (TestConversation, TestProvider, SignatureKeyPair) {
+        let (mls, provider, signer) = make_creator_mls(b"test-member-id");
+        (build_conversation(mls, steward_list), provider, signer)
     }
 
     fn make_conversation_working() -> TestConversation {
-        let (mls, _signer) = make_creator_mls(b"test-member-id");
+        let (mls, _provider, _signer) = make_creator_mls(b"test-member-id");
         build_conversation(mls, StubStewardList::member())
     }
 
@@ -837,18 +859,20 @@ mod tests {
 
     #[test]
     fn create_commit_candidate_errors_for_non_steward_outside_recovery() {
-        let (mut conversation, signer) = make_conversation_with_steward(StubStewardList::member());
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(StubStewardList::member());
         let err = conversation
-            .create_commit_candidate(&signer, b"me")
+            .create_commit_candidate(&provider, &signer, b"me")
             .expect_err("non-steward should be rejected");
         assert!(matches!(err, ConversationError::NotASteward));
     }
 
     #[test]
     fn create_commit_candidate_errors_when_no_approved_proposals() {
-        let (mut conversation, signer) = make_conversation_with_steward(StubStewardList::steward());
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(StubStewardList::steward());
         let err = conversation
-            .create_commit_candidate(&signer, b"me")
+            .create_commit_candidate(&provider, &signer, b"me")
             .expect_err("empty approved queue should be rejected");
         assert!(matches!(err, ConversationError::NoProposals));
     }
@@ -861,7 +885,8 @@ mod tests {
     fn create_commit_candidate_errors_on_emergency_in_approved_queue() {
         use crate::protos::de_mls::messages::v1::ViolationEvidence;
 
-        let (mut conversation, signer) = make_conversation_with_steward(StubStewardList::steward());
+        let (mut conversation, provider, signer) =
+            make_conversation_with_steward(StubStewardList::steward());
         let emergency = ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new())
             .with_creator(vec![0x01])
             .into_update_request()
@@ -869,7 +894,7 @@ mod tests {
         conversation.queues.insert_approved_proposal(50, emergency);
 
         let err = conversation
-            .create_commit_candidate(&signer, b"me")
+            .create_commit_candidate(&provider, &signer, b"me")
             .expect_err("emergency in approved queue should be rejected");
         let ConversationError::UnexpectedNonMlsProposals { proposal_ids } = err else {
             panic!("expected UnexpectedNonMlsProposals, got {err:?}");

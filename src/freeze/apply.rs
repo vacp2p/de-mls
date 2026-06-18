@@ -2,6 +2,10 @@
 //! Per-candidate apply paths (local merge / remote stage-validate-merge),
 //! MLS staging, validation, and post-commit bookkeeping live here.
 
+use std::error::Error as StdError;
+
+use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
+
 use crate::{
     CommitHash, ConversationError, ConversationQueues, FreezeFinalizeResult, FreezeOutcome,
     ProcessResult, ScoreEvent, ScoreOp, StewardListPlugin,
@@ -35,14 +39,19 @@ enum CandidateOutcome {
 /// `own_commit_discarded` enforces MLS's one-pending-commit rule: the first
 /// incoming attempt wipes our own pending commit, so a later lower-priority
 /// local candidate has nothing to apply.
-pub(super) fn apply_in_priority_order<M: MlsService, St: StewardListPlugin>(
+pub(super) fn apply_in_priority_order<Pr, M: MlsService, St: StewardListPlugin>(
+    provider: &Pr,
     conversation: &mut ConversationQueues,
     mls: &mut M,
     steward: &St,
     sorted: Vec<BufferedCommitCandidate>,
     ctx: &RoundContext,
     self_member_id: &[u8],
-) -> Result<FreezeFinalizeResult, ConversationError> {
+) -> Result<FreezeFinalizeResult, ConversationError>
+where
+    Pr: OpenMlsProvider,
+    <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+{
     let mut score_ops: Vec<ScoreOp> = Vec::new();
     let mut own_commit_discarded = false;
     let conversation_id = conversation.name().to_owned();
@@ -57,16 +66,16 @@ pub(super) fn apply_in_priority_order<M: MlsService, St: StewardListPlugin>(
                 );
                 continue;
             }
-            apply_local_candidate(conversation, mls, chosen, ctx)?
+            apply_local_candidate(provider, conversation, mls, chosen, ctx)?
         } else {
             if !own_commit_discarded && steward.is_steward(self_member_id) {
                 // A failure here leaves an old pending commit in MLS and
                 // would sabotage every subsequent staging attempt — bubble
                 // the error out of the round instead of pressing on.
-                mls.discard_own_commit()?;
+                mls.discard_own_commit(provider)?;
                 own_commit_discarded = true;
             }
-            apply_incoming_candidate(conversation, mls, steward, chosen, ctx)?
+            apply_incoming_candidate(provider, conversation, mls, steward, chosen, ctx)?
         };
 
         match apply_result {
@@ -98,7 +107,7 @@ pub(super) fn apply_in_priority_order<M: MlsService, St: StewardListPlugin>(
     // merged or discarded along an incoming-wins path — leaving it
     // behind would break the next MLS encrypt.
     if !own_commit_discarded {
-        mls.discard_own_commit()?;
+        mls.discard_own_commit(provider)?;
     }
     conversation.clear_freeze_round();
     Ok(FreezeFinalizeResult {
@@ -159,13 +168,18 @@ fn record_winner_scores<St: StewardListPlugin>(
 
 /// Merge our own commit and surface the welcome we held back until merge.
 /// Validation happened at commit-creation time, so no re-staging is needed.
-fn apply_local_candidate<M: MlsService>(
+fn apply_local_candidate<Pr, M: MlsService>(
+    provider: &Pr,
     conversation: &mut ConversationQueues,
     mls: &mut M,
     chosen: BufferedCommitCandidate,
     ctx: &RoundContext,
-) -> Result<CandidateOutcome, ConversationError> {
-    mls.merge_own_commit()?;
+) -> Result<CandidateOutcome, ConversationError>
+where
+    Pr: OpenMlsProvider,
+    <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+{
+    mls.merge_own_commit(provider)?;
 
     let committed_batch =
         finalize_committed_batch(conversation, chosen.commit_hash, mls.current_epoch()?);
@@ -195,17 +209,22 @@ fn apply_local_candidate<M: MlsService>(
 ///
 /// Caller must have discarded any own pending commit first — MLS allows
 /// only one per conversation.
-fn apply_incoming_candidate<M: MlsService, St: StewardListPlugin>(
+fn apply_incoming_candidate<Pr, M: MlsService, St: StewardListPlugin>(
+    provider: &Pr,
     conversation: &mut ConversationQueues,
     mls: &mut M,
     steward: &St,
     chosen: BufferedCommitCandidate,
     ctx: &RoundContext,
-) -> Result<CandidateOutcome, ConversationError> {
+) -> Result<CandidateOutcome, ConversationError>
+where
+    Pr: OpenMlsProvider,
+    <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+{
     let conversation_id = conversation.name().to_owned();
 
     let (commit_sender, self_removed, commit_actions) =
-        match stage_candidate(mls, &conversation_id, &chosen.candidate_msg, ctx)? {
+        match stage_candidate(provider, mls, &conversation_id, &chosen.candidate_msg, ctx)? {
             StagingOutcome::Staged {
                 commit_sender,
                 self_removed,
@@ -214,14 +233,14 @@ fn apply_incoming_candidate<M: MlsService, St: StewardListPlugin>(
             StagingOutcome::Abort => {
                 // Wire-valid but MLS-invalid — penalize the author; the
                 // loop will try the next candidate.
-                mls.discard_staged_commit()?;
+                mls.discard_staged_commit(provider)?;
                 return Ok(CandidateOutcome::Drop(Some(ScoreOp {
                     member_id: chosen.candidate_msg.steward_member_id,
                     event: ScoreEvent::MisbehavingCommit,
                 })));
             }
             StagingOutcome::Violation(v) => {
-                mls.discard_staged_commit()?;
+                mls.discard_staged_commit(provider)?;
                 return Ok(CandidateOutcome::Drop(v.target_score_op()));
             }
         };
@@ -230,7 +249,7 @@ fn apply_incoming_candidate<M: MlsService, St: StewardListPlugin>(
     if let Some(violation) =
         check_commit_sender_authorized(conversation, steward, &commit_sender, ctx)
     {
-        mls.discard_staged_commit()?;
+        mls.discard_staged_commit(provider)?;
         return Ok(CandidateOutcome::Drop(violation.target_score_op()));
     }
 
@@ -238,11 +257,11 @@ fn apply_incoming_candidate<M: MlsService, St: StewardListPlugin>(
     if let Some(violation) =
         validate_commit_candidate(conversation, &commit_sender, &commit_actions, ctx)?
     {
-        mls.discard_staged_commit()?;
+        mls.discard_staged_commit(provider)?;
         return Ok(CandidateOutcome::Drop(violation.target_score_op()));
     }
 
-    mls.merge_staged_commit()?;
+    mls.merge_staged_commit(provider)?;
     let committed_batch =
         finalize_committed_batch(conversation, chosen.commit_hash, mls.current_epoch()?);
 
@@ -281,17 +300,20 @@ enum StagingOutcome {
 ///
 /// Leaves MLS in the staged state on `Staged`; the caller must clean up
 /// via `discard_staged_commit` for `Abort` / `Violation`.
-fn stage_candidate<M>(
+fn stage_candidate<Pr, M>(
+    provider: &Pr,
     mls: &mut M,
     conversation_id: &str,
     candidate: &CommitCandidate,
     ctx: &RoundContext,
 ) -> Result<StagingOutcome, ConversationError>
 where
+    Pr: OpenMlsProvider,
+    <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     M: MlsService,
 {
     let staged_result = mls
-        .stage_remote_commit(&candidate.mls_proposals, &candidate.commit_message)
+        .stage_remote_commit(provider, &candidate.mls_proposals, &candidate.commit_message)
         .inspect_err(|e| {
             tracing::debug!(conversation = conversation_id, error = %e, "candidate failed to stage");
         });

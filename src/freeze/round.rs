@@ -2,6 +2,9 @@
 //!
 //! Per-candidate apply lives in the sibling [`super::apply`] module.
 
+use std::error::Error as StdError;
+
+use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 use sha2::{Digest, Sha256};
 use tracing::info;
 
@@ -174,21 +177,26 @@ pub fn replay_early_candidates<M: MlsService>(
 
 /// Snapshot round state, rank the buffered candidates by RFC priority, and
 /// apply best-first — falling back to the next when MLS staging rejects one.
-pub fn finalize_freeze_round<M: MlsService, St: StewardListPlugin>(
+pub fn finalize_freeze_round<Pr, M: MlsService, St: StewardListPlugin>(
+    provider: &Pr,
     conversation: &mut ConversationQueues,
     mls: &mut M,
     steward: &St,
     in_recovery: bool,
     allow_subset_candidates: bool,
     self_member_id: &[u8],
-) -> Result<FreezeFinalizeResult, ConversationError> {
+) -> Result<FreezeFinalizeResult, ConversationError>
+where
+    Pr: OpenMlsProvider,
+    <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+{
     let current_epoch = mls.current_epoch()?;
     let Some(candidates) = conversation.take_round_candidates(current_epoch) else {
-        return discard_and_finish(mls);
+        return discard_and_finish(provider, mls);
     };
 
     if candidates.is_empty() {
-        return discard_and_finish(mls);
+        return discard_and_finish(provider, mls);
     }
 
     let ctx = RoundContext::snapshot(
@@ -202,18 +210,31 @@ pub fn finalize_freeze_round<M: MlsService, St: StewardListPlugin>(
     let sorted = rank_applicable_candidates(candidates, &ctx, allow_subset_candidates);
 
     if sorted.is_empty() {
-        return discard_and_finish(mls);
+        return discard_and_finish(provider, mls);
     }
 
-    apply_in_priority_order(conversation, mls, steward, sorted, &ctx, self_member_id)
+    apply_in_priority_order(
+        provider,
+        conversation,
+        mls,
+        steward,
+        sorted,
+        &ctx,
+        self_member_id,
+    )
 }
 
 /// No candidate applied: drop any local pending commit (otherwise the next
 /// MLS encrypt trips on "pending proposal exists") and report a no-op.
-fn discard_and_finish<M: MlsService>(
+fn discard_and_finish<Pr, M: MlsService>(
+    provider: &Pr,
     mls: &mut M,
-) -> Result<FreezeFinalizeResult, ConversationError> {
-    mls.discard_own_commit()?;
+) -> Result<FreezeFinalizeResult, ConversationError>
+where
+    Pr: OpenMlsProvider,
+    <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+{
+    mls.discard_own_commit(provider)?;
     Ok(FreezeFinalizeResult::default())
 }
 

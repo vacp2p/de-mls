@@ -45,29 +45,30 @@ pub(crate) const TEST_SUITE: Ciphersuite =
 /// Concrete OpenMLS provider the crate-internal fixtures run.
 pub(crate) type TestProvider = OpenMlsRustCrypto;
 
-/// MLS service type the crate-internal unit tests run: the reference engine
-/// over `OpenMlsRustCrypto`.
-pub(crate) type TestMls = OpenMlsService<TestProvider>;
+/// MLS service type the crate-internal unit tests run: the reference engine.
+pub(crate) type TestMls = OpenMlsService;
 
-/// Build a real creator-side MLS service for `member_id`, returning it
-/// alongside the signer that seeded it (needed for any signing path the test
+/// Build a real creator-side MLS service for `member_id` against a fresh
+/// test-held provider, returning the service alongside the provider and the
+/// signer that seeded it (both needed for any signing path the test
 /// exercises). The guard tests this serves early-return before MLS advances,
 /// but the service must still be a real, queryable group.
-pub(crate) fn make_creator_mls(member_id: &[u8]) -> (TestMls, SignatureKeyPair) {
+pub(crate) fn make_creator_mls(member_id: &[u8]) -> (TestMls, TestProvider, SignatureKeyPair) {
     let signer = SignatureKeyPair::new(TEST_SUITE.signature_algorithm()).expect("signer");
     let credential = CredentialWithKey {
         credential: BasicCredential::new(member_id.to_vec()).into(),
         signature_key: signer.to_public_vec().into(),
     };
+    let provider = TestProvider::default();
     let mls = OpenMlsService::new_as_creator(
         "test-conversation".to_string(),
-        TestProvider::default(),
+        &provider,
         credential,
         TEST_SUITE,
         &signer,
     )
     .expect("create creator mls");
-    (mls, signer)
+    (mls, provider, signer)
 }
 
 /// Steward-list plug-in with controllable `is_steward`. Other methods panic.

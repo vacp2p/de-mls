@@ -45,13 +45,13 @@ use de_mls::{
 };
 
 use crate::common::{
-    TEST_SUITE, TestProvider, make_scoring, make_steward, mint_key_package, test_credential,
+    TEST_SUITE, make_scoring, make_steward, mint_key_package, test_credential,
     wallet::WalletMemberId,
 };
 
 /// Per-conversation MLS service stack the harness runs.
 pub type TestConversation =
-    Conversation<DefaultConsensusPlugin, TestProvider, DefaultPeerScoring, DefaultStewardList>;
+    Conversation<DefaultConsensusPlugin, DefaultPeerScoring, DefaultStewardList>;
 
 const MAX_SESSIONS_PER_SCOPE: usize = 10;
 
@@ -80,9 +80,10 @@ struct Integrator {
     member_id: WalletMemberId,
     scoring_config: ScoringConfig,
     steward_list_config: StewardListConfig,
-    /// Provider holding the private keys of a minted-but-not-yet-joined key
-    /// package; `open_welcome` consumes it once the welcome arrives.
-    pending_provider: Option<OpenMlsRustCrypto>,
+    /// One OpenMLS provider reused across every driving call (OpenMLS's native
+    /// model). The creator seeds its group into it; a joiner mints its key
+    /// package into it and later opens the welcome from it.
+    provider: OpenMlsRustCrypto,
 }
 
 impl Integrator {
@@ -98,7 +99,7 @@ impl Integrator {
             member_id,
             scoring_config: ScoringConfig::default(),
             steward_list_config,
-            pending_provider: None,
+            provider: OpenMlsRustCrypto::default(),
         }
     }
 
@@ -116,12 +117,10 @@ impl Integrator {
         )
     }
 
-    /// Mint a single-use key package, stashing its provider for the matching
-    /// welcome.
+    /// Mint a single-use key package into this integrator's reused provider,
+    /// which thereby holds the private keys for the matching welcome.
     fn mint_key_package(&mut self) -> KeyPackageBytes {
-        let (kp, provider) = mint_key_package(&self.credential, &self.signer);
-        self.pending_provider = Some(provider);
-        kp
+        mint_key_package(&self.provider, &self.credential, &self.signer)
     }
 
     /// Build a fresh per-conversation consensus service drawn from this
@@ -179,7 +178,7 @@ impl Member {
         let steward = integ.steward();
         let convo = Conversation::create(
             conversation_id,
-            TestProvider::default(),
+            &integ.provider,
             integ.credential.clone(),
             TEST_SUITE,
             &integ.signer,
@@ -423,7 +422,7 @@ impl Member {
         self.convo
             .as_mut()
             .expect("member has joined")
-            .send_message(message, &self.integ.signer)
+            .send_message(&self.integ.provider, message, &self.integ.signer)
             .expect("send message");
     }
 
@@ -431,7 +430,7 @@ impl Member {
         self.convo
             .as_mut()
             .expect("member has joined")
-            .add_member(key_package, &self.integ.signer)
+            .add_member(&self.integ.provider, key_package, &self.integ.signer)
             .expect("add member");
     }
 
@@ -439,7 +438,7 @@ impl Member {
         self.convo
             .as_mut()
             .expect("member has joined")
-            .remove_member(member_id, &self.integ.signer)
+            .remove_member(&self.integ.provider, member_id, &self.integ.signer)
             .expect("remove member");
     }
 
@@ -448,7 +447,7 @@ impl Member {
         self.convo
             .as_mut()
             .expect("member has joined")
-            .vote(proposal_id, vote, &self.integ.signer)
+            .vote(&self.integ.provider, proposal_id, vote, &self.integ.signer)
             .expect("vote");
     }
 
@@ -458,7 +457,7 @@ impl Member {
         self.convo
             .as_mut()
             .expect("member has joined")
-            .initiate_proposal(request, vote, &self.integ.signer)
+            .initiate_proposal(&self.integ.provider, request, vote, &self.integ.signer)
             .expect("initiate proposal");
     }
 
@@ -466,7 +465,7 @@ impl Member {
         self.convo
             .as_mut()
             .expect("member has joined")
-            .leave(&self.integ.signer)
+            .leave(&self.integ.provider, &self.integ.signer)
             .expect("leave");
     }
 
@@ -480,7 +479,8 @@ impl Member {
     /// No-op when the member hasn't joined.
     pub fn deliver_raw(&mut self, sender: &[u8], payload: &[u8]) {
         if let Some(convo) = self.convo.as_mut() {
-            let _ = convo.process_inbound(sender, payload, &self.integ.signer);
+            let _ =
+                convo.process_inbound(&self.integ.provider, sender, payload, &self.integ.signer);
         }
     }
 
@@ -516,7 +516,7 @@ impl Member {
     /// poll outcome. No-op (empty outcome) when the member hasn't joined.
     pub fn poll(&mut self) -> PollOutcome {
         match self.convo.as_mut() {
-            Some(convo) => convo.poll(&self.integ.signer),
+            Some(convo) => convo.poll(&self.integ.provider, &self.integ.signer),
             None => PollOutcome {
                 next_wakeup_in: None,
                 leave_requested: false,
@@ -539,7 +539,12 @@ impl Member {
 
     fn deliver(&mut self, packet: &Outbound) {
         if let Some(convo) = self.convo.as_mut() {
-            let _ = convo.process_inbound(&packet.sender, &packet.payload, &self.integ.signer);
+            let _ = convo.process_inbound(
+                &self.integ.provider,
+                &packet.sender,
+                &packet.payload,
+                &self.integ.signer,
+            );
         }
     }
 
@@ -557,7 +562,11 @@ impl Member {
             return;
         }
         let invite = MemberInvite::decode(packet.payload.as_slice()).expect("decode key package");
-        let _ = convo.add_member(&invite.key_package_bytes, &self.integ.signer);
+        let _ = convo.add_member(
+            &self.integ.provider,
+            &invite.key_package_bytes,
+            &self.integ.signer,
+        );
     }
 
     /// Try to open `welcome` with this member's stashed key-package provider.
@@ -568,15 +577,15 @@ impl Member {
         if self.convo.is_some() {
             return false;
         }
-        // A fresh provider (we never minted a KP) holds no matching key package,
-        // so a welcome not for us cleanly yields `Ok(None)`.
-        let provider = self.integ.pending_provider.take().unwrap_or_default();
+        // The integrator's reused provider holds the minted KP's private keys;
+        // a member that never minted a KP holds none, so a welcome not for us
+        // cleanly yields `Ok(None)`.
         let scoring = self.integ.scoring();
         let steward = self.integ.steward();
         // `join` opens the welcome internally; only the addressed joiner gets
         // `Some`.
         match Conversation::join(
-            provider,
+            &self.integ.provider,
             &welcome.welcome_bytes,
             &welcome.conversation_sync_bytes,
             scoring,

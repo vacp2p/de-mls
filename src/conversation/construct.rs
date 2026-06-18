@@ -24,23 +24,21 @@ use crate::{
     mls_crypto::{MlsService, OpenMlsService},
 };
 
-impl<C, P, Sc, St> Conversation<C, P, Sc, St>
+impl<C, Sc, St> Conversation<C, Sc, St>
 where
     C: ConsensusPlugin,
-    P: OpenMlsProvider,
-    <P::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     Sc: PeerScoringPlugin,
     St: StewardListPlugin,
 {
     /// Create a brand-new conversation we steward. Starts in `Working` with the
     /// local member installed as sole steward at epoch 0. The library seeds a
-    /// fresh MLS group from `provider`, `credential`, and `ciphersuite`.
-    /// `member_id` names the local member — the opaque id bytes the protocol
-    /// matches on.
+    /// fresh MLS group into `provider` (which it does not retain) from
+    /// `credential` and `ciphersuite`. `member_id` names the local member — the
+    /// opaque id bytes the protocol matches on.
     #[allow(clippy::too_many_arguments)]
-    pub fn create(
+    pub fn create<Pr>(
         conversation_id: &str,
-        provider: P,
+        provider: &Pr,
         credential: CredentialWithKey,
         ciphersuite: Ciphersuite,
         signer: &impl Signer,
@@ -50,7 +48,11 @@ where
         app_id: Arc<[u8]>,
         config: ConversationConfig,
         member_id: &[u8],
-    ) -> Result<Self, ConversationError> {
+    ) -> Result<Self, ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let mls = OpenMlsService::new_as_creator(
             conversation_id.to_string(),
             provider,
@@ -83,8 +85,8 @@ where
     /// The conversation id comes from the MLS group, so the caller needs no
     /// prior knowledge of the conversation.
     #[allow(clippy::too_many_arguments)]
-    pub fn join(
-        provider: P,
+    pub fn join<Pr>(
+        provider: &Pr,
         welcome_bytes: &[u8],
         conversation_sync_bytes: &[u8],
         scoring: Sc,
@@ -94,8 +96,12 @@ where
         config: ConversationConfig,
         member_id: &[u8],
         signer: &impl Signer,
-    ) -> Result<Option<Self>, ConversationError> {
-        let Some(mls) = OpenMlsService::new_from_welcome(welcome_bytes, provider)? else {
+    ) -> Result<Option<Self>, ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let Some(mls) = OpenMlsService::new_from_welcome(provider, welcome_bytes)? else {
             return Ok(None);
         };
         let conversation_id = mls.conversation_id().to_string();
@@ -110,8 +116,8 @@ where
             false,
             member_id,
         )?;
-        conversation.on_joined(signer)?;
-        conversation.apply_welcome_sync(conversation_sync_bytes, signer)?;
+        conversation.on_joined(provider, signer)?;
+        conversation.apply_welcome_sync(provider, conversation_sync_bytes, signer)?;
         Ok(Some(conversation))
     }
 
@@ -124,7 +130,7 @@ where
     #[allow(clippy::too_many_arguments)]
     fn assemble(
         conversation_id: &str,
-        mls: OpenMlsService<P>,
+        mls: OpenMlsService,
         mut scoring: Sc,
         mut steward_list: St,
         consensus: ConsensusServiceFor<C>,

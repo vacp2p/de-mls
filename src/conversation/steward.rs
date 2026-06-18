@@ -32,11 +32,9 @@ pub(crate) enum StewardListReconcile {
     NeedsElection,
 }
 
-impl<C, P, Sc, St> Conversation<C, P, Sc, St>
+impl<C, Sc, St> Conversation<C, Sc, St>
 where
     C: ConsensusPlugin,
-    P: OpenMlsProvider,
-    <P::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     Sc: PeerScoringPlugin,
     St: StewardListPlugin,
 {
@@ -69,13 +67,18 @@ where
     /// Reconcile the list after an epoch advance, opening a voted election when
     /// it's needed. Election-init failures are logged, not surfaced — the
     /// conversation may legitimately reject a new proposal right now.
-    pub(crate) fn steward_list_housekeeping(
+    pub(crate) fn steward_list_housekeeping<Pr>(
         &mut self,
+        provider: &Pr,
         signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let reconcile = self.reconcile_steward_list()?;
         if reconcile == StewardListReconcile::NeedsElection
-            && let Err(e) = self.initiate_steward_election(false, signer)
+            && let Err(e) = self.initiate_steward_election(provider, false, signer)
         {
             info!(conversation = %self.conversation_id, error = %e, "election initiation deferred");
         }
@@ -118,11 +121,16 @@ where
     /// `RemoveMember`): buffer it so every member has a durable record, then
     /// promote it to a voting proposal if this node is the current epoch
     /// steward and the conversation accepts new proposals.
-    pub(crate) fn handle_incoming_update_request(
+    pub(crate) fn handle_incoming_update_request<Pr>(
         &mut self,
+        provider: &Pr,
         request: ConversationUpdateRequest,
         signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let state = self.current_state();
         // Defensive — core only emits membership changes here.
         if target_member_id_of(&request).is_none() {
@@ -165,7 +173,8 @@ where
             // let the vote request drive the steward's vote like any other member.
             // `check_proposal_allowed` may still reject (active emergency
             // etc.) — leave the entry in the buffer for next rotation.
-            if let Err(e) = self.initiate_proposal(request, CreatorVote::Deferred, signer) {
+            if let Err(e) = self.initiate_proposal(provider, request, CreatorVote::Deferred, signer)
+            {
                 info!(conversation = %self.conversation_id, error = %e, "proposal deferred");
             }
         }
@@ -204,10 +213,15 @@ where
     /// On epoch advance, the new live epoch steward drains the pending-update
     /// buffer into voting proposals. Skips entries already covered by the
     /// current voting/approved queues so we don't double-propose.
-    pub(crate) fn process_buffered_updates(
+    pub(crate) fn process_buffered_updates<Pr>(
         &mut self,
+        provider: &Pr,
         signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let (current_epoch, to_propose, conversation_id): (
             u64,
             Vec<ConversationUpdateRequest>,
@@ -269,7 +283,8 @@ where
         // Buffered updates inherit the same vote request path as fresh
         // steward-auto-propose — the steward still decides per proposal.
         for request in to_propose {
-            if let Err(e) = self.initiate_proposal(request, CreatorVote::Deferred, signer) {
+            if let Err(e) = self.initiate_proposal(provider, request, CreatorVote::Deferred, signer)
+            {
                 info!(
                     conversation = %conversation_id,
                     error = %e,
@@ -286,10 +301,15 @@ where
     /// owns delivery: broadcast it as an [`Outbound`](crate::Outbound)
     /// or feed it into another channel. The post-commit join path bundles
     /// the same payload into [`crate::ConversationEvent::WelcomeReady`].
-    pub(crate) fn build_conversation_sync_payload(
+    pub(crate) fn build_conversation_sync_payload<Pr>(
         &mut self,
+        provider: &Pr,
         signer: &impl Signer,
-    ) -> Result<Option<Vec<u8>>, ConversationError> {
+    ) -> Result<Option<Vec<u8>>, ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         // Sparse snapshot — only members whose score has diverged
         // from `default_score`. Joiners init every member at default
         // via membership sync before applying the snapshot, so
@@ -343,16 +363,23 @@ where
         };
 
         let app_msg: AppMessage = sync.into();
-        Ok(Some(self.mls_mut().build_message(signer, &app_msg)?))
+        Ok(Some(
+            self.mls_mut().build_message(provider, signer, &app_msg)?,
+        ))
     }
 
     /// Steward-only: file `ScoreBelowThreshold` ECPs for any member whose
     /// score fell at or below the removal threshold. Skips self and any
     /// target already covered by a pending removal.
-    pub(crate) fn check_and_initiate_score_removals(
+    pub(crate) fn check_and_initiate_score_removals<Pr>(
         &mut self,
+        provider: &Pr,
         signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         // Reactive entry: callers chain into this after a scoring apply
         // emitted a downward cross, so we expect at least one tracked
         // member to be at-or-below threshold. The scan is the source of
@@ -410,7 +437,7 @@ where
             // SCORE_BELOW_THRESHOLD is self-executing: threshold crossed ⇒
             // member must be removed. The steward's vote is YES by
             // protocol, so we bundle it at submit and skip the vote request.
-            if let Err(e) = self.initiate_proposal(request, CreatorVote::Yes, signer) {
+            if let Err(e) = self.initiate_proposal(provider, request, CreatorVote::Yes, signer) {
                 self.queues.remove_pending_removal(&target_id);
                 error!(
                     conversation = %conversation_id,
@@ -435,11 +462,16 @@ where
     /// already in `approved_proposals` thanks to
     /// [`crate::apply_consensus_result`], so `has_approved_removal`
     /// catches them without an explicit exclude.
-    pub(crate) fn initiate_steward_election(
+    pub(crate) fn initiate_steward_election<Pr>(
         &mut self,
+        provider: &Pr,
         recovery: bool,
         signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let (proposed_stewards, election_epoch, retry_round, conversation_id) = {
             let mls = self.mls();
             let epoch = mls.current_epoch()?;
@@ -513,7 +545,7 @@ where
 
         // Elections are conversation-wide decisions — broadcast unbundled
         // so the responsible proposer still votes via the vote request.
-        self.initiate_proposal(request, CreatorVote::Deferred, signer)?;
+        self.initiate_proposal(provider, request, CreatorVote::Deferred, signer)?;
 
         Ok(())
     }
@@ -521,10 +553,15 @@ where
     /// Layer 3 escalation: file a `Deadlock` ECP after re-election retries
     /// exhaust. Only the deterministic responsible proposer submits;
     /// others no-op. On YES the ECP opens `recovery_mode`.
-    pub(crate) fn initiate_deadlock_ecp(
+    pub(crate) fn initiate_deadlock_ecp<Pr>(
         &mut self,
+        provider: &Pr,
         signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let (is_authorized, self_id, epoch, conversation_id) = {
             let mls = self.mls();
             let mls_members = mls.members()?;
@@ -565,7 +602,7 @@ where
 
         // Bundle YES — the proposer's observation that the deadlock is
         // real is their vote.
-        self.initiate_proposal(request, CreatorVote::Yes, signer)?;
+        self.initiate_proposal(provider, request, CreatorVote::Yes, signer)?;
         Ok(())
     }
 }

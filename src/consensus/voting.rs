@@ -36,11 +36,9 @@ pub enum CreatorVote {
     Deferred,
 }
 
-impl<C, P, Sc, St> Conversation<C, P, Sc, St>
+impl<C, Sc, St> Conversation<C, Sc, St>
 where
     C: ConsensusPlugin,
-    P: OpenMlsProvider,
-    <P::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     Sc: PeerScoringPlugin,
     St: StewardListPlugin,
 {
@@ -57,12 +55,17 @@ where
     /// Local ownership is recorded before any vote is cast: with a single
     /// expected voter the bundled YES resolves the session synchronously,
     /// and the outcome handler must already see us as the owner by then.
-    pub fn initiate_proposal(
+    pub fn initiate_proposal<Pr>(
         &mut self,
+        provider: &Pr,
         request: ConversationUpdateRequest,
         creator_vote: CreatorVote,
         signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let kind = ProposalKind::of(&request);
         let expected_voters = self.check_proposal_allowed(kind)?;
 
@@ -110,7 +113,7 @@ where
                     "YES vote cast (bundled at submit)"
                 );
                 let outbound: AppMessage = proposal.into();
-                let payload = self.mls_mut().build_message(signer, &outbound)?;
+                let payload = self.mls_mut().build_message(provider, signer, &outbound)?;
                 self.broadcast(payload);
                 self.emit_event(ConversationEvent::OwnProposalSubmitted {
                     proposal_id,
@@ -118,7 +121,7 @@ where
                 });
             }
             CreatorVote::Deferred => {
-                let payload = self.mls_mut().build_message(signer, &unbundled)?;
+                let payload = self.mls_mut().build_message(provider, signer, &unbundled)?;
                 self.broadcast(payload);
                 self.emit_event(ConversationEvent::VoteRequested {
                     proposal_id,
@@ -135,24 +138,33 @@ where
     /// manual choice wins. Blocked while an epoch rotation is in flight
     /// (`Freezing`/`Selection`) — the encrypted vote might not decrypt on
     /// peers that already merged the next commit.
-    pub fn vote(
+    pub fn vote<Pr>(
         &mut self,
+        provider: &Pr,
         proposal_id: u32,
         vote: bool,
         signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let state = self.current_state();
         if state == ConversationState::Freezing || state == ConversationState::Selection {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
         self.cancel_auto_vote(proposal_id);
-        self.broadcast_vote(proposal_id, vote, signer)
+        self.broadcast_vote(provider, proposal_id, vote, signer)
     }
 
     /// Fire elapsed auto-votes and consensus timeouts, then drain the
     /// event bus into `apply_consensus_outcome`. Per-proposal errors are
     /// logged and skipped so one stuck proposal can't block the rest.
-    pub(crate) fn tick_deadlines(&mut self, signer: &impl Signer) {
+    pub(crate) fn tick_deadlines<Pr>(&mut self, provider: &Pr, signer: &impl Signer)
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let now = std::time::Instant::now();
         let auto_votes_due: Vec<(u32, bool)> = self
             .timing
@@ -176,7 +188,7 @@ where
         }
 
         for (proposal_id, vote) in auto_votes_due {
-            if let Err(e) = self.broadcast_vote(proposal_id, vote, signer) {
+            if let Err(e) = self.broadcast_vote(provider, proposal_id, vote, signer) {
                 tracing::debug!(
                     proposal_id,
                     error = %e,
@@ -196,7 +208,7 @@ where
             else {
                 break;
             };
-            if let Err(e) = self.apply_consensus_outcome(event, signer) {
+            if let Err(e) = self.apply_consensus_outcome(provider, event, signer) {
                 tracing::warn!(
                     conversation = %self.conversation_id,
                     error = %e,
@@ -215,10 +227,15 @@ where
     /// Safe to repeat: the pending-leave check catches local duplicates,
     /// and the deterministic [`self_leave_proposal_id`] dedupes
     /// retransmits inside the consensus library.
-    pub(crate) fn initiate_self_leave(
+    pub(crate) fn initiate_self_leave<Pr>(
         &mut self,
+        provider: &Pr,
         signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         if self.queues.is_pending_self_leave(&self.self_member_id) {
             info!(
                 conversation = %self.conversation_id,
@@ -254,7 +271,7 @@ where
             return Ok(());
         };
 
-        let payload = self.mls_mut().build_message(signer, &app_msg)?;
+        let payload = self.mls_mut().build_message(provider, signer, &app_msg)?;
         self.broadcast(payload);
         Ok(())
     }
@@ -339,19 +356,26 @@ where
     /// Cast a vote in the local session, encrypt the Vote-only wire
     /// message, and buffer it for broadcast. Manual votes and the auto-vote
     /// timer share this path; the consensus library can't tell them apart.
-    fn broadcast_vote(
+    fn broadcast_vote<Pr>(
         &mut self,
+        provider: &Pr,
         proposal_id: u32,
         vote: bool,
         signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let app_message = cast_vote::<C>(
             &self.conversation_id,
             proposal_id,
             vote,
             &self.services.consensus,
         )?;
-        let payload = self.mls_mut().build_message(signer, &app_message)?;
+        let payload = self
+            .mls_mut()
+            .build_message(provider, signer, &app_message)?;
         self.broadcast(payload);
         Ok(())
     }

@@ -39,23 +39,23 @@ pub fn test_credential(member_id: &[u8]) -> (CredentialWithKey, SignatureKeyPair
     (credential, signer)
 }
 
-/// Mint a single-use key package into a fresh provider and hand both back. The
-/// caller (the integrator) holds the returned provider until its welcome
-/// arrives — it carries the KP's private keys needed to join.
+/// Mint a single-use key package into `provider` — the integrator's one
+/// reused provider, which thereby holds the KP's private keys needed to join
+/// once the matching welcome arrives.
 pub fn mint_key_package(
+    provider: &TestProvider,
     credential: &CredentialWithKey,
     signer: &SignatureKeyPair,
-) -> (KeyPackageBytes, TestProvider) {
-    let provider = TestProvider::default();
+) -> KeyPackageBytes {
     let member_id = credential.credential.serialized_content().to_vec();
     let bundle = KeyPackage::builder()
-        .build(TEST_SUITE, &provider, signer, credential.clone())
+        .build(TEST_SUITE, provider, signer, credential.clone())
         .expect("key package");
     let bytes = bundle
         .key_package()
         .tls_serialize_detached()
         .expect("kp tls");
-    (KeyPackageBytes::new(bytes, member_id), provider)
+    KeyPackageBytes::new(bytes, member_id)
 }
 
 /// Build a fresh peer-scoring plug-in.

@@ -1,16 +1,14 @@
 //! Gateway-side MLS defaults: the concrete plug-in helper the reference
 //! integrator wires into [`User`](crate::user::User).
 //!
-//! de-mls names no concrete MLS backend — `Conversation` is generic over an
-//! `OpenMlsProvider` and the two plug-in traits, and builds the MLS service
-//! itself from a credential + ciphersuite + provider. This module supplies the
+//! de-mls names no concrete MLS backend — `Conversation` takes an
+//! `OpenMlsProvider` by reference on every driving call and builds the MLS
+//! service from a credential + ciphersuite + provider. This module supplies the
 //! integrator half: the OpenMLS reference provider (`OpenMlsRustCrypto`),
 //! credential generation from a member id, key-package minting, and the
 //! concrete scoring / steward-list plug-in instances the `User` passes into
 //! [`Conversation::create`](de_mls::Conversation::create) /
 //! [`Conversation::join`](de_mls::Conversation::join).
-
-use std::sync::Mutex;
 
 use de_mls::{
     DeterministicStewardList, PeerScoringService, ScoringConfig, StewardListConfig,
@@ -47,16 +45,17 @@ pub fn build_credential(
 }
 
 /// Reference plug-in helper over `OpenMlsRustCrypto`. Holds the member's
-/// credential + signer, mints key packages, and builds per-conversation plug-in
-/// instances the `User` feeds into the de-mls constructors. One per `User`.
+/// credential + signer, owns the single OpenMLS provider every conversation
+/// borrows, mints key packages, and builds per-conversation plug-in instances
+/// the `User` feeds into the de-mls constructors. One per `User`.
 pub struct DefaultConversationPluginsFactory {
     credential: CredentialWithKey,
     signer: SignatureKeyPair,
-    /// Provider stashed by [`Self::generate_key_package`] so the matching join
-    /// can reuse it — it owns the key package's private keys, which the
-    /// welcome's `StagedWelcome` needs to decrypt the group secrets. `Mutex`
-    /// (not `RefCell`) because `User` is shared across tasks.
-    pending_provider: Mutex<Option<OpenMlsRustCrypto>>,
+    /// The one OpenMLS provider for this `User`, borrowed on every driving
+    /// call. The creator seeds its group into it; a joiner mints its key
+    /// package into it, and the matching welcome opens against the same
+    /// provider — the key package's private keys are already there.
+    provider: OpenMlsRustCrypto,
 }
 
 impl DefaultConversationPluginsFactory {
@@ -64,7 +63,7 @@ impl DefaultConversationPluginsFactory {
         Self {
             credential,
             signer,
-            pending_provider: Mutex::new(None),
+            provider: OpenMlsRustCrypto::default(),
         }
     }
 
@@ -74,15 +73,18 @@ impl DefaultConversationPluginsFactory {
         self.credential.clone()
     }
 
-    /// Mint a single-use key package in a fresh provider, stashing that
-    /// provider so a later join can open the welcome with the key package's
-    /// private keys.
+    /// The User's OpenMLS provider, borrowed into every `Conversation` call.
+    pub fn provider(&self) -> &OpenMlsRustCrypto {
+        &self.provider
+    }
+
+    /// Mint a single-use key package into the User's provider so a later join
+    /// can open the welcome with the key package's private keys.
     pub fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
-        let provider = OpenMlsRustCrypto::default();
         let member_id = self.credential.credential.serialized_content().to_vec();
         let bundle = KeyPackage::builder().build(
             GATEWAY_SUITE,
-            &provider,
+            &self.provider,
             &self.signer,
             self.credential.clone(),
         )?;
@@ -90,27 +92,7 @@ impl DefaultConversationPluginsFactory {
             .key_package()
             .tls_serialize_detached()
             .map_err(MlsError::KeyPackageTls)?;
-        if let Ok(mut stash) = self.pending_provider.lock() {
-            *stash = Some(provider);
-        }
         Ok(KeyPackageBytes::new(bytes, member_id))
-    }
-
-    /// A fresh provider for the creator path. The creator seeds its own MLS
-    /// group, so it needs no stashed key-package keys.
-    pub fn creator_provider(&self) -> OpenMlsRustCrypto {
-        OpenMlsRustCrypto::default()
-    }
-
-    /// Take the provider stashed when we minted our key package, so the joiner
-    /// can open the welcome with the matching private keys. With no stash (we
-    /// never minted one) a fresh empty provider holds no matching key package,
-    /// so de-mls cleanly reports the welcome isn't for us.
-    pub fn take_pending_provider(&self) -> Option<OpenMlsRustCrypto> {
-        self.pending_provider
-            .lock()
-            .ok()
-            .and_then(|mut stash| stash.take())
     }
 
     /// Build a fresh peer-scoring plug-in.

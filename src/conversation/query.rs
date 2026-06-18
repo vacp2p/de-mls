@@ -1,20 +1,14 @@
 //! Read-only queries over a conversation's state.
 
-use std::error::Error as StdError;
-
-use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
-
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationState, MemberRole,
     PeerScoringPlugin, StewardListPlugin, mls_crypto::MlsService,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 
-impl<C, P, Sc, St> Conversation<C, P, Sc, St>
+impl<C, Sc, St> Conversation<C, Sc, St>
 where
     C: ConsensusPlugin,
-    P: OpenMlsProvider,
-    <P::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     Sc: PeerScoringPlugin,
     St: StewardListPlugin,
 {

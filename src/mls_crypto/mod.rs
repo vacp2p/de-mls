@@ -5,11 +5,12 @@
 //!   Signer`).
 //! - `types` — the byte boundary types (`KeyPackageBytes`, `MlsCommitInput`, …).
 //! - `error` — `MlsError`.
-//! - `engine` — the reference `OpenMlsService<P>`, generic over the OpenMLS
-//!   provider `P` (crypto + rand + storage). It owns `P`, takes the credential +
-//!   ciphersuite from the creator's key package, and the signer per call — so it
-//!   pins no provider, credential, or suite. The integrator (the gateway)
-//!   supplies the provider, credentials, and key-package generation.
+//! - `engine` — the reference `OpenMlsService`. It owns no OpenMLS provider:
+//!   crypto + rand + storage arrive by reference per call, so one provider can
+//!   back every conversation. It takes the credential + ciphersuite from the
+//!   creator's key package, and the signer per call — so it pins no provider,
+//!   credential, or suite. The integrator (the gateway) supplies the provider,
+//!   credentials, and key-package generation.
 
 mod engine;
 mod error;

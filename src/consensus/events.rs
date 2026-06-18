@@ -17,22 +17,25 @@ use crate::{
     },
 };
 
-impl<C, P, Sc, St> Conversation<C, P, Sc, St>
+impl<C, Sc, St> Conversation<C, Sc, St>
 where
     C: ConsensusPlugin,
-    P: OpenMlsProvider,
-    <P::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     Sc: PeerScoringPlugin,
     St: StewardListPlugin,
 {
     /// Apply one resolved outcome: surface the decision to the integrator,
     /// apply the queue effects, then run whatever follow-up the result
     /// calls for (election install/retry, freeze entry, emergency scoring).
-    pub(crate) fn apply_consensus_outcome(
+    pub(crate) fn apply_consensus_outcome<Pr>(
         &mut self,
+        provider: &Pr,
         event: ConsensusEvent,
         signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let (proposal_id, approved, timestamp) = match &event {
             ConsensusEvent::ConsensusReached {
                 proposal_id,
@@ -93,10 +96,10 @@ where
         match consensus_apply {
             ConsensusApplyResult::NoAction => {}
             ConsensusApplyResult::ElectionAccepted(election) => {
-                self.handle_election_accepted(election, signer)?;
+                self.handle_election_accepted(provider, election, signer)?;
             }
             ConsensusApplyResult::ElectionRejected => {
-                self.handle_election_rejected(signer)?;
+                self.handle_election_rejected(provider, signer)?;
             }
             ConsensusApplyResult::RecoveryModeOpened => {
                 self.enter_recovery_mode();
@@ -104,10 +107,10 @@ where
             }
             ConsensusApplyResult::UrgentRemoval { target } => {
                 self.start_freezing_and_emit();
-                self.refresh_stewards_after_removal(&target, signer)?;
+                self.refresh_stewards_after_removal(provider, &target, signer)?;
             }
             ConsensusApplyResult::QueuedRemoval { target } => {
-                self.refresh_stewards_after_removal(&target, signer)?;
+                self.refresh_stewards_after_removal(provider, &target, signer)?;
             }
             ConsensusApplyResult::RejectedMembership { target } => {
                 self.queues.remove_pending_update(&target);
@@ -117,7 +120,7 @@ where
         // Empty for everything but emergency-criteria payloads.
         let score_ops = emergency_score_ops(&request, approved);
         if !score_ops.is_empty() {
-            self.handle_emergency_scored(proposal_id, &request, &score_ops, signer)?;
+            self.handle_emergency_scored(provider, proposal_id, &request, &score_ops, signer)?;
         }
 
         Ok(())
@@ -141,15 +144,20 @@ where
     /// the next epoch still has a live epoch + backup steward. Election
     /// rejection here is deferred, not fatal — the list heals on a later
     /// reconcile.
-    fn refresh_stewards_after_removal(
+    fn refresh_stewards_after_removal<Pr>(
         &mut self,
+        provider: &Pr,
         target: &[u8],
         signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         if !self.services.steward_list.is_steward(target) {
             return Ok(());
         }
-        if let Err(e) = self.initiate_steward_election(true, signer) {
+        if let Err(e) = self.initiate_steward_election(provider, true, signer) {
             info!(
                 conversation = %self.conversation_id,
                 error = %e,
@@ -162,11 +170,16 @@ where
     /// Validate and install an accepted steward list, close any recovery
     /// window, resume from `Reelection` if that's where we were, and drain
     /// buffered updates so the fresh epoch steward proposes them.
-    fn handle_election_accepted(
+    fn handle_election_accepted<Pr>(
         &mut self,
+        provider: &Pr,
         election: StewardElectionProposal,
         signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         // The proposal carries no separate candidate pool: `proposed_stewards`
         // is the full set the proposer sorted.
         let is_valid = self.services.steward_list.validate_proposed(
@@ -206,12 +219,20 @@ where
             "steward election applied"
         );
 
-        self.process_buffered_updates(signer)
+        self.process_buffered_updates(provider, signer)
     }
 
     /// Bump the retry round and re-run the election, or escalate to a
     /// `Deadlock` emergency proposal once retries are exhausted.
-    fn handle_election_rejected(&mut self, signer: &impl Signer) -> Result<(), ConversationError> {
+    fn handle_election_rejected<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         self.services.steward_list.bump_retry();
         let round = self.services.steward_list.next_retry_round();
         let max = self.services.steward_list.max_retries();
@@ -220,7 +241,7 @@ where
                 conversation = %self.conversation_id,
                 round, max, "election retries exhausted; escalating to Layer 3"
             );
-            if let Err(e) = self.initiate_deadlock_ecp(signer) {
+            if let Err(e) = self.initiate_deadlock_ecp(provider, signer) {
                 error!(conversation = %self.conversation_id, error = %e, "Deadlock ECP filing failed");
                 self.emit_event(ConversationEvent::Error {
                     operation: "Reelection stuck".to_string(),
@@ -233,7 +254,7 @@ where
             conversation = %self.conversation_id,
             round, max, "steward election rejected, retrying"
         );
-        if let Err(e) = self.initiate_steward_election(true, signer) {
+        if let Err(e) = self.initiate_steward_election(provider, true, signer) {
             info!(conversation = %self.conversation_id, error = %e, "election retry deferred");
         }
         Ok(())
@@ -244,13 +265,18 @@ where
     /// the emergency set), and resume from `Reelection` if the emergency
     /// put us there. Ends with a below-threshold sweep — the score ops may
     /// have pushed someone over the removal line.
-    fn handle_emergency_scored(
+    fn handle_emergency_scored<Pr>(
         &mut self,
+        provider: &Pr,
         proposal_id: u32,
         request: &ConversationUpdateRequest,
         score_ops: &[ScoreOp],
         signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         // The threshold-cross flag is dropped: the terminal
         // `check_and_initiate_score_removals` sweep below covers it.
         let _ = self.services.scoring.apply_ops(score_ops);
@@ -268,7 +294,7 @@ where
         };
         self.emit_phase_change(resumed_event);
 
-        if let Err(e) = self.check_and_initiate_score_removals(signer) {
+        if let Err(e) = self.check_and_initiate_score_removals(provider, signer) {
             error!(conversation = %self.conversation_id, error = %e, "score-removal check failed");
         }
         Ok(())

@@ -31,11 +31,9 @@ pub struct PollOutcome {
     pub leave_requested: bool,
 }
 
-impl<C, P, Sc, St> Conversation<C, P, Sc, St>
+impl<C, Sc, St> Conversation<C, Sc, St>
 where
     C: ConsensusPlugin,
-    P: OpenMlsProvider,
-    <P::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     Sc: PeerScoringPlugin,
     St: StewardListPlugin,
 {
@@ -52,12 +50,16 @@ where
     /// `signer` is the local member's MLS signer, threaded into the
     /// steward commit-candidate build and any auto-vote casts that fire
     /// this cycle.
-    pub fn poll(&mut self, signer: &impl Signer) -> PollOutcome {
+    pub fn poll<Pr>(&mut self, provider: &Pr, signer: &impl Signer) -> PollOutcome
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let mut leave_requested = false;
 
-        self.tick_deadlines(signer);
+        self.tick_deadlines(provider, signer);
 
-        match self.advance_freeze(signer) {
+        match self.advance_freeze(provider, signer) {
             Ok(DispatchOutcome::LeaveRequested) => leave_requested = true,
             Ok(_) => {}
             Err(e) => warn!(
@@ -67,7 +69,7 @@ where
             ),
         }
 
-        if let Err(e) = self.start_freeze_on_inactivity(signer) {
+        if let Err(e) = self.start_freeze_on_inactivity(provider, signer) {
             warn!(
                 conversation = %self.conversation_id,
                 error = %e,
@@ -88,10 +90,15 @@ where
     /// [`crate::ProcessResult`]. Returns
     /// [`DispatchOutcome::LeaveRequested`] if the applied commit ejected the
     /// local member — `poll()` surfaces that as `leave_requested`.
-    fn advance_freeze(
+    fn advance_freeze<Pr>(
         &mut self,
+        provider: &Pr,
         signer: &impl Signer,
-    ) -> Result<DispatchOutcome, ConversationError> {
+    ) -> Result<DispatchOutcome, ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let state = self.current_state();
         if state != ConversationState::Freezing {
             self.timing.last_freeze_progress = None;
@@ -124,13 +131,14 @@ where
         let conversation_id = self.conversation_id.clone();
         let allow_subset = self.services.steward_list.config().allow_subset_candidates;
         let self_member_id = Arc::clone(&self.self_member_id);
-        let mut finalize_result = match self.finalize_freeze_round(allow_subset, &self_member_id) {
-            Ok(result) => result,
-            Err(e) => {
-                error!(conversation = %conversation_id, error = %e, "freeze finalize failed");
-                FreezeFinalizeResult::default()
-            }
-        };
+        let mut finalize_result =
+            match self.finalize_freeze_round(provider, allow_subset, &self_member_id) {
+                Ok(result) => result,
+                Err(e) => {
+                    error!(conversation = %conversation_id, error = %e, "freeze finalize failed");
+                    FreezeFinalizeResult::default()
+                }
+            };
         // Apply locally-observed score events. These come from dropped
         // candidates in the phase-3 loop (RFC §Peer Scoring: direct local
         // observation, no ECP needed). A downward threshold cross schedules
@@ -149,7 +157,7 @@ where
 
         // `check_and_initiate_score_removals` calls `initiate_proposal`. A
         // downward threshold cross during finalize schedules a removal pass.
-        if downward_cross && let Err(e) = self.check_and_initiate_score_removals(signer) {
+        if downward_cross && let Err(e) = self.check_and_initiate_score_removals(provider, signer) {
             error!(conversation = %conversation_id, error = %e, "score-removal check failed (freeze finalize)");
         }
 
@@ -168,7 +176,7 @@ where
                     // group leaves the list for the post-commit election.
                     welcome.conversation_sync_bytes = {
                         let _ = self.reconcile_steward_list()?;
-                        self.build_conversation_sync_payload(signer)?
+                        self.build_conversation_sync_payload(provider, signer)?
                             .unwrap_or_default()
                     };
                     // Broadcast the welcome to the group so every member can deliver it to the
@@ -181,7 +189,7 @@ where
                     self.broadcast(broadcast_payload);
                 }
 
-                let outcome = match self.dispatch_inbound_result(result, signer) {
+                let outcome = match self.dispatch_inbound_result(provider, result, signer) {
                     Ok(o) => o,
                     Err(e) => {
                         error!(conversation = %conversation_id, error = %e, "finalize result dispatch failed");
@@ -235,7 +243,9 @@ where
                     (event, false)
                 };
 
-                if downward_cross && let Err(e) = self.check_and_initiate_score_removals(signer) {
+                if downward_cross
+                    && let Err(e) = self.check_and_initiate_score_removals(provider, signer)
+                {
                     error!(conversation = %conversation_id, error = %e, "score-removal check failed (freeze timeout)");
                 }
 
@@ -244,7 +254,9 @@ where
 
                 // Layer 2 recovery: regenerate the steward list. Only the
                 // responsible proposer's call actually submits.
-                if entered_reelection && let Err(e) = self.initiate_steward_election(true, signer) {
+                if entered_reelection
+                    && let Err(e) = self.initiate_steward_election(provider, true, signer)
+                {
                     info!(conversation = %conversation_id, error = %e, "recovery election deferred");
                 }
 
@@ -259,10 +271,15 @@ where
     /// candidate-build failure is logged and the freeze transition proceeds
     /// (peers' candidates still get processed). No-ops outside `Working`
     /// (via `check_steward_inactivity`) and while an election is in flight.
-    fn start_freeze_on_inactivity(
+    fn start_freeze_on_inactivity<Pr>(
         &mut self,
+        provider: &Pr,
         signer: &impl Signer,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let proposal_count = self.queues.approved_proposals_count();
         // Hold the freeze while an election is in flight — committing on
         // the known-stale list would just produce a NoCandidate.
@@ -286,7 +303,7 @@ where
 
         let self_member_id = Arc::clone(&self.self_member_id);
         let outbound = if self.services.steward_list.is_steward(&self_member_id) {
-            match self.create_commit_candidate(signer, &self_member_id) {
+            match self.create_commit_candidate(provider, signer, &self_member_id) {
                 Ok(payload) => payload,
                 Err(e) => {
                     error!(
