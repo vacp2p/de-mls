@@ -4,13 +4,16 @@
 //! Also defines [`Outbound`] — the conversation's I/O-agnostic product, and
 //! [`build_key_package_announcement`] — the encoding helper for KP broadcasts.
 
+use std::error::Error as StdError;
+
 use openmls_traits::signatures::Signer;
+use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 use prost::Message;
 use tracing::info;
 
 use crate::{
-    ConsensusPlugin, Conversation, ConversationError, ConversationPlugins, ConversationState,
-    CreatorVote,
+    ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote,
+    PeerScoringPlugin, StewardListPlugin,
     mls_crypto::{KeyPackageBytes, MlsService, key_package_bytes_from_tls},
     protos::de_mls::messages::v1::{
         AppMessage, ConversationMessage, ConversationUpdateRequest, MemberInvite,
@@ -32,7 +35,14 @@ pub struct Outbound {
     pub payload: Vec<u8>,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
+impl<C, P, Sc, St> Conversation<C, P, Sc, St>
+where
+    C: ConsensusPlugin,
+    P: OpenMlsProvider,
+    <P::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    Sc: PeerScoringPlugin,
+    St: StewardListPlugin,
+{
     /// Buffer a chat message for broadcast. The conversation never sends — the
     /// message is enqueued and the integrator drains it via
     /// [`Conversation::drain_outbound`]. Blocked in `Freezing` and `Selection`

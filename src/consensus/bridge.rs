@@ -31,11 +31,11 @@ pub(crate) struct ProposalParams {
 
 /// Open a consensus session for `ConversationUpdateRequest`; returns the new `proposal_id`
 /// and the unbundled `Proposal` wire message.
-pub(crate) fn submit_proposal<P: ConsensusPlugin>(
+pub(crate) fn submit_proposal<C: ConsensusPlugin>(
     conversation_id: &str,
     request: &ConversationUpdateRequest,
     creator_id: &[u8],
-    consensus: &ConsensusServiceFor<P>,
+    consensus: &ConsensusServiceFor<C>,
     params: ProposalParams,
 ) -> Result<(u32, AppMessage), ConversationError> {
     let create_request = CreateProposalRequest::new(
@@ -47,7 +47,7 @@ pub(crate) fn submit_proposal<P: ConsensusPlugin>(
         params.liveness_criteria_yes,
     )?;
 
-    let scope = P::Scope::from(conversation_id.to_string());
+    let scope = C::Scope::from(conversation_id.to_string());
     let proposal = consensus.create_proposal_with_config(
         &scope,
         create_request,
@@ -66,16 +66,16 @@ pub(crate) fn submit_proposal<P: ConsensusPlugin>(
 }
 
 /// Cast our vote in the local session; returns the Vote-only wire message.
-pub(crate) fn cast_vote<P>(
+pub(crate) fn cast_vote<C>(
     conversation_id: &str,
     proposal_id: u32,
     vote: bool,
-    consensus: &ConsensusServiceFor<P>,
+    consensus: &ConsensusServiceFor<C>,
 ) -> Result<AppMessage, ConversationError>
 where
-    P: ConsensusPlugin,
+    C: ConsensusPlugin,
 {
-    let scope = P::Scope::from(conversation_id.to_string());
+    let scope = C::Scope::from(conversation_id.to_string());
 
     let choice = if vote { "YES" } else { "NO" };
     info!(
@@ -91,14 +91,14 @@ where
 ///
 /// Late arrivals are swallowed (logged, `Ok`) so inbound dispatch keeps
 /// draining.
-pub(crate) fn forward_incoming_vote<P: ConsensusPlugin>(
+pub(crate) fn forward_incoming_vote<C: ConsensusPlugin>(
     conversation_id: &str,
     vote: Vote,
-    consensus: &ConsensusServiceFor<P>,
+    consensus: &ConsensusServiceFor<C>,
     outcome_applied_locally: bool,
 ) -> Result<(), ConversationError> {
     let proposal_id = vote.proposal_id;
-    let scope = P::Scope::from(conversation_id.to_string());
+    let scope = C::Scope::from(conversation_id.to_string());
     match consensus.process_incoming_vote(&scope, vote) {
         Ok(()) => Ok(()),
         Err(ConsensusError::SessionNotActive) => {
@@ -135,14 +135,14 @@ pub(crate) fn forward_incoming_vote<P: ConsensusPlugin>(
 ///
 /// The fixed id makes retransmits collide as `ProposalAlreadyExist`,
 /// returned as `Ok(None)` — nothing to broadcast.
-pub(crate) fn submit_self_leave_proposal<P>(
+pub(crate) fn submit_self_leave_proposal<C>(
     conversation_id: &str,
     self_member_id: &[u8],
-    consensus: &ConsensusServiceFor<P>,
+    consensus: &ConsensusServiceFor<C>,
     params: ProposalParams,
 ) -> Result<Option<(u32, AppMessage)>, ConversationError>
 where
-    P: ConsensusPlugin,
+    C: ConsensusPlugin,
 {
     let request = ConversationUpdateRequest::remove_member(self_member_id.to_vec());
     let payload = request.encode_to_vec();
@@ -167,7 +167,7 @@ where
     let yes_vote = build_vote(&proposal, true, consensus.signer())?;
     proposal.votes.push(yes_vote);
 
-    let scope = P::Scope::from(conversation_id.to_string());
+    let scope = C::Scope::from(conversation_id.to_string());
     match consensus.process_incoming_proposal(&scope, proposal.clone()) {
         Ok(()) => {
             info!(

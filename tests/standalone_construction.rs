@@ -1,8 +1,8 @@
-//! Step 1 proof: a `Conversation` can be built and queried straight from a
-//! `ConversationDeps` bundle, with no `User` in the picture. The integrator
-//! holds its credential + signer plus shared consensus storage + signer,
-//! builds each conversation's plug-in instances and consensus service inline —
-//! exactly what `User` does internally, here done by hand.
+//! Step 1 proof: a `Conversation` can be built and queried straight from
+//! direct arguments, with no `User` in the picture. The integrator holds its
+//! credential + signer plus shared consensus storage + signer, builds each
+//! conversation's plug-in instances and consensus service inline — exactly what
+//! `User` does internally, here done by hand.
 
 mod common;
 
@@ -15,19 +15,22 @@ use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use openmls::credentials::CredentialWithKey;
 use openmls_basic_credential::SignatureKeyPair;
-use openmls_rust_crypto::OpenMlsRustCrypto;
 
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, DefaultStewardList};
 use de_mls::mls_crypto::KeyPackageBytes;
 use de_mls::{
     ConsensusPlugin, ConsensusServiceFor, ConversationEvent, ScoringConfig, StewardListConfig,
 };
-use de_mls::{Conversation, ConversationDeps, ConversationState};
+use de_mls::{Conversation, ConversationState};
 
 use common::{
-    TestMls, TestPlugins, creator_mls, make_scoring, make_steward, mint_key_package, open_welcome,
-    test_credential, wallet::WalletMemberId,
+    TEST_SUITE, TestProvider, make_scoring, make_steward, mint_key_package, test_credential,
+    wallet::WalletMemberId,
 };
+
+/// Per-conversation stack the standalone tests build.
+type TestConversation =
+    Conversation<DefaultConsensusPlugin, TestProvider, DefaultPeerScoring, DefaultStewardList>;
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
@@ -42,7 +45,7 @@ struct Integrator {
     consensus_storage: <DefaultConsensusPlugin as ConsensusPlugin>::ConsensusStorage,
     consensus_signer: <DefaultConsensusPlugin as ConsensusPlugin>::Signer,
     member_id: WalletMemberId,
-    pending_provider: RefCell<Option<OpenMlsRustCrypto>>,
+    pending_provider: RefCell<Option<TestProvider>>,
 }
 
 impl Integrator {
@@ -75,16 +78,6 @@ impl Integrator {
         )
     }
 
-    /// Build the creator's MLS service from this integrator's credential.
-    fn creator_mls(&self, conversation_id: &str) -> TestMls {
-        creator_mls(
-            conversation_id.to_string(),
-            self.credential.clone(),
-            &self.signer,
-        )
-        .expect("create mls")
-    }
-
     /// Mint a single-use key package, stashing its provider for the welcome.
     fn mint_key_package(&self) -> KeyPackageBytes {
         let (kp, provider) = mint_key_package(&self.credential, &self.signer);
@@ -92,55 +85,49 @@ impl Integrator {
         kp
     }
 
-    /// Open a welcome with the stashed provider. A fresh provider (we never
-    /// minted a KP) holds no matching key package → `Ok(None)`.
-    fn open_welcome(&self, welcome_bytes: &[u8]) -> Option<TestMls> {
-        let provider = self
-            .pending_provider
+    /// Take the stashed provider (the joiner-side keys minted with the KP). A
+    /// fresh provider (we never minted a KP) holds no matching key package, so
+    /// `Conversation::join` returns `Ok(None)`.
+    fn take_provider(&self) -> TestProvider {
+        self.pending_provider
             .borrow_mut()
             .take()
-            .unwrap_or_default();
-        open_welcome(welcome_bytes, provider).expect("open welcome")
+            .unwrap_or_default()
     }
 
-    /// Fresh per-conversation deps drawn from the shared state, around a
-    /// pre-built MLS service. The consensus service clones the shared storage
-    /// (scope-keyed) and gets its own private event bus. The member id doubles
-    /// as the `app_id` so two integrators in one test don't echo-drop each
-    /// other's packets.
-    fn deps(&self, mls: TestMls) -> ConversationDeps<DefaultConsensusPlugin, TestPlugins> {
-        self.deps_with_config(mls, de_mls::ConversationConfig::default())
-    }
-
-    fn deps_with_config(
-        &self,
-        mls: TestMls,
-        config: de_mls::ConversationConfig,
-    ) -> ConversationDeps<DefaultConsensusPlugin, TestPlugins> {
-        let consensus = ConsensusServiceFor::<DefaultConsensusPlugin>::new_with_components(
+    /// Fresh per-conversation consensus service drawn from the shared state.
+    /// Clones the shared storage (scope-keyed) and gets its own private event
+    /// bus.
+    fn consensus(&self) -> ConsensusServiceFor<DefaultConsensusPlugin> {
+        ConsensusServiceFor::<DefaultConsensusPlugin>::new_with_components(
             self.consensus_storage.clone(),
             DefaultConsensusPlugin::new_event_bus(),
             self.consensus_signer.clone(),
             10,
-        );
-        ConversationDeps {
-            mls,
-            scoring: self.scoring(),
-            steward: self.steward(),
-            consensus,
-            app_id: Arc::from(self.member_id.member_id_bytes()),
-            config,
-        }
+        )
+    }
+
+    /// This integrator's `app_id` — the member id doubles as it so two
+    /// integrators in one test don't echo-drop each other's packets.
+    fn app_id(&self) -> Arc<[u8]> {
+        Arc::from(self.member_id.member_id_bytes())
     }
 }
 
 #[test]
 fn create_builds_a_working_steward_session_without_user() {
     let integrator = Integrator::new();
-    let mls = integrator.creator_mls("standalone");
-    let conversation = Conversation::create(
+    let conversation: TestConversation = Conversation::create(
         "standalone",
-        integrator.deps(mls),
+        TestProvider::default(),
+        integrator.credential.clone(),
+        TEST_SUITE,
+        &integrator.signer,
+        integrator.scoring(),
+        integrator.steward(),
+        integrator.consensus(),
+        integrator.app_id(),
+        de_mls::ConversationConfig::default(),
         integrator.member_id.member_id_bytes(),
     )
     .expect("create");
@@ -183,10 +170,17 @@ fn join_completes_in_one_call() {
     let alice = Integrator::new();
     let bob = Integrator::with_key(BOB);
 
-    let alice_mls = alice.creator_mls("standalone-welcome");
-    let mut creator = Conversation::create(
+    let mut creator: TestConversation = Conversation::create(
         "standalone-welcome",
-        alice.deps_with_config(alice_mls, fast_config()),
+        TestProvider::default(),
+        alice.credential.clone(),
+        TEST_SUITE,
+        &alice.signer,
+        alice.scoring(),
+        alice.steward(),
+        alice.consensus(),
+        alice.app_id(),
+        fast_config(),
         alice.member_id.member_id_bytes(),
     )
     .expect("create");
@@ -218,26 +212,44 @@ fn join_completes_in_one_call() {
     }
     let welcome = welcome.expect("creator mints a welcome");
 
-    // A welcome not addressed to us yields `None` at open time — a fresh
-    // integrator that never minted the key package can't open it.
+    // A welcome not addressed to us yields `Ok(None)` — a fresh integrator that
+    // never minted the key package can't open it.
     let bystander = Integrator::with_key(ALICE);
+    let bystander_join: Option<TestConversation> = Conversation::join(
+        bystander.take_provider(),
+        &welcome.welcome_bytes,
+        &welcome.conversation_sync_bytes,
+        bystander.scoring(),
+        bystander.steward(),
+        bystander.consensus(),
+        bystander.app_id(),
+        fast_config(),
+        bystander.member_id.member_id_bytes(),
+        &bystander.signer,
+    )
+    .expect("join is not an error for the wrong addressee");
     assert!(
-        bystander.open_welcome(&welcome.welcome_bytes).is_none(),
+        bystander_join.is_none(),
         "a welcome for someone else is ignored"
     );
 
-    // The integrator opens the welcome, then `join` completes the whole joiner
-    // path in one call: run the join side-effects, apply the bundled sync.
-    let bob_mls = bob
-        .open_welcome(&welcome.welcome_bytes)
-        .expect("welcome addresses bob");
-    let joined = Conversation::join(
-        bob.deps_with_config(bob_mls, fast_config()),
+    // `join` opens the welcome and completes the whole joiner path in one call:
+    // run the join side-effects, apply the bundled sync. Only the addressed
+    // joiner — holding the KP provider — gets `Some`.
+    let joined: TestConversation = Conversation::join(
+        bob.take_provider(),
+        &welcome.welcome_bytes,
         &welcome.conversation_sync_bytes,
+        bob.scoring(),
+        bob.steward(),
+        bob.consensus(),
+        bob.app_id(),
+        fast_config(),
         bob.member_id.member_id_bytes(),
         &bob.signer,
     )
-    .expect("join");
+    .expect("join")
+    .expect("welcome addresses bob");
     assert_eq!(joined.id(), "standalone-welcome");
     assert_eq!(joined.state(), ConversationState::Working);
     assert_eq!(joined.members().expect("members").len(), 2);

@@ -51,20 +51,15 @@ pub use crate::bootstrap::{
 
 /// Type alias for the user reference stored in the gateway.
 ///
-/// The MLS engine is the reference [`mls::GatewayMls`] — `OpenMlsService` over
-/// `OpenMlsRustCrypto` — minted per conversation by
-/// [`mls::DefaultConversationPluginsFactory`]. The MLS signing keypair is
-/// [`SignatureKeyPair`], owned by `User` and threaded into every signing call.
-pub(crate) type UserRef = Arc<
-    tokio::sync::RwLock<
-        User<DefaultConsensusPlugin, DefaultConversationPluginsFactory, SignatureKeyPair>,
-    >,
->;
+/// de-mls builds the MLS service itself over the reference
+/// [`mls::GatewayProvider`] (`OpenMlsRustCrypto`); the credential + key packages
+/// come from [`mls::DefaultConversationPluginsFactory`]. The MLS signing keypair
+/// is [`SignatureKeyPair`], owned by `User` and threaded into every signing call.
+pub(crate) type UserRef = Arc<tokio::sync::RwLock<User<DefaultConsensusPlugin, SignatureKeyPair>>>;
 
 /// Type alias for a conversation registry entry obtained via
 /// `User::lookup_entry`. Re-exports the sync-locked entry from `de_mls::session`.
-pub(crate) type ConversationRef =
-    ConversationEntry<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
+pub(crate) type ConversationRef = ConversationEntry<DefaultConsensusPlugin>;
 
 // Global, process-wide gateway instance
 pub static GATEWAY: Lazy<Gateway<WakuDeliveryService>> = Lazy::new(Gateway::new);
@@ -207,8 +202,7 @@ pub fn render_member_id(bytes: &[u8]) -> String {
 fn build_user_from_private_key(
     private_key: &str,
     transport: SharedDeliveryService,
-) -> anyhow::Result<User<DefaultConsensusPlugin, DefaultConversationPluginsFactory, SignatureKeyPair>>
-{
+) -> anyhow::Result<User<DefaultConsensusPlugin, SignatureKeyPair>> {
     let eth_signer = PrivateKeySigner::from_str(private_key)
         .map_err(|e| anyhow::anyhow!("invalid private key: {e}"))?;
     let member_id = WalletMemberId::from_address(eth_signer.address());

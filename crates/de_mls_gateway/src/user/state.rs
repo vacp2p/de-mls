@@ -9,17 +9,17 @@ use std::{
 };
 
 use de_mls::{
-    ConsensusPlugin, Conversation, ConversationConfig, ConversationDeps, ConversationError,
-    ConversationEvent, ConversationPlugins, ConversationState, CreatorVote, MemberRole,
-    PollOutcome, ScoringConfig, StewardListConfig,
-    mls_crypto::{KeyPackageBytes, MlsError, MlsService},
+    ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationState,
+    CreatorVote, MemberRole, PollOutcome, ScoringConfig, StewardListConfig,
+    defaults::{DefaultPeerScoring, DefaultStewardList},
+    mls_crypto::{KeyPackageBytes, MlsError},
     protos::de_mls::messages::v1::{ConversationUpdateRequest, MemberWelcome},
 };
 use de_mls_ds::{OutboundPacket, SharedDeliveryService};
 use openmls_traits::signatures::Signer;
 
 use crate::user::{LockExt, UserError, UserPlugins};
-use crate::{WalletMemberId, mls::DefaultConversationPluginsFactory};
+use crate::{WalletMemberId, mls::GatewayProvider};
 
 /// Registry-level notification emitted when conversations are created or
 /// removed. Drain via [`User::drain_lifecycle_events`] once per polling cycle.
@@ -32,17 +32,23 @@ pub enum ConversationLifecycle {
     Removed(String),
 }
 
+/// The concrete conversation type the gateway stores: the consensus plug-in is
+/// the User's `C`, the OpenMLS provider is the reference RustCrypto backend, and
+/// the scoring / steward-list plug-ins are the library defaults.
+pub type GatewayConversation<C> =
+    Conversation<C, GatewayProvider, DefaultPeerScoring, DefaultStewardList>;
+
 /// Single registry entry: one `Arc<RwLock<Conversation>>` per conversation.
 /// Cloned out of the registry under the outer read lock, then locked
 /// independently — writes on one conversation don't block reads on another.
-pub type ConversationEntry<P, CP> = Arc<RwLock<Conversation<P, CP>>>;
+pub type ConversationEntry<C> = Arc<RwLock<GatewayConversation<C>>>;
 
 /// Per-user registry of conversations. Each entry's inner per-conversation
 /// lock guards per-conversation reads/mutations so a write on conversation
 /// A doesn't block reads on conversation B.
-pub(crate) type ConversationRegistry<P, CP> = RwLock<HashMap<String, ConversationEntry<P, CP>>>;
+pub(crate) type ConversationRegistry<C> = RwLock<HashMap<String, ConversationEntry<C>>>;
 
-pub struct User<P: ConsensusPlugin, CP: ConversationPlugins, Sig: Signer> {
+pub struct User<P: ConsensusPlugin, Sig: Signer> {
     pub(crate) member_id: WalletMemberId,
     /// MLS signing key for this user. Owned here — the single holder across
     /// the conversation registry — and passed by reference into every
@@ -58,9 +64,9 @@ pub struct User<P: ConsensusPlugin, CP: ConversationPlugins, Sig: Signer> {
     /// All User-level plugin state: the per-conversation factory, the
     /// consensus context, the key-package provider, and the three default
     /// configs cloned into newly-created conversations.
-    pub(crate) plugins: UserPlugins<P, CP>,
+    pub(crate) plugins: UserPlugins<P>,
     /// Conversation handles keyed by conversation id.
-    pub(crate) conversations: ConversationRegistry<P, CP>,
+    pub(crate) conversations: ConversationRegistry<P>,
     /// User-level conversation lifecycle events: `Created(name)` /
     /// `Removed(name)`. Integrators drain via
     /// [`Self::drain_lifecycle_events`] once per polling cycle to learn
@@ -71,59 +77,62 @@ pub struct User<P: ConsensusPlugin, CP: ConversationPlugins, Sig: Signer> {
 
 // ── Public API ──────────────────────────────────────────────────────────
 
-impl<P: ConsensusPlugin, Sig: Signer> User<P, DefaultConversationPluginsFactory, Sig> {
+impl<P: ConsensusPlugin, Sig: Signer> User<P, Sig> {
     /// Generate a single-use key package via the default factory. Key-package
     /// generation is the integrator's concern — not part of the de-mls plug-in
-    /// contract — so it lives on the concrete-factory `User`.
+    /// contract — so it lives on the gateway `User`.
     pub fn generate_key_package(&self) -> Result<KeyPackageBytes, MlsError> {
         self.plugins.conversation_plugins.generate_key_package()
     }
 }
 
-impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, DefaultConversationPluginsFactory, Sig> {
+impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
     /// Ingest a [`MemberWelcome`] delivered out of band (e.g. the
     /// inviter's [`de_mls::ConversationEvent::WelcomeReady`] routed
-    /// through the integrator's transport). The factory opens the welcome
-    /// (needs the concrete provider that minted our key package); on a match we
-    /// build the plug-in instances and complete the join — running the
-    /// joiner-side side-effects and replaying the bundled `ConversationSync` —
-    /// then register it. Returns the joined conversation name, or
-    /// [`UserError::WelcomeNotForUs`] if the welcome doesn't address this
-    /// user's key package. Idempotent: a welcome for an already-joined
-    /// conversation returns its name without re-registering.
+    /// through the integrator's transport). We hand de-mls the provider that
+    /// minted our key package and let it open the welcome; on a match it builds
+    /// the joined conversation — running the joiner-side side-effects and
+    /// replaying the bundled `ConversationSync` — which we then register.
+    /// Returns the joined conversation name, or [`UserError::WelcomeNotForUs`]
+    /// if the welcome doesn't address this user's key package (de-mls returns
+    /// `None`). Idempotent: a welcome for an already-joined conversation returns
+    /// its name without re-registering.
     pub fn accept_welcome(&mut self, welcome: &MemberWelcome) -> Result<String, UserError> {
         let factory = &self.plugins.conversation_plugins;
-        let Some(mls) = factory.welcome_mls(&welcome.welcome_bytes)? else {
+        let Some(provider) = factory.take_pending_provider() else {
             return Err(UserError::WelcomeNotForUs);
         };
-        let conversation_id = mls.conversation_id().to_string();
-        if self.lookup_entry(&conversation_id)?.is_some() {
-            return Ok(conversation_id);
-        }
         let scoring = factory.make_scoring(&self.plugins.default_scoring_config);
-        let steward = factory.make_steward_list(
+        let steward = factory.make_steward(
             self.member_id.member_id_bytes(),
             self.plugins.default_steward_list_config.clone(),
         );
-        let deps = self.build_deps(
-            mls,
+        let Some(conversation) = Conversation::join(
+            provider,
+            &welcome.welcome_bytes,
+            &welcome.conversation_sync_bytes,
             scoring,
             steward,
+            self.plugins.consensus.build_service(),
+            Arc::from(self.app_id.as_slice()),
             self.plugins.default_conversation_config.clone(),
-        );
-        let conversation = Conversation::join(
-            deps,
-            &welcome.conversation_sync_bytes,
             self.member_id.member_id_bytes(),
             &self.signer,
-        )?;
+        )?
+        else {
+            return Err(UserError::WelcomeNotForUs);
+        };
+        let conversation_id = conversation.id().to_string();
+        if self.lookup_entry(&conversation_id)?.is_some() {
+            return Ok(conversation_id);
+        }
         let entry_arc = self.register_built(&conversation_id, conversation)?;
         self.flush(&entry_arc)?;
         Ok(conversation_id)
     }
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPlugins, Sig: Signer + Clone> User<P, CP, Sig> {
+impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
     /// Display form of the local member_id, derived from [`MemberId::member_id_display`].
     pub fn member_id_string(&self) -> String {
         self.member_id.member_id_display().to_string()
@@ -425,31 +434,9 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins, Sig: Signer + Clone> User<P, C
 
 // ── User-internal helpers ───────────────────────────────────────────────
 
-impl<P: ConsensusPlugin, CP: ConversationPlugins, Sig: Signer> User<P, CP, Sig> {
+impl<P: ConsensusPlugin, Sig: Signer> User<P, Sig> {
     pub fn self_member_id(&self) -> &[u8] {
         self.member_id.member_id_bytes()
-    }
-
-    /// Assemble a [`ConversationDeps`] bundle for a new conversation on this
-    /// user around the pre-built plug-in instances — a freshly-minted consensus
-    /// service, the local identity, and the durable config. Shared by the
-    /// creator path (`register_conversation`) and the welcome-driven join
-    /// (`accept_welcome`).
-    pub(crate) fn build_deps(
-        &self,
-        mls: CP::Mls,
-        scoring: CP::Scoring,
-        steward: CP::StewardList,
-        config: ConversationConfig,
-    ) -> ConversationDeps<P, CP> {
-        ConversationDeps {
-            mls,
-            scoring,
-            steward,
-            consensus: self.plugins.consensus.build_service(),
-            app_id: Arc::from(self.app_id.as_slice()),
-            config,
-        }
     }
 
     /// Insert an already-built [`Conversation`] into the registry, emit the
@@ -459,8 +446,8 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins, Sig: Signer> User<P, CP, Sig> 
     pub(crate) fn register_built(
         &self,
         conversation_id: &str,
-        conversation: Conversation<P, CP>,
-    ) -> Result<ConversationEntry<P, CP>, UserError> {
+        conversation: GatewayConversation<P>,
+    ) -> Result<ConversationEntry<P>, UserError> {
         let entry = Arc::new(RwLock::new(conversation));
         {
             let mut conversations = self
@@ -497,7 +484,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins, Sig: Signer> User<P, CP, Sig> 
     /// User's push-adapter so its callers keep their send-on-op behaviour.
     /// (When `User` moves out of the library, the integrator drains and
     /// publishes directly instead.)
-    pub(crate) fn flush(&self, entry: &ConversationEntry<P, CP>) -> Result<(), UserError> {
+    pub(crate) fn flush(&self, entry: &ConversationEntry<P>) -> Result<(), UserError> {
         let outbound = entry.read_or_err("conversation")?.drain_outbound();
         if outbound.is_empty() {
             return Ok(());
@@ -529,7 +516,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins, Sig: Signer> User<P, CP, Sig> 
     pub fn new_with_plugins(
         member_id: WalletMemberId,
         signer: Sig,
-        plugins: UserPlugins<P, CP>,
+        plugins: UserPlugins<P>,
         transport: SharedDeliveryService,
     ) -> Self {
         Self {

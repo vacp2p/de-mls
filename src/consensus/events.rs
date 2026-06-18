@@ -1,20 +1,30 @@
 //! Applying resolved consensus outcomes to the conversation.
 
+use std::error::Error as StdError;
+
 use hashgraph_like_consensus::{storage::ConsensusStorage, types::ConsensusEvent};
 use openmls_traits::signatures::Signer;
+use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 use prost::Message;
 use tracing::{error, info};
 
 use crate::{
     ConsensusApplyResult, ConsensusPlugin, Conversation, ConversationError, ConversationEvent,
-    ConversationPlugins, ConversationState, PeerScoringPlugin, ScoreOp, StewardListPlugin,
-    apply_consensus_result, emergency_score_ops,
+    ConversationState, PeerScoringPlugin, ScoreOp, StewardListPlugin, apply_consensus_result,
+    emergency_score_ops,
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, conversation_update_request,
     },
 };
 
-impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
+impl<C, P, Sc, St> Conversation<C, P, Sc, St>
+where
+    C: ConsensusPlugin,
+    P: OpenMlsProvider,
+    <P::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    Sc: PeerScoringPlugin,
+    St: StewardListPlugin,
+{
     /// Apply one resolved outcome: surface the decision to the integrator,
     /// apply the queue effects, then run whatever follow-up the result
     /// calls for (election install/retry, freeze entry, emergency scoring).
@@ -55,7 +65,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
             approved,
             timestamp,
         });
-        let scope = P::Scope::from(self.conversation_id.clone());
+        let scope = C::Scope::from(self.conversation_id.clone());
         let proposal = self
             .services
             .consensus

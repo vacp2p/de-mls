@@ -6,7 +6,7 @@
 //! - **event bus**: delivery of consensus outcomes
 //! - **signer**: vote authentication (must match across peers)
 //!
-//! The app layer constructs a per-conversation [`ConsensusServiceFor<P>`] using
+//! The app layer constructs a per-conversation [`ConsensusServiceFor<C>`] using
 //! these associated types and factories.
 //!
 //! Reference implementation: [`crate::defaults::DefaultConsensusPlugin`].
@@ -61,9 +61,9 @@ pub trait ConsensusPlugin {
 
 /// Concrete consensus service derived from a [`ConsensusPlugin`]'s
 /// associated types.
-pub type ConsensusServiceFor<P> = ConsensusService<
-    <P as ConsensusPlugin>::Scope,
-    <P as ConsensusPlugin>::ConsensusStorage,
-    <P as ConsensusPlugin>::EventBus,
-    <P as ConsensusPlugin>::Signer,
+pub type ConsensusServiceFor<C> = ConsensusService<
+    <C as ConsensusPlugin>::Scope,
+    <C as ConsensusPlugin>::ConsensusStorage,
+    <C as ConsensusPlugin>::EventBus,
+    <C as ConsensusPlugin>::Signer,
 >;

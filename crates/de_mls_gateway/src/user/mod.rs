@@ -20,7 +20,7 @@
 //!   library's `ConversationError`.
 //! - `consensus` — [`ConsensusContext`], the shared consensus storage +
 //!   signer that mints each conversation's service.
-//! - `plugins` — `UserPlugins<P, CP>` bundle.
+//! - `plugins` — `UserPlugins<P>` bundle.
 
 mod consensus;
 mod error;
@@ -36,4 +36,4 @@ pub use error::UserError;
 pub use inbound::Inbound;
 pub(crate) use lock::LockExt;
 pub use plugins::UserPlugins;
-pub use state::{ConversationEntry, ConversationLifecycle, User};
+pub use state::{ConversationEntry, ConversationLifecycle, GatewayConversation, User};

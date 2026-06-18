@@ -13,12 +13,11 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use de_mls::defaults::DefaultConsensusPlugin;
-use de_mls::{Conversation, ConversationConfig, StewardListConfig};
+use de_mls::{ConversationConfig, StewardListConfig};
 use de_mls_ds::{
     DeliveryService, DeliveryServiceError, OutboundPacket, SharedDeliveryService, WELCOME_SUBTOPIC,
 };
-use de_mls_gateway::mls::DefaultConversationPluginsFactory;
-use de_mls_gateway::user::{Inbound, User};
+use de_mls_gateway::user::{GatewayConversation, Inbound, User};
 use openmls_basic_credential::SignatureKeyPair;
 
 use crate::common::wallet::user_from_private_key;
@@ -27,9 +26,8 @@ use crate::common::wallet::user_from_private_key;
 /// and reach into it via `.lock().unwrap()`.
 pub type TransportHandle = Arc<Mutex<CapturingTransport>>;
 
-pub type TestUser =
-    User<DefaultConsensusPlugin, DefaultConversationPluginsFactory, SignatureKeyPair>;
-pub type TestConversation = Conversation<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
+pub type TestUser = User<DefaultConsensusPlugin, SignatureKeyPair>;
+pub type TestConversation = GatewayConversation<DefaultConsensusPlugin>;
 pub type ConversationArc = Arc<RwLock<TestConversation>>;
 
 /// Test transport that captures every outbound packet for later inspection

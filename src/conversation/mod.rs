@@ -28,7 +28,6 @@ pub use config::{
     DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION,
     DEFAULT_RECOVERY_INACTIVITY_DURATION, DEFAULT_VOTING_DELAY,
 };
-pub use construct::ConversationDeps;
 pub use display::{MemberRole, MessageType, message_types};
 pub(crate) use handle::ConversationServices;
 pub use handle::{Conversation, LeaveOutcome};

@@ -14,16 +14,19 @@
 //!   MLS state; the integrator then removes the registry entry and cleans up
 //!   the consensus scope.
 
-use openmls_traits::signatures::Signer;
+use std::error::Error as StdError;
 use std::sync::Arc;
+
+use openmls_traits::signatures::Signer;
+use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 
 use hashgraph_like_consensus::protos::consensus::v1::Proposal;
 use prost::Message;
 use tracing::{error, info, warn};
 
 use crate::{
-    ConsensusPlugin, ConversationEvent, ConversationPlugins, PeerScoringPlugin, ProcessResult,
-    ProposalKind, ScoreSnapshot, StewardList, StewardListConfig, StewardListPlugin,
+    ConsensusPlugin, ConversationEvent, PeerScoringPlugin, ProcessResult, ProposalKind,
+    ScoreSnapshot, StewardList, StewardListConfig, StewardListPlugin,
     conversation::{ConversationQueues, member_set},
     freeze::{buffer_commit_candidate, compute_commit_hash},
     mls_crypto::{DecryptResult, MlsService},
@@ -161,7 +164,14 @@ pub enum DispatchOutcome {
     LeaveRequested,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
+impl<C, P, Sc, St> Conversation<C, P, Sc, St>
+where
+    C: ConsensusPlugin,
+    P: OpenMlsProvider,
+    <P::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    Sc: PeerScoringPlugin,
+    St: StewardListPlugin,
+{
     /// Decrypt and dispatch an inbound conversation payload. Drops self-echoes.
     /// Runs the full dispatch chain internally. Returns
     /// [`DispatchOutcome::LeaveRequested`] when the conversation has completed
@@ -209,7 +219,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
             }
             ProcessResult::Vote(vote) => {
                 let outcome_applied = self.queues.is_consensus_outcome_applied(vote.proposal_id);
-                forward_incoming_vote::<P>(
+                forward_incoming_vote::<C>(
                     &self.conversation_id,
                     *vote,
                     &self.services.consensus,
@@ -301,7 +311,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
             .map(ProposalKind::of)
             .unwrap_or(ProposalKind::Commit);
 
-        let scope = P::Scope::from(self.conversation_id.clone());
+        let scope = C::Scope::from(self.conversation_id.clone());
         self.services
             .consensus
             .process_incoming_proposal(&scope, proposal)?;

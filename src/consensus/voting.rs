@@ -5,13 +5,16 @@
 //! (auto-votes, consensus timeouts) are deadlines that `tick_deadlines`
 //! fires on a later poll.
 
+use std::error::Error as StdError;
+
 use hashgraph_like_consensus::{error::ConsensusError, storage::ConsensusStorage};
 use openmls_traits::signatures::Signer;
+use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 use tracing::info;
 
 use crate::{
-    ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationPlugins,
-    ConversationState, ProposalKind, SyncConsensusReceiver,
+    ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationState,
+    PeerScoringPlugin, ProposalKind, StewardListPlugin, SyncConsensusReceiver,
     consensus::bridge::{ProposalParams, cast_vote, submit_proposal, submit_self_leave_proposal},
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{AppMessage, ConversationUpdateRequest},
@@ -33,7 +36,14 @@ pub enum CreatorVote {
     Deferred,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
+impl<C, P, Sc, St> Conversation<C, P, Sc, St>
+where
+    C: ConsensusPlugin,
+    P: OpenMlsProvider,
+    <P::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    Sc: PeerScoringPlugin,
+    St: StewardListPlugin,
+{
     // ── Public API ───────────────────────────────────────────────────
 
     /// Open a consensus vote for `request`; [`CreatorVote`] picks the wire
@@ -60,7 +70,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         let consensus_timeout = self.config.consensus_timeout;
         let voting_delay = self.config.voting_delay_for(kind);
 
-        let (proposal_id, unbundled) = submit_proposal::<P>(
+        let (proposal_id, unbundled) = submit_proposal::<C>(
             &self.conversation_id,
             &request,
             &self.self_member_id,
@@ -87,7 +97,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
                 // Owner-bundling API, not the `cast_vote` helper: peers don't
                 // have the proposal yet, so a Vote-only message would be
                 // undeliverable.
-                let scope = P::Scope::from(self.conversation_id.clone());
+                let scope = C::Scope::from(self.conversation_id.clone());
                 let proposal = self.services.consensus.cast_vote_and_get_proposal(
                     &scope,
                     proposal_id,
@@ -226,7 +236,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         self.queues
             .insert_voting_proposal(proposal_id, request.clone());
 
-        let submitted = submit_self_leave_proposal::<P>(
+        let submitted = submit_self_leave_proposal::<C>(
             &self.conversation_id,
             &self.self_member_id,
             &self.services.consensus,
@@ -287,7 +297,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     /// when the proposal is in the resolved cache, a logic bug worth a
     /// warning when it isn't.
     fn resolve_on_timeout(&self, proposal_id: u32) {
-        let scope = P::Scope::from(self.conversation_id.clone());
+        let scope = C::Scope::from(self.conversation_id.clone());
         let still_active = self
             .services
             .consensus
@@ -335,7 +345,7 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
         vote: bool,
         signer: &impl Signer,
     ) -> Result<(), ConversationError> {
-        let app_message = cast_vote::<P>(
+        let app_message = cast_vote::<C>(
             &self.conversation_id,
             proposal_id,
             vote,

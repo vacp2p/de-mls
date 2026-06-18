@@ -2,14 +2,16 @@
 //! pending-update buffering and drain, scoring sync, conversation-sync
 //! broadcast.
 
-use openmls_traits::signatures::Signer;
+use std::error::Error as StdError;
 use std::sync::Arc;
 
+use openmls_traits::signatures::Signer;
+use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 use tracing::{error, info};
 
 use crate::{
-    ConsensusPlugin, Conversation, ConversationError, ConversationPlugins, ConversationState,
-    CreatorVote, ElectionDecision, PeerScoringPlugin, StewardListPlugin, member_set,
+    ConsensusPlugin, Conversation, ConversationError, ConversationState, CreatorVote,
+    ElectionDecision, PeerScoringPlugin, StewardListPlugin, member_set,
     mls_crypto::MlsService,
     protos::de_mls::messages::v1::{
         AppMessage, ConversationSync, ConversationUpdateRequest, PeerScore,
@@ -30,7 +32,14 @@ pub(crate) enum StewardListReconcile {
     NeedsElection,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
+impl<C, P, Sc, St> Conversation<C, P, Sc, St>
+where
+    C: ConsensusPlugin,
+    P: OpenMlsProvider,
+    <P::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    Sc: PeerScoringPlugin,
+    St: StewardListPlugin,
+{
     // ── Public API ───────────────────────────────────────────────────
 
     /// Add any MLS members not yet tracked in scoring, and drop scored

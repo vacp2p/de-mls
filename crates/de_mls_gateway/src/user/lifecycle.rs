@@ -2,16 +2,16 @@
 
 use tracing::info;
 
-use de_mls::{
-    ConsensusPlugin, Conversation, ConversationConfig, ConversationPlugins, LeaveOutcome,
-};
+use std::sync::Arc;
+
+use de_mls::{ConsensusPlugin, Conversation, ConversationConfig, LeaveOutcome};
 
 use openmls_traits::signatures::Signer;
 
-use crate::mls::DefaultConversationPluginsFactory;
+use crate::mls::GATEWAY_SUITE;
 use crate::user::{LockExt, User, UserError};
 
-impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, DefaultConversationPluginsFactory, Sig> {
+impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
     /// Create a conversation we steward: seed the group from our credential and
     /// register it in `Working`. Seeding needs the concrete factory, so this
     /// path is concrete. Joiners hold no conversation until a welcome arrives —
@@ -50,21 +50,30 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, DefaultConversationPlugins
         }
 
         let factory = &self.plugins.conversation_plugins;
-        let mls = factory.create_mls(conversation_id.to_string(), &self.signer)?;
         let scoring = factory.make_scoring(&self.plugins.default_scoring_config);
-        let steward = factory.make_steward_list(
+        let steward = factory.make_steward(
             self.member_id.member_id_bytes(),
             self.plugins.default_steward_list_config.clone(),
         );
-        let deps = self.build_deps(mls, scoring, steward, config);
-        let conversation =
-            Conversation::create(conversation_id, deps, self.member_id.member_id_bytes())?;
+        let conversation = Conversation::create(
+            conversation_id,
+            factory.creator_provider(),
+            factory.credential(),
+            GATEWAY_SUITE,
+            &self.signer,
+            scoring,
+            steward,
+            self.plugins.consensus.build_service(),
+            Arc::from(self.app_id.as_slice()),
+            config,
+            self.member_id.member_id_bytes(),
+        )?;
         self.register_built(conversation_id, conversation)?;
         Ok(())
     }
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPlugins, Sig: Signer + Clone> User<P, CP, Sig> {
+impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
     /// Leave the conversation. Delegates to [`Conversation::leave`], which
     /// opens a self-leave consensus round and returns
     /// [`LeaveOutcome::LeaveInitiated`]; the User-side registry cleanup

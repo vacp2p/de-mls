@@ -5,13 +5,15 @@
 //! inbound dispatch, etc.) live in sibling modules and extend `Conversation`
 //! via additional `impl` blocks.
 
+use std::error::Error as StdError;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
-use openmls_traits::signatures::Signer;
+use openmls_traits::storage::StorageProvider;
+use openmls_traits::{OpenMlsProvider, signatures::Signer};
 use prost::Message;
 use tracing::info;
 
@@ -19,12 +21,13 @@ use hashgraph_like_consensus::events::ConsensusEventBus;
 
 use crate::{
     BufferedCommitCandidate, ConsensusPlugin, ConsensusServiceFor, ConversationConfig,
-    ConversationError, ConversationEvent, ConversationPlugins, ConversationQueues,
-    ConversationState, ConversationStateMachine, FreezeBufferOutcome, FreezeFinalizeResult,
-    OperatingMode, Outbound, PhaseTimer, ProcessResult, ProposalKind, StewardListPlugin,
+    ConversationError, ConversationEvent, ConversationQueues, ConversationState,
+    ConversationStateMachine, FreezeBufferOutcome, FreezeFinalizeResult, OperatingMode, Outbound,
+    PeerScoringPlugin, PhaseTimer, ProcessResult, ProposalKind, StewardListPlugin,
     compute_commit_hash, decode_inbound_payload, finalize_freeze_round, member_set,
     mls_crypto::{
         CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MlsCommitInput, MlsService,
+        OpenMlsService,
     },
     protos::de_mls::messages::v1::{
         AppMessage, CommitCandidate, conversation_update_request::Payload,
@@ -43,8 +46,8 @@ pub enum LeaveOutcome {
 /// Receiver type the conversation drains from `tick_deadlines`. Resolves to the
 /// `Receiver` associated type on the plugin's [`ConsensusEventBus`], which
 /// is bound to implement [`crate::SyncConsensusReceiver`].
-pub(crate) type ConsensusReceiver<P> = <<P as ConsensusPlugin>::EventBus as ConsensusEventBus<
-    <P as ConsensusPlugin>::Scope,
+pub(crate) type ConsensusReceiver<C> = <<C as ConsensusPlugin>::EventBus as ConsensusEventBus<
+    <C as ConsensusPlugin>::Scope,
 >>::Receiver;
 
 /// One pending auto-vote: cast `vote` for `proposal_id` once the wall-clock
@@ -57,27 +60,28 @@ pub struct AutoVoteEntry {
     pub vote: bool,
 }
 
-/// The per-conversation plug-in instances and consensus wiring, grouped so the
-/// handle holds them as one unit. Construction moves the instances in from
-/// `ConversationDeps` and subscribes the consensus receiver here.
-pub(crate) struct ConversationServices<P: ConsensusPlugin, CP: ConversationPlugins> {
+/// The per-conversation MLS service, plug-in instances, and consensus wiring,
+/// grouped so the handle holds them as one unit. Construction builds the MLS
+/// service, moves the plug-in instances in, and subscribes the consensus
+/// receiver here.
+pub(crate) struct ConversationServices<C: ConsensusPlugin, P: OpenMlsProvider, Sc, St> {
     /// Per-conversation MLS service. Present for the conversation's whole
     /// lifetime: the creator seeds it at [`Conversation::create`], the joiner
     /// at [`Conversation::join`].
-    pub(crate) mls: CP::Mls,
+    pub(crate) mls: OpenMlsService<P>,
     /// Per-conversation peer-score plug-in.
-    pub(crate) scoring: CP::Scoring,
+    pub(crate) scoring: Sc,
     /// Per-conversation steward-list plug-in.
-    pub(crate) steward_list: CP::StewardList,
+    pub(crate) steward_list: St,
     /// Per-conversation consensus service. Owns this conversation's scope
-    /// in the shared storage and a private event bus. Minted from the
-    /// [`crate::ConversationDeps`] consensus service at construction.
-    pub(crate) consensus: ConsensusServiceFor<P>,
+    /// in the shared storage and a private event bus. Built from the
+    /// consensus service passed at construction.
+    pub(crate) consensus: ConsensusServiceFor<C>,
     /// Subscriber on `consensus.event_bus()`. Drained by
     /// `tick_deadlines`, which dispatches each event through
     /// `apply_consensus_outcome`. Subscribed when the conversation is built in
     /// [`Conversation::create`] / [`Conversation::join`].
-    pub(crate) consensus_rx: ConsensusReceiver<P>,
+    pub(crate) consensus_rx: ConsensusReceiver<C>,
 }
 
 /// Time-driven conversation state walked once per polling cycle.
@@ -115,14 +119,14 @@ impl Timing {
     }
 }
 
-pub struct Conversation<P: ConsensusPlugin, CP: ConversationPlugins> {
+pub struct Conversation<C: ConsensusPlugin, P: OpenMlsProvider, Sc, St> {
     /// Conversation name. Identifies this conversation in the integrator's
     /// registry and is used to construct scope keys for consensus operations.
     /// Read via [`Conversation::conversation_id`].
     pub(crate) conversation_id: String,
     pub(crate) queues: ConversationQueues,
-    /// Per-conversation plug-in instances and consensus wiring.
-    pub(crate) services: ConversationServices<P, CP>,
+    /// Per-conversation MLS service, plug-in instances, and consensus wiring.
+    pub(crate) services: ConversationServices<C, P, Sc, St>,
     pub(crate) state_machine: ConversationStateMachine,
     /// Per-conversation durable config: voting/consensus durations,
     /// `liveness_criteria_yes`, `pending_update_max_epochs`.
@@ -149,14 +153,21 @@ pub struct Conversation<P: ConsensusPlugin, CP: ConversationPlugins> {
     pending_outbound: Mutex<Vec<Outbound>>,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
+impl<C, P, Sc, St> Conversation<C, P, Sc, St>
+where
+    C: ConsensusPlugin,
+    P: OpenMlsProvider,
+    <P::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    Sc: PeerScoringPlugin,
+    St: StewardListPlugin,
+{
     /// Build a fresh conversation around an already-assembled `services`
     /// bundle (MLS service seeded, plug-ins configured, consensus receiver
     /// subscribed). The time-driven `timing` state starts from defaults.
     pub(crate) fn new(
         conversation_id: String,
         queues: ConversationQueues,
-        services: ConversationServices<P, CP>,
+        services: ConversationServices<C, P, Sc, St>,
         state_machine: ConversationStateMachine,
         config: ConversationConfig,
         self_member_id: Arc<[u8]>,
@@ -200,13 +211,13 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
     // ── MLS service ─────────────────────────────────────────────────
 
     /// Borrow the MLS service.
-    pub(crate) fn mls(&self) -> &CP::Mls {
+    pub(crate) fn mls(&self) -> &OpenMlsService<P> {
         &self.services.mls
     }
 
     /// Mutably borrow the MLS service — required for the commit pipeline
     /// and encrypt/decrypt methods that advance MLS state.
-    pub(crate) fn mls_mut(&mut self) -> &mut CP::Mls {
+    pub(crate) fn mls_mut(&mut self) -> &mut OpenMlsService<P> {
         &mut self.services.mls
     }
 
@@ -643,44 +654,43 @@ impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
 mod tests {
     use std::time::Instant;
 
+    use openmls_basic_credential::SignatureKeyPair;
+
     use super::*;
     use crate::ConversationQueues;
     use crate::defaults::DefaultConsensusPlugin;
     use crate::test_fixtures::{
-        StubPlugins, StubScoring, StubStewardList, UnusedMls, UnusedSigner,
+        StubScoring, StubStewardList, TestMls, TestProvider, make_creator_mls,
         make_test_consensus_service,
     };
 
+    type TestConversation =
+        Conversation<DefaultConsensusPlugin, TestProvider, StubScoring, StubStewardList>;
+
+    /// Build a conversation with a real creator-side MLS service and the given
+    /// steward stub, returning it alongside the signer that seeded the MLS
+    /// group (for paths that sign — the guard tests early-return before then).
     fn make_conversation_with_steward(
         steward_list: StubStewardList,
-    ) -> Conversation<DefaultConsensusPlugin, StubPlugins> {
-        let (consensus, consensus_rx) = make_test_consensus_service();
-        Conversation::new(
-            "g".to_string(),
-            ConversationQueues::new("g"),
-            ConversationServices {
-                mls: UnusedMls,
-                scoring: StubScoring,
-                steward_list,
-                consensus,
-                consensus_rx,
-            },
-            ConversationStateMachine::new_as_member(),
-            ConversationConfig::default(),
-            Arc::from(&b"test-member-id"[..]),
-            Arc::from(&[0u8; 16][..]),
-        )
+    ) -> (TestConversation, SignatureKeyPair) {
+        let (mls, signer) = make_creator_mls(b"test-member-id");
+        (build_conversation(mls, steward_list), signer)
     }
 
-    fn make_conversation_working() -> Conversation<DefaultConsensusPlugin, StubPlugins> {
+    fn make_conversation_working() -> TestConversation {
+        let (mls, _signer) = make_creator_mls(b"test-member-id");
+        build_conversation(mls, StubStewardList::member())
+    }
+
+    fn build_conversation(mls: TestMls, steward_list: StubStewardList) -> TestConversation {
         let (consensus, consensus_rx) = make_test_consensus_service();
         Conversation::new(
             "g".to_string(),
             ConversationQueues::new("g"),
             ConversationServices {
-                mls: UnusedMls,
+                mls,
                 scoring: StubScoring,
-                steward_list: StubStewardList::member(),
+                steward_list,
                 consensus,
                 consensus_rx,
             },
@@ -827,18 +837,18 @@ mod tests {
 
     #[test]
     fn create_commit_candidate_errors_for_non_steward_outside_recovery() {
-        let mut conversation = make_conversation_with_steward(StubStewardList::member());
+        let (mut conversation, signer) = make_conversation_with_steward(StubStewardList::member());
         let err = conversation
-            .create_commit_candidate(&UnusedSigner, b"me")
+            .create_commit_candidate(&signer, b"me")
             .expect_err("non-steward should be rejected");
         assert!(matches!(err, ConversationError::NotASteward));
     }
 
     #[test]
     fn create_commit_candidate_errors_when_no_approved_proposals() {
-        let mut conversation = make_conversation_with_steward(StubStewardList::steward());
+        let (mut conversation, signer) = make_conversation_with_steward(StubStewardList::steward());
         let err = conversation
-            .create_commit_candidate(&UnusedSigner, b"me")
+            .create_commit_candidate(&signer, b"me")
             .expect_err("empty approved queue should be rejected");
         assert!(matches!(err, ConversationError::NoProposals));
     }
@@ -851,7 +861,7 @@ mod tests {
     fn create_commit_candidate_errors_on_emergency_in_approved_queue() {
         use crate::protos::de_mls::messages::v1::ViolationEvidence;
 
-        let mut conversation = make_conversation_with_steward(StubStewardList::steward());
+        let (mut conversation, signer) = make_conversation_with_steward(StubStewardList::steward());
         let emergency = ViolationEvidence::broken_commit(vec![0xAA], 0, Vec::<u8>::new())
             .with_creator(vec![0x01])
             .into_update_request()
@@ -859,7 +869,7 @@ mod tests {
         conversation.queues.insert_approved_proposal(50, emergency);
 
         let err = conversation
-            .create_commit_candidate(&UnusedSigner, b"me")
+            .create_commit_candidate(&signer, b"me")
             .expect_err("emergency in approved queue should be rejected");
         let ConversationError::UnexpectedNonMlsProposals { proposal_ids } = err else {
             panic!("expected UnexpectedNonMlsProposals, got {err:?}");

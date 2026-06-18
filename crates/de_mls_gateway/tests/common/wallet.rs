@@ -30,7 +30,7 @@ pub fn user_from_private_key(
     private_key: &str,
     transport: SharedDeliveryService,
     cfg: ConversationConfig,
-) -> User<DefaultConsensusPlugin, DefaultConversationPluginsFactory, SignatureKeyPair> {
+) -> User<DefaultConsensusPlugin, SignatureKeyPair> {
     let eth_signer = PrivateKeySigner::from_str(private_key).expect("valid private key");
     let member_id = WalletMemberId::from_address(eth_signer.address());
 

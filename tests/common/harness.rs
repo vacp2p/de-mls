@@ -40,17 +40,18 @@ use de_mls::{
     StewardListConfig,
 };
 use de_mls::{
-    Conversation, ConversationConfig, ConversationDeps, CreatorVote, MemberRole, Outbound,
-    PollOutcome, build_key_package_announcement,
+    Conversation, ConversationConfig, CreatorVote, MemberRole, Outbound, PollOutcome,
+    build_key_package_announcement,
 };
 
 use crate::common::{
-    TestMls, TestPlugins, creator_mls, make_scoring, make_steward, mint_key_package, open_welcome,
-    test_credential, wallet::WalletMemberId,
+    TEST_SUITE, TestProvider, make_scoring, make_steward, mint_key_package, test_credential,
+    wallet::WalletMemberId,
 };
 
 /// Per-conversation MLS service stack the harness runs.
-pub type TestConversation = Conversation<DefaultConsensusPlugin, TestPlugins>;
+pub type TestConversation =
+    Conversation<DefaultConsensusPlugin, TestProvider, DefaultPeerScoring, DefaultStewardList>;
 
 const MAX_SESSIONS_PER_SCOPE: usize = 10;
 
@@ -123,28 +124,20 @@ impl Integrator {
         kp
     }
 
-    /// Assemble a deps bundle around pre-built plug-in instances.
-    fn deps(
-        &self,
-        mls: TestMls,
-        scoring: DefaultPeerScoring,
-        steward: DefaultStewardList,
-        config: ConversationConfig,
-    ) -> ConversationDeps<DefaultConsensusPlugin, TestPlugins> {
-        let consensus = ConsensusServiceFor::<DefaultConsensusPlugin>::new_with_components(
+    /// Build a fresh per-conversation consensus service drawn from this
+    /// integrator's shared (scope-keyed) storage and signer.
+    fn consensus(&self) -> ConsensusServiceFor<DefaultConsensusPlugin> {
+        ConsensusServiceFor::<DefaultConsensusPlugin>::new_with_components(
             self.consensus_storage.clone(),
             DefaultConsensusPlugin::new_event_bus(),
             self.consensus_signer.clone(),
             MAX_SESSIONS_PER_SCOPE,
-        );
-        ConversationDeps {
-            mls,
-            scoring,
-            steward,
-            consensus,
-            app_id: Arc::from(self.member_id.member_id_bytes()),
-            config,
-        }
+        )
+    }
+
+    /// This integrator's `app_id` (its member-id bytes).
+    fn app_id(&self) -> Arc<[u8]> {
+        Arc::from(self.member_id.member_id_bytes())
     }
 }
 
@@ -167,8 +160,8 @@ pub struct Member {
     /// The encrypted `conversation_sync_bytes` from the welcome this member
     /// joined with — captured so a test can replay it (idempotency check).
     last_sync: Option<Vec<u8>>,
-    /// Config used to build this member's `ConversationDeps` when it accepts a
-    /// welcome (joiner path) or rejoins.
+    /// Config passed to `Conversation::join` when this member accepts a welcome
+    /// (joiner path) or rejoins.
     pending_config: ConversationConfig,
 }
 
@@ -182,17 +175,22 @@ impl Member {
         steward_list_config: StewardListConfig,
     ) -> Self {
         let integ = Integrator::new(private_key, steward_list_config);
-        let mls = creator_mls(
-            conversation_id.to_string(),
-            integ.credential.clone(),
-            &integ.signer,
-        )
-        .expect("create mls");
         let scoring = integ.scoring();
         let steward = integ.steward();
-        let deps = integ.deps(mls, scoring, steward, config.clone());
-        let convo = Conversation::create(conversation_id, deps, integ.member_id.member_id_bytes())
-            .expect("create conversation");
+        let convo = Conversation::create(
+            conversation_id,
+            TestProvider::default(),
+            integ.credential.clone(),
+            TEST_SUITE,
+            &integ.signer,
+            scoring,
+            steward,
+            integ.consensus(),
+            integ.app_id(),
+            config.clone(),
+            integ.member_id.member_id_bytes(),
+        )
+        .expect("create conversation");
         Self {
             integ,
             convo: Some(convo),
@@ -571,29 +569,30 @@ impl Member {
             return false;
         }
         // A fresh provider (we never minted a KP) holds no matching key package,
-        // so a welcome not for us cleanly yields `None`.
+        // so a welcome not for us cleanly yields `Ok(None)`.
         let provider = self.integ.pending_provider.take().unwrap_or_default();
-        // Integrator opens the welcome; only the addressed joiner gets `Some`.
-        let Ok(Some(mls)) = open_welcome(&welcome.welcome_bytes, provider) else {
-            return false;
-        };
         let scoring = self.integ.scoring();
         let steward = self.integ.steward();
-        let deps = self
-            .integ
-            .deps(mls, scoring, steward, self.pending_config.clone());
+        // `join` opens the welcome internally; only the addressed joiner gets
+        // `Some`.
         match Conversation::join(
-            deps,
+            provider,
+            &welcome.welcome_bytes,
             &welcome.conversation_sync_bytes,
+            scoring,
+            steward,
+            self.integ.consensus(),
+            self.integ.app_id(),
+            self.pending_config.clone(),
             self.integ.member_id.member_id_bytes(),
             &self.integ.signer,
         ) {
-            Ok(convo) => {
+            Ok(Some(convo)) => {
                 self.convo = Some(convo);
                 self.last_sync = Some(welcome.conversation_sync_bytes.clone());
                 true
             }
-            Err(_) => false,
+            Ok(None) | Err(_) => false,
         }
     }
 

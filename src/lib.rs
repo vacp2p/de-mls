@@ -31,14 +31,17 @@
 //! ## Quick Example
 //!
 //! ```ignore
-//! use de_mls::{ConversationDeps, Conversation};
+//! use de_mls::Conversation;
 //!
-//! // Build a conversation from injected deps (pre-built plug-in
-//! // instances, consensus service, identity).
-//! let mut conversation = Conversation::create("de-mls-test", deps)?;
+//! // Build a conversation from direct arguments: the OpenMLS provider,
+//! // credential + ciphersuite, the plug-in instances, and a consensus service.
+//! let mut conversation = Conversation::create(
+//!     "de-mls-test", provider, credential, ciphersuite, &signer,
+//!     scoring, steward, consensus, app_id, config, member_id,
+//! )?;
 //!
 //! // Send a chat message — buffered, never auto-sent.
-//! conversation.send_message(b"Hello, world!".to_vec())?;
+//! conversation.send_message(b"Hello, world!".to_vec(), &signer)?;
 //!
 //! // Drain outbound and publish it on your own transport.
 //! for out in conversation.drain_outbound() { /* publish */ }
@@ -69,9 +72,6 @@ pub mod process_result;
 /// Proposal classification.
 pub mod proposal_kind;
 
-/// Per-conversation plug-in types bundle.
-pub mod conversation_plugins;
-
 /// Wall-clock anchor combined with the conversation state machine.
 pub mod phase_timer;
 
@@ -89,13 +89,12 @@ pub use process_result::*;
 pub use proposal_kind::*;
 pub use steward_list::*;
 
-// `consensus`, `conversation_plugins`, and `phase_timer` are re-exported
-// explicitly below to avoid glob collisions with the conversation glob.
+// `consensus` and `phase_timer` are re-exported explicitly below to avoid glob
+// collisions with the conversation glob.
 pub use consensus::{
     ConsensusApplyResult, ConsensusPlugin, ConsensusServiceFor, CreatorVote, SyncConsensusReceiver,
     apply_consensus_result,
 };
-pub use conversation_plugins::ConversationPlugins;
 
 pub(crate) use phase_timer::PhaseTimer;
 

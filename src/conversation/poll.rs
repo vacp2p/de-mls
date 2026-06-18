@@ -5,17 +5,18 @@
 //! entry. The sub-steps are private to this module — the integrator calls
 //! `poll()` once per wakeup cycle and reacts to the returned [`PollOutcome`].
 
-use openmls_traits::signatures::Signer;
+use std::error::Error as StdError;
 use std::{sync::Arc, time::Duration};
 
+use openmls_traits::signatures::Signer;
+use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 use prost::Message;
 use tracing::{error, info, warn};
 
 use crate::{
-    ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationPlugins,
-    ConversationState, DispatchOutcome, FreezeFinalizeResult, FreezeOutcome, PeerScoringPlugin,
-    ScoreEvent, ScoreOp, StewardListPlugin, mls_crypto::MlsService,
-    protos::de_mls::messages::v1::AppMessage,
+    ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationState,
+    DispatchOutcome, FreezeFinalizeResult, FreezeOutcome, PeerScoringPlugin, ScoreEvent, ScoreOp,
+    StewardListPlugin, mls_crypto::MlsService, protos::de_mls::messages::v1::AppMessage,
 };
 
 /// Summary returned by [`Conversation::poll`] after one polling pass.
@@ -30,7 +31,14 @@ pub struct PollOutcome {
     pub leave_requested: bool,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPlugins> Conversation<P, CP> {
+impl<C, P, Sc, St> Conversation<C, P, Sc, St>
+where
+    C: ConsensusPlugin,
+    P: OpenMlsProvider,
+    <P::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    Sc: PeerScoringPlugin,
+    St: StewardListPlugin,
+{
     /// Drive one polling cycle: tick consensus deadlines, advance freeze
     /// state, and check steward inactivity.
     ///
