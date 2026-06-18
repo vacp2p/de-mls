@@ -632,13 +632,13 @@ mod tests {
     use crate::ConversationQueues;
     use crate::defaults::DefaultConsensusPlugin;
     use crate::test_fixtures::{
-        StubPluginsFactory, StubScoring, StubStewardList, UnusedMls, UnusedSigner,
+        StubPlugins, StubScoring, StubStewardList, UnusedMls, UnusedSigner,
         make_test_consensus_service,
     };
 
     fn make_conversation_with_steward(
         steward_list: StubStewardList,
-    ) -> Conversation<DefaultConsensusPlugin, StubPluginsFactory> {
+    ) -> Conversation<DefaultConsensusPlugin, StubPlugins> {
         let (consensus, consensus_rx) = make_test_consensus_service();
         Conversation::new(
             "g".to_string(),
@@ -657,7 +657,7 @@ mod tests {
         )
     }
 
-    fn make_conversation_working() -> Conversation<DefaultConsensusPlugin, StubPluginsFactory> {
+    fn make_conversation_working() -> Conversation<DefaultConsensusPlugin, StubPlugins> {
         let (consensus, consensus_rx) = make_test_consensus_service();
         Conversation::new(
             "g".to_string(),

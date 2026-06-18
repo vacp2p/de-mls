@@ -5,7 +5,7 @@
 //! owns `N` [`Member`]s wired to one in-memory bus, and [`TestHarness::process`]
 //! / [`TestHarness::process_until`] drive the polling-and-relay loop until a
 //! predicate holds. Each `Member` bundles the per-participant integrator state
-//! (plug-in factory, consensus storage + signer, member id) with its live
+//! (credential + signer, consensus storage + signer, member id) with its live
 //! `Conversation` and a captured-chat buffer.
 //!
 //! Relay model (de-mls layer has no transport subtopic):
@@ -25,7 +25,9 @@ use std::time::Duration;
 
 use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
+use openmls::credentials::CredentialWithKey;
 use openmls_basic_credential::SignatureKeyPair;
+use openmls_rust_crypto::OpenMlsRustCrypto;
 use prost::Message;
 
 use de_mls::defaults::{DefaultConsensusPlugin, DefaultPeerScoring, DefaultStewardList};
@@ -42,10 +44,13 @@ use de_mls::{
     PollOutcome, build_key_package_announcement,
 };
 
-use crate::common::{TestMls, TestPluginsFactory, test_credential, wallet::WalletMemberId};
+use crate::common::{
+    TestMls, TestPlugins, creator_mls, make_scoring, make_steward, mint_key_package, open_welcome,
+    test_credential, wallet::WalletMemberId,
+};
 
 /// Per-conversation MLS service stack the harness runs.
-pub type TestConversation = Conversation<DefaultConsensusPlugin, TestPluginsFactory>;
+pub type TestConversation = Conversation<DefaultConsensusPlugin, TestPlugins>;
 
 const MAX_SESSIONS_PER_SCOPE: usize = 10;
 
@@ -63,16 +68,20 @@ pub fn fast_config() -> ConversationConfig {
     }
 }
 
-/// Per-member integrator state: everything needed to build per-conversation
-/// `ConversationDeps`, including the pre-built plug-in instances.
+/// Per-member integrator state: the member's credential + signer, the shared
+/// consensus bits, the seed configs, and the provider it mints a key package
+/// into while waiting for the matching welcome.
 struct Integrator {
-    plugins: TestPluginsFactory,
+    credential: CredentialWithKey,
     signer: SignatureKeyPair,
     consensus_storage: <DefaultConsensusPlugin as ConsensusPlugin>::ConsensusStorage,
     consensus_signer: <DefaultConsensusPlugin as ConsensusPlugin>::Signer,
     member_id: WalletMemberId,
     scoring_config: ScoringConfig,
     steward_list_config: StewardListConfig,
+    /// Provider holding the private keys of a minted-but-not-yet-joined key
+    /// package; `open_welcome` consumes it once the welcome arrives.
+    pending_provider: Option<OpenMlsRustCrypto>,
 }
 
 impl Integrator {
@@ -81,28 +90,37 @@ impl Integrator {
         let member_id = WalletMemberId::from_address(eth_signer.address());
         let (credential, signer) = test_credential(member_id.member_id_bytes());
         Self {
-            plugins: TestPluginsFactory::new(credential, signer.clone()),
+            credential,
             signer,
             consensus_storage: DefaultConsensusPlugin::new_storage(),
             consensus_signer: EthereumConsensusSigner::new(eth_signer),
             member_id,
             scoring_config: ScoringConfig::default(),
             steward_list_config,
+            pending_provider: None,
         }
     }
 
     /// Build a fresh scoring plug-in from this integrator's seed config.
-    fn make_scoring(&self) -> DefaultPeerScoring {
-        self.plugins.make_scoring(&self.scoring_config)
+    fn scoring(&self) -> DefaultPeerScoring {
+        make_scoring(&self.scoring_config)
     }
 
     /// Build a fresh (empty) steward-list plug-in from this integrator's
     /// seed config.
-    fn make_steward_list(&self) -> DefaultStewardList {
-        self.plugins.make_steward_list(
+    fn steward(&self) -> DefaultStewardList {
+        make_steward(
             self.member_id.member_id_bytes(),
             self.steward_list_config.clone(),
         )
+    }
+
+    /// Mint a single-use key package, stashing its provider for the matching
+    /// welcome.
+    fn mint_key_package(&mut self) -> KeyPackageBytes {
+        let (kp, provider) = mint_key_package(&self.credential, &self.signer);
+        self.pending_provider = Some(provider);
+        kp
     }
 
     /// Assemble a deps bundle around pre-built plug-in instances.
@@ -112,7 +130,7 @@ impl Integrator {
         scoring: DefaultPeerScoring,
         steward: DefaultStewardList,
         config: ConversationConfig,
-    ) -> ConversationDeps<DefaultConsensusPlugin, TestPluginsFactory> {
+    ) -> ConversationDeps<DefaultConsensusPlugin, TestPlugins> {
         let consensus = ConsensusServiceFor::<DefaultConsensusPlugin>::new_with_components(
             self.consensus_storage.clone(),
             DefaultConsensusPlugin::new_event_bus(),
@@ -164,12 +182,14 @@ impl Member {
         steward_list_config: StewardListConfig,
     ) -> Self {
         let integ = Integrator::new(private_key, steward_list_config);
-        let mls = integ
-            .plugins
-            .create_mls(conversation_id.to_string(), &integ.signer)
-            .expect("create mls");
-        let scoring = integ.make_scoring();
-        let steward = integ.make_steward_list();
+        let mls = creator_mls(
+            conversation_id.to_string(),
+            integ.credential.clone(),
+            &integ.signer,
+        )
+        .expect("create mls");
+        let scoring = integ.scoring();
+        let steward = integ.steward();
         let deps = integ.deps(mls, scoring, steward, config.clone());
         let convo = Conversation::create(
             conversation_id,
@@ -475,7 +495,7 @@ impl Member {
     /// integrator publishes this on the welcome channel; the harness routes it
     /// to existing members via `add_member`).
     pub fn announce_key_package(&mut self, conversation_id: &str) -> Outbound {
-        let key_package = self.integ.plugins.generate_key_package();
+        let key_package = self.integ.mint_key_package();
         Outbound {
             conversation_id: conversation_id.to_string(),
             sender: self.app_id().to_vec(),
@@ -487,7 +507,7 @@ impl Member {
     /// `add_member(kp_bytes)` (the proposer-side path, where a member is added
     /// without a prior key-package announcement).
     pub fn mint_key_package(&mut self) -> KeyPackageBytes {
-        self.integ.plugins.generate_key_package()
+        self.integ.mint_key_package()
     }
 
     /// Reset this member to a fresh prospective joiner of `conversation_id`
@@ -555,12 +575,15 @@ impl Member {
         if self.convo.is_some() {
             return false;
         }
+        // A fresh provider (we never minted a KP) holds no matching key package,
+        // so a welcome not for us cleanly yields `None`.
+        let provider = self.integ.pending_provider.take().unwrap_or_default();
         // Integrator opens the welcome; only the addressed joiner gets `Some`.
-        let Ok(Some(mls)) = self.integ.plugins.welcome_mls(&welcome.welcome_bytes) else {
+        let Ok(Some(mls)) = open_welcome(&welcome.welcome_bytes, provider) else {
             return false;
         };
-        let scoring = self.integ.make_scoring();
-        let steward = self.integ.make_steward_list();
+        let scoring = self.integ.scoring();
+        let steward = self.integ.steward();
         let deps = self
             .integ
             .deps(mls, scoring, steward, self.pending_config.clone());

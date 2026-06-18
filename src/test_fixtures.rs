@@ -219,7 +219,7 @@ impl StewardListPlugin for StubStewardList {
 }
 
 /// Scoring plug-in that panics on every call. Tests that don't read
-/// scores use this as `StubPluginsFactory::Scoring` so the bundle still
+/// scores use this as `StubPlugins::Scoring` so the bundle still
 /// satisfies [`crate::ConversationPlugins`].
 pub(crate) struct StubScoring;
 
@@ -263,9 +263,9 @@ impl PeerScoringPlugin for StubScoring {
 /// types so tests can construct a [`crate::Conversation`] under its single
 /// `<CP>` parameter. Tests build plug-in instances directly and hand them to
 /// the conversation constructors.
-pub(crate) struct StubPluginsFactory;
+pub(crate) struct StubPlugins;
 
-impl ConversationPlugins for StubPluginsFactory {
+impl ConversationPlugins for StubPlugins {
     type Mls = UnusedMls;
     type Scoring = StubScoring;
     type StewardList = StubStewardList;
