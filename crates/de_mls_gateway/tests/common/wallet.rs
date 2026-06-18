@@ -10,52 +10,17 @@
 
 use std::str::FromStr;
 
-use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
+use de_mls_gateway::WalletMemberId;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 
 use de_mls::defaults::DefaultConsensusPlugin;
-use de_mls::member_id::MemberId;
 use de_mls::{ConversationConfig, ScoringConfig, StewardListConfig};
 use de_mls_ds::SharedDeliveryService;
 use de_mls_gateway::mls::{DefaultConversationPluginsFactory, build_credential};
 use de_mls_gateway::user::ConsensusContext;
 use de_mls_gateway::user::{User, UserPlugins};
 use openmls_basic_credential::SignatureKeyPair;
-
-/// Wallet-flavoured [`Identity`] used by integration tests. Holds the
-/// 20-byte Ethereum address bytes and its EIP-55 checksummed hex form.
-#[derive(Debug, Clone)]
-pub struct WalletMemberId {
-    bytes: Vec<u8>,
-    display: String,
-}
-
-impl WalletMemberId {
-    /// Build from a parsed [`Address`].
-    pub fn from_address(addr: Address) -> Self {
-        Self {
-            bytes: addr.as_slice().to_vec(),
-            display: addr.to_checksum(None),
-        }
-    }
-
-    /// Parse a `0x…`-prefixed wallet hex string.
-    pub fn from_hex(hex: &str) -> Self {
-        let addr = Address::from_str(hex.trim()).expect("valid wallet hex");
-        Self::from_address(addr)
-    }
-}
-
-impl MemberId for WalletMemberId {
-    fn member_id_bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    fn member_id_display(&self) -> &str {
-        &self.display
-    }
-}
 
 /// Build a [`User`] keyed by an Ethereum private-key string. Uses the
 /// default plug-in bundle (in-memory MLS storage, default scoring +
@@ -85,5 +50,5 @@ pub fn user_from_private_key(
         default_steward_list_config: StewardListConfig::default(),
     };
 
-    User::new_with_plugins(Box::new(member_id), mls_signer, plugins, transport)
+    User::new_with_plugins(member_id, mls_signer, plugins, transport)
 }

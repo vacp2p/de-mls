@@ -59,7 +59,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer + Clone> Us
         }
 
         let deps = self.build_deps(config);
-        let conversation = Conversation::create(conversation_id, key_package, deps, &self.signer)?;
+        let conversation = Conversation::create(
+            conversation_id,
+            key_package,
+            deps,
+            self.member_id.member_id_bytes(),
+            self.member_id.member_id_display(),
+            &self.signer,
+        )?;
         self.register_built(conversation_id, conversation)?;
         Ok(())
     }

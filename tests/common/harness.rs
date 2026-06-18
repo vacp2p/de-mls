@@ -29,7 +29,6 @@ use openmls_basic_credential::SignatureKeyPair;
 use prost::Message;
 
 use de_mls::defaults::DefaultConsensusPlugin;
-use de_mls::member_id::MemberId;
 use de_mls::mls_crypto::KeyPackageBytes;
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberInvite, MemberWelcome, app_message,
@@ -105,7 +104,6 @@ impl Integrator {
         ConversationDeps {
             plugins: &self.plugins,
             consensus,
-            identity: &self.member_id,
             app_id: Arc::from(self.member_id.member_id_bytes()),
             config,
             scoring_config: self.scoring_config.clone(),
@@ -153,6 +151,8 @@ impl Member {
             conversation_id,
             key_package.as_bytes(),
             integ.deps(config.clone()),
+            integ.member_id.member_id_bytes(),
+            integ.member_id.member_id_display(),
             &integ.signer,
         )
         .expect("create conversation");
@@ -534,7 +534,13 @@ impl Member {
             return false;
         }
         let deps = self.integ.deps(self.pending_config.clone());
-        match Conversation::from_welcome(deps, welcome, &self.integ.signer) {
+        match Conversation::from_welcome(
+            deps,
+            welcome,
+            self.integ.member_id.member_id_bytes(),
+            self.integ.member_id.member_id_display(),
+            &self.integ.signer,
+        ) {
             Ok(Some(convo)) => {
                 self.convo = Some(convo);
                 self.last_sync = Some(welcome.conversation_sync_bytes.clone());

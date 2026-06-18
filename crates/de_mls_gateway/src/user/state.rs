@@ -12,15 +12,14 @@ use de_mls::{
     ConsensusPlugin, Conversation, ConversationConfig, ConversationDeps, ConversationError,
     ConversationEvent, ConversationPluginsFactory, ConversationState, CreatorVote, MemberRole,
     PollOutcome, ScoringConfig, StewardListConfig,
-    member_id::MemberId,
     mls_crypto::{KeyPackageBytes, MlsError},
     protos::de_mls::messages::v1::{ConversationUpdateRequest, MemberWelcome},
 };
 use de_mls_ds::{OutboundPacket, SharedDeliveryService};
 use openmls_traits::signatures::Signer;
 
-use crate::mls::DefaultConversationPluginsFactory;
 use crate::user::{LockExt, UserError, UserPlugins};
+use crate::{WalletMemberId, mls::DefaultConversationPluginsFactory};
 
 /// Registry-level notification emitted when conversations are created or
 /// removed. Drain via [`User::drain_lifecycle_events`] once per polling cycle.
@@ -44,7 +43,7 @@ pub type ConversationEntry<P, CP> = Arc<RwLock<Conversation<P, CP>>>;
 pub(crate) type ConversationRegistry<P, CP> = RwLock<HashMap<String, ConversationEntry<P, CP>>>;
 
 pub struct User<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> {
-    pub(crate) member_id: Box<dyn MemberId>,
+    pub(crate) member_id: WalletMemberId,
     /// MLS signing key for this user. Owned here — the single holder across
     /// the conversation registry — and passed by reference into every
     /// conversation-driving call that needs to sign.
@@ -229,7 +228,14 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer + Clone> Us
     /// conversation returns its name without re-registering.
     pub fn accept_welcome(&mut self, welcome: &MemberWelcome) -> Result<String, UserError> {
         let deps = self.build_deps(self.plugins.default_conversation_config.clone());
-        let Some(conversation) = Conversation::from_welcome(deps, welcome, &self.signer)? else {
+        let Some(conversation) = Conversation::from_welcome(
+            deps,
+            welcome,
+            self.member_id.member_id_bytes(),
+            self.member_id.member_id_display(),
+            &self.signer,
+        )?
+        else {
             return Err(UserError::WelcomeNotForUs);
         };
         let conversation_id = conversation.id().to_string();
@@ -420,7 +426,6 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> User<P, CP
         ConversationDeps {
             plugins: &self.plugins.conversation_plugins,
             consensus: self.plugins.consensus.build_service(),
-            identity: self.member_id.as_ref(),
             app_id: Arc::from(self.app_id.as_slice()),
             config,
             scoring_config: self.plugins.default_scoring_config.clone(),
@@ -503,7 +508,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer> User<P, CP
     }
 
     pub fn new_with_plugins(
-        member_id: Box<dyn MemberId>,
+        member_id: WalletMemberId,
         signer: Sig,
         plugins: UserPlugins<P, CP>,
         transport: SharedDeliveryService,

@@ -14,8 +14,6 @@ use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use openmls_basic_credential::SignatureKeyPair;
 
-use de_mls::member_id::MemberId;
-
 use de_mls::defaults::DefaultConsensusPlugin;
 use de_mls::mls_crypto::KeyPackageBytes;
 use de_mls::{
@@ -83,7 +81,6 @@ impl Integrator {
         ConversationDeps {
             plugins: &self.plugins,
             consensus,
-            identity: &self.member_id,
             app_id: Arc::from(self.member_id.member_id_bytes()),
             config,
             scoring_config: ScoringConfig::default(),
@@ -100,6 +97,8 @@ fn create_builds_a_working_steward_session_without_user() {
         "standalone",
         kp.as_bytes(),
         integrator.deps(),
+        integrator.member_id.member_id_bytes(),
+        integrator.member_id.member_id_display(),
         &integrator.signer,
     )
     .expect("create");
@@ -147,6 +146,8 @@ fn from_welcome_joins_in_one_call() {
         "standalone-welcome",
         alice_kp.as_bytes(),
         alice.deps_with_config(fast_config()),
+        alice.member_id.member_id_bytes(),
+        alice.member_id.member_id_display(),
         &alice.signer,
     )
     .expect("create");
@@ -185,6 +186,8 @@ fn from_welcome_joins_in_one_call() {
         Conversation::from_welcome(
             bystander.deps_with_config(fast_config()),
             &welcome,
+            bystander.member_id.member_id_bytes(),
+            bystander.member_id.member_id_display(),
             &bystander.signer,
         )
         .expect("from_welcome on a foreign welcome")
@@ -194,10 +197,15 @@ fn from_welcome_joins_in_one_call() {
 
     // The whole joiner path in one call: attach MLS, complete the join,
     // apply the bundled sync.
-    let joined =
-        Conversation::from_welcome(bob.deps_with_config(fast_config()), &welcome, &bob.signer)
-            .expect("from_welcome")
-            .expect("welcome addresses bob");
+    let joined = Conversation::from_welcome(
+        bob.deps_with_config(fast_config()),
+        &welcome,
+        bob.member_id.member_id_bytes(),
+        bob.member_id.member_id_display(),
+        &bob.signer,
+    )
+    .expect("from_welcome")
+    .expect("welcome addresses bob");
     assert_eq!(joined.id(), "standalone-welcome");
     assert_eq!(joined.state(), ConversationState::Working);
     assert_eq!(joined.members().expect("members").len(), 2);

@@ -26,7 +26,7 @@ use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 
 use de_mls::{
     ConversationConfig, ScoringConfig, StewardListConfig, defaults::DefaultConsensusPlugin,
-    member_id::MemberId, protos::de_mls::messages::v1::ConversationUpdateRequest,
+    protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 use de_mls_ds::{DeliveryService, SharedDeliveryService, WakuDeliveryService};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
@@ -170,25 +170,24 @@ impl<DS: DeliveryService> Gateway<DS> {
 }
 
 #[derive(Debug, Clone)]
-struct WalletMemberId {
+pub struct WalletMemberId {
     bytes: Vec<u8>,
     display: String,
 }
 
 impl WalletMemberId {
-    fn from_address(addr: Address) -> Self {
+    pub fn from_address(addr: Address) -> Self {
         Self {
             bytes: addr.as_slice().to_vec(),
             display: addr.to_checksum(None),
         }
     }
-}
 
-impl MemberId for WalletMemberId {
-    fn member_id_bytes(&self) -> &[u8] {
+    pub fn member_id_bytes(&self) -> &[u8] {
         &self.bytes
     }
-    fn member_id_display(&self) -> &str {
+
+    pub fn member_id_display(&self) -> &str {
         &self.display
     }
 }
@@ -218,10 +217,7 @@ fn build_user_from_private_key(
     };
 
     Ok(User::new_with_plugins(
-        Box::new(member_id),
-        mls_signer,
-        plugins,
-        transport,
+        member_id, mls_signer, plugins, transport,
     ))
 }
 

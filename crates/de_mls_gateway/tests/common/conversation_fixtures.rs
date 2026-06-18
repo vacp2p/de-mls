@@ -20,7 +20,6 @@ use de_mls_ds::{
 use de_mls_gateway::mls::DefaultConversationPluginsFactory;
 use de_mls_gateway::user::{Inbound, User};
 use openmls_basic_credential::SignatureKeyPair;
-use prost::Message;
 
 use crate::common::wallet::user_from_private_key;
 

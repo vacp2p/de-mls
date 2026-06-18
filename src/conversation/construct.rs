@@ -3,8 +3,8 @@
 //!
 //! [`ConversationDeps`] gathers everything a single conversation needs:
 //! the shared plug-in factory (borrowed — one serves every conversation an
-//! integrator runs), a ready consensus service, the identity, and the
-//! per-conversation configs. [`Conversation::create`] and
+//! integrator runs), a ready consensus service, and the per-conversation
+//! configs. [`Conversation::create`] and
 //! [`Conversation::from_welcome`] consume one bundle and return a conversation
 //! ready to drop into a registry.
 
@@ -17,25 +17,21 @@ use crate::{
     ConsensusPlugin, ConsensusServiceFor, Conversation, ConversationConfig, ConversationError,
     ConversationEvent, ConversationPluginsFactory, ConversationQueues, ConversationStateMachine,
     PeerScoringPlugin, PhaseTimer, ScoringConfig, StewardListConfig, StewardListPlugin,
-    member_id::MemberId, mls_crypto::MlsService, protos::de_mls::messages::v1::MemberWelcome,
+    mls_crypto::MlsService, protos::de_mls::messages::v1::MemberWelcome,
 };
 
 /// Everything one conversation needs to come into being.
 ///
 /// The plug-in factory is borrowed (one serves every conversation an
-/// integrator runs) and the identity is borrowed too — the constructor
-/// snapshots its bytes/display. The consensus service is owned: each
-/// conversation gets its own, and how services share storage is the
-/// integrator's wiring (see the gateway's `ConsensusContext`).
+/// integrator runs). The consensus service is owned: each conversation gets
+/// its own, and how services share storage is the integrator's wiring (see
+/// the gateway's `ConsensusContext`).
 pub struct ConversationDeps<'a, P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// Builds the per-conversation MLS / scoring / steward plug-ins.
     pub plugins: &'a CP,
     /// This conversation's consensus service, ready to use. The conversation
     /// subscribes to its event bus at construction.
     pub consensus: ConsensusServiceFor<P>,
-    /// Local participant identity; the constructor snapshots its bytes
-    /// and display form onto the conversation.
-    pub identity: &'a dyn MemberId,
     /// Per-instance UUID stamped on every outbound packet for echo dedup.
     pub app_id: Arc<[u8]>,
     /// Durable per-conversation protocol config.
@@ -50,17 +46,28 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     /// Create a brand-new conversation we steward. Starts in `Working` with
     /// the local member installed as sole steward at epoch 0. The creator's
     /// own `key_package` supplies the leaf credential and ciphersuite.
-    /// `signer` is the local member's MLS signer, used to seed the group.
+    /// `member_id` / `member_id_display` name the local member — the opaque id
+    /// bytes the protocol matches on and the human-readable form. `signer` is
+    /// the member's MLS signer, used to seed the group.
     pub fn create(
         conversation_id: &str,
         key_package: &[u8],
         deps: ConversationDeps<P, CP>,
+        member_id: &[u8],
+        member_id_display: &str,
         signer: &impl Signer,
     ) -> Result<Self, ConversationError> {
         let mls = deps
             .plugins
             .create_mls(conversation_id.to_string(), key_package, signer)?;
-        Self::assemble(conversation_id, deps, mls, true)
+        Self::assemble(
+            conversation_id,
+            deps,
+            mls,
+            true,
+            member_id,
+            member_id_display,
+        )
     }
 
     /// Build a fully-joined conversation straight from a received
@@ -74,13 +81,22 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
     pub fn from_welcome(
         deps: ConversationDeps<P, CP>,
         welcome: &MemberWelcome,
+        member_id: &[u8],
+        member_id_display: &str,
         signer: &impl Signer,
     ) -> Result<Option<Self>, ConversationError> {
         let Some(mls) = deps.plugins.welcome_mls(&welcome.welcome_bytes)? else {
             return Ok(None);
         };
         let conversation_id = mls.conversation_id().to_string();
-        let mut conversation = Self::assemble(&conversation_id, deps, mls, false)?;
+        let mut conversation = Self::assemble(
+            &conversation_id,
+            deps,
+            mls,
+            false,
+            member_id,
+            member_id_display,
+        )?;
         conversation.on_joined(signer)?;
         conversation.apply_welcome_sync(&welcome.conversation_sync_bytes, signer)?;
         Ok(Some(conversation))
@@ -97,8 +113,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
         deps: ConversationDeps<P, CP>,
         mls: CP::Mls,
         is_creation: bool,
+        member_id: &[u8],
+        member_id_display: &str,
     ) -> Result<Self, ConversationError> {
-        let self_member_id_bytes = deps.identity.member_id_bytes().to_vec();
+        let self_member_id_bytes = member_id.to_vec();
         let queues = ConversationQueues::new(conversation_id);
 
         let mut steward_list = deps
@@ -135,8 +153,8 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> Conversation<P, CP> {
             steward_list,
             consensus,
             consensus_rx,
-            Arc::from(deps.identity.member_id_bytes()),
-            Arc::from(deps.identity.member_id_display()),
+            Arc::from(member_id),
+            Arc::from(member_id_display),
             deps.app_id,
         );
         // Surface the opening phase so a caller draining conversation events sees

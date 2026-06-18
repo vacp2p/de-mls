@@ -99,9 +99,8 @@ pub struct Conversation<P: ConsensusPlugin, CP: ConversationPluginsFactory> {
     /// `tick_deadlines` which calls `consensus.handle_consensus_timeout`.
     /// Removed when the consensus session resolves naturally via `apply_consensus_outcome`.
     pub(crate) pending_consensus_timeouts: HashMap<u32, Instant>,
-    /// Identity bytes of the local member, derived from the integrator's
-    /// [`crate::member_id::MemberId`] at construction. Read via
-    /// [`Conversation::member_id_bytes`].
+    /// Identity bytes of the local member, snapshotted from the `member_id`
+    /// passed at construction. Read via [`Conversation::member_id_bytes`].
     pub(crate) self_member_id: Arc<[u8]>,
     /// Display form of the local member id, derived at construction.
     /// `Arc<str>` for the same reason as `self_member_id` — cheap clone
