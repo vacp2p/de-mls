@@ -69,6 +69,7 @@ impl GatewayEventFanout {
                             .into_bytes(),
                         sender: "system".to_string(),
                         conversation_id: conversation_id.to_string(),
+                        ..Default::default()
                     }));
             }
             ConversationEvent::Error { operation, message } => {

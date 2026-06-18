@@ -156,6 +156,7 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                             .into_bytes(),
                         sender: "system".to_string(),
                         conversation_id: conversation_id.clone(),
+                        ..Default::default()
                     }));
                 }
             }
@@ -180,6 +181,7 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                             message: body.into_bytes(),
                             sender: "me".to_string(),
                             conversation_id: conversation_id,
+                            ..Default::default()
                         }));
                     }
                     Err(e) => {
@@ -194,6 +196,7 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                     message: "History loaded (stub)".as_bytes().to_vec(),
                     sender: "system".to_string(),
                     conversation_id: conversation_id.clone(),
+                    ..Default::default()
                 }));
             }
 
@@ -232,6 +235,7 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                     .to_vec(),
                     sender: "system".to_string(),
                     conversation_id: conversation_id.clone(),
+                    ..Default::default()
                 }));
             }
 
