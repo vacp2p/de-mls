@@ -98,7 +98,12 @@ pub fn decode_inbound_payload<M: MlsService>(
 
     match res {
         DecryptResult::Application(app_bytes, sender) => {
-            let app_msg = AppMessage::decode(app_bytes.as_ref())?;
+            let mut app_msg = AppMessage::decode(app_bytes.as_ref())?;
+            // Stamp the MLS-authenticated sender (the verified leaf credential
+            // content) onto conversation messages.
+            if let Some(app_message::Payload::ConversationMessage(cm)) = &mut app_msg.payload {
+                cm.sender_credential = sender.clone();
+            }
             if let Some(app_message::Payload::Proposal(proposal)) = &app_msg.payload
                 && !authorize_fast_path_proposal(proposal, &sender)
             {

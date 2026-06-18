@@ -69,6 +69,7 @@ impl GatewayEventFanout {
                             .into_bytes(),
                         sender: b"system".to_vec(),
                         conversation_id: conversation_id.to_string(),
+                        ..Default::default()
                     }));
             }
             ConversationEvent::Error { operation, message } => {
@@ -227,6 +228,7 @@ pub fn forward_app_message(
                 message: cm.message.clone(),
                 sender: render_member_id(&cm.sender).into_bytes(),
                 conversation_id: cm.conversation_id.clone(),
+                sender_credential: cm.sender_credential.clone(),
             };
             evt_tx
                 .unbounded_send(AppEvent::ChatMessage(msg))
