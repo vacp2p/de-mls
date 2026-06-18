@@ -16,12 +16,12 @@ use openmls_basic_credential::SignatureKeyPair;
 
 use de_mls::member_id::MemberId;
 
-use de_mls::core::{
-    ConsensusPlugin, ConsensusServiceFor, ConversationEvent, ScoringConfig, StewardListConfig,
-};
 use de_mls::defaults::DefaultConsensusPlugin;
 use de_mls::mls_crypto::KeyPackageBytes;
-use de_mls::session::{Conversation, ConversationDeps, ConversationState};
+use de_mls::{
+    ConsensusPlugin, ConsensusServiceFor, ConversationEvent, ScoringConfig, StewardListConfig,
+};
+use de_mls::{Conversation, ConversationDeps, ConversationState};
 
 use common::{TestPluginsFactory, test_credential, wallet::WalletMemberId};
 
@@ -67,12 +67,12 @@ impl Integrator {
     /// its own private event bus. The member id doubles as the `app_id` so
     /// two integrators in one test don't echo-drop each other's packets.
     fn deps(&self) -> ConversationDeps<'_, DefaultConsensusPlugin, TestPluginsFactory> {
-        self.deps_with_config(de_mls::session::ConversationConfig::default())
+        self.deps_with_config(de_mls::ConversationConfig::default())
     }
 
     fn deps_with_config(
         &self,
-        config: de_mls::session::ConversationConfig,
+        config: de_mls::ConversationConfig,
     ) -> ConversationDeps<'_, DefaultConsensusPlugin, TestPluginsFactory> {
         let consensus = ConsensusServiceFor::<DefaultConsensusPlugin>::new_with_components(
             self.consensus_storage.clone(),
@@ -137,8 +137,8 @@ fn join_builds_a_pending_join_session_without_user() {
 
 /// Sub-second timers so the solo creator's bundled-YES consensus and the
 /// inactivity commit land within a few polling rounds.
-fn fast_config() -> de_mls::session::ConversationConfig {
-    de_mls::session::ConversationConfig {
+fn fast_config() -> de_mls::ConversationConfig {
+    de_mls::ConversationConfig {
         commit_inactivity_duration: Duration::from_millis(50),
         freeze_duration: Duration::from_millis(20),
         voting_delay: Duration::from_millis(30),

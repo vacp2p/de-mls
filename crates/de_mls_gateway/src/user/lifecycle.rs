@@ -5,8 +5,8 @@ use std::sync::{Arc, RwLock};
 use tracing::info;
 
 use de_mls::{
-    core::{ConsensusPlugin, ConversationConfig, ConversationPluginsFactory},
-    session::{Conversation, ConversationDeps, ConversationError, LeaveOutcome},
+    ConsensusPlugin, Conversation, ConversationConfig, ConversationDeps, ConversationError,
+    ConversationPluginsFactory, LeaveOutcome,
 };
 
 use openmls_traits::signatures::Signer;

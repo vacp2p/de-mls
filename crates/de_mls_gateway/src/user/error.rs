@@ -5,7 +5,7 @@
 //! registry-side: conversation lookup, lock poisoning, and transport
 //! delivery.
 
-use de_mls::session::ConversationError;
+use de_mls::ConversationError;
 
 /// Errors from `User` operations.
 #[derive(Debug, thiserror::Error)]

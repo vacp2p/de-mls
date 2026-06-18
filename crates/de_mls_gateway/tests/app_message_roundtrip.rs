@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
-use de_mls::core::{ConversationEvent, StewardListConfig};
 use de_mls::protos::de_mls::messages::v1::app_message;
+use de_mls::{ConversationEvent, StewardListConfig};
 
 mod common;
 use common::conversation_fixtures::{

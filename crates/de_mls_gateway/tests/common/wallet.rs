@@ -14,10 +14,9 @@ use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 
-use de_mls::core::{ScoringConfig, StewardListConfig};
 use de_mls::defaults::DefaultConsensusPlugin;
 use de_mls::member_id::MemberId;
-use de_mls::session::ConversationConfig;
+use de_mls::{ConversationConfig, ScoringConfig, StewardListConfig};
 use de_mls_ds::SharedDeliveryService;
 use de_mls_gateway::mls::{DefaultConversationPluginsFactory, build_credential};
 use de_mls_gateway::user::ConsensusContext;

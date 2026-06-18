@@ -25,11 +25,8 @@ use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 
 use de_mls::{
-    core::{ScoringConfig, StewardListConfig},
-    defaults::DefaultConsensusPlugin,
-    member_id::MemberId,
-    protos::de_mls::messages::v1::ConversationUpdateRequest,
-    session::ConversationConfig,
+    ConversationConfig, ScoringConfig, StewardListConfig, defaults::DefaultConsensusPlugin,
+    member_id::MemberId, protos::de_mls::messages::v1::ConversationUpdateRequest,
 };
 use de_mls_ds::{DeliveryService, SharedDeliveryService, WakuDeliveryService};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
@@ -263,7 +260,7 @@ impl Gateway<WakuDeliveryService> {
     /// Spawn the gateway's UI event pump. Once per polling cycle it
     /// drains [`crate::user::User::drain_lifecycle_events`] (to learn
     /// when new conversations appear or disappear) and
-    /// [`de_mls::session::Conversation::drain_events`] on every active
+    /// [`de_mls::Conversation::drain_events`] on every active
     /// conversation (to forward UI-bound events). Replaces the previous
     /// broadcast-channel subscriber pattern.
     fn spawn_conversation_subscribers(&self, user: UserRef, transport: SharedDeliveryService) {

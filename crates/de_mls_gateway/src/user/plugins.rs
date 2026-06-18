@@ -5,7 +5,7 @@
 //! into new conversations. Grouping these here keeps the `User` definition
 //! surfacing registry + transport at top level.
 
-use de_mls::core::{
+use de_mls::{
     ConsensusPlugin, ConversationConfig, ConversationPluginsFactory, ScoringConfig,
     StewardListConfig,
 };

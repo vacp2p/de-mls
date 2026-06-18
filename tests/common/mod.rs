@@ -10,12 +10,12 @@ pub mod wallet;
 
 use std::cell::RefCell;
 
-use de_mls::core::{
+use de_mls::defaults::{DefaultPeerScoring, DefaultStewardList, InMemoryPeerScoreStorage};
+use de_mls::mls_crypto::{KeyPackageBytes, MlsError, OpenMlsService};
+use de_mls::{
     ConversationPluginsFactory, DeterministicStewardList, PeerScoringService, ScoringConfig,
     StewardListConfig, default_score_deltas,
 };
-use de_mls::defaults::{DefaultPeerScoring, DefaultStewardList, InMemoryPeerScoreStorage};
-use de_mls::mls_crypto::{KeyPackageBytes, MlsError, OpenMlsService};
 use openmls::credentials::{BasicCredential, CredentialWithKey};
 use openmls::key_packages::KeyPackage;
 use openmls::prelude::Ciphersuite;

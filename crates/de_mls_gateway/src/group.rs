@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use alloy::primitives::Address;
 
+use de_mls::ConversationState;
 use de_mls_ds::WakuDeliveryService;
 use de_mls_ui_protocol::v1::MemberInfo;
 
@@ -75,8 +76,8 @@ impl Gateway<WakuDeliveryService> {
                     .await
                     .conversation_state(&group_name_clone)
                 {
-                    Ok(de_mls::session::ConversationState::Working) => break true,
-                    Ok(de_mls::session::ConversationState::PendingJoin) => continue,
+                    Ok(ConversationState::Working) => break true,
+                    Ok(ConversationState::PendingJoin) => continue,
                     Ok(_) => break true,
                     Err(_) => break false,
                 }

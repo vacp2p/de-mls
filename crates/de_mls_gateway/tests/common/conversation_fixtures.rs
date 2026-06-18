@@ -1,6 +1,6 @@
 //! Integration-test fixtures for Conversation-driven scenarios.
 //!
-//! Built around [`User`] + [`de_mls::session::Conversation`] over the
+//! Built around [`User`] + [`de_mls::Conversation`] over the
 //! `DefaultConversationPluginsFactory`. Every helper drives the production
 //! public surface — no peeking at private state. Packet relay is explicit:
 //! tests drain a [`CapturingTransport`] and call `process_inbound_packet`
@@ -12,9 +12,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread::sleep;
 use std::time::Duration;
 
-use de_mls::core::StewardListConfig;
 use de_mls::defaults::DefaultConsensusPlugin;
-use de_mls::session::{Conversation, ConversationConfig};
+use de_mls::{Conversation, ConversationConfig, StewardListConfig};
 use de_mls_ds::{
     DeliveryService, DeliveryServiceError, OutboundPacket, SharedDeliveryService, WELCOME_SUBTOPIC,
 };
@@ -155,7 +154,7 @@ pub fn route_welcomes(
     sessions: &[ConversationArc],
     users: &mut [(TestUser, TransportHandle)],
 ) -> (usize, Vec<Vec<u8>>) {
-    use de_mls::core::ConversationEvent;
+    use de_mls::ConversationEvent;
     use de_mls::protos::de_mls::messages::v1::MemberWelcome;
 
     // Route only minted welcomes — peers re-emit the committer's broadcast
@@ -268,7 +267,7 @@ pub fn bootstrap_joined_conversation(
     cfg: ConversationConfig,
     steward_cfg: StewardListConfig,
 ) -> Vec<(TestUser, TransportHandle)> {
-    use de_mls::core::ConversationState;
+    use de_mls::ConversationState;
     use std::time::Duration;
     const MAX_ROUNDS: usize = 30;
     assert!(!keys.is_empty(), "bootstrap needs at least one key");

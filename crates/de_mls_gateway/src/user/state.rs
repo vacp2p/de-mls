@@ -9,16 +9,12 @@ use std::{
 };
 
 use de_mls::{
-    core::{
-        ConsensusPlugin, ConversationEvent, ConversationPluginsFactory, ScoringConfig,
-        StewardListConfig,
-    },
+    ConsensusPlugin, Conversation, ConversationError, ConversationEvent,
+    ConversationPluginsFactory, ConversationState, CreatorVote, MemberRole, PollOutcome,
+    ScoringConfig, StewardListConfig,
     member_id::MemberId,
     mls_crypto::{KeyPackageBytes, MlsError, MlsService},
     protos::de_mls::messages::v1::{ConversationUpdateRequest, MemberWelcome},
-    session::{
-        Conversation, ConversationError, ConversationState, CreatorVote, MemberRole, PollOutcome,
-    },
 };
 use de_mls_ds::{OutboundPacket, SharedDeliveryService};
 use openmls_traits::signatures::Signer;
@@ -158,7 +154,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer + Clone> Us
         conversation_id: &str,
         key_package: KeyPackageBytes,
     ) -> Result<(), UserError> {
-        let payload = de_mls::session::build_key_package_announcement(&key_package);
+        let payload = de_mls::build_key_package_announcement(&key_package);
         let packet = OutboundPacket::key_package(conversation_id, &self.app_id, payload);
         self.transport
             .lock()
@@ -205,7 +201,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer + Clone> Us
     /// `conversation_id`. The local vote is bundled YES at submit. On
     /// consensus YES the epoch steward authors a commit containing the
     /// Add; the resulting welcome arrives via
-    /// [`de_mls::core::ConversationEvent::WelcomeReady`] for the integrator to
+    /// [`de_mls::ConversationEvent::WelcomeReady`] for the integrator to
     /// deliver out of band.
     pub fn add_member(
         &self,
@@ -223,7 +219,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory, Sig: Signer + Clone> Us
     }
 
     /// Ingest a [`MemberWelcome`] delivered out of band (e.g. the
-    /// inviter's [`de_mls::core::ConversationEvent::WelcomeReady`] routed
+    /// inviter's [`de_mls::ConversationEvent::WelcomeReady`] routed
     /// through the integrator's transport). Completes the join and applies
     /// the bundled `ConversationSync`. Returns the joined conversation
     /// name, or [`UserError::WelcomeNotForUs`] if the welcome doesn't

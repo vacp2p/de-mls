@@ -27,17 +27,17 @@ use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 use openmls_basic_credential::SignatureKeyPair;
 
-use de_mls::core::{
-    ConsensusPlugin, ConsensusServiceFor, ConversationEvent, ConversationState, ScoringConfig,
-    StewardListConfig,
-};
 use de_mls::defaults::DefaultConsensusPlugin;
 use de_mls::member_id::MemberId;
 use de_mls::mls_crypto::KeyPackageBytes;
 use de_mls::protos::de_mls::messages::v1::{
     AppMessage, ConversationUpdateRequest, MemberWelcome, app_message,
 };
-use de_mls::session::{
+use de_mls::{
+    ConsensusPlugin, ConsensusServiceFor, ConversationEvent, ConversationState, ScoringConfig,
+    StewardListConfig,
+};
+use de_mls::{
     Conversation, ConversationConfig, ConversationDeps, CreatorVote, MemberRole, Outbound,
     PollOutcome, build_key_package_announcement,
 };
@@ -453,7 +453,7 @@ impl Member {
     /// Returns `true` only for the addressed joiner (attaches MLS + applies the
     /// bundled sync); `false` for everyone else.
     fn try_accept_welcome(&mut self, welcome: &MemberWelcome) -> bool {
-        use de_mls::core::ConversationPluginsFactory;
+        use de_mls::ConversationPluginsFactory;
         match self.integ.plugins.welcome_mls(&welcome.welcome_bytes) {
             Ok(Some(mls)) => {
                 self.convo

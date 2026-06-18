@@ -1,6 +1,6 @@
 //! Registry CRUD on the `User` side: conversation lookup.
 
-use de_mls::core::{ConsensusPlugin, ConversationPluginsFactory};
+use de_mls::{ConsensusPlugin, ConversationPluginsFactory};
 
 use openmls_traits::signatures::Signer;
 

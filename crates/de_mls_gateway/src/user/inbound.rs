@@ -7,10 +7,7 @@
 //! delegate dedup and dispatch decisions to the conversation. Raw MLS welcomes
 //! enter through [`User::accept_welcome`].
 
-use de_mls::{
-    core::{ConsensusPlugin, ConversationPluginsFactory},
-    session::DispatchOutcome,
-};
+use de_mls::{ConsensusPlugin, ConversationPluginsFactory, DispatchOutcome};
 
 use openmls_traits::signatures::Signer;
 

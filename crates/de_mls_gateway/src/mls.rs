@@ -10,10 +10,8 @@
 use std::sync::Mutex;
 
 use de_mls::{
-    core::{
-        ConversationPluginsFactory, DeterministicStewardList, PeerScoringService, ScoringConfig,
-        StewardListConfig, default_score_deltas,
-    },
+    ConversationPluginsFactory, DeterministicStewardList, PeerScoringService, ScoringConfig,
+    StewardListConfig, default_score_deltas,
     defaults::{DefaultPeerScoring, DefaultStewardList, InMemoryPeerScoreStorage},
     mls_crypto::{KeyPackageBytes, MlsError, OpenMlsService},
 };

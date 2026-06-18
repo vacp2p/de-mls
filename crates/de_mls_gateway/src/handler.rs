@@ -2,7 +2,7 @@
 //!
 //! [`crate::Gateway`] runs one polling task per logged-in user. Each tick
 //! drains [`crate::user::User::drain_lifecycle_events`] for `Created` /
-//! `Removed`, then drains [`de_mls::session::Conversation::drain_events`] on
+//! `Removed`, then drains [`de_mls::Conversation::drain_events`] on
 //! every active conversation and dispatches the [`ConversationEvent`]s to `AppEvent`
 //! variants on the UI pipe — also maintaining the per-group
 //! `epoch_history` cache used by the History tab.
@@ -16,7 +16,7 @@ use futures::channel::mpsc::UnboundedSender;
 use prost::Message;
 
 use de_mls::{
-    core::ConversationEvent,
+    ConversationEvent,
     protos::de_mls::messages::v1::{AppMessage, ConversationMessage, VotePayload, app_message},
 };
 use de_mls_ds::{OutboundPacket, SharedDeliveryService, TopicFilter, WELCOME_SUBTOPIC};

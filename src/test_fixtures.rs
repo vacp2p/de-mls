@@ -1,5 +1,5 @@
 //! Crate-internal test fixtures: minimal trait impls for tests that need
-//! to construct a [`crate::session::Conversation`] without standing up real
+//! to construct a [`crate::Conversation`] without standing up real
 //! MLS / scoring / steward backends.
 //!
 //! Most methods are `unreachable!()` — tests should only exercise the
@@ -13,11 +13,9 @@ use openmls_traits::signatures::{Signer, SignerError};
 use openmls_traits::types::SignatureScheme;
 
 use crate::{
-    core::{
-        ConsensusPlugin, ConsensusServiceFor, ConversationPluginsFactory, ElectionDecision,
-        PeerScoringPlugin, ScoreOp, ScoreSnapshot, ScoringConfig, StewardList, StewardListConfig,
-        StewardListPlugin,
-    },
+    ConsensusPlugin, ConsensusServiceFor, ConversationPluginsFactory, ElectionDecision,
+    PeerScoringPlugin, ScoreOp, ScoreSnapshot, ScoringConfig, StewardList, StewardListConfig,
+    StewardListPlugin,
     defaults::DefaultConsensusPlugin,
     mls_crypto::{
         CommitCandidate, DecryptResult, MlsCommitInput, MlsError, MlsMessageKind, MlsService,
@@ -27,7 +25,7 @@ use crate::{
 };
 
 /// Build a `ConsensusServiceFor<DefaultConsensusPlugin>` paired with a
-/// subscribed receiver for [`crate::session::Conversation::new`].
+/// subscribed receiver for [`crate::Conversation::new`].
 pub(crate) fn make_test_consensus_service() -> (
     ConsensusServiceFor<DefaultConsensusPlugin>,
     crate::defaults::SyncEventReceiver<String>,
@@ -191,7 +189,7 @@ impl StewardListPlugin for StubStewardList {
         _: &[Vec<u8>],
         _: usize,
         _: u32,
-    ) -> Result<(), crate::core::CoreError> {
+    ) -> Result<(), crate::CoreError> {
         unreachable!()
     }
     fn validate_proposed(
@@ -200,7 +198,7 @@ impl StewardListPlugin for StubStewardList {
         _: u64,
         _: &[Vec<u8>],
         _: u32,
-    ) -> Result<bool, crate::core::CoreError> {
+    ) -> Result<bool, crate::CoreError> {
         unreachable!()
     }
     fn propose_election<F: Fn(&[u8]) -> bool>(
@@ -210,7 +208,7 @@ impl StewardListPlugin for StubStewardList {
         _: &[u8],
         _: F,
         _: bool,
-    ) -> Result<ElectionDecision, crate::core::CoreError> {
+    ) -> Result<ElectionDecision, crate::CoreError> {
         unreachable!()
     }
     fn bump_retry(&mut self) {
@@ -223,7 +221,7 @@ impl StewardListPlugin for StubStewardList {
 
 /// Scoring plug-in that panics on every call. Tests that don't read
 /// scores use this as `StubPluginsFactory::Scoring` so the bundle still
-/// satisfies [`crate::core::ConversationPluginsFactory`].
+/// satisfies [`crate::ConversationPluginsFactory`].
 pub(crate) struct StubScoring;
 
 impl PeerScoringPlugin for StubScoring {
@@ -263,7 +261,7 @@ impl PeerScoringPlugin for StubScoring {
 }
 
 /// Test plug-in bundle wiring the three stubs into the [`ConversationPluginsFactory`]
-/// trait so tests can construct a [`crate::session::Conversation`] under its
+/// trait so tests can construct a [`crate::Conversation`] under its
 /// single `<CP>` parameter. The factory methods are `unreachable!()` — tests
 /// build plug-in instances directly and hand them to the conversation
 /// constructors.

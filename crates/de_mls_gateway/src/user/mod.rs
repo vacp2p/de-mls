@@ -1,7 +1,7 @@
 //! [`User`] — multi-conversation facade over the de-mls library. One node
 //! owns one `User`, which holds the per-conversation registry, the plugin
 //! bundle, and the outbound transport. Per-conv protocol work lives on each
-//! [`de_mls::session::Conversation`]; callers reach a session via
+//! [`de_mls::Conversation`]; callers reach a session via
 //! [`User::lookup_entry`].
 //!
 //! This is the reference integrator — the registry + routing + lifecycle
