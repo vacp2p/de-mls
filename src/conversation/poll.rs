@@ -6,7 +6,10 @@
 //! `poll()` once per wakeup cycle and reacts to the returned [`PollOutcome`].
 
 use std::error::Error as StdError;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use openmls_traits::signatures::Signer;
 use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
@@ -67,6 +70,14 @@ where
                 error = %e,
                 "advance_freeze error in poll"
             ),
+        }
+
+        if let Err(e) = self.drive_buffered_proposals(provider, signer) {
+            warn!(
+                conversation = %self.conversation_id,
+                error = %e,
+                "buffered-proposal drive error in poll"
+            );
         }
 
         if let Err(e) = self.start_freeze_on_inactivity(provider, signer) {
@@ -265,6 +276,63 @@ where
         }
     }
 
+    /// Drive the backup-steward proposal takeover. The epoch steward sponsors
+    /// announced joiners immediately; everyone else only buffers them. If the
+    /// epoch steward stays silent, the join would stall — so here a backup
+    /// steward drains the buffer once the recovery window passes, mirroring the
+    /// commit takeover (primary leads, backup follows after `recovery`).
+    ///
+    /// No-op outside `Working`; deferred while approved work is pending (the
+    /// commit path owns that, and the next epoch advance drains the buffer);
+    /// the epoch steward drains immediately; plain members never drain.
+    fn drive_buffered_proposals<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let idle = self.current_state() != ConversationState::Working
+            || self.queues.approved_proposals_count() > 0
+            || self.actionable_buffered_updates()?.is_empty();
+        if idle {
+            self.timing.buffered_propose_anchor = None;
+            return Ok(());
+        }
+
+        // The epoch steward is responsible now — propose without waiting.
+        if self.is_epoch_steward()? {
+            self.timing.buffered_propose_anchor = None;
+            return self.drain_buffered_updates(provider, signer);
+        }
+        // Only a steward can take over; a plain member just keeps its backup copy.
+        if !self.is_steward() {
+            return Ok(());
+        }
+
+        // Backup steward: give the epoch steward the recovery window first.
+        let anchor = match self.timing.buffered_propose_anchor {
+            Some(a) => a,
+            None => {
+                self.timing.buffered_propose_anchor = Some(Instant::now());
+                return Ok(());
+            }
+        };
+        let delay =
+            self.config.commit_inactivity_duration + self.config.recovery_inactivity_duration;
+        if Instant::now() < anchor + delay {
+            return Ok(());
+        }
+        self.timing.buffered_propose_anchor = None;
+        info!(
+            conversation = %self.conversation_id,
+            "backup steward proposing buffered updates: epoch steward silent past recovery window"
+        );
+        self.drain_buffered_updates(provider, signer)
+    }
+
     /// Steward-inactivity freeze entry: once the inactivity timer fires with
     /// approved work pending, start the freeze round and transition into
     /// `Freezing`. Stewards build their own commit candidate too;
@@ -292,8 +360,16 @@ where
             self.is_in_recovery_mode() || self.services.steward_list.next_retry_round() > 0;
         let inactivity = if in_recovery {
             self.config.recovery_inactivity_duration
-        } else {
+        } else if self.is_epoch_steward()? {
+            // The primary steward leads: it commits at the commit-inactivity
+            // deadline.
             self.config.commit_inactivity_duration
+        } else {
+            // Backups (and non-stewards) wait an extra recovery window. In the
+            // normal case the primary's commit candidate pulls them into freeze
+            // first, so they never self-drive it; only a silent primary lets
+            // this longer deadline fire and a backup step in.
+            self.config.commit_inactivity_duration + self.config.recovery_inactivity_duration
         };
         let Some(event) = self.check_steward_inactivity(proposal_count, inactivity) else {
             return Ok(());

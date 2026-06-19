@@ -104,6 +104,13 @@ pub(crate) struct Timing {
     /// on consecutive polling ticks that observe the same progress. Reset to
     /// `None` when the conversation leaves `Freezing`.
     pub(crate) last_freeze_progress: Option<(usize, usize)>,
+    /// Anchor for the backup-steward proposal takeover: set when an
+    /// unproposed buffered membership update first appears with no live
+    /// proposal for it. A backup steward proposes the buffered update once
+    /// this is older than the recovery window — the epoch steward had its
+    /// chance and stayed silent. Cleared when the buffer is drained or nothing
+    /// is left to propose.
+    pub(crate) buffered_propose_anchor: Option<Instant>,
 }
 
 impl Timing {
@@ -115,6 +122,7 @@ impl Timing {
             pending_auto_votes: HashMap::new(),
             pending_consensus_timeouts: HashMap::new(),
             last_freeze_progress: None,
+            buffered_propose_anchor: None,
         }
     }
 }

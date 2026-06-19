@@ -211,8 +211,9 @@ where
     }
 
     /// On epoch advance, the new live epoch steward drains the pending-update
-    /// buffer into voting proposals. Skips entries already covered by the
-    /// current voting/approved queues so we don't double-propose.
+    /// buffer into voting proposals. A backup steward reaches the same drain
+    /// from `poll` once the recovery window passes (see
+    /// [`Self::drain_buffered_updates`]).
     pub(crate) fn process_buffered_updates<Pr>(
         &mut self,
         provider: &Pr,
@@ -222,71 +223,67 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        let (current_epoch, to_propose, conversation_id): (
-            u64,
-            Vec<ConversationUpdateRequest>,
-            String,
-        ) = {
-            let (current_epoch, members) = {
-                let mls = self.mls();
-                (mls.current_epoch()?, mls.members()?)
-            };
-            let self_member_id: &[u8] = &self.self_member_id;
-            let eligible = self.queues.steward_eligibility(&members);
-            let is_live = self
-                .services
-                .steward_list
-                .epoch_steward(current_epoch, &eligible)
-                .is_some_and(|es| es == self_member_id);
-            if !is_live {
-                return Ok(());
-            }
+        if !self.is_epoch_steward()? {
+            return Ok(());
+        }
+        self.drain_buffered_updates(provider, signer)
+    }
 
-            // Collect buffered updates whose target isn't already in an
-            // active proposal queue. Both the voting and approved queues
-            // live on `ConversationQueues`.
-            let approved = self.queues.approved_proposals();
-            let approved_targets: std::collections::HashSet<&[u8]> =
-                approved.values().filter_map(target_member_id_of).collect();
-            let members_set = member_set(&members);
+    /// Buffered membership updates still needing a proposal: not already
+    /// covered by a live (voting or approved) proposal, and still valid — an
+    /// Add for a non-member or a Remove for a current member.
+    pub(crate) fn actionable_buffered_updates(
+        &self,
+    ) -> Result<Vec<ConversationUpdateRequest>, ConversationError> {
+        let members = self.mls().members()?;
+        let members_set = member_set(&members);
+        let active = self.queues.active_proposal_targets();
+        Ok(self
+            .queues
+            .pending_updates()
+            .iter()
+            .filter(|(id, _)| !active.contains(id.as_slice()))
+            .filter(|(id, p)| {
+                // Drop Add for already-member and Remove for non-member.
+                let is_member = members_set.contains(id.as_slice());
+                match p.request.payload.as_ref() {
+                    Some(conversation_update_request::Payload::MemberInvite(_)) => !is_member,
+                    Some(conversation_update_request::Payload::RemoveMember(_)) => is_member,
+                    _ => false,
+                }
+            })
+            .map(|(_, p)| p.request.clone())
+            .collect())
+    }
 
-            let to_propose: Vec<ConversationUpdateRequest> = self
-                .queues
-                .pending_updates()
-                .iter()
-                .filter(|(id, _)| !approved_targets.contains(id.as_slice()))
-                .filter(|(id, p)| {
-                    // Drop Add for already-member and Remove for non-member.
-                    let is_member = members_set.contains(id.as_slice());
-                    match p.request.payload.as_ref() {
-                        Some(conversation_update_request::Payload::MemberInvite(_)) => !is_member,
-                        Some(conversation_update_request::Payload::RemoveMember(_)) => is_member,
-                        _ => false,
-                    }
-                })
-                .map(|(_, p)| p.request.clone())
-                .collect();
-            (current_epoch, to_propose, self.conversation_id.clone())
-        };
-
+    /// Promote every actionable buffered update to a voting proposal
+    /// (`CreatorVote::Deferred` — the proposer relays peer intent, it doesn't
+    /// endorse). Callers gate *who* drains: the epoch steward immediately via
+    /// [`Self::process_buffered_updates`], a backup after the recovery window
+    /// via `poll`. This just performs the drain.
+    pub(crate) fn drain_buffered_updates<Pr>(
+        &mut self,
+        provider: &Pr,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        let to_propose = self.actionable_buffered_updates()?;
         if to_propose.is_empty() {
             return Ok(());
         }
-
         info!(
-            conversation = %conversation_id,
-            epoch = current_epoch,
+            conversation = %self.conversation_id,
             count = to_propose.len(),
             "promoting buffered updates to proposals"
         );
-
-        // Buffered updates inherit the same vote request path as fresh
-        // steward-auto-propose — the steward still decides per proposal.
         for request in to_propose {
             if let Err(e) = self.initiate_proposal(provider, request, CreatorVote::Deferred, signer)
             {
                 info!(
-                    conversation = %conversation_id,
+                    conversation = %self.conversation_id,
                     error = %e,
                     "buffered proposal deferred"
                 );
