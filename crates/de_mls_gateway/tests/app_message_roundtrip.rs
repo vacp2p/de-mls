@@ -43,6 +43,8 @@ fn chat_message_delivered_to_peer_as_app_message_event() {
     let chat = bob_session
         .read()
         .unwrap()
+        .live_ref()
+        .unwrap()
         .drain_events()
         .into_iter()
         .find_map(|e| match e {

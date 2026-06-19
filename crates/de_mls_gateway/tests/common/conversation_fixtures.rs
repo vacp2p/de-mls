@@ -8,7 +8,7 @@
 
 #![allow(dead_code)]
 
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -17,7 +17,7 @@ use de_mls::{ConversationConfig, StewardListConfig};
 use de_mls_ds::{
     DeliveryService, DeliveryServiceError, OutboundPacket, SharedDeliveryService, WELCOME_SUBTOPIC,
 };
-use de_mls_gateway::user::{GatewayConversation, Inbound, User};
+use de_mls_gateway::user::{Inbound, User};
 use openmls_basic_credential::SignatureKeyPair;
 
 use crate::common::wallet::user_from_private_key;
@@ -27,8 +27,6 @@ use crate::common::wallet::user_from_private_key;
 pub type TransportHandle = Arc<Mutex<CapturingTransport>>;
 
 pub type TestUser = User<DefaultConsensusPlugin, SignatureKeyPair>;
-pub type TestConversation = GatewayConversation<DefaultConsensusPlugin>;
-pub type ConversationArc = Arc<RwLock<TestConversation>>;
 
 /// Test transport that captures every outbound packet for later inspection
 /// instead of sending. `subscribe` is a no-op — tests deliver inbound
@@ -214,18 +212,6 @@ pub fn poll_once(user: &TestUser, conversation: &str) {
     let _ = user.poll_conversation(conversation);
 }
 
-/// Flush a session's pull-buffered outbound into its user's transport handle
-/// so the relay (which drains the handle) picks it up. The session is
-/// pull-only — direct session calls in tests buffer here instead of sending;
-/// this stands in for the integrator's drain-and-publish.
-pub fn flush_conversation(session: &ConversationArc, transport: &TransportHandle) {
-    let outbound = session.read().unwrap().drain_outbound();
-    let mut t = transport.lock().unwrap();
-    for out in outbound {
-        t.publish(out.into()).expect("capture publish");
-    }
-}
-
 /// Flush every conversation's pull-buffered outbound on `user` into its
 /// transport handle. Uniform stand-in for the integrator's drain — relay
 /// loops call this for each user before draining the handles, regardless of
@@ -234,7 +220,11 @@ pub fn flush_user(user: &TestUser, transport: &TransportHandle) {
     let mut t = transport.lock().unwrap();
     for name in user.list_conversations().unwrap_or_default() {
         if let Ok(Some(session)) = user.lookup_entry(&name) {
-            for out in session.read().unwrap().drain_outbound() {
+            let guard = session.read().unwrap();
+            let Ok(conversation) = guard.live_ref() else {
+                continue;
+            };
+            for out in conversation.drain_outbound() {
                 t.publish(out.into()).expect("capture publish");
             }
         }

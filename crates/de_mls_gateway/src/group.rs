@@ -6,10 +6,25 @@ use de_mls_ds::WakuDeliveryService;
 use de_mls_ui_protocol::v1::MemberInfo;
 
 use crate::{
-    Gateway, UserRef,
-    forwarder::{display_batch, load_member_info, lookup_conversation},
+    ConversationRef, Gateway, UserRef,
+    forwarder::{display_batch, load_member_info},
     user::UserError,
 };
+
+/// State string surfaced for a conversation whose welcome has not yet
+/// arrived. Distinct from the library's [`de_mls::ConversationState`] values,
+/// which only exist once the conversation is live.
+const PENDING_JOIN_STATE: &str = "PendingJoin";
+
+/// Where a conversation id resolves in the gateway registry.
+enum Located {
+    /// A live conversation handle.
+    Live(ConversationRef),
+    /// A registered join still waiting for its welcome.
+    Pending,
+    /// No slot for this id.
+    Missing,
+}
 
 impl Gateway<WakuDeliveryService> {
     pub async fn create_conversation(&self, conversation_id: String) -> anyhow::Result<()> {
@@ -34,10 +49,13 @@ impl Gateway<WakuDeliveryService> {
         tracing::info!(group = %conversation_id, "joining group");
         let core = self.core();
         let user_ref = self.user()?;
-        // A joiner holds no conversation until a welcome arrives: it subscribes
-        // to the topics and announces its key package, then waits. The welcome
-        // is ingested by the delivery forwarder via `User::accept_welcome`,
-        // which builds and registers the conversation in `Working`.
+        // A joiner holds no live conversation until a welcome arrives. We first
+        // register a pending-join slot so the conversation lists and reports as
+        // "joining" right away, then subscribe to the topics and announce our
+        // key package. The welcome is ingested by the delivery forwarder via
+        // `User::accept_welcome`, which fills the slot with the `Working`
+        // conversation.
+        user_ref.read().await.begin_pending_join(&conversation_id)?;
         core.topics.add_many(&conversation_id)?;
         let key_package = user_ref.read().await.generate_key_package()?;
         user_ref
@@ -78,6 +96,15 @@ impl Gateway<WakuDeliveryService> {
 
             if !joined {
                 tracing::debug!(group = %group_name_clone, "join timed out waiting for welcome");
+                // Drop the pending slot so the abandoned join stops listing /
+                // reporting as "joining" (no-op if the welcome raced in).
+                if let Err(e) = user_clone
+                    .read()
+                    .await
+                    .abandon_pending_join(&group_name_clone)
+                {
+                    tracing::warn!(group = %group_name_clone, error = %e, "abandon pending join failed");
+                }
                 return;
             }
 
@@ -187,24 +214,49 @@ impl Gateway<WakuDeliveryService> {
         }
     }
 
-    pub async fn get_steward_status(&self, conversation_id: String) -> anyhow::Result<bool> {
+    /// Resolve a conversation id to a live handle, a pending join, or nothing.
+    async fn locate(&self, conversation_id: &str) -> anyhow::Result<Located> {
         let user_ref = self.user()?;
-        let entry = lookup_conversation(&user_ref, &conversation_id).await?;
-        let is_steward = entry
+        let Some(entry) = user_ref.read().await.lookup_entry(conversation_id)? else {
+            return Ok(Located::Missing);
+        };
+        let pending = entry
             .read()
             .map_err(|_| UserError::LockPoisoned("conversation"))?
-            .is_steward();
-        Ok(is_steward)
+            .is_pending();
+        Ok(if pending {
+            Located::Pending
+        } else {
+            Located::Live(entry)
+        })
+    }
+
+    pub async fn get_steward_status(&self, conversation_id: String) -> anyhow::Result<bool> {
+        match self.locate(&conversation_id).await? {
+            Located::Live(entry) => Ok(entry
+                .read()
+                .map_err(|_| UserError::LockPoisoned("conversation"))?
+                .live_ref()?
+                .is_steward()),
+            // A joining member isn't a steward yet.
+            Located::Pending => Ok(false),
+            Located::Missing => Err(UserError::ConversationNotFound.into()),
+        }
     }
 
     pub async fn get_group_state(&self, conversation_id: String) -> anyhow::Result<String> {
-        let user_ref = self.user()?;
-        let entry = lookup_conversation(&user_ref, &conversation_id).await?;
-        let state = entry
-            .read()
-            .map_err(|_| UserError::LockPoisoned("conversation"))?
-            .state();
-        Ok(state.to_string())
+        match self.locate(&conversation_id).await? {
+            Located::Live(entry) => {
+                let state = entry
+                    .read()
+                    .map_err(|_| UserError::LockPoisoned("conversation"))?
+                    .live_ref()?
+                    .state();
+                Ok(state.to_string())
+            }
+            Located::Pending => Ok(PENDING_JOIN_STATE.to_string()),
+            Located::Missing => Err(UserError::ConversationNotFound.into()),
+        }
     }
 
     /// Get current epoch proposals for the given group
@@ -212,17 +264,28 @@ impl Gateway<WakuDeliveryService> {
         &self,
         conversation_id: String,
     ) -> anyhow::Result<Vec<(String, String)>> {
-        let user_ref = self.user()?;
-        let entry = lookup_conversation(&user_ref, &conversation_id).await?;
-        let proposals = entry
-            .read()
-            .map_err(|_| UserError::LockPoisoned("conversation"))?
-            .approved_proposals_for_current_epoch();
-        Ok(display_batch(&proposals))
+        match self.locate(&conversation_id).await? {
+            Located::Live(entry) => {
+                let proposals = entry
+                    .read()
+                    .map_err(|_| UserError::LockPoisoned("conversation"))?
+                    .live_ref()?
+                    .approved_proposals_for_current_epoch();
+                Ok(display_batch(&proposals))
+            }
+            // No epoch yet — the joiner has no proposals to show.
+            Located::Pending => Ok(Vec::new()),
+            Located::Missing => Err(UserError::ConversationNotFound.into()),
+        }
     }
 
     pub async fn members(&self, conversation_id: String) -> anyhow::Result<Vec<MemberInfo>> {
-        load_member_info(&self.user()?, &conversation_id).await
+        match self.locate(&conversation_id).await? {
+            Located::Live(_) => load_member_info(&self.user()?, &conversation_id).await,
+            // No roster until we hold the welcome.
+            Located::Pending => Ok(Vec::new()),
+            Located::Missing => Err(UserError::ConversationNotFound.into()),
+        }
     }
 
     /// Get epoch history for a group (past batches of approved proposals).

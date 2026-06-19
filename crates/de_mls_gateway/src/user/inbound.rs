@@ -3,13 +3,11 @@
 //! de-mls carries no transport subtopic: the integrator routes its own
 //! channels here. Conversation traffic (chat / vote / commit / sync — the
 //! envelope self-identifies) goes to [`User::handle_inbound`]; a joiner's
-//! key-package announcement goes to [`User::receive_key_package`], which any
-//! `Working` member turns into an `add_member` proposal. Raw MLS welcomes
-//! enter through [`User::accept_welcome`].
+//! key-package announcement goes to [`User::receive_key_package`], which the
+//! epoch steward relays as an Add proposal. Raw MLS welcomes enter through
+//! [`User::accept_welcome`].
 
-use de_mls::{
-    ConsensusPlugin, ConversationState, DispatchOutcome, protos::de_mls::messages::v1::MemberInvite,
-};
+use de_mls::{ConsensusPlugin, DispatchOutcome, protos::de_mls::messages::v1::MemberInvite};
 use prost::Message;
 
 use openmls_traits::signatures::Signer;
@@ -44,12 +42,20 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
         let entry_arc = self
             .lookup_entry(&inbound.conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        let outcome = entry_arc.write_or_err("conversation")?.process_inbound(
-            self.plugins.conversation_plugins.provider(),
-            &inbound.sender,
-            &inbound.payload,
-            &self.signer,
-        )?;
+        let outcome = {
+            let mut slot = entry_arc.write_or_err("conversation")?;
+            // A pending-join slot has no live conversation yet — it can't process
+            // conversation traffic. Dropping it is benign, not a failure.
+            let Ok(conversation) = slot.live_mut() else {
+                return Ok(());
+            };
+            conversation.process_inbound(
+                self.plugins.conversation_plugins.provider(),
+                &inbound.sender,
+                &inbound.payload,
+                &self.signer,
+            )?
+        };
         if matches!(outcome, DispatchOutcome::LeaveRequested) {
             self.finalize_self_leave(&inbound.conversation_id)?;
         }
@@ -58,11 +64,14 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
     }
 
     /// Ingest a joiner's key-package announcement: decode the `MemberInvite`
-    /// and, if we are a `Working` member of the conversation, open an Add
-    /// proposal for the joiner via [`de_mls::Conversation::add_member`].
-    /// Self-echoes are dropped before the registry lookup (same rationale as
+    /// and hand it to [`de_mls::Conversation::sponsor_member`], which relays it
+    /// as an Add proposal only if we are the epoch steward — de-mls owns the
+    /// steward-only-relay and unbundled-vote policy. (An explicit invite via
+    /// [`User::add_member`] stays open to any member and bundles YES: that is
+    /// one deliberate, endorsed action, not a broadcast fan-out.) Self-echoes
+    /// are dropped before the registry lookup (same rationale as
     /// [`Self::handle_inbound`]); an announcement for a conversation we don't
-    /// hold — or that we are not yet `Working` in — is silently ignored.
+    /// hold — or aren't yet joined into — is silently ignored.
     pub fn receive_key_package(&self, inbound: Inbound) -> Result<(), UserError> {
         if inbound.sender == self.app_id {
             return Ok(());
@@ -75,11 +84,12 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
             Err(_) => return Ok(()),
         };
         {
-            let mut conversation = entry_arc.write_or_err("conversation")?;
-            if conversation.state() != ConversationState::Working {
+            let mut slot = entry_arc.write_or_err("conversation")?;
+            // Not yet joined ourselves (pending slot) — nothing to relay.
+            let Ok(conversation) = slot.live_mut() else {
                 return Ok(());
-            }
-            conversation.add_member(
+            };
+            conversation.sponsor_member(
                 self.plugins.conversation_plugins.provider(),
                 &invite.key_package_bytes,
                 &self.signer,

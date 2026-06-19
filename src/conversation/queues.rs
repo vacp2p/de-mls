@@ -205,6 +205,17 @@ impl ConversationQueues {
         &self.approved_proposals
     }
 
+    /// Member ids targeted by an in-flight proposal — either still voting or
+    /// already approved. A buffered update whose target is in this set is
+    /// already covered by a live proposal and must not be re-proposed.
+    pub fn active_proposal_targets(&self) -> HashSet<&[u8]> {
+        self.voting_proposals
+            .values()
+            .chain(self.approved_proposals.values())
+            .filter_map(target_member_id_of)
+            .collect()
+    }
+
     /// True iff `approved_proposals` carries any `RemoveMember(member_id)`,
     /// regardless of source. Used by `steward_eligibility` to skip a member
     /// whose removal is queued — MLS forbids them from committing it

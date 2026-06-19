@@ -379,8 +379,15 @@ fn validate_commit_candidate(
         .filter_map(action_projection_from_request)
         .collect();
     let mut actual: Vec<(u8, &[u8])> = mls_actions.iter().map(action_projection_from_mls).collect();
+    // Dedup by (kind, member): RFC §Consensus Types lets any member create a
+    // Commit proposal, so several finalized proposals may name the same
+    // membership change. The steward commits that change once, so the MLS
+    // actions carry one entry where the voted set carries duplicates — not a
+    // violation. Both sides are compared as deduplicated sets.
     expected.sort();
+    expected.dedup();
     actual.sort();
+    actual.dedup();
 
     if expected == actual {
         return Ok(None);

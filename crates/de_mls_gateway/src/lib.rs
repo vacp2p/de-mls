@@ -307,7 +307,11 @@ impl Gateway<WakuDeliveryService> {
                         _ => continue,
                     };
                     let events = match entry.read() {
-                        Ok(g) => g.drain_events(),
+                        Ok(slot) => match slot.live_ref() {
+                            Ok(conversation) => conversation.drain_events(),
+                            // Pending join — no conversation to drain yet.
+                            Err(_) => continue,
+                        },
                         Err(_) => {
                             tracing::warn!(
                                 conversation = %name,
@@ -326,7 +330,10 @@ impl Gateway<WakuDeliveryService> {
                     // by direct conversation calls in the polling / handler paths
                     // (commit candidates, auto-votes, …).
                     let outbound = match entry.read() {
-                        Ok(g) => g.drain_outbound(),
+                        Ok(slot) => slot
+                            .live_ref()
+                            .map(|c| c.drain_outbound())
+                            .unwrap_or_default(),
                         Err(_) => Vec::new(),
                     };
                     if !outbound.is_empty()

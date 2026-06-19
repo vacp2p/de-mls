@@ -7,7 +7,7 @@ mod common;
 use std::time::Duration;
 
 use common::harness::{TestHarness, fast_config};
-use de_mls::StewardListConfig;
+use de_mls::{ConversationConfig, StewardListConfig};
 
 const ALICE: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const BOB: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
@@ -82,4 +82,49 @@ fn assert_no_election_storm<const N: usize>(h: &TestHarness<N>) {
         h.members().iter().all(|m| m.retry_round() == 0),
         "retry_round stays 0 — no election fires for unsettled members"
     );
+}
+
+#[test]
+fn backup_steward_proposes_buffered_joiner_when_epoch_steward_silent() {
+    // sn_max = 5 ≥ membership at every size here, so the steward list is always
+    // the full roster and growing back to 3 fires no subset election — the test
+    // isolates the backup *proposal* takeover, not election.
+    let cfg = ConversationConfig {
+        recovery_inactivity_duration: Duration::from_millis(100),
+        ..fast_config()
+    };
+    let mut h = TestHarness::<3>::bootstrap(
+        [ALICE, BOB, CHARLIE],
+        "bk",
+        cfg.clone(),
+        StewardListConfig::new(1, 5).unwrap(),
+    );
+
+    // Evict member 2 so we can re-announce it as a fresh joiner.
+    let target = 2usize;
+    let target_id = h.member(target).member_id_bytes().to_vec();
+    let driver = (0..3).find(|&i| i != target).unwrap();
+    h.member_mut(driver).remove_member(&target_id);
+    h.process_until("target evicted", |h| h.member(driver).member_count() == 2);
+
+    // Identify the two remaining stewards' roles.
+    let epoch_steward = (0..3)
+        .filter(|&i| i != target)
+        .find(|&i| h.member(i).convo().is_epoch_steward().unwrap())
+        .expect("an epoch steward exists among the remaining two");
+    let backup = (0..3)
+        .find(|&i| i != target && i != epoch_steward)
+        .expect("a backup steward exists");
+
+    // The joiner announces, but only the backup observes it — the epoch steward
+    // never sees the announcement, so it never sponsors. Without the backup
+    // takeover the join would stall forever; with it, the backup proposes the
+    // buffered Add after the recovery window and the live epoch steward commits.
+    h.member_mut(target).rejoin("bk", cfg.clone());
+    let announcement = h.member_mut(target).announce_key_package("bk");
+    h.deliver_key_package_to(backup, &announcement);
+
+    h.process_until("backup carries the join to completion", |h| {
+        h.member(backup).member_count() == 3 && h.member(target).member_count() == 3
+    });
 }
