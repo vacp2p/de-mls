@@ -1,31 +1,28 @@
-//! Crate-internal test fixtures: minimal trait impls for tests that need
-//! to construct a [`crate::core::ConversationCore`] or [`crate::session::Conversation`]
-//! without standing up real MLS / scoring / steward backends.
+//! Crate-internal test fixtures: a real creator-side MLS service builder over
+//! `OpenMlsRustCrypto` plus minimal scoring / steward stubs, for tests that
+//! construct a [`crate::Conversation`] without standing up real scoring or
+//! steward backends.
 //!
-//! Most methods are `unreachable!()` — tests should only exercise the
-//! handful of paths the test specifically targets. If a test reaches
-//! into an `unreachable!()` branch, that's a sign the test is touching
+//! The stub scoring / steward methods are `unreachable!()` — tests should only
+//! exercise the handful of paths the test specifically targets. If a test
+//! reaches into an `unreachable!()` branch, that's a sign the test is touching
 //! state it shouldn't be (and the panic location pinpoints the leak).
 
 use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
+use openmls::credentials::{BasicCredential, CredentialWithKey};
+use openmls::prelude::Ciphersuite;
+use openmls_basic_credential::SignatureKeyPair;
+use openmls_rust_crypto::OpenMlsRustCrypto;
 
 use crate::{
-    core::{
-        ConsensusPlugin, ConsensusServiceFor, ConversationPluginsFactory, ElectionDecision,
-        PeerScoringPlugin, ScoreOp, ScoreSnapshot, ScoringConfig, StewardList, StewardListConfig,
-        StewardListPlugin,
-    },
-    defaults::DefaultConsensusPlugin,
-    mls_crypto::{
-        CommitCandidate, DecryptResult, MlsCommitInput, MlsError, MlsMessageKind, MlsService,
-        StagedCandidateResult,
-    },
-    protos::de_mls::messages::v1::AppMessage,
+    ConsensusPlugin, ConsensusServiceFor, ElectionDecision, PeerScoringPlugin, ScoreOp,
+    ScoreSnapshot, StewardList, StewardListConfig, StewardListPlugin,
+    defaults::DefaultConsensusPlugin, mls_crypto::OpenMlsService,
 };
 
 /// Build a `ConsensusServiceFor<DefaultConsensusPlugin>` paired with a
-/// subscribed receiver for [`crate::session::Conversation::new`].
+/// subscribed receiver for [`crate::Conversation::new`].
 pub(crate) fn make_test_consensus_service() -> (
     ConsensusServiceFor<DefaultConsensusPlugin>,
     crate::defaults::SyncEventReceiver<String>,
@@ -41,66 +38,37 @@ pub(crate) fn make_test_consensus_service() -> (
     (service, rx)
 }
 
-/// MLS service that errors on every operation. Lets tests construct a
-/// `Conversation` whose early-return paths never invoke MLS.
-pub(crate) struct UnusedMls;
+/// Ciphersuite the crate-internal fixtures pin.
+pub(crate) const TEST_SUITE: Ciphersuite =
+    Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
-impl MlsService for UnusedMls {
-    fn conversation_id(&self) -> &str {
-        "unused"
-    }
-    fn delete(&mut self) -> Result<(), MlsError> {
-        unreachable!("UnusedMls::delete called")
-    }
-    fn members(&self) -> Result<Vec<Vec<u8>>, MlsError> {
-        unreachable!("UnusedMls::members called")
-    }
-    fn is_member(&self, _: &[u8]) -> bool {
-        unreachable!("UnusedMls::is_member called")
-    }
-    fn current_epoch(&self) -> Result<u64, MlsError> {
-        unreachable!("UnusedMls::current_epoch called")
-    }
-    fn create_commit_candidate(
-        &mut self,
-        _: &[MlsCommitInput],
-    ) -> Result<CommitCandidate, MlsError> {
-        unreachable!("UnusedMls::create_commit_candidate called")
-    }
-    fn merge_own_commit(&mut self) -> Result<(), MlsError> {
-        unreachable!()
-    }
-    fn discard_own_commit(&mut self) -> Result<(), MlsError> {
-        unreachable!()
-    }
-    fn stage_remote_commit(
-        &mut self,
-        _: &[Vec<u8>],
-        _: &[u8],
-    ) -> Result<StagedCandidateResult, MlsError> {
-        unreachable!()
-    }
-    fn merge_staged_commit(&mut self) -> Result<(), MlsError> {
-        unreachable!()
-    }
-    fn discard_staged_commit(&mut self) -> Result<(), MlsError> {
-        unreachable!()
-    }
-    fn encrypt(&mut self, _: &[u8]) -> Result<Vec<u8>, MlsError> {
-        unreachable!()
-    }
-    fn build_message(&mut self, _: &AppMessage) -> Result<Vec<u8>, MlsError> {
-        unreachable!()
-    }
-    fn decrypt_application_only(&mut self, _: &[u8]) -> Result<DecryptResult, MlsError> {
-        unreachable!()
-    }
-    fn decrypt(&mut self, _: &[u8]) -> Result<DecryptResult, MlsError> {
-        unreachable!()
-    }
-    fn inspect_message_kind(&self, _: &[u8]) -> Result<MlsMessageKind, MlsError> {
-        unreachable!()
-    }
+/// Concrete OpenMLS provider the crate-internal fixtures run.
+pub(crate) type TestProvider = OpenMlsRustCrypto;
+
+/// MLS service type the crate-internal unit tests run: the reference engine.
+pub(crate) type TestMls = OpenMlsService;
+
+/// Build a real creator-side MLS service for `member_id` against a fresh
+/// test-held provider, returning the service alongside the provider and the
+/// signer that seeded it (both needed for any signing path the test
+/// exercises). The guard tests this serves early-return before MLS advances,
+/// but the service must still be a real, queryable group.
+pub(crate) fn make_creator_mls(member_id: &[u8]) -> (TestMls, TestProvider, SignatureKeyPair) {
+    let signer = SignatureKeyPair::new(TEST_SUITE.signature_algorithm()).expect("signer");
+    let credential = CredentialWithKey {
+        credential: BasicCredential::new(member_id.to_vec()).into(),
+        signature_key: signer.to_public_vec().into(),
+    };
+    let provider = TestProvider::default();
+    let mls = OpenMlsService::new_as_creator(
+        "test-conversation".to_string(),
+        &provider,
+        credential,
+        TEST_SUITE,
+        &signer,
+    )
+    .expect("create creator mls");
+    (mls, provider, signer)
 }
 
 /// Steward-list plug-in with controllable `is_steward`. Other methods panic.
@@ -172,7 +140,7 @@ impl StewardListPlugin for StubStewardList {
         _: &[Vec<u8>],
         _: usize,
         _: u32,
-    ) -> Result<(), crate::core::CoreError> {
+    ) -> Result<(), crate::ConversationError> {
         unreachable!()
     }
     fn validate_proposed(
@@ -181,7 +149,7 @@ impl StewardListPlugin for StubStewardList {
         _: u64,
         _: &[Vec<u8>],
         _: u32,
-    ) -> Result<bool, crate::core::CoreError> {
+    ) -> Result<bool, crate::ConversationError> {
         unreachable!()
     }
     fn propose_election<F: Fn(&[u8]) -> bool>(
@@ -191,7 +159,7 @@ impl StewardListPlugin for StubStewardList {
         _: &[u8],
         _: F,
         _: bool,
-    ) -> Result<ElectionDecision, crate::core::CoreError> {
+    ) -> Result<ElectionDecision, crate::ConversationError> {
         unreachable!()
     }
     fn bump_retry(&mut self) {
@@ -203,8 +171,8 @@ impl StewardListPlugin for StubStewardList {
 }
 
 /// Scoring plug-in that panics on every call. Tests that don't read
-/// scores use this as `StubPluginsFactory::Scoring` so the bundle still
-/// satisfies [`crate::core::ConversationPluginsFactory`].
+/// scores hand this to the conversation so the unread scoring slot is
+/// inert.
 pub(crate) struct StubScoring;
 
 impl PeerScoringPlugin for StubScoring {
@@ -239,35 +207,6 @@ impl PeerScoringPlugin for StubScoring {
         unreachable!()
     }
     fn default_score(&self) -> i64 {
-        unreachable!()
-    }
-}
-
-/// Test plug-in bundle wiring the three stubs into the [`ConversationPluginsFactory`]
-/// trait so tests can construct [`crate::core::ConversationCore`] and
-/// [`crate::session::Conversation`] under their single `<CP>` parameter. The
-/// factory methods are `unreachable!()` — tests build plug-in instances
-/// directly and hand them to the conversation constructors.
-pub(crate) struct StubPluginsFactory;
-
-impl ConversationPluginsFactory for StubPluginsFactory {
-    type Mls = UnusedMls;
-    type Scoring = StubScoring;
-    type StewardList = StubStewardList;
-
-    fn create_mls(&self, _: String) -> Result<Self::Mls, MlsError> {
-        unreachable!()
-    }
-    fn welcome_mls(&self, _: &[u8]) -> Result<Option<Self::Mls>, MlsError> {
-        unreachable!()
-    }
-    fn make_scoring(&self, _: &ScoringConfig) -> Self::Scoring {
-        unreachable!()
-    }
-    fn make_steward_list(&self, _: &[u8], _: StewardListConfig) -> Self::StewardList {
-        unreachable!()
-    }
-    fn generate_key_package(&self) -> Result<crate::mls_crypto::KeyPackageBytes, MlsError> {
         unreachable!()
     }
 }

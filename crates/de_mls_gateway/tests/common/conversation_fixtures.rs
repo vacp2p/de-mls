@@ -1,10 +1,10 @@
 //! Integration-test fixtures for Conversation-driven scenarios.
 //!
-//! Built around [`User`] + [`de_mls::session::Conversation`] over the
+//! Built around [`User`] + [`de_mls::Conversation`] over the
 //! `DefaultConversationPluginsFactory`. Every helper drives the production
 //! public surface — no peeking at private state. Packet relay is explicit:
-//! tests drain a [`CapturingTransport`] and call `process_inbound_packet`
-//! on the receivers, mirroring what `recovery_cascade.rs` established.
+//! tests drain a [`CapturingTransport`] and route each packet into the
+//! receivers via `User::handle_inbound` / `User::receive_key_package`.
 
 #![allow(dead_code)]
 
@@ -12,14 +12,13 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread::sleep;
 use std::time::Duration;
 
-use de_mls::core::StewardListConfig;
-use de_mls::defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory};
-use de_mls::session::{Conversation, ConversationConfig};
+use de_mls::defaults::DefaultConsensusPlugin;
+use de_mls::{ConversationConfig, StewardListConfig};
 use de_mls_ds::{
     DeliveryService, DeliveryServiceError, OutboundPacket, SharedDeliveryService, WELCOME_SUBTOPIC,
 };
-use de_mls_gateway::user::{Inbound, User};
-use prost::Message;
+use de_mls_gateway::user::{GatewayConversation, Inbound, User};
+use openmls_basic_credential::SignatureKeyPair;
 
 use crate::common::wallet::user_from_private_key;
 
@@ -27,13 +26,13 @@ use crate::common::wallet::user_from_private_key;
 /// and reach into it via `.lock().unwrap()`.
 pub type TransportHandle = Arc<Mutex<CapturingTransport>>;
 
-pub type TestUser = User<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
-pub type TestConversation = Conversation<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
+pub type TestUser = User<DefaultConsensusPlugin, SignatureKeyPair>;
+pub type TestConversation = GatewayConversation<DefaultConsensusPlugin>;
 pub type ConversationArc = Arc<RwLock<TestConversation>>;
 
 /// Test transport that captures every outbound packet for later inspection
 /// instead of sending. `subscribe` is a no-op — tests deliver inbound
-/// explicitly via `process_inbound_packet`.
+/// explicitly via the `User` inbound entry points.
 #[derive(Debug, Default)]
 pub struct CapturingTransport {
     packets: Vec<OutboundPacket>,
@@ -78,72 +77,6 @@ impl DeliveryService for CapturingTransport {
 
     fn subscribe(&mut self, _delivery_address: &str) -> Result<(), Self::Error> {
         Ok(())
-    }
-}
-
-/// Predicates for matching packets on the wire.
-///
-/// **Outer-envelope asymmetry on `APP_MSG_SUBTOPIC`.** Most app messages
-/// (chat, votes, proposals, `ConversationSync`) get a fresh MLS encryption
-/// pass in `mls.build_message`, so the outer prost payload is opaque to a
-/// non-member observer. `CommitCandidate` skips that pass: the inner
-/// `commit_message` field is already MLS-encrypted output of
-/// `mls.create_commit_candidate`, and the outer prost wrapper carries the
-/// staging metadata peers must read *before* they can apply the commit
-/// (steward identity for sender cross-validation, the staged
-/// `mls_proposals`). Wrapping it again would force peers to be members of
-/// the new epoch before they could even tell whose commit it is.
-/// `WELCOME_SUBTOPIC` is similarly plaintext on its outer prost layer.
-///
-/// In practice: [`is_commit_candidate`] and [`is_kp`] can prost-decode
-/// the wire payload. For everything else on the app-msg subtopic,
-/// identify packets by ordering / sender state rather than by payload
-/// inspection.
-pub mod predicate {
-    use super::*;
-    use de_mls::protos::de_mls::messages::v1::{AppMessage, MemberInvite, app_message};
-    use de_mls_ds::{APP_MSG_SUBTOPIC, WELCOME_SUBTOPIC};
-
-    pub fn is_app_msg(p: &OutboundPacket) -> bool {
-        p.subtopic == APP_MSG_SUBTOPIC
-    }
-
-    pub fn is_welcome_subtopic(p: &OutboundPacket) -> bool {
-        p.subtopic == WELCOME_SUBTOPIC
-    }
-
-    /// Matches `CommitCandidate` on app-msg subtopic. Works because the
-    /// outer prost wrapper carries pre-merge staging metadata and isn't
-    /// re-encrypted by `build_message` — see the module doc.
-    pub fn is_commit_candidate(p: &OutboundPacket) -> bool {
-        if p.subtopic != APP_MSG_SUBTOPIC {
-            return false;
-        }
-        let Ok(msg) = AppMessage::decode(p.payload.as_slice()) else {
-            return false;
-        };
-        matches!(msg.payload, Some(app_message::Payload::CommitCandidate(_)))
-    }
-
-    /// Matches a KP-broadcast packet on the welcome subtopic.
-    pub fn is_kp(p: &OutboundPacket) -> bool {
-        if p.subtopic != WELCOME_SUBTOPIC {
-            return false;
-        }
-        MemberInvite::decode(p.payload.as_slice()).is_ok()
-    }
-
-    /// Matches the committer's in-group welcome broadcast on the app-msg
-    /// subtopic. Decodable for the same reason as [`is_commit_candidate`]:
-    /// the outer prost wrapper is plaintext.
-    pub fn is_member_welcome(p: &OutboundPacket) -> bool {
-        if p.subtopic != APP_MSG_SUBTOPIC {
-            return false;
-        }
-        let Ok(msg) = AppMessage::decode(p.payload.as_slice()) else {
-            return false;
-        };
-        matches!(msg.payload, Some(app_message::Payload::MemberWelcome(_)))
     }
 }
 
@@ -204,9 +137,9 @@ pub fn broadcast(packets: &[OutboundPacket], receivers: &[&TestUser]) {
     }
 }
 
-/// Drain `ConversationEvent::WelcomeReady` events from each session and
-/// route each locally-minted welcome to the matching joiner via
-/// [`TestUser::accept_welcome`] (which also applies the bundled
+/// Drain `ConversationEvent::WelcomeReady` events from each user's
+/// conversation and route each locally-minted welcome to the matching joiner
+/// via [`TestUser::accept_welcome`] (which also applies the bundled
 /// `conversation_sync_bytes`). Returns `(delivered_count,
 /// sync_bytes_captured)` — the second element holds every non-empty
 /// `conversation_sync_bytes` from delivered welcomes, in order. Call
@@ -214,18 +147,18 @@ pub fn broadcast(packets: &[OutboundPacket], receivers: &[&TestUser]) {
 /// packets (e.g. the post-commit steward election proposal) need the joiner's
 /// MLS attached first.
 pub fn route_welcomes(
-    sessions: &[ConversationArc],
+    conversation: &str,
     users: &mut [(TestUser, TransportHandle)],
 ) -> (usize, Vec<Vec<u8>>) {
-    use de_mls::core::ConversationEvent;
+    use de_mls::ConversationEvent;
     use de_mls::protos::de_mls::messages::v1::MemberWelcome;
 
     // Route only minted welcomes — peers re-emit the committer's broadcast
     // as `minted_locally: false`, and routing those too would just bounce
     // off the joiner as duplicates (mirrors the gateway's delivery gate).
     let mut welcomes: Vec<MemberWelcome> = Vec::new();
-    for s in sessions.iter() {
-        for event in s.read().unwrap().drain_events() {
+    for (u, _) in users.iter() {
+        for event in u.drain_events(conversation).unwrap_or_default() {
             if let ConversationEvent::WelcomeReady {
                 welcome,
                 minted_locally: true,
@@ -271,11 +204,14 @@ pub fn fast_test_config() -> ConversationConfig {
     }
 }
 
-/// One polling cycle on a session: tick deadlines, advance freeze state,
-/// check member-freeze inactivity, and check pending-join expiry. Mirrors the
-/// production `group_polling_loop` body in `de_mls_gateway::group`.
-pub fn poll_once(session: &ConversationArc) {
-    let _ = session.write().unwrap().poll();
+/// One polling cycle on a user's conversation: tick deadlines, advance freeze
+/// state, and check member-freeze inactivity. Routes through
+/// [`TestUser::poll_conversation`] so the user's signer is threaded in,
+/// mirroring the production `group_polling_loop` body in
+/// `de_mls_gateway::group`. A no-op for a conversation the user hasn't joined
+/// yet (no welcome).
+pub fn poll_once(user: &TestUser, conversation: &str) {
+    let _ = user.poll_conversation(conversation);
 }
 
 /// Flush a session's pull-buffered outbound into its user's transport handle
@@ -330,7 +266,7 @@ pub fn bootstrap_joined_conversation(
     cfg: ConversationConfig,
     steward_cfg: StewardListConfig,
 ) -> Vec<(TestUser, TransportHandle)> {
-    use de_mls::core::ConversationState;
+    use de_mls::ConversationState;
     use std::time::Duration;
     const MAX_ROUNDS: usize = 30;
     assert!(!keys.is_empty(), "bootstrap needs at least one key");
@@ -340,23 +276,12 @@ pub fn bootstrap_joined_conversation(
         .map(|k| make_user(k, cfg.clone(), steward_cfg.clone()))
         .collect();
 
+    // Only the creator registers a conversation up front; joiners hold none
+    // until a welcome arrives and `accept_welcome` builds one.
     users[0]
         .0
-        .start_conversation(conversation, true)
+        .start_conversation(conversation)
         .expect("creator start");
-    for (u, _) in users.iter_mut().skip(1) {
-        u.start_conversation(conversation, false)
-            .expect("joiner start");
-    }
-
-    let mut sessions: Vec<ConversationArc> = Vec::with_capacity(users.len());
-    for (u, _) in &users {
-        sessions.push(
-            u.lookup_entry(conversation)
-                .unwrap()
-                .expect("session registered"),
-        );
-    }
 
     // Joiners announce KPs. Key-package send is user-level and publishes
     // straight to the user's transport. Drain joiner transports, deliver to
@@ -385,11 +310,11 @@ pub fn bootstrap_joined_conversation(
     let mut quiet_rounds = 0;
     for round in 0..MAX_ROUNDS {
         sleep(Duration::from_millis(60));
-        for s in &sessions {
-            poll_once(s);
-        }
-        for (i, (_, h)) in users.iter().enumerate() {
-            flush_conversation(&sessions[i], h);
+        // Poll every user's conversation (a no-op for joiners not joined yet)
+        // and drain their pull-buffered outbound into their transport handle.
+        for (u, h) in &users {
+            poll_once(u, conversation);
+            flush_user(u, h);
         }
 
         // Welcomes never traverse the test transport: the steward emits
@@ -397,7 +322,7 @@ pub fn bootstrap_joined_conversation(
         // its joiner BEFORE relaying packets — same-round app-msg
         // traffic (the post-commit steward election proposal) needs
         // the joiner's MLS attached first.
-        let (welcome_count, _) = route_welcomes(&sessions, &mut users);
+        let (welcome_count, _) = route_welcomes(conversation, &mut users);
         let delivered_welcome = welcome_count > 0;
 
         let mut packets = Vec::new();
@@ -412,11 +337,16 @@ pub fn bootstrap_joined_conversation(
             }
         }
 
+        // A joiner is Working only once its welcome built a conversation that
+        // reached `Working`; before that it holds no conversation at all.
         let mut all_working = true;
-        for s in sessions.iter().skip(1) {
-            if s.read().unwrap().state() != ConversationState::Working {
-                all_working = false;
-                break;
+        for (u, _) in users.iter().skip(1) {
+            match u.conversation_state(conversation) {
+                Ok(ConversationState::Working) => {}
+                _ => {
+                    all_working = false;
+                    break;
+                }
             }
         }
         if all_working && packets.is_empty() && !delivered_welcome {

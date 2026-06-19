@@ -1,10 +1,12 @@
 //! Registry CRUD on the `User` side: conversation lookup.
 
-use de_mls::core::{ConsensusPlugin, ConversationPluginsFactory};
+use de_mls::ConsensusPlugin;
+
+use openmls_traits::signatures::Signer;
 
 use crate::user::{ConversationEntry, User, UserError};
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
+impl<P: ConsensusPlugin, Sig: Signer> User<P, Sig> {
     /// Look up a conversation. Returns `Ok(None)` when no entry is
     /// registered for `conversation_id`. Takes the outer read lock briefly
     /// to clone the inner `Arc`, then releases it before the caller
@@ -12,7 +14,7 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     pub fn lookup_entry(
         &self,
         conversation_id: &str,
-    ) -> Result<Option<ConversationEntry<P, CP>>, UserError> {
+    ) -> Result<Option<ConversationEntry<P>>, UserError> {
         Ok(self
             .conversations
             .read()

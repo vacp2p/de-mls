@@ -1,10 +1,10 @@
 //! Application message roundtrip through `Conversation::send_message`
-//! and `Conversation::dispatch_inbound_result` → `ConversationEvent::AppMessage`.
+//! and `Conversation::process_inbound` → `ConversationEvent::AppMessage`.
 
 use std::time::Duration;
 
-use de_mls::core::{ConversationEvent, StewardListConfig};
 use de_mls::protos::de_mls::messages::v1::app_message;
+use de_mls::{ConversationEvent, StewardListConfig};
 
 mod common;
 use common::conversation_fixtures::{
@@ -23,13 +23,13 @@ fn chat_message_delivered_to_peer_as_app_message_event() {
         StewardListConfig::new(1, 5).unwrap(),
     );
 
-    let alice_session = users[0].0.lookup_entry("chat").unwrap().unwrap();
     let bob_session = users[1].0.lookup_entry("chat").unwrap().unwrap();
 
-    alice_session
-        .write()
-        .unwrap()
-        .send_message(b"Hello from alice".to_vec())
+    // Route through `User`, which threads alice's signer into the
+    // conversation's `send_message`.
+    users[0]
+        .0
+        .send_message("chat", b"Hello from alice".to_vec())
         .unwrap();
 
     // Relay alice's outbound to bob.
@@ -57,5 +57,5 @@ fn chat_message_delivered_to_peer_as_app_message_event() {
     let (body, sender) =
         chat.expect("bob must surface alice's chat message as a ConversationEvent");
     assert_eq!(body, b"Hello from alice");
-    assert_eq!(sender, users[0].0.member_id_string());
+    assert_eq!(sender, users[0].0.member_id_bytes());
 }

@@ -3,14 +3,16 @@
 //! de-mls carries no transport subtopic: the integrator routes its own
 //! channels here. Conversation traffic (chat / vote / commit / sync — the
 //! envelope self-identifies) goes to [`User::handle_inbound`]; a joiner's
-//! key-package announcement goes to [`User::receive_key_package`]. Both
-//! delegate dedup and dispatch decisions to the conversation. Raw MLS welcomes
+//! key-package announcement goes to [`User::receive_key_package`], which any
+//! `Working` member turns into an `add_member` proposal. Raw MLS welcomes
 //! enter through [`User::accept_welcome`].
 
 use de_mls::{
-    core::{ConsensusPlugin, ConversationPluginsFactory},
-    session::DispatchOutcome,
+    ConsensusPlugin, ConversationState, DispatchOutcome, protos::de_mls::messages::v1::MemberInvite,
 };
+use prost::Message;
+
+use openmls_traits::signatures::Signer;
 
 use crate::user::{ConversationLifecycle, LockExt, User, UserError};
 
@@ -26,7 +28,7 @@ pub struct Inbound {
     pub payload: Vec<u8>,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
+impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
     // ── Public API ───────────────────────────────────────────────────
 
     /// Ingest conversation traffic (chat / vote / commit / sync). Self-echoes
@@ -42,9 +44,12 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry_arc = self
             .lookup_entry(&inbound.conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        let outcome = entry_arc
-            .write_or_err("conversation")?
-            .process_inbound(&inbound.sender, &inbound.payload)?;
+        let outcome = entry_arc.write_or_err("conversation")?.process_inbound(
+            self.plugins.conversation_plugins.provider(),
+            &inbound.sender,
+            &inbound.payload,
+            &self.signer,
+        )?;
         if matches!(outcome, DispatchOutcome::LeaveRequested) {
             self.finalize_self_leave(&inbound.conversation_id)?;
         }
@@ -52,19 +57,34 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         Ok(())
     }
 
-    /// Ingest a joiner's key-package announcement. Self-echoes are dropped
-    /// before the registry lookup (same rationale as [`Self::handle_inbound`]);
-    /// admission decisions are handled inside the conversation.
+    /// Ingest a joiner's key-package announcement: decode the `MemberInvite`
+    /// and, if we are a `Working` member of the conversation, open an Add
+    /// proposal for the joiner via [`de_mls::Conversation::add_member`].
+    /// Self-echoes are dropped before the registry lookup (same rationale as
+    /// [`Self::handle_inbound`]); an announcement for a conversation we don't
+    /// hold — or that we are not yet `Working` in — is silently ignored.
     pub fn receive_key_package(&self, inbound: Inbound) -> Result<(), UserError> {
         if inbound.sender == self.app_id {
             return Ok(());
         }
-        let entry_arc = self
-            .lookup_entry(&inbound.conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
-        entry_arc
-            .write_or_err("conversation")?
-            .receive_key_package(&inbound.sender, &inbound.payload)?;
+        let Some(entry_arc) = self.lookup_entry(&inbound.conversation_id)? else {
+            return Ok(());
+        };
+        let invite = match MemberInvite::decode(inbound.payload.as_slice()) {
+            Ok(invite) => invite,
+            Err(_) => return Ok(()),
+        };
+        {
+            let mut conversation = entry_arc.write_or_err("conversation")?;
+            if conversation.state() != ConversationState::Working {
+                return Ok(());
+            }
+            conversation.add_member(
+                self.plugins.conversation_plugins.provider(),
+                &invite.key_package_bytes,
+                &self.signer,
+            )?;
+        }
         self.flush(&entry_arc)?;
         Ok(())
     }

@@ -31,14 +31,14 @@ message BanRequest {
 
 message ConversationMessage {
   bytes message = 1;
-  string sender = 2;
+  bytes sender = 2;
   string conversation_id = 3;
   bytes sender_credential = 4;
 }
 
 message EventMembershipChange {
   string conversation_id = 1;
-  string member = 2;
+  bytes member = 2;
   TypeMembershipChange change_type = 3;
 }
 

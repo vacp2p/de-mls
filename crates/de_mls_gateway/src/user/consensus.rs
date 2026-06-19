@@ -1,14 +1,15 @@
 //! [`ConsensusContext`] — the consensus storage + signer pair a `User`
 //! creates once and mints every conversation's consensus service from.
 //!
-//! This is integrator wiring, not library API: the library's
-//! [`de_mls::session::ConversationDeps`] takes a ready
+//! This is integrator wiring, not library API:
+//! [`Conversation::create`](de_mls::Conversation::create) /
+//! [`Conversation::join`](de_mls::Conversation::join) take a ready
 //! [`ConsensusServiceFor`], and how services share storage is the
 //! integrator's choice.
 
 use hashgraph_like_consensus::storage::ConsensusStorage;
 
-use de_mls::core::{ConsensusPlugin, ConsensusServiceFor};
+use de_mls::{ConsensusPlugin, ConsensusServiceFor};
 
 /// Cap on concurrent consensus sessions per conversation scope; the
 /// consensus library evicts the oldest session once the cap is reached.

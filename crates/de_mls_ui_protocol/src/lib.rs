@@ -6,11 +6,11 @@ pub mod v1 {
     use std::fmt::Write;
 
     use de_mls::{
+        MessageType,
         protos::de_mls::messages::v1::{
             BanRequest, ConversationMessage, ConversationUpdateRequest, ProposalAdded, VotePayload,
             conversation_update_request,
         },
-        session::MessageType,
     };
 
     /// Render raw member id bytes as a `0x…` lowercase hex string.

@@ -27,6 +27,11 @@ alloy = { version = "2.0.5", default-features = false, features = [
     "signer-local",
 ] }
 
+openmls = "0.8.1"
+openmls_traits = "0.5.0"
+openmls_rust_crypto = "0.5.1"
+openmls_basic_credential = { version = "0.5.0", features = ["clonable"] }
+
 de-mls-ui-protocol = { path = "../de_mls_ui_protocol" }
 de-mls = { path = "../../" }
 de-mls-ds = { path = "../de_mls_ds", features = ["waku"] }

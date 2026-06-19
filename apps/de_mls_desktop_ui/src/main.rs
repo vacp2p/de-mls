@@ -992,19 +992,24 @@ fn ChatSection() -> Element {
                 ActiveVotesBanner {}
                 div { class: "messages",
                     for (i, m) in msgs_for_group.iter().enumerate() {
-                        if (*my_name).clone() == m.sender || m.sender.eq_ignore_ascii_case("me") {
-                            div { key: "{i}", class: "msg me",
-                                span { class: "from", "{m.sender}" }
-                                span { class: "body", "{String::from_utf8_lossy(&m.message)}" }
-                            }
-                        } else if m.sender.eq_ignore_ascii_case("system") {
-                            div { key: "{i}", class: "msg system",
-                                span { class: "body", "{String::from_utf8_lossy(&m.message)}" }
-                            }
-                        } else {
-                            div { key: "{i}", class: "msg",
-                                span { class: "from", "{m.sender}" }
-                                span { class: "body", "{String::from_utf8_lossy(&m.message)}" }
+                        {
+                            let sender = String::from_utf8_lossy(&m.sender);
+                            rsx! {
+                                if (*my_name).clone() == sender || sender.eq_ignore_ascii_case("me") {
+                                    div { key: "{i}", class: "msg me",
+                                        span { class: "from", "{sender}" }
+                                        span { class: "body", "{String::from_utf8_lossy(&m.message)}" }
+                                    }
+                                } else if sender.eq_ignore_ascii_case("system") {
+                                    div { key: "{i}", class: "msg system",
+                                        span { class: "body", "{String::from_utf8_lossy(&m.message)}" }
+                                    }
+                                } else {
+                                    div { key: "{i}", class: "msg",
+                                        span { class: "from", "{sender}" }
+                                        span { class: "body", "{String::from_utf8_lossy(&m.message)}" }
+                                    }
+                                }
                             }
                         }
                     }

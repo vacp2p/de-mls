@@ -1,25 +1,24 @@
 //! Create and leave operations for a conversation.
 
-use std::sync::{Arc, RwLock};
-
 use tracing::info;
 
-use de_mls::{
-    core::{ConsensusPlugin, ConversationConfig, ConversationPluginsFactory},
-    session::{Conversation, ConversationDeps, LeaveOutcome},
-};
+use std::sync::Arc;
 
-use crate::user::{ConversationLifecycle, LockExt, User, UserError};
+use de_mls::{ConsensusPlugin, Conversation, ConversationConfig, LeaveOutcome};
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
-    pub fn start_conversation(
-        &mut self,
-        conversation_id: &str,
-        is_creation: bool,
-    ) -> Result<(), UserError> {
+use openmls_traits::signatures::Signer;
+
+use crate::mls::GATEWAY_SUITE;
+use crate::user::{LockExt, User, UserError};
+
+impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
+    /// Create a conversation we steward: seed the group from our credential and
+    /// register it in `Working`. Seeding needs the concrete factory, so this
+    /// path is concrete. Joiners hold no conversation until a welcome arrives —
+    /// they reach one through [`User::accept_welcome`], not here.
+    pub fn start_conversation(&mut self, conversation_id: &str) -> Result<(), UserError> {
         self.start_conversation_with_config(
             conversation_id,
-            is_creation,
             self.plugins.default_conversation_config.clone(),
         )
     }
@@ -28,7 +27,17 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
     pub fn start_conversation_with_config(
         &mut self,
         conversation_id: &str,
-        is_creation: bool,
+        config: ConversationConfig,
+    ) -> Result<(), UserError> {
+        self.register_conversation(conversation_id, config)
+    }
+
+    /// Build and register the conversation we create; the factory seeds the
+    /// group's leaf from our credential. The joiner side never lands here — it
+    /// builds straight from a welcome in [`User::accept_welcome`].
+    pub(crate) fn register_conversation(
+        &mut self,
+        conversation_id: &str,
         config: ConversationConfig,
     ) -> Result<(), UserError> {
         if self
@@ -40,45 +49,34 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             return Err(UserError::ConversationAlreadyExists);
         }
 
-        let deps = ConversationDeps {
-            plugins: &self.plugins.conversation_plugins,
-            consensus: self.plugins.consensus.build_service(),
-            identity: self.member_id.as_ref(),
-            app_id: Arc::from(self.app_id.as_slice()),
+        let factory = &self.plugins.conversation_plugins;
+        let scoring = factory.make_scoring(&self.plugins.default_scoring_config);
+        let steward = factory.make_steward(self.plugins.default_steward_list_config.clone());
+        let conversation = Conversation::create(
+            conversation_id,
+            factory.provider(),
+            factory.credential(),
+            GATEWAY_SUITE,
+            &self.signer,
+            scoring,
+            steward,
+            self.plugins.consensus.build_service(),
+            Arc::from(self.app_id.as_slice()),
             config,
-            scoring_config: self.plugins.default_scoring_config.clone(),
-            steward_list_config: self.plugins.default_steward_list_config.clone(),
-        };
-        let conversation = if is_creation {
-            Conversation::create(conversation_id, deps)?
-        } else {
-            Conversation::join(conversation_id, deps)?
-        };
-        let entry = Arc::new(RwLock::new(conversation));
-        {
-            let mut conversations = self
-                .conversations
-                .write()
-                .map_err(|_| UserError::LockPoisoned("conversation registry"))?;
-            if conversations.contains_key(conversation_id) {
-                return Err(UserError::ConversationAlreadyExists);
-            }
-            conversations.insert(conversation_id.to_string(), entry);
-        }
-
-        // The conversation already buffered its opening `PhaseChange`; record the
-        // lifecycle event so integrators draining
-        // [`User::drain_lifecycle_events`] discover the conversation.
-        self.emit_lifecycle(ConversationLifecycle::Created(conversation_id.to_string()));
-
+            self.member_id.member_id_bytes(),
+        )?;
+        self.register_built(conversation_id, conversation)?;
         Ok(())
     }
+}
 
-    /// Leave the conversation. Delegates to [`Conversation::leave`]: in
-    /// `PendingJoin` the conversation tears down locally and returns `TornDown`;
-    /// otherwise it opens a self-leave consensus round and returns
-    /// `LeaveInitiated`. On `TornDown` this method finalises the User-side
-    /// registry cleanup via `finalize_self_leave`.
+impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
+    /// Leave the conversation. Delegates to [`Conversation::leave`], which
+    /// opens a self-leave consensus round and returns
+    /// [`LeaveOutcome::LeaveInitiated`]; the User-side registry cleanup
+    /// happens later, once the conversation signals teardown via
+    /// `LeaveRequested` / `finalize_self_leave`. Flush publishes the opening
+    /// self-leave proposal.
     pub fn leave_conversation(&mut self, conversation_id: &str) -> Result<(), UserError> {
         info!(conversation = conversation_id, "leaving conversation");
 
@@ -86,15 +84,10 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
 
-        let outcome = entry_arc.write_or_err("conversation")?.leave()?;
-        match outcome {
-            LeaveOutcome::TornDown => {
-                self.finalize_self_leave(conversation_id)?;
-            }
-            LeaveOutcome::LeaveInitiated => {
-                self.flush(&entry_arc)?;
-            }
-        }
+        let LeaveOutcome::LeaveInitiated = entry_arc
+            .write_or_err("conversation")?
+            .leave(self.plugins.conversation_plugins.provider(), &self.signer)?;
+        self.flush(&entry_arc)?;
         Ok(())
     }
 }
