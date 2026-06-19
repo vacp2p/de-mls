@@ -38,10 +38,57 @@ pub enum ConversationLifecycle {
 /// call from the User's factory.
 pub type GatewayConversation<C> = Conversation<C, DefaultPeerScoring, DefaultStewardList>;
 
-/// Single registry entry: one `Arc<RwLock<Conversation>>` per conversation.
-/// Cloned out of the registry under the outer read lock, then locked
-/// independently — writes on one conversation don't block reads on another.
-pub type ConversationEntry<C> = Arc<RwLock<GatewayConversation<C>>>;
+/// One registry slot: a conversation the user is part of or joining. While a
+/// join is in flight the live handle is `None` — a key package has been
+/// announced and we await the welcome — and [`Self::accept_welcome`] fills it
+/// in. Holding a slot from join-time keeps the registry the single source of
+/// truth: a joining conversation lists and reports as "joining" without a
+/// parallel pending set. This is the gateway's per-conversation wrapper over
+/// the transport-free library handle.
+pub struct ConversationSlot<C: ConsensusPlugin> {
+    conversation: Option<GatewayConversation<C>>,
+}
+
+impl<C: ConsensusPlugin> ConversationSlot<C> {
+    /// A join in progress — no live conversation yet.
+    pub(crate) fn pending() -> Self {
+        Self { conversation: None }
+    }
+
+    /// A live conversation (created by us, or joined via a welcome).
+    pub(crate) fn live(conversation: GatewayConversation<C>) -> Self {
+        Self {
+            conversation: Some(conversation),
+        }
+    }
+
+    /// `true` while the welcome has not yet arrived (slot present, no handle).
+    pub fn is_pending(&self) -> bool {
+        self.conversation.is_none()
+    }
+
+    /// Borrow the live conversation, or [`UserError::ConversationNotFound`]
+    /// while the join is still pending.
+    pub fn live_ref(&self) -> Result<&GatewayConversation<C>, UserError> {
+        self.conversation
+            .as_ref()
+            .ok_or(UserError::ConversationNotFound)
+    }
+
+    /// Mutably borrow the live conversation, or
+    /// [`UserError::ConversationNotFound`] while pending.
+    pub fn live_mut(&mut self) -> Result<&mut GatewayConversation<C>, UserError> {
+        self.conversation
+            .as_mut()
+            .ok_or(UserError::ConversationNotFound)
+    }
+}
+
+/// Single registry entry: one `Arc<RwLock<ConversationSlot>>` per
+/// conversation. Cloned out of the registry under the outer read lock, then
+/// locked independently — writes on one conversation don't block reads on
+/// another.
+pub type ConversationEntry<C> = Arc<RwLock<ConversationSlot<C>>>;
 
 /// Per-user registry of conversations. Each entry's inner per-conversation
 /// lock guards per-conversation reads/mutations so a write on conversation
@@ -65,7 +112,8 @@ pub struct User<P: ConsensusPlugin, Sig: Signer> {
     /// consensus context, the key-package provider, and the three default
     /// configs cloned into newly-created conversations.
     pub(crate) plugins: UserPlugins<P>,
-    /// Conversation handles keyed by conversation id.
+    /// Conversation slots keyed by conversation id. A slot may be live or a
+    /// pending join (welcome not yet received) — see [`ConversationSlot`].
     pub(crate) conversations: ConversationRegistry<P>,
     /// User-level conversation lifecycle events: `Created(name)` /
     /// `Removed(name)`. Integrators drain via
@@ -118,10 +166,12 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
             return Err(UserError::WelcomeNotForUs);
         };
         let conversation_id = conversation.id().to_string();
-        if self.lookup_entry(&conversation_id)?.is_some() {
+        // The welcome landed: fill the pending-join slot (or insert a live one
+        // if we accepted without a prior `join_group`). A `None` return means
+        // the conversation is already live — an idempotent re-delivered welcome.
+        let Some(entry_arc) = self.install_conversation(&conversation_id, conversation)? else {
             return Ok(conversation_id);
-        }
-        let entry_arc = self.register_built(&conversation_id, conversation)?;
+        };
         self.flush(&entry_arc)?;
         Ok(conversation_id)
     }
@@ -184,11 +234,14 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        entry.write_or_err("conversation")?.send_message(
-            self.plugins.conversation_plugins.provider(),
-            message,
-            &self.signer,
-        )?;
+        entry
+            .write_or_err("conversation")?
+            .live_mut()?
+            .send_message(
+                self.plugins.conversation_plugins.provider(),
+                message,
+                &self.signer,
+            )?;
         self.flush(&entry)?;
         Ok(())
     }
@@ -223,6 +276,7 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
             .ok_or(UserError::ConversationNotFound)?;
         let outcome = entry
             .write_or_err("conversation")?
+            .live_mut()?
             .poll(self.plugins.conversation_plugins.provider(), &self.signer);
         self.flush(&entry)?;
         Ok(outcome)
@@ -234,7 +288,10 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        Ok(entry.read_or_err("conversation")?.drain_events())
+        Ok(entry
+            .read_or_err("conversation")?
+            .live_ref()?
+            .drain_events())
     }
 
     /// Earliest pending deadline on `conversation_id` relative to now,
@@ -244,7 +301,10 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        Ok(entry.read_or_err("conversation")?.next_wakeup_in())
+        Ok(entry
+            .read_or_err("conversation")?
+            .live_ref()?
+            .next_wakeup_in())
     }
 
     /// Propose adding the holder of `key_package_bytes` to
@@ -261,7 +321,7 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        entry.write_or_err("conversation")?.add_member(
+        entry.write_or_err("conversation")?.live_mut()?.add_member(
             self.plugins.conversation_plugins.provider(),
             key_package_bytes,
             &self.signer,
@@ -284,7 +344,7 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        entry.write_or_err("conversation")?.vote(
+        entry.write_or_err("conversation")?.live_mut()?.vote(
             self.plugins.conversation_plugins.provider(),
             proposal_id,
             vote,
@@ -301,11 +361,14 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        entry.write_or_err("conversation")?.remove_member(
-            self.plugins.conversation_plugins.provider(),
-            member_id,
-            &self.signer,
-        )?;
+        entry
+            .write_or_err("conversation")?
+            .live_mut()?
+            .remove_member(
+                self.plugins.conversation_plugins.provider(),
+                member_id,
+                &self.signer,
+            )?;
         self.flush(&entry)?;
         Ok(())
     }
@@ -324,12 +387,15 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        entry.write_or_err("conversation")?.initiate_proposal(
-            self.plugins.conversation_plugins.provider(),
-            request,
-            creator_vote,
-            &self.signer,
-        )?;
+        entry
+            .write_or_err("conversation")?
+            .live_mut()?
+            .initiate_proposal(
+                self.plugins.conversation_plugins.provider(),
+                request,
+                creator_vote,
+                &self.signer,
+            )?;
         self.flush(&entry)?;
         Ok(())
     }
@@ -345,7 +411,7 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        Ok(entry.read_or_err("conversation")?.state())
+        Ok(entry.read_or_err("conversation")?.live_ref()?.state())
     }
 
     /// `true` if the local user is on the current steward list for
@@ -354,7 +420,7 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        Ok(entry.read_or_err("conversation")?.is_steward())
+        Ok(entry.read_or_err("conversation")?.live_ref()?.is_steward())
     }
 
     /// MLS epoch + reelection retry round for `conversation_id`. Mirrors
@@ -363,21 +429,27 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        Ok(entry.read_or_err("conversation")?.epoch_and_retry()?)
+        Ok(entry
+            .read_or_err("conversation")?
+            .live_ref()?
+            .epoch_and_retry()?)
     }
 
     pub fn members(&self, conversation_id: &str) -> Result<Vec<Vec<u8>>, UserError> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        Ok(entry.read_or_err("conversation")?.members()?)
+        Ok(entry.read_or_err("conversation")?.live_ref()?.members()?)
     }
 
     pub fn member_scores(&self, conversation_id: &str) -> Result<Vec<(Vec<u8>, i64)>, UserError> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        Ok(entry.read_or_err("conversation")?.member_scores())
+        Ok(entry
+            .read_or_err("conversation")?
+            .live_ref()?
+            .member_scores())
     }
 
     pub fn member_score(
@@ -388,7 +460,10 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        Ok(entry.read_or_err("conversation")?.member_score(member_id))
+        Ok(entry
+            .read_or_err("conversation")?
+            .live_ref()?
+            .member_score(member_id))
     }
 
     pub fn member_roles(
@@ -398,7 +473,10 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        Ok(entry.read_or_err("conversation")?.member_roles()?)
+        Ok(entry
+            .read_or_err("conversation")?
+            .live_ref()?
+            .member_roles()?)
     }
 
     /// Identities with an in-flight self-leave request. Mirrors
@@ -412,6 +490,7 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
             .ok_or(UserError::ConversationNotFound)?;
         Ok(entry
             .read_or_err("conversation")?
+            .live_ref()?
             .pending_leave_member_ids()?)
     }
 
@@ -421,7 +500,10 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
         let entry = self
             .lookup_entry(conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        Ok(entry.read_or_err("conversation")?.pending_update_count())
+        Ok(entry
+            .read_or_err("conversation")?
+            .live_ref()?
+            .pending_update_count())
     }
 
     /// Approved proposals for the current epoch. Mirrors
@@ -435,6 +517,7 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
             .ok_or(UserError::ConversationNotFound)?;
         Ok(entry
             .read_or_err("conversation")?
+            .live_ref()?
             .approved_proposals_for_current_epoch())
     }
 }
@@ -446,31 +529,40 @@ impl<P: ConsensusPlugin, Sig: Signer> User<P, Sig> {
         self.member_id.member_id_bytes()
     }
 
-    /// Insert an already-built [`Conversation`] into the registry, emit the
-    /// `Created` lifecycle event, and return the registry entry. Errors with
-    /// [`UserError::ConversationAlreadyExists`] if an entry races in under the
-    /// write lock. Shared by the creator path and the welcome-driven join.
-    pub(crate) fn register_built(
+    /// Install an already-built [`Conversation`] into its slot: fill an
+    /// existing pending-join slot, or insert a new live one. Emits the
+    /// `Created` lifecycle event when the conversation first becomes
+    /// addressable and returns its registry entry. Returns `Ok(None)` if the
+    /// slot is already live — an idempotent re-delivered welcome for a
+    /// conversation we already joined. Shared by the creator path and the
+    /// welcome-driven join.
+    pub(crate) fn install_conversation(
         &self,
         conversation_id: &str,
         conversation: GatewayConversation<P>,
-    ) -> Result<ConversationEntry<P>, UserError> {
-        let entry = Arc::new(RwLock::new(conversation));
-        {
+    ) -> Result<Option<ConversationEntry<P>>, UserError> {
+        let entry = {
             let mut conversations = self
                 .conversations
                 .write()
                 .map_err(|_| UserError::LockPoisoned("conversation registry"))?;
-            if conversations.contains_key(conversation_id) {
-                return Err(UserError::ConversationAlreadyExists);
+            conversations
+                .entry(conversation_id.to_string())
+                .or_insert_with(|| Arc::new(RwLock::new(ConversationSlot::pending())))
+                .clone()
+        };
+        {
+            let mut slot = entry.write_or_err("conversation")?;
+            if !slot.is_pending() {
+                return Ok(None);
             }
-            conversations.insert(conversation_id.to_string(), entry.clone());
+            *slot = ConversationSlot::live(conversation);
         }
         // The conversation already buffered its opening `PhaseChange`; record the
         // lifecycle event so integrators draining
         // [`Self::drain_lifecycle_events`] discover the conversation.
         self.emit_lifecycle(ConversationLifecycle::Created(conversation_id.to_string()));
-        Ok(entry)
+        Ok(Some(entry))
     }
 
     /// Append a [`ConversationLifecycle`] event to the pending-events buffer
@@ -492,7 +584,10 @@ impl<P: ConsensusPlugin, Sig: Signer> User<P, Sig> {
     /// (When `User` moves out of the library, the integrator drains and
     /// publishes directly instead.)
     pub(crate) fn flush(&self, entry: &ConversationEntry<P>) -> Result<(), UserError> {
-        let outbound = entry.read_or_err("conversation")?.drain_outbound();
+        let outbound = entry
+            .read_or_err("conversation")?
+            .live_ref()?
+            .drain_outbound();
         if outbound.is_empty() {
             return Ok(());
         }

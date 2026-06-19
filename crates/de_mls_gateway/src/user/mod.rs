@@ -36,4 +36,6 @@ pub use error::UserError;
 pub use inbound::Inbound;
 pub(crate) use lock::LockExt;
 pub use plugins::UserPlugins;
-pub use state::{ConversationEntry, ConversationLifecycle, GatewayConversation, User};
+pub use state::{
+    ConversationEntry, ConversationLifecycle, ConversationSlot, GatewayConversation, User,
+};

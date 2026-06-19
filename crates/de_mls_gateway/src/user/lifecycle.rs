@@ -65,7 +65,7 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
             config,
             self.member_id.member_id_bytes(),
         )?;
-        self.register_built(conversation_id, conversation)?;
+        self.install_conversation(conversation_id, conversation)?;
         Ok(())
     }
 }
@@ -86,6 +86,7 @@ impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
 
         let LeaveOutcome::LeaveInitiated = entry_arc
             .write_or_err("conversation")?
+            .live_mut()?
             .leave(self.plugins.conversation_plugins.provider(), &self.signer)?;
         self.flush(&entry_arc)?;
         Ok(())
