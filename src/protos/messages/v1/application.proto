@@ -17,6 +17,10 @@ message AppMessage {
     ProposalAdded proposal_added = 7;
     CommitCandidate commit_candidate = 8;
     ConversationSync conversation_sync = 9;
+    // Plaintext broadcast of a freshly minted welcome so every member —
+    // not just the committing steward — can deliver it to the joiners.
+    MemberWelcome member_welcome = 10;
+    EventMembershipChange membership_change = 11;
   }
 }
 
@@ -29,6 +33,17 @@ message ConversationMessage {
   bytes message = 1;
   string sender = 2;
   string conversation_id = 3;
+  bytes sender_credential = 4;
+}
+
+message EventMembershipChange {
+  string conversation_id = 1;
+  string member = 2;
+  TypeMembershipChange change_type = 3;
+}
+
+enum TypeMembershipChange{
+  Add = 0;
 }
 
 message CommitCandidate {
@@ -155,6 +170,6 @@ enum Outcome {
 message VotePayload {
   string conversation_id = 41;
   uint32 proposal_id = 42;
-  bytes payload = 43; 
+  bytes payload = 43;
   uint64 timestamp = 44;
-} 
+}

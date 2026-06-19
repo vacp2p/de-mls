@@ -4,9 +4,9 @@
 //! joiner that hasn't yet installed a steward list.
 
 use de_mls::core::{ProcessResult, StewardListConfig, StewardListPlugin};
-use de_mls::ds::APP_MSG_SUBTOPIC;
 use de_mls::mls_crypto::MlsService;
 use de_mls::protos::de_mls::messages::v1::AppMessage;
+use de_mls_ds::APP_MSG_SUBTOPIC;
 
 mod common;
 use common::{
@@ -34,7 +34,7 @@ fn test_process_inbound_welcome_already_joined_ignores() {
 
     // A second welcome (this one for joiner2's KP) doesn't address us, so
     // try_accept_welcome surfaces "not for us" rather than disturbing our
-    // MLS state. `SessionRunner` additionally guards on
+    // MLS state. `Conversation` additionally guards on
     // `conversation.mls().is_some()` to skip wholesale; both safeguards land at
     // the same outcome.
     let mut joiner2 = setup_joiner(
@@ -119,15 +119,12 @@ fn test_conversation_sync_propagates_divergent_per_conv_config() {
         pending_update_max_epochs: steward_handle.pending_update_max_epochs,
     };
     let app_msg: AppMessage = sync.clone().into();
-    let sync_packet = steward_handle
-        .mls
-        .build_message(&app_msg, b"test-app-id")
-        .unwrap();
+    let sync_payload = steward_handle.mls.build_message(&app_msg).unwrap();
 
     let result = process_inbound_compat(
         &mut joiner.group,
         joiner.mls.as_mut(),
-        &sync_packet.payload,
+        &sync_payload,
         APP_MSG_SUBTOPIC,
     )
     .unwrap();

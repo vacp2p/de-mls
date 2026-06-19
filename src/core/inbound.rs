@@ -12,7 +12,7 @@ use crate::{
     core::{
         conversation::ConversationQueues,
         error::CoreError,
-        freeze::buffer_commit_candidate,
+        freeze::{buffer_commit_candidate, compute_commit_hash},
         process_result::{NoopReason, ProcessResult},
     },
     mls_crypto::{DecryptResult, MlsService},
@@ -51,10 +51,26 @@ pub fn process_inbound<M: MlsService>(
     mls: &mut M,
     payload: &[u8],
 ) -> Result<ProcessResult, CoreError> {
-    // 1. Try plaintext CommitCandidate (sent as plaintext AppMessage)
+    // 1. Try the plaintext envelopes (sent as plaintext AppMessage):
+    //    CommitCandidate and MemberWelcome both have to be readable before
+    //    the receiver merges the commit they belong to.
     if let Ok(app_message) = AppMessage::decode(payload) {
-        if let Some(app_message::Payload::CommitCandidate(candidate)) = app_message.payload {
-            return buffer_commit_candidate(conversation, mls, candidate);
+        match app_message.payload {
+            Some(app_message::Payload::CommitCandidate(candidate)) => {
+                return buffer_commit_candidate(conversation, mls, candidate);
+            }
+            Some(app_message::Payload::MemberWelcome(welcome)) => {
+                if welcome.welcome_bytes.is_empty() {
+                    return Ok(ProcessResult::Noop(NoopReason::EmptyWelcomePayload));
+                }
+                if !conversation
+                    .record_welcome_broadcast(compute_commit_hash(&welcome.welcome_bytes))
+                {
+                    return Ok(ProcessResult::Noop(NoopReason::DuplicateWelcomeBroadcast));
+                }
+                return Ok(ProcessResult::WelcomeBroadcastReceived(Box::new(welcome)));
+            }
+            _ => {}
         }
     }
 
@@ -65,7 +81,12 @@ pub fn process_inbound<M: MlsService>(
 
     match res {
         DecryptResult::Application(app_bytes, sender) => {
-            let app_msg = AppMessage::decode(app_bytes.as_ref())?;
+            let mut app_msg = AppMessage::decode(app_bytes.as_ref())?;
+            // Stamp the MLS-authenticated sender (the verified leaf credential
+            // content) onto conversation messages.
+            if let Some(app_message::Payload::ConversationMessage(cm)) = &mut app_msg.payload {
+                cm.sender_credential = sender.clone();
+            }
             if let Some(app_message::Payload::Proposal(proposal)) = &app_msg.payload
                 && !authorize_fast_path_proposal(proposal, &sender)
             {
@@ -114,21 +135,13 @@ pub fn process_inbound<M: MlsService>(
 mod tests {
     use super::*;
     use crate::core::conversation::self_leave_proposal_id;
-    use crate::protos::de_mls::messages::v1::RemoveMember;
 
     fn member(id: u8) -> Vec<u8> {
         vec![id; 20]
     }
 
     fn remove_payload(member_id: &[u8]) -> Vec<u8> {
-        ConversationUpdateRequest {
-            payload: Some(conversation_update_request::Payload::RemoveMember(
-                RemoveMember {
-                    member_id: member_id.to_vec(),
-                },
-            )),
-        }
-        .encode_to_vec()
+        ConversationUpdateRequest::remove_member(member_id.to_vec()).encode_to_vec()
     }
 
     fn proposal_for_self_remove(sender: &[u8], expected_voters: u32) -> Proposal {

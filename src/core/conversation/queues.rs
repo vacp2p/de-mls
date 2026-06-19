@@ -122,6 +122,9 @@ pub struct ConversationQueues {
     /// "settled" check (see [`Self::is_settled`]); deterministic across nodes
     /// that apply the same commit.
     member_join_epoch: HashMap<Vec<u8>, u64>,
+    /// Hashes of recently-seen welcome broadcasts, so gossip duplicates
+    /// emit a single `WelcomeReady` event.
+    welcome_broadcast_hashes: VecDeque<CommitHash>,
 }
 
 impl ConversationQueues {
@@ -139,6 +142,7 @@ impl ConversationQueues {
             urgent_commit_target: None,
             early_candidates: Vec::new(),
             member_join_epoch: HashMap::new(),
+            welcome_broadcast_hashes: VecDeque::new(),
         }
     }
 
@@ -366,6 +370,20 @@ impl ConversationQueues {
             self.committed_batch_hashes.pop_front();
         }
         self.committed_batch_hashes.push_back(commit_hash);
+    }
+
+    /// Record a welcome broadcast's hash. Returns `true` when the hash is
+    /// new (process it) and `false` for a duplicate (drop it). Bounded the
+    /// same way as the committed-hash window.
+    pub(crate) fn record_welcome_broadcast(&mut self, hash: CommitHash) -> bool {
+        if self.welcome_broadcast_hashes.iter().any(|h| *h == hash) {
+            return false;
+        }
+        if self.welcome_broadcast_hashes.len() >= MAX_COMMITTED_HASHES {
+            self.welcome_broadcast_hashes.pop_front();
+        }
+        self.welcome_broadcast_hashes.push_back(hash);
+        true
     }
 
     // ─────────────────────────── Freeze Round ───────────────────────────
@@ -668,7 +686,7 @@ impl ResolvedProposalCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protos::de_mls::messages::v1::{MemberInvite, RemoveMember};
+    use crate::protos::de_mls::messages::v1::MemberInvite;
 
     fn member(id: u8) -> Vec<u8> {
         vec![id; 20]
@@ -679,13 +697,7 @@ mod tests {
     }
 
     fn insert_self_leave(conversation: &mut ConversationQueues, member_id: &[u8]) {
-        let remove = ConversationUpdateRequest {
-            payload: Some(conversation_update_request::Payload::RemoveMember(
-                RemoveMember {
-                    member_id: member_id.to_vec(),
-                },
-            )),
-        };
+        let remove = ConversationUpdateRequest::remove_member(member_id.to_vec());
         conversation.insert_approved_proposal(self_leave_proposal_id(member_id), remove);
     }
 
@@ -755,13 +767,7 @@ mod tests {
         target: &[u8],
         proposal_id: ProposalId,
     ) {
-        let remove = ConversationUpdateRequest {
-            payload: Some(conversation_update_request::Payload::RemoveMember(
-                RemoveMember {
-                    member_id: target.to_vec(),
-                },
-            )),
-        };
+        let remove = ConversationUpdateRequest::remove_member(target.to_vec());
         conversation.insert_approved_proposal(proposal_id, remove);
     }
 
@@ -776,14 +782,10 @@ mod tests {
         let add_id: ProposalId = 0x5555_6666;
         insert_remove_member(&mut conversation, &member(2), ban_id);
         insert_remove_member(&mut conversation, &member(3), ecp_id);
-        let add = ConversationUpdateRequest {
-            payload: Some(conversation_update_request::Payload::MemberInvite(
-                MemberInvite {
-                    key_package_bytes: vec![0; 8],
-                    member_id: member(99),
-                },
-            )),
-        };
+        let add = ConversationUpdateRequest::member_invite(MemberInvite {
+            key_package_bytes: vec![0; 8],
+            member_id: member(99),
+        });
         conversation.insert_approved_proposal(add_id, add);
         assert_eq!(conversation.approved_proposals_count(), 3);
 
@@ -853,13 +855,7 @@ mod tests {
     }
 
     fn buffer_remove_at(conversation: &mut ConversationQueues, target: &[u8], epoch: u64) {
-        let request = ConversationUpdateRequest {
-            payload: Some(conversation_update_request::Payload::RemoveMember(
-                RemoveMember {
-                    member_id: target.to_vec(),
-                },
-            )),
-        };
+        let request = ConversationUpdateRequest::remove_member(target.to_vec());
         assert!(conversation.insert_pending_update(request, epoch));
     }
 

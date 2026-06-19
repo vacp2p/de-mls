@@ -18,7 +18,6 @@ use openmls_traits::{OpenMlsProvider, storage::StorageProvider};
 use prost::Message;
 
 use crate::{
-    ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     mls_crypto::{
         CommitCandidate, DeMlsStorage, DecryptResult, MlsCommitInput, MlsError, MlsMessageKind,
         MlsProposalOutput, OpenMlsService, StagedCandidateResult, service::api::MlsService,
@@ -350,18 +349,8 @@ where
         Ok(message.to_bytes()?)
     }
 
-    fn build_message(
-        &mut self,
-        app_msg: &AppMessage,
-        app_id: &[u8],
-    ) -> Result<OutboundPacket, MlsError> {
-        let bytes = self.encrypt(&app_msg.encode_to_vec())?;
-        Ok(OutboundPacket::new(
-            bytes,
-            APP_MSG_SUBTOPIC,
-            &self.conversation_id,
-            app_id,
-        ))
+    fn build_message(&mut self, app_msg: &AppMessage) -> Result<Vec<u8>, MlsError> {
+        self.encrypt(&app_msg.encode_to_vec())
     }
 
     fn decrypt_application_only(&mut self, ciphertext: &[u8]) -> Result<DecryptResult, MlsError> {

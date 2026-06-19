@@ -12,7 +12,6 @@ use crate::{
         StewardListPlugin, compute_commit_hash, finalize_freeze_round, member_set, process_inbound,
         replay_early_candidates,
     },
-    ds::{APP_MSG_SUBTOPIC, OutboundPacket},
     mls_crypto::{
         CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MlsCommitInput, MlsService,
     },
@@ -24,7 +23,7 @@ use crate::{
 /// Per-conversation aggregate owned by the orchestrator. Bundles protocol
 /// state, the MLS service, plug-ins, state machine, durable config, and
 /// operating mode behind one type parameter.
-pub struct Conversation<CP: ConversationPluginsFactory> {
+pub struct ConversationCore<CP: ConversationPluginsFactory> {
     pub queues: ConversationQueues,
     /// Per-conversation MLS service. `None` for joiners in `PendingJoin` who
     /// haven't accepted a welcome yet; once attached via
@@ -42,7 +41,7 @@ pub struct Conversation<CP: ConversationPluginsFactory> {
     operating_mode: OperatingMode,
 }
 
-impl<CP: ConversationPluginsFactory> Conversation<CP> {
+impl<CP: ConversationPluginsFactory> ConversationCore<CP> {
     /// Build a fresh conversation. Creator path passes `Some(mls)`; joiner
     /// path passes `None` and attaches later via [`Self::attach_mls`].
     pub(crate) fn new(
@@ -129,8 +128,7 @@ impl<CP: ConversationPluginsFactory> Conversation<CP> {
     pub(crate) fn create_commit_candidate(
         &mut self,
         self_member_id: &[u8],
-        app_id: &[u8],
-    ) -> Result<Option<OutboundPacket>, CoreError> {
+    ) -> Result<Option<Vec<u8>>, CoreError> {
         if self.mls.is_none() {
             return Err(CoreError::MlsGroupNotInitialized);
         }
@@ -274,12 +272,7 @@ impl<CP: ConversationPluginsFactory> Conversation<CP> {
         );
 
         let candidate_msg: AppMessage = candidate.into();
-        Ok(Some(OutboundPacket::new(
-            candidate_msg.encode_to_vec(),
-            APP_MSG_SUBTOPIC,
-            self.queues.name(),
-            app_id,
-        )))
+        Ok(Some(candidate_msg.encode_to_vec()))
     }
 
     /// Finalize the active freeze round.
@@ -324,8 +317,8 @@ mod tests {
     use super::*;
     use crate::test_fixtures::{StubPluginsFactory, StubScoring, StubStewardList, UnusedMls};
 
-    fn make_conversation(steward_list: StubStewardList) -> Conversation<StubPluginsFactory> {
-        Conversation::new(
+    fn make_conversation(steward_list: StubStewardList) -> ConversationCore<StubPluginsFactory> {
+        ConversationCore::new(
             ConversationQueues::new("g"),
             Some(UnusedMls),
             ConversationStateMachine::new_as_member(),
@@ -339,7 +332,7 @@ mod tests {
     fn create_commit_candidate_errors_for_non_steward_outside_recovery() {
         let mut conversation = make_conversation(StubStewardList::member());
         let err = conversation
-            .create_commit_candidate(b"me", b"app")
+            .create_commit_candidate(b"me")
             .expect_err("non-steward should be rejected");
         assert!(matches!(err, CoreError::NotASteward));
     }
@@ -348,7 +341,7 @@ mod tests {
     fn create_commit_candidate_errors_when_no_approved_proposals() {
         let mut conversation = make_conversation(StubStewardList::steward());
         let err = conversation
-            .create_commit_candidate(b"me", b"app")
+            .create_commit_candidate(b"me")
             .expect_err("empty approved queue should be rejected");
         assert!(matches!(err, CoreError::NoProposals));
     }
@@ -369,7 +362,7 @@ mod tests {
         conversation.queues.insert_approved_proposal(50, emergency);
 
         let err = conversation
-            .create_commit_candidate(b"me", b"app")
+            .create_commit_candidate(b"me")
             .expect_err("emergency in approved queue should be rejected");
         let CoreError::UnexpectedNonMlsProposals { proposal_ids } = err else {
             panic!("expected UnexpectedNonMlsProposals, got {err:?}");

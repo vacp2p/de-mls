@@ -1,23 +1,6 @@
 //! Shared fixtures for integration tests.
-//!
-//! Rust compiles each file in `tests/` as its own binary; a file under
-//! `tests/common/` is *not* a test binary, so this module can be reused by
-//! adding `mod common;` to any test file. Helpers carry `#[allow(dead_code)]`
-//! at the module level because not every binary exercises every helper.
-//!
-//! Two distinct fixture surfaces live here:
-//!
-//! - [`session_fixtures`] is the public-surface fixture set: `User` +
-//!   `SessionRunner` driven through `process_inbound_packet`, transport
-//!   capture, polling helpers. Default for new tests.
-//! - The low-level helpers in this file (`StewardHandle`, `JoinerHandle`,
-//!   `process_inbound_compat`, `build_commit_candidate`) let a test reach
-//!   into `core::process_inbound` and the MLS layer directly, which is
-//!   what the forgery / adversarial-input tests in `core_violations.rs`
-//!   need. New tests should prefer [`session_fixtures`].
 #![allow(dead_code)]
 
-pub mod session_fixtures;
 pub mod wallet;
 
 pub use wallet::WalletMemberId;
@@ -27,7 +10,6 @@ use std::sync::{
     atomic::{AtomicU32, Ordering},
 };
 
-use de_mls::app::build_key_package_packet;
 use de_mls::core::{
     BufferedCommitCandidate, ConversationQueues, CoreError, DeterministicStewardList,
     FreezeOutcome, NoopReason, OperatingMode, PeerScoringService, ProcessResult, ProposalKind,
@@ -35,7 +17,6 @@ use de_mls::core::{
     finalize_freeze_round, member_set, process_inbound,
 };
 use de_mls::defaults::{InMemoryPeerScoreStorage, MemoryDeMlsStorage};
-use de_mls::ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
 use de_mls::member_id::MemberId;
 use de_mls::mls_crypto::{
     CommitCandidate as MlsCommitCandidate, KeyPackageBytes, MlsCommitInput, MlsCredentials,
@@ -45,6 +26,7 @@ use de_mls::protos::de_mls::messages::v1::{
     AppMessage, CommitCandidate, ConversationUpdateRequest, MemberInvite,
     conversation_update_request,
 };
+use de_mls_ds::{APP_MSG_SUBTOPIC, OutboundPacket, WELCOME_SUBTOPIC};
 use prost::Message as _;
 
 /// Test-side MLS service: storage is `Arc`-shared so a single helper can
@@ -231,15 +213,13 @@ pub fn process_inbound_compat(
     } else if subtopic == APP_MSG_SUBTOPIC {
         let Some(mls) = mls else {
             // App messages on a conversation with no MLS state are
-            // silently ignored. Mirrors `SessionRunner::process_inbound_packet`,
+            // silently ignored. Mirrors `Conversation::process_inbound_packet`,
             // which gates app payloads on `conversation.mls().is_some()`.
             return Ok(ProcessResult::Noop(NoopReason::UnknownAppMessage));
         };
         process_inbound(group, mls, payload)
     } else {
-        Err(de_mls::core::CoreError::InvalidSubtopic(
-            subtopic.to_string(),
-        ))
+        panic!("process_inbound_compat called with unknown subtopic: {subtopic}")
     }
 }
 
@@ -383,7 +363,12 @@ pub fn setup_joiner_with_config(
     let key_package =
         OpenMlsService::<Arc<MemoryDeMlsStorage>>::generate_key_package(&storage, &credentials)
             .unwrap();
-    let kp_packet = build_key_package_packet(conversation_id, key_package, b"test-app-id");
+    let invite = MemberInvite {
+        key_package_bytes: key_package.as_bytes().to_vec(),
+        member_id: key_package.member_id().to_vec(),
+    };
+    let kp_packet =
+        OutboundPacket::key_package(conversation_id, b"test-app-id", invite.encode_to_vec());
     JoinerHandle {
         member_id,
         credentials,

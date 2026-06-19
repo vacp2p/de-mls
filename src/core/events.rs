@@ -1,16 +1,12 @@
 //! I/O contract between the protocol layer and an integrator.
 //!
-//! Two queues:
+//! [`ConversationEvent`] — fire-and-forget notifications about a single
+//! conversation. Each [`crate::session::Conversation`] holds a pending
+//! buffer; integrators drain it once per polling cycle.
 //!
-//! - [`SessionEvent`] — fire-and-forget notifications about a single
-//!   conversation. Each [`crate::app::SessionRunner`] holds a pending
-//!   buffer; integrators drain it once per polling cycle.
-//! - [`ConversationLifecycle`] — User-level create/remove notifications.
-//!   Integrators use this to discover new sessions and start draining them.
-//!
-//! Synchronous outbound transport is supplied by
-//! [`crate::ds::DeliveryService`], passed to `User` at construction and
-//! cloned into each session.
+//! The library carries no transport: it buffers `Outbound` and consumes
+//! inbound payloads. The integrator owns delivery (see the `de-mls-ds`
+//! crate's `DeliveryService` for the reference transport).
 
 use crate::{
     core::ConversationState,
@@ -19,17 +15,17 @@ use crate::{
 
 /// Per-conversation notification. Sessions append these to their pending
 /// buffer; integrators drain via
-/// [`crate::app::SessionRunner::drain_events`] once per polling cycle. All
-/// variants are fire-and-forget — no failure path back to the session.
+/// [`crate::session::Conversation::drain_events`] once per polling cycle. All
+/// variants are fire-and-forget — no failure path back to the conversation.
 #[derive(Debug, Clone)]
-pub enum SessionEvent {
+pub enum ConversationEvent {
     /// Decrypted application message (chat, vote request, proposal
     /// notification, ban request, …).
     AppMessage(AppMessage),
 
-    /// The user is out of this conversation (self-leave commit merged, or
-    /// someone else removed us). The session entry is about to be removed
-    /// from `User`'s registry.
+    /// The local member is out of this conversation (self-leave commit
+    /// merged, or removed by a steward). The integrator should remove the
+    /// registry entry and clean up the consensus scope.
     Leaving,
 
     /// A background operation (e.g., vote submission) failed. UI may surface;
@@ -44,6 +40,15 @@ pub enum SessionEvent {
         request: ConversationUpdateRequest,
     },
 
+    /// A peer's consensus proposal needs the local user's vote. The
+    /// integrator surfaces a vote affordance however it wishes; an auto-vote
+    /// fires after the configured delay if no manual vote arrives. Peer-side
+    /// mirror of [`Self::OwnProposalSubmitted`].
+    VoteRequested {
+        proposal_id: u32,
+        request: ConversationUpdateRequest,
+    },
+
     /// A freeze round merged a commit; `batch` is the set of approved
     /// proposals that landed in this commit (in insertion order).
     CommitApplied(Vec<ConversationUpdateRequest>),
@@ -51,10 +56,16 @@ pub enum SessionEvent {
     /// Conversation transitioned into `state`.
     PhaseChange(ConversationState),
 
-    /// Our merged commit added members. Carries the MLS welcome blob
-    /// and the encrypted `ConversationSync` payload bundled for atomic
-    /// delivery. The integrator owns delivery to each joiner.
-    WelcomeReady(MemberWelcome),
+    /// A merged commit added members. Carries the MLS welcome blob and the
+    /// encrypted `ConversationSync` payload bundled for atomic delivery.
+    /// Fires on every member — the committing steward mints it
+    /// (`minted_locally == true`) and broadcasts it to the group, so peers
+    /// receive the same welcome (`minted_locally == false`). The
+    /// application decides who delivers it to the joiners and how.
+    WelcomeReady {
+        welcome: MemberWelcome,
+        minted_locally: bool,
+    },
 
     /// A consensus session on this conversation resolved. Emitted before
     /// the protocol effects (commit candidate, freeze, score apply, …)
@@ -66,20 +77,11 @@ pub enum SessionEvent {
         approved: bool,
         timestamp: u64,
     },
-}
 
-/// User-level conversation lifecycle event. Appended to [`crate::app::User`]'s
-/// pending buffer; integrators drain via
-/// [`crate::app::User::drain_lifecycle_events`] once per polling cycle and
-/// use `Created` as the trigger to begin draining per-session
-/// [`SessionEvent`]s.
-#[derive(Debug, Clone)]
-pub enum ConversationLifecycle {
-    /// A new conversation entry has been registered. The session is in the
-    /// registry; the integrator can look it up and `subscribe()` to its
-    /// per-session events.
-    Created(String),
-
-    /// A conversation entry has been removed from the registry.
-    Removed(String),
+    /// Freeze-round candidate progress changed: `received` stewards have
+    /// submitted candidates out of `expected`. Emitted by `poll()` when in
+    /// `Freezing` and the count changed since the previous emission. The
+    /// integrator can surface this as a progress indicator without polling
+    /// `freeze_candidate_count()`.
+    FreezeProgress { received: usize, expected: usize },
 }

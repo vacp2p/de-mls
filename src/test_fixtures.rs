@@ -1,5 +1,5 @@
 //! Crate-internal test fixtures: minimal trait impls for tests that need
-//! to construct a [`crate::core::Conversation`] or [`crate::app::SessionRunner`]
+//! to construct a [`crate::core::ConversationCore`] or [`crate::session::Conversation`]
 //! without standing up real MLS / scoring / steward backends.
 //!
 //! Most methods are `unreachable!()` — tests should only exercise the
@@ -7,87 +7,25 @@
 //! into an `unreachable!()` branch, that's a sign the test is touching
 //! state it shouldn't be (and the panic location pinpoints the leak).
 
-use std::str::FromStr;
-use std::sync::Arc;
-
-use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 
 use crate::{
-    app::{ConsensusContext, ConversationConfig, User, UserPlugins},
     core::{
         ConsensusPlugin, ConsensusServiceFor, ConversationPluginsFactory, ElectionDecision,
         PeerScoringPlugin, ScoreOp, ScoreSnapshot, ScoringConfig, StewardList, StewardListConfig,
         StewardListPlugin,
     },
-    defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage},
-    ds::{OutboundPacket, SharedDeliveryService},
-    member_id::MemberId,
+    defaults::DefaultConsensusPlugin,
     mls_crypto::{
-        CommitCandidate, DecryptResult, MlsCommitInput, MlsCredentials, MlsError, MlsMessageKind,
-        MlsService, StagedCandidateResult,
+        CommitCandidate, DecryptResult, MlsCommitInput, MlsError, MlsMessageKind, MlsService,
+        StagedCandidateResult,
     },
     protos::de_mls::messages::v1::AppMessage,
 };
 
-/// Wallet-flavoured test `MemberId`: 20-byte Ethereum address + EIP-55 hex.
-pub(crate) struct TestWalletMemberId {
-    bytes: Vec<u8>,
-    display: String,
-}
-
-impl TestWalletMemberId {
-    pub(crate) fn from_private_key(pk: &str) -> (Self, PrivateKeySigner) {
-        let signer = PrivateKeySigner::from_str(pk).expect("valid private key");
-        let addr: Address = signer.address();
-        let member_id = Self {
-            bytes: addr.as_slice().to_vec(),
-            display: addr.to_checksum(None),
-        };
-        (member_id, signer)
-    }
-}
-
-impl MemberId for TestWalletMemberId {
-    fn member_id_bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-    fn member_id_display(&self) -> &str {
-        &self.display
-    }
-}
-
-/// Test helper: build a `User` keyed by an Ethereum private key. Mirrors
-/// what `tests/common/wallet.rs::user_from_private_key` does for the
-/// integration suite — kept here so crate-internal tests can construct a
-/// default-bundle `User` without a `tests/common` import.
-pub(crate) fn make_user_from_private_key(
-    private_key: &str,
-    transport: SharedDeliveryService,
-) -> User<DefaultConsensusPlugin, DefaultConversationPluginsFactory> {
-    let (member_id, signer) = TestWalletMemberId::from_private_key(private_key);
-
-    let credentials = Arc::new(MlsCredentials::from_member_id(&member_id).expect("credentials"));
-    let storage = Arc::new(MemoryDeMlsStorage::new());
-    let conversation_plugins = DefaultConversationPluginsFactory::new(storage, credentials);
-
-    let consensus_signer = EthereumConsensusSigner::new(signer);
-    let consensus = ConsensusContext::<DefaultConsensusPlugin>::new(consensus_signer);
-
-    let plugins = UserPlugins {
-        conversation_plugins,
-        consensus,
-        default_conversation_config: ConversationConfig::default(),
-        default_scoring_config: ScoringConfig::default(),
-        default_steward_list_config: StewardListConfig::default(),
-    };
-
-    User::new_with_plugins(Box::new(member_id), plugins, transport)
-}
-
 /// Build a `ConsensusServiceFor<DefaultConsensusPlugin>` paired with a
-/// subscribed receiver for [`crate::app::SessionRunner::new`].
+/// subscribed receiver for [`crate::session::Conversation::new`].
 pub(crate) fn make_test_consensus_service() -> (
     ConsensusServiceFor<DefaultConsensusPlugin>,
     crate::defaults::SyncEventReceiver<String>,
@@ -101,23 +39,6 @@ pub(crate) fn make_test_consensus_service() -> (
     );
     let rx = service.event_bus().subscribe();
     (service, rx)
-}
-
-/// Transport stub for tests. `publish` is unreachable (tests should never
-/// push outbound) and `subscribe` is a no-op.
-#[derive(Debug)]
-pub(crate) struct UnusedTransport;
-
-impl crate::ds::DeliveryService for UnusedTransport {
-    type Error = crate::ds::DeliveryServiceError;
-
-    fn publish(&mut self, _: crate::ds::OutboundPacket) -> Result<(), Self::Error> {
-        unreachable!("UnusedTransport::publish called")
-    }
-
-    fn subscribe(&mut self, _delivery_address: &str) -> Result<(), Self::Error> {
-        Ok(())
-    }
 }
 
 /// MLS service that errors on every operation. Lets tests construct a
@@ -168,7 +89,7 @@ impl MlsService for UnusedMls {
     fn encrypt(&mut self, _: &[u8]) -> Result<Vec<u8>, MlsError> {
         unreachable!()
     }
-    fn build_message(&mut self, _: &AppMessage, _: &[u8]) -> Result<OutboundPacket, MlsError> {
+    fn build_message(&mut self, _: &AppMessage) -> Result<Vec<u8>, MlsError> {
         unreachable!()
     }
     fn decrypt_application_only(&mut self, _: &[u8]) -> Result<DecryptResult, MlsError> {
@@ -323,10 +244,10 @@ impl PeerScoringPlugin for StubScoring {
 }
 
 /// Test plug-in bundle wiring the three stubs into the [`ConversationPluginsFactory`]
-/// trait so tests can construct [`crate::core::Conversation`] and
-/// [`crate::app::SessionRunner`] under their single `<CP>` parameter. The
+/// trait so tests can construct [`crate::core::ConversationCore`] and
+/// [`crate::session::Conversation`] under their single `<CP>` parameter. The
 /// factory methods are `unreachable!()` — tests build plug-in instances
-/// directly and hand them to the handle/runner constructors.
+/// directly and hand them to the conversation constructors.
 pub(crate) struct StubPluginsFactory;
 
 impl ConversationPluginsFactory for StubPluginsFactory {

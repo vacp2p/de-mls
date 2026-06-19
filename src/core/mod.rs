@@ -3,7 +3,7 @@
 //! Wraps MLS cryptography, consensus voting, and message routing. Transport,
 //! UI, and state management live in the app layer.
 //!
-//! Integrators implement `SessionEvent` / `ConversationLifecycle` (transport
+//! Integrators drain `ConversationEvent` from each conversation (transport
 //! + UI delivery) and feed inbound packets to [`crate::core::process_inbound`],
 //! then dispatch the returned [`crate::core::ProcessResult`].
 //! [`crate::defaults::DefaultConsensusPlugin`] bundles in-memory backends for tests
@@ -14,8 +14,8 @@
 //! `consensus_plugin` ([`crate::core::ConsensusPlugin`] +
 //! [`crate::defaults::DefaultConsensusPlugin`]), `conversation_plugins`
 //! ([`crate::core::ConversationPluginsFactory`] — the per-conversation
-//! plug-in factory bundle), `events` (`SessionEvent` /
-//! `ConversationLifecycle`), `freeze` (round selection + apply),
+//! plug-in factory bundle), `events` (`ConversationEvent`),
+//! `freeze` (round selection + apply),
 //! `inbound` (app-subtopic packet routing), `peer_scoring`
 //! (scoring plug-in contract), `process_result`
 //! ([`crate::core::ProcessResult`]), `proposal_kind`
@@ -44,7 +44,7 @@ pub use inbound::process_inbound;
 
 // ── Per-conversation types: state, queues, state machine, config ──
 pub use conversation::{
-    BufferedCommitCandidate, Conversation, ConversationConfig, ConversationQueues,
+    BufferedCommitCandidate, ConversationConfig, ConversationCore, ConversationQueues,
     ConversationState, ConversationStateMachine, DEFAULT_COMMIT_INACTIVITY_DURATION,
     DEFAULT_CONSENSUS_TIMEOUT, DEFAULT_ELECTION_VOTING_DELAY, DEFAULT_LIVENESS_CRITERIA_YES,
     DEFAULT_PENDING_UPDATE_MAX_EPOCHS, DEFAULT_PROPOSAL_EXPIRATION,
@@ -63,8 +63,8 @@ pub use peer_scoring::{
 // ── Error type ──
 pub use error::CoreError;
 
-// ── Session-event types ──
-pub use events::{ConversationLifecycle, SessionEvent};
+// ── Conversation-event types ──
+pub use events::ConversationEvent;
 
 // ── Proposal classification ──
 pub use proposal_kind::ProposalKind;

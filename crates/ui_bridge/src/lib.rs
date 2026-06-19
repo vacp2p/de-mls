@@ -7,7 +7,8 @@
 
 use std::sync::Arc;
 
-use de_mls::{ds::WakuDeliveryService, protos::de_mls::messages::v1::ConversationMessage};
+use de_mls::protos::de_mls::messages::v1::ConversationMessage;
+use de_mls_ds::WakuDeliveryService;
 use de_mls_gateway::{CoreCtx, GATEWAY, init_core};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
 use futures::{
@@ -125,10 +126,7 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
             }
 
             AppCmd::GetGroupMembers { conversation_id } => {
-                match GATEWAY
-                    .get_conversation_members(conversation_id.clone())
-                    .await
-                {
+                match GATEWAY.members(conversation_id.clone()).await {
                     Ok(members) => {
                         GATEWAY.push_event(AppEvent::GroupMembers {
                             conversation_id,
@@ -158,6 +156,7 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                             .into_bytes(),
                         sender: "system".to_string(),
                         conversation_id: conversation_id.clone(),
+                        ..Default::default()
                     }));
                 }
             }
@@ -182,6 +181,7 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                             message: body.into_bytes(),
                             sender: "me".to_string(),
                             conversation_id: conversation_id,
+                            ..Default::default()
                         }));
                     }
                     Err(e) => {
@@ -196,6 +196,7 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                     message: "History loaded (stub)".as_bytes().to_vec(),
                     sender: "system".to_string(),
                     conversation_id: conversation_id.clone(),
+                    ..Default::default()
                 }));
             }
 
@@ -210,7 +211,7 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                 // Silently drop so the user doesn't see a surprising error
                 // popup; their vote is on record regardless.
                 if let Err(e) = GATEWAY
-                    .process_user_vote(conversation_id.clone(), proposal_id, choice)
+                    .vote(conversation_id.clone(), proposal_id, choice)
                     .await
                 {
                     let msg = e.to_string();
@@ -234,6 +235,7 @@ async fn ui_loop(mut cmd_rx: UnboundedReceiver<AppCmd>) -> anyhow::Result<()> {
                     .to_vec(),
                     sender: "system".to_string(),
                     conversation_id: conversation_id.clone(),
+                    ..Default::default()
                 }));
             }
 

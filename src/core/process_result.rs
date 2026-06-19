@@ -10,9 +10,9 @@ use crate::{
     core::{CoreError, ScoreEvent, ScoreOp},
     protos::de_mls::messages::v1::{
         AppMessage, BanRequest, CommitCandidate, ConversationMessage, ConversationSync,
-        ConversationUpdateRequest, EmergencyCriteriaProposal, Outcome, ProposalAdded, RemoveMember,
-        UserVote, ViolationEvidence, ViolationType, VotePayload, app_message,
-        conversation_update_request,
+        ConversationUpdateRequest, EmergencyCriteriaProposal, EventMembershipChange, MemberWelcome,
+        Outcome, ProposalAdded, UserVote, ViolationEvidence, ViolationType, VotePayload,
+        app_message, conversation_update_request,
     },
 };
 
@@ -39,8 +39,8 @@ pub enum ProcessResult {
     /// Steward received a membership change (invite KP / ban) — start a vote.
     MembershipChangeReceived(Box<ConversationUpdateRequest>),
 
-    /// Successfully joined via a welcome message; carries the conversation name.
-    JoinedConversation(String),
+    /// Successfully joined via a welcome message.
+    JoinedConversation(),
 
     /// MLS state advanced (batch commit applied).
     ConversationUpdated,
@@ -50,6 +50,11 @@ pub enum ProcessResult {
 
     /// Conversation-sync message from the steward.
     ConversationSyncReceived(Box<ConversationSync>),
+
+    /// Welcome broadcast from the committing steward: every member learns
+    /// the welcome so the application decides who delivers it to the
+    /// joiners and how.
+    WelcomeBroadcastReceived(Box<MemberWelcome>),
 
     /// Nothing to do.
     Noop(NoopReason),
@@ -87,6 +92,10 @@ pub enum NoopReason {
     /// Candidate arrived before its proposal was locally approved (consensus
     /// outcome still in flight). Stashed for replay once approval lands.
     CandidateStashedEarly,
+    /// Welcome broadcast carried no welcome bytes.
+    EmptyWelcomePayload,
+    /// Welcome broadcast hash was already seen — duplicate gossip delivery.
+    DuplicateWelcomeBroadcast,
 }
 
 // ── ViolationEvidence constructors ────────────────────────────────
@@ -213,6 +222,8 @@ impl_payload_from!(
     Vote                => app_message::Payload::Vote,
     ConversationSync    => app_message::Payload::ConversationSync,
     ProposalAdded       => app_message::Payload::ProposalAdded,
+    MemberWelcome       => app_message::Payload::MemberWelcome,
+    EventMembershipChange => app_message::Payload::MembershipChange,
 );
 
 impl From<ConsensusEvent> for Outcome {
@@ -232,21 +243,20 @@ impl TryFrom<AppMessage> for ProcessResult {
             Some(app_message::Payload::ConversationMessage(_)) => {
                 Ok(ProcessResult::AppMessage(Box::new(value)))
             }
+            Some(app_message::Payload::MembershipChange(_)) => {
+                Ok(ProcessResult::AppMessage(Box::new(value)))
+            }
             Some(app_message::Payload::Proposal(proposal)) => {
                 Ok(ProcessResult::Proposal(Box::new(proposal.clone())))
             }
             Some(app_message::Payload::Vote(vote)) => {
                 Ok(ProcessResult::Vote(Box::new(vote.clone())))
             }
-            Some(app_message::Payload::BanRequest(ban_request)) => Ok(
-                ProcessResult::MembershipChangeReceived(Box::new(ConversationUpdateRequest {
-                    payload: Some(conversation_update_request::Payload::RemoveMember(
-                        RemoveMember {
-                            member_id: ban_request.user_to_ban.clone(),
-                        },
-                    )),
-                })),
-            ),
+            Some(app_message::Payload::BanRequest(ban_request)) => {
+                Ok(ProcessResult::MembershipChangeReceived(Box::new(
+                    ConversationUpdateRequest::remove_member(ban_request.user_to_ban.clone()),
+                )))
+            }
             Some(app_message::Payload::ConversationSync(sync)) => Ok(
                 ProcessResult::ConversationSyncReceived(Box::new(sync.clone())),
             ),

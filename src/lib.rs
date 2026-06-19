@@ -11,7 +11,7 @@
 //! └───────────────────────────────┬─────────────────────────────────────┘
 //!                                 │
 //!                        ┌────────┴────────┐
-//!                        │      app        │
+//!                        │    session      │
 //!                        │ (reference impl,│
 //!                        │   optional)     │
 //!                        └────────┬────────┘
@@ -28,48 +28,47 @@
 //!
 //! - **[`core`]** - Protocol implementation (message processing, consensus integration)
 //! - **[`mls_crypto`]** - MLS cryptographic operations (OpenMLS wrapper)
-//! - **[`ds`]** - Delivery service abstraction (Waku transport)
-//! - **[`app`]** - Reference application layer (multi-conversation management, state machine)
+//! - **[`session`]** - Reference session layer (the `Conversation` handle, state machine)
 //! - **[`protos`]** - Protobuf message definitions
+//!
+//! The library carries no transport. The reference delivery service (the
+//! `DeliveryService` trait + Waku implementation) lives in the `de-mls-ds`
+//! crate, and the reference integrator (`User`) in `de-mls-gateway`.
 //!
 //! ## Getting Started
 //!
 //! Most developers should start with the [`core`] module documentation, which explains:
-//! - What traits you need to implement (`core::SessionEvent`)
+//! - What traits you need to implement (`core::ConversationEvent`)
 //! - Core operations (start conversation, join, send messages)
 //! - The `ProcessResult` matching flow
 //!
-//! If you want a ready-to-use solution, see [`app::User`] which provides complete
-//! conversation management with state machine and epoch handling.
+//! The library exposes the per-conversation [`session::Conversation`] handle.
+//! It carries no transport: it buffers outbound and consumes inbound
+//! payloads, and the integrator owns routing. A ready-to-use reference
+//! integrator (the multi-conversation `User` with registry + routing +
+//! lifecycle over a transport) lives in the `de-mls-gateway` crate.
 //!
 //! ## Quick Example
 //!
 //! ```ignore
-//! use de_mls::app::User;
+//! use de_mls::session::{ConversationDeps, Conversation};
 //!
-//! // Build a user from your own `MemberId` impl plus the default plug-in
-//! // bundle.
-//! let mut user = User::new_with_plugins(&member_id, plugins, transport);
+//! // Build a conversation from injected deps (plug-in factory,
+//! // consensus service, identity).
+//! let mut conversation = Conversation::create("de-mls-test", deps)?;
 //!
-//! // Start a conversation (as steward).
-//! user.start_conversation("de-mls-test", true).await?;
+//! // Send a chat message — buffered, never auto-sent.
+//! conversation.send_message(b"Hello, world!".to_vec())?;
 //!
-//! // Send a message.
-//! user.send_app_message("de-mls-test", b"Hello, world!".to_vec()).await?;
-//!
-//! // Drain lifecycle + per-session events on your polling cycle.
-//! for event in user.drain_lifecycle_events() { /* … */ }
+//! // Drain outbound and publish it on your own transport.
+//! for out in conversation.drain_outbound() { /* publish */ }
 //! ```
 
 /// Protocol implementation.
 pub mod core;
 
-/// Reference application layer.
-pub mod app;
-
-/// Delivery service: transport-agnostic messaging.
-/// Enable the **`waku`** feature for the Waku relay implementation.
-pub mod ds;
+/// Reference session layer.
+pub mod session;
 
 /// MLS cryptographic operations: OpenMLS wrapper for encryption/decryption.
 pub mod mls_crypto;
@@ -87,21 +86,4 @@ pub mod defaults;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 
-/// Protobuf message definitions.
-pub mod protos {
-    /// Re-exported consensus protocol messages.
-    pub mod hashgraph_like_consensus {
-        pub mod v1 {
-            pub use ::hashgraph_like_consensus::protos::consensus::v1::*;
-        }
-    }
-
-    /// DE-MLS application-level messages.
-    pub mod de_mls {
-        pub mod messages {
-            pub mod v1 {
-                include!(concat!(env!("OUT_DIR"), "/de_mls.messages.v1.rs"));
-            }
-        }
-    }
-}
+pub mod protos;

@@ -80,7 +80,7 @@ pub struct ScoringConfig {
 
 impl Default for ScoringConfig {
     /// RFC §Peer Scoring defaults. Adjust at `User` init via
-    /// [`crate::app::User::set_default_scoring_config`].
+    /// `User::set_default_scoring_config`.
     fn default() -> Self {
         Self {
             default_score: DEFAULT_PEER_SCORE,

@@ -1,21 +1,21 @@
 use std::sync::{Arc, atomic::Ordering};
 
-use de_mls::{
-    app::UserError, ds::WakuDeliveryService,
-    protos::de_mls::messages::v1::ConversationUpdateRequest,
-};
+use de_mls::protos::de_mls::messages::v1::ConversationUpdateRequest;
+use de_mls_ds::WakuDeliveryService;
+
+use crate::user::{Inbound, UserError};
 use de_mls_ui_protocol::v1::{AppEvent, MemberInfo, encode_hex, format_conversation_request};
 use futures::channel::mpsc::UnboundedSender;
 
-use crate::{CoreCtx, Gateway, SessionRef, UserRef};
+use crate::{ConversationRef, CoreCtx, Gateway, UserRef};
 
-/// Look up a per-conversation session from the `User` registry. Returns
+/// Look up a conversation entry in the `User` registry. Returns
 /// `Err(ConversationNotFound)` when the conversation has been removed.
 /// Centralized so every call site uses the same lookup + error shape.
-pub(crate) async fn lookup_session(
+pub(crate) async fn lookup_conversation(
     user: &UserRef,
     conversation_id: &str,
-) -> Result<SessionRef, UserError> {
+) -> Result<ConversationRef, UserError> {
     user.read()
         .await
         .lookup_entry(conversation_id)?
@@ -38,14 +38,14 @@ pub(crate) async fn load_member_info(
     user: &UserRef,
     conversation_id: &str,
 ) -> anyhow::Result<Vec<MemberInfo>> {
-    let session = lookup_session(user, conversation_id).await?;
-    let runner = session
+    let entry = lookup_conversation(user, conversation_id).await?;
+    let conversation = entry
         .read()
-        .map_err(|_| UserError::LockPoisoned("session"))?;
-    let member_bytes = runner.get_conversation_members()?;
-    let scores = runner.get_member_scores();
-    let roles = runner.get_member_roles().unwrap_or_default();
-    let pending_leavers = runner.get_pending_leave_member_ids().unwrap_or_default();
+        .map_err(|_| UserError::LockPoisoned("conversation"))?;
+    let member_bytes = conversation.members()?;
+    let scores = conversation.member_scores();
+    let roles = conversation.member_roles().unwrap_or_default();
+    let pending_leavers = conversation.pending_leave_member_ids().unwrap_or_default();
 
     Ok(member_bytes
         .into_iter()
@@ -77,26 +77,26 @@ pub(crate) async fn push_consensus_state(
     evt_tx: &UnboundedSender<AppEvent>,
     conversation_id: &str,
 ) {
-    let Ok(session) = lookup_session(user, conversation_id).await else {
+    let Ok(entry) = lookup_conversation(user, conversation_id).await else {
         return;
     };
-    let runner = match session.read() {
+    let conversation = match entry.read() {
         Ok(s) => s,
         Err(_) => {
             tracing::warn!(
                 conversation = %conversation_id,
-                "push_consensus_state skipped: session lock poisoned"
+                "push_consensus_state skipped: conversation lock poisoned"
             );
             return;
         }
     };
-    let proposals = runner.get_approved_proposals_for_current_epoch();
+    let proposals = conversation.approved_proposals_for_current_epoch();
     let _ = evt_tx.unbounded_send(AppEvent::CurrentEpochProposals {
         conversation_id: conversation_id.to_string(),
         proposals: display_batch(&proposals),
     });
 
-    if let Ok((epoch, retry_round)) = runner.get_epoch_and_retry() {
+    if let Ok((epoch, retry_round)) = conversation.epoch_and_retry() {
         let _ = evt_tx.unbounded_send(AppEvent::GroupEpoch {
             conversation_id: conversation_id.to_string(),
             epoch,
@@ -122,15 +122,15 @@ pub(crate) async fn push_member_scores(
         members,
     });
 
-    let Ok(session) = lookup_session(user, conversation_id).await else {
+    let Ok(entry) = lookup_conversation(user, conversation_id).await else {
         return;
     };
-    let is_steward = match session.read() {
-        Ok(s) => s.is_steward_for_self(),
+    let is_steward = match entry.read() {
+        Ok(s) => s.is_steward(),
         Err(_) => {
             tracing::warn!(
                 conversation = %conversation_id,
-                "is_steward read skipped: session lock poisoned"
+                "is_steward read skipped: conversation lock poisoned"
             );
             return;
         }
@@ -180,47 +180,38 @@ impl Gateway<WakuDeliveryService> {
                 }
 
                 let conversation_id = pkt.conversation_id.clone();
+                let is_welcome_channel = pkt.subtopic == de_mls_ds::WELCOME_SUBTOPIC;
 
-                if pkt.subtopic == de_mls::ds::WELCOME_SUBTOPIC
+                if is_welcome_channel
                     && let Some(mw) = crate::welcome_envelope::decode(&pkt.payload)
                 {
-                    let accepted = user.write().await.accept_welcome(&mw.welcome_bytes);
-                    match accepted {
-                        Ok(_) if !mw.conversation_sync_bytes.is_empty() => {
-                            // Replay the bundled ConversationSync
-                            // through the standard inbound path now
-                            // that MLS is attached — the sync payload
-                            // is an MLS-encrypted app message
-                            // addressed to the new epoch.
-                            let sync_pkt = de_mls::ds::InboundPacket::new(
-                                mw.conversation_sync_bytes,
-                                de_mls::ds::APP_MSG_SUBTOPIC,
-                                &pkt.conversation_id,
-                                pkt.app_id.clone(),
-                                pkt.timestamp,
-                            );
-                            if let Err(e) = user.read().await.process_inbound_packet(sync_pkt) {
-                                tracing::warn!(
-                                    group = %conversation_id,
-                                    error = %e,
-                                    "bundled sync replay failed"
-                                );
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::warn!(
-                                group = %conversation_id,
-                                error = %e,
-                                "accept_welcome failed"
-                            );
-                        }
+                    // `accept_welcome` completes the join and applies the
+                    // bundled ConversationSync in one step.
+                    if let Err(e) = user.write().await.accept_welcome(&mw) {
+                        tracing::warn!(
+                            group = %conversation_id,
+                            error = %e,
+                            "accept_welcome failed"
+                        );
                     }
                     continue;
                 }
 
-                if let Err(e) = user.read().await.process_inbound_packet(pkt) {
-                    tracing::error!(group = %conversation_id, error = %e, "process_inbound_packet failed");
+                // Route by the integrator's own channel knowledge: the welcome
+                // channel carries a joiner's key-package announcement; every
+                // other channel carries conversation traffic.
+                let inbound = Inbound {
+                    conversation_id: pkt.conversation_id.clone(),
+                    sender: pkt.app_id,
+                    payload: pkt.payload,
+                };
+                let result = if is_welcome_channel {
+                    user.read().await.receive_key_package(inbound)
+                } else {
+                    user.read().await.handle_inbound(inbound)
+                };
+                if let Err(e) = result {
+                    tracing::error!(group = %conversation_id, error = %e, "inbound handling failed");
                 }
 
                 // Push refreshed approved queue + epoch history + members.

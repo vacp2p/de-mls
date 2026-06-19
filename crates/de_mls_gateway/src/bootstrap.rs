@@ -1,6 +1,6 @@
 use std::{env::VarError, num::ParseIntError, sync::Arc, time::Duration};
 
-use de_mls::ds::{
+use de_mls_ds::{
     DeliveryService, DeliveryServiceError, InboundPacket, TopicFilter, WakuConfig,
     WakuDeliveryService, WakuStartResult,
 };
