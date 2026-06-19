@@ -559,7 +559,10 @@ impl Member {
             return;
         }
         let invite = MemberInvite::decode(packet.payload.as_slice()).expect("decode key package");
-        let _ = convo.add_member(
+        // Mirror the integrator: an announced joiner is relayed via
+        // `sponsor_member` (epoch steward proposes; others buffer for backup
+        // takeover), not the explicit any-member `add_member`.
+        let _ = convo.sponsor_member(
             &self.integ.provider,
             &invite.key_package_bytes,
             &self.integ.signer,
@@ -708,6 +711,13 @@ impl<const N: usize> TestHarness<N> {
         for member in &mut self.members {
             member.deliver_key_package(packet);
         }
+    }
+
+    /// Deliver a key-package announcement to a single member — models an
+    /// announcement that only some members observed (e.g. the epoch steward
+    /// missed it, so a backup must carry the join).
+    pub fn deliver_key_package_to(&mut self, index: usize, packet: &Outbound) {
+        self.members[index].deliver_key_package(packet);
     }
 
     pub fn conversation_id(&self) -> &str {
