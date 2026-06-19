@@ -65,6 +65,25 @@ where
         self.services.steward_list.is_steward(&self.self_member_id)
     }
 
+    /// `true` if the local member is the **primary** steward designated for the
+    /// current epoch — the one that should commit and sponsor joiners first.
+    /// Unlike [`Self::is_steward`] (true for any member on the list, backups
+    /// included), this is true for exactly one member per epoch, so it gates the
+    /// single-actor paths: backups defer to the primary and only step in after
+    /// the recovery window. Eligibility is the same live rotation
+    /// [`Self::member_roles`] uses, so all members agree on who it is.
+    pub fn is_epoch_steward(&self) -> Result<bool, ConversationError> {
+        let mls = self.mls();
+        let epoch = mls.current_epoch()?;
+        let members = mls.members()?;
+        let eligible = self.queues.steward_eligibility(&members);
+        let (epoch_steward, _backup) = self
+            .services
+            .steward_list
+            .epoch_and_backup(epoch, &eligible);
+        Ok(epoch_steward == Some(self.self_member_id.as_ref()))
+    }
+
     /// Identity bytes of every current member of this conversation, as
     /// reported by MLS.
     pub fn members(&self) -> Result<Vec<Vec<u8>>, ConversationError> {

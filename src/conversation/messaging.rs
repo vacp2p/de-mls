@@ -78,12 +78,11 @@ where
         Ok(())
     }
 
-    /// Start a `MemberInvite` consensus round for the given TLS-encoded key
-    /// package. Parses the key package, extracts the member id, and submits a
-    /// proposal with a bundled YES vote. The resulting welcome fires as
-    /// [`crate::ConversationEvent::WelcomeReady`] for the integrator to
-    /// deliver out of band. No-op when the key package addresses the local
-    /// member or someone already in the group.
+    /// Invite a joiner whose key package the caller supplies out of band,
+    /// endorsing the add by bundling a YES vote at submit. Any member may call.
+    /// Errors unless the conversation is `Working`.
+    ///
+    /// See [`Self::sponsor_member`] for the non-endorsing steward relay.
     pub fn add_member<Pr>(
         &mut self,
         provider: &Pr,
@@ -98,6 +97,72 @@ where
         if state != ConversationState::Working {
             return Err(ConversationError::ConversationBlocked(state.to_string()));
         }
+        self.propose_add(provider, key_package_bytes, CreatorVote::Yes, signer)
+    }
+
+    /// Relay a joiner that announced its own key package, without endorsing it:
+    /// the proposal is submitted unbundled ([`CreatorVote::Deferred`]) and this
+    /// member votes on it like any other. Only the primary epoch steward relays
+    /// immediately, so a single Add proposal is opened per joiner. Every other
+    /// member records the announcement in the pending-update buffer instead —
+    /// a backup proposes it from there if the epoch steward stays silent past
+    /// the recovery window (drained by `poll`), so an offline epoch steward
+    /// doesn't strand the join. No-op outside `Working`.
+    ///
+    /// See [`Self::add_member`] for the endorsing out-of-band invite.
+    pub fn sponsor_member<Pr>(
+        &mut self,
+        provider: &Pr,
+        key_package_bytes: &[u8],
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
+        if self.current_state() != ConversationState::Working {
+            return Ok(());
+        }
+        if self.is_epoch_steward()? {
+            return self.propose_add(provider, key_package_bytes, CreatorVote::Deferred, signer);
+        }
+        self.buffer_announced_add(key_package_bytes)
+    }
+
+    /// Record an announced joiner in the pending-update buffer (the same buffer
+    /// every member keeps for membership changes seen on the wire). Lets a
+    /// backup steward propose the Add later if the epoch steward never does.
+    /// Skips our own key package and members already in the group.
+    fn buffer_announced_add(&mut self, key_package_bytes: &[u8]) -> Result<(), ConversationError> {
+        let (kp_bytes, member_id) = key_package_bytes_from_tls(key_package_bytes.to_vec())?;
+        if member_id == *self.member_id_bytes() || self.mls().is_member(&member_id) {
+            return Ok(());
+        }
+        let epoch = self.mls().current_epoch()?;
+        self.queues.insert_pending_update(
+            ConversationUpdateRequest::member_invite(MemberInvite {
+                key_package_bytes: kp_bytes,
+                member_id,
+            }),
+            epoch,
+        );
+        Ok(())
+    }
+
+    /// Shared body of [`Self::add_member`] / [`Self::sponsor_member`]: parse the
+    /// key package, skip our own and already-present members, and open the Add
+    /// proposal with the caller-chosen vote mode.
+    fn propose_add<Pr>(
+        &mut self,
+        provider: &Pr,
+        key_package_bytes: &[u8],
+        creator_vote: CreatorVote,
+        signer: &impl Signer,
+    ) -> Result<(), ConversationError>
+    where
+        Pr: OpenMlsProvider,
+        <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
+    {
         let (kp_bytes, member_id) = key_package_bytes_from_tls(key_package_bytes.to_vec())?;
         // Don't propose our own key package.
         if member_id == *self.member_id_bytes() {
@@ -118,7 +183,7 @@ where
                 key_package_bytes: kp_bytes,
                 member_id,
             }),
-            CreatorVote::Yes,
+            creator_vote,
             signer,
         )?;
         Ok(())
