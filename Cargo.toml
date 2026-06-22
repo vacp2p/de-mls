@@ -1,12 +1,3 @@
-[workspace]
-members = [
-    "apps/de_mls_desktop_ui",
-    "crates/de_mls_ds",
-    "crates/de_mls_gateway",
-    "crates/de_mls_ui_protocol",
-    "crates/ui_bridge",
-]
-
 [package]
 name = "de-mls"
 version = "3.0.0"
@@ -20,16 +11,7 @@ documentation = "https://docs.rs/de-mls"
 readme = "README.md"
 keywords = ["mls", "decentralized", "consensus", "group-messaging"]
 categories = ["cryptography", "network-programming"]
-exclude = [
-    "logos-messaging-nim/",
-    "libs/",
-    "apps/",
-    "crates/",
-    "tests/",
-    ".github/",
-    ".cargo/",
-    "Makefile",
-]
+exclude = ["tests/", ".github/"]
 
 [dependencies]
 openmls = "0.8.1"
@@ -48,24 +30,8 @@ hashgraph-like-consensus = "0.5.1"
 alloy = { version = "2.0.5", default-features = false, features = [
     "signer-local",
 ] }
-# Reference transport layer. A dev-only dependency
-de-mls-ds = { path = "crates/de_mls_ds" }
-# Tests build a concrete provider (OpenMlsRustCrypto) + signer (SignatureKeyPair)
-# and name the signer type for `ConversationDeps`. The lib itself is agnostic.
 openmls_basic_credential = { version = "0.5.0", features = ["clonable"] }
 openmls_rust_crypto = "0.5.1"
 
 [build-dependencies]
 prost-build = "0.14"
-
-[profile]
-
-[profile.wasm-dev]
-inherits = "dev"
-opt-level = 1
-
-[profile.server-dev]
-inherits = "dev"
-
-[profile.android-dev]
-inherits = "dev"
