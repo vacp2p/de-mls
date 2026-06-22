@@ -9,21 +9,15 @@ target/
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 
-.DS_Store
-src/.DS_Store
-.idea
-apps/de_mls_desktop_ui/logs
-
 # files
 *.env
 *.log
 .DS_Store
+.idea
 .pnp.*
 lcov.info
 yarn.lock
 
 .claude
 docs/
-logs/
-logos-messaging-nim/
 CLAUDE.md
