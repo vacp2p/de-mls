@@ -9,9 +9,6 @@
 //! `Conversation`) through `handle_inbound` / `receive_key_package`, with
 //! transport capture and polling helpers. [`wallet`] supplies the test
 //! `MemberId` adapter and a `User` constructor keyed by a private key.
-#![allow(dead_code, unused_imports)]
 
 pub mod conversation_fixtures;
 pub mod wallet;
-
-pub use wallet::WalletMemberId;

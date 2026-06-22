@@ -20,8 +20,7 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
 };
 
-/// Chosen by eyeballing the longest target in the workspace
-/// (`de_mls::session::user::consensus_events` ≈ 35 chars) with breathing room.
+/// Chosen by eyeballing the longest target in the workspace with breathing room.
 const TARGET_PAD: usize = 37;
 
 /// Message padding — the longest event message is around 36 chars

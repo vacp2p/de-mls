@@ -3,14 +3,14 @@
 //! de-mls carries no transport subtopic: the integrator routes its own
 //! channels here. Conversation traffic (chat / vote / commit / sync — the
 //! envelope self-identifies) goes to [`User::handle_inbound`]; a joiner's
-//! key-package announcement goes to [`User::receive_key_package`]. Both
-//! delegate dedup and dispatch decisions to the conversation. Raw MLS welcomes
-//! enter through [`User::accept_welcome`].
+//! key-package announcement goes to [`User::receive_key_package`], which the
+//! epoch steward relays as an Add proposal. Raw MLS welcomes enter through
+//! [`User::accept_welcome`].
 
-use de_mls::{
-    core::{ConsensusPlugin, ConversationPluginsFactory},
-    session::DispatchOutcome,
-};
+use de_mls::{ConsensusPlugin, DispatchOutcome, protos::de_mls::messages::v1::MemberInvite};
+use prost::Message;
+
+use openmls_traits::signatures::Signer;
 
 use crate::user::{ConversationLifecycle, LockExt, User, UserError};
 
@@ -26,7 +26,7 @@ pub struct Inbound {
     pub payload: Vec<u8>,
 }
 
-impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
+impl<P: ConsensusPlugin, Sig: Signer + Clone> User<P, Sig> {
     // ── Public API ───────────────────────────────────────────────────
 
     /// Ingest conversation traffic (chat / vote / commit / sync). Self-echoes
@@ -42,9 +42,20 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         let entry_arc = self
             .lookup_entry(&inbound.conversation_id)?
             .ok_or(UserError::ConversationNotFound)?;
-        let outcome = entry_arc
-            .write_or_err("conversation")?
-            .process_inbound(&inbound.sender, &inbound.payload)?;
+        let outcome = {
+            let mut slot = entry_arc.write_or_err("conversation")?;
+            // A pending-join slot has no live conversation yet — it can't process
+            // conversation traffic. Dropping it is benign, not a failure.
+            let Ok(conversation) = slot.live_mut() else {
+                return Ok(());
+            };
+            conversation.process_inbound(
+                self.plugins.conversation_plugins.provider(),
+                &inbound.sender,
+                &inbound.payload,
+                &self.signer,
+            )?
+        };
         if matches!(outcome, DispatchOutcome::LeaveRequested) {
             self.finalize_self_leave(&inbound.conversation_id)?;
         }
@@ -52,19 +63,38 @@ impl<P: ConsensusPlugin, CP: ConversationPluginsFactory> User<P, CP> {
         Ok(())
     }
 
-    /// Ingest a joiner's key-package announcement. Self-echoes are dropped
-    /// before the registry lookup (same rationale as [`Self::handle_inbound`]);
-    /// admission decisions are handled inside the conversation.
+    /// Ingest a joiner's key-package announcement: decode the `MemberInvite`
+    /// and hand it to [`de_mls::Conversation::sponsor_member`], which relays it
+    /// as an Add proposal only if we are the epoch steward — de-mls owns the
+    /// steward-only-relay and unbundled-vote policy. (An explicit invite via
+    /// [`User::add_member`] stays open to any member and bundles YES: that is
+    /// one deliberate, endorsed action, not a broadcast fan-out.) Self-echoes
+    /// are dropped before the registry lookup (same rationale as
+    /// [`Self::handle_inbound`]); an announcement for a conversation we don't
+    /// hold — or aren't yet joined into — is silently ignored.
     pub fn receive_key_package(&self, inbound: Inbound) -> Result<(), UserError> {
         if inbound.sender == self.app_id {
             return Ok(());
         }
-        let entry_arc = self
-            .lookup_entry(&inbound.conversation_id)?
-            .ok_or(UserError::ConversationNotFound)?;
-        entry_arc
-            .write_or_err("conversation")?
-            .receive_key_package(&inbound.sender, &inbound.payload)?;
+        let Some(entry_arc) = self.lookup_entry(&inbound.conversation_id)? else {
+            return Ok(());
+        };
+        let invite = match MemberInvite::decode(inbound.payload.as_slice()) {
+            Ok(invite) => invite,
+            Err(_) => return Ok(()),
+        };
+        {
+            let mut slot = entry_arc.write_or_err("conversation")?;
+            // Not yet joined ourselves (pending slot) — nothing to relay.
+            let Ok(conversation) = slot.live_mut() else {
+                return Ok(());
+            };
+            conversation.sponsor_member(
+                self.plugins.conversation_plugins.provider(),
+                &invite.key_package_bytes,
+                &self.signer,
+            )?;
+        }
         self.flush(&entry_arc)?;
         Ok(())
     }

@@ -1,7 +1,7 @@
 //! [`User`] — multi-conversation facade over the de-mls library. One node
 //! owns one `User`, which holds the per-conversation registry, the plugin
 //! bundle, and the outbound transport. Per-conv protocol work lives on each
-//! [`de_mls::session::Conversation`]; callers reach a session via
+//! [`de_mls::Conversation`]; callers reach a session via
 //! [`User::lookup_entry`].
 //!
 //! This is the reference integrator — the registry + routing + lifecycle
@@ -20,7 +20,7 @@
 //!   library's `ConversationError`.
 //! - `consensus` — [`ConsensusContext`], the shared consensus storage +
 //!   signer that mints each conversation's service.
-//! - `plugins` — `UserPlugins<P, CP>` bundle.
+//! - `plugins` — `UserPlugins<P>` bundle.
 
 mod consensus;
 mod error;
@@ -36,4 +36,6 @@ pub use error::UserError;
 pub use inbound::Inbound;
 pub(crate) use lock::LockExt;
 pub use plugins::UserPlugins;
-pub use state::{ConversationEntry, ConversationLifecycle, User};
+pub use state::{
+    ConversationEntry, ConversationLifecycle, ConversationSlot, GatewayConversation, User,
+};

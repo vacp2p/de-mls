@@ -39,9 +39,10 @@ pub(crate) async fn load_member_info(
     conversation_id: &str,
 ) -> anyhow::Result<Vec<MemberInfo>> {
     let entry = lookup_conversation(user, conversation_id).await?;
-    let conversation = entry
+    let slot = entry
         .read()
         .map_err(|_| UserError::LockPoisoned("conversation"))?;
+    let conversation = slot.live_ref()?;
     let member_bytes = conversation.members()?;
     let scores = conversation.member_scores();
     let roles = conversation.member_roles().unwrap_or_default();
@@ -80,7 +81,7 @@ pub(crate) async fn push_consensus_state(
     let Ok(entry) = lookup_conversation(user, conversation_id).await else {
         return;
     };
-    let conversation = match entry.read() {
+    let slot = match entry.read() {
         Ok(s) => s,
         Err(_) => {
             tracing::warn!(
@@ -89,6 +90,10 @@ pub(crate) async fn push_consensus_state(
             );
             return;
         }
+    };
+    // Pending join — no live conversation to report on yet.
+    let Ok(conversation) = slot.live_ref() else {
+        return;
     };
     let proposals = conversation.approved_proposals_for_current_epoch();
     let _ = evt_tx.unbounded_send(AppEvent::CurrentEpochProposals {
@@ -126,7 +131,11 @@ pub(crate) async fn push_member_scores(
         return;
     };
     let is_steward = match entry.read() {
-        Ok(s) => s.is_steward(),
+        Ok(slot) => match slot.live_ref() {
+            Ok(conversation) => conversation.is_steward(),
+            // Pending join — nothing to report yet.
+            Err(_) => return,
+        },
         Err(_) => {
             tracing::warn!(
                 conversation = %conversation_id,
@@ -187,12 +196,17 @@ impl Gateway<WakuDeliveryService> {
                 {
                     // `accept_welcome` completes the join and applies the
                     // bundled ConversationSync in one step.
-                    if let Err(e) = user.write().await.accept_welcome(&mw) {
-                        tracing::warn!(
-                            group = %conversation_id,
-                            error = %e,
-                            "accept_welcome failed"
-                        );
+                    match user.write().await.accept_welcome(&mw) {
+                        Ok(_) => {}
+                        // The welcome is broadcast to every member on the welcome
+                        // subtopic; only the addressed joiner can open it. Everyone
+                        // else gets `WelcomeNotForUs` — expected, not a failure.
+                        Err(UserError::WelcomeNotForUs) => {
+                            tracing::debug!(group = %conversation_id, "welcome not addressed to us");
+                        }
+                        Err(e) => {
+                            tracing::warn!(group = %conversation_id, error = %e, "accept_welcome failed");
+                        }
                     }
                     continue;
                 }
@@ -211,7 +225,13 @@ impl Gateway<WakuDeliveryService> {
                     user.read().await.handle_inbound(inbound)
                 };
                 if let Err(e) = result {
-                    tracing::error!(group = %conversation_id, error = %e, "inbound handling failed");
+                    if matches!(e, UserError::ConversationNotFound) {
+                        // No live conversation here (a pending join, or one we
+                        // left) — we can't process this traffic. Benign.
+                        tracing::debug!(group = %conversation_id, "inbound dropped: no live conversation");
+                    } else {
+                        tracing::error!(group = %conversation_id, error = %e, "inbound handling failed");
+                    }
                 }
 
                 // Push refreshed approved queue + epoch history + members.

@@ -33,8 +33,6 @@ exclude = [
 
 [dependencies]
 openmls = "0.8.1"
-openmls_basic_credential = "0.5.0"
-openmls_rust_crypto = "0.5.1"
 openmls_traits = "0.5.0"
 
 sha2 = "0.11.0"
@@ -52,6 +50,10 @@ alloy = { version = "2.0.5", default-features = false, features = [
 ] }
 # Reference transport layer. A dev-only dependency
 de-mls-ds = { path = "crates/de_mls_ds" }
+# Tests build a concrete provider (OpenMlsRustCrypto) + signer (SignatureKeyPair)
+# and name the signer type for `ConversationDeps`. The lib itself is agnostic.
+openmls_basic_credential = { version = "0.5.0", features = ["clonable"] }
+openmls_rust_crypto = "0.5.1"
 
 [build-dependencies]
 prost-build = "0.14"

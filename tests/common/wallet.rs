@@ -10,8 +10,6 @@ use std::str::FromStr;
 
 use alloy::primitives::Address;
 
-use de_mls::member_id::MemberId;
-
 /// Wallet-flavoured [`MemberId`] used by the core fixtures. Holds the
 /// 20-byte Ethereum address bytes and its EIP-55 checksummed hex form.
 #[derive(Debug, Clone)]
@@ -34,14 +32,12 @@ impl WalletMemberId {
         let addr = Address::from_str(hex.trim()).expect("valid wallet hex");
         Self::from_address(addr)
     }
-}
 
-impl MemberId for WalletMemberId {
-    fn member_id_bytes(&self) -> &[u8] {
+    pub fn member_id_bytes(&self) -> &[u8] {
         &self.bytes
     }
 
-    fn member_id_display(&self) -> &str {
+    pub fn member_id_display(&self) -> &str {
         &self.display
     }
 }

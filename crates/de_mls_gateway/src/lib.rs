@@ -10,6 +10,7 @@ mod bootstrap;
 pub(crate) mod forwarder;
 mod group;
 pub mod handler;
+pub mod mls;
 pub mod user;
 mod welcome_envelope;
 
@@ -24,16 +25,14 @@ use alloy::signers::local::PrivateKeySigner;
 use hashgraph_like_consensus::signing::EthereumConsensusSigner;
 
 use de_mls::{
-    core::{ScoringConfig, StewardListConfig},
-    defaults::{DefaultConsensusPlugin, DefaultConversationPluginsFactory, MemoryDeMlsStorage},
-    member_id::MemberId,
-    mls_crypto::MlsCredentials,
+    ConversationConfig, ScoringConfig, StewardListConfig, defaults::DefaultConsensusPlugin,
     protos::de_mls::messages::v1::ConversationUpdateRequest,
-    session::ConversationConfig,
 };
 use de_mls_ds::{DeliveryService, SharedDeliveryService, WakuDeliveryService};
 use de_mls_ui_protocol::v1::{AppCmd, AppEvent};
+use openmls_basic_credential::SignatureKeyPair;
 
+use crate::mls::{DefaultConversationPluginsFactory, build_credential};
 use crate::user::{ConsensusContext, ConversationEntry, User, UserPlugins};
 use futures::{
     StreamExt,
@@ -52,17 +51,15 @@ pub use crate::bootstrap::{
 
 /// Type alias for the user reference stored in the gateway.
 ///
-/// Uses [`de_mls::session::DefaultMlsService`] — `OpenMlsService` over
-/// `Arc<MemoryDeMlsStorage>` — so per-group services share one storage
-/// (the `Arc<S>: DeMlsStorage` blanket impl makes this work). MLS
-/// credentials live on `User` and are passed in at service construction.
-pub(crate) type UserRef =
-    Arc<tokio::sync::RwLock<User<DefaultConsensusPlugin, DefaultConversationPluginsFactory>>>;
+/// de-mls builds the MLS service itself over the reference
+/// [`mls::GatewayProvider`] (`OpenMlsRustCrypto`); the credential + key packages
+/// come from [`mls::DefaultConversationPluginsFactory`]. The MLS signing keypair
+/// is [`SignatureKeyPair`], owned by `User` and threaded into every signing call.
+pub(crate) type UserRef = Arc<tokio::sync::RwLock<User<DefaultConsensusPlugin, SignatureKeyPair>>>;
 
 /// Type alias for a conversation registry entry obtained via
 /// `User::lookup_entry`. Re-exports the sync-locked entry from `de_mls::session`.
-pub(crate) type ConversationRef =
-    ConversationEntry<DefaultConsensusPlugin, DefaultConversationPluginsFactory>;
+pub(crate) type ConversationRef = ConversationEntry<DefaultConsensusPlugin>;
 
 // Global, process-wide gateway instance
 pub static GATEWAY: Lazy<Gateway<WakuDeliveryService>> = Lazy::new(Gateway::new);
@@ -168,42 +165,53 @@ impl<DS: DeliveryService> Gateway<DS> {
 }
 
 #[derive(Debug, Clone)]
-struct WalletMemberId {
+pub struct WalletMemberId {
     bytes: Vec<u8>,
     display: String,
 }
 
 impl WalletMemberId {
-    fn from_address(addr: Address) -> Self {
+    pub fn from_address(addr: Address) -> Self {
         Self {
             bytes: addr.as_slice().to_vec(),
             display: addr.to_checksum(None),
         }
     }
-}
 
-impl MemberId for WalletMemberId {
-    fn member_id_bytes(&self) -> &[u8] {
+    pub fn member_id_bytes(&self) -> &[u8] {
         &self.bytes
     }
-    fn member_id_display(&self) -> &str {
+
+    pub fn member_id_display(&self) -> &str {
         &self.display
+    }
+}
+
+/// Render opaque member-id bytes to the gateway's display form. Member ids
+/// here are wallet address bytes, rendered EIP-55 checksummed the same way
+/// [`WalletMemberId::from_address`] builds its display; non-address byte
+/// strings fall back to lowercase hex.
+pub fn render_member_id(bytes: &[u8]) -> String {
+    if bytes.len() == Address::len_bytes() {
+        Address::from_slice(bytes).to_checksum(None)
+    } else {
+        alloy::hex::encode(bytes)
     }
 }
 
 fn build_user_from_private_key(
     private_key: &str,
     transport: SharedDeliveryService,
-) -> anyhow::Result<User<DefaultConsensusPlugin, DefaultConversationPluginsFactory>> {
-    let signer = PrivateKeySigner::from_str(private_key)
+) -> anyhow::Result<User<DefaultConsensusPlugin, SignatureKeyPair>> {
+    let eth_signer = PrivateKeySigner::from_str(private_key)
         .map_err(|e| anyhow::anyhow!("invalid private key: {e}"))?;
-    let member_id = WalletMemberId::from_address(signer.address());
+    let member_id = WalletMemberId::from_address(eth_signer.address());
 
-    let credentials = Arc::new(MlsCredentials::from_member_id(&member_id)?);
-    let storage = Arc::new(MemoryDeMlsStorage::new());
-    let conversation_plugins = DefaultConversationPluginsFactory::new(storage, credentials);
+    let (credential, mls_signer) = build_credential(member_id.member_id_bytes())?;
+    let conversation_plugins =
+        DefaultConversationPluginsFactory::new(credential, mls_signer.clone());
 
-    let consensus_signer = EthereumConsensusSigner::new(signer);
+    let consensus_signer = EthereumConsensusSigner::new(eth_signer);
     let consensus = ConsensusContext::<DefaultConsensusPlugin>::new(consensus_signer);
 
     let plugins = UserPlugins {
@@ -215,9 +223,7 @@ fn build_user_from_private_key(
     };
 
     Ok(User::new_with_plugins(
-        Box::new(member_id),
-        plugins,
-        transport,
+        member_id, mls_signer, plugins, transport,
     ))
 }
 
@@ -256,7 +262,7 @@ impl Gateway<WakuDeliveryService> {
     /// Spawn the gateway's UI event pump. Once per polling cycle it
     /// drains [`crate::user::User::drain_lifecycle_events`] (to learn
     /// when new conversations appear or disappear) and
-    /// [`de_mls::session::Conversation::drain_events`] on every active
+    /// [`de_mls::Conversation::drain_events`] on every active
     /// conversation (to forward UI-bound events). Replaces the previous
     /// broadcast-channel subscriber pattern.
     fn spawn_conversation_subscribers(&self, user: UserRef, transport: SharedDeliveryService) {
@@ -301,7 +307,11 @@ impl Gateway<WakuDeliveryService> {
                         _ => continue,
                     };
                     let events = match entry.read() {
-                        Ok(g) => g.drain_events(),
+                        Ok(slot) => match slot.live_ref() {
+                            Ok(conversation) => conversation.drain_events(),
+                            // Pending join — no conversation to drain yet.
+                            Err(_) => continue,
+                        },
                         Err(_) => {
                             tracing::warn!(
                                 conversation = %name,
@@ -320,7 +330,10 @@ impl Gateway<WakuDeliveryService> {
                     // by direct conversation calls in the polling / handler paths
                     // (commit candidates, auto-votes, …).
                     let outbound = match entry.read() {
-                        Ok(g) => g.drain_outbound(),
+                        Ok(slot) => slot
+                            .live_ref()
+                            .map(|c| c.drain_outbound())
+                            .unwrap_or_default(),
                         Err(_) => Vec::new(),
                     };
                     if !outbound.is_empty()

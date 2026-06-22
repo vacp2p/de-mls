@@ -6,10 +6,25 @@ use de_mls_ds::WakuDeliveryService;
 use de_mls_ui_protocol::v1::MemberInfo;
 
 use crate::{
-    Gateway, UserRef,
-    forwarder::{display_batch, load_member_info, lookup_conversation},
+    ConversationRef, Gateway, UserRef,
+    forwarder::{display_batch, load_member_info},
     user::UserError,
 };
+
+/// State string surfaced for a conversation whose welcome has not yet
+/// arrived. Distinct from the library's [`de_mls::ConversationState`] values,
+/// which only exist once the conversation is live.
+const PENDING_JOIN_STATE: &str = "PendingJoin";
+
+/// Where a conversation id resolves in the gateway registry.
+enum Located {
+    /// A live conversation handle.
+    Live(ConversationRef),
+    /// A registered join still waiting for its welcome.
+    Pending,
+    /// No slot for this id.
+    Missing,
+}
 
 impl Gateway<WakuDeliveryService> {
     pub async fn create_conversation(&self, conversation_id: String) -> anyhow::Result<()> {
@@ -19,7 +34,7 @@ impl Gateway<WakuDeliveryService> {
         user_ref
             .write()
             .await
-            .start_conversation(&conversation_id, true)?;
+            .start_conversation(&conversation_id)?;
         core.topics.add_many(&conversation_id)?;
         tracing::info!(group = %conversation_id, "group ready, subtopics subscribed");
 
@@ -34,10 +49,13 @@ impl Gateway<WakuDeliveryService> {
         tracing::info!(group = %conversation_id, "joining group");
         let core = self.core();
         let user_ref = self.user()?;
-        user_ref
-            .write()
-            .await
-            .start_conversation(&conversation_id, false)?;
+        // A joiner holds no live conversation until a welcome arrives. We first
+        // register a pending-join slot so the conversation lists and reports as
+        // "joining" right away, then subscribe to the topics and announce our
+        // key package. The welcome is ingested by the delivery forwarder via
+        // `User::accept_welcome`, which fills the slot with the `Working`
+        // conversation.
+        user_ref.read().await.begin_pending_join(&conversation_id)?;
         core.topics.add_many(&conversation_id)?;
         let key_package = user_ref.read().await.generate_key_package()?;
         user_ref
@@ -49,41 +67,44 @@ impl Gateway<WakuDeliveryService> {
         let user_clone = user_ref.clone();
         let group_name_clone = conversation_id.clone();
         tokio::spawn(async move {
-            // Phase 1: Poll until welcome received or timed out.
-            let joined = loop {
+            // Phase 1: wait for the welcome to register the conversation in
+            // `Working`. Until then `conversation_state` returns
+            // `ConversationNotFound` — treat that as "still waiting", not
+            // failure. Bound the wait by a fixed number of polling rounds.
+            const MAX_JOIN_ROUNDS: usize = 24;
+            let mut joined = false;
+            for _ in 0..MAX_JOIN_ROUNDS {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                let outcome = match user_clone.read().await.poll_conversation(&group_name_clone) {
-                    Ok(o) => o,
-                    Err(e) if e.is_fatal() => {
-                        tracing::warn!(group = %group_name_clone, error = %e, "join poll exiting");
-                        break false;
-                    }
-                    Err(_) => continue,
-                };
-                if outcome.leave_requested {
-                    if let Err(e) = user_clone
-                        .read()
-                        .await
-                        .finalize_self_leave(&group_name_clone)
-                    {
-                        tracing::error!(group = %group_name_clone, error = %e, "pending-join cleanup failed");
-                    }
-                    break false;
-                }
                 match user_clone
                     .read()
                     .await
                     .conversation_state(&group_name_clone)
                 {
-                    Ok(de_mls::session::ConversationState::Working) => break true,
-                    Ok(de_mls::session::ConversationState::PendingJoin) => continue,
-                    Ok(_) => break true,
-                    Err(_) => break false,
+                    // Conversation registered and live — joined.
+                    Ok(_) => {
+                        joined = true;
+                        break;
+                    }
+                    // Welcome not in yet — keep waiting.
+                    Err(UserError::ConversationNotFound) => continue,
+                    Err(e) => {
+                        tracing::warn!(group = %group_name_clone, error = %e, "join wait exiting");
+                        break;
+                    }
                 }
-            };
+            }
 
             if !joined {
-                tracing::debug!(group = %group_name_clone, "join failed");
+                tracing::debug!(group = %group_name_clone, "join timed out waiting for welcome");
+                // Drop the pending slot so the abandoned join stops listing /
+                // reporting as "joining" (no-op if the welcome raced in).
+                if let Err(e) = user_clone
+                    .read()
+                    .await
+                    .abandon_pending_join(&group_name_clone)
+                {
+                    tracing::warn!(group = %group_name_clone, error = %e, "abandon pending join failed");
+                }
                 return;
             }
 
@@ -127,11 +148,12 @@ impl Gateway<WakuDeliveryService> {
         message: String,
     ) -> anyhow::Result<()> {
         let user_ref = self.user()?;
-        let entry = lookup_conversation(&user_ref, &conversation_id).await?;
-        entry
-            .write()
-            .map_err(|_| UserError::LockPoisoned("conversation"))?
-            .send_message(message.into_bytes())?;
+        // Route through `User`, which threads the user's signer into the
+        // conversation's `send_message` and flushes the outbound.
+        user_ref
+            .read()
+            .await
+            .send_message(&conversation_id, message.into_bytes())?;
         tracing::debug!(group = %conversation_id, "app message sent");
         Ok(())
     }
@@ -142,15 +164,16 @@ impl Gateway<WakuDeliveryService> {
         user_to_ban: String,
     ) -> anyhow::Result<()> {
         let user_ref = self.user()?;
-        let entry = lookup_conversation(&user_ref, &conversation_id).await?;
 
         let target = Address::from_str(user_to_ban.trim())
             .map_err(|e| anyhow::anyhow!("invalid ban target address {user_to_ban:?}: {e}"))?;
 
-        entry
-            .write()
-            .map_err(|_| UserError::LockPoisoned("conversation"))?
-            .remove_member(target.as_slice())?;
+        // Route through `User`, which threads the signer into the
+        // conversation's `remove_member` and flushes the outbound.
+        user_ref
+            .read()
+            .await
+            .remove_member(&conversation_id, target.as_slice())?;
 
         Ok(())
     }
@@ -162,11 +185,12 @@ impl Gateway<WakuDeliveryService> {
         vote: bool,
     ) -> anyhow::Result<()> {
         let user_ref = self.user()?;
-        let entry = lookup_conversation(&user_ref, &conversation_id).await?;
-        entry
-            .write()
-            .map_err(|_| UserError::LockPoisoned("conversation"))?
-            .vote(proposal_id, vote)?;
+        // Route through `User`, which threads the signer into the
+        // conversation's `vote` and flushes the outbound.
+        user_ref
+            .read()
+            .await
+            .vote(&conversation_id, proposal_id, vote)?;
         Ok(())
     }
 
@@ -190,24 +214,49 @@ impl Gateway<WakuDeliveryService> {
         }
     }
 
-    pub async fn get_steward_status(&self, conversation_id: String) -> anyhow::Result<bool> {
+    /// Resolve a conversation id to a live handle, a pending join, or nothing.
+    async fn locate(&self, conversation_id: &str) -> anyhow::Result<Located> {
         let user_ref = self.user()?;
-        let entry = lookup_conversation(&user_ref, &conversation_id).await?;
-        let is_steward = entry
+        let Some(entry) = user_ref.read().await.lookup_entry(conversation_id)? else {
+            return Ok(Located::Missing);
+        };
+        let pending = entry
             .read()
             .map_err(|_| UserError::LockPoisoned("conversation"))?
-            .is_steward();
-        Ok(is_steward)
+            .is_pending();
+        Ok(if pending {
+            Located::Pending
+        } else {
+            Located::Live(entry)
+        })
+    }
+
+    pub async fn get_steward_status(&self, conversation_id: String) -> anyhow::Result<bool> {
+        match self.locate(&conversation_id).await? {
+            Located::Live(entry) => Ok(entry
+                .read()
+                .map_err(|_| UserError::LockPoisoned("conversation"))?
+                .live_ref()?
+                .is_steward()),
+            // A joining member isn't a steward yet.
+            Located::Pending => Ok(false),
+            Located::Missing => Err(UserError::ConversationNotFound.into()),
+        }
     }
 
     pub async fn get_group_state(&self, conversation_id: String) -> anyhow::Result<String> {
-        let user_ref = self.user()?;
-        let entry = lookup_conversation(&user_ref, &conversation_id).await?;
-        let state = entry
-            .read()
-            .map_err(|_| UserError::LockPoisoned("conversation"))?
-            .state();
-        Ok(state.to_string())
+        match self.locate(&conversation_id).await? {
+            Located::Live(entry) => {
+                let state = entry
+                    .read()
+                    .map_err(|_| UserError::LockPoisoned("conversation"))?
+                    .live_ref()?
+                    .state();
+                Ok(state.to_string())
+            }
+            Located::Pending => Ok(PENDING_JOIN_STATE.to_string()),
+            Located::Missing => Err(UserError::ConversationNotFound.into()),
+        }
     }
 
     /// Get current epoch proposals for the given group
@@ -215,17 +264,28 @@ impl Gateway<WakuDeliveryService> {
         &self,
         conversation_id: String,
     ) -> anyhow::Result<Vec<(String, String)>> {
-        let user_ref = self.user()?;
-        let entry = lookup_conversation(&user_ref, &conversation_id).await?;
-        let proposals = entry
-            .read()
-            .map_err(|_| UserError::LockPoisoned("conversation"))?
-            .approved_proposals_for_current_epoch();
-        Ok(display_batch(&proposals))
+        match self.locate(&conversation_id).await? {
+            Located::Live(entry) => {
+                let proposals = entry
+                    .read()
+                    .map_err(|_| UserError::LockPoisoned("conversation"))?
+                    .live_ref()?
+                    .approved_proposals_for_current_epoch();
+                Ok(display_batch(&proposals))
+            }
+            // No epoch yet — the joiner has no proposals to show.
+            Located::Pending => Ok(Vec::new()),
+            Located::Missing => Err(UserError::ConversationNotFound.into()),
+        }
     }
 
     pub async fn members(&self, conversation_id: String) -> anyhow::Result<Vec<MemberInfo>> {
-        load_member_info(&self.user()?, &conversation_id).await
+        match self.locate(&conversation_id).await? {
+            Located::Live(_) => load_member_info(&self.user()?, &conversation_id).await,
+            // No roster until we hold the welcome.
+            Located::Pending => Ok(Vec::new()),
+            Located::Missing => Err(UserError::ConversationNotFound.into()),
+        }
     }
 
     /// Get epoch history for a group (past batches of approved proposals).

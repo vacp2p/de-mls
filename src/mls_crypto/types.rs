@@ -37,7 +37,7 @@ impl KeyPackageBytes {
 /// | Shape | Where | Carries |
 /// |-------|-------|---------|
 /// | [`crate::protos::de_mls::messages::v1::ConversationUpdateRequest`] | consensus wire | wire payload, also covers governance kinds (emergency / election) |
-/// | [`MlsCommitInput`] | input to [`super::MlsService::create_commit_candidate`] | Add carries the full key package; Remove carries the target member-id |
+/// | [`MlsCommitInput`] | input to [`crate::mls_crypto::MlsService::create_commit_candidate`] | Add carries the full key package; Remove carries the target member-id |
 /// | [`MlsProposalOutput`] | output of MLS staging / decryption | member-id-only for both Add and Remove |
 #[derive(Clone, Debug)]
 pub enum MlsCommitInput {
