@@ -8,10 +8,6 @@
 //! - [`crate::defaults::DefaultPeerScoring`],
 //!   [`crate::defaults::DefaultStewardList`] — type aliases for the reference
 //!   peer-scoring and steward-list plug-ins.
-//!
-//! The reference MLS engine (the OpenMLS provider, credentials, key-package
-//! generation, and the plug-in factory that bundles them) lives in the
-//! integrator, not here — the protocol crate names no concrete MLS backend.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -30,8 +26,6 @@ use crate::{
 // In-memory peer-score storage
 // ═══════════════════════════════════════════════════════════════════
 
-/// `HashMap`-backed [`PeerScoreStorage`] for tests and simple deployments.
-/// Production integrators supply a durable backend.
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryPeerScoreStorage {
     scores: HashMap<Vec<u8>, i64>,
@@ -65,11 +59,10 @@ impl PeerScoreStorage for InMemoryPeerScoreStorage {
 // Sync consensus event bus
 // ═══════════════════════════════════════════════════════════════════
 
-/// Single-consumer FIFO event bus for [`ConsensusEvent`]s. The default
-/// `EventBus` for [`DefaultConsensusPlugin`].
+/// Single-consumer FIFO event bus for [`ConsensusEvent`]s.
 ///
 /// `publish` appends to the shared queue; `subscribe` hands back a
-/// receiver that pops from it. Clones share the queue.
+/// receiver that pops from it.
 #[derive(Clone)]
 pub struct SyncEventBus<Scope: ConsensusScope> {
     queue: Arc<Mutex<VecDeque<(Scope, ConsensusEvent)>>>,
@@ -115,9 +108,6 @@ impl<Scope: ConsensusScope> SyncConsensusReceiver<Scope> for SyncEventReceiver<S
 // Default consensus plug-in
 // ═══════════════════════════════════════════════════════════════════
 
-/// In-memory consensus backend for tests and simple deployments.
-///
-/// Implements [`crate::ConsensusPlugin`].
 pub struct DefaultConsensusPlugin;
 
 impl ConsensusPlugin for DefaultConsensusPlugin {

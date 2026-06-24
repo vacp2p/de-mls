@@ -1,5 +1,6 @@
 //! Application-message delivery through the protocol: a chat sent by one
-//! member surfaces on a peer as a decrypted `ConversationEvent::AppMessage`.
+//! member surfaces on a peer as a decrypted
+//! `ConversationEvent::ConversationMessage`.
 
 mod common;
 

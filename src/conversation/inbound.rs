@@ -228,7 +228,7 @@ where
     {
         match result {
             ProcessResult::AppMessage(msg) => {
-                self.emit_event(ConversationEvent::AppMessage(*msg));
+                self.emit_event(ConversationEvent::ConversationMessage(*msg));
                 Ok(DispatchOutcome::Done)
             }
             ProcessResult::Proposal(proposal) => {

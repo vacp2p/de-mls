@@ -10,7 +10,7 @@ use crate::protos::de_mls::messages::v1::{
 use crate::{ScoreEvent, ScoreOp, ScoringMemberDiff};
 
 /// Diff between a scoring table snapshot and an MLS member roster.
-/// Caller applies the diff to its own [`super::PeerScoringPlugin`].
+/// Caller applies the diff to its xown [`super::PeerScoringPlugin`].
 pub fn scoring_member_diff(scored: &[Vec<u8>], mls_members: &[Vec<u8>]) -> ScoringMemberDiff {
     let scored_set: HashSet<&[u8]> = scored.iter().map(Vec::as_slice).collect();
     let mls_set: HashSet<&[u8]> = mls_members.iter().map(Vec::as_slice).collect();
@@ -35,22 +35,20 @@ pub fn scoring_member_diff(scored: &[Vec<u8>], mls_members: &[Vec<u8>]) -> Scori
 /// - accepted `SCORE_BELOW_THRESHOLD` or `DEADLOCK` → creator reward only.
 /// - rejected emergency → creator penalty.
 pub fn emergency_score_ops(request: &ConversationUpdateRequest, approved: bool) -> Vec<ScoreOp> {
-    let Some(Payload::EmergencyCriteria(ec)) = &request.payload else {
-        return Vec::new();
-    };
-    let Some(evidence) = &ec.evidence else {
-        return Vec::new();
-    };
-
-    if approved {
-        let mut ops = vec![creator_reward(evidence)];
-        if let Some(target_op) = evidence.target_score_op() {
-            ops.push(target_op);
+    if let Some(Payload::EmergencyCriteria(ec)) = &request.payload {
+        if let Some(evidence) = &ec.evidence {
+            if approved {
+                let mut ops = vec![creator_reward(evidence)];
+                if let Some(target_op) = evidence.target_score_op() {
+                    ops.push(target_op);
+                }
+                return ops;
+            } else {
+                return vec![creator_penalty(evidence)];
+            }
         }
-        ops
-    } else {
-        vec![creator_penalty(evidence)]
     }
+    Vec::new()
 }
 
 fn creator_reward(ev: &ViolationEvidence) -> ScoreOp {

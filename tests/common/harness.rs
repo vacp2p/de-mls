@@ -349,7 +349,7 @@ impl Member {
         self.events
             .iter()
             .filter_map(|e| match e {
-                ConversationEvent::AppMessage(AppMessage {
+                ConversationEvent::ConversationMessage(AppMessage {
                     payload: Some(app_message::Payload::ConversationMessage(cm)),
                 }) => Some(ReceivedChat {
                     body: cm.message.clone(),
