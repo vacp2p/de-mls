@@ -1,42 +1,46 @@
-//! Peer-scoring value types: events, ops, configuration, threshold-cross
-//! events, snapshots, and the membership-diff result.
+//! Peer-scoring value types: score events, ops, configuration, snapshots,
+//! and the membership-diff result.
 
 use std::collections::HashMap;
 
-/// A scoreable event in the protocol.
+/// Something a member did that moves their peer score. Each variant maps to
+/// one delta in the score table (see [`default_score_deltas`]);
 ///
-/// Each variant maps to a single score delta. Violation types (BrokenCommit, etc.)
-/// go through the ECP consensus path — when accepted, the target receives a
-/// violation-type-specific penalty and the creator receives a flat reward.
+/// The first two groups come from the ECP consensus path: a member is
+/// accused of a violation and the group votes. On a YES the accused takes a
+/// violation-specific penalty and the accuser takes a flat reward; a NO flips
+/// it onto the accuser.
+///
+/// The last group is observed locally at commit selection, with no vote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScoreEvent {
-    // ── ECP target penalties (mapped from ViolationType in evidence) ──
-    /// ECP accepted: steward committed proposals that don't match what was voted on.
+    // ── Target of an accepted ECP (the violation it's penalized for) ──
+    /// Committed proposals that don't match the voted-on set.
     BrokenCommit,
-    /// ECP accepted: MLS proposal payload was malformed or didn't match the voted action.
+    /// MLS proposal payload was malformed, or didn't match the voted action.
     BrokenMlsProposal,
-    /// ECP accepted: steward failed to commit within the threshold duration.
+    /// Failed to commit approved work within the inactivity window.
     CensorshipInactivity,
 
-    // ── ECP creator outcomes ──
-    /// ECP accepted — flat reward to the proposal creator.
+    // ── Creator of an ECP (rewarded if it passes, penalized if it doesn't) ──
+    /// An emergency proposal this member raised was accepted.
     EmergencyYesCreator,
-    /// ECP rejected — flat penalty to the proposal creator (false accusation).
+    /// An emergency proposal this member raised was rejected (false accusation).
     EmergencyNoCreator,
 
-    // ── Commit selection ──
-    /// Steward successfully committed a valid batch.
+    // ── Observed locally at commit selection, no vote ──
+    /// Committed a valid batch.
     SuccessfulCommit,
-    /// Competing commit with same proposals but different MLS entropy — honest
-    /// participation (RFC: "MUST NOT be classified as misbehavior").
+    /// Lost a commit race with the same proposals but different MLS entropy —
+    /// honest participation (RFC: MUST NOT be misbehavior).
     HonestCommitAttempt,
     /// Competing commit with a different proposal set than the selected one
-    /// (RFC: "MUST be classified as misbehavior").
+    /// (RFC: MUST be misbehavior).
     MisbehavingCommit,
 }
 
-/// A score operation produced by core logic. The app layer feeds these
-/// into its scoring service.
+/// A [`ScoreEvent`] paired with the member it applies to. The scoring
+/// helpers produce these; [`crate::PeerScoringService::apply_op`] applies them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScoreOp {
     pub member_id: Vec<u8>,
@@ -46,7 +50,7 @@ pub struct ScoreOp {
 /// RFC §Peer Scoring default delta for each [`ScoreEvent`]. Values are
 /// placeholders pending an empirical tuning pass (see `docs/ROADMAP.md`).
 /// Integrators that want different deltas pass their own map to
-/// [`super::PeerScoringService::new`].
+/// [`crate::PeerScoringService::new`].
 pub fn default_score_deltas() -> HashMap<ScoreEvent, i64> {
     HashMap::from([
         // ECP target penalties (violation-type-specific)
@@ -74,13 +78,12 @@ pub struct ScoringConfig {
     /// Score assigned to newly added members.
     pub default_score: i64,
     /// At or below this score, a member is eligible for
-    /// `SCORE_BELOW_THRESHOLD` ECP removal (RFC §Peer Scoring).
+    /// `ViolationType::SCORE_BELOW_THRESHOLD` ECP removal (RFC §Peer Scoring).
     pub threshold: i64,
 }
 
 impl Default for ScoringConfig {
-    /// RFC §Peer Scoring defaults. Adjust at `User` init via
-    /// `User::set_default_scoring_config`.
+    /// RFC §Peer Scoring defaults.
     fn default() -> Self {
         Self {
             default_score: DEFAULT_PEER_SCORE,

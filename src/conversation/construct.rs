@@ -20,14 +20,14 @@ use hashgraph_like_consensus::events::ConsensusEventBus;
 use crate::{
     ConsensusPlugin, ConsensusServiceFor, Conversation, ConversationConfig, ConversationError,
     ConversationEvent, ConversationQueues, ConversationServices, ConversationStateMachine,
-    PeerScoringPlugin, StewardListPlugin,
+    PeerScoreStorage, PeerScoringService, StewardListPlugin,
     mls_crypto::{MlsService, OpenMlsService},
 };
 
 impl<C, Sc, St> Conversation<C, Sc, St>
 where
     C: ConsensusPlugin,
-    Sc: PeerScoringPlugin,
+    Sc: PeerScoreStorage,
     St: StewardListPlugin,
 {
     /// Create a brand-new conversation we steward. Starts in `Working` with the
@@ -42,7 +42,7 @@ where
         credential: CredentialWithKey,
         ciphersuite: Ciphersuite,
         signer: &impl Signer,
-        scoring: Sc,
+        scoring: PeerScoringService<Sc>,
         steward: St,
         consensus: ConsensusServiceFor<C>,
         app_id: Arc<[u8]>,
@@ -89,7 +89,7 @@ where
         provider: &Pr,
         welcome_bytes: &[u8],
         conversation_sync_bytes: &[u8],
-        scoring: Sc,
+        scoring: PeerScoringService<Sc>,
         steward: St,
         consensus: ConsensusServiceFor<C>,
         app_id: Arc<[u8]>,
@@ -131,7 +131,7 @@ where
     fn assemble(
         conversation_id: &str,
         mls: OpenMlsService,
-        mut scoring: Sc,
+        mut scoring: PeerScoringService<Sc>,
         mut steward_list: St,
         consensus: ConsensusServiceFor<C>,
         app_id: Arc<[u8]>,
@@ -151,9 +151,7 @@ where
         // epoch 0. Joiner path leaves the plug-in empty until `ConversationSync`.
         if is_creation {
             steward_list.install_list(0, std::slice::from_ref(&self_member_id_bytes), 1, 0)?;
-            // Creator is self at `default_score`; under standard config
-            // (`default > threshold`) no cross fires, so we drop the result.
-            let _ = scoring.add_member(&self_member_id_bytes);
+            scoring.add_member(&self_member_id_bytes)?;
         }
 
         let state_machine = ConversationStateMachine::new_as_member();

@@ -1,24 +1,20 @@
-//! Peer-scoring vocabulary, traits, reference [`PeerScoringService`],
-//! and score-derivation helpers.
+//! Peer-scoring vocabulary, the [`PeerScoreStorage`] backend trait, the
+//! library-owned [`PeerScoringService`], and score-derivation helpers.
 //!
 //! Submodules:
 //! - `types` — `ScoreEvent`, `ScoreOp`, `ScoringConfig`,
 //!   `ScoreSnapshot`, `ScoringMemberDiff` + RFC defaults.
-//! - `storage` — `PeerScoreStorage` trait (concrete backends live in the
-//!   app layer).
-//! - `plugin` — `PeerScoringPlugin` trait (per-conversation contract).
-//! - `service` — `PeerScoringService` reference implementation.
-//! - `helpers` — `scoring_member_diff`, `emergency_score_ops` (pure
-//!   functions over the protobuf wire types).
+//! - `storage` — `PeerScoreStorage` trait (integrator-supplied backend).
+//! - `service` — `PeerScoringService`, the library-owned scoring logic.
+//! - `helpers` — pure functions: `scoring_member_diff` (scoring-table vs.
+//!   MLS-roster diff) and `emergency_score_ops` (emergency-vote → score ops).
 
 mod helpers;
-mod plugin;
 mod service;
 mod storage;
 mod types;
 
 pub use helpers::{emergency_score_ops, scoring_member_diff};
-pub use plugin::PeerScoringPlugin;
 pub use service::PeerScoringService;
 pub use storage::PeerScoreStorage;
 pub use types::{

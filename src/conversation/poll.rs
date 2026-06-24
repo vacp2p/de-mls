@@ -18,7 +18,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     ConsensusPlugin, Conversation, ConversationError, ConversationEvent, ConversationState,
-    DispatchOutcome, FreezeFinalizeResult, FreezeOutcome, PeerScoringPlugin, ScoreEvent, ScoreOp,
+    DispatchOutcome, FreezeFinalizeResult, FreezeOutcome, PeerScoreStorage, ScoreEvent, ScoreOp,
     StewardListPlugin, mls_crypto::MlsService, protos::de_mls::messages::v1::AppMessage,
 };
 
@@ -37,7 +37,7 @@ pub struct PollOutcome {
 impl<C, Sc, St> Conversation<C, Sc, St>
 where
     C: ConsensusPlugin,
-    Sc: PeerScoringPlugin,
+    Sc: PeerScoreStorage,
     St: StewardListPlugin,
 {
     /// Drive one polling cycle: tick consensus deadlines, advance freeze
@@ -152,13 +152,14 @@ where
             };
         // Apply locally-observed score events. These come from dropped
         // candidates in the phase-3 loop (RFC §Peer Scoring: direct local
-        // observation, no ECP needed). A downward threshold cross schedules
-        // a removal-init pass below.
-        let downward_cross = if !finalize_result.score_ops.is_empty() {
-            self.services.scoring.apply_ops(&finalize_result.score_ops)
-        } else {
-            false
-        };
+        // observation, no ECP needed). The removal sweep below picks up any
+        // member these ops pushed below threshold.
+        let applied_score_ops = !finalize_result.score_ops.is_empty();
+        if applied_score_ops {
+            self.services
+                .scoring
+                .apply_ops(&finalize_result.score_ops)?;
+        }
 
         if !finalize_result.committed_batch.is_empty() {
             self.emit_event(ConversationEvent::CommitApplied(std::mem::take(
@@ -166,9 +167,11 @@ where
             )));
         }
 
-        // `check_and_initiate_score_removals` calls `initiate_proposal`. A
-        // downward threshold cross during finalize schedules a removal pass.
-        if downward_cross && let Err(e) = self.check_and_initiate_score_removals(provider, signer) {
+        // `check_and_initiate_score_removals` re-scans `members_below_threshold`
+        // and calls `initiate_proposal` for any uncovered target.
+        if applied_score_ops
+            && let Err(e) = self.check_and_initiate_score_removals(provider, signer)
+        {
             error!(conversation = %conversation_id, error = %e, "score-removal check failed (freeze finalize)");
         }
 
@@ -215,7 +218,7 @@ where
                 // other than ourselves. Self-penalties are skipped — the
                 // node that failed to commit observes its own state directly
                 // and doesn't need to record a ScoreOp against itself.
-                let (transition_event, downward_cross) = if has_proposals {
+                let (transition_event, accused_steward) = if has_proposals {
                     // Approved batch (and in-flight votes) survive so
                     // the recovered steward commits the same proposals
                     // once the next election lands.
@@ -238,23 +241,24 @@ where
                             .filter(|id| !id.is_empty() && *id != self_member_id)
                             .map(|id| id.to_vec())
                     };
-                    let cross = if let Some(steward_id) = accuse_target {
+                    let accused = accuse_target.is_some();
+                    if let Some(steward_id) = accuse_target {
                         self.services.scoring.apply_op(&ScoreOp {
                             member_id: steward_id,
                             event: ScoreEvent::CensorshipInactivity,
-                        })
-                    } else {
-                        false
-                    };
+                        })?;
+                    }
 
-                    (event, cross)
+                    (event, accused)
                 } else {
                     self.queues.clear_freeze_round();
                     let event = self.start_working();
                     (event, false)
                 };
 
-                if downward_cross
+                // A recorded censorship penalty may push the steward below
+                // threshold; sweep `members_below_threshold` to act on it.
+                if accused_steward
                     && let Err(e) = self.check_and_initiate_score_removals(provider, signer)
                 {
                     error!(conversation = %conversation_id, error = %e, "score-removal check failed (freeze timeout)");

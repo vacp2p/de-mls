@@ -61,7 +61,7 @@ pub fn mint_key_package(
 /// Build a fresh peer-scoring plug-in.
 pub fn make_scoring(config: &ScoringConfig) -> DefaultPeerScoring {
     PeerScoringService::new(
-        InMemoryPeerScoreStorage::new(),
+        InMemoryPeerScoreStorage::default(),
         default_score_deltas(),
         config.clone(),
     )

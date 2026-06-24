@@ -10,7 +10,7 @@ use tracing::{error, info};
 
 use crate::{
     ConsensusApplyResult, ConsensusPlugin, Conversation, ConversationError, ConversationEvent,
-    ConversationState, PeerScoringPlugin, ScoreOp, StewardListPlugin, apply_consensus_result,
+    ConversationState, PeerScoreStorage, ScoreOp, StewardListPlugin, apply_consensus_result,
     emergency_score_ops,
     protos::de_mls::messages::v1::{
         ConversationUpdateRequest, StewardElectionProposal, conversation_update_request,
@@ -20,7 +20,7 @@ use crate::{
 impl<C, Sc, St> Conversation<C, Sc, St>
 where
     C: ConsensusPlugin,
-    Sc: PeerScoringPlugin,
+    Sc: PeerScoreStorage,
     St: StewardListPlugin,
 {
     /// Apply one resolved outcome: surface the decision to the integrator,
@@ -277,9 +277,7 @@ where
         Pr: OpenMlsProvider,
         <Pr::StorageProvider as StorageProvider<1>>::Error: StdError + Send + Sync + 'static,
     {
-        // The threshold-cross flag is dropped: the terminal
-        // `check_and_initiate_score_removals` sweep below covers it.
-        let _ = self.services.scoring.apply_ops(score_ops);
+        self.services.scoring.apply_ops(score_ops)?;
         if let Some(conversation_update_request::Payload::EmergencyCriteria(ec)) = &request.payload
             && let Some(ev) = &ec.evidence
         {

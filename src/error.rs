@@ -34,6 +34,9 @@ pub enum ConversationError {
     #[error("System time error: {0}")]
     SystemTime(#[from] SystemTimeError),
 
+    #[error("Score storage error: {0}")]
+    ScoreStorage(Box<dyn std::error::Error + Send + Sync>),
+
     #[error("Caller is not a steward")]
     NotASteward,
 
